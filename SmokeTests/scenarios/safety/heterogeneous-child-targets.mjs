@@ -3,14 +3,22 @@
 // INDEPENDENTLY — a hash is graded per-chain, so one child's difficulty must not leak into
 // the other's. child-epoch-difficulty proves ONE child retargets; MergedMiningTemplateTargetTests
 // proves the template's target math; this proves the end-to-end property no smoke does: a
-// single merged miner sustaining two children at genuinely DIFFERENT live difficulties, both
-// advancing. If per-chain target derivation were shared/leaky, the two would converge to the
-// same difficulty (or the harder one would stall because it was graded at the easier target).
+// single merged miner sustaining two children at genuinely DIFFERENT live difficulties. If
+// per-chain target derivation were shared/leaky, the two would NOT diverge (the harder one
+// would be graded at the easier target and stay easy, or both would track one difficulty).
 //
-// Construction: EasyChild (tiny targetBlockTime → blocks are "too slow" vs target → difficulty
-// eases toward trivial) vs HardChild (large targetBlockTime → blocks are "too fast" → difficulty
-// hardens). After both pass their retarget window, their live block targets must differ and the
-// easy child must have produced strictly more blocks.
+// DETERMINISM: the retarget direction is a function of (actual block interval) vs
+// (targetBlockTime), so it's only robust if each child's direction can't flip under load.
+// We pick targetBlockTimes so far outside any achievable smoke block rate that the direction
+// is unambiguous regardless of how fast/slow the box mines:
+//   EasyChild  tbt=50ms        → no miner produces blocks <50ms apart (minBlockIntervalMs floors
+//                                 it higher anyway) → blocks are ALWAYS "too slow" → ALWAYS eases to max.
+//   HardChild  tbt=3_600_000ms → no smoke produces blocks >1h apart → blocks are ALWAYS "too fast"
+//                                 → ALWAYS hardens below max.
+// So the two diverge deterministically-in-practice. (The earlier tbt=5000ms for the hard child
+// was the flake: under CI load the merged miner's interval drifted ABOVE 5s, so it eased like the
+// easy child and both collapsed to max — a false "leak".) We then assert each child moved in ITS
+// OWN direction — which is precisely what per-chain independence means.
 
 import { rmSync, mkdirSync } from 'node:fs'
 import { allocPorts, smokeRoot } from 'lattice-node-sdk/env'
@@ -31,14 +39,18 @@ await node.waitForRPC()
 const nexusDir = (await node.chainInfo()).nexus
 
 // [1] Deploy two children with very different targetBlockTimes (→ divergent difficulty).
-console.log('\n[1] Deploy EasyChild (tbt=50) + HardChild (tbt=5000) under one Nexus...')
+console.log('\n[1] Deploy EasyChild (tbt=50ms) + HardChild (tbt=1h) under one Nexus...')
 const easy = net.add(await node.spawnChild({ directory: 'EasyChild', parentDirectory: nexusDir, ports: easyPorts, retargetWindow: WINDOW, targetBlockTime: 50, premine: 0 }))
-const hard = net.add(await node.spawnChild({ directory: 'HardChild', parentDirectory: nexusDir, ports: hardPorts, retargetWindow: WINDOW, targetBlockTime: 5000, premine: 0 }))
+const hard = net.add(await node.spawnChild({ directory: 'HardChild', parentDirectory: nexusDir, ports: hardPorts, retargetWindow: WINDOW, targetBlockTime: 3_600_000, premine: 0 }))
 
 async function blockTarget(n, dir) {
   const r = await n.rpc('GET', `/api/block/latest?chainPath=${dir}`).catch(() => null)
   return r?.ok ? (r.json?.target ?? null) : null
 }
+
+// Genesis target (before any mining) — the per-child baseline each retarget moves FROM.
+// Fixed-width 64-char unprefixed hex (UInt256.toHexString), so string < equals numeric <.
+const [easyGen, hardGen] = await Promise.all([blockTarget(easy, 'EasyChild'), blockTarget(hard, 'HardChild')])
 
 // [2] ONE merged miner advances both children past their retarget windows.
 console.log('\n[2] Merge-mine both with a single miner past the retarget window...')
@@ -61,20 +73,30 @@ const [easyT, hardT] = await Promise.all([blockTarget(easy, 'EasyChild'), blockT
 console.log(`  EasyChild: height=${easyH} target=${easyT?.slice(0, 24)}…`)
 console.log(`  HardChild: height=${hardH} target=${hardT?.slice(0, 24)}…`)
 
-// [3] THE TEST: both advanced, AND they hold genuinely different live difficulties under
-// the single miner (per-chain independent retarget — no leakage/convergence).
+// [3] THE TEST: each child retargeted in ITS OWN direction under the single merged miner.
+// That is precisely per-chain independence — EasyChild's blocks are graded against
+// EasyChild's tbt and HardChild's against HardChild's, with no cross-contamination. Harder
+// target = numerically smaller hex (more leading zeros). Targets are fixed-width 64-char hex,
+// so string < equals numeric <.
 if (easyH < WINDOW || hardH < WINDOW) fail(`a child did not pass its retarget window (easy=${easyH} hard=${hardH})`)
-if (!easyT || !hardT) fail('could not read a child block target')
-if (easyT === hardT) fail(`both children converged to the SAME target ${easyT} under one miner — per-chain difficulty leaked`)
-// Harder target = numerically smaller hex (more leading zeros). HardChild (tbt=5000) hardens;
-// EasyChild (tbt=50) stays near-trivial. So HardChild's target must be strictly smaller.
-// Targets are fixed-width 64-char unprefixed lowercase hex (UInt256.toHexString), so
-// lexicographic < equals numeric < — HardChild's target must be strictly smaller (harder).
-if (!(hardT < easyT)) fail(`HardChild target (${hardT?.slice(0, 16)}) is not harder than EasyChild's (${easyT?.slice(0, 16)})`)
-// (Block COUNT is not asserted: under one merged miner, per-child count is governed by
-// template-fetch scheduling, not difficulty, so it isn't a sound difficulty signal — the
-// per-chain target divergence above is.)
-console.log('  ✓ two children sustained DIFFERENT live difficulties under one merged miner (per-chain independent retarget)')
+if (!easyT || !hardT || !easyGen || !hardGen) fail('could not read a child block target')
+
+// EasyChild (tbt=50ms): every real block is far slower than 50ms, so it must EASE — its target
+// must not get harder than genesis. If it hardened, EasyChild's retarget was graded too fast
+// (e.g. against HardChild's tbt) — a leak.
+if (easyT < easyGen) fail(`EasyChild HARDENED (target ${easyT.slice(0, 16)}… < genesis ${easyGen.slice(0, 16)}…) — its blocks were graded too fast; per-chain difficulty leaked`)
+
+// HardChild (tbt=1h): every real block is far faster than 1h, so it must HARDEN — its target
+// must be strictly smaller than genesis. If it didn't, HardChild's retarget was graded too slow
+// (e.g. against EasyChild's tbt) or shared — a leak. The 2× per-window clamp keeps this from
+// overshooting, so it stays mineable.
+if (!(hardT < hardGen)) fail(`HardChild did NOT harden (target ${hardT.slice(0, 16)}… ≥ genesis ${hardGen.slice(0, 16)}…) — its blocks were graded too slow; per-chain difficulty leaked/shared`)
+
+// And the end state: HardChild strictly harder than EasyChild — two live, divergent difficulties
+// under one miner. (Block COUNT is not asserted: under one merged miner per-child count is
+// governed by template-fetch scheduling, not difficulty.)
+if (!(hardT < easyT)) fail(`HardChild target (${hardT.slice(0, 16)}…) is not harder than EasyChild's (${easyT.slice(0, 16)}…) — children did not diverge`)
+console.log('  ✓ each child retargeted in its own direction (Easy eased, Hard hardened) — per-chain independent difficulty under one merged miner')
 
 console.log('\n✓ heterogeneous-child-targets smoke test passed.')
 await net.teardown(); await sleep(500); process.exit(0)
