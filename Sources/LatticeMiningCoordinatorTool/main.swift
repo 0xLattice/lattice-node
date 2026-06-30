@@ -63,11 +63,9 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
     var minBlockIntervalMs: UInt64 = 0
 
     func run() async throws {
-        // Line-buffer stdout/stderr so mining progress streams into container/journald
-        // logs live. Block-buffering (the default to a non-TTY) makes a running miner
-        // look hung — output only appears on clean exit, and is lost on SIGKILL.
-        setvbuf(stdout, nil, _IOLBF, 0)
-        setvbuf(stderr, nil, _IOLBF, 0)
+        // NOTE: stdout block-buffers to a non-TTY, so a running miner can look hung in
+        // container/journald logs (output only flushes on clean exit, lost on SIGKILL).
+        // Run under `stdbuf -oL -eL` (the GPU image entrypoint does) for live progress.
         guard let apiBaseURL = URL(string: node) else {
             throw ValidationError("Invalid --node URL: \(node)")
         }
