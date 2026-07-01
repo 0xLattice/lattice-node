@@ -724,7 +724,13 @@ extension LatticeNode {
             return $0.proof.canonicalProofID < $1.proof.canonicalProofID
         }
         guard !verified.isEmpty else {
-            NodeLogger("blocks").warn("\(directory): childBlock proof verification failed for \(String(cid.prefix(16)))…")
+            // debug, not warn: no proof yielded a verified committing parent anchor. This
+            // is NORMAL when this node isn't the parent producer that commits the child
+            // (e.g. a single miner merge-mining a child on live mainnet Nexus it follows
+            // but doesn't win blocks on) — the child still advances on its own PoW; only
+            // parent-anchoring is deferred. The block is still fail-closed (rejected).
+            // A genuinely malformed/absent proof is caught earlier and stays at warn.
+            NodeLogger("blocks").debug("\(directory): childBlock proof verification failed for \(String(cid.prefix(16)))…")
             return
         }
         let parentAnchor = await selectChildParentAnchor(

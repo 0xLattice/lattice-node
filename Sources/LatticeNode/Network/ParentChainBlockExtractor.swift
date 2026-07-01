@@ -868,7 +868,13 @@ public actor ParentChainBlockExtractor: IvyDelegate {
                 inboundProofs: parsedProofs
             )
             guard !verifiedProofs.isEmpty else {
-                log.warn("\(childDirectory): rejected parent relay \(String(cid.prefix(16)))…: no verified inbound work proof")
+                // debug, not warn: a well-formed proof that doesn't verify against our
+                // parent view is NORMAL operation, not an anomaly — e.g. merge-mining a
+                // child on a parent chain this node follows but does not produce (no local
+                // committing parent block), or a relay for a parent fork we don't track.
+                // The relay is still fail-closed (rejected). Structural/DoS anomalies
+                // (oversized / malformed / missing proof bytes) stay at warn above.
+                log.debug("\(childDirectory): rejected parent relay \(String(cid.prefix(16)))…: no verified inbound work proof")
                 return
             }
             guard let verifiedAnchor = await verifiedParentAnchor(
