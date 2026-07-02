@@ -122,6 +122,32 @@ extension RPCRoutes {
         }
     }
 
+    // GET /api/chain/endpoints?chainPath=Nexus/toy — public HTTP RPC endpoints that this
+    // node's directly-connected `toy` children have advertised through the child-peer
+    // rendezvous. Lets a browser connect straight to a child chain's node (Nexus stays
+    // Nexus-only, just relaying the directory). Self-declared + UNVERIFIED: the caller MUST
+    // verify the served chain's genesis against the parent's anchor before trusting one.
+    // Bounded, unauthenticated read. Only answers for a chain THIS node serves as parent.
+    static func chainEndpoints(node: LatticeNode, request: Request) async throws -> Response {
+        let basePath = await currentChainPath(node: node)
+        guard let raw = request.uri.queryParameters["chainPath"].map(String.init),
+              let resolved = resolveChainSelector(raw.split(separator: "/").map(String.init), from: basePath),
+              resolved.count >= 2 else {
+            return jsonError("Expected chainPath=<parent>/<child>, e.g. Nexus/toy", status: .badRequest)
+        }
+        let directory = resolved.last!
+        let parentPath = Array(resolved.dropLast())
+        struct Ep: Encodable { let rpcUrl: String; let pubkey: String }
+        struct R: Encodable { let chainPath: [String]; let endpoints: [Ep]; let count: Int }
+        guard let network = await node.network(forPath: parentPath) else {
+            // We don't serve the parent chain here, so we have no subscriber set to answer from.
+            return json(R(chainPath: resolved, endpoints: [], count: 0))
+        }
+        let eps = await node.advertisedChildRPCEndpoints(network: network, directory: directory)
+            .map { Ep(rpcUrl: $0.rpcUrl, pubkey: $0.pubkey) }
+        return json(R(chainPath: resolved, endpoints: eps, count: eps.count))
+    }
+
     // GET /api/chain/parent-height?chainPath=<path>
     // Contract 2 (parent-visibility): a child block carried by parent block H commits
     // `parentState = postState(H-1)` (BlockBuilder uses the carrier's prevState). So:

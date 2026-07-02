@@ -146,18 +146,24 @@ public actor ChildPeerProvider {
     /// A `pubkey@host:port` endpoint; cap well above any real value.
     static let maxEndpointBytes = 512
 
-    static func encodeAdvertise(directory: String, endpoint: String) -> Data {
+    static func encodeAdvertise(directory: String, endpoint: String, rpcUrl: String? = nil) -> Data {
         var out = Data()
         out.appendLPString(String(directory.prefix(maxDirectoryBytes)))
         out.appendLPString(String(endpoint.prefix(maxEndpointBytes)))
+        // Optional trailing field (backward-compatible on a live network): the child's
+        // public HTTP RPC URL, so a browser can be pointed straight at it. Old decoders
+        // read dir+endpoint and stop, ignoring these trailing bytes; new decoders read it.
+        if let rpcUrl, !rpcUrl.isEmpty { out.appendLPString(String(rpcUrl.prefix(maxEndpointBytes))) }
         return out
     }
 
-    static func decodeAdvertise(_ data: Data) -> (directory: String, endpoint: String)? {
+    static func decodeAdvertise(_ data: Data) -> (directory: String, endpoint: String, rpcUrl: String?)? {
         var r = ByteCursor(data)
         guard let dir = r.readLPString(), !dir.isEmpty, dir.utf8.count <= maxDirectoryBytes,
               let endpoint = r.readLPString(), !endpoint.isEmpty, endpoint.utf8.count <= maxEndpointBytes else { return nil }
-        return (dir, endpoint)
+        // Tolerant trailing read: absent (old wire) → nil; empty/oversized → nil.
+        let rpcUrl = r.readLPString().flatMap { ($0.isEmpty || $0.utf8.count > maxEndpointBytes) ? nil : $0 }
+        return (dir, endpoint, rpcUrl)
     }
 }
 

@@ -45,7 +45,21 @@ final class ChildPeerProviderTests: XCTestCase {
         let adv = ChildPeerProvider.decodeAdvertise(ChildPeerProvider.encodeAdvertise(directory: "toy", endpoint: "k@1.2.3.4:4001"))
         XCTAssertEqual(adv?.directory, "toy")
         XCTAssertEqual(adv?.endpoint, "k@1.2.3.4:4001")
+        XCTAssertNil(adv?.rpcUrl) // no rpcUrl advertised → nil
         XCTAssertNil(ChildPeerProvider.decodeAdvertise(ChildPeerProvider.encodeAdvertise(directory: "", endpoint: "k@h:1")))
+
+        // Optional rpcUrl round-trips.
+        let withRpc = ChildPeerProvider.decodeAdvertise(
+            ChildPeerProvider.encodeAdvertise(directory: "toy", endpoint: "k@1.2.3.4:4001", rpcUrl: "https://toy.example.com"))
+        XCTAssertEqual(withRpc?.rpcUrl, "https://toy.example.com")
+
+        // Backward-compat (live-network safe): the nil-rpcUrl encoding is byte-identical to
+        // the legacy 2-field wire, and adding an rpcUrl only APPENDS trailing bytes — so old
+        // decoders (which read dir+endpoint and ignore the rest) are unaffected.
+        let legacy = ChildPeerProvider.encodeAdvertise(directory: "toy", endpoint: "k@1.2.3.4:4001")
+        let extended = ChildPeerProvider.encodeAdvertise(directory: "toy", endpoint: "k@1.2.3.4:4001", rpcUrl: "https://toy.example.com")
+        XCTAssertGreaterThan(extended.count, legacy.count)
+        XCTAssertEqual(Array(extended.prefix(legacy.count)), Array(legacy)) // legacy prefix unchanged
     }
 
     /// Full in-process loopback: the follower asks, the parent serves the matching
