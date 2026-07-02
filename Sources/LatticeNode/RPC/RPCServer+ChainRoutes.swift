@@ -137,14 +137,26 @@ extension RPCRoutes {
         }
         let directory = resolved.last!
         let parentPath = Array(resolved.dropLast())
+        // `pubkey` is the ADVERTISER's parent-link identity — it authenticates who relayed the
+        // URL, NOT the RPC server. The URL is self-declared and untrusted: the browser MUST
+        // verify the served genesis against the parent's anchor before using an endpoint.
         struct Ep: Encodable { let rpcUrl: String; let pubkey: String }
         struct R: Encodable { let chainPath: [String]; let endpoints: [Ep]; let count: Int }
-        guard let network = await node.network(forPath: parentPath) else {
-            // We don't serve the parent chain here, so we have no subscriber set to answer from.
-            return json(R(chainPath: resolved, endpoints: [], count: 0))
+        var eps: [Ep] = []
+        // If THIS node serves the child chain in-process (multichain parent) and exposes a
+        // public RPC, include itself — otherwise the explorer's level-by-level walk would find
+        // no endpoint for an in-process level even though this very node can serve it.
+        if await node.network(forPath: resolved) != nil,
+           let ownRpc = await node.config.rpcPublicUrl, ChildPeerProvider.isBrowsableHTTPURL(ownRpc) {
+            eps.append(Ep(rpcUrl: ownRpc, pubkey: await node.config.p2pPublicKey))
         }
-        let eps = await node.advertisedChildRPCEndpoints(network: network, directory: directory)
-            .map { Ep(rpcUrl: $0.rpcUrl, pubkey: $0.pubkey) }
+        if let network = await node.network(forPath: parentPath) {
+            let seen = Set(eps.map { $0.rpcUrl })
+            for e in await node.advertisedChildRPCEndpoints(network: network, directory: directory)
+            where !seen.contains(e.rpcUrl) {
+                eps.append(Ep(rpcUrl: e.rpcUrl, pubkey: e.pubkey))
+            }
+        }
         return json(R(chainPath: resolved, endpoints: eps, count: eps.count))
     }
 
