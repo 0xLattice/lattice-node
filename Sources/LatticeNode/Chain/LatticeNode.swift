@@ -163,7 +163,7 @@ public actor LatticeNode: ChainNetworkDelegate {
     /// parent chain's link, keyed by the (parent-subscription) peer that
     /// advertised. Served to a follower asking for `directory`; the directory is
     /// self-declared and verified on dial. Evicted when the peer disconnects.
-    var advertisedChildEndpoints: [PeerID: (directory: String, endpoint: String)] = [:]
+    var advertisedChildEndpoints: [PeerID: (directory: String, endpoint: String, rpcUrl: String?)] = [:]
     /// the parent-subscription link(s) as node-managed trusted
     /// consensus channels, keyed by child directory. The `ivy` lets us send
     /// cw-requests to the parent; `peer` is captured when the parent identifies.

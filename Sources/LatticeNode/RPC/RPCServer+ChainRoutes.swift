@@ -122,6 +122,44 @@ extension RPCRoutes {
         }
     }
 
+    // GET /api/chain/endpoints?chainPath=Nexus/toy — public HTTP RPC endpoints that this
+    // node's directly-connected `toy` children have advertised through the child-peer
+    // rendezvous. Lets a browser connect straight to a child chain's node (Nexus stays
+    // Nexus-only, just relaying the directory). Self-declared + UNVERIFIED: the caller MUST
+    // verify the served chain's genesis against the parent's anchor before trusting one.
+    // Bounded, unauthenticated read. Only answers for a chain THIS node serves as parent.
+    static func chainEndpoints(node: LatticeNode, request: Request) async throws -> Response {
+        let basePath = await currentChainPath(node: node)
+        guard let raw = request.uri.queryParameters["chainPath"].map(String.init),
+              let resolved = resolveChainSelector(raw.split(separator: "/").map(String.init), from: basePath),
+              resolved.count >= 2 else {
+            return jsonError("Expected chainPath=<parent>/<child>, e.g. Nexus/toy", status: .badRequest)
+        }
+        let directory = resolved.last!
+        let parentPath = Array(resolved.dropLast())
+        // `pubkey` is the ADVERTISER's parent-link identity — it authenticates who relayed the
+        // URL, NOT the RPC server. The URL is self-declared and untrusted: the browser MUST
+        // verify the served genesis against the parent's anchor before using an endpoint.
+        struct Ep: Encodable { let rpcUrl: String; let pubkey: String }
+        struct R: Encodable { let chainPath: [String]; let endpoints: [Ep]; let count: Int }
+        var eps: [Ep] = []
+        // If THIS node serves the child chain in-process (multichain parent) and exposes a
+        // public RPC, include itself — otherwise the explorer's level-by-level walk would find
+        // no endpoint for an in-process level even though this very node can serve it.
+        if await node.network(forPath: resolved) != nil,
+           let ownRpc = await node.config.rpcPublicUrl, ChildPeerProvider.isBrowsableHTTPURL(ownRpc) {
+            eps.append(Ep(rpcUrl: ownRpc, pubkey: await node.config.p2pPublicKey))
+        }
+        if let network = await node.network(forPath: parentPath) {
+            let seen = Set(eps.map { $0.rpcUrl })
+            for e in await node.advertisedChildRPCEndpoints(network: network, directory: directory)
+            where !seen.contains(e.rpcUrl) {
+                eps.append(Ep(rpcUrl: e.rpcUrl, pubkey: e.pubkey))
+            }
+        }
+        return json(R(chainPath: resolved, endpoints: eps, count: eps.count))
+    }
+
     // GET /api/chain/parent-height?chainPath=<path>
     // Contract 2 (parent-visibility): a child block carried by parent block H commits
     // `parentState = postState(H-1)` (BlockBuilder uses the carrier's prevState). So:

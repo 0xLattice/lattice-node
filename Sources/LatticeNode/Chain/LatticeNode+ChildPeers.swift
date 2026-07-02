@@ -13,11 +13,27 @@ extension LatticeNode {
 
     nonisolated public func chainNetwork(_ network: ChainNetwork, handleChildPeerAdvertise payload: Data, from peer: PeerID) async {
         guard let adv = ChildPeerProvider.decodeAdvertise(payload) else { return }
-        await recordAdvertisedChildEndpoint(peer: peer, directory: adv.directory, endpoint: adv.endpoint)
+        await recordAdvertisedChildEndpoint(peer: peer, directory: adv.directory, endpoint: adv.endpoint, rpcUrl: adv.rpcUrl)
     }
 
-    func recordAdvertisedChildEndpoint(peer: PeerID, directory: String, endpoint: String) {
-        advertisedChildEndpoints[peer] = (directory, endpoint)
+    func recordAdvertisedChildEndpoint(peer: PeerID, directory: String, endpoint: String, rpcUrl: String? = nil) {
+        advertisedChildEndpoints[peer] = (directory, endpoint, rpcUrl)
+    }
+
+    /// Public HTTP RPC endpoints that directly-connected `directory` children have
+    /// advertised over `network` (self-declared; a browser MUST verify the served genesis
+    /// against the parent's anchor before trusting one). Deduped by URL, bounded.
+    func advertisedChildRPCEndpoints(network: ChainNetwork, directory: String) async -> [(rpcUrl: String, pubkey: String)] {
+        let connected = await network.ivy.connectedPeers
+        var out: [(rpcUrl: String, pubkey: String)] = []
+        var seen = Set<String>()
+        for p in connected {
+            guard let adv = advertisedChildEndpoints[p], adv.directory == directory,
+                  let rpc = adv.rpcUrl, !rpc.isEmpty, seen.insert(rpc).inserted else { continue }
+            out.append((rpcUrl: rpc, pubkey: p.publicKey))
+            if out.count >= ChildPeerProvider.maxEndpoints { break }
+        }
+        return out
     }
 
     nonisolated public func chainNetwork(_ network: ChainNetwork, handleChildPeerRequest payload: Data, from peer: PeerID) async -> Data? {
@@ -112,7 +128,7 @@ extension LatticeNode {
     /// link, so a parent can serve us to a same-chain follower.
     func advertiseChainEndpointToParents(directory: String) async {
         guard let ivy = parentConsensusLinks[directory]?.ivy else { return }
-        let payload = ChildPeerProvider.encodeAdvertise(directory: directory, endpoint: ownChainGossipEndpoint)
+        let payload = ChildPeerProvider.encodeAdvertise(directory: directory, endpoint: ownChainGossipEndpoint, rpcUrl: config.rpcPublicUrl)
         await ivy.broadcastMessage(topic: ChildPeerProvider.advertiseTopic, payload: payload)
     }
 

@@ -146,18 +146,37 @@ public actor ChildPeerProvider {
     /// A `pubkey@host:port` endpoint; cap well above any real value.
     static let maxEndpointBytes = 512
 
-    static func encodeAdvertise(directory: String, endpoint: String) -> Data {
+    /// An advertised rpcUrl is served verbatim to browsers, so accept only an absolute
+    /// http(s) URL with a host — reject javascript:/data:/file:/scheme-less strings at BOTH
+    /// ends of the wire. Defense in depth; the browser must still verify genesis. (The node
+    /// itself never dials this URL — it only relays it.)
+    static func isBrowsableHTTPURL(_ s: String) -> Bool {
+        guard s.utf8.count <= maxEndpointBytes, let u = URL(string: s),
+              let scheme = u.scheme?.lowercased(), u.host != nil else { return false }
+        return scheme == "http" || scheme == "https"
+    }
+
+    static func encodeAdvertise(directory: String, endpoint: String, rpcUrl: String? = nil) -> Data {
         var out = Data()
         out.appendLPString(String(directory.prefix(maxDirectoryBytes)))
         out.appendLPString(String(endpoint.prefix(maxEndpointBytes)))
+        // Optional trailing field (backward-compatible on a live network): the child's
+        // public HTTP RPC URL, so a browser can be pointed straight at it. Old decoders
+        // read dir+endpoint and stop, ignoring these trailing bytes; new decoders read it.
+        // Only appended when it's a valid browsable http(s) URL (garbage is dropped, so the
+        // nil/invalid case stays byte-identical to the legacy 2-field wire).
+        if let rpcUrl, isBrowsableHTTPURL(rpcUrl) { out.appendLPString(rpcUrl) }
         return out
     }
 
-    static func decodeAdvertise(_ data: Data) -> (directory: String, endpoint: String)? {
+    static func decodeAdvertise(_ data: Data) -> (directory: String, endpoint: String, rpcUrl: String?)? {
         var r = ByteCursor(data)
         guard let dir = r.readLPString(), !dir.isEmpty, dir.utf8.count <= maxDirectoryBytes,
               let endpoint = r.readLPString(), !endpoint.isEmpty, endpoint.utf8.count <= maxEndpointBytes else { return nil }
-        return (dir, endpoint)
+        // Tolerant trailing read: absent (old wire) → nil; anything not a browsable http(s)
+        // URL → nil (an untrusted peer can't smuggle javascript:/data:/file: to browsers).
+        let rpcUrl = r.readLPString().flatMap { isBrowsableHTTPURL($0) ? $0 : nil }
+        return (dir, endpoint, rpcUrl)
     }
 }
 

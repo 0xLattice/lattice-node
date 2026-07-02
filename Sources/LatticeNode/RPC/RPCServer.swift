@@ -153,6 +153,7 @@ enum RPCRoutes {
         api.get("chain/info") { _, _ in try await chainInfo(node: node) }
         api.get("chain/map") { _, _ in try await chainMap(node: node) }
         api.get("chain/children") { req, _ in try await chainChildren(node: node, request: req) }
+        api.get("chain/endpoints") { req, _ in try await chainEndpoints(node: node, request: req) }
         api.post("chain/register-rpc") { req, _ in
             if let denied = requireAdminAccess(request: req, auth: auth, endpoint: "chain/register-rpc") {
                 return denied

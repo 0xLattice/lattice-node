@@ -45,7 +45,38 @@ final class ChildPeerProviderTests: XCTestCase {
         let adv = ChildPeerProvider.decodeAdvertise(ChildPeerProvider.encodeAdvertise(directory: "toy", endpoint: "k@1.2.3.4:4001"))
         XCTAssertEqual(adv?.directory, "toy")
         XCTAssertEqual(adv?.endpoint, "k@1.2.3.4:4001")
+        XCTAssertNil(adv?.rpcUrl) // no rpcUrl advertised → nil
         XCTAssertNil(ChildPeerProvider.decodeAdvertise(ChildPeerProvider.encodeAdvertise(directory: "", endpoint: "k@h:1")))
+
+        // Optional rpcUrl round-trips.
+        let withRpc = ChildPeerProvider.decodeAdvertise(
+            ChildPeerProvider.encodeAdvertise(directory: "toy", endpoint: "k@1.2.3.4:4001", rpcUrl: "https://toy.example.com"))
+        XCTAssertEqual(withRpc?.rpcUrl, "https://toy.example.com")
+
+        // Backward-compat (live-network safe): the nil-rpcUrl encoding is byte-identical to
+        // the legacy 2-field wire, and adding an rpcUrl only APPENDS trailing bytes — so old
+        // decoders (which read dir+endpoint and ignore the rest) are unaffected.
+        let legacy = ChildPeerProvider.encodeAdvertise(directory: "toy", endpoint: "k@1.2.3.4:4001")
+        let extended = ChildPeerProvider.encodeAdvertise(directory: "toy", endpoint: "k@1.2.3.4:4001", rpcUrl: "https://toy.example.com")
+        XCTAssertGreaterThan(extended.count, legacy.count)
+        XCTAssertEqual(Array(extended.prefix(legacy.count)), Array(legacy)) // legacy prefix unchanged
+
+        // Non-http(s) rpcUrls are rejected at both ends — never smuggled to a browser — and
+        // the encoding falls back to the byte-identical legacy 2-field wire.
+        for bad in ["javascript:alert(1)", "data:text/html,x", "file:///etc/passwd", "toy.example.com", "http:///nohost"] {
+            let enc = ChildPeerProvider.encodeAdvertise(directory: "toy", endpoint: "k@1.2.3.4:4001", rpcUrl: bad)
+            XCTAssertEqual(Array(enc), Array(legacy), "bad rpcUrl \(bad) should be dropped → legacy wire")
+            XCTAssertNil(ChildPeerProvider.decodeAdvertise(enc)?.rpcUrl)
+        }
+
+        // Forward-compat: a legacy wire with UNRECOGNIZED trailing bytes still decodes to
+        // (dir, endpoint, nil) — the tolerant-trailing property the rolling upgrade rests on.
+        var garbage = legacy
+        garbage.append(contentsOf: [0xFF, 0x00, 0x07]) // bogus length prefix + stray byte
+        let dg = ChildPeerProvider.decodeAdvertise(garbage)
+        XCTAssertEqual(dg?.directory, "toy")
+        XCTAssertEqual(dg?.endpoint, "k@1.2.3.4:4001")
+        XCTAssertNil(dg?.rpcUrl)
     }
 
     /// Full in-process loopback: the follower asks, the parent serves the matching

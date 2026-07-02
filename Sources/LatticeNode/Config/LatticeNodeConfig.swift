@@ -107,6 +107,10 @@ public struct LatticeNodeConfig: Sendable {
     /// overriding STUN/observed addresses. Required for cloud/NAT nodes (e.g. fly)
     /// whose observed address is private and not externally dialable.
     public let externalAddress: (host: String, port: UInt16)?
+    /// Public, CORS-enabled HTTP RPC base URL for this node (e.g. https://node.example.com),
+    /// advertised through the child-peer rendezvous so a browser can be pointed straight at
+    /// this node's chain. nil = don't advertise an RPC URL (NAT/private node).
+    public let rpcPublicUrl: String?
     /// Serve as a circuit relay for NAT'd peers (Phase 1 NAT traversal).
     public let relayEnabled: Bool
     /// Relay peers to route through when a direct dial fails.
@@ -139,6 +143,7 @@ public struct LatticeNodeConfig: Sendable {
         minPeerKeyBits: Int = LatticeNodeConfig.defaultMinPeerKeyBits,
         coinbaseAddress: String? = nil,
         externalAddress: (host: String, port: UInt16)? = nil,
+        rpcPublicUrl: String? = nil,
         relayEnabled: Bool = false,
         knownRelays: [PeerEndpoint] = []
     ) {
@@ -167,6 +172,7 @@ public struct LatticeNodeConfig: Sendable {
         self.fullChainPath = fullChainPath
         self.minPeerKeyBits = minPeerKeyBits
         self.coinbaseAddress = coinbaseAddress
+        self.rpcPublicUrl = rpcPublicUrl
         self.externalAddress = externalAddress
         self.relayEnabled = relayEnabled
         self.knownRelays = knownRelays

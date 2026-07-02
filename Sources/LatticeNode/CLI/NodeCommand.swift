@@ -55,6 +55,9 @@ struct NodeCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Public P2P address to advertise to peers (host:port). Required for cloud/NAT nodes whose locally-observed address is not externally dialable (e.g. fly 172.x). Without it peers learn an unreachable address and cannot join.")
     var externalAddress: String?
 
+    @Option(name: .long, help: "Public, CORS-enabled HTTP RPC base URL for this node (e.g. https://node.example.com), advertised through the child-peer rendezvous so a browser can be pointed straight at this node's chain via GET /api/chain/endpoints. Set it on a child-chain node you want browsable; leave unset for NAT/private nodes.")
+    var rpcPublicUrl: String?
+
     @Flag(name: .long, help: "Serve as a circuit relay: forward traffic for peers that cannot connect directly (NAT). Defaults on when --external-address is set (public/backbone nodes).")
     var relay: Bool = false
 
@@ -433,6 +436,7 @@ struct NodeCommand: AsyncParsableCommand {
             minPeerKeyBits: effectiveMinPeerKeyBits,
             coinbaseAddress: coinbaseAddress,
             externalAddress: parsedExternalAddress,
+            rpcPublicUrl: rpcPublicUrl,
             relayEnabled: effectiveRelay,
             knownRelays: parsedRelays
         )
