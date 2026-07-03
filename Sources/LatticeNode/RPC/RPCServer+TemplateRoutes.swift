@@ -383,7 +383,7 @@ extension RPCRoutes {
         // signing always uses node-owned key material; request bodies may select a
         // recipient address, but must never provide private key material.
         let templateData = (try? await request.body.collect(upTo: 65_536)).map { Data(buffer: $0) } ?? Data()
-        let body = RPCRequestBodyCodecs.decodeChainTemplate(templateData)
+        var body = RPCRequestBodyCodecs.decodeChainTemplate(templateData)
             ?? ChainTemplateRequestBody(chain: nil, chainPath: nil, childNodes: nil, childNodeAuth: nil)
         if body.chain != nil {
             return jsonError("Use chainPath=Nexus/...; bare chain is no longer supported", status: .badRequest)
@@ -400,6 +400,33 @@ extension RPCRoutes {
         switch await resolveChainResult(node: node, request: request, chainPath: body.chainPath) {
         case .success(let resolved): chain = resolved
         case .failure(let response): return response
+        }
+        // Auto-include the children this node is ALREADY serving (supervised / followed —
+        // their loopback RPC is in the registered-RPC map) into the merged template, so a
+        // coordinator mines "this node + whatever it follows" without passing any --child-node.
+        // Union with the caller-supplied childNodes; the loopback/count/SSRF checks below still
+        // run on the combined set. Chain membership stays a NODE concern, not the miner's.
+        let autoChildren = await node.registeredDirectChildEndpoints(parentPath: chain.path)
+        if !autoChildren.isEmpty {
+            // Append auto-children only up to the fan-out cap and dedup by normalized (/api)
+            // URL, so they can NEVER push the set over maxChildNodesFanout and 400 the node's
+            // OWN template (a node serving >cap children would otherwise halt even Nexus work)
+            // — graceful degradation over total outage. Caller URLs are left as-is; the
+            // loopback/count checks below still run on the combined set.
+            func normAPI(_ s: String) -> String { s.hasSuffix("/api") ? s : s + "/api" }
+            var merged = body.childNodes ?? []
+            var seen = Set(merged.map(normAPI))
+            var authMap = body.childNodeAuth ?? [:]
+            for c in autoChildren {
+                let key = normAPI(c.url)
+                guard !seen.contains(key), merged.count < maxChildNodesFanout else { continue }
+                seen.insert(key)
+                merged.append(c.url)
+                if let a = c.auth { authMap[c.url] = a }
+            }
+            body = ChainTemplateRequestBody(chain: body.chain, chainPath: body.chainPath,
+                                            childNodes: merged, childNodeAuth: authMap.isEmpty ? nil : authMap,
+                                            rewardAddress: body.rewardAddress)
         }
         let dir = chain.directory
         guard let chainState = await node.chain(forPath: chain.path),

@@ -488,6 +488,29 @@ public actor LatticeNode: ChainNetworkDelegate {
         registeredRPCEndpoints
     }
 
+    /// Direct children of `parentPath` this node currently serves — i.e. the supervised /
+    /// followed children whose loopback RPC is in the registered-RPC map — as
+    /// (apiURL, authToken?). Used to auto-include them in the merged mining template so a
+    /// coordinator mines "this node + whatever it follows" with no explicit --child-node.
+    /// Registrations are loopback-validated at ingress; a defensive subset check keeps a
+    /// stray non-loopback entry from poisoning the template's SSRF-safe fan-out.
+    func registeredDirectChildEndpoints(parentPath: [String]) -> [(url: String, auth: String?)] {
+        func isLoopbackAPIBase(_ s: String) -> Bool {
+            guard let u = URL(string: s), let scheme = u.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https", let host = u.host?.lowercased() else { return false }
+            return host == "127.0.0.1" || host == "::1" || host == "localhost"
+        }
+        var out: [(url: String, auth: String?)] = []
+        for (key, endpoint) in registeredRPCEndpoints {
+            let path = key.split(separator: "/").map(String.init)
+            guard path.count == parentPath.count + 1,
+                  Array(path.prefix(parentPath.count)) == parentPath,
+                  isLoopbackAPIBase(endpoint) else { continue }
+            out.append((url: endpoint, auth: registeredRPCAuthTokens[key]))
+        }
+        return out
+    }
+
     public func registeredRPCEndpoint(chainPath: [String]) -> String? {
         registeredRPCEndpoints[chainKey(forPath: chainPath)]
     }

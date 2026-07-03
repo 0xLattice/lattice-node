@@ -98,6 +98,7 @@ const TESTS = [
     { name: 'mesh-convergence',      file: 'scenarios/network/mesh-convergence.mjs',      timeoutMs: 300_000 },
     { name: 'peer-churn',            file: 'scenarios/network/peer-churn.mjs',            timeoutMs: 300_000 },
     { name: 'merged-mining',         file: 'scenarios/network/merged-mining.mjs',         timeoutMs: 90_000 },
+    { name: 'auto-include-children', file: 'scenarios/network/auto-include-children.mjs', timeoutMs: 120_000 },
     { name: 'external-miner-quickstart', file: 'scenarios/network/external-miner-quickstart.mjs', timeoutMs: 180_000 },
   ]),
   ...group('follower', [
