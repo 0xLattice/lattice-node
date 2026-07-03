@@ -462,11 +462,53 @@ extension LatticeNode {
         if let spec {
             for policy in spec.wasmPolicies {
                 let moduleHeader = WasmPolicyModuleHeader(rawCID: policy.moduleCID)
+                // Fail-closed like the tx path: a missing policy module → incomplete genesis-hex
+                // (the rebuild-compare below can't catch it — modules are referenced by CID, not
+                // embedded in the block closure). Retry rather than boot a child missing a policy.
                 guard let module = try? await moduleHeader.resolve(fetcher: parentNetwork.ivyFetcher).node,
-                      let moduleData = module.toData() else { continue }
+                      let moduleData = module.toData() else { return nil }
                 entries.append(GenesisHexEntry(cid: policy.moduleCID, data: moduleData))
             }
         }
+        // Include the genesis TRANSACTION bodies. The child rebuilds a fully-inline genesis via
+        // buildGenesis(transactions:), so without these it constructs a DIFFERENT genesis block
+        // (mismatched CID → the followed child forks a divergent chain that can never sync with
+        // nodes on the real chain). Mirrors the deploy path's genesisBootstrapEntries.
+        //
+        // FAIL-CLOSED: a PARTIAL tx set (some bodies not yet fetchable) would still boot a
+        // divergent genesis — but silently, and get persisted. So require every tx body to
+        // resolve; on any miss return nil and let the reconciler re-probe next sweep (never
+        // emit an incomplete genesis-hex).
+        guard let spec,
+              let txDict = try? await genesisBlock.transactions.resolveRecursive(fetcher: parentNetwork.ivyFetcher).node,
+              let txVols = try? txDict.allKeysAndValues() else { return nil }
+        // buildGenesis keys transactions by ARRAY INDEX and applies them in order, so the
+        // reconstruction must feed txs in the original order. allKeysAndValues() keys are the
+        // index as a string ("0","1",…); sort by INTEGER (not lexical: "10" < "2") to recover it.
+        var genesisTxs: [Transaction] = []
+        for (_, txVol) in txVols.sorted(by: { (Int($0.key) ?? Int.max) < (Int($1.key) ?? Int.max) }) {
+            guard let tx = try? await txVol.resolve(fetcher: parentNetwork.ivyFetcher).node else { return nil }
+            var body = tx.body.node
+            if body == nil { body = try? await tx.body.resolve(fetcher: parentNetwork.ivyFetcher).node }
+            guard let bodyData = body?.toData() else { return nil }
+            entries.append(GenesisHexEntry(cid: tx.body.rawCID, data: bodyData))
+            genesisTxs.append(tx)
+        }
+        // Invariant the follow path was missing entirely: verify the reconstructed genesis
+        // actually reproduces the announced CID BEFORE accepting. Deterministic genesis, so a
+        // rebuild from (spec, txs, timestamp, target) must equal the anchored genesisCID — if it
+        // doesn't, the hex is wrong/incomplete; return nil rather than spawn a divergent child.
+        var rebuiltCID: String? = nil
+        if let rebuilt = try? await BlockBuilder.buildGenesis(
+               spec: spec, transactions: genesisTxs,
+               timestamp: genesisBlock.timestamp, target: genesisBlock.target,
+               fetcher: parentNetwork.ivyFetcher),
+           let vol = try? VolumeImpl<Block>(node: rebuilt) {
+            rebuiltCID = vol.rawCID
+        }
+        // Fail-closed: reconstructed genesis must reproduce the announced CID, else the hex is
+        // incomplete/wrong — return nil and let the reconciler re-probe rather than fork a child.
+        guard rebuiltCID == genesisCID else { return nil }
         let genesisHex = GenesisHexCodec.encodeEntries(entries).map { String(format: "%02x", $0) }.joined()
         return DeployedChainMetadata(
             chainPath: metadata.chainPath, directory: metadata.directory,

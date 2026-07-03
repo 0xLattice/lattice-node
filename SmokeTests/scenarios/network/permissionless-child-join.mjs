@@ -43,7 +43,10 @@ await A.readIdentity()
 const infoA = await A.chainInfo()
 const nexusDir = infoA.nexus
 const childPathStr = `${nexusDir}/${CHILD}`
-const aToy = net.add(await A.spawnChild({ directory: CHILD, parentDirectory: nexusDir, ports: toyA, premine: 0 }))
+// Premine > 0 so the genesis carries a transaction: the follow path must fold the genesis
+// TX bodies into the resolved genesis-hex, else B rebuilds a DIFFERENT genesis (mismatched
+// CID) and the genesis-equality check below fails. (A premine-0 child hides that class of bug.)
+const aToy = net.add(await A.spawnChild({ directory: CHILD, parentDirectory: nexusDir, ports: toyA, premine: 1_000_000_000, premineRecipient: funder.address }))
 const toyGenesisHash = aToy._deployInfo.genesisHash
 // THROTTLED from the start to ~3s/block — slower than B applies a block, so the live tip
 // moves perpetually but a joiner can ride it (the production case). One continuous miner,
