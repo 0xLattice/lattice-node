@@ -500,6 +500,10 @@ extension RPCRoutes {
             ) {
                 selectedTxs.append(coinbase)
                 appendedCoinbase = true
+            } else {
+                // A coinbase address IS configured but the coinbase couldn't be built — the
+                // block would silently forfeit its reward. Surface it rather than re-hiding it.
+                log.warning("coinbase address configured but coinbase build returned nil for '\(dir)' — this block forfeits its reward")
             }
         }
 
@@ -1000,18 +1004,22 @@ extension RPCRoutes {
                 recipientAddress: candidateBody?.rewardAddress ?? $0
             )
         }
-        if let nodeReward,
-           let coinbase = try? await BlockProducer.buildCoinbaseTransaction(
-               spec: specNode,
-               identity: nodeReward.identity,
-               chainPath: chain.path,
-               previousBlock: baseTipBlock,
-               mempoolTransactions: selectedTxs,
-               fetcher: mempoolFetcher,
-               recipientAddress: nodeReward.recipientAddress
-           ) {
-            selectedTxs.append(coinbase)
-            appendedCoinbase = true
+        if let nodeReward {
+            if let coinbase = try? await BlockProducer.buildCoinbaseTransaction(
+                   spec: specNode,
+                   identity: nodeReward.identity,
+                   chainPath: chain.path,
+                   previousBlock: baseTipBlock,
+                   mempoolTransactions: selectedTxs,
+                   fetcher: mempoolFetcher,
+                   recipientAddress: nodeReward.recipientAddress
+               ) {
+                selectedTxs.append(coinbase)
+                appendedCoinbase = true
+            } else {
+                // Configured coinbase that couldn't be built — surface the silent forfeit.
+                log.warning("coinbase address configured but coinbase build returned nil for '\(dir)' — this block forfeits its reward")
+            }
         }
         let candidateTimestampMs = candidateBody?.timestampMs ?? max(
             Int64(Date().timeIntervalSince1970 * 1000),

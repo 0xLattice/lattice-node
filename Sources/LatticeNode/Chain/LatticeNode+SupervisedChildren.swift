@@ -291,7 +291,10 @@ extension LatticeNode {
             subscribeP2P: "\(config.publicKey)@127.0.0.1:\(config.listenPort)",
             bootstrapPeer: childBootstrapPeer,
             port: childPort, rpcPort: childRPCPort,
-            dataDir: childDataDir, inheritedArguments: childInheritedArguments
+            // Inherit the parent's payout address so the child claims its block reward too;
+            // without it the child mines empty-reward templates (forfeiting the reward).
+            dataDir: childDataDir, coinbaseAddress: config.coinbaseAddress,
+            inheritedArguments: childInheritedArguments
         )
         do {
             _ = try await supervisor.spawn(spec.launch(nodeExecutable: ChildProcessSupervisor.selfExecutableURL()))

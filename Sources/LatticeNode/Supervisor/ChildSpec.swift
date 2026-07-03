@@ -19,6 +19,10 @@ public struct ChildSpec: Sendable, Equatable {
     /// Child RPC port (deterministic from the parent RPC base + directory).
     public let rpcPort: UInt16
     public let dataDir: String
+    /// Public payout address to credit in the child's block-template coinbase, inherited from
+    /// the parent node's `--coinbase-address`. nil → the child mines an empty-reward template
+    /// (forfeiting its block reward), so this must be set for a child to earn its reward.
+    public let coinbaseAddress: String?
     /// Config the child inherits from the parent (e.g. `--min-peer-key-bits`),
     /// already expressed as argv pairs.
     public let inheritedArguments: [String]
@@ -32,6 +36,7 @@ public struct ChildSpec: Sendable, Equatable {
         port: UInt16,
         rpcPort: UInt16,
         dataDir: String,
+        coinbaseAddress: String? = nil,
         inheritedArguments: [String] = []
     ) {
         self.directory = directory
@@ -42,6 +47,7 @@ public struct ChildSpec: Sendable, Equatable {
         self.port = port
         self.rpcPort = rpcPort
         self.dataDir = dataDir
+        self.coinbaseAddress = coinbaseAddress
         self.inheritedArguments = inheritedArguments
     }
 
@@ -49,9 +55,8 @@ public struct ChildSpec: Sendable, Equatable {
     /// explicit `node` subcommand to match the harness invocation exactly rather
     /// than relying on it being the default subcommand. `inheritedArguments`
     /// carries the parent's namespace-independent policy (`--no-dns-seeds`,
-    /// `--min-fee-rate`, `--min-peer-key-bits`). Coinbase address and identity
-    /// pre-seed are wired with the smoke migration (step 1b), where they are
-    /// actually exercised.
+    /// `--min-fee-rate`, `--min-peer-key-bits`). `--coinbase-address` is passed so the child
+    /// claims its block reward (without it the child mines empty-reward templates).
     public func arguments() -> [String] {
         var args: [String] = [
             "node",
@@ -64,6 +69,7 @@ public struct ChildSpec: Sendable, Equatable {
             "--data-dir", dataDir,
         ]
         if let bootstrapPeer { args += ["--peer", bootstrapPeer] }
+        if let coinbaseAddress { args += ["--coinbase-address", coinbaseAddress] }
         args += inheritedArguments
         return args
     }
