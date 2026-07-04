@@ -44,7 +44,12 @@ let package = Package(
         // requests keyed by (relayPeer, nonce) so concurrent connects through one
         // relay no longer overwrite each other's continuation; relay continuations
         // also drained on teardown.
-        .package(url: "https://github.com/adalinxx/Ivy.git", exact: "6.10.0"),
+        // Ivy 6.11.0 = 6.10.0 + relay circuit RENEWAL: the hard 120s circuit lifetime +
+        // 128KB total budget black-holed a NAT'd node's long-lived chain gossip (a
+        // relay-only follower stalled the instant it crossed 120s/128KB). Now: sliding
+        // idle-timeout renewed on activity + per-circuit AND node-wide aggregate byte-RATE
+        // caps (DoS-bounded) + 3600s backstop; relayed-conn isLive tracks inbound activity.
+        .package(url: "https://github.com/adalinxx/Ivy.git", exact: "6.11.0"),
         // VolumeBroker 3.10.0: retained-root merge for historical state
         // retention, plus retained-root scopes and serve-gate/eviction pins.
         .package(url: "https://github.com/adalinxx/VolumeBroker.git", from: "3.10.0"),
