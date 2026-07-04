@@ -240,7 +240,6 @@ struct ChainDeployCommand: AsyncParsableCommand {
             print("      --chain-path \(childChainPathEarlyStr) \\")
             if !chainP2PAddress.isEmpty {
                 print("      --subscribe-p2p \(chainP2PAddress) \\")
-                print("      --peer \(chainP2PAddress) \\")
             }
             printWarning("Or rerun `chain deploy` with the same arguments to retry the genesisAction tx.")
             throw ExitCode.failure
@@ -280,7 +279,6 @@ struct ChainDeployCommand: AsyncParsableCommand {
         print("      --chain-path \(childChainPathStr) \\")
         if !chainP2PAddress.isEmpty {
             print("      --subscribe-p2p \(chainP2PAddress) \\")
-            print("      --peer \(chainP2PAddress) \\")
         }
         print("      --port <p2p-port> \\")
         print("      --rpc-port <rpc-port> \\")
@@ -543,7 +541,6 @@ struct ChainGenesisCommand: AsyncParsableCommand {
         print("      --chain-path \(chainPath) \\")
         if !chainP2PAddress.isEmpty {
             print("      --subscribe-p2p \(chainP2PAddress) \\")
-            print("      --peer \(chainP2PAddress) \\")
         }
         print("      --port <p2p-port> \\")
         print("      --rpc-port <rpc-port> \\")
