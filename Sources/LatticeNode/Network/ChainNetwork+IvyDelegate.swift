@@ -414,6 +414,13 @@ extension ChainNetwork {
             // hand to the node, which stores it against the peer for getChildPeers.
             guard childPeerRequestBuckets.tryConsume(peer) else { break }
             await delegate?.chainNetwork(self, handleChildPeerAdvertise: payload, from: peer)
+        case ChildPeerProvider.genesisTopic:
+            // A connected child pushed its genesis content. Charge a HEAVY cost on the shared
+            // bucket: unlike the near-free advertise/request messages, an admitted genesis message
+            // can drive a durable store + closure rebuild, so it must be far rarer (cost 10 ≈ ~1/s
+            // sustained vs ~10/s). The handler additionally short-circuits once the genesis is held.
+            guard childPeerRequestBuckets.tryConsume(peer, cost: 10) else { break }
+            await delegate?.chainNetwork(self, handleChildGenesisAdvertise: payload, from: peer)
         case ChildPeerProvider.requestTopic:
             // (serve): answer a followed child's same-chain-peer query from the live
             // spawn-trusted subscriber set and reply on THIS network. Rate gate FIRST
@@ -595,7 +602,7 @@ struct PeerRateBuckets {
     /// Charge one token to `peer`. Returns true if admitted. The peer's bucket
     /// is created (full) only if it does not already exist; an existing bucket
     /// is mutated in place so an exhausted bucket is never reset.
-    mutating func tryConsume(_ peer: PeerID) -> Bool {
+    mutating func tryConsume(_ peer: PeerID, cost: Double = 1) -> Bool {
         seq &+= 1
         if buckets[peer] == nil {
             evictIfNeeded(incoming: peer)
@@ -603,7 +610,7 @@ struct PeerRateBuckets {
         }
         lastSeen[peer] = seq
         // `buckets[peer]` exists here; mutate in place (no `?? TokenBucket(...)`).
-        return buckets[peer]!.tryConsume()
+        return buckets[peer]!.tryConsume(cost)
     }
 
     /// Evict the least-recently-seen peer when inserting `incoming` would exceed

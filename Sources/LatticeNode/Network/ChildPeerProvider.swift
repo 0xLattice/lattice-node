@@ -178,6 +178,40 @@ public actor ChildPeerProvider {
         let rpcUrl = r.readLPString().flatMap { isBrowsableHTTPURL($0) ? $0 : nil }
         return (dir, endpoint, rpcUrl)
     }
+
+    // MARK: - Genesis advertise (child → parent: "here is my genesis content; re-serve it")
+    //
+    // A node serving a child pushes its genesis CAS entries to its parent so the parent durably
+    // re-serves them on the PARENT network. Without this, only the original deployer ever pins a
+    // child's genesis on the parent; once it leaves, a follower resolving the genesis via the
+    // parent network gets `notFound`. The parent MUST verify each entry hashes to its CID and that
+    // the genesis block CID matches the ANNOUNCED child genesis before pinning — an untrusted child
+    // can't inject a fake/oversized genesis (fails CID re-derivation or the anchor match; bounded).
+    public static let genesisTopic = "childgenesis-advertise"
+    static let maxGenesisEntries = 512
+    static let maxGenesisTotalBytes = 512 * 1024  // genesis closure is small; hard-cap the push
+
+    static func encodeGenesis(directory: String, entries: [(cid: String, data: Data)]) -> Data {
+        var out = Data()
+        out.appendLPString(String(directory.prefix(maxDirectoryBytes)))
+        let capped = entries.prefix(maxGenesisEntries)
+        out.appendUInt16BE(UInt16(capped.count))
+        for (cid, data) in capped { out.appendLPString(cid); out.appendLPData(data) }
+        return out
+    }
+
+    static func decodeGenesis(_ data: Data) -> (directory: String, entries: [(cid: String, data: Data)])? {
+        guard data.count <= maxGenesisTotalBytes else { return nil }
+        var r = ByteCursor(data)
+        guard let dir = r.readLPString(), !dir.isEmpty, dir.utf8.count <= maxDirectoryBytes,
+              let count = r.readUInt16BE(), count <= maxGenesisEntries else { return nil }
+        var entries: [(cid: String, data: Data)] = []
+        for _ in 0..<Int(count) {
+            guard let cid = r.readLPString(), !cid.isEmpty, let d = r.readLPData() else { return nil }
+            entries.append((cid, d))
+        }
+        return (dir, entries)
+    }
 }
 
 // MARK: - Minimal big-endian byte helpers (local to the provider wire)
@@ -187,11 +221,19 @@ private extension Data {
         for shift in stride(from: 56, through: 0, by: -8) { append(UInt8((v >> UInt64(shift)) & 0xff)) }
     }
     mutating func appendUInt16BE(_ v: UInt16) { append(UInt8(v >> 8)); append(UInt8(v & 0xff)) }
+    mutating func appendUInt32BE(_ v: UInt32) {
+        for shift in stride(from: 24, through: 0, by: -8) { append(UInt8((v >> UInt32(shift)) & 0xff)) }
+    }
     mutating func appendLPString(_ s: String) {
         let bytes = Data(s.utf8)
         let n = Swift.min(bytes.count, 0xffff)
         appendUInt16BE(UInt16(n))
         append(bytes.prefix(n))
+    }
+    mutating func appendLPData(_ d: Data) {
+        let n = Swift.min(d.count, Int(UInt32.max))
+        appendUInt32BE(UInt32(n))
+        append(d.prefix(n))
     }
 }
 
@@ -212,6 +254,18 @@ private struct ByteCursor {
         var v: UInt64 = 0
         for _ in 0..<8 { guard let b = readUInt8() else { return nil }; v = (v << 8) | UInt64(b) }
         return v
+    }
+    mutating func readUInt32BE() -> UInt32? {
+        var v: UInt32 = 0
+        for _ in 0..<4 { guard let b = readUInt8() else { return nil }; v = (v << 8) | UInt32(b) }
+        return v
+    }
+    mutating func readLPData() -> Data? {
+        guard let len = readUInt32BE() else { return nil }
+        guard len <= UInt32(Int.max), i + Int(len) <= data.endIndex else { return nil }
+        let slice = Data(data[i..<i + Int(len)])
+        i += Int(len)
+        return slice
     }
     mutating func readLPString() -> String? {
         guard let len = readUInt16BE() else { return nil }

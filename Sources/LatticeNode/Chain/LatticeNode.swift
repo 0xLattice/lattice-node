@@ -164,6 +164,12 @@ public actor LatticeNode: ChainNetworkDelegate {
     /// advertised. Served to a follower asking for `directory`; the directory is
     /// self-declared and verified on dial. Evicted when the peer disconnects.
     var advertisedChildEndpoints: [PeerID: (directory: String, endpoint: String, rpcUrl: String?)] = [:]
+    /// This child's own genesis CAS entries (from `--genesis-hex` boot), retained so it can
+    /// re-advertise its genesis to its parent(s) — the parent durably re-serves them so later
+    /// followers can resolve the genesis even after the original deployer leaves. Empty on a
+    /// root/Nexus node (no parent to advertise to).
+    var childGenesisBootstrapEntries: [(cid: String, data: Data)] = []
+    func setChildGenesisBootstrapEntries(_ entries: [(cid: String, data: Data)]) { childGenesisBootstrapEntries = entries }
     /// the parent-subscription link(s) as node-managed trusted
     /// consensus channels, keyed by child directory. The `ivy` lets us send
     /// cw-requests to the parent; `peer` is captured when the parent identifies.

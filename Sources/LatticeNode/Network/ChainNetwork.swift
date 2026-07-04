@@ -58,6 +58,10 @@ public protocol ChainNetworkDelegate: AnyObject, Sendable {
     /// (parent) chain's link. The node stores it against the peer and pairs it with
     /// the observed host when serving `getChildPeers`.
     func chainNetwork(_ network: ChainNetwork, handleChildPeerAdvertise payload: Data, from peer: PeerID) async
+    /// (serve): a connected child pushed its genesis content over the parent link.
+    /// The node verifies each entry's CID + that the genesis matches the anchored
+    /// child genesis, then durably re-serves it on the parent network.
+    func chainNetwork(_ network: ChainNetwork, handleChildGenesisAdvertise payload: Data, from peer: PeerID) async
     /// (serve): a followed child asked for the chain endpoints of this chain's
     /// `directory` children. Returns the response payload to send back on THIS
     /// network, or nil to stay silent (undecodable).
@@ -93,6 +97,7 @@ public extension ChainNetworkDelegate {
     func chainNetwork(_ network: ChainNetwork, handleConsensusRequest payload: Data, from peer: PeerID) async -> Data? { nil }
     func chainNetwork(_ network: ChainNetwork, handleConsensusResponse payload: Data, from peer: PeerID) async {}
     func chainNetwork(_ network: ChainNetwork, handleChildPeerAdvertise payload: Data, from peer: PeerID) async {}
+    func chainNetwork(_ network: ChainNetwork, handleChildGenesisAdvertise payload: Data, from peer: PeerID) async {}
     func chainNetwork(_ network: ChainNetwork, handleChildPeerRequest payload: Data, from peer: PeerID) async -> Data? { nil }
     func chainNetwork(_ network: ChainNetwork, handleChildPeerResponse payload: Data, from peer: PeerID) async {}
     // Default: no proof available. Keeps non-node conformers (test mocks) source-compatible.

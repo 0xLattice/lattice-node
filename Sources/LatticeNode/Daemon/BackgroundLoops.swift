@@ -267,6 +267,9 @@ func startParentChainSubscription(
                 var needsPeer = false
                 if await parentIvy.directPeerCount > 0 {
                     await node.advertiseChainEndpointToParents(directory: directory)
+                    // Also push our genesis to the parent so it durably re-serves it on the parent
+                    // network — lets later followers resolve the genesis without a local hex.
+                    await node.advertiseGenesisToParents(directory: directory)
                     needsPeer = await node.needsSameChainPeer(directory: directory)
                     if needsPeer {
                         await node.discoverAndDialSameChainPeers(directory: directory)

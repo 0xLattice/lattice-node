@@ -575,6 +575,11 @@ struct NodeCommand: AsyncParsableCommand {
         // what lets a deep subtree (Nexus -> Mid -> Stable -> …) self-assemble one level
         // per process — no chain is special. (See autoFollowAnnouncedChildren.)
         if superviseChildren { childInheritedArgs.append("--supervise-children") }
+        // Relay reachability is inherited too: a reconciler-spawned child subscribes only to
+        // its LOCAL parent (loopback), so it never learns the backbone relays on its own. A
+        // NAT'd node's child therefore has no way to reach a same-chain peer it can't
+        // direct-dial (e.g. one behind a cloud proxy) unless it inherits the parent's relay(s).
+        for relay in useRelay { childInheritedArgs.append(contentsOf: ["--use-relay", relay]) }
         // Decode this node's spawn-cert chain (base64 JSON), if delivered. A
         // malformed value fails closed (federated) — it never trusts on a parse error.
         var decodedSpawnCertChain: [SpawnCertificate] = []
@@ -598,6 +603,9 @@ struct NodeCommand: AsyncParsableCommand {
         if !bootstrapEntries.isEmpty,
            let network = await node.network(for: genesisConfig.directory) {
             await network.storeBatch(bootstrapEntries.map { ($0.cid, $0.data) })
+            // Retain the genesis entries so the child re-advertises them to its parent(s), which
+            // durably re-serve the genesis on the parent network (permissionless follow bootstrap).
+            await node.setChildGenesisBootstrapEntries(bootstrapEntries)
         }
 
         // Skip genesis hash verification for child chains bootstrapped from --genesis-hex
