@@ -19,6 +19,32 @@ final class ChildPeerProviderTests: XCTestCase {
         XCTAssertEqual(decoded?.directory, "toy")
     }
 
+    func testGenesisWireRoundTrip() {
+        // Regression: a bad `UInt32(Int.max)` bound in readLPData TRAPPED on every decode, crashing
+        // the parent on the first genesis advertise it received. This exercises decode → readLPData.
+        let entries: [(cid: String, data: Data)] = [
+            ("bafyGenesisBlock", Data([0x01, 0x02, 0x03])),
+            ("bafySpec", Data(repeating: 0xAB, count: 300)),   // > one LP chunk
+            ("bafyTxBody", Data("hello genesis".utf8)),
+        ]
+        let decoded = ChildPeerProvider.decodeGenesis(ChildPeerProvider.encodeGenesis(directory: "toy", entries: entries))
+        XCTAssertEqual(decoded?.directory, "toy")
+        XCTAssertEqual(decoded?.entries.map(\.cid), entries.map(\.cid))
+        XCTAssertEqual(decoded?.entries.map(\.data), entries.map(\.data))
+    }
+
+    func testGenesisRejectsOversizedPayload() {
+        // Over the total-bytes cap → nil (fail closed), never a trap.
+        let big: [(cid: String, data: Data)] = [("bafyBig", Data(repeating: 0, count: ChildPeerProvider.maxGenesisTotalBytes + 10))]
+        XCTAssertNil(ChildPeerProvider.decodeGenesis(ChildPeerProvider.encodeGenesis(directory: "toy", entries: big)))
+    }
+
+    func testGenesisRejectsTruncatedAndEmpty() {
+        XCTAssertNil(ChildPeerProvider.decodeGenesis(Data()))
+        let full = ChildPeerProvider.encodeGenesis(directory: "toy", entries: [("bafyA", Data([1, 2, 3, 4]))])
+        XCTAssertNil(ChildPeerProvider.decodeGenesis(full.prefix(full.count - 2)))  // truncated mid-entry → nil, no trap
+    }
+
     func testRequestRejectsEmptyDirectory() {
         // An empty directory is undecodable (fail closed) — never serve "all".
         XCTAssertNil(ChildPeerProvider.decodeRequest(ChildPeerProvider.encodeRequest(requestId: 1, directory: "")))

@@ -262,9 +262,12 @@ private struct ByteCursor {
     }
     mutating func readLPData() -> Data? {
         guard let len = readUInt32BE() else { return nil }
-        guard len <= UInt32(Int.max), i + Int(len) <= data.endIndex else { return nil }
-        let slice = Data(data[i..<i + Int(len)])
-        i += Int(len)
+        // A UInt32 always fits in Int on a 64-bit platform, so widen to Int and bounds-check.
+        // (Do NOT write `len <= UInt32(Int.max)` — Int.max overflows UInt32 and TRAPS at runtime.)
+        let n = Int(len)
+        guard i + n <= data.endIndex else { return nil }
+        let slice = Data(data[i..<i + n])
+        i += n
         return slice
     }
     mutating func readLPString() -> String? {
