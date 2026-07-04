@@ -149,6 +149,29 @@ struct NodeCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Public payout address credited in the block-template coinbase. The node signs with its local coinbase authority; the miner never sends or holds any signing key. When unset, templates carry no reward.")
     var coinbaseAddress: String?
 
+    /// Whether this process's chain-gossip network is a ROOT network (Nexus / testnet) and may
+    /// therefore bootstrap from the hardcoded backbone peer list (137.66.x) and the DNS seeds.
+    ///
+    /// A CHILD chain must not: the backbone/DNS seeds are Nexus (parent-chain) nodes that never
+    /// serve the child, so wiring them into the child's chain-gossip Ivy pollutes its same-chain
+    /// peer set and masks `needsSameChainPeer`. A child finds its same-chain peers via the
+    /// getChildPeers rendezvous over its parent link (+ relay) instead. The node has a parent —
+    /// and is therefore a child — when it subscribes to a parent's gossip (`--subscribe-p2p`),
+    /// carries a full path below the root (`--chain-path a/b/…`), or tracks a non-root directory
+    /// (`--chain-directory X`). `--genesis-hex` alone is NOT the signal: a root re-served from
+    /// hex (`--chain-directory` omitted ⇒ directory defaults to Nexus) has none of these and
+    /// legitimately keeps the backbone.
+    static func isRootChainGossip(subscribeP2P: String?, chainPath: String?, chainDirectory: String?) -> Bool {
+        if subscribeP2P != nil { return false }
+        if (chainPath?.split(separator: "/").count ?? 0) > 1 { return false }
+        // INVARIANT: the only root chain-gossip directory is DEFAULT_ROOT_DIRECTORY. Any other
+        // explicit `--chain-directory` names a child, which must NOT seed the Nexus backbone/DNS.
+        // If a second root name is ever introduced, widen this check (else that root is silently
+        // misclassified as a child and never bootstraps from its backbone).
+        if let dir = chainDirectory, dir != DEFAULT_ROOT_DIRECTORY { return false }
+        return true
+    }
+
     func run() async throws {
         #if canImport(Darwin)
         setbuf(Darwin.stdout, nil)
@@ -335,13 +358,20 @@ struct NodeCommand: AsyncParsableCommand {
             print("  Max frame:   \(effectiveMaxFrameSize) bytes")
         }
 
-        // Under DEV genesis overrides, never fall back to the real mainnet/testnet
-        // bootstrap peers — a dev node only connects to explicit --peer.
-        let fallbackPeers = usesDevGenesisOverride
+        // Only a ROOT chain-gossip network (Nexus / testnet) may seed itself with the hardcoded
+        // backbone list or the DNS seeds. A child chain's backbone/DNS peers are parent-chain
+        // (Nexus) nodes that never serve the child, so seeding them into the child's chain-gossip
+        // Ivy pollutes its same-chain peer set and masks `needsSameChainPeer`; the child finds its
+        // same-chain peers via the getChildPeers rendezvous instead. Under DEV genesis overrides,
+        // never fall back to the real mainnet/testnet peers either — a dev node only connects to
+        // explicit --peer.
+        let isRootChainGossip = Self.isRootChainGossip(
+            subscribeP2P: subscribeP2p, chainPath: chainPath, chainDirectory: chainDirectory)
+        let fallbackPeers = (usesDevGenesisOverride || !isRootChainGossip)
             ? []
             : (effectiveTestnet ? BootstrapPeers.testnet : BootstrapPeers.nexus)
         var allPeers = await loadPeers(dataDirURL: dataDirURL, bootstrapPeers: bootstrapPeers, fallbackPeers: fallbackPeers)
-        if !effectiveNoDnsSeeds {
+        if !effectiveNoDnsSeeds && isRootChainGossip {
             let dnsConfigured = effectiveTestnet
                 ? DNSSeeds.isTestnetBootstrapConfigured
                 : DNSSeeds.isMainnetBootstrapConfigured

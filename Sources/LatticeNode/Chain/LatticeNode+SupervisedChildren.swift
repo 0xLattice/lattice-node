@@ -279,13 +279,18 @@ extension LatticeNode {
         }
         let cookiePath = URL(fileURLWithPath: childDataDir).appendingPathComponent(".cookie")
         try? FileManager.default.removeItem(at: cookiePath)
-        // A followed child has no operator-supplied same-chain peer; it discovers
-        // one via getChildPeers over the parent link. Passing the PARENT's endpoint
-        // as the child's chain-gossip `--peer` would be a bogus cross-chain peer (a
-        // Nexus node is not a Toy peer) that pollutes the Toy peer count and would
-        // mask "I still need a same-chain peer". So leave it empty for followed
-        // children; deployed children keep the existing parent bootstrap.
-        let childBootstrapPeer = metadata.followed ? nil : "\(config.publicKey)@127.0.0.1:\(config.listenPort)"
+        // No supervised child — followed OR deployed — gets a chain-gossip `--peer`.
+        // `config.publicKey` is the PARENT's Nexus key (distinct from the child's own
+        // p2p key), so passing "\(config.publicKey)@127.0.0.1:\(listenPort)" as the
+        // child's chain-gossip `--peer` wires in a bogus cross-chain peer: a Nexus node
+        // never serves this child chain, yet it IS counted in `chainGossipPeerCount`
+        // (it is not a relay, so the relay-exclusion does not drop it). Once the child
+        // is past genesis that makes `needsSameChainPeer` false and masks the
+        // getChildPeers rendezvous discovery. A followed child finds same-chain peers
+        // via getChildPeers over the parent link; a deployed child is the deployer's
+        // own local SOURCE of the chain (other nodes follow IT) and needs no bootstrap
+        // peer to find itself. So leave it empty in both cases.
+        let childBootstrapPeer: String? = nil
         let spec = ChildSpec(
             directory: dir, chainPath: metadata.chainPath,
             genesisHex: metadata.genesisHex,

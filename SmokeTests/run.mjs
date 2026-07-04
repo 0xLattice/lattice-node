@@ -110,6 +110,7 @@ const TESTS = [
     { name: 'nexus-only-child-isolation', file: 'scenarios/follower/nexus-only-child-isolation.mjs', timeoutMs: 240_000 },
     { name: 'duplicate-edge-label-isolation', file: 'scenarios/follower/duplicate-edge-label-isolation.mjs', timeoutMs: 420_000 },
     { name: 'parent-restart-reconnect',   file: 'scenarios/follower/parent-restart-reconnect.mjs',   timeoutMs: 8 * 60_000 },
+    { name: 'relay-discovery',            file: 'scenarios/follower/relay-discovery.mjs',            timeoutMs: 12 * 60_000 },
     { name: 'per-process-parent-reorg',   file: 'scenarios/follower/per-process-parent-reorg.mjs',   timeoutMs: 240_000 },
     { name: 'per-process-deep-reorg',     file: 'scenarios/follower/per-process-deep-reorg.mjs',     timeoutMs: 300_000 },
   ]),
