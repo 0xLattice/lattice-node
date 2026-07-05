@@ -78,7 +78,7 @@ Child chains are created by including a child genesis block inside a Nexus block
 
 ### 3.3 Merged Mining
 
-A block template includes a `children` field — a content-addressed dictionary mapping parent-relative directory edges to child block headers. When the miner finds a valid nonce for the parent block, all embedded child blocks are simultaneously "mined" at no additional cost.
+A block template includes a `children` field — a content-addressed dictionary mapping parent-relative directory edges to child block headers. The miner searches against the **easiest** target among the chains it carries; whatever nonce it finds produces a valid block for exactly those chains whose target that one hash clears — the child (easy target) commonly, the parent/Nexus (hard target) only when the same hash also clears it. Each level is graded **independently** against its own target from the single grind. A hash that clears the child but *not* the parent yields a **child-only carrier**: a root-shaped block that commits the child but is never added to the parent chain, yet still secures the child via a self-contained `ChildBlockProof`.
 
 The proof-of-work hash covers the entire block structure including the child block CIDs. Each block commits to its predecessor (`parent`), its pre- and post-execution state roots (`prevState`, `postState`), its parent chain's state (`parentState`), the embedded child blocks (`children`), and its `height`:
 
@@ -91,7 +91,7 @@ Since the `children` CID is included in the hash input, the child blocks are imm
 
 ### 3.4 Security Analysis
 
-A child chain inherits the full hashrate of the Nexus chain. To rewrite a child chain block at depth *d*, an attacker must rewrite the corresponding Nexus block, which requires controlling more than 50% of the network's total hashrate — the same security threshold as the Nexus chain itself.
+Each chain is validated against **its own** target and secured by its own opt-in hashpower; a child is not automatically backed by "the full hashrate of Nexus." A child block is secured by the carrier's proof-of-work *hash* via a self-contained `ChildBlockProof` (`childTarget >= carrierHash` + parent-state anchor), **independent of whether that carrier ever became a canonical Nexus block** — a child-only carrier secures a child while never being a Nexus block at all, so there is no "corresponding Nexus block" to rewrite. Inherited (parent-level) work is credited **per level, only for a carrier whose hash actually clears that level's target** (counted once per chain), and is **zero** for a child-only carrier. See `docs/analysis/merged-mining-incentives.md` for the authoritative per-chain security model, which superseded the earlier "one Nexus PoW secures everything" framing.
 
 This contrasts with independent PoW chains, where security is proportional to each chain's individual hashrate, and with federated sidechains, where security depends on the honesty of a fixed set of signers.
 
@@ -219,7 +219,7 @@ The canonical tip is the one of greatest **`trueCumWork`**, which combines a blo
 ```
 work(B)          = MAX_UINT256 / B.target
 subtreeWeight(B) = work(B) + Σ subtreeWeight(children(B))   // forward GHOST subtree, each block once
-inherited(B)     = Σ verifiedProofContribution(B)           // 0 for the nexus; idempotent by proof contribution ID
+inherited(B)     = Σ verifiedProofContribution(B)           // 0 for the nexus, AND 0 for any carrier level whose shared hash did NOT clear that level's own target (e.g. a child-only carrier); credited once per chain; idempotent by proof contribution ID
 trueCumWork(B)   = subtreeWeight(B) + inherited(B)
 ```
 

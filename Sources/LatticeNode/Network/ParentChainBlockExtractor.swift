@@ -686,21 +686,56 @@ public actor ParentChainBlockExtractor: IvyDelegate {
         // "has proofs" alone then wrongly sends a ROOT block down the proof branch and rejects
         // it (the depth-2 regression).
         let expectedParentPath = await parentProofChainPath(node: node)
-        // ROOT carrier ONLY (the parent chain IS the absolute PoW root, e.g. Nexus — path
-        // count 1): validate its OWN standalone PoW; it cleared its own target by construction.
-        // Restricting standalone to the root (defense-in-depth) keeps a forged-target DEEP
-        // parent off the continuity index entirely, and still covers a ROOT block relayed with
-        // its CHILDREN's proofs attached (which don't project to the root's own path — routing
-        // it down the proof branch would wrongly reject it, the depth-2 regression).
-        if (expectedParentPath?.count ?? 1) == 1 {
-            return parentBlock.validateProofOfWork(nexusHash: parentBlock.proofOfWorkHash())
+        // (1) CANONICAL ROOT carrier (path count 1) that cleared its OWN target by construction:
+        // the common, cheap path for a real Nexus/Bitcoin block. Restricting standalone to the
+        // root (defense-in-depth) keeps a forged-target DEEP parent off the continuity index.
+        // NB: only ACCEPTS on success now — a root-shaped block that does NOT clear its own
+        // target is not necessarily junk; it may be a child-only carrier (2a below).
+        if (expectedParentPath?.count ?? 1) == 1,
+           parentBlock.validateProofOfWork(nexusHash: parentBlock.proofOfWorkHash()) {
+            return true
         }
-        // The parent is itself a MERGE-MINED child (built nonce=0, no standalone work): REQUIRE
-        // securing work via a carrier proof. One valid projected proof bound to THIS block
-        // (childCID == cid) on THIS chain (expectedParentPath) suffices — identical to the
+        guard let expectedParentPath, !inboundProofs.isEmpty else { return false }
+
+        // (2a) ROOT-LEVEL CHILD-ONLY CARRIER (path count 1, standalone failed above): a carrier
+        // whose PoW hash did NOT clear the root target. It is a PROOF CARRIER for our child, not
+        // a canonical root block ("parent blocks are proof carriers, not fork-choice
+        // authorities"). Its work is legitimately zero at the root; validity is per-level:
+        // accept iff an inbound proof shows OUR child (childDirectory) cleared THIS carrier's
+        // PoW hash — the same predicate `verifiedCommittingParentAnchor` applies to a child that
+        // arrives via child-gossip. Resolving the child ONLY from the proof's SEALED entries
+        // (never the network) means this adds no availability/trust dependency, and a child-only
+        // carrier contributes ZERO inherited parent weight, so accepting it cannot inflate
+        // fork-choice work. Without this, a pure parent-stream follower rejects every toy block
+        // whose carrier didn't co-clear Nexus (the wedge).
+        if expectedParentPath.count == 1 {
+            let childPath = expectedParentPath + [childDirectory]
+            let carrierHash = parentBlock.proofOfWorkHash()
+            for inboundProof in inboundProofs {
+                guard let proofForChild = MinedChildBlockSelection.projectedProof(inboundProof, targeting: childPath) else { continue }
+                // Sealed, network-free source over the proof's own attacker-supplied-but-
+                // content-bound entries — mirrors ChildBlockProof.verify's proofSource().
+                let sealed = InMemoryContentSource(Dictionary(
+                    inboundProof.entries.map { ($0.cid, $0.data) }, uniquingKeysWith: { first, _ in first }))
+                guard let childrenNode = try? await parentBlock.children.resolve(
+                          paths: [[childDirectory]: .targeted], fetcher: sealed).node,
+                      let childHeader: VolumeImpl<Block> = try? childrenNode.get(key: childDirectory),
+                      let childBlock = try? await childHeader.resolve(fetcher: sealed).node else { continue }
+                if await MinedChildBlockSelection.accepts(
+                    chainPath: childPath, block: childBlock,
+                    childCID: childHeader.rawCID, rootHash: carrierHash, proof: proofForChild
+                ) {
+                    return true
+                }
+            }
+            return false
+        }
+
+        // (2b) DEEPER MERGE-MINED parent (path count >= 2, built nonce=0, no standalone work):
+        // REQUIRE securing work via a carrier proof. One valid projected proof bound to THIS
+        // block (childCID == cid) on THIS chain (expectedParentPath) suffices — identical to the
         // predicate that ACCEPTS these blocks. Without this, a nonce-0 child parent is falsely
         // rejected after the target retargets (the depth-3 deep-child stall).
-        guard let expectedParentPath, !inboundProofs.isEmpty else { return false }
         for inboundProof in inboundProofs {
             if let proofForParent = MinedChildBlockSelection.projectedProof(inboundProof, targeting: expectedParentPath),
                let root = await proofForParent.anchorRoot(),

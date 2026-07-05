@@ -51,6 +51,18 @@ regardless of how it stores or transports anything:
   root-anchored `ChildBlockProof` that the securing parent committed it
   (`parent.children ∋ child`) — never a self-hash fallback. This is what lets the
   node attribute inherited work without trusting a peer-supplied number.
+- **Child-only carriers (direct-child edge).** A securing carrier need not be
+  canonical, and — when it **is** the PoW root (the direct-child case — proof
+  path length 1) — need not clear its own target. A shared grind that clears the
+  child's easy target but not the root's hard target yields a **child-only
+  carrier**: never a canonical Nexus block, yet a valid carrier for the child.
+  `parentBlockWorkVerified` admits it by the child-proof predicate
+  (`childTarget >= carrierHash`, a path-bound `ChildBlockProof`, parent-state
+  anchor), resolved from the proof's **own sealed entries** — never by standalone
+  root PoW. It contributes **zero** inherited root weight (the `inherited(B)`
+  zero-credit rule), so admission cannot inflate fork choice; it only lets the
+  child advance. Gating a direct-child carrier on standalone root PoW permanently
+  wedges a pure parent-stream follower.
 - **Per-process topology.** In production the chain tree spans OS processes (Nexus
   in the root process; each child via `--subscribe-p2p`); the node wires a dedicated
   parent link per child and extracts/validates child blocks from the parent's

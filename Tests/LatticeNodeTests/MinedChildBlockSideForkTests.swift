@@ -77,7 +77,7 @@ final class MinedChildBlockSideForkTests: XCTestCase {
         nexusGenesis: Block,
         nexusNonce: UInt64,
         ts: Int64
-    ) async throws -> (midCID: String, block: Block, proof: ChildBlockProof) {
+    ) async throws -> (midCID: String, block: Block, proof: ChildBlockProof, carrier: Block, carrierCID: String) {
         // Build the child with the derived (retargeted) target/nextTarget so it
         // passes Lattice's `validateNextTarget` (target == parent.nextTarget and
         // nextTarget == windowed retarget). An explicit target would break that.
@@ -116,7 +116,8 @@ final class MinedChildBlockSideForkTests: XCTestCase {
         }
 
         let midCID = try VolumeImpl<Block>(node: child).rawCID
-        return (midCID, child, proof)
+        let carrierCID = try VolumeImpl<Block>(node: nexusCarrier).rawCID
+        return (midCID, child, proof, nexusCarrier, carrierCID)
     }
 
     func testMinedChildAnnouncedAsTipOnlyWhenItWinsForkChoice() async throws {
@@ -330,5 +331,58 @@ final class MinedChildBlockSideForkTests: XCTestCase {
             producedAnchor.blockHash, mined.midCID,
             "the produced anchor must bind to the relayed parent block CID"
         )
+    }
+
+    /// Fix (the wedge): the DIRECT-CHILD parent-extractor path (`expectedParentPath.count == 1`).
+    /// A pure parent-stream follower of a direct child of Nexus (leaf path `["Nexus","Mid"]`,
+    /// parent path `["Nexus"]`) receives, on its Nexus subscription, the CHILD-ONLY CARRIER that
+    /// secures a Mid block — a Nexus-shaped block whose PoW hash did NOT clear Nexus's hard target
+    /// (so it was never a canonical Nexus block; it exists only as the proof carrier). Validity is
+    /// per-level: the Mid child cleared THIS carrier's hash (`childTarget >= carrierHash`).
+    ///
+    /// RED before the fix: `parentBlockWorkVerified`'s `count == 1` branch validated the carrier
+    /// with standalone `validateProofOfWork` (target >= hash), which a child-only carrier can never
+    /// pass → "invalid work" → no anchor → the follower is wedged and can never adopt the Mid
+    /// block. GREEN after: the count==1 branch falls back to the child-proof predicate (`accepts`
+    /// on `["Nexus","Mid"]`, resolving the child from the proof's SEALED entries) and admits it.
+    func testChildOnlyRootCarrierAdmittedViaChildProof() async throws {
+        // Hard Nexus target → the carrier's hash will NOT clear it → child-only carrier.
+        let (node, fixture, nexusGenesis, midGenesis) = try await makeChildNode(nexusTarget: UInt256(1_000))
+        let ts = midGenesis.timestamp
+        let mined = try await minedChild(
+            node: node, fixture: fixture, previousMid: midGenesis,
+            nexusGenesis: nexusGenesis, nexusNonce: 1, ts: ts + 1_000
+        )
+        // Confirm the bug condition: the carrier is child-only (zero inherited work at the root).
+        let w = await mined.proof.securingWork()
+        XCTAssertEqual(w, .zero, "carrier must be child-only (must NOT clear the hard Nexus target)")
+
+        // A DIRECT-child extractor: "Mid" under parent path ["Nexus"] (count 1) — the wedged path.
+        let extractor = ParentChainBlockExtractor(
+            childDirectory: "Mid",
+            parentDirectory: "Nexus",
+            parentChainPath: ["Nexus"],
+            extractor: LatticeChildBlockExtractor(),
+            node: node
+        )
+
+        // The parent block delivered on the Nexus subscription IS the child-only carrier, with the
+        // single-hop ["Mid"] proof rooted at it. Must be admitted (child cleared the carrier's
+        // target), not rejected as "invalid work".
+        let anchor = await extractor.verifiedParentAnchorForTesting(
+            cid: mined.carrierCID, parentBlock: mined.carrier, node: node, inboundProofs: [mined.proof]
+        )
+        let produced = try XCTUnwrap(
+            anchor,
+            "a child-only root carrier must be admitted via its child-proof, not rejected as 'invalid work'"
+        )
+        XCTAssertEqual(produced.blockHash, mined.carrierCID, "the anchor must bind the carrier CID")
+
+        // Negative: with NO proof, a root-level carrier that does not clear its own target has no
+        // demonstrated securing work and MUST be rejected — no free admission of a non-clearing root.
+        let rejected = await extractor.verifiedParentAnchorForTesting(
+            cid: mined.carrierCID, parentBlock: mined.carrier, node: node, inboundProofs: []
+        )
+        XCTAssertNil(rejected, "a non-clearing root carrier with NO securing proof must be rejected")
     }
 }

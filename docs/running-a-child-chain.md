@@ -25,8 +25,17 @@ duplicate-identity eviction). Two roles:
 - **Miner node** — supplies the hashrate (GPU/Metal), syncs the child from the serving node, and
   mines it forward.
 
-On mainnet, Nexus has no miner and its height is frozen. A child still advances on its **own**
-proof-of-work, anchored to the frozen Nexus tip — this is by design, not a stall.
+On mainnet, Nexus's own (hard) PoW target is rarely cleared, so its canonical height advances
+slowly or not at all for long stretches — Nexus is a **fixed PoW root, not permanently frozen**,
+and it advances the moment any hash clears its hard target. A child still advances on its **own**
+(easy) target: each grind that clears the child's target but *not* Nexus's produces a **child-only
+carrier** — a root-shaped block that never becomes a canonical Nexus block but still commits the
+child block via a self-contained `ChildBlockProof`. A follower accepts these carriers by the
+child-proof predicate (`childTarget >= carrierHash` + proof + parent-state anchor), *independent*
+of whether the carrier ever became canonical Nexus, and a child-only carrier contributes **zero**
+inherited Nexus-level weight (it secures the child; it does not add root work). So the child keeps
+advancing while Nexus's height stands still — this is by design, not a stall, and a follower must
+**not** gate a direct child's carrier on standalone Nexus PoW.
 
 ## Serving node
 
@@ -87,8 +96,10 @@ lattice-mining-coordinator \
   serving node on the current build; if its chain is stale, re-establish it fresh.
 - **A weak miner can't hold the difficulty.** A max-target genesis mints the first blocks freely,
   then difficulty retargets up. If the miner's hashrate can't sustain it, the chain goes stale.
-  Difficulty is Bitcoin-aligned with no recovery mechanism — the answer is enough hashrate (or a
-  calibrated genesis target), not a difficulty override.
+  Difficulty is Bitcoin-aligned: the windowed retarget is the only adjustment (it does climb back
+  down as blocks slow — see protocol.md §2.3), and there is deliberately **no emergency/wall-clock
+  override**. So the answer to a stalled chain is enough hashrate (or a calibrated genesis target),
+  not a difficulty override.
 - **Stale miner state.** If a miner's reconciler is confused (a child appears in `chain/map` but
   has no process), wipe the miner's data directory and start clean.
 - **macOS.** Port 8080 is taken by AirPlay Receiver — use another RPC port. Build with
