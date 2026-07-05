@@ -1111,6 +1111,10 @@ public actor LatticeNode: ChainNetworkDelegate {
                    await chain(for: dir)?.getMainChainTip() == committed {
                     // Fill any missing rows (pre-upgrade / gaps)…
                     await backfillBlockIndex(directory: dir)
+                    // …re-materialize any retained block's root-keyed Volume grouping that CID-only
+                    // recovery / parent-embedding left absent, so getHeaders2 serves every block over
+                    // P2P (else a follower syncs 0 headers though the data is intact locally)…
+                    await reconstructBlockVolumes(directory: dir)
                     // …and reconcile to repair the narrow two-transaction window a crash
                     // mid-reorg can leave (per-block tip apply, then segment commit).
                     do {

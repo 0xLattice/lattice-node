@@ -622,6 +622,44 @@ extension LatticeNode {
         log.info("\(directory): backfilled \(entries.count)/\(height + 1) block index entries")
     }
 
+    /// Re-materialize the ROOT-keyed Volume grouping (`volume_entries(blockHash, *)`) for any
+    /// retained main-chain block that lacks one. A block's bytes can be present in `cas_data`
+    /// (so RPC `/api/block/N` serves it, and it's transitively pinned) yet have NO root-keyed
+    /// volume of its own — which happens when the block arrived embedded inside a parent block's
+    /// volume (root=parentHash — e.g. a child block carried inside a Nexus block on the shared
+    /// DiskBroker) or was rebuilt by CID-only crash recovery (`rebuildChainState` resolves blocks
+    /// by CID and never re-creates root volumes). Without its own root volume,
+    /// `fetchVolumeLocal(root: blockHash)` returns nil, so `getHeaders/getHeaders2` cannot serve
+    /// the block over P2P: a follower downloads 0 headers and can never sync, even though the data
+    /// is fully intact locally. `storeBlockData` re-derives the volume from the block's
+    /// content-addressed closure (already in `cas_data`), so we reconstruct the missing groupings
+    /// here on startup. Idempotent (skips blocks whose durable root volume already exists) and
+    /// bounded to the retained window.
+    func reconstructBlockVolumes(directory: String) async {
+        guard let network = network(for: directory),
+              let chainState = await chain(for: directory) else { return }
+        let log = NodeLogger("persistence")
+        let height = await chainState.getHighestBlockHeight()
+        let lowest = height > config.retentionDepth ? height - config.retentionDepth : 0
+        let source = recoverySource(directory: directory, network: network)
+        var reconstructed = 0
+        for i in lowest...height {
+            guard let blockHash = await chainState.getMainChainBlockHash(atIndex: i) else { continue }
+            if await network.hasDurableVolume(rootCID: blockHash) { continue }
+            let stub = VolumeImpl<Block>(rawCID: blockHash, node: nil, encryptionInfo: nil)
+            guard let block = try? await stub.resolve(source: source).node else {
+                log.warn("\(directory): reconstructBlockVolumes: could not resolve block \(String(blockHash.prefix(16)))… at height \(i)")
+                continue
+            }
+            guard let roots = await storeBlockData(block, network: network), !roots.isEmpty else { continue }
+            try? await network.pinBatchDurably(roots: roots, owner: "\(network.ownerNamespace):\(i)")
+            reconstructed += 1
+        }
+        if reconstructed > 0 {
+            log.info("\(directory): reconstructed \(reconstructed) missing block root volume(s) in [\(lowest)...\(height)] for P2P header serving")
+        }
+    }
+
     // MARK: - Account Pin Rebuild
 
     /// Rebuild account pins from tx_history so the node retains and serves
