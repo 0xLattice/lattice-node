@@ -1310,6 +1310,18 @@ public actor StateStore {
         return (previousHash: row["previous_hash"]?.textValue, height: UInt64(height))
     }
 
+    /// The highest-height persisted parent header — the child's last-known parent tip.
+    /// Used to start the proof self-heal backfill without waiting for a fresh
+    /// chainAnnounce (a frozen parent may not re-announce on reconnect).
+    public nonisolated func getHighestParentHeader() -> (hash: String, height: UInt64)? {
+        guard let rows = try? readDb.query(
+            "SELECT parent_hash, height FROM parent_headers ORDER BY height DESC LIMIT 1",
+            params: []
+        ), let row = rows.first, let hash = row["parent_hash"]?.textValue,
+           let height = row["height"]?.intValue else { return nil }
+        return (hash: hash, height: UInt64(height))
+    }
+
     public func persistChildParentAnchor(childHash: String, parentHash: String, height: UInt64) throws {
         do {
             _ = try db.transaction {

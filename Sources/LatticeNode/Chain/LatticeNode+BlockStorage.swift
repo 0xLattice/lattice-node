@@ -458,6 +458,16 @@ extension LatticeNode {
         guard !proofs.isEmpty else { return nil }
         return ChildBlockProofEnvelope.serialize(proofs)
     }
+    /// True when a ChildBlockProof is already persisted for `blockHash` in `directory`.
+    /// Used by the proof self-heal backfill to skip blocks that already have a proof.
+    public func blockProofExists(directory: String, blockHash: String) -> Bool {
+        !(stateStores[chainKey(forDirectory: directory)]?.getBlockProofs(blockHash: blockHash).isEmpty ?? true)
+    }
+    /// The child's last-known parent tip hash (highest persisted parent header) — the
+    /// proof self-heal backfill's walk start when no fresh chainAnnounce has arrived.
+    public func highestParentHeaderHash(directory: String) -> String? {
+        stateStores[chainKey(forDirectory: directory)]?.getHighestParentHeader()?.hash
+    }
     func persistAcceptedChildParentAnchor(
         directory: String,
         blockHash: String,
