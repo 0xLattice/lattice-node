@@ -112,7 +112,11 @@ public actor ParentChainBlockExtractor: IvyDelegate {
     /// await) prevents two concurrent walks from a connect race.
     private var didBackfillChildProofs = false
     private var backfillInProgress = false
-    /// Depth bound for the proof-backfill parent-chain walk.
+    /// Parents fully handled this session (healed / committed-nothing-for-us / invalid) —
+    /// skipped on re-scan so an un-converged retry costs O(still-unavailable), not O(all),
+    /// bounding drip-feed amplification.
+    private var backfillProcessedParents = Set<String>()
+    /// Depth bound for the proof self-heal parent set.
     private let maxProofBackfillBlocks = 50_000
     private struct PendingHeaderRequest {
         let targetPeer: PeerID
@@ -551,25 +555,21 @@ public actor ParentChainBlockExtractor: IvyDelegate {
         if completed { didBackfillChildProofs = true }
     }
 
-    /// Self-heal (data present ⇒ recover derived state): re-derive and persist every
-    /// missing direct-child ChildBlockProof by walking OUR OWN verified parent chain
-    /// from the last-known tip. Returns true if the walk completed cleanly (reached the
-    /// verified-chain boundary / genesis / a fully-healed run), false if it aborted on a
-    /// transient fetch miss (so `backfillChildProofsOnce` won't latch and a later connect
-    /// retries). Hardened per adversarial review:
-    ///  - LOCAL tip only + `hasVerifiedParentHeaderEdge` gate + stop at the first
-    ///    unverified parent: re-derive proofs ONLY for parents this node already
-    ///    PoW-verified, never from peer-steerable/unverified data (no amplification vector).
-    ///  - Depth-1 only: `generate` yields a single hop; a deeper child's live proof is
-    ///    COMPOSED across levels, so re-deriving one hop would persist a wrong-anchored
-    ///    proof. Skip non-direct children rather than write invalid proofs.
-    ///  - Fold inherited (securing) work in-session (`applyInheritedWeight`) so this node's
-    ///    fork choice matches a live-synced node immediately, not only after the next
-    ///    restart's `restoreInheritedWeight`.
-    ///  - Validate each re-derived proof (`MinedChildBlockSelection.accepts`) before
-    ///    persisting, and promote the authoritative union inherited weight from the
-    ///    trusted parent (`refreshTrustedInheritedWeight`) so a self-healed node's fork
-    ///    choice matches a live-synced node (a child may be secured by multiple parents).
+    /// Self-heal, engineered for DATA AVAILABILITY, not divergence. Iterate EVERY
+    /// PoW-verified parent this node holds and, for each, fetch its block by CID from any
+    /// peer (source-agnostic, content-addressed) and re-derive the proof for the child it
+    /// commits. Divergence — forks, reorgs, ahead/behind peers — is a non-issue: a proof
+    /// anchored to any PoW-valid committing parent is valid, and the follower applies its
+    /// OWN fork choice by construction. The ONLY failure mode is a parent whose bytes
+    /// aren't reachable right now; that parent is simply skipped, and the gap closes the
+    /// moment any redundant source has it (a later connect re-runs). Returns true when the
+    /// pass CONVERGED (nothing new to heal), false while it's still making progress (so
+    /// `backfillChildProofsOnce` retries) — the availability-driven fixed point.
+    /// STRICTLY an availability operation — it re-derives + persists ONE servable proof per
+    /// child and does NOT touch fork choice / inherited weight. That is consensus's job:
+    /// `restoreInheritedWeight` rebuilds inherited weight from these persisted proofs. Kept
+    /// from review: depth-1 only (a deeper child needs a COMPOSED proof) and validate each
+    /// proof with `MinedChildBlockSelection.accepts` before persisting.
     private func backfillMissingChildProofs(ivy: Ivy, from peer: PeerID) async -> Bool {
         guard let node else { return false }
         // Depth-1 only: a direct child of the PoW root has parentChainPath == [root].
@@ -577,7 +577,8 @@ public actor ParentChainBlockExtractor: IvyDelegate {
             NodeLogger("sync").info("\(childDirectory): proof self-heal skipped — non-direct child (parent depth \(parentChainPath?.count ?? 0)); composed-proof backfill unsupported")
             return true
         }
-        guard let tip = await node.highestParentHeaderHash(directory: childDirectory) else { return true }
+        let parents = await node.allVerifiedParentHashes(directory: childDirectory, limit: maxProofBackfillBlocks)
+        guard !parents.isEmpty else { return true }
         let parentIvyFetcher = parentIvyFetcher(for: ivy)
         let childFetcher = await node.network(for: childDirectory)?.ivyFetcher
         let source: any ContentSource = childFetcher.map {
@@ -585,63 +586,77 @@ public actor ParentChainBlockExtractor: IvyDelegate {
         } ?? IvyContentSource(parentIvyFetcher)
         let fetcher: Fetcher = CoalescingFetcher(source)
 
-        NodeLogger("sync").info("\(childDirectory): proof self-heal starting from local parent tip \(String(tip.prefix(16)))…")
-        var currentCID: String? = tip
-        var backfilled = 0, walked = 0, committersRecorded = 0
-        var healedChildren = Set<String>()
-        for _ in 0..<maxProofBackfillBlocks {
-            guard let cid = currentCID, !cid.isEmpty else { break }   // genesis: clean end
-            // Only touch parents this node ALREADY PoW-verified; stop at the first
-            // unverified parent — the boundary of our vetted chain. This is what kills
-            // the attacker-tip vector and bounds the walk to real history.
-            guard await node.hasVerifiedParentHeaderEdge(directory: childDirectory, blockHash: cid) else { break }
+        NodeLogger("sync").info("\(childDirectory): proof self-heal over \(parents.count) verified parent(s) (availability-driven)…")
+        var backfilled = 0, unavailable = 0
+        for cid in parents {
+            // Skip parents fully handled earlier this session so an un-converged retry is
+            // O(still-unavailable), not O(all) — bounds drip-feed amplification.
+            if backfillProcessedParents.contains(cid) { continue }
+            // Fetch the parent block by CID from ANY peer. No canonicity logic — a proof
+            // anchored to any PoW-valid committing parent is valid. Unreachable bytes are a
+            // data-availability gap: skip WITHOUT marking processed, so a later connect
+            // retries once redundancy has them.
             guard let data = try? await fetcher.fetch(rawCid: cid),
                   let parentBlock = Block(data: data),
                   ChainNetwork.blockCIDMatches(cid, block: parentBlock),
-                  let parentHeader = try? VolumeImpl<Block>(node: parentBlock) else {
-                return false   // transient fetch miss: don't latch — retry on a later connect
+                  let parentHeader = try? VolumeImpl<Block>(node: parentBlock),
+                  let childDict = try? await parentBlock.children.resolve(
+                      paths: [[childDirectory]: .targeted], fetcher: fetcher).node else {
+                unavailable += 1
+                continue
             }
-            walked += 1
-            // For EVERY verified committing parent, re-derive the child's single-hop proof
-            // and — after validating it exactly as the live path does — RECORD this
-            // committer's securing work + anchor. Recording every committer (not just the
-            // first the walk reaches) is what makes the union inherited weight promoted
-            // below match a live-synced node's for a multiply-committed child. The PROOF is
-            // persisted only once per child (one is all getHeaders2 serving needs). No
-            // early-stop: a full walk each session is O(verified-chain) once, and stopping
-            // early could skip an interior gap.
-            if let childDict = try? await parentBlock.children.resolve(
-                    paths: [[childDirectory]: .targeted], fetcher: fetcher).node,
-               let childHeader: VolumeImpl<Block> = try? childDict.get(key: childDirectory),
-               let childBlock = try? await childHeader.resolve(fetcher: fetcher).node,
-               let childCID = (try? VolumeImpl<Block>(node: childBlock))?.rawCID,
-               let proof = try? await ChildBlockProof.generate(
-                   rootHeader: parentHeader, childDirectory: childDirectory, fetcher: fetcher),
-               await MinedChildBlockSelection.accepts(
-                   chainPath: (parentChainPath ?? []) + [childDirectory], block: childBlock,
-                   childCID: childCID, rootHash: parentBlock.proofOfWorkHash(), proof: proof) {
-                // Record THIS committer's securing work + anchor (idempotent per committer).
-                _ = await node.applyInheritedWeight(
-                    directory: childDirectory, blockHash: childCID, proof: proof, source: source)
-                committersRecorded += 1
-                healedChildren.insert(childCID)
-                if !(await node.blockProofExists(directory: childDirectory, blockHash: childCID)) {
-                    await node.persistAcceptedBlockProof(
-                        directory: childDirectory, height: childBlock.height,
-                        blockHash: childCID, proof: proof)
-                    backfilled += 1
-                }
+            // Does this parent commit OUR child? A nil here is TRUE absence, not a content
+            // miss: the `.targeted` resolve above already materialized the childDirectory
+            // key path (a content miss on that path THROWS at resolve → the unavailable case
+            // above), so on an immutable parent a nil `get` means it genuinely commits no
+            // child for us — a terminal (converged) outcome; mark it processed. (Load-bearing
+            // on cashew `.targeted` fully materializing the path; revisit if it goes lazier.)
+            guard let childHeader: VolumeImpl<Block> = try? childDict.get(key: childDirectory) else {
+                backfillProcessedParents.insert(cid)
+                continue
             }
-            currentCID = parentBlock.parent?.rawCID
+            guard let childBlock = try? await childHeader.resolve(fetcher: fetcher).node,
+                  let childCID = (try? VolumeImpl<Block>(node: childBlock))?.rawCID else {
+                unavailable += 1   // child body not reachable yet — retry
+                continue
+            }
+            // This parent is ONE committing grind; persist a proof PER committer (keyed by
+            // proofID = rootCID+path), exactly as a freshly-synced node does, so a multiply-
+            // committed child ends up with every committer's proof and `restoreInheritedWeight`
+            // rebuilds the full per-grind UNION weight (not just one committer). Skip cheaply
+            // if THIS committer's proof is already stored — the proofID needs no re-derivation.
+            let committerProofID = ChildBlockProof(
+                rootCID: cid, directoryPath: [childDirectory], entries: []).proofPathID
+            if await node.blockProofIDExists(directory: childDirectory, blockHash: childCID, proofID: committerProofID) {
+                backfillProcessedParents.insert(cid)   // this committer already stored — terminal
+                continue
+            }
+            guard let proof = try? await ChildBlockProof.generate(
+                    rootHeader: parentHeader, childDirectory: childDirectory, fetcher: fetcher) else {
+                unavailable += 1   // proof spine not reachable yet — retry
+                continue
+            }
+            // Validate exactly as the live path; an unaccepted proof is terminal (this parent
+            // isn't a valid carrier) — mark processed, don't persist. We do NOT fold inherited
+            // weight or touch fork choice here: that is consensus's job — `restoreInheritedWeight`
+            // rebuilds inherited weight from these persisted proofs. The self-heal restores
+            // AVAILABILITY (servable proofs, one per committer); consensus derives weight from them.
+            guard await MinedChildBlockSelection.accepts(
+                    chainPath: (parentChainPath ?? []) + [childDirectory], block: childBlock,
+                    childCID: childCID, rootHash: parentBlock.proofOfWorkHash(), proof: proof) else {
+                backfillProcessedParents.insert(cid)
+                continue
+            }
+            await node.persistAcceptedBlockProof(
+                directory: childDirectory, height: childBlock.height, blockHash: childCID, proof: proof)
+            backfilled += 1
+            backfillProcessedParents.insert(cid)
         }
-        // All verified committers are now recorded — promote the AUTHORITATIVE union
-        // inherited weight from the trusted parent for each healed child, queried with the
-        // FULL committer set, so this node's fork choice matches a live-synced node.
-        for childCID in healedChildren {
-            await refreshTrustedInheritedWeight(childHash: childCID, node: node)
-        }
-        NodeLogger("sync").info("\(childDirectory): proof self-heal done — backfilled \(backfilled) proof(s), recorded \(committersRecorded) committer(s) across \(healedChildren.count) child(ren), walked \(walked) parent block(s)")
-        return true
+        NodeLogger("sync").info("\(childDirectory): proof self-heal pass — backfilled \(backfilled) proof(s), \(unavailable) parent(s) unavailable")
+        // Converged only when this pass persisted no new proof AND nothing was unavailable —
+        // the availability-complete fixed point. While any parent/child content is unreachable,
+        // return false so a later connect retries once redundancy provides it.
+        return backfilled == 0 && unavailable == 0
     }
 
     private func requiresInboundParentProof() async -> Bool {

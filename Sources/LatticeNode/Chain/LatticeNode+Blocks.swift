@@ -1113,15 +1113,9 @@ extension LatticeNode {
         }
         let inheritedStore = await ensureInheritedWeightStore(directory: directory)
         var restored = 0
-        if !storedContributions.isEmpty {
-            let grouped = Dictionary(grouping: storedContributions, by: \.blockHash)
-            for (blockHash, rows) in grouped {
-                let contributions = rows.map { (id: $0.contributorID, work: $0.work) }
-                if inheritedStore.recordVerifiedWorkContributions(contributions, committingChild: blockHash) {
-                    restored += 1
-                }
-            }
-        }
+        // Proofs are the SOURCE OF TRUTH for inherited weight — re-derive from them first
+        // (per-grind max crediting) and remember which children we covered.
+        var rebuiltFromProof = Set<String>()
         for entry in proofs {
             guard let proof = ChildBlockProof.deserialize(entry.proof) else { continue }
             if let anchor = await proof.committingParentAnchor() {
@@ -1129,12 +1123,27 @@ extension LatticeNode {
             }
             let contributions = await proof.securingWorkContributions()
             guard !contributions.isEmpty else { continue }
+            rebuiltFromProof.insert(entry.blockHash)
             if inheritedStore.recordVerifiedWorkContributions(contributions, committingChild: entry.blockHash) {
                 restored += 1
             }
         }
+        // Persisted per-level contribution rows are a DERIVED cache that predates the
+        // per-grind crediting rule (Lattice `securingWorkContributions`). Replaying them for
+        // a child we can rebuild from its proof would re-inflate depth>=2 inherited weight
+        // and diverge from a freshly-synced node — so use them ONLY as a fallback for a
+        // child that has no persisted proof.
+        if !storedContributions.isEmpty {
+            let grouped = Dictionary(grouping: storedContributions, by: \.blockHash)
+            for (blockHash, rows) in grouped where !rebuiltFromProof.contains(blockHash) {
+                let contributions = rows.map { (id: $0.contributorID, work: $0.work) }
+                if inheritedStore.recordVerifiedWorkContributions(contributions, committingChild: blockHash) {
+                    restored += 1
+                }
+            }
+        }
         if restored > 0 {
-            NodeLogger("recovery").info("\(directory): restored inherited weight from \(restored) persisted proof(s)")
+            NodeLogger("recovery").info("\(directory): restored inherited weight from \(restored) source(s) (proofs preferred)")
         }
     }
     /// Build a ContentSource that pre-caches mempool transaction data for

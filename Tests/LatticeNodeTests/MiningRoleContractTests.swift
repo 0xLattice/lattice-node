@@ -240,7 +240,7 @@ final class MiningRoleContractTests: XCTestCase {
         let producerSource = try readRepoFile("Sources/LatticeNode/Mining/BlockProducer.swift")
 
         assertContains(packageSource, [
-            #"exact: "15.0.0""#
+            #"exact: "16.0.0""#
         ])
         assertContains(templateSource, [
             #""parentBlockHex": parentCarrierHex"#,

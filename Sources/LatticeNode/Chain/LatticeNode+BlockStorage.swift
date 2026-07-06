@@ -463,10 +463,15 @@ extension LatticeNode {
     public func blockProofExists(directory: String, blockHash: String) -> Bool {
         !(stateStores[chainKey(forDirectory: directory)]?.getBlockProofs(blockHash: blockHash).isEmpty ?? true)
     }
-    /// The child's last-known parent tip hash (highest persisted parent header) — the
-    /// proof self-heal backfill's walk start when no fresh chainAnnounce has arrived.
-    public func highestParentHeaderHash(directory: String) -> String? {
-        stateStores[chainKey(forDirectory: directory)]?.getHighestParentHeader()?.hash
+    /// True when the specific proof `proofID` (one committing grind) is stored for `blockHash`.
+    public func blockProofIDExists(directory: String, blockHash: String, proofID: String) -> Bool {
+        stateStores[chainKey(forDirectory: directory)]?.blockProofIDExists(blockHash: blockHash, proofID: proofID) ?? false
+    }
+    /// Up to `limit` PoW-verified parent block hashes this node holds for `directory`
+    /// (highest height first) — the proof self-heal fetches each by CID (source-agnostic)
+    /// and heals what's available.
+    public func allVerifiedParentHashes(directory: String, limit: Int) -> [String] {
+        stateStores[chainKey(forDirectory: directory)]?.allParentHeaderHashes(limit: limit) ?? []
     }
     func persistAcceptedChildParentAnchor(
         directory: String,

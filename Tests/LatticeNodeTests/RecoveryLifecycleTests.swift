@@ -130,6 +130,73 @@ final class RecoveryLifecycleTests: XCTestCase {
         await node2.stop()
     }
 
+    /// H1 guard (per-grind consensus fix): an in-place upgrade must NOT replay stale
+    /// PER-LEVEL inherited-work rows that predate the per-grind crediting rule.
+    /// `restoreInheritedWeight` rebuilds from the PROOF (source of truth, per-grind MAX)
+    /// for any child that has one, and uses the persisted contribution rows only as a
+    /// fallback for a proof-less child. Persist an inflated stale-row set AND a real proof
+    /// for the SAME child, restore, and assert the proof value wins — not the stale sum.
+    func testRestorePrefersProofOverStalePerLevelContributions() async throws {
+        let kp = CryptoUtils.generateKeyPair()
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let genesis = testGenesis(spec: testSpec(), directory: "Mid")
+        let storagePath = tmpDir.appendingPathComponent("node1")
+        let ts = now() - 100_000
+
+        let p1 = nextTestPort()
+        let config1 = LatticeNodeConfig(
+            publicKey: kp.publicKey, privateKey: kp.privateKey,
+            listenPort: p1, storagePath: storagePath,
+            enableLocalDiscovery: false, persistInterval: 10_000, minPeerKeyBits: 0)
+        let node1 = try await LatticeNode(config: config1, genesisConfig: genesis)
+        try await node1.start()
+
+        let f = cas()
+        let midGenesis = await node1.genesisResult.block
+        let midBlock = try await BlockBuilder.buildBlock(
+            previous: midGenesis, timestamp: ts + 1000, target: UInt256.max, nonce: 0, fetcher: f)
+        let midCID = try VolumeImpl<Block>(node: midBlock).rawCID
+        await f.store(rawCid: midCID, data: midBlock.toData()!)
+
+        let nexusGenesis = try await BlockBuilder.buildGenesis(
+            spec: testSpec("Nexus"), timestamp: ts, target: UInt256.max, fetcher: f)
+        let nexusBlock = try await BlockBuilder.buildBlock(
+            previous: nexusGenesis, children: ["Mid": midBlock],
+            timestamp: ts + 1000, target: UInt256.max, nonce: 1, fetcher: f)
+        let nexusHeader = try VolumeImpl<Block>(node: nexusBlock)
+        await f.store(rawCid: nexusHeader.rawCID, data: nexusBlock.toData()!)
+        let storer = CollectingProofStorer()
+        try nexusHeader.storeRecursively(storer: storer)
+        for (cid, data) in storer.entries { await f.store(rawCid: cid, data: data) }
+
+        let proof = try await ChildBlockProof.generate(
+            rootHeader: nexusHeader, childDirectory: "Mid", fetcher: f)
+        let proofWork = await proof.securingWork()
+        XCTAssertGreaterThan(proofWork, .zero)
+
+        let midStore = await node1.stateStore(for: "Mid")!
+        try await midStore.persistBlockProof(
+            height: midBlock.height, blockHash: midCID, proofID: proof.proofPathID, proof: proof.serialize())
+
+        // Simulate a PRE-FIX in-place upgrade: stale per-level rows for the SAME child with
+        // distinct contributor ids (old per-level crediting), disjoint from the proof's
+        // per-grind (rootCID) contribution and summing to an inflated 3x.
+        try await midStore.persistInheritedWorkContributions(
+            height: midBlock.height, blockHash: midCID,
+            contributions: [(id: "stale-level-A", work: proofWork),
+                            (id: "stale-level-B", work: proofWork),
+                            (id: "stale-level-C", work: proofWork)])
+        let staleRows = midStore.getAllInheritedWorkContributions().filter { $0.blockHash == midCID }
+        XCTAssertEqual(staleRows.count, 3, "stale per-level rows must persist, else the test is vacuous")
+
+        await node1.restoreInheritedWeight(directory: "Mid")
+        let restored = await node1.ensureInheritedWeightStore(directory: "Mid").inheritedWeight(forChild: midCID)
+        XCTAssertEqual(restored, proofWork,
+                       "restore must credit the PROOF's per-grind work, NOT replay the stale inflated per-level rows")
+        await node1.stop()
+    }
+
     // MARK: - Residual 1
 
     /// Restored deploy metadata must stay metadata-only. The parent advertises

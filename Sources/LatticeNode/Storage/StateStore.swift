@@ -1107,6 +1107,17 @@ public actor StateStore {
         return rows.compactMap { $0["proof"]?.blobValue }
     }
 
+    /// True when a specific proof (identified by `proofID`, i.e. a specific committing
+    /// grind) is already stored for `blockHash`. Lets the self-heal persist a proof PER
+    /// committer (matching a freshly-synced node) without re-deriving already-stored ones.
+    public nonisolated func blockProofIDExists(blockHash: String, proofID: String) -> Bool {
+        guard let rows = try? readDb.query(
+            "SELECT 1 FROM block_proofs WHERE blockHash = ?1 AND proofID = ?2 LIMIT 1",
+            params: [.text(blockHash), .text(proofID)]
+        ) else { return false }
+        return !rows.isEmpty
+    }
+
     public nonisolated func getAllBlockProofs() -> [(height: UInt64, blockHash: String, proofID: String, proof: Data)] {
         guard let rows = try? readDb.query(
             "SELECT height, blockHash, proofID, proof FROM block_proofs ORDER BY height ASC, blockHash ASC, proofID ASC"
@@ -1310,16 +1321,16 @@ public actor StateStore {
         return (previousHash: row["previous_hash"]?.textValue, height: UInt64(height))
     }
 
-    /// The highest-height persisted parent header — the child's last-known parent tip.
-    /// Used to start the proof self-heal backfill without waiting for a fresh
-    /// chainAnnounce (a frozen parent may not re-announce on reconnect).
-    public nonisolated func getHighestParentHeader() -> (hash: String, height: UInt64)? {
-        guard let rows = try? readDb.query(
-            "SELECT parent_hash, height FROM parent_headers ORDER BY height DESC LIMIT 1",
-            params: []
-        ), let row = rows.first, let hash = row["parent_hash"]?.textValue,
-           let height = row["height"]?.intValue else { return nil }
-        return (hash: hash, height: UInt64(height))
+
+    /// Every PoW-verified parent block hash this node has persisted, highest height
+    /// first. The proof self-heal fetches each by CID (source-agnostic) and heals the
+    /// child it commits when the bytes are available — divergence is irrelevant, only
+    /// data availability is.
+    public nonisolated func allParentHeaderHashes(limit: Int) -> [String] {
+        (try? readDb.query(
+            "SELECT parent_hash FROM parent_headers ORDER BY height DESC LIMIT ?1",
+            params: [.int(Int64(limit))]
+        ))?.compactMap { $0["parent_hash"]?.textValue } ?? []
     }
 
     public func persistChildParentAnchor(childHash: String, parentHash: String, height: UInt64) throws {
