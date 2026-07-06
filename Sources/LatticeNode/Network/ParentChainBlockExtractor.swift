@@ -850,6 +850,15 @@ public actor ParentChainBlockExtractor: IvyDelegate {
         // carrier contributes ZERO inherited parent weight, so accepting it cannot inflate
         // fork-choice work. Without this, a pure parent-stream follower rejects every toy block
         // whose carrier didn't co-clear Nexus (the wedge).
+        //
+        // NOTE (L1): admitting the carrier here does NOT itself adopt the child on this parent-
+        // subscription route — a direct-child (path count 1) carrier is still rejected downstream
+        // in `handle` because `verifiedInboundParentProofs`→`projectedProof` needs path count ≥ 2;
+        // actual child adoption happens on the child-gossip route (`verifiedCommittingParentAnchor`,
+        // same predicate). And the continuity-edge side effect this admission used to have is now
+        // gated on standalone work in `handle` (a child-only carrier is forgeable at an easy child
+        // target, so it must not write continuity rows). The branch is retained for parity with the
+        // per-level acceptance model; it is effectively inert on this route.
         if expectedParentPath.count == 1 {
             let childPath = expectedParentPath + [childDirectory]
             let carrierHash = parentBlock.proofOfWorkHash()
@@ -965,16 +974,31 @@ public actor ParentChainBlockExtractor: IvyDelegate {
         // latency rather than content-fetch latency — lets the child keep pace.
         // This grants no fork-choice weight (inherited work is folded separately,
         // from verified securing proofs); it only lets continuity track the parent.
-        await node.persistVerifiedParentStateEdge(directory: childDirectory, parentBlock: parentBlock)
-        await node.persistVerifiedParentHeaderEdge(
-            directory: childDirectory,
-            anchor: ParentAnchor(
-                blockHash: cid,
-                parentHash: parentBlock.parent?.rawCID,
-                height: parentBlock.height,
-                prevStateCID: parentBlock.prevState.rawCID
+        //
+        // GATED on STANDALONE parent-chain work (the block clears its OWN target).
+        // `parentBlockWorkVerified` also admits CHILD-ONLY CARRIERS — root-shaped
+        // blocks whose hash cleared only a child's easy target, not their own (#13,
+        // to serve child proofs). Such a carrier is NOT a canonical parent-chain
+        // block, its state edge is not a canonical parent transition, and it can be
+        // forged at ~1 grind against an easy child target — so recording its edge here
+        // would let a permissionless peer pollute the continuity index unboundedly for
+        // a block that is then rejected downstream. A legitimately-secured deeper
+        // parent (merge-mined, no standalone work) still records its edge post-
+        // verification in the proof branch below — also before the content prefetch —
+        // so pacing is preserved for every real block; only the forgeable child-only
+        // carrier is dropped from the early write.
+        if parentBlock.validateProofOfWork(nexusHash: parentBlock.proofOfWorkHash()) {
+            await node.persistVerifiedParentStateEdge(directory: childDirectory, parentBlock: parentBlock)
+            await node.persistVerifiedParentHeaderEdge(
+                directory: childDirectory,
+                anchor: ParentAnchor(
+                    blockHash: cid,
+                    parentHash: parentBlock.parent?.rawCID,
+                    height: parentBlock.height,
+                    prevStateCID: parentBlock.prevState.rawCID
+                )
             )
-        )
+        }
 
         // Build a fetcher that uses the child's own IvyFetcher (with DiskBroker access)
         // as primary, falling back to the parent subscription Ivy for anything not local.
