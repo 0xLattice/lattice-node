@@ -1115,6 +1115,12 @@ public actor LatticeNode: ChainNetworkDelegate {
                     // recovery / parent-embedding left absent, so getHeaders2 serves every block over
                     // P2P (else a follower syncs 0 headers though the data is intact locally)…
                     await reconstructBlockVolumes(directory: dir)
+                    // …and self-heal the STATE closure the same way: a node that synced
+                    // its tip before state-on-sync persisted the full closure holds only
+                    // diffs, so recompute+durably-store the retained heights' state from
+                    // local blocks (near-zero work once converged) — else candidate build
+                    // and deep serving fault every full-state read to the network.
+                    await materializeRetainedState(directory: dir)
                     // …and reconcile to repair the narrow two-transaction window a crash
                     // mid-reorg can leave (per-block tip apply, then segment commit).
                     do {

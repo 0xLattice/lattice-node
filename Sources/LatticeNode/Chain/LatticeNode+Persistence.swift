@@ -463,7 +463,7 @@ extension LatticeNode {
         return true
     }
 
-    private func recoverySource(directory: String, network: ChainNetwork) -> any ContentSource {
+    func recoverySource(directory: String, network: ChainNetwork) -> any ContentSource {
         guard directory == genesisConfig.directory else {
             return IvyContentSource(network.ivyFetcher)
         }
