@@ -213,6 +213,19 @@ func startParentChainSubscription(
             bootstrapPeers: [parentEndpoint],
             enableLocalDiscovery: false,
             stunServers: [],
+            // PEX OFF: this link is a TRUSTED consensus channel — the child derives
+            // inherited weight from the parent's cumulative work on anchor blocks, so it
+            // may only trust the CONFIGURED parent (operator-set, spawn-cert verified),
+            // never an arbitrarily-discovered peer. With PEX on (the default) this
+            // dedicated link would discover + dial untrusted backbone parents and treat
+            // THEIR cum-work as trusted (a safety hole); it would also churn them (~1s,
+            // netgroup caps / inbound eviction) while keeping `directPeerCount > 0`, so
+            // the reconnect loop never re-dials the configured parent — masking the local
+            // link entirely (observed: 0 connects to the local Nexus, endless remote
+            // flapping). A trusted remote parent, if ever wanted, belongs in explicit
+            // `bootstrapPeers`, not untrusted discovery. This is a SEPARATE Ivy from the
+            // child's own gossip network, so the child's same-chain PEX is unaffected.
+            enablePEX: false,
             signingKey: key.privateKey,
             baseThresholdMultiplier: UInt64.max,
             maxFrameSize: await node.config.maxFrameSize,
