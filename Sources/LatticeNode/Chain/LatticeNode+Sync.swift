@@ -1278,13 +1278,15 @@ extension LatticeNode {
             }
         }
         // Converged short-circuit: skip ONLY when a prior pass covered [≤lowest … ≥height] on the
-        // SAME canonical tip (by hash — a reorg to a numerically-lower tip must re-check) AND the
-        // tip's post-state STILL resolves from local CAS. The local-resolve gate is load-bearing:
-        // a watermark that claims complete but whose tip state faults locally (bare-root stub /
-        // eviction) is stale and MUST be ignored so the pass re-runs.
-        if !tipHash.isEmpty, wmTip == tipHash,
-           let wl = wmLowest, let wt = wmThrough, wl <= lowest, wt >= height,
-           await tipPostStateLocallyResolvable(tipHash: tipHash, network: network) {
+        // SAME canonical tip (by hash — a reorg to a numerically-lower tip must re-check). The
+        // watermark is written ONLY after a real recompute+store pass below, so it is a trustworthy
+        // completeness signal on its own. We deliberately do NOT gate on a local-resolve check:
+        // `resolveRecursive` over the state header does NOT cross the account-trie Volume boundaries
+        // (every internal trie edge is a separate Volume), so it resolves only the shallow closure —
+        // the header + 5 sub-state roots, present as bare-root stubs — and false-passes even when the
+        // DEEP account trie is absent. That shallow gate is exactly why prior passes "converged"
+        // while every full-state read still faulted to the network.
+        if !tipHash.isEmpty, wmTip == tipHash, (wmLowest ?? UInt64.max) <= lowest, (wmThrough ?? 0) >= height {
             return
         }
         // No resume-prefix skip: once the short-circuit above did NOT fire, always scan from
@@ -1318,14 +1320,12 @@ extension LatticeNode {
             }
             let stub = VolumeImpl<Block>(rawCID: blockHash, node: nil, encryptionInfo: nil)
             guard let block = try? await stub.resolve(source: source).node else { contiguousBroken = true; continue }
-            // Real "already materialized?" skip: the FULL post-state trie already resolves from
-            // local CAS — no recompute. (A bare-root-stub check would falsely skip un-materialized
-            // blocks; this walks the closure.) Checked BEFORE binding peers so already-materialized
-            // heights don't issue useless binds.
-            if await postStateLocallyResolvable(block.postState, network: network) {
-                if !contiguousBroken { contiguousThrough = i }
-                continue
-            }
+            // No per-block "already materialized?" resolve check: any resolve-based probe is either
+            // shallow (a bare-root-stub / boundary-stopping walk that false-passes) or an unbounded
+            // full-trie walk. Instead recompute unconditionally — proveAndUpdateState touches only the
+            // paths this block's txs hit, and storeAcceptedStateDiffRoots is idempotent (already-durable
+            // roots are skipped), so a genuinely-materialized height is already cheap. The watermark
+            // short-circuit above (written only after a full pass) covers the converged fast path.
             // Route this height's content resolves straight to connected backbone peers
             // (bindBlockRoots) — the sync path's pattern — instead of the untargeted DHT-walk timeout.
             for peer in peers {
@@ -1391,32 +1391,10 @@ extension LatticeNode {
         }
     }
 
-    private var stateHealWatermarkKey: String { "state-materialized-height" }
-
-    /// Real "already materialized?" test for a block's post-state closure: resolve the ENTIRE
-    /// post-state trie from LOCAL storage alone — the DHT-free durable broker
-    /// (`canonicalContentFetcher`) — boundary roots AND their whole sub-tries. A
-    /// `hasDurableVolume` check on the 6 boundary roots is satisfied by a bare-root stub whose
-    /// sub-trie is absent, so it wrongly reports un-materialized state as complete; this walk is
-    /// the honest test. Faulting locally on the first missing node ⇒ NOT materialized (recompute).
-    /// Local, unlike the network `resolveRecursive` warned against on the sync path: structural
-    /// sharing means every node of a materialized closure lives in the local CAS, so the walk
-    /// never hits the wire. Cheap when state is absent (early fault), a network-free CAS walk when
-    /// present.
-    private func postStateLocallyResolvable(_ postState: LatticeStateHeader, network: ChainNetwork) async -> Bool {
-        let localFetcher = network.canonicalContentFetcher()
-        return (try? await postState.resolveRecursive(fetcher: localFetcher)) != nil
-    }
-
-    /// True iff the tip block (`tipHash`) and its ENTIRE post-state trie resolve from local CAS
-    /// alone. Gates the converged short-circuit: a watermark claiming completeness whose tip state
-    /// no longer resolves locally is stale and must not be trusted.
-    private func tipPostStateLocallyResolvable(tipHash: String, network: ChainNetwork) async -> Bool {
-        let localFetcher = network.canonicalContentFetcher()
-        guard let tip = try? await VolumeImpl<Block>(rawCID: tipHash, node: nil, encryptionInfo: nil)
-            .resolve(fetcher: localFetcher).node else { return false }
-        return await postStateLocallyResolvable(tip.postState, network: network)
-    }
+    // v2: the v1 watermark was written by a pass whose shallow resolveRecursive gate false-passed,
+    // so v1 markers claim completeness over un-materialized deep state. A new key forces every node
+    // to re-run the (now unconditional-recompute) pass once, healing the deep closure, then converge.
+    private var stateHealWatermarkKey: String { "state-materialized-height-v2" }
 
     private func verifySyncedStateTransition(
         block: Block,
