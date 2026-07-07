@@ -81,39 +81,43 @@ extension ChainNetwork {
         //      sent; unioning it into a served bundle would let a peer graft
         //      padded content-addressed junk into a legitimately-pinned root's
         //      response. Disk-only serving closes that.
-        // The serve gate is PIN-REACHABILITY: serve a CID iff it is pinned or
-        // reachable upward through `volume_entries` from a live pin. The disk
-        // `volume_entries` graph is written ONLY by a structural
-        // `storeRecursively` walk of a VALIDATED object (the fetch cache is
-        // memory-only and never consulted here), so a pin-reachable CID is
-        // committed, verified content — safe to serve at any grain. Content we
-        // hold but never committed to (unpinned relay/cache residue) is not
-        // pin-reachable and is refused.
-        guard await diskBroker.isPinReachable(cid: rootCID) else { return [] }
-        // Whole-object-by-root: serve a CID iff it has its OWN
-        // `volume_entries(self, *)` grouping — i.e. it is a genuine Volume ROOT
-        // (a block, chain spec, tx-body, sub-volume / state boundary; every such
-        // root is written with its own grouping by `storeRecursively`, even a
-        // single-node volume like a chain spec, which gets a one-entry
-        // `volume_entries(self, self)`). `fetchVolumeLocal(root:)` queries
-        // `volume_entries WHERE root = rootCID`, so a non-nil return IS exactly
-        // the "is a servable root" test — serve the whole grouping (one entry or
-        // many).
-        //
-        // An internal in-package CID (a block transactions/children trie node)
-        // has NO own grouping: it lives only as a NON-root entry of its owning
-        // block's grouping (`volume_entries(blockRoot, internalCID)`), so
-        // `fetchVolumeLocal(root: internalCID)` returns nil → we refuse it. It is
-        // delivered ONLY inside the owning object's bundle (fetched by that
-        // object's root), never as a standalone by-CID response.
-        let payload = await diskBroker.fetchVolumeLocal(root: rootCID)
-        guard let entries = payload?.entries, !entries.isEmpty else { return [] }
+        // The serve gate — pin-reachability AND an own non-empty grouping — is factored
+        // into `servableRootPayload(for:)` (below) so startup recovery's "already servable"
+        // skip reuses the EXACT same predicate and cannot drift from it.
+        guard let payload = await servableRootPayload(for: rootCID) else { return [] }
+        let entries = payload.entries
         if cids.isEmpty {
             return entries.map { (cid: $0.key, data: $0.value) }
         }
         return cids.compactMap { cid in
             entries[cid].map { (cid: cid, data: $0) }
         }
+    }
+
+    /// The whole-object-by-root serve predicate. A root is servable over P2P iff BOTH:
+    ///  1. PIN-REACHABLE — pinned, or reachable upward through the disk `volume_entries`
+    ///     graph from a live pin. That graph is written ONLY by a structural
+    ///     `storeRecursively` walk of a VALIDATED object (the fetch cache is memory-only
+    ///     and never consulted here), so a pin-reachable CID is committed, verified content
+    ///     — safe to serve at any grain. Unpinned relay/cache residue is refused.
+    ///  2. Has its OWN non-empty `volume_entries(self, *)` grouping — i.e. it is a genuine
+    ///     Volume ROOT (block, chain spec, tx-value/sub-volume, state boundary), written
+    ///     with its own grouping by `storeRecursively`. `fetchVolumeLocal(root:)` queries
+    ///     `volume_entries WHERE root = rootCID`, so a non-empty return IS the "is a
+    ///     servable root" test.
+    ///
+    /// CRUCIAL: pin-reachability ALONE is insufficient. An internal in-package CID (a block
+    /// transactions/children trie node, a tx BODY) is pin-reachable — it lives as a NON-root
+    /// entry of its owner's pinned grouping — yet has NO own grouping, so it is refused and
+    /// delivered ONLY inside the owning object's bundle. Recovery reuses this predicate so a
+    /// tx-value root that is pin-reachable via a block bundle but missing its own grouping is
+    /// NOT mistaken for servable.
+    ///
+    /// Returns the servable grouping (for `volumeData` to serve) or nil (refused).
+    nonisolated public func servableRootPayload(for rootCID: String) async -> SerializedVolume? {
+        guard await diskBroker.isPinReachable(cid: rootCID) else { return nil }
+        guard let payload = await diskBroker.fetchVolumeLocal(root: rootCID), !payload.entries.isEmpty else { return nil }
+        return payload
     }
 
     nonisolated public func hasVolume(rootCID: String) async -> Bool {
