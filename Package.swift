@@ -21,7 +21,11 @@ let package = Package(
         // Lattice 16.0.0 = 15.0.0 + inherited work credited per-grind (MAX cleared
         // difficulty, counted once by rootCID), not per-level (SUM). Consensus-breaking at
         // depth >= 2; depth-1 (direct children) byte-identical.
-        .package(url: "https://github.com/adalinxx/Lattice.git", exact: "16.0.0"),
+        // Lattice 16.1.0 = 16.0.0 + segment-anchored catch-up sync:
+        // syncFromHeaders(knownAnchors:) trusted-local anchor context,
+        // ChainState.getCumulativeWork(aboveHeight:) fork-point work compare,
+        // mainChainHashesFrom(index:) public (header-walk stop set).
+        .package(url: "https://github.com/adalinxx/Lattice.git", exact: "16.1.0"),
         // cashew 3.2.0 = 3.1.0 + Overlay/Composite ContentSource composition
         // adapters (Module 2: generic adapters co-located with the protocol).
         // cashew 3.3.0 = 3.2.0 + Header.walkOwnedSubtree (Module 11: generic

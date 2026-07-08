@@ -105,7 +105,22 @@ extension LatticeNode {
             if let block = materializedBlocks[height] {
                 root = block.postState.rawCID
             } else {
-                guard let blockHash = await getBlockHash(atIndex: height, directory: directory) else {
+                // Read the chain/store DIRECTLY, not via getBlockHash(atIndex:):
+                // that public accessor fail-closes on isChainUnavailable, which
+                // is TRUE for the duration of any deep sync (gap > shallow
+                // threshold) — but THIS read is the deep sync's own publish
+                // path. Routing it through the external-consumer gate self-
+                // deadlocks every deep catch-up: the sync can never publish
+                // because the sync is running. The gate exists to blank reads
+                // for external consumers mid-sync, not to starve the publisher.
+                var directHash: String? = nil
+                if let chainState = await chain(for: directory) {
+                    directHash = await chainState.getMainChainBlockHash(atIndex: height)
+                }
+                if directHash == nil {
+                    directHash = stateStores[chainKey(forDirectory: directory)]?.getBlockHash(atHeight: height)
+                }
+                guard let blockHash = directHash else {
                     throw StateRetainedRootAdvanceFailed(directory: directory, reason: "missing canonical block hash at height \(height)")
                 }
                 guard let block = try await VolumeImpl<Block>(rawCID: blockHash).resolve(fetcher: fetcher).node else {
