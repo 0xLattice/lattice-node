@@ -40,7 +40,7 @@ final class ReconnectBackoffTests: XCTestCase {
 
         let action = ParentSubscriptionReconnectLoop.nextAction(
             isCancelled: true,
-            directPeerCount: 0,
+            peerConnectionCount: 0,
             backoff: &backoff
         )
 
@@ -54,7 +54,7 @@ final class ReconnectBackoffTests: XCTestCase {
 
         let action = ParentSubscriptionReconnectLoop.nextAction(
             isCancelled: false,
-            directPeerCount: 1,
+            peerConnectionCount: 1,
             backoff: &backoff
         )
 
@@ -67,12 +67,12 @@ final class ReconnectBackoffTests: XCTestCase {
 
         let first = ParentSubscriptionReconnectLoop.nextAction(
             isCancelled: false,
-            directPeerCount: 0,
+            peerConnectionCount: 0,
             backoff: &backoff
         )
         let second = ParentSubscriptionReconnectLoop.nextAction(
             isCancelled: false,
-            directPeerCount: 0,
+            peerConnectionCount: 0,
             backoff: &backoff
         )
 

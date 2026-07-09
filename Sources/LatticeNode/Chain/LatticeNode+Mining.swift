@@ -259,6 +259,25 @@ extension LatticeNode {
                 return false
             }
         }
+        // Held-heavier rescue: a proof-verified child block that did NOT enter
+        // the chain (e.g. a below-tip connector dropped by the push height
+        // guard) is cached so the connector rescue can replay it once the chain
+        // declares its CID a missing ancestor; a non-promoted add may have just
+        // declared such an ancestor — schedule a drain either way.
+        if outcome == .rejected {
+            cacheDetachedChildEvidence(
+                directory: directory,
+                chainPath: chainPath,
+                cid: header.rawCID,
+                blockData: blockData,
+                selectedAnchor: parentAnchor,
+                processingRootHash: rootHash,
+                verified: [VerifiedChildProofEvidence(proof: proof, anchor: parentAnchor, rootHash: rootHash)]
+            )
+        }
+        if outcome != .storageFailed {
+            scheduleChildConnectorRescue(directory: directory, chainPath: chainPath)
+        }
         if accepted {
             // Route through the canonical publish choke point so the tip announce
             // is gated on the promoted-to-tip contract: a mined child that lands

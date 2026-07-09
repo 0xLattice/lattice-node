@@ -3,7 +3,7 @@ import XCTest
 
 /// Regression for the relay-masked same-chain discovery bug.
 ///
-/// `chainGossipPeerCount` used to return Ivy's raw `directPeerCount`, which counts a
+/// `chainGossipPeerCount` used to return Ivy's raw `peerConnectionCount`, which counts a
 /// `--use-relay` circuit-relay peer even though the relay never serves the child chain.
 /// Once a NAT'd follower was past genesis, that made `needsSameChainPeer` return false and
 /// the getChildPeers rendezvous discovery never ran again — the node could never (re)find a
@@ -16,7 +16,7 @@ final class RelayPeerCountTests: XCTestCase {
     private var relayStripped: String { String(repeating: "a", count: 64) } // as seen in Ivy connections
     private let sourceKey = String(repeating: "b", count: 64)
 
-    /// The masking scenario: the ONLY connection is the relay. Raw `directPeerCount` would be
+    /// The masking scenario: the ONLY connection is the relay. Raw `peerConnectionCount` would be
     /// 1 (→ needsSameChainPeer false → discovery masked); the fix must report 0.
     func testRelayOnlyCountsAsNoSameChainPeer() {
         let count = LatticeNode.nonRelayPeerCount(

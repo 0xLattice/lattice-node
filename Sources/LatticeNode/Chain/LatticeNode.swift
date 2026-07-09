@@ -368,6 +368,22 @@ public actor LatticeNode: ChainNetworkDelegate {
     /// (≤ shallowSyncThreshold) keep that chain readable and mining; only
     /// deep/initial syncs gate reads via `isChainUnavailable`.
     var activeSyncGaps: [String: UInt64] = [:]
+
+    // Held-heavier rescue state (see LatticeNode+HeldHeavierRescue.swift).
+    /// Verified-but-unconnected child connector evidence, per chain key → CID.
+    var detachedChildEvidence: [String: [String: DetachedChildEvidence]] = [:]
+    /// Insertion order per chain key, for bounded FIFO eviction of the above.
+    var detachedChildEvidenceOrder: [String: [String]] = [:]
+    /// Single-flight per-chain connector rescue drains (syncTasks pattern).
+    var childRescueTasks: [String: Task<Void, Never>] = [:]
+    /// Memoized connectors that failed replay against a tip ("cid|localTip").
+    var refusedRescueConnectors: Set<String> = []
+    /// Memoized held-heavier backfill targets that failed ("tipHash|chainTip").
+    var heldHeavierBackfillMemo: Set<String> = []
+    /// Last held-heavier target issued per chain key, for failure memoization.
+    var heldHeavierLastIssuedTarget: [String: String] = [:]
+    /// Idempotence flag: backfill provider installed on the node's own facade.
+    var mainLatticeBackfillInstalled = false
     var peerRefreshTask: Task<Void, Never>?
     private var mempoolPruneTask: Task<Void, Never>?
     private var pinReannounceTask: Task<Void, Never>?
@@ -1197,12 +1213,14 @@ public actor LatticeNode: ChainNetworkDelegate {
         for task in cancellableMaintenanceTasks {
             await task.value
         }
-        let cancellableNetworkTasks = [peerRefreshTask].compactMap { $0 } + Array(syncTasks.values)
+        let cancellableNetworkTasks = [peerRefreshTask].compactMap { $0 }
+            + Array(syncTasks.values) + Array(childRescueTasks.values)
         for task in cancellableNetworkTasks {
             task.cancel()
         }
         peerRefreshTask = nil
         syncTasks.removeAll()
+        childRescueTasks.removeAll()
         activeSyncGaps.removeAll()
         for task in cancellableNetworkTasks {
             await task.value
@@ -1415,16 +1433,26 @@ public actor LatticeNode: ChainNetworkDelegate {
     /// through a temporary Lattice view rooted at that child level so the same
     /// validation logic updates the intended chain.
     func latticeView(for chainPath: [String]?) async -> Lattice {
+        let ownPath = config.fullChainPath ?? [genesisConfig.directory]
         guard let chainPath,
               let address = ChainAddress(chainPath),
-              address.components != (config.fullChainPath ?? [genesisConfig.directory]) else {
+              address.components != ownPath else {
+            // Held-heavier body backfill (CFC-A1 drain): make sure the node's
+            // own facade has the transport provider before it processes blocks.
+            await installHeldHeavierBackfill(on: lattice, chainPath: ownPath)
             return lattice
         }
         let allLevels = await lattice.nexus.collectAllLevels(chainPath: [genesisConfig.directory])
         guard let hit = allLevels.first(where: { $0.chainPath == address.components }) else {
+            await installHeldHeavierBackfill(on: lattice, chainPath: ownPath)
             return lattice
         }
-        return Lattice(nexus: hit.level)
+        let view = Lattice(nexus: hit.level)
+        // Per-view facades are freshly constructed each call: install the
+        // held-heavier backfill transport so their processBlockHeader choke
+        // point can drain a hold on this level too.
+        await installHeldHeavierBackfill(on: view, chainPath: address.components)
+        return view
     }
 
     /// Full chain path from nexus down to `directory`, e.g. `[nexus, child, grandchild]`,

@@ -450,7 +450,7 @@ extension LatticeNode {
             // catch-up (the segment can never outweigh a chain that includes
             // its own shared prefix).
             var knownAnchors: [SyncBlockHeader] = []
-            var localWorkForAdmission = localWork
+            var localWorkForAdmission = Self.syncerWorkFloor(chainPath: network.chainPath, localWork: localWork)
             // downloadHeaders returns OLDEST-FIRST; the attach point is the
             // oldest header's parent.
             if let oldest = headers.first, let anchorCID = oldest.previousBlockCID,
@@ -557,7 +557,7 @@ extension LatticeNode {
             log.info("Headers-first sync complete")
 
         } catch {
-            let peerCount2 = await network.ivy.directPeerCount
+            let peerCount2 = await network.ivy.peerConnectionCount
             // Don't blacklist the (honest) tip CID when the failure was lying peers —
             // they were already Tally-penalized; a reshuffled retry should re-reach the
             // tip via other peers. Blacklisting the content would lock honest peers out
@@ -1007,6 +1007,21 @@ extension LatticeNode {
         peerWork > localWork
     }
 
+    /// The local-work floor handed to the syncer's pre-admission gate
+    /// (`ChainSyncer.syncFromHeaders` throws `insufficientWork` when the
+    /// segment's work is below it). ROOT chains pass their whole-chain work
+    /// (self-PoW-verified headers make that the correct Nakamoto pre-filter;
+    /// the anchor-context branch overwrites it fork-point-relative when the
+    /// segment attaches to a retained block). CHILD chains pass ZERO: their
+    /// own-target sums are meaningless for ordering (real weight = inherited
+    /// securing work, invisible to this gate), so a whole-chain floor
+    /// pre-refuses every valid carrier fast-forward before the single
+    /// admission choke point (`admitSyncedChainAgainstCurrentChain`) can
+    /// decide it — the live "insufficientWork" freeze.
+    static func syncerWorkFloor(chainPath: [String], localWork: UInt256) -> UInt256 {
+        chainPath.count > 1 ? .zero : localWork
+    }
+
     func recordRefusedSyncTip(_ peerTip: String, localTip: String) {
         if refusedSyncTipPairs.count > 512 { refusedSyncTipPairs.removeAll() }
         refusedSyncTipPairs.insert("\(peerTip)|\(localTip)")
@@ -1086,9 +1101,16 @@ extension LatticeNode {
                   lowest.parentBlockHash == currentTip else {
                 return .refuse
             }
-            let localBeyondFork = await chainState.getCumulativeWork(aboveHeight: lowest.blockHeight - 1)
-            if Self.shouldAdmitSyncedChain(peerWork: result.cumulativeWork, localWork: localBeyondFork) { return .admit }
-            return .refuse
+            // Strict fast-forward of the current tip: admit WITHOUT a work
+            // comparison. Child own-target work sums are meaningless for child
+            // ordering (a carrier's real weight is the securing work in its
+            // ChildBlockProofs, which admission cannot see), so gating a pure
+            // append on them refuses valid carrier catch-ups (the frozen-
+            // follower "insufficientWork" loop). The segment was fully
+            // validated and proof-anchored upstream, it evicts nothing, and it
+            // decides no reorg — fork choice over trueCumWork remains the sole
+            // switch authority for competing branches.
+            return .admit
         }
         if let lowest = sortedBlocks.first, lowest.blockHeight > 0,
            let anchorCID = lowest.parentBlockHash,
@@ -2004,7 +2026,7 @@ extension LatticeNode {
 
     func verifySyncWithPeers(tipCID: String, tipHeight: UInt64, network: ChainNetwork) async {
         let log = NodeLogger("sync")
-        let peerCount = await network.ivy.directPeerCount
+        let peerCount = await network.ivy.peerConnectionCount
         if peerCount < 2 {
             log.warn("Sync completed with only \(peerCount) peer(s) — insufficient for cross-verification")
             return

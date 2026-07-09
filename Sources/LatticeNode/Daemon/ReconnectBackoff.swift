@@ -40,12 +40,12 @@ enum ParentSubscriptionReconnectAction: Equatable {
 enum ParentSubscriptionReconnectLoop {
     static func nextAction(
         isCancelled: Bool,
-        directPeerCount: Int,
+        peerConnectionCount: Int,
         backoff: inout ReconnectBackoff
     ) -> ParentSubscriptionReconnectAction {
         guard !isCancelled else { return .exit }
 
-        if directPeerCount > 0 {
+        if peerConnectionCount > 0 {
             backoff.reset()
             return .wait(.seconds(backoff.baseSeconds))
         }

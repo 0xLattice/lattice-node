@@ -101,6 +101,8 @@ const TESTS = [
     { name: 'merged-mining',         file: 'scenarios/network/merged-mining.mjs',         timeoutMs: 90_000 },
     { name: 'auto-include-children', file: 'scenarios/network/auto-include-children.mjs', timeoutMs: 120_000 },
     { name: 'external-miner-quickstart', file: 'scenarios/network/external-miner-quickstart.mjs', timeoutMs: 180_000 },
+    { name: 'outbound-push-no-relay', file: 'scenarios/network/outbound-push-no-relay.mjs', timeoutMs: 180_000 },
+    { name: 'child-sync-fallback',   file: 'scenarios/network/child-sync-fallback.mjs',   timeoutMs: 240_000 },
   ]),
   ...group('follower', [
     { name: 'parent-dependency',          file: 'scenarios/follower/parent-dependency.mjs',          timeoutMs: 12 * 60_000 },

@@ -43,8 +43,9 @@ Run a Nexus node that hosts the child from the genesis, with a **reachable, hist
 configuration:
 
 - `--storage-mode historical --block-retention historical` — serve all blocks + genesis content.
-- `--external-address <public-ip>:<port>` — advertise a reachable address (this also enables
-  `--relay`, letting NAT'd miners connect through it). Without it the node advertises loopback.
+- `--external-address <public-ip>:<port>` — advertise a reachable address (this also makes the
+  node serve as a resource-capped circuit relay, like every public node). Without it the node
+  advertises loopback.
 - The child process must advertise its **own** reachable chain-gossip address and expose its p2p
   port, or remote miners can only reach it over a relay.
 - Set `--coinbase-address` on both the Nexus node and the child so mined blocks pay out.
@@ -62,14 +63,39 @@ lattice-node node \
   --subscribe-p2p <local-nexus-p2p> \
   --port <p2p> --rpc-port <rpc> --data-dir <dir> \
   --min-peer-key-bits 16 --coinbase-address <addr> \
-  --use-relay <backbone-p2p> --no-dns-seeds
+  --no-dns-seeds
 ```
 
-- **`--use-relay <peer>` is required for a NAT'd miner** (home/laptop/cloud). A direct dial to a
-  serving node behind a cloud proxy fails; the child reaches it through a public relay (any
-  backbone node run with `--external-address`). Discovery still happens via `getChildPeers`; the
-  relay only provides transport.
 - No `--peer` — `getChildPeers` finds the serving node.
+- No `--use-relay` — see below: a NAT'd miner talking to a *public* serving node needs no relay.
+
+### NAT: outbound-first, relays as an automatic assist
+
+- **A NAT'd miner participates fully with no relay.** Everything it needs flows over the
+  connections it dials OUT — to the serving node and to peers discovered via `getChildPeers`:
+  newly mined blocks are push-gossiped over those outbound connections, and sync/fetch runs
+  over them too. The common producer → public-follower topology requires no `--use-relay`
+  (regression-proven by `SmokeTests/scenarios/network/outbound-push-no-relay.mjs`, which mines
+  on a producer whose every advertised address is undialable and asserts a public follower
+  still tracks its tip).
+- **Relays cover relay-only reachability (NAT-to-NAT).** Only when *neither* side can accept an
+  inbound dial does traffic bridge through a circuit relay. Every public node
+  (`--external-address`) serves as a resource-capped relay automatically, and relay carriers
+  are drawn from the peer set — the p2p layer prefers carriers in distinct network groups and
+  fails over between them; a relay is never a designated backbone. `--use-relay <peer>` is
+  only an OPTIONAL bootstrap hint (a seed carrier for a node booting with an empty peer set) —
+  it is not required, and any connected public peer serves the same role.
+- **Trust model: relays are availability-only.** Relayed frames are integrity- and
+  identity-protected end to end: blocks and content are content-addressed (a relay cannot
+  alter bytes without changing the CID), peer identity is bound by the signed identify
+  handshake + key proof-of-work, and block validity is PoW-verified by the receiver. Relay
+  traffic is **not encrypted**, though — a relay sees plaintext frames. Trust a relay for
+  availability only (it can drop or delay), never for confidentiality or correctness.
+- **Hole-punching tripwire.** Direct-upgrade of relayed connections (DCUtR-style hole
+  punching) is deliberately deferred: today's NAT-to-NAT population doesn't justify it.
+  Revisit when NAT-to-NAT relayed traffic approaches a meaningful fraction of a public
+  relay's aggregate byte-rate cap — relays cap total relayed egress per window, so sustained
+  growth toward that cap is the signal that long-lived circuits need a direct upgrade path.
 
 Then mine both chains with one coordinator:
 

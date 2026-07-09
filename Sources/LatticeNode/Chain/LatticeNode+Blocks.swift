@@ -132,7 +132,8 @@ extension LatticeNode {
         requireDurableResolvedBlock: Bool = false,
         preStoredCIDs: [String]? = nil,
         storageBrokerOverride: (any VolumeBroker)? = nil,
-        baseValidationSourceOverride: (any ContentSource)? = nil
+        baseValidationSourceOverride: (any ContentSource)? = nil,
+        allowBelowTipHeight: Bool = false
     ) async -> BlockProcessOutcome {
         let key = chainPath.map { chainKey(forPath: $0) } ?? chainKey(forDirectory: directory)
         return await withChainMutation(key) {
@@ -147,7 +148,8 @@ extension LatticeNode {
                 requireDurableResolvedBlock: requireDurableResolvedBlock,
                 preStoredCIDs: preStoredCIDs,
                 storageBrokerOverride: storageBrokerOverride,
-                baseValidationSourceOverride: baseValidationSourceOverride
+                baseValidationSourceOverride: baseValidationSourceOverride,
+                allowBelowTipHeight: allowBelowTipHeight
             )
         }
     }
@@ -163,7 +165,8 @@ extension LatticeNode {
         requireDurableResolvedBlock: Bool = false,
         preStoredCIDs: [String]? = nil,
         storageBrokerOverride: (any VolumeBroker)? = nil,
-        baseValidationSourceOverride: (any ContentSource)? = nil
+        baseValidationSourceOverride: (any ContentSource)? = nil,
+        allowBelowTipHeight: Bool = false
     ) async -> BlockProcessOutcome {
         let key = chainPath.map { chainKey(forPath: $0) } ?? chainKey(forDirectory: directory)
         let keyedNetwork = chainPath.flatMap { network(forPath: $0) }
@@ -285,7 +288,14 @@ extension LatticeNode {
         // the Lattice framework validates the target transition there.
         var blockForProcessing = resolvedBlock
         var durablyStoredCIDs = preStoredCIDs
-        if let block = blockForProcessing {
+        // Height-monotonicity DoS guard: a PUSHED block below the local tip
+        // height costs a full validation for something that can never extend
+        // the tip, so gossip drops it cheaply. `allowBelowTipHeight` is the
+        // PULL exception — the held-heavier connector rescue re-submits a
+        // proof-verified interior block precisely because the chain declared
+        // it a missing ancestor of a held heavier subtree; the block still
+        // runs the complete validation/durability pipeline below.
+        if let block = blockForProcessing, !allowBelowTipHeight {
             let localHeight = await chain.getHighestBlockHeight()
             if block.height < localHeight {
                 return .rejected
@@ -316,7 +326,7 @@ extension LatticeNode {
                 await prefetchBlockContentClosure(blockHash: header.rawCID, network: network)
             }
             let localHeightAfterPrefetch = await chain.getHighestBlockHeight()
-            if block.height < localHeightAfterPrefetch {
+            if block.height < localHeightAfterPrefetch, !allowBelowTipHeight {
                 return .rejected
             }
             guard let durableBlock = await resolveBlockForDurableValidation(

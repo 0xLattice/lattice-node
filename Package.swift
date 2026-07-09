@@ -56,7 +56,10 @@ let package = Package(
         // relay-only follower stalled the instant it crossed 120s/128KB). Now: sliding
         // idle-timeout renewed on activity + per-circuit AND node-wide aggregate byte-RATE
         // caps (DoS-bounded) + 3600s backstop; relayed-conn isLive tracks inbound activity.
-        .package(url: "https://github.com/adalinxx/Ivy.git", exact: "6.11.0"),
+        // Ivy 7.0.0 = 6.11.0 + observed-keyed eclipse floor + relay hardening; connection-state
+        // refactor renames the public `directPeerCount` property to `peerConnectionCount`
+        // (same value — total connections, direct + relayed).
+        .package(url: "https://github.com/adalinxx/Ivy.git", exact: "7.0.0"),
         // VolumeBroker 3.10.0: retained-root merge for historical state
         // retention, plus retained-root scopes and serve-gate/eviction pins.
         .package(url: "https://github.com/adalinxx/VolumeBroker.git", from: "3.10.0"),

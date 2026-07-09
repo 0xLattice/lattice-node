@@ -260,6 +260,49 @@ public actor ChainNetwork: IvyDelegate, IvyDataSource {
     var pendingHeaderProofRequests: [Data: PendingHeaderProofRequest] = [:]
     static let maxHeaderBatchSize = 1_000
 
+    // MARK: - Header batch byte budget
+    //
+    // Ivy's `Message.serialize` returns EMPTY Data when the encoded frame
+    // exceeds `maxFrameSize` (4 MiB) — the message is silently dropped, never
+    // truncated. An unbudgeted headerBatch/headerBatch2 response over that
+    // limit therefore vanishes on the wire: the requester times out, retries,
+    // and loops on whatever tiny batch DOES fit ("Downloaded 1 headers"). The
+    // serving side must budget the batch while building it; the requesting
+    // side's multi-batch continuation already handles short batches.
+
+    /// Encoded response budget: the frame cap minus headroom for the
+    /// peerMessage envelope (tag + topic + length prefixes) and codec slack.
+    static let headerBatchByteBudget = Int(IvyConfig.defaultMaxFrameSize) - 64 * 1024
+
+    /// Fixed head of a headerBatch/headerBatch2 response body:
+    /// requestID(16) + numHeaders(u32).
+    static let headerBatchBaseBytes = 20
+
+    /// Encoded size of one batch entry — mirrors
+    /// `NetworkWireCodecs.appendHeaderEntry` (+ proof length field for
+    /// headerBatch2, where a nil proof still encodes a 4-byte zero length).
+    static func headerBatchEntryBytes(cidByteCount: Int, dataByteCount: Int, proofByteCount: Int?) -> Int {
+        let entry = 2 + cidByteCount + 4 + dataByteCount
+        guard let proofByteCount else { return entry }
+        return entry + 4 + proofByteCount
+    }
+
+    /// The batch-size decision: may an entry of this shape still be appended
+    /// to a response currently totalling `currentBytes`?
+    static func headerBatchHasRoom(
+        currentBytes: Int,
+        cidByteCount: Int,
+        dataByteCount: Int,
+        proofByteCount: Int?,
+        budget: Int = headerBatchByteBudget
+    ) -> Bool {
+        currentBytes + headerBatchEntryBytes(
+            cidByteCount: cidByteCount,
+            dataByteCount: dataByteCount,
+            proofByteCount: proofByteCount
+        ) <= budget
+    }
+
     public init(
         chainPath: [String],
         config: IvyConfig,

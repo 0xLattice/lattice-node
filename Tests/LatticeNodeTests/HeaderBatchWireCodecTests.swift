@@ -501,6 +501,75 @@ final class HeaderBatchWireCodecTests: XCTestCase {
             sharedDiskBroker: disk
         )
     }
+
+    // MARK: - Serving-side byte budget (silent frame-drop hazard)
+
+    /// Documents the hazard the budget exists for: Ivy's `Message.serialize`
+    /// returns EMPTY Data — a silent drop, never a truncation — once the
+    /// peerMessage frame exceeds `maxFrameSize`. An unbudgeted header batch
+    /// above the cap therefore never reaches the requester at all, and the
+    /// requester loops on whatever tiny batch does fit.
+    func testOversizedHeaderBatchIsSilentlyDroppedByIvyFraming() {
+        let requestID = Data(repeating: 0xB2, count: 16)
+        let big = Data(repeating: 0x42, count: 1 << 20) // 1 MiB per entry
+        let headers: [(cid: String, data: Data)] = (0..<5).map { ("cid-\($0)", big) }
+        let payload = NetworkWireCodecs.encodeHeaderBatch(requestID: requestID, headers: headers)
+        XCTAssertGreaterThan(payload.count, Int(IvyConfig.defaultMaxFrameSize),
+                             "fixture must exceed the frame cap")
+        let frame = Message.peerMessage(topic: "headerBatch", payload: payload).serialize()
+        XCTAssertTrue(frame.isEmpty,
+                      "Ivy silently drops an over-cap frame — the serving handlers must budget the batch")
+    }
+
+    /// The handlers' batch-size decision layer: entries stop accumulating
+    /// BEFORE the encoded response would bust the frame budget, the byte
+    /// accounting matches the encoder exactly, and the truncated batch
+    /// actually survives Ivy framing (non-empty serialized frame).
+    func testHeaderBatchBudgetTruncatesBeforeFrameCap() {
+        let requestID = Data(repeating: 0xB3, count: 16)
+        let big = Data(repeating: 0x42, count: 1 << 20) // 1 MiB per entry
+        var included: [(cid: String, data: Data)] = []
+        var responseBytes = ChainNetwork.headerBatchBaseBytes
+        for i in 0..<8 {
+            let cid = "cid-\(i)"
+            guard ChainNetwork.headerBatchHasRoom(
+                currentBytes: responseBytes,
+                cidByteCount: cid.utf8.count,
+                dataByteCount: big.count,
+                proofByteCount: nil
+            ) else { break }
+            responseBytes += ChainNetwork.headerBatchEntryBytes(
+                cidByteCount: cid.utf8.count, dataByteCount: big.count, proofByteCount: nil)
+            included.append((cid, big))
+        }
+        XCTAssertGreaterThan(included.count, 0, "budget must admit at least one entry")
+        XCTAssertLessThan(included.count, 8, "budget must truncate an over-cap batch")
+        let payload = NetworkWireCodecs.encodeHeaderBatch(requestID: requestID, headers: included)
+        XCTAssertEqual(payload.count, responseBytes, "byte accounting must match the encoder exactly")
+        XCTAssertLessThanOrEqual(payload.count, ChainNetwork.headerBatchByteBudget)
+        let frame = Message.peerMessage(topic: "headerBatch", payload: payload).serialize()
+        XCTAssertFalse(frame.isEmpty, "a budgeted batch must survive Ivy framing")
+    }
+
+    /// headerBatch2 accounting: a nil proof still encodes a 4-byte zero
+    /// length, and proof bytes count against the budget byte-for-byte.
+    func testHeaderBatch2BudgetAccountingMatchesEncoder() {
+        let requestID = Data(repeating: 0xB4, count: 16)
+        let entries: [(cid: String, data: Data, proof: Data?)] = [
+            ("cid-a", Data("block-a".utf8), Data(repeating: 0x51, count: 96)),
+            ("cid-b", Data("block-b".utf8), nil),
+            ("cid-c", Data("block-c".utf8), Data(repeating: 0x52, count: 7)),
+        ]
+        var responseBytes = ChainNetwork.headerBatchBaseBytes
+        for entry in entries {
+            responseBytes += ChainNetwork.headerBatchEntryBytes(
+                cidByteCount: entry.cid.utf8.count,
+                dataByteCount: entry.data.count,
+                proofByteCount: entry.proof?.count ?? 0)
+        }
+        let payload = NetworkWireCodecs.encodeHeaderBatch2(requestID: requestID, entries: entries)
+        XCTAssertEqual(payload.count, responseBytes, "headerBatch2 byte accounting must match the encoder exactly")
+    }
 }
 
 // MARK: - Wire payload builders (byte format pinned to the serving encoder

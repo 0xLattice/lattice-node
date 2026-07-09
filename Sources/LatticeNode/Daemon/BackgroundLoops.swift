@@ -219,7 +219,7 @@ func startParentChainSubscription(
             // never an arbitrarily-discovered peer. With PEX on (the default) this
             // dedicated link would discover + dial untrusted backbone parents and treat
             // THEIR cum-work as trusted (a safety hole); it would also churn them (~1s,
-            // netgroup caps / inbound eviction) while keeping `directPeerCount > 0`, so
+            // netgroup caps / inbound eviction) while keeping `peerConnectionCount > 0`, so
             // the reconnect loop never re-dials the configured parent — masking the local
             // link entirely (observed: 0 connects to the local Nexus, endless remote
             // flapping). A trusted remote parent, if ever wanted, belongs in explicit
@@ -278,7 +278,7 @@ func startParentChainSubscription(
         let bootstrapTask = Task {
             while !Task.isCancelled {
                 var needsPeer = false
-                if await parentIvy.directPeerCount > 0 {
+                if await parentIvy.peerConnectionCount > 0 {
                     await node.advertiseChainEndpointToParents(directory: directory)
                     // Also push our genesis to the parent so it durably re-serves it on the parent
                     // network — lets later followers resolve the genesis without a local hex.
@@ -301,7 +301,7 @@ func startParentChainSubscription(
         while true {
             let action = ParentSubscriptionReconnectLoop.nextAction(
                 isCancelled: Task.isCancelled,
-                directPeerCount: await parentIvy.directPeerCount,
+                peerConnectionCount: await parentIvy.peerConnectionCount,
                 backoff: &reconnectBackoff
             )
             switch action {
@@ -320,7 +320,7 @@ func startParentChainSubscription(
                     return
                 }
                 guard !Task.isCancelled else { return }
-                guard await parentIvy.directPeerCount == 0 else {
+                guard await parentIvy.peerConnectionCount == 0 else {
                     reconnectBackoff.reset()
                     continue
                 }

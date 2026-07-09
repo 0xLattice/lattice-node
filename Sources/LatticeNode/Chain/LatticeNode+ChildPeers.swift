@@ -179,7 +179,7 @@ extension LatticeNode {
 
     /// Direct peer count on the `directory` chain-gossip network, EXCLUDING known
     /// relay peers. A `--use-relay` circuit-relay peer is connected directly (it
-    /// lives in Ivy's `connections`, so `directPeerCount` counts it) but is a
+    /// lives in Ivy's `connections`, so `peerConnectionCount` counts it) but is a
     /// cross-chain bootstrap node that never serves this child chain. Counting it
     /// would make `needsSameChainPeer` return false once a NAT'd node is past
     /// genesis, masking the getChildPeers rendezvous discovery — the node would

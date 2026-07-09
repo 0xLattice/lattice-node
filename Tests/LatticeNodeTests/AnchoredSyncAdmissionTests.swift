@@ -132,6 +132,62 @@ final class AnchoredSyncAdmissionTests: XCTestCase {
         }
     }
 
+    /// Child chains: a strict fast-forward of the current tip is admitted
+    /// WITHOUT any work comparison — even a zero own-target segment work sum.
+    /// Child own-target sums are meaningless for ordering (a carrier's real
+    /// weight is the securing work in its ChildBlockProofs, invisible here);
+    /// gating a pure append on them is exactly the frozen-follower
+    /// "insufficientWork" refusal loop. The append evicts nothing and decides
+    /// no reorg, so fork choice (trueCumWork) stays the sole switch authority.
+    func testChildFastForwardAdmittedWithoutWorkComparison() async throws {
+        try await withSyncNode { node in
+            let chainState = await node.lattice.nexus.chain
+            let maybeNetwork = await node.network(forPath: ["Nexus"])
+            let network = try XCTUnwrap(maybeNetwork)
+            let fetcher = await network.ivyFetcher
+            let genesis = await node.genesisResult
+            let ext = try await BlockBuilder.buildBlock(
+                previous: genesis.block,
+                timestamp: genesis.block.timestamp + 1_000,
+                target: genesis.block.nextTarget,
+                fetcher: fetcher)
+            // Segment work declared ZERO: strictly less than any local work,
+            // so the old `peerWork > localWork` gate refused this append.
+            let result = try await Self.resultFor(
+                blocks: [ext], genesis: genesis.block, fetcher: fetcher, cumulativeWork: .zero)
+            let decision = await node.admitSyncedChainAgainstCurrentChain(
+                result, chainState: chainState, chainPath: ["Nexus", "toy"])
+            guard case .admit = decision else {
+                return XCTFail("a strict child fast-forward must admit without a work comparison (own-target sums do not order child chains)")
+            }
+        }
+    }
+
+    /// Deterministic refusals are memoized per (peerTip, localTip) pair so a
+    /// refused tip is not re-synced every announce round; either tip changing
+    /// re-arms the sync.
+    func testRefusedSyncTipMemoizationIsPairScoped() async throws {
+        try await withSyncNode { node in
+            await node.recordRefusedSyncTip("bafy-peer-tip", localTip: "bafy-local-tip")
+            let memoized = await node.isRefusedSyncTip("bafy-peer-tip", localTip: "bafy-local-tip")
+            XCTAssertTrue(memoized, "a refused (peerTip, localTip) pair must stay refused while both tips are unchanged")
+            let localMoved = await node.isRefusedSyncTip("bafy-peer-tip", localTip: "bafy-local-tip-2")
+            XCTAssertFalse(localMoved, "a local tip change must re-arm the refused peer tip")
+            let otherPeer = await node.isRefusedSyncTip("bafy-peer-tip-2", localTip: "bafy-local-tip")
+            XCTAssertFalse(otherPeer, "an unseen peer tip must not be pre-refused")
+        }
+    }
+
+    /// The syncer's `insufficientWork` pre-gate floor: root chains pass their
+    /// whole-chain work; CHILD chains pass ZERO so the gate can never
+    /// pre-refuse a fast-forward before the single admission choke point
+    /// (`admitSyncedChainAgainstCurrentChain`) decides it.
+    func testChildSyncerWorkFloorIsZero() {
+        XCTAssertEqual(LatticeNode.syncerWorkFloor(chainPath: ["Nexus"], localWork: UInt256(7)), UInt256(7))
+        XCTAssertEqual(LatticeNode.syncerWorkFloor(chainPath: ["Nexus", "toy"], localWork: UInt256(7)), UInt256.zero)
+        XCTAssertEqual(LatticeNode.syncerWorkFloor(chainPath: ["Nexus", "toy", "tt"], localWork: UInt256(7)), UInt256.zero)
+    }
+
     /// Child chains: an anchored result whose anchor is NOT the current tip
     /// falls back to the legacy whole-chain compare (and refuses when the
     /// segment does not outweigh the whole local chain) — a child sync-reorg

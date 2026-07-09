@@ -93,7 +93,7 @@ extension LatticeNode {
                 let candidates = discovered + unconnectedKnown
                 let diverse = PeerDiversity.selectDiversePeers(
                     from: candidates,
-                    existing: connectedEndpoints,
+                    existing: [],
                     maxNew: targetOutbound - connected,
                     minKeyWorkBits: config.minPeerKeyBits,
                     score: score
@@ -108,7 +108,7 @@ extension LatticeNode {
                     let dnsCandidates = dnsSeeds.filter { !connectedIDs.contains($0.publicKey) }
                     let dnsSelection = PeerDiversity.selectDiversePeers(
                         from: dnsCandidates,
-                        existing: connectedEndpoints,
+                        existing: [],
                         maxNew: targetOutbound - connected - diverse.count,
                         minKeyWorkBits: config.minPeerKeyBits,
                         score: score
@@ -116,24 +116,6 @@ extension LatticeNode {
                     for peer in dnsSelection {
                         try? await network.ivy.connect(to: peer)
                     }
-                }
-            }
-
-            // Prune overrepresented subnets and replace with diverse peers
-            let overrepresented = PeerDiversity.findOverrepresentedPeers(peers: connectedEndpoints)
-            if !overrepresented.isEmpty {
-                let unconnectedKnown = allKnown
-                    .filter { !connectedIDs.contains($0.id.publicKey) }
-                    .map { $0.endpoint }
-                let replacements = PeerDiversity.selectDiversePeers(
-                    from: discovered + unconnectedKnown,
-                    existing: connectedEndpoints,
-                    maxNew: min(overrepresented.count, 2),
-                    minKeyWorkBits: config.minPeerKeyBits,
-                    score: score
-                )
-                for peer in replacements {
-                    try? await network.ivy.connect(to: peer)
                 }
             }
 
@@ -171,7 +153,7 @@ extension LatticeNode {
                     .filter { !connectedIDs.contains($0.publicKey) }
                 let probes = PeerDiversity.selectDiversePeers(
                     from: probeCandidates,
-                    existing: connectedEndpoints,
+                    existing: [],
                     maxNew: 2,
                     minKeyWorkBits: config.minPeerKeyBits,
                     score: score

@@ -466,10 +466,28 @@ extension ChainNetwork {
 
             var headers: [(cid: String, data: Data)] = []
             var currentCID = fromCID
+            // Byte-budget the batch while building it: Ivy's Message.serialize
+            // silently returns EMPTY Data when the encoded frame exceeds
+            // maxFrameSize, so an oversized headerBatch response vanishes and
+            // the requester loops on tiny batches. Stop before the entry that
+            // would bust the budget — the client's multi-batch continuation
+            // handles short batches.
+            var responseBytes = Self.headerBatchBaseBytes
             for _ in 0..<min(count, Self.maxHeaderBatchSize) {
                 guard let vol = await diskBroker.fetchVolumeLocal(root: currentCID),
                       let blockData = vol.entries[currentCID],
                       let block = Block(data: blockData) else { break }
+                guard Self.headerBatchHasRoom(
+                    currentBytes: responseBytes,
+                    cidByteCount: currentCID.utf8.count,
+                    dataByteCount: blockData.count,
+                    proofByteCount: nil
+                ) else { break }
+                responseBytes += Self.headerBatchEntryBytes(
+                    cidByteCount: currentCID.utf8.count,
+                    dataByteCount: blockData.count,
+                    proofByteCount: nil
+                )
                 headers.append((cid: currentCID, data: blockData))
                 guard let parentCID = block.parent?.rawCID, !parentCID.isEmpty else { break }
                 currentCID = parentCID
@@ -499,6 +517,10 @@ extension ChainNetwork {
 
             var entries: [(cid: String, data: Data, proof: Data?)] = []
             var currentCID = fromCID
+            // Same silent-drop hazard as getHeaders (see above), and worse:
+            // bundled proofs inflate entries well past bare headers, so an
+            // unbudgeted proof-carrying batch busts maxFrameSize far sooner.
+            var responseBytes = Self.headerBatchBaseBytes
             for _ in 0..<min(count, Self.maxHeaderBatchSize) {
                 guard let vol = await diskBroker.fetchVolumeLocal(root: currentCID),
                       let blockData = vol.entries[currentCID],
@@ -507,6 +529,17 @@ extension ChainNetwork {
                 if proof == nil {
                     NodeLogger("sync").warn("\(directory): getHeaders2 serving \(String(currentCID.prefix(16)))… without child proof")
                 }
+                guard Self.headerBatchHasRoom(
+                    currentBytes: responseBytes,
+                    cidByteCount: currentCID.utf8.count,
+                    dataByteCount: blockData.count,
+                    proofByteCount: proof?.count ?? 0
+                ) else { break }
+                responseBytes += Self.headerBatchEntryBytes(
+                    cidByteCount: currentCID.utf8.count,
+                    dataByteCount: blockData.count,
+                    proofByteCount: proof?.count ?? 0
+                )
                 entries.append((cid: currentCID, data: blockData, proof: proof))
                 guard let parentCID = block.parent?.rawCID, !parentCID.isEmpty else { break }
                 currentCID = parentCID

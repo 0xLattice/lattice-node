@@ -823,8 +823,29 @@ extension LatticeNode {
             // A rejection often means we're missing ancestors — trigger sync if
             // the received block is far ahead of our local tip.
             _ = await checkSyncNeeded(peerBlock: block, peerTipCID: cid, network: network)
+            // Held-heavier rescue: this block's proofs and committing anchor
+            // are fully verified — keep the evidence so the connector rescue
+            // can replay it once the chain declares its CID a missing ancestor
+            // (the below-tip interior connector of a heavier gossip branch).
+            await cacheDetachedChildEvidence(
+                directory: directory,
+                chainPath: nil,
+                cid: cid,
+                blockData: data,
+                selectedAnchor: parentAnchor,
+                processingRootHash: processingRootHash,
+                verified: verified.map {
+                    VerifiedChildProofEvidence(proof: $0.proof, anchor: $0.anchor, rootHash: $0.rootHash)
+                }
+            )
         } else if outcome == .storageFailed {
             NodeLogger("blocks").error("\(directory): child block \(String(cid.prefix(16)))… was accepted but not durably stored; withholding tip publish")
+        }
+        if outcome != .storageFailed {
+            // A non-promoted add may have just declared a missing ancestor, and
+            // a freshly cached connector may be exactly what an earlier detached
+            // add is waiting for — drain either way (single-flight, memoized).
+            await scheduleChildConnectorRescue(directory: directory, chainPath: nil)
         }
     }
 
