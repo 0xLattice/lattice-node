@@ -1346,7 +1346,7 @@ extension LatticeNode {
         await network.announce(cid: specCID, expiry: expiry, fee: fee)
     }
     func clearStaleSyncFailures() {
-        failedSyncTips.removeAll()
+        syncOutcomes.clearFailed()
     }
     func bufferGossipBlock(cid: String, data: Data, network: ChainNetwork, peer: PeerID) {
         let key = ObjectIdentifier(network)

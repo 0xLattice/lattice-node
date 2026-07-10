@@ -106,7 +106,7 @@ extension LatticeNode {
         let localTip = await chainState.getMainChainTip()
         // Exact ties hold the incumbent — only a higher peer tip (gap > 0) is
         // worth an announce-driven sync; equal-height siblings are not adopted.
-        let shouldSync = announceOnly ? gap > 0 : gap > catchUpSyncThreshold
+        let shouldSync = SyncPolicy.heightGapTrigger(gap: gap, announceOnly: announceOnly, catchUpThreshold: catchUpSyncThreshold)
         guard shouldSync else { return false }
         guard !isRefusedSyncTip(peerTipCID, localTip: localTip) else { return false }
         guard syncTasks[syncKey] == nil else { return true }
@@ -142,32 +142,23 @@ extension LatticeNode {
         let peerChainDepth = UInt256(peerBlock.height + 1)
         let estimatedPeerWork = peerWorkPerBlock * peerChainDepth
 
-        let aheadByHeight = gap > catchUpSyncThreshold
-        // Require the peer to have at least one full block's worth more work to
-        // avoid spurious syncs from estimation rounding at equal target.
-        let aheadByWork = localWork > UInt256.zero && estimatedPeerWork > localWork + peerWorkPerBlock
-
-        // Exact ties hold the incumbent (docs/protocol.md §fork-choice,
-        // docs/whitepaper.md): only a STRICTLY heavier fork is worth syncing.
-        // Equal-work siblings are never adopted on receipt — the next block to
-        // extend either fork makes it strictly heavier and the network converges
-        // on that, so there is no permanent-fork hazard while mining continues.
+        // Exact ties hold the incumbent (docs/protocol.md §fork-choice): only a
+        // STRICTLY heavier fork is worth syncing. Equal-work siblings are never
+        // adopted on receipt — the next extending block breaks the tie and the
+        // network converges, so there is no permanent-fork hazard while mining.
         let localTip = await chainState.getMainChainTip()
 
-        guard aheadByHeight || aheadByWork else { return false }
-
-        // Pre-check: if estimated peer work is clearly less than ours, skip the
-        // bandwidth cost — the sync would fail with insufficientWork anyway.
-        // Own-target estimate veto — ROOT chains only. A child chain's real
-        // weight is the securing work in its anchoring proofs (child-only
-        // carriers may have a near-trivial own target), which this estimate
-        // cannot see — vetoing a child sync on own-work silently freezes
-        // followers behind a carrier-era chain. Child chains fall through to
-        // the height gate here; the real work decision happens at admission,
-        // after the segment's proofs are downloaded and verified.
-        if network.chainPath.count == 1, localWork > UInt256.zero, estimatedPeerWork < localWork {
-            return false
-        }
+        // Ahead-by-height OR heavier-even-at-lower-height, with a root-only own-work
+        // veto (a child's real weight is inherited securing work, decided at
+        // admission after its proofs are verified). See SyncPolicy.workAwareTrigger.
+        guard SyncPolicy.workAwareTrigger(
+            gap: gap,
+            catchUpThreshold: catchUpSyncThreshold,
+            localWork: localWork,
+            estimatedPeerWork: estimatedPeerWork,
+            peerWorkPerBlock: peerWorkPerBlock,
+            isRootChain: network.chainPath.count == 1
+        ) else { return false }
 
         // A tip we already fully synced and refused stays refused while our own
         // tip is unchanged — re-syncing it every announce round is pure churn.
@@ -188,7 +179,9 @@ extension LatticeNode {
         activeSyncGaps[syncKey] = gap
         let task = Task { [weak self] in
             guard let self = self else { return }
-            await withTaskGroup(of: Void.self) { group in
+            // Race the sync against the timeout; the winner's ChainOutcome (nil = the
+            // timeout fired first) drives the retry decision below.
+            let outcome: ChainOutcome? = await withTaskGroup(of: ChainOutcome?.self) { group in
                 group.addTask {
                     await self.performHeadersFirstSync(
                         peerTipCID: peerTipCID,
@@ -199,37 +192,44 @@ extension LatticeNode {
                 }
                 group.addTask {
                     _ = await sleepUnlessCancelled(syncTimeout)
+                    return nil
                 }
-                await group.next()
+                let first = await group.next() ?? nil
                 group.cancelAll()
+                return first
             }
             if Task.isCancelled {
                 let log = NodeLogger("sync")
                 log.warn("Sync timed out — will retry on next peer block")
             }
 
-            // Transient-failure retry. A sync that downloaded a strictly-heavier
-            // peer chain but could not materialize its content — e.g. the source
-            // peer JUST restarted (a partition heal) and was not serving its
-            // volumes yet — leaves the local tip unchanged WITHOUT marking the tip
-            // refused. The trigger to retry is normally "next peer block / new
-            // announcement", but an announce-driven target is intentionally not
-            // recorded in `knownPeerTips` (unvalidated), and a stopped/idle source
-            // never re-announces — so the node would otherwise wait forever on a
-            // gap that is one fetch away from closing. Re-attempt the SAME target
-            // with bounded backoff; a genuinely-unreachable peer simply exhausts
-            // the budget, and a work-refused tip is skipped (it IS marked refused).
-            if let peerTipHeight, retryCount < Self.maxSyncRetries, !Task.isCancelled,
-               let chainState = await self.chain(forPath: network.chainPath) {
-                let localHeight = await chainState.getHighestBlockHeight()
-                let localTip = await chainState.getMainChainTip()
-                if localHeight < peerTipHeight, !(await self.isRefusedSyncTip(peerTipCID, localTip: localTip)) {
-                    await self.clearSyncTaskForRetry(network: network)
-                    let backoffSeconds = UInt64(min(30, 1 << min(retryCount, 5)))   // 1,2,4,8,16,30…
-                    guard await sleepUnlessCancelled(.seconds(backoffSeconds)) else { return }
-                    await self.startSync(peerTipCID: peerTipCID, network: network, gap: gap, sourcePeer: sourcePeer, peerTipHeight: peerTipHeight, retryCount: retryCount + 1)
-                    return
-                }
+            // Transient-failure retry, driven by the sync OUTCOME (not height). A sync
+            // that downloaded a strictly-heavier peer chain but could not materialize
+            // its content — e.g. the source peer JUST restarted (a partition heal) and
+            // was not serving its volumes yet — returns `.pendingUnavailable`. The
+            // trigger to retry is normally "next peer block / new announcement", but an
+            // announce-driven target is not recorded in `knownPeerTips` (unvalidated),
+            // and a stopped/idle source never re-announces — so the node would wait
+            // forever on a gap one fetch from closing. Crucially, the peer can be
+            // strictly heavier at the SAME or LOWER height (work-aware fork choice), so
+            // a height-gated retry would miss it entirely. Re-attempt the SAME target
+            // with bounded backoff while the outcome is retriable-transient (a content
+            // miss or a timeout, `outcome == nil`); a genuinely-unreachable peer simply
+            // exhausts the budget. TERMINAL outcomes stop: `.adopted` (done),
+            // `.ignoredLighter` (work-refused — retrying is churn), `.invalid` (bad
+            // data), `.degraded` (local failure — not fixable by waiting).
+            // The `!isChainUnhealthy` guard closes the timeout-race edge (M1): if the
+            // sync and the timeout complete near-simultaneously, `group.next()` can
+            // surface the timeout's `nil` and mask a real `.degraded` outcome — whose
+            // markChain* already called `network.stop()`. Without this guard the retry
+            // would re-run against a deliberately-stopped/unhealthy chain.
+            if (outcome?.isRetriableTransient ?? true), retryCount < Self.maxSyncRetries, !Task.isCancelled,
+               !(await self.isChainUnhealthy(chainPath: network.chainPath)) {
+                await self.clearSyncTaskForRetry(network: network)
+                let backoffSeconds = UInt64(min(30, 1 << min(retryCount, 5)))   // 1,2,4,8,16,30…
+                guard await sleepUnlessCancelled(.seconds(backoffSeconds)) else { return }
+                await self.startSync(peerTipCID: peerTipCID, network: network, gap: gap, sourcePeer: sourcePeer, peerTipHeight: peerTipHeight, retryCount: retryCount + 1)
+                return
             }
             await self.clearSyncTask(completedNetwork: network)
         }
@@ -261,7 +261,7 @@ extension LatticeNode {
             syncTasks.removeAll()
             activeSyncGaps.removeAll()
         }
-        failedSyncTips.removeAll()
+        syncOutcomes.clearFailed()
         updateSyncActiveMetric()
 
         // Replay gossip blocks that arrived while sync was running. These were
@@ -323,7 +323,10 @@ extension LatticeNode {
         }
     }
 
-    func performHeadersFirstSync(peerTipCID: String, network: ChainNetwork, sourcePeer: PeerID? = nil, peerTipHeight: UInt64? = nil) async {
+    /// Returns the terminal `ChainOutcome` of the attempt so `startSync` can decide
+    /// whether to retry: `.pendingUnavailable` (content miss / timeout / threw) is
+    /// retriable regardless of height; every other outcome is terminal.
+    func performHeadersFirstSync(peerTipCID: String, network: ChainNetwork, sourcePeer: PeerID? = nil, peerTipHeight: UInt64? = nil) async -> ChainOutcome {
         let log = NodeLogger("sync")
         log.info("Starting headers-first sync from \(String(peerTipCID.prefix(16)))...")
 
@@ -533,7 +536,26 @@ extension LatticeNode {
                 )
             }
 
-            let finalized = await finalizeSyncResult(result, localWork: localWork, network: network, fetcher: fetcher, sourcePeer: activeSourcePeer)
+            let outcome = await finalizeSyncResult(result, localWork: localWork, network: network, fetcher: fetcher, sourcePeer: activeSourcePeer)
+            let finalized = outcome.wasAdopted
+            // Act on the outcome — make each fate an observable signal so a transient
+            // content miss (the seed-496 class) is VISIBLE, not a silent stall.
+            // `.pendingUnavailable` is deliberately NOT recorded as refused/failed, so
+            // it stays retriable when data/peers arrive; only `.ignoredLighter` is the
+            // settled work-refusal (already memoized inside finalizeSyncResult).
+            metrics.increment("lattice_sync_outcome_\(outcome.metricSuffix)")
+            switch outcome {
+            case .adopted:
+                break  // logged below as "Headers-first sync complete"
+            case .ignoredLighter:
+                log.info("\(network.directory): sync settled — incumbent held (peer chain not heavier)")
+            case .pendingUnavailable:
+                log.warn("\(network.directory): sync pending — canonical content unavailable; will retry when data/peers arrive (not refused, stays retriable)")
+            case .invalid(let reason):
+                log.warn("\(network.directory): sync rejected invalid chain: \(reason)")
+            case .degraded(let reason):
+                log.error("\(network.directory): sync could not publish — local storage/config failure: \(reason) (not retriable by waiting)")
+            }
 
             // F5-4: child blocks just synced carry verified anchoring proofs. Persist
             // each (so this node can serve it onward) and fold its securing work into
@@ -555,6 +577,7 @@ extension LatticeNode {
             }
 
             log.info("Headers-first sync complete")
+            return outcome
 
         } catch {
             let peerCount2 = await network.ivy.peerConnectionCount
@@ -574,6 +597,10 @@ extension LatticeNode {
                 await prefetch.value
             }
             log.error("Headers-first sync failed: \(error)")
+            // A throw = the attempt did not complete = transient. A reshuffled retry
+            // (bounded) can re-reach the tip via other peers; a genuinely-dead source
+            // just exhausts the budget. Terminal validity is decided at finalize, not here.
+            return .pendingUnavailable
         }
     }
 
@@ -1003,34 +1030,25 @@ extension LatticeNode {
     // finalizeSyncResult is chain-agnostic — `network` identifies which chain
     // was just synced. After applying the result, child chains are synced
     // recursively via the same performHeadersFirstSync path.
+    // Behavior-preserving delegation to the pure `SyncPolicy` module (plan 3a);
+    // full docs live there. Kept as thin wrappers so existing call sites + tests
+    // are the characterization net during the extraction.
     static func shouldAdmitSyncedChain(peerWork: UInt256, localWork: UInt256) -> Bool {
-        peerWork > localWork
+        SyncPolicy.shouldAdmit(peerWork: peerWork, localWork: localWork)
     }
 
-    /// The local-work floor handed to the syncer's pre-admission gate
-    /// (`ChainSyncer.syncFromHeaders` throws `insufficientWork` when the
-    /// segment's work is below it). ROOT chains pass their whole-chain work
-    /// (self-PoW-verified headers make that the correct Nakamoto pre-filter;
-    /// the anchor-context branch overwrites it fork-point-relative when the
-    /// segment attaches to a retained block). CHILD chains pass ZERO: their
-    /// own-target sums are meaningless for ordering (real weight = inherited
-    /// securing work, invisible to this gate), so a whole-chain floor
-    /// pre-refuses every valid carrier fast-forward before the single
-    /// admission choke point (`admitSyncedChainAgainstCurrentChain`) can
-    /// decide it — the live "insufficientWork" freeze.
     static func syncerWorkFloor(chainPath: [String], localWork: UInt256) -> UInt256 {
-        chainPath.count > 1 ? .zero : localWork
+        SyncPolicy.workFloor(chainPath: chainPath, localWork: localWork)
     }
 
     func recordRefusedSyncTip(_ peerTip: String, localTip: String) {
-        if refusedSyncTipPairs.count > 512 { refusedSyncTipPairs.removeAll() }
-        refusedSyncTipPairs.insert("\(peerTip)|\(localTip)")
+        syncOutcomes.recordRefused(peerTip: peerTip, localTip: localTip)
     }
 
     /// Was `peerTip` already fully synced and refused while our tip was `localTip`?
     /// Re-syncing it is pure churn until either tip changes.
     func isRefusedSyncTip(_ peerTip: String, localTip: String) -> Bool {
-        refusedSyncTipPairs.contains("\(peerTip)|\(localTip)")
+        syncOutcomes.isRefused(peerTip: peerTip, localTip: localTip)
     }
 
     enum SyncAdmissionDecision {
@@ -1060,8 +1078,7 @@ extension LatticeNode {
     /// Near genesis (tip within retention + context) everything is anchorable
     /// or genesis-reachable, so the floor is 0.
     static func anchorableStopFloor(tipHeight: UInt64, retentionDepth: UInt64, contextDepth: UInt64) -> UInt64 {
-        guard tipHeight > retentionDepth + contextDepth else { return 0 }
-        return tipHeight - retentionDepth + contextDepth
+        SyncPolicy.anchorableStopFloor(tipHeight: tipHeight, retentionDepth: retentionDepth, contextDepth: contextDepth)
     }
 
     /// Anchor eligibility for a downloaded segment: root chains may anchor at
@@ -1137,7 +1154,7 @@ extension LatticeNode {
     /// this — a refused or failed finalize means the segment was
     /// never committed.
     @discardableResult
-    func finalizeSyncResult(_ result: SyncResult, localWork: UInt256, network: ChainNetwork, fetcher: Fetcher, sourcePeer: PeerID? = nil) async -> Bool {
+    func finalizeSyncResult(_ result: SyncResult, localWork: UInt256, network: ChainNetwork, fetcher: Fetcher, sourcePeer: PeerID? = nil) async -> ChainOutcome {
         let key = chainKey(forPath: network.chainPath)
         return await withChainMutation(key) {
             await finalizeSyncResultUnlocked(
@@ -1151,10 +1168,10 @@ extension LatticeNode {
     }
 
     @discardableResult
-    private func finalizeSyncResultUnlocked(_ result: SyncResult, localWork: UInt256, network: ChainNetwork, fetcher: Fetcher, sourcePeer: PeerID? = nil) async -> Bool {
+    private func finalizeSyncResultUnlocked(_ result: SyncResult, localWork: UInt256, network: ChainNetwork, fetcher: Fetcher, sourcePeer: PeerID? = nil) async -> ChainOutcome {
         let log = NodeLogger("sync")
         let directory = network.directory
-        guard let chainState = await chain(for: directory) else { return false }
+        guard let chainState = await chain(for: directory) else { return .pendingUnavailable }
 
         // Gate against the CURRENT chain, not the caller's pre-download
         // `localWork` snapshot: a block mined or accepted during the sync must
@@ -1165,7 +1182,7 @@ extension LatticeNode {
         case .refuse:
             log.warn("\(directory): sync refused: peer work \(result.cumulativeWork) does not beat the current local chain")
             recordRefusedSyncTip(result.tipBlockHash, localTip: await chainState.getMainChainTip())
-            return false
+            return .ignoredLighter
         }
 
         let sortedBlocks = result.persisted.blocks.sorted { $0.blockHeight < $1.blockHeight }
@@ -1173,7 +1190,7 @@ extension LatticeNode {
               let lowest = sortedBlocks.first,
               let tipMeta = sortedBlocks.last else {
             log.error("\(directory): cannot publish sync without StateStore and a non-empty canonical segment")
-            return false
+            return .degraded(reason: "missing StateStore or empty canonical segment")
         }
 
         guard let materialized = await materializeSyncedCanonicalContent(
@@ -1184,7 +1201,7 @@ extension LatticeNode {
             sourcePeer: sourcePeer
         ) else {
             log.warn("\(directory): could not materialize synced canonical content; retrying before durable publish")
-            return false
+            return .pendingUnavailable
         }
         let tipBlock = materialized.tipBlock
         let oldTip = await chainState.getMainChainTip()
@@ -1194,7 +1211,7 @@ extension LatticeNode {
         // that advanced mid-sync is never durably replaced by a stale result.
         guard case .admit = await admitSyncedChainAgainstCurrentChain(result, chainState: chainState, chainPath: network.chainPath) else {
             log.info("\(directory): sync abandoned after materialization: local chain advanced past the synced chain")
-            return false
+            return .ignoredLighter
         }
 
         // Publish the synced canonical chain as ONE atomic segment commit before
@@ -1223,7 +1240,12 @@ extension LatticeNode {
             directory: directory,
             fetcher: fetcher
         ) else {
-            return false
+            // prepareSyncedCanonicalEffects marks the chain unhealthy on ALL its nil
+            // paths, so this is a degraded (terminal) failure, not a wait-and-retry
+            // availability miss. Return .degraded so the classification is self-
+            // consistent (any markChain*-degrade → .degraded) rather than relying on
+            // the retry loop's !isChainUnhealthy guard to suppress a wrong retry.
+            return .degraded(reason: "failed to prepare synced canonical effects (chain marked unhealthy)")
         }
 
         do {
@@ -1238,7 +1260,7 @@ extension LatticeNode {
         } catch {
             log.error("\(directory): failed to pre-protect synced state retained roots before sync publish: \(error)")
             await markChainStorageDegraded(directory: directory, reason: "failed to advance synced state retained roots")
-            return false
+            return .degraded(reason: "failed to advance synced state retained roots")
         }
 
         for meta in sortedBlocks {
@@ -1251,7 +1273,7 @@ extension LatticeNode {
             } catch {
                 log.error("\(directory): failed to pre-pin synced block \(String(meta.blockHash.prefix(16)))… at height \(meta.blockHeight): \(error)")
                 await markChainStorageDegraded(directory: directory, reason: "failed to pin synced canonical content before durable commit")
-                return false
+                return .degraded(reason: "failed to pin synced canonical content")
             }
         }
 
@@ -1262,7 +1284,7 @@ extension LatticeNode {
             )
         } catch {
             log.error("\(directory): failed to publish synced canonical segment: \(error)")
-            return false
+            return .pendingUnavailable
         }
 
         for meta in sortedBlocks {
@@ -1272,7 +1294,7 @@ extension LatticeNode {
             } catch {
                 log.error("\(directory): failed to persist synced stored roots for \(String(meta.blockHash.prefix(16)))… at height \(meta.blockHeight): \(error)")
                 await markChainStorageDegraded(directory: directory, reason: "failed to persist synced canonical content roots after durable commit")
-                return false
+                return .degraded(reason: "failed to persist synced canonical content roots")
             }
         }
 
@@ -1313,7 +1335,7 @@ extension LatticeNode {
         } catch {
             log.error("\(directory): failed to project synced state into ChainState: \(error)")
             await markChainUnhealthy(directory: directory, reason: "failed to project synced state after durable commit")
-            return false
+            return .degraded(reason: "failed to project synced state after durable commit")
         }
         await chainState.updateTipSnapshot(block: tipBlock)
 
@@ -1331,14 +1353,21 @@ extension LatticeNode {
             newTip: result.tipBlockHash,
             transition: syncedTransition
         ) else {
-            return false
+            // POST-COMMIT (segment committed + ChainState reset): a sync retry would
+            // re-attempt an already-committed segment, so this is TERMINAL, not
+            // wait-and-retry availability.
+            return .degraded(reason: "failed to publish synced canonical side effects after commit")
         }
 
         // Parent sync must not rewrite descendant fork choice. Child chains are
         // independent proof-validated chains; parent canonicity only changes the
         // local parent data available to prove future child work.
         guard await reprocessSyncedBlocksForChildChains(persisted: result.persisted, fetcher: fetcher, network: network) else {
-            return false
+            // POST-COMMIT: the canonical segment is already committed and ChainState
+            // reset; this helper marks storage degraded on missing durable content. A
+            // sync retry is wrong here (it would re-attempt an already-committed segment
+            // on a stopped/unhealthy chain), so this is TERMINAL, not wait-and-retry.
+            return .degraded(reason: "failed to reprocess synced blocks for child chains after commit")
         }
         await reconcileChildChainStatesAfterSync(
             persisted: result.persisted,
@@ -1348,7 +1377,7 @@ extension LatticeNode {
         await verifySyncWithPeers(tipCID: result.tipBlockHash, tipHeight: result.tipBlockHeight, network: network)
 
         await syncSubscribedChildren(of: directory)
-        return true
+        return .adopted(tipCID: result.tipBlockHash)
     }
 
     private func syncedCanonicalTransition(
@@ -1949,7 +1978,9 @@ extension LatticeNode {
         await withTaskGroup(of: Void.self) { group in
             for candidate in candidates {
                 group.addTask { [weak self] in
-                    await self?.performHeadersFirstSync(
+                    // Recursive child wave: children reorg via gossip / held-heavier
+                    // rescue, not this transient-retry loop, so the outcome is discarded.
+                    _ = await self?.performHeadersFirstSync(
                         peerTipCID: candidate.tipCID,
                         network: candidate.network
                     )
@@ -1993,7 +2024,7 @@ extension LatticeNode {
         for peer in connectedPeers {
             guard let entry = tips[peer.publicKey] else { continue }
             guard tally.shouldAllow(peer: peer) else { continue }
-            guard !failedSyncTips.contains(entry.tipCID) else { continue }
+            guard !syncOutcomes.isFailed(tip: entry.tipCID) else { continue }
             if best == nil || entry.height > best!.height {
                 best = (key: peer.publicKey, height: entry.height, tipCID: entry.tipCID, peer: peer)
             }
@@ -2007,7 +2038,7 @@ extension LatticeNode {
         // Targeting it is safe: the headers-first path fully validates (PoW +
         // cumulative work) before any adoption.
         if let defaultTipHeight,
-           !failedSyncTips.contains(defaultTipCID),
+           !syncOutcomes.isFailed(tip: defaultTipCID),
            best == nil || defaultTipHeight > best!.height {
             return (defaultTipCID, anyAllowedPeer)
         }
@@ -2015,7 +2046,7 @@ extension LatticeNode {
            let connectedPreferred = connectedPeers.first(where: { $0.publicKey == preferredPeer.publicKey }),
            let preferredEntry = tips[preferredPeer.publicKey],
            tally.shouldAllow(peer: connectedPreferred),
-           !failedSyncTips.contains(preferredEntry.tipCID),
+           !syncOutcomes.isFailed(tip: preferredEntry.tipCID),
            best == nil || preferredEntry.height >= best!.height {
             // Preferred peer is a source hint for this announced tip, not fork
             // choice. Header validation and cumulative work still decide adoption.

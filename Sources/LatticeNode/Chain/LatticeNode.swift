@@ -267,21 +267,20 @@ public actor LatticeNode: ChainNetworkDelegate {
         return true
     }
 
-    /// Tips that repeatedly failed to sync — excluded from headers-first peer selection.
-    var failedSyncTips: Set<String> = []
-    /// "peerTip|localTip" pairs for synced chains that were fully downloaded and
-    /// REFUSED admission (not more work / tiebreak kept local). While the local
-    /// tip is unchanged, re-syncing the same refused tip is pure churn: it
-    /// re-downloads the whole chain every announce round and drains the peer's
-    /// getHeaders rate budget, starving the peer's own catch-up sync.
-    var refusedSyncTipPairs: Set<String> = []
+    /// Unified store for the two sync failure caches (co-located, behavior-
+    /// preserving — see SyncOutcomeStore): `failed` tips excluded from headers-first
+    /// peer selection (cleared on connect/completion), and `refused` peerTip|localTip
+    /// pairs that were fully downloaded and REFUSED admission (sticky while the local
+    /// tip is unchanged — re-syncing a refused tip every announce round is pure churn
+    /// that drains the peer's getHeaders budget and starves its own catch-up).
+    var syncOutcomes = SyncOutcomeStore()
     var chainHealth: [String: ChainHealthState] = [:]
     var unhealthyChains: Set<String> {
         Set(chainHealth.compactMap { key, state in state.isUnavailable ? key : nil })
     }
 
     func recordFailedSyncTip(_ tipCID: String) {
-        failedSyncTips.insert(tipCID)
+        syncOutcomes.recordFailed(tip: tipCID)
     }
 
     private func healthTimestampMillis() -> Int64 {
