@@ -39,14 +39,8 @@ public enum ProofOfWork {
     }
 
     public static func midstate(for block: Block) -> SHA256 {
-        midstate(prefixBytes: Array(proofOfWorkHashPrefixBytes(block)))
-    }
-
-    /// Midstate from the raw nonce-independent prefix bytes, so a worker can mine
-    /// from a coordinator-supplied `--prefix-hex` without parsing the block (no
-    /// Lattice dependency) — the contract external miners implement.
-    public static func midstate(prefixBytes: [UInt8]) -> SHA256 {
-        prefixBytes.withUnsafeBufferPointer { ptr in
+        let prefixBytes = proofOfWorkHashPrefixBytes(block)
+        return prefixBytes.withUnsafeBufferPointer { ptr in
             var hasher = SHA256()
             hasher.update(bufferPointer: UnsafeRawBufferPointer(ptr))
             return hasher
@@ -54,11 +48,11 @@ public enum ProofOfWork {
     }
 
     public static func hash(midstate: SHA256, nonce: UInt64) -> UInt256 {
+        var nonceBytes = nonce.bigEndian
         var hasher = midstate
-        // Fixed-width 8-byte big-endian nonce — must match
-        // Block.proofOfWorkNonceBytes (the consensus encoding).
-        var beNonce = nonce.bigEndian
-        withUnsafeBytes(of: &beNonce) { hasher.update(bufferPointer: $0) }
+        withUnsafeBytes(of: &nonceBytes) { bytes in
+            hasher.update(bufferPointer: bytes)
+        }
         let digest = hasher.finalize()
         return digest.withUnsafeBytes { raw in
             let p = raw.bindMemory(to: UInt64.self)
@@ -150,17 +144,17 @@ public enum ProofOfWork {
         startNonce: UInt64,
         count: UInt64
     ) -> UInt64? {
-        let end = startNonce &+ count
         var nonce = startNonce
+        var remaining = count
 
-        while nonce < end {
+        while remaining > 0 {
             if nonce & 0x3FF == 0 && Task.isCancelled { return nil }
 
+            var nonceBytes = nonce.bigEndian
             var hasher = midstate
-            // Fixed-width 8-byte big-endian nonce — must match
-            // Block.proofOfWorkNonceBytes (the consensus encoding).
-            var beNonce = nonce.bigEndian
-            withUnsafeBytes(of: &beNonce) { hasher.update(bufferPointer: $0) }
+            withUnsafeBytes(of: &nonceBytes) { bytes in
+                hasher.update(bufferPointer: bytes)
+            }
             let digest = hasher.finalize()
             let hash: UInt256 = digest.withUnsafeBytes { raw in
                 let p = raw.bindMemory(to: UInt64.self)
@@ -173,6 +167,7 @@ public enum ProofOfWork {
             }
             if target >= hash { return nonce }
             nonce &+= 1
+            remaining -= 1
         }
         return nil
     }

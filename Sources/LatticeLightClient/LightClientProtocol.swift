@@ -165,16 +165,16 @@ public enum LightClientProtocol {
 
         let storer = _ProofCollectingStorer()
         // The pruned account-path nodes (top node hashes to accountRoot).
-        try proof.storeRecursively(storer: storer)
+        try await proof.storeRecursively(storer: storer)
         // The LatticeState wrapper node committed under stateRoot. Store only the
         // wrapper's own bytes (not its full sub-trees) so the witness stays pruned
         // while still binding accountRoot → stateRoot.
         if let wrapperData = state.toData() {
-            try storer.store(rawCid: stateRoot, data: wrapperData)
+            try await storer.store(entries: [stateRoot: wrapperData])
         }
 
-        let witness = dedupedProofEntries(storer.entries).map {
-            LightClientProof.WitnessNode(cid: $0.cid, data: $0.data)
+        let witness = await storer.entries.sorted { $0.key < $1.key }.map {
+            LightClientProof.WitnessNode(cid: $0.key, data: $0.value)
         }
         return (proof.rawCID, witness)
     }
@@ -244,16 +244,12 @@ public enum LightClientProtocol {
     }
 }
 
-private final class _ProofCollectingStorer: Storer, @unchecked Sendable {
-    var entries: [(cid: String, data: Data)] = []
-    func store(rawCid: String, data: Data) throws { entries.append((rawCid, data)) }
-}
+private actor _ProofCollectingStorer: Storer {
+    private(set) var entries: [String: Data] = [:]
 
-private func dedupedProofEntries(_ entries: [(cid: String, data: Data)]) -> [(cid: String, data: Data)] {
-    var seen = Set<String>()
-    var result: [(cid: String, data: Data)] = []
-    for entry in entries where seen.insert(entry.cid).inserted {
-        result.append(entry)
+    func store(entries newEntries: [String: Data]) async throws {
+        for (cid, data) in newEntries {
+            entries[cid] = data
+        }
     }
-    return result
 }

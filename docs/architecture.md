@@ -1,180 +1,293 @@
-# Lattice Node Architecture
+# Architecture
 
-## Overview
+## Process boundary
 
-Lattice is a protocol where a chain is both a root chain and the tree of chains rooted at it. Each chain defines its own operations, state, and economics, and secures its children through one shared proof-of-work (merged mining) — its core philosophy is [fractal structure](design/fractal-structure.md). The single root chain is the **Nexus**; every other chain is a descendant beneath it. In production the tree is spread across separate OS processes — see [Per-Process Topology](#per-process-topology).
+One `lattice-node` process owns exactly one absolute chain path. `Nexus` is the
+only root; every other process is configured with a complete Nexus-inclusive
+path and one immediate parent endpoint.
 
-```
-┌─────────────────────────────────────────────────────┐
-│  CLI (swift-argument-parser)                         │
-│  node | devnet | cluster | keys | status | query     │
-├─────────────────────────────────────────────────────┤
-│  Daemon                                              │
-│  Signal handling, background loops, lifecycle        │
-├──────────┬──────────┬───────────┬───────────────────┤
-│  Chain   │  Mempool │  Network  │  RPC              │
-│  Blocks  │  NodeMem │  Ivy P2P  │  Hummingbird HTTP │
-│  Sync    │  Validat │  Peers    │  Auth             │
-│  State   │  Persist │  Diversity│  Prometheus       │
-│  Persist │  RBF     │  Anchors  │  Receipts         │
-├──────────┼──────────┼───────────┼───────────────────┤
-│ Produce  │  Storage      │  Config   │  Health           │
-│ Work     │  DiskBroker   │  NodeConf │  Logger           │
-│ + Merged │  MemoryBroker │  Protocol │  Metrics          │
-│ commits  │  SQLite/PBSS  │  Version  │                   │
-├──────────┴───────────────┴───────────┴───────────────────┤
-│  Lattice (external): Consensus, ChainState, Blocks,       │
-│    Cross-chain Deposits / Withdrawals / Receipts          │
-│  Ivy (external): P2P, DHT, Tally                         │
-│  VolumeBroker (external): DiskBroker, MemoryBroker, Pins  │
-│  cashew (external): Merkle trees, BrokerStorer/Fetcher    │
-└───────────────────────────────────────────────────────────┘
+```text
+Nexus process
+  chain: Nexus
+  overlay: 4001
+  hierarchy facts: 4002
+  RPC: 127.0.0.1:8080
+
+Payments process
+  chain: Nexus/Payments
+  parent: <nexus-key>@<nexus-host>:4002
+  overlay: 4101
+  hierarchy facts: 4102
+  RPC: 127.0.0.1:8180
 ```
 
-## Per-Process Topology
+A parent never owns its child's chain state, mempool, persistence, sync, or fork
+choice. External orchestration starts and stops independent chain processes.
 
-In production, the chain tree spans operating-system processes rather than living inside one node. Nexus runs in the root process; each child chain runs as its own `LatticeNode` bootstrapped from its parent's genesis (`--genesis-hex --chain-directory --subscribe-p2p`).
+## Identity and addressing
 
-Lattice addressing is path-based. `Nexus` is the root handle used by external clients to enter the tree. A child `directory` is the relative edge label from a parent chain to one of its children, not a globally unique chain identity. The canonical address of a chain is its full path from Nexus, such as `Nexus/Payments` or `Nexus/Games/Payments`. See [Chain Addressing Model](design/chain-addressing.md).
+`ChainAddress` accepts only absolute paths beginning with `Nexus`. The final
+component is also the parent-relative `directory` edge, but a directory alone
+is not a chain identity and is never accepted as a public chain path.
 
-```
-Root process (Nexus)
-  LatticeNode
-    ├─ Lattice / ChainLevel: Nexus
-    ├─ ChainNetwork: Nexus
-    │    └─ Ivy (Nexus gossip)
-    ├─ BlockProducer (node work; no nonce loop)
-    └─ RPC control plane:
-         ├─ POST /api/chain/deploy
-         ├─ POST /api/chain/register-rpc
-         └─ GET  /api/chain/map
+Examples:
 
-Child process (e.g. Mid, --genesis-hex --chain-directory --subscribe-p2p)
-  LatticeNode
-    ├─ ChainNetwork: Mid (own gossip)
-    ├─ ParentChainBlockExtractor
-    │    └─ dedicated Ivy link to parent P2P blocks
-    ├─ BlockProducer (node work; no nonce loop)
-    └─ RPC (serves clients; deploy grandchildren)
-```
+- `Nexus` — valid root path.
+- `Nexus/Payments` — valid child path.
+- `Nexus/Payments/Rollups` — valid descendant path.
+- `Payments` — invalid chain path.
+- `/Nexus/Payments`, `Nexus/`, and `Nexus//Payments` — invalid.
 
-1. **Deploy** — `POST /api/chain/deploy` on the parent builds the child genesis and returns `genesisHex` (genesis block + spec + genesis transactions) and `chainP2PAddress` (the parent P2P endpoint the child subscribes to for proof-carrying parent blocks). The parent advertises child genesis availability, but it does not create a child `ChainState` or fork-choice view.
-2. **Spawn** — an external orchestrator launches `lattice-node --genesis-hex <hex> --chain-directory <name> --subscribe-p2p <parentP2P>`. The child boots from the embedded genesis; no DHT lookup is needed.
-3. **Extract** — the child's `ParentChainBlockExtractor` opens a dedicated Ivy link to the parent, receives parent-block gossip, extracts `parent.children[directory]` via a sparse content-addressed proof (`ChildBlockProof`), validates it against the parent's proof-of-work root hash and parent-state continuity evidence, applies it, and relays it to the child's own gossip.
-4. **Register** — the child calls `POST /api/chain/register-rpc`; `GET /api/chain/map` then resolves any chain path to a direct RPC URL.
+The Nexus process has no parent. Every child must configure `--parent` with the
+authenticated immediate parent's fact-plane public key and endpoint.
 
-Each child's P2P port is `basePort + 1 + FNV1a(directory) mod 16384`, where `directory` is the child's edge label relative to its parent. Both sides can agree on the port without coordination. The deterministic port plus `genesisHex` mean a child can be launched on any host with no shared state beyond the parent's P2P address.
+## Runtime components
 
-Legacy in-process child registration exists only as a compatibility/test harness. The production topology is per-process: each chain owns its own `ChainState`, P2P network, sync, and fork choice, while parents only provide proof-carrying blocks and genesis/bootstrap availability.
-
-The process tree mirrors the chain tree, with Nexus as the single root. What a child process may trust about the parent that spawned it — lineage and authority are verified (spawn certificates), block content is never trusted (always cryptographically verified) — is the [process trust model](design/process-trust-model.md).
-
-That boundary is deliberate. Parent blocks are proof carriers, not child-chain
-views. A child may fetch parent bytes and state Volumes from its parent process,
-but it accepts them only after content-address, PoW, inclusion, and state-root
-verification. Parent canonicity therefore does not by itself roll back child
-state or rewrite child fork choice; it only affects what the parent mines and
-serves next. This keeps child chains independent, keeps parent processes from
-being polluted by child state, and lets the same parent→child rule recurse to
-grandchildren without any Nexus-specific authority path.
-
-## Mining Role Split
-
-The E15 mining contract keeps chain authority inside `LatticeNode` while moving
-hash search out to narrow workers. `LatticeNode` owns template/work creation,
-effective target calculation, merged-mining proof handling, solution validation,
-block sealing, acceptance, persistence, and gossip. `MiningCoordinator` owns
-stale-work detection, retry/backoff, nonce-range fan-out, and result submission.
-`LatticeMiner` workers only search assigned immutable work and return nonce/hash
-results. They do not hold miner private keys, know child-chain topology, build
-child proofs, seal blocks, or publish to Ivy.
-
-See [Mining role boundaries](design/mining-role-boundaries.md).
-
-## CAS-First Principle
-
-The Content-Addressed Storage (CAS) is the single source of truth. All other storage is derived.
-
-The broker cascade for each chain is: per-chain **MemoryBroker** (LRU) -> shared **DiskBroker** (SQLite, Volume-granular) -> **IvyFetcher** (network). The DiskBroker is shared across all chains; each chain only has its own MemoryBroker. Pins are ref-counted with owner tags (e.g., `chain:height`), and two retention policies control when data is unpinned:
-
-- **BlockRetention** (tip / retention / historical) -- governs block data lifetime.
-- **StorageMode** (stateless / stateful / historical) -- governs state root lifetime via StateDiff.
-
-| Layer | What it stores | Derived from |
-|-------|---------------|--------------|
-| MemoryBroker (per-chain LRU) | Hot blocks, recent state | DiskBroker |
-| DiskBroker (shared SQLite) | All pinned blocks, transactions, state trees | Original data |
-| IvyFetcher (network) | Remote block/state data | Peers |
-| PBSS (SQLite) | Account balances, block index | DiskBroker postState |
-| Mempool persistence | Transaction CIDs | DiskBroker tx bodies |
-| Receipt index | txCID -> blockHash | DiskBroker block data |
-
-## Data Flow
-
-### Block Acceptance
-```
-Block received (inline via topic message)
-  → Broker resolution (MemoryBroker → DiskBroker → IvyFetcher)
-  → PoW validation
-  → State update via CAS diff (prevState → postState)
-  → Pin block data in DiskBroker with owner tag
-  → Unpin replaced state roots per StorageMode (StateDiff)
-  → PBSS StateStore updated
-  → Receipt index written
-  → Metrics incremented
-  → Subscription events emitted
-  → Peer reputation updated (Tally)
+```text
+LatticeNodeDaemon
+  ├─ NodeConfiguration     immutable path, keys, ports
+  ├─ ChainProcess          consensus admission and durable recovery
+  ├─ ChainService          transactions, intents, templates, work results
+  ├─ NodeStore             state.db: semantic facts, indexes, root references
+  ├─ DiskBroker            volumes.db: materialized CAS volumes
+  ├─ Ivy overlay           same-chain peers and content
+  ├─ Ivy hierarchy plane   authenticated direct parent/child facts
+  └─ loopback HTTP         thin JSON adapter over ChainService
 ```
 
-### Transaction Lifecycle
-```
-Submit via RPC
-  → Validate (signatures, fees, nonces, balances)
-  → Add to NodeMempool (fee-ordered) + Mempool (Ivy)
-  → Store tx body in CAS
-  → Announce CID to peers
-  → Selected by miner (highest fee first)
-  → Included in block → confirmed
-  → Removed from both mempools
-```
+`ChainProcess` is the sole consensus-admission boundary. Service and network
+code may prepare data, but canonical state changes only through process
+admission and its staged durable batch.
 
-### Reorg Recovery
-```
-New tip diverges from old tip
-  → Walk back to common ancestor
-  → CAS diff each orphaned block via DiskBroker (postState → prevState)
-  → Roll back StateStore account balances
-  → Unpin orphaned block data; pin new chain's blocks
-  → Collect new chain's confirmed tx CIDs
-  → Remove confirmed txs from both mempools
-  → Re-validate orphaned txs against new state
-  → Add valid txs to both mempools
+Production ingress is intentionally one-way:
+
+```text
+Ivy acquisition and root attribution
+  -> ChainService ingress
+  -> ChainProcess validation and durable commit
+  -> ChainService reconciliation and publication
 ```
 
-## Key Design Decisions
+The runtime never mutates consensus state directly. Network preflight remains
+outside the service operation gate, while a commit reserves the service's small
+reconciliation fence before process mutation order is released. That prevents a
+new template, mempool operation, or child intent from observing a canonical
+commit before its service projection catches up, without allowing a slow peer
+to stall mining or RPC. Miner/RPC/reconciliation reads are local-only; remote
+content acquisition is explicit and root-scoped to network admission or a
+targeted retry.
 
-1. **CAS diffing over transaction replay**: State changes derived from merkle tree diffs, not by re-executing transactions. Correct by construction.
+Each network generation receives one immutable handler bundle before either
+listener starts. Candidate acquisition creates an explicit root-bound content
+session and passes that session through service ingress; provider identity,
+cache state, and attribution never depend on ambient task-local state.
 
-2. **Inline block propagation**: Block data is sent inline via topic messages, eliminating the round-trip fetch peers previously needed.
+Ivy applies bounded transport admission before awaiting the runtime's inbound
+delegate, so peer work is backpressured at the transport boundary. On the
+private hierarchy plane, only the exact configured immediate parent bypasses
+the receiver's local Tally admission; all normal hierarchy and overlay traffic
+remains reputation-gated, and the bypass grants no consensus authority.
+Its optional public-address discovery runs after listener readiness and never
+delays local RPC availability.
 
-3. **Two-tier receipts**: Full receipt for recent blocks, CAS-derived for historical.
+## Two network planes
 
-4. **Dual mempool**: NodeMempool (fee-ordered, for mining) alongside Ivy Mempool (for network compatibility). Both kept in sync.
+The planes are deliberately separate:
 
-5. **PBSS as cache**: SQLite provides O(1) reads; the shared DiskBroker is authoritative. PBSS rebuilt from DiskBroker after sync.
+1. The public overlay admits peers that claim the same Nexus genesis and
+   absolute chain path. It carries block and transaction
+   Volume inventories plus content-addressed retrieval.
+2. The private hierarchy plane has no relay role. It carries direct-child
+   candidate requests, parent-issued proofs, genesis links, and exact
+   parent-state continuity answers. A configured parent key gates parent facts;
+   a claimed path alone grants no authority. Exact-CID exchange is explicitly
+   enabled on this plane, but only a connection that completed its own
+   compatible hierarchy hello may use it.
 
-### Crash Recovery
+Hierarchy CAS reads are bounded, exact selections rather than database access:
+there is no enumeration or mutation API, the bytes are non-secret availability,
+and the receiver independently checks CIDs and Lattice evidence. A replacement
+connection must send a fresh hello even when it authenticates with the same
+key.
+
+While a parent requests contextual child candidates, it leases the nonce-zero
+provisional carrier as an ephemeral CAS root. Only a request rooted at that
+exact CID can receive it; durable descendants in the same selection still come
+from the process store. The lease is reference-counted across overlapping
+requests, fenced by runtime generation, and discarded after the bounded round.
+The provisional carrier is never written to durable consensus content.
+
+A parent may request candidates only from authenticated direct children. Slow
+or absent children are omitted within a bounded deadline, so one child cannot
+stall Nexus template creation.
+
+Before replying, a child stores the candidate's complete block and transaction
+Volumes as a bounded speculative offer. The parent does not expose miner work
+until it sends that exact child an authenticated snapshot of every candidate
+referenced by its live template book and receives a durable acknowledgement.
+The child recursively reserves its own descendants, atomically replaces its
+issued set, and then releases every unselected offer. Additions require the
+durable acknowledgement; removals run in order without making parent progress
+wait on a child. When a parent commits a candidate, its next authenticated
+reservation update atomically moves that CID into durable admission-handoff
+ownership before releasing the speculative reservation. The same update
+recursively hands off committed descendants. Parent-proof delivery and recovery
+remain independent, so neither a delayed announcement nor garbage collection
+can lose committed content. Offer churn can evict only offers; it cannot evict
+issued or handoff candidates. Lost acknowledgements can therefore over-retain,
+never under-retain, and the next exact snapshot reconciles the set.
+Every hierarchy level applies the same rule. A reconnecting child is omitted
+from candidate selection until the final page of its durable evidence index is
+ordered into that session. The index resumes from a durable
+`(source, ordinal)` cursor against one fixed cut; a changed parent store source
+restarts at zero. Validated attachments enter a durable,
+VolumeBroker-retained inbox before the cursor advances and leave it only after
+admission owns the same Volume. Evidence published while the index is in flight is
+queued after its final page and before the child's exact reservation replay, so
+neither a page race nor a slow child can stall or under-retain issued evidence.
+Child timestamps derive from the immutable parent carrier, so an unchanged
+request is CID-stable and refreshes one offer instead of consuming another.
+
+## Child genesis flow
+
+1. Start the child process with its absolute path and parent fact endpoint. It
+   opens its durable store in `awaitingGenesis`.
+2. Call the parent's `POST /v1/children/intents`. The parent builds and stores a
+   child genesis bound to its current state and returns the block and CID.
+3. Construct and sign an ordinary parent transaction containing the matching
+   `GenesisAction`, then submit it to `POST /v1/transactions`.
+4. External mining commits that transaction and child block in a parent
+   carrier.
+5. The parent durably prepares and publishes the direct-child proof. It also
+   acknowledges the exact deployment fact from its accepted graph. The child
+   verifies the proof, requires its `parentState` to equal the deployment
+   block's entering state, and becomes `active`.
+
+There is no opaque genesis byte channel. The parent retains the complete Cashew
+Volumes it created for genesis, while any exact same-chain advertiser may
+supply the same CID-verified Volumes. The authenticated immediate-parent process
+alone acknowledges the exact accepted deployment tuple and later forward
+parent-state movements from its recovered validated graph. These positive
+acknowledgements are unsigned, session-bound, and non-portable.
+
+The process that directly parents an edge retains only its sparse commitment
+proof. Ordinary child validation Volumes remain child-chain data. Admission stages a
+newly authorized child's proof route in the same transaction as its genesis
+link, because that child cannot authenticate before the authorization exists.
+The parent replays durable authorized-genesis availability when the child
+reconnects. An ancestor does not become an implicit archive for packages below
+its direct children.
+
+Parent and child retain the same child-evidence proof attachment, but acquire it
+at different moments. The semantic direct edge is indexed in SQLite and derived
+from that proof when read; it is not stored again as a second Volume. The parent
+retains the edge it issued; the child retains the edge it validated and may
+relay complete content-verified root Volumes to same-chain peers.
+The child never returns topology or derived work to its parent. Work is derived
+from the child proof and remains entirely inside the child process.
+
+An evidence Volume is one complete, one-entry Volume whose canonical manifest
+contains the child CID and proof envelope. Parent-created genesis retention
+stores complete Volume root IDs in NodeStore as local metadata; those IDs do
+not affect evidence identity or wire size. Its Ivy request carries a local
+singleton/archive allocation bound even though those limits are not added to
+the wire protocol.
+
+The permanent edge record is the reusable source for later outer-root
+attachments. The bounded prepared-proof store exists only to bridge a crash
+before first publication. Neither record is embedded as a backlink in a block.
+
+Evidence discovery is only an index or live availability summary containing
+`child CID + root CID + attachment Volume CID`. The receiver fetches that
+complete Volume from the exact announcing session and verifies it locally.
+There is no second evidence request, proof-root request, or partial evidence
+response protocol; every `(child, root)` attachment is already one independent
+inventory entry, including noncanonical and repeated-child roots.
+
+## Nexus bootstrap
+
+Nexus has no parent, so an empty Nexus store starts from a configured local
+trust anchor. `ChainProcess.open` constructs the deterministic genesis,
+recomputes its CID, and requires it to equal:
+
+`bafyreiayw4z5qz4lt2sljf2enzn7uol3qa6bebadav7qwnqz7agxkiuwhq`
+
+Only then does it bootstrap the root locally. Signature and signer fields in
+genesis transactions are non-authoritative and need no special empty shape. The
+exact genesis CID supplies authorization: local configuration for Nexus and a
+parent `GenesisAction` commitment for a child. Ordinary post-genesis
+transactions remain signature-strict. On recovery, store
+metadata and the height-zero fact must name that same CID; no alternate Nexus
+genesis is accepted.
+
+## External mining pipeline
+
+```text
+lattice-mining-coordinator
+  │ POST /v1/mining/templates
+  ▼
+lattice-node (Nexus)
+  │ complete nonce-zero candidate + effective search target
+  ▼
+lattice-miner workers
+  │ nonce results
+  ▼
+lattice-mining-coordinator
+  │ POST /v1/mining/work
+  ▼
+lattice-node admission → durability → overlay and child-proof publication
 ```
-Node starts with existing data directory
-  → Restore chain state from chain_state.json (may be stale)
-  → Read authoritative tip from SQLite (crash-safe via WAL)
-  → If SQLite tip > chain state tip:
-      Walk backwards through DiskBroker from SQLite tip to chain state tip
-      Replay missing blocks forward via processBlockHeader
-      Persist recovered chain state
-  → Resume normal operation at full height
+
+The node owns chain truth and template validity. The coordinator owns work
+lifecycle and range allocation. Workers own only proof-of-work search over an
+immutable assignment.
+
+Normal work never includes a `GenesisAction`. Deployment work explicitly
+selects one transaction whose complete anchor set has matching locally retained
+child intents, or one deployment subtree supplied by a direct child. Its
+effective search target preserves the hardest deployment barrier recursively.
+Because every intent binds the carrier's entering parent state, sibling chains
+that must launch together are anchored atomically by one transaction.
+
+A child intent carries the exact complete WASM module Volumes named by its
+spec. Validation composes those request-owned bytes over local VolumeBroker
+content; there is no ambient module-upload CAS. After validation, one exact
+`child-intents` retention scope covers every Volume in each live intent closure.
+Replacement, anchoring, and parent-state staleness update that set atomically
+with respect to process eviction, while restart clears it because intents are
+operational state rather than recovery authority.
+
+## Durability and recovery
+
+Each process directory contains:
+
+```text
+<storage>/
+  process.key   # default process identity, mode 0600
+  state.db      # staged protocol facts, immutable indexes, recovery metadata
+  volumes.db    # materialized content volumes
 ```
 
-Pinned data in the shared DiskBroker is crash-safe (SQLite WAL), and the PBSS state store updates on every block acceptance. Only `chain_state.json` can be stale (written every `persistInterval` blocks). This means any blocks confirmed between the last persist and an ungraceful shutdown are recoverable from the DiskBroker without peers.
+Admission publishes each complete Volume, merge-retains its root, and only then
+commits the protocol fact that references it. A failed fact commit may leave a
+safe retained orphan. Admission and issued hierarchy roots therefore grow
+merge-only while live. Prepared hierarchy evidence is different: it is a
+bounded cache, so one serialized store gate performs its Volume writes, SQLite
+capacity eviction, and exact retained-set advance as a single ordered
+operation. Under the exclusive startup lock, the node materializes protocol
+constants, derives the exact roots for admission, issued hierarchy, and
+prepared hierarchy scopes, verifies every referenced Volume, populates the
+hierarchy scopes before removing legacy ownership, audits semantic indexes,
+and reconstructs the chain by replaying staged admission batches. Networking
+starts afterward. Nexus also verifies the exact genesis CID.
 
-Path-aware persistence stores Nexus under `<data-dir>/Nexus` for compatibility and non-root chains under `<data-dir>/chains/<full-chain-path>`, such as `<data-dir>/chains/Nexus/Games/Payments`. Startup still reads legacy single-level child directories when present, then writes future state back to the canonical path-aware namespace.
+Legacy databases and volume layouts are not migrated in place. Operators must
+remove the entire configured storage directory and resync; keeping only one of
+`state.db` or `volumes.db` breaks their durability invariant.
+
+## Testing networks
+
+Deploy a child chain with test-oriented parameters when an application needs a
+public or long-lived testing network. Nexus retains its one pinned genesis.
+This preserves the same addressing, parent facts,
+merged mining, and consensus rules used by every other child.

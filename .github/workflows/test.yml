@@ -8,56 +8,211 @@ on:
     branches: [main]
 
 jobs:
-  # Primary gate: macOS build + full test suite on the newest runner's Apple
-  # toolchain (Xcode 26 / Apple Swift 6.2+) — has both the relaxed concurrency
-  # the code needs and Apple's XCTest/Foundation the tests use.
-  test-macos:
-    runs-on: macos-26
+  strict-concurrency:
+    runs-on: ubuntu-latest
+    container: swift:6.1-jammy
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
-      - name: Swift version
-        run: swift --version
+      - name: Install dependencies for Linux
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev ripgrep
+
+      - name: Run strict concurrency gate
+        run: .github/scripts/check-strict-concurrency.sh
+
+  strict-concurrency-macos:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
+
+      - name: Run strict concurrency build (macOS parity)
+        run: swift build -Xswiftc -strict-concurrency=complete
+
+  branch-freshness:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify PR branch includes latest base
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: .github/scripts/check-pr-branch-freshness.sh
+
+  test-macos:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      E2E_TIME_SCALE: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
+
+      - name: Cache SPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-macos-${{ hashFiles('Package.resolved') }}
 
       - name: Resolve dependencies
         run: swift package resolve
 
-      - name: Verify dependency pins
-        run: swift test --filter SupplyChainGateTests
-
       - name: Build
-        run: swift build -c release
+        run: swift build -c release -Xswiftc -warnings-as-errors
 
-      - name: Build test targets
-        run: swift build --build-tests
+      - name: Build test targets with warnings as errors
+        run: swift build --build-tests -Xswiftc -warnings-as-errors
 
       - name: Run tests
         run: swift test
 
-      - name: Verify executable runs
-        run: swift run LatticeNode --help
+      - name: Run optimized multichain E2E
+        env:
+          E2E_NODE_BIN: ${{ github.workspace }}/.build/release/lattice-node
+          E2E_COORDINATOR_BIN: ${{ github.workspace }}/.build/release/lattice-mining-coordinator
+          E2E_MINER_BIN: ${{ github.workspace }}/.build/release/lattice-miner
+        run: swift test --skip-build --filter LatticeNodeE2ETests
 
-  # Linux build is informational: several tests use macOS-only XCTest/Foundation
-  # APIs (XCTExpectFailure, URLSession.shared) and are not Linux-portable.
+      - name: Verify executables run
+        run: |
+          swift run lattice-node --help
+          swift run lattice-mining-coordinator --help
+          swift run lattice-miner --help
+
+      - name: Collect retained E2E artifacts
+        if: failure()
+        run: |
+          mkdir -p e2e-failure-artifacts
+          for d in /tmp/lattice-node-e2e-* "${TMPDIR:-/tmp}"/lattice-node-e2e-*; do
+            [ -d "$d" ] && cp -R "$d" e2e-failure-artifacts/ || true
+          done
+
+      - name: Upload retained E2E artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-failure-artifacts-${{ github.job }}
+          path: e2e-failure-artifacts
+          if-no-files-found: ignore
+
   test-linux:
     runs-on: ubuntu-latest
-    continue-on-error: true
-    container: swift:6.2-jammy
+    container: swift:6.1-jammy
     timeout-minutes: 90
+    env:
+      E2E_TIME_SCALE: 3
     steps:
       - uses: actions/checkout@v4
-      - name: Install dependencies for Linux
-        run: apt-get update && apt-get install -y --no-install-recommends libjavascriptcoregtk-4.1-dev libsqlite3-dev
-      - name: Build
-        run: swift build -c release
 
-  # Auxiliary (non-blocking) signal.
-  strict-concurrency-macos:
-    runs-on: macos-26
-    continue-on-error: true
+      - name: Install dependencies for Linux
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev
+
+      - name: Build
+        run: swift build -c release -Xswiftc -warnings-as-errors
+
+      - name: Build test targets with warnings as errors
+        run: swift build --build-tests -Xswiftc -warnings-as-errors
+
+      - name: Run tests
+        run: swift test
+
+      - name: Run optimized multichain E2E
+        env:
+          E2E_NODE_BIN: ${{ github.workspace }}/.build/release/lattice-node
+          E2E_COORDINATOR_BIN: ${{ github.workspace }}/.build/release/lattice-mining-coordinator
+          E2E_MINER_BIN: ${{ github.workspace }}/.build/release/lattice-miner
+        run: swift test --skip-build --filter LatticeNodeE2ETests
+
+      - name: Run tests with code coverage
+        run: swift test --enable-code-coverage --skip LatticeNodeE2ETests
+
+      - name: Verify executables run
+        run: |
+          swift run lattice-node --help
+          swift run lattice-mining-coordinator --help
+          swift run lattice-miner --help
+
+      - name: Collect retained E2E artifacts
+        if: failure()
+        run: |
+          mkdir -p e2e-failure-artifacts
+          for d in /tmp/lattice-node-e2e-* "${TMPDIR:-/tmp}"/lattice-node-e2e-*; do
+            [ -d "$d" ] && cp -R "$d" e2e-failure-artifacts/ || true
+          done
+
+      - name: Upload retained E2E artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-failure-artifacts-${{ github.job }}
+          path: e2e-failure-artifacts
+          if-no-files-found: ignore
+
+  thread-sanitizer:
+    runs-on: macos-15
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - name: Strict concurrency build
-        run: swift build -Xswiftc -strict-concurrency=complete
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
+
+      - name: Run ThreadSanitizer gate
+        run: .github/scripts/check-tsan.sh
+
+  reproducible-build-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify reproducible release binaries
+        run: scripts/reproducible-build.sh
+
+  sanitizer-macos:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      ASAN_OPTIONS: detect_leaks=0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
+
+      - name: Resolve dependencies
+        run: swift package resolve
+
+      - name: Run hierarchy regressions under ASan + UBSan
+        run: swift test --sanitize address --sanitize undefined --filter NetworkTrustTests
+
+  static-analysis:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
+
+      - name: Install SwiftLint
+        run: brew install swiftlint
+
+      - name: Run SwiftLint
+        run: swiftlint lint --strict --config .swiftlint.yml
+
+      - name: Run Clang analyzer seed/smoke
+        run: scripts/run-clang-analyzer.sh

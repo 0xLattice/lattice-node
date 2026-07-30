@@ -1,1 +1,0 @@
-{"directory":"Child","parentDirectory":"Nexus","targetBlockTime":1000,"initialReward":1,"halvingInterval":100,"premine":0,"maxTransactionsPerBlock":100,"maxStateGrowth":1000,"maxBlockSize":1000000,"retargetWindow":10}

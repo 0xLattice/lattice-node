@@ -1,0 +1,7 @@
+.git
+.build
+.swiftpm
+.codex
+.claude
+AGENTS.md
+deploy/keys*

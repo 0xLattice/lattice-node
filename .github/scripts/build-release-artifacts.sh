@@ -6,6 +6,11 @@ cd "$repo_root"
 
 version="${RELEASE_VERSION:-${1:-$(git describe --tags --always --dirty 2>/dev/null || git rev-parse --short HEAD)}}"
 platform="${RELEASE_PLATFORM:-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)}"
+portable_name='^[A-Za-z0-9][A-Za-z0-9._+-]*$'
+if [[ ! "$version" =~ $portable_name || ! "$platform" =~ $portable_name ]]; then
+    echo "release version and platform must be portable filename atoms" >&2
+    exit 2
+fi
 out_dir="${RELEASE_OUT_DIR:-.build/release-artifacts}"
 bundle_name="lattice-node-${version}-${platform}"
 bundle_dir="${out_dir}/${bundle_name}"
@@ -19,31 +24,38 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 1
 fi
 
-rm -rf "$bundle_dir" "$archive" "$checksum" "$sbom" "$manifest"
+rm -rf -- "$bundle_dir"
+rm -f -- "$archive" "$checksum" "$sbom" "$manifest"
 mkdir -p "$bundle_dir/bin" "$out_dir"
 
-if [[ "${SKIP_SWIFT_BUILD:-0}" != "1" ]]; then
-    for product in LatticeNode LatticeMiner; do
-        swift build -c release --product "$product"
-    done
+if [[ "${SKIP_SWIFT_BUILD:-0}" == "1" ]]; then
+    RELEASE_PREBUILT_PATH="${RELEASE_PREBUILT_PATH:-$PWD/.build}" \
+        RELEASE_ARTIFACT_ROOT="$PWD/.build" \
+        scripts/build-release-binaries.sh
+else
+    RELEASE_BUILD_ROOT="$PWD/.build" \
+        RELEASE_ARTIFACT_ROOT="$PWD/.build" \
+        scripts/build-release-binaries.sh
 fi
-
-for product in LatticeNode LatticeMiner; do
-    binary=".build/release/${product}"
-    if [[ ! -x "$binary" ]]; then
-        echo "missing release binary: $binary" >&2
-        exit 1
-    fi
-    cp "$binary" "$bundle_dir/bin/"
+for product in lattice-node lattice-mining-coordinator lattice-miner; do
+    cp "$PWD/.build/release-binaries/$product" "$bundle_dir/bin/$product"
 done
+.github/scripts/smoke-lattice-node.sh \
+    "$bundle_dir/bin/lattice-node" \
+    "$bundle_dir/bin/lattice-mining-coordinator" \
+    "$bundle_dir/bin/lattice-miner"
 
 cat > "$bundle_dir/README.md" <<EOF
 # Lattice Node ${version} (${platform})
 
 This archive contains the release builds for:
 
-- LatticeNode
-- LatticeMiner
+- lattice-node
+- lattice-mining-coordinator
+- lattice-miner
+
+Linux executables statically include the Swift runtime and require the host's
+glibc and SQLite runtime libraries.
 
 Verify the archive checksum with:
 
@@ -89,7 +101,7 @@ jq -n \
       downloadLocation: "https://github.com/adalinxx/lattice-node",
       filesAnalyzed: false,
       versionInfo: $version,
-      supplier: "Organization: The Lattice Authors"
+      supplier: "Person: adalinxx"
     }
   ] + ($resolved[0].pins | map({
     name: .identity,
@@ -111,16 +123,19 @@ jq -n \
   }))
 }
 ' > "$sbom"
+sbom_sha256="$(shasum -a 256 "$sbom" | awk '{print $1}')"
+bundle_path="$(cd "$bundle_dir" && pwd)"
 
 jq -n \
-    --arg archivePath "$archive" \
+    --arg archivePath "$archive_name" \
     --arg archiveName "$archive_name" \
     --arg archiveSHA256 "$archive_sha256" \
-    --arg checksumPath "$checksum" \
+    --arg checksumPath "$checksum_name" \
     --arg checksumName "$checksum_name" \
-    --arg sbomPath "$sbom" \
+    --arg sbomPath "$sbom_name" \
     --arg sbomName "$sbom_name" \
-    --arg manifestPath "$manifest" \
+    --arg sbomSHA256 "$sbom_sha256" \
+    --arg manifestPath "$manifest_name" \
     --arg manifestName "$manifest_name" '
 {
   archive: {
@@ -136,6 +151,7 @@ jq -n \
   sbom: {
     path: $sbomPath,
     name: $sbomName,
+    sha256: $sbomSHA256,
     subjectName: $archiveName
   },
   manifest: {
@@ -147,6 +163,7 @@ jq -n \
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     {
+        printf 'bundle_path=%s\n' "$bundle_path"
         printf 'archive_path=%s\n' "$archive"
         printf 'checksum_path=%s\n' "$checksum"
         printf 'sbom_path=%s\n' "$sbom"

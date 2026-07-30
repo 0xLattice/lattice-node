@@ -1,473 +1,214 @@
-# Lattice Node RPC API
+# Lattice Node HTTP API
 
-This document is the single source of truth for the node's HTTP API. For
-protocol-level detail (block structure, cross-chain semantics, state model),
-see the protocol spec at [./protocol.md](./protocol.md) (§8).
+This is the HTTP surface of the current one-process/one-chain daemon.
 
-Base URL: `http://localhost:<rpc-port>`
+Base URL: `http://127.0.0.1:<rpc-port>`
 
-Endpoints that target chain state accept an optional `?chainPath=<path>` query
-parameter. The path is interpreted relative to the chain being queried; when
-the queried chain is Nexus, `Nexus/Payments` is the canonical Nexus-rooted
-form and `Payments` is equivalent. When omitted, the request targets the
-queried node's current chain. The legacy bare `?chain=<directory>` query
-parameter is rejected. Cryptography is Ed25519: an address is the CID of an account's
-public key. Block header fields are `parent`, `prevState`, `postState`,
-`parentState`, `children`, and `height`.
+The listener is unauthenticated and therefore loopback-only. Put a
+same-host authenticated proxy in front of it if another machine must call it;
+the daemon itself rejects non-loopback bind addresses.
 
-## Authentication
+Every request targets the chain owned by that process. There is no `chainPath`
+query selector. Whenever a path appears in a body or response, it is an
+absolute array whose first element is `"Nexus"`; paths that omit it are rejected.
 
-Nodes generate `<dataDir>/.cookie` at startup. Include that cookie token as a
-bearer credential when calling privileged endpoints:
-```
-Authorization: Bearer <token from ~/.lattice/.cookie>
-```
-
-Public read endpoints, `/health`, `/metrics`, and `/ws` remain public. Query
-tokens are not accepted as credentials for privileged RPC routes.
-
-### Privileged endpoints
-
-The following endpoints mutate node state and require a valid bearer cookie
-credential even when the RPC listener is bound to loopback. Otherwise they
-return `401 Unauthorized`:
-
-- `POST /api/chain/deploy`
-- `POST /api/chain/register-rpc`
-- `POST /api/chain/unregister-rpc`
-- `POST /api/chain/template`
-- `POST /api/chain/submit-work`
-- `POST /api/chain/submit-child-block`
-- `POST /api/chain/parent-continuity`
-- `GET /api/chain/candidate`
-- `POST /api/chain/candidate`
-- `GET /api/chain/auth-check`
-
-## Chain
-
-### GET /api/chain/info
-Status of all chains hosted by this node, plus genesis and P2P metadata.
+Requests are JSON. Transaction-bearing fields use a content-bound form so the
+receiver can reconstruct and verify the transaction body CID:
 
 ```json
 {
-  "chains": [
-    {
-      "directory": "Nexus",
-      "parentDirectory": null,
-      "height": 1234,
-      "tip": "baguqeera...",
-      "mining": true,
-      "mempoolCount": 5,
-      "syncing": false,
-      "minFeeRate": 1,
-      "chainP2PAddress": "<pubkey>@127.0.0.1:4001"
-    }
-  ],
-  "genesisHash": "baguqeera...",
-  "genesisTimestamp": 0,
-  "nexus": "Nexus",
-  "p2pAddress": "<pubkey>@127.0.0.1:4001"
+  "signatures": {"<public-key-hex>": "<signature-hex>"},
+  "body": {
+    "accountActions": [],
+    "actions": [],
+    "depositActions": [],
+    "genesisActions": [],
+    "receiptActions": [],
+    "withdrawalActions": [],
+    "signers": [],
+    "fee": 0,
+    "nonce": 0,
+    "chainPath": ["Nexus"]
+  }
 }
 ```
 
-`minFeeRate` is the per-byte fee-rate floor this node enforces at admission for the
-chain. A cross-chain swap buyer must size the child withdrawal fee at or above
-`minFeeRate` before paying the irreversible parent receipt; otherwise the withdrawal
-is rejected and the seller has already been credited with no refund path.
+## Status
 
-### GET /api/chain/spec
-Chain specification parameters. `targetBlockTime` is in milliseconds (Nexus
-targets `3600000`, i.e. 1 hour).
+### `GET /health`
+
+### `GET /v1/status`
+
+Both routes return the same chain-process status:
 
 ```json
 {
-  "directory": "Nexus",
-  "targetBlockTime": 3600000,
-  "initialReward": 1048576,
-  "halvingInterval": 876600,
-  "maxTransactionsPerBlock": 5000,
-  "maxStateGrowth": 3000000,
-  "maxBlockSize": 1000000,
-  "premine": 175320,
-  "premineAmount": 183836344320,
-  "wasmPolicies": []
+  "phase": "active",
+  "chainPath": ["Nexus"],
+  "nexusGenesisCID": "bafyreiayw4z5qz4lt2sljf2enzn7uol3qa6bebadav7qwnqz7agxkiuwhq",
+  "tipCID": "<cid>",
+  "height": 42,
+  "revision": 57,
+  "mempoolCount": 3,
+  "mempoolBytes": 2048,
+  "pendingChildIntents": 0
 }
 ```
 
-### Per-process control plane
+A child reports `phase: "awaitingGenesis"`, with null tip and height, until it
+receives its authenticated genesis link from its immediate parent.
+After bootstrap, it reports `phase: "active"` from its durable accepted graph;
+parent connectivity does not change the meaning of proof-derived work.
 
-These endpoints coordinate a tree of per-process chain nodes.
-
-#### GET /api/chain/auth-check *(privileged)*
-Returns `{"ok": true}` (200) iff the presented bearer cookie is the one this
-process accepts; otherwise `401`. A supervising parent probes this on restart to
-classify a child as alive-and-authenticated (adopt), alive-but-stale-cookie
-(re-read cookie), or dead (recover). It mutates nothing.
-
-#### GET /api/chain/map
-Map of full chain path → RPC endpoint for every registered chain whose endpoint
-has been announced. Lets clients discover the direct HTTP endpoint of any chain
-in the subtree.
-
-```json
-{"Nexus": "http://127.0.0.1:8080/api", "Nexus/Payments": "http://127.0.0.1:8081/api"}
-```
-
-#### POST /api/chain/register-rpc *(privileged)*
-Called by a child node on startup to announce its RPC endpoint to its parent.
-`endpoint` must be a loopback HTTP(S) URL; `/api` is appended automatically if
-omitted. `authToken` is the child node's RPC cookie and is forwarded to the child
-when the parent delivers a mined block.
-
-**Request:** `{"chainPath": ["Nexus", "Payments"], "endpoint": "http://127.0.0.1:8081/api", "authToken"?: "<child-cookie>"}`
-
-**Response:** `{"ok": true}`
-
-#### POST /api/chain/unregister-rpc *(privileged)*
-Removes a previously-registered child RPC endpoint from the parent. Called by
-`chain detach`. After this call, the parent will no longer deliver mined child
-blocks to the child's process.
-
-**Request:** `{"chainPath": ["Nexus", "Payments"]}`
-
-**Response:** `{"ok": true, "warning": "Block delivery to this child may stall if this node was its only merged-mined relay. Ensure the child has an alternative peer before detaching."}`
-
-#### GET /api/chain/parent-height?chainPath=<path>
-Reports how far up the parent chain the specified child's current tip can see.
-A child block carried by parent block `H` commits `parentState = postState(H-1)`,
-so two heights are returned:
-
-- `parentHeight` (`H`) — the carrier block the child's tip is anchored to.
-- `visibleStateHeight` (`H-1`) — the highest parent block whose **post-state**
-  (including `receiptState`) is visible through `parentState`. This is the state a
-  child withdrawal validates against.
-
-A receipt mined in parent block `R` becomes claimable once `visibleStateHeight >= R`
-(equivalently `parentHeight >= R + 1`). Both are `null` for the root chain.
-
-**Response:** `{"parentHeight": 1234, "visibleStateHeight": 1233}` or
-`{"parentHeight": null, "visibleStateHeight": null}` for root chains.
-
-#### GET /api/chain/genesis?chainPath=<path>
-Returns the genesis block (hex-encoded payload) for a child chain so a new
-process can self-bootstrap without manual genesis passing.
-
-```json
-{
-  "directory": "Payments",
-  "genesisHash": "baguqeera...",
-  "genesisHex": "0100...",
-  "chainP2PAddress": "<pubkey>@127.0.0.1:4002"
-}
-```
-
-#### POST /api/chain/deploy *(privileged)*
-Deploy a new child chain under an existing parent. Destructive admin operation;
-see [Privileged endpoints](#privileged-endpoints).
-
-**Request:**
-```json
-{
-  "directory": "Payments",
-  "parentDirectory": "Nexus",
-  "targetBlockTime": 3600000,
-  "initialReward": 1048576,
-  "halvingInterval": 876600,
-  "premine": 0,
-  "maxTransactionsPerBlock": 5000,
-  "maxStateGrowth": 3000000,
-  "maxBlockSize": 10000000,
-  "retargetWindow": 100
-}
-```
-
-**Response:** `{"directory", "parentDirectory", "genesisHash", "genesisHex", "chainP2PAddress"}`
-
-> **Constraint:** `maxBlockSize` must be **≤ the node's Ivy `maxFrameSize` − 1024**
-> (default frame size 4 MiB, set with `--max-frame-size`); a larger spec is
-> rejected at deploy. Deploy only sets the child up locally and returns its
-> `genesisHex` — to make the child **discoverable** by other nodes, announce it
-> with a `genesisActions` transaction (see [`/api/transaction/prepare`](#post-apitransactionprepare)).
-
-#### GET /api/chain/candidate · POST /api/chain/candidate
-Returns this chain's pending candidate block for a parent-chain miner to embed.
-`POST` accepts `{"parentBlockHex": "...", "childNodes": ["http://..."], "childNodeAuth"?: {"http://...": "<token>"}}` to set
-`parentState` continuity and recursively embed grandchild candidates. `childNodeAuth`
-maps each grandchild base URL to that node's RPC cookie token.
-Privileged endpoint; `childNodes` must be loopback HTTP(S) base URLs because the
-node performs server-side requests to them.
-
-#### POST /api/chain/template
-Returns a fully built candidate block (nonce = 0) for a miner; the node assembles
-`postState`, transactions, and embedded child candidates. Body:
-`{"chainPath"?: ["Nexus", "..."], "childNodes"?: [...], "childNodeAuth"?: {"http://...": "<token>"}}`.
-Privileged endpoint; `childNodes` must be loopback HTTP(S) base URLs because the
-node performs server-side requests to them.
-
-The coinbase recipient comes from the node's `--coinbase-address` config, never
-the request (Mechanism A). The node signs the coinbase with its
-persisted local coinbase authority; the coinbase credit is authorization-free,
-so the node never holds the payout address's private key and the payout account
-nonce is not consumed by rewards. The legacy `minerPrivateKey` and
-`minerPublicKey` template fields are removed: the request body no longer decodes
-them, and any such field a legacy client still sends is ignored — workers and
-coordinators must not send coinbase private keys or miner private keys to the
-node. See [Mining role boundaries](./design/mining-role-boundaries.md).
-
-Response includes `workId`, the content identifier of the nonce-0 candidate.
-Coordinators submit that `workId` plus a nonce to `/api/chain/submit-work`; the
-node seals, validates, accepts, persists, and publishes accepted work.
-
-#### POST /api/chain/submit-work
-Submit a nonce result for node-owned work. Body:
-`{"chainPath"?: ["Nexus", "..."], "workId": "<candidate-cid>", "nonce": 123, "hash"?: "<proof-of-work-hash-hex>"}`.
-
-The node resolves `workId` locally, verifies it still builds on the addressed
-chain's current tip, applies the nonce, checks the optional hash and PoW target,
-then accepts/persists/publishes through the normal chain path. Stale, malformed,
-wrong-target, wrong-chain, and duplicate submissions are rejected without
-mutating canonical state or publishing a block.
-
-## Accounts
-
-### GET /api/balance/{address}
-```json
-{"address": "baguqeera...", "balance": 1048576, "chainPath": "Nexus"}
-```
-
-### GET /api/nonce/{address}
-Next valid nonce for the address (stored nonce + 1; `0` for fresh accounts).
-```json
-{"address": "baguqeera...", "nonce": 0, "chain": "Nexus"}
-```
-
-### GET /api/proof/{address}
-Balance proof for light-client verification (raw proof JSON). The witness proves
-the account balance/nonce against the returned block header's `stateRoot`; a
-client must still verify or otherwise trust the header chain before trusting
-that root.
-
-### GET /api/state/account/{address}
-Account balance, nonce, existence flag, and recent transaction history.
-
-### GET /api/state/summary
-Chain height, tip hash, and state root.
-
-## Blocks
-
-### GET /api/block/latest
-```json
-{"hash": "baguqeera...", "height": 1234, "timestamp": 1742601600000, "target": "ff...", "chain": "Nexus"}
-```
-
-### GET /api/block/{id}
-Fetch by hash or height. Returns header fields and the CIDs of `transactions`,
-`prevState`, `postState`, `parentState`, `spec`, and `children`.
-
-### GET /api/block/{id}/transactions
-Summaries of the transactions in a block (fee, nonce, signers, per-action counts).
-
-Optional pagination (defaults to the full collection for backward compatibility):
-`?limit=` (clamped to 1…1000) and `?offset=` page over the block's transactions.
-The response always includes `total` (entries in the block), `count` (entries in
-this page), `offset`, and `nextOffset` (the offset of the next page, or `null`
-when the last page has been returned). Omitting `limit` returns every entry.
-
-### GET /api/block/{id}/children
-Child-chain blocks embedded in this block. Supports the same optional
-`?limit=`/`?offset=` pagination and `total`/`count`/`offset`/`nextOffset` fields
-as `/transactions`; omitting `limit` returns every child.
-
-### GET /api/block/{id}/state
-Post-block state section CIDs (`accountState`, `depositState`, `receiptState`,
-`genesisState`, `generalState`).
-
-### GET /api/block/{id}/state/account/{address}
-Account balance as of a specific block.
+`revision` is the local consensus mutation watermark.
 
 ## Transactions
 
-### POST /api/transaction
-Submit a signed transaction.
+### `POST /v1/transactions`
 
-**Request:**
+Submit one signed transaction whose body path exactly matches this process.
+
 ```json
 {
-  "signatures": {"<publicKeyHex>": "<signatureHex>"},
-  "bodyCID": "<cid>",
-  "bodyData": "<hex-encoded body>",
-  "chainPath": ["Nexus"]
+  "transaction": {
+    "signatures": {"<public-key-hex>": "<signature-hex>"},
+    "body": {"chainPath": ["Nexus"], "...": "other TransactionBody fields"}
+  }
 }
 ```
 
-**Response:** `{"accepted": true, "txCID": "baguqeera...", "bodyCID": "baguqeerb...", "error": null}`
+Response:
 
-`txCID` is the canonical transaction CID — the key under which the mined receipt is
-indexed, so `GET /api/receipt/{txCID}` resolves once the tx is in a block. `bodyCID`
-is the transaction-body CID used for mempool dedup; do not use it for receipt lookups.
-
-### POST /api/transaction/prepare
-Build and serialize an unsigned transaction body from structured action inputs.
-Returns `{"bodyCID", "bodyData", "signingPreimage"}` ready to sign and submit.
-
-**Request:**
 ```json
 {
-  "nonce": 1,
-  "signers": ["<address>"],
-  "fee": 1,
-  "accountActions": [{"owner": "<address>", "delta": -1}],
-  "actions": [{"key": "<key>", "oldValue": null, "newValue": "<value>"}],
-  "genesisActions": [{"directory": "<name>", "blockCID": "<child-genesis-CID>"}],
-  "chainPath": ["Nexus"]
-}
-```
-`accountActions`/`depositActions`/`receiptActions`/`withdrawalActions` are optional
-financial actions. **`actions`** are general key-value state changes applied to the
-chain's isolated `GeneralState` dictionary (never balances) — use them to record
-arbitrary data, e.g. **timestamping / proof-of-existence** (key = a content hash):
-`oldValue: null` inserts (fails if the key exists), a matching `oldValue` updates
-(compare-and-set), `newValue: null` deletes.
-
-**`genesisActions`** announce a child chain into the parent's `genesisState`
-(creation + discovery — see [Protocol §2.6](protocol.md)). Each records only the
-opaque `{directory, blockCID}` anchor; the parent never resolves the child genesis
-content (verify-not-trust). Submit one in an ordinary signed transaction so it
-**gossips and any miner can include it** — not tied to the deploying node. Building
-one trips three validator rules worth calling out:
-
-- **`signers` is the account address**, not the public key (signatures stay keyed
-  by public key in `POST /api/transaction`).
-- A non-zero `fee` needs a matching **debit**: `accountActions: [{owner, delta: -fee}]`
-  (conservation requires `debits == credits + fee`).
-- The fee floor is **1 per byte of the serialized body**, not just the global
-  `MINIMUM_TRANSACTION_FEE` of 1 — a ~360-byte announcement needs `fee ≥ 360`.
-
-The signer must be a **funded** account (it pays the fee); a node's coinbase
-*authority* key is not the same as its configured payout address.
-
-### GET /api/transaction/{txCID}
-Full decoded transaction (actions, signers, signatures, block context).
-
-### GET /api/transactions/{address}
-Transaction history for an address.
-
-### GET /api/receipt/{txCID}
-Transaction receipt derived from the CAS (block context, account deltas, status).
-
-### GET /api/mempool
-```json
-{"count": 5, "totalFees": 500, "chain": "Nexus"}
-```
-
-### GET /api/finality/{height} · GET /api/finality/config
-Returns the confirmation **depth** for a height and the node's **local** finality
-status (`isFinal`) under its configured policy (`--finality-confirmations`).
-This is a **node-local guard, not protocol finality:** the consensus rule itself
-has no finality gadget — any block may be reorganized at any depth under a heavier
-`trueCumWork` (Lattice library `spec.md §9`). `isFinal` means "below this node's
-configured local reorg-guard horizon," which different operators may set differently.
-
-## Fee Market
-
-### GET /api/fee/estimate?target=N
-Estimate the fee for confirmation within N blocks.
-```json
-{"fee": 42, "target": 5, "chain": "Nexus"}
-```
-
-### GET /api/fee/histogram
-Fee distribution across recent blocks.
-```json
-{"buckets": [{"range": "1-10", "count": 150}], "blockCount": 100, "chain": "Nexus"}
-```
-
-## Cross-Chain Transfer
-
-Cross-chain value movement is deposit → receipt → withdrawal (no swaps or
-orders). See [./protocol.md](./protocol.md) (§8) for the full flow.
-
-### GET /api/deposit?demander=&amount=&nonce=<hex>&chainPath=<path>
-Look up a single deposit by key.
-```json
-{"exists": true, "amountDeposited": 1000, "chain": "Payments", "key": "<depositKey>"}
-```
-
-### GET /api/deposits?limit=&after=
-List deposits on a chain (paginated; `limit` max 1000).
-```json
-{
-  "deposits": [
-    {"key": "...", "demander": "baguqeera...", "amountDemanded": 1000, "nonce": "12ab", "amountDeposited": 1000}
-  ],
-  "count": 1,
-  "chain": "Nexus"
+  "transactionCID": "<cid>",
+  "mempoolCount": 4,
+  "mempoolBytes": 2600
 }
 ```
 
-### GET /api/receipt-state?demander=&amount=&nonce=<hex>&chainPath=<destinationPath>
-Look up the receipt (withdrawer) recorded for a cross-chain demand.
-```json
-{"exists": true, "withdrawer": "baguqeera...", "directory": "Payments", "chainPath": ["Nexus", "Payments"], "key": "<receiptKey>"}
-```
-
-## Light Client
-
-### GET /api/light/headers?from=X&to=Y
-Chain headers for light-client sync (max range 500 per request).
-
-### GET /api/light/proof/{address}
-Account proof with block context (header hash, height, timestamp, state root)
-for independent witness verification. The proof verifier checks that the witness
-is bound to the embedded header metadata; header-chain / cumulative-work
-verification is the light client's responsibility.
+The premine is never accepted through RPC. It exists only in the locally
+constructed Nexus bootstrap block whose recomputed CID matches the configured
+trust anchor.
 
 ## Mining
 
-The node does not run a nonce-search loop and exposes no start/stop mining
-control. The E15 target split is:
+Mining is an external pipeline: the node issues and later validates work,
+`lattice-mining-coordinator` schedules ranges, and `lattice-miner` workers
+search those ranges.
 
-- `LatticeNode` owns chain state, template/work construction, effective target
-  calculation, solution validation, block sealing, acceptance, persistence,
-  merged-mining proof handling, and gossip publication.
-- `MiningCoordinator` owns stale-work detection, retry/backoff, nonce-range
-  fan-out, result collection, and node submission.
-- `LatticeMiner` workers only search immutable assigned work and return
-  nonce/hash results.
+### `POST /v1/mining/templates`
 
-See [Mining role boundaries](./design/mining-role-boundaries.md). The
-coordinator CLI owns node transport and result submission; `lattice-miner`
-workers only search assigned nonce ranges.
+Issue bounded, expiring work. This public route is Nexus-only; child candidates
+are requested through the authenticated hierarchy plane while the template is
+assembled.
 
-### GET /api/chain/template
-Returns the current candidate block (assembled coinbase + merged-mined children
-+ target) plus `workId` for external nonce search. The worker submits
-`workId` and nonce to `/api/chain/submit-work`.
-
-## Network
-
-### GET /api/peers
 ```json
-{"count": 12, "peers": [{"publicKey": "abcd...", "host": "1.2.3.4", "port": 4001}]}
+{
+  "mode": "normal",
+  "rewards": [
+    {
+      "chainPath": ["Nexus"],
+      "transaction": {
+        "signatures": {"<public-key-hex>": "<signature-hex>"},
+        "body": {"chainPath": ["Nexus"], "...": "other TransactionBody fields"}
+      }
+    }
+  ]
+}
 ```
 
-## Observability
+`mode` is optional and defaults to `normal`. Normal work excludes all
+`GenesisAction` transactions. `deployment` selects one pending deployment whose
+complete anchor set has matching child intent content, rotating across eligible
+work. Child intents bind one parent state: siblings intended for the same carrier
+belong in one transaction containing all of their `GenesisAction`s. `rewards`
+may be empty. Each reward is an externally signed transaction
+for one absolute chain path; process identity is never converted into wallet
+identity. The coordinator exposes the same choice as `--deployment`.
+When no complete deployment subtree is currently available, the endpoint
+returns `409` so the coordinator backs off instead of mining ordinary work.
 
-### GET /health
-Liveness/readiness summary (status, chain height, peer count, sync state, uptime).
+Response fields:
 
-### GET /metrics
-Prometheus-format metrics.
+- `workID`: CID of the nonce-zero candidate.
+- `block`: the complete candidate block.
+- `searchTarget`: the effective threshold the miner must hit. It is bounded by
+  the configured minimum Nexus-root work and, for deployment work, by the
+  hardest pending deployment target in the selected recursive subtree.
+- `chainPath`: always `["Nexus"]` on this route.
+- `expiresInMilliseconds`: template lifetime.
+
+### `POST /v1/mining/work`
+
+```json
+{"workID": "<candidate-cid>", "nonce": 123456}
 ```
-lattice_chain_height{chain="Nexus"} 1234
-lattice_mempool_size{chain="Nexus"} 5
-# lattice_mining_active: work/template-serving readiness, NOT in-process nonce search
-lattice_mining_active{chain="Nexus"} 1
-lattice_peer_count 12
-lattice_chain_count 1
-lattice_uptime_seconds 86400
+
+Response fields are `accepted`, `disposition`, `tipCID`,
+`parentCarrierLink`, `parentGenesisLinks`, and `durableChildProofs`. Child-proof
+delivery is asynchronous; this field acknowledges local durability, not remote
+receipt.
+Possible dispositions are `canonicalized`, `acceptedSide`, `carrier`,
+`duplicate`, `unavailable`, `temporarilyInvalid`, `invalid`, `localFailure`,
+and `storageFailed`.
+
+## Child deployment
+
+### `POST /v1/children/intents`
+
+Build an ordinary direct-child genesis against the current parent state.
+
+Request fields:
+
+- `directory`: one 1–64 byte visible-ASCII direct-child edge label; it cannot
+  contain `/`.
+- `spec`: the child's `ChainSpec`.
+- `genesisTransactions`: content-bound transactions for the absolute child
+  path.
+- `policyModules`: the exact complete module Volumes named by `spec.wasmPolicies`,
+  encoded as `{rootCID, bytes}`. The field is empty when the spec has no policy.
+- `target`: child genesis target.
+- `timestamp`: child genesis timestamp in milliseconds.
+
+Response:
+
+```json
+{
+  "directory": "Payments",
+  "chainPath": ["Nexus", "Payments"],
+  "genesisCID": "<cid>",
+  "genesisBlock": {"...": "Block fields"},
+  "parentStateCID": "<cid>"
+}
 ```
 
-### GET /ws?events=newBlock,newTransaction
-Server-Sent Events stream (EventSource). Available event types: `newBlock`,
-`newTransaction`, `chainReorg`, `syncStatus`.
+The response is the content-addressed block itself, not an opaque serialized
+bootstrap field.
+The request is validated through an in-memory content overlay, so a novel
+module need not already exist in the node's broker. Only a valid intent is
+published to VolumeBroker. Its complete genesis, transaction, spec, state-witness,
+and module Volumes remain exactly retained through template creation, and are
+released when the intent is replaced, anchored, or made stale by parent state.
+Creating the intent does not mutate the parent chain. The caller separately
+constructs and signs the parent transaction containing the matching
+`GenesisAction`, submits it through `/v1/transactions`, and mines it. A child
+process launched with `--chain-path Nexus/Payments` and `--parent
+<parent-key>@<host>:<fact-port>` activates only after the hierarchy plane
+delivers the authenticated genesis link.
+
+## Errors and limits
+
+- Malformed or invalid requests return `400 Bad Request`.
+- Requests that require an active child before genesis return `409 Conflict`.
+- Consensus-producing requests return `503 Service Unavailable` only when the
+  process is not active or the requested local resource is temporarily
+  unavailable.
+- A full transaction pool or child-intent capacity returns `429 Too Many
+  Requests`.
+- A temporarily unavailable transaction policy returns `503 Service
+  Unavailable`.
+- Ordinary JSON requests are bounded to 1 MiB. Child-intent bodies use a
+  node-local byte ceiling before decoding because they may carry a genesis
+  Volume plus content-bound policy modules; exceeding it is local capacity, not
+  chain invalidity.

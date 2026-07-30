@@ -1,19 +1,13 @@
 # Every @unchecked Sendable or nonisolated(unsafe) site must be listed here with
 # a rationale. This keeps strict-concurrency escapes visible in review.
 Sources/LatticeMinerCore/ProofOfWork.swift|private struct SendableSearchArgs: @unchecked Sendable {|SHA256 midstate is copied into worker arguments and not mutated after task creation.
-Tests/LatticeNodeTests/MinedSubmitAcceptanceTests.swift|private final class FailingBroker: VolumeBroker, @unchecked Sendable {|Test broker has no mutable shared state beyond protocol links and always fails local stores.
-Sources/LatticeNode/RPC/RPCServer+ChainRoutes.swift|private final class RPCBufferedStorer: Storer, @unchecked Sendable {|All buffered entry mutation and reads are guarded by a Synchronization.Mutex.
-Sources/LatticeNode/RPC/RPCServer.swift|private final class RPCProxyResponseCollector: NSObject, URLSessionDataDelegate, @unchecked Sendable {|Collector state is scoped to one proxied request and protects response/data/continuation mutation with NSLock.
-Sources/LatticeNode/Mempool/PostStateCache.swift|public final class PostStateCache: @unchecked Sendable {|The cached frontier entry is read and written only through a Synchronization.Mutex.
-Sources/LatticeNode/Sync/ParallelBlockFetcher.swift|private final class CompletedCounter: @unchecked Sendable {|The progress counter is a single UInt64 guarded by a Synchronization.Mutex.
-Sources/LatticeNode/Chain/LatticeNode+Persistence.swift|private final class DiskBrokerFetcher: Fetcher, @unchecked Sendable {|Wrapper delegates to DiskBroker's async broker API and has no mutable state after initialization.
-Sources/LatticeNode/Chain/LatticeNode.swift|nonisolated(unsafe) private var nextTargetByBlockCID: [String: UInt256] = [:]|All accesses are routed through cacheNextTarget/cachedNextTarget/pruneNextTargetCache under nextTargetLock.
-Sources/LatticeNode/Storage/SQLiteDatabase.swift|public final class SQLiteDatabase: @unchecked Sendable {|The SQLite handle and statement cache are serialized by an internal Mutex and SQLite is opened with SQLITE_OPEN_FULLMUTEX.
-Sources/LatticeNode/Storage/CompositeFetcher.swift|final class CompositeFetcher: VolumeAwareFetcher, @unchecked Sendable {|Fetcher references are immutable after initialization; calls are delegated to each fetcher's async API.
-Sources/LatticeNode/Storage/IvyBroker.swift|public final class IvyBroker: @unchecked Sendable, VolumeBroker {|Wrapper stores immutable Ivy reference and delegates async network work; near/far links follow VolumeBroker composition.
-Sources/LatticeNode/Network/ChildBlockProof.swift|final class _CollectingStorer: Storer, @unchecked Sendable {|Internal proof helper collects synchronously during serialization before the entries are consumed.
-Sources/LatticeNode/Network/ChildBlockProof.swift|private final class _BrokerFetcher: Fetcher, @unchecked Sendable {|Wrapper has immutable broker reference and delegates through VolumeBroker's async fetch path.
-Sources/LatticeNode/Storage/MempoolAwareFetcher.swift|final class MempoolAwareFetcher: VolumeAwareFetcher, @unchecked Sendable {|Inner fetcher and transaction cache are immutable after initialization; calls delegate to async fetcher APIs.
-Tests/LatticeNodeTests/HeaderBatchPeerBindingTests.swift|private final class HeaderBatchBox: @unchecked Sendable {|Test capture box protects value and random-draw state with NSLock.
-Tests/LatticeNodeTests/HeaderBatchPeerBindingTests.swift|private final class HeaderBatchProofBox: @unchecked Sendable {|Test capture box protects value state with NSLock.
-Sources/LatticeMiningCoordinator/MiningWorkerProcess.swift|private final class MiningWorkerSubprocess: @unchecked Sendable {|Owns one Foundation.Process whose lifecycle is confined to a single search call; the cancellation handler only calls thread-safe terminate().
+Sources/LatticeMiningCoordinator/MiningWorkerProcess.swift|private final class MiningWorkerSubprocess: @unchecked Sendable {|Owns one Foundation.Process whose lifecycle is confined to a single search call; cancellation only invokes its synchronized termination path.
+Sources/LatticeNode/Architecture/NodeSQLite.swift|final class NodeSQLite: @unchecked Sendable {|SQLite is opened FULLMUTEX and every operation uses that serialized handle without exposing it.
+Sources/LatticeNode/Architecture/IvyContentBridge.swift|public final class AttributionCapture: @unchecked Sendable {|All access to the optional attribution value is guarded by AttributionCapture's NSLock.
+Sources/LatticeNode/Architecture/IvyContentBridge.swift|private final class Trace: @unchecked Sendable {|All mutable attribution state is guarded by Trace's NSLock.
+Sources/LatticeNode/Architecture/IvyContentBridge.swift|private final class Context: @unchecked Sendable {|The root CID is immutable and the referenced Trace synchronizes its own mutable state.
+Sources/LatticeNode/Architecture/NodeNetworkRuntime.swift|private final class RuntimeCallbackEpoch: @unchecked Sendable {|Every read and increment of the callback generation is guarded by the epoch's NSLock.
+Tests/LatticeMiningCoordinatorTests/MiningCoordinatorTests.swift|nonisolated(unsafe) static var responder: ((URLRequest) -> (Int, Data))?|The URLProtocol test stub installs and clears this callback serially within each test.
+Tests/LatticeNodeTests/Architecture/NetworkTrustTests.swift|private nonisolated(unsafe) static var allocated = Set<UInt16>()|The issued test port set is read and mutated only while holding its static NSLock.
+Tests/LatticeNodeE2ETests/ParentChildE2ETests.swift|private final class LoopbackTCPFaultProxy: @unchecked Sendable {|All proxy lifecycle, listener, counters, and session-map mutation is guarded by the proxy's NSLock.
+Tests/LatticeNodeE2ETests/ParentChildE2ETests.swift|private final class Session: @unchecked Sendable {|Socket descriptors are immutable and exactly-once close state is guarded by the session's NSLock.

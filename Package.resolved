@@ -1,5 +1,5 @@
 {
-  "originHash" : "bbecba68531fffe89ab373c38a91b8f5f1a55901b9870167cf70f964b0b37cff",
+  "originHash" : "149058bc57afaed854b4b2d6560390000ee3d9bea8d43395c6826f82e01ad961",
   "pins" : [
     {
       "identity" : "arraytrie",
@@ -24,8 +24,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adalinxx/cashew.git",
       "state" : {
-        "revision" : "3fb878df9a91cdb1c445a30fd4457b704807f6ea",
-        "version" : "3.4.0"
+        "revision" : "769e801047b097ad72fc6fd89f3a353f3b3293be",
+        "version" : "4.0.2"
       }
     },
     {
@@ -60,8 +60,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adalinxx/Ivy.git",
       "state" : {
-        "revision" : "1cdab302379c73255f2e631333617ad546aa17cf",
-        "version" : "7.0.0"
+        "revision" : "b9b90578249fe3f9391ef20085de12a21ad1d97f",
+        "version" : "13.0.0"
       }
     },
     {
@@ -69,8 +69,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adalinxx/Lattice.git",
       "state" : {
-        "revision" : "5516672fe91d739222e27851400db6a4b2833e31",
-        "version" : "16.1.0"
+        "revision" : "241fae4c6433e4faecbad569ab86b4f5e6ba1e6a",
+        "version" : "27.0.0"
       }
     },
     {
@@ -132,8 +132,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/swift-libp2p/swift-bases.git",
       "state" : {
-        "revision" : "96615d4b582f9f6536d8278304ce2a64c8e5288a",
-        "version" : "0.2.0"
+        "revision" : "162f6ef3ed3ebd5954c445443d93e41d30a473da",
+        "version" : "0.2.1"
       }
     },
     {
@@ -339,8 +339,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/swift-libp2p/swift-varint.git",
       "state" : {
-        "revision" : "b62beeea61d5c7c434d7af8a212211a4e7a8f926",
-        "version" : "0.2.0"
+        "revision" : "10254c96e8b979fe39775e28524c5da698278055",
+        "version" : "0.2.1"
       }
     },
     {
@@ -348,8 +348,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adalinxx/Tally.git",
       "state" : {
-        "revision" : "0ab492cc30700880004a21e68b70590072d231d3",
-        "version" : "2.0.0"
+        "revision" : "bbc83ac8be0816682cbc6a52fe37f1b99886114a",
+        "version" : "3.0.1"
       }
     },
     {
@@ -375,8 +375,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adalinxx/VolumeBroker.git",
       "state" : {
-        "revision" : "5837ad5e7fc946a999edd31c4d62a4f5a7d3167c",
-        "version" : "3.10.0"
+        "revision" : "815471d599db5b7f9d326d4573e721bf051e33c4",
+        "version" : "7.0.1"
       }
     },
     {

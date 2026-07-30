@@ -1,0 +1,27 @@
+[Unit]
+Description=Lattice external mining coordinator and workers
+After=lattice-node.service
+Wants=lattice-node.service
+
+[Service]
+Type=simple
+User=lattice
+Group=lattice
+# The coordinator owns node transport and range allocation. External
+# lattice-miner processes receive immutable nonce assignments.
+ExecStart=/usr/local/bin/lattice-mining-coordinator \
+  --node http://127.0.0.1:8080 \
+  --worker-executable /usr/local/bin/lattice-miner \
+  --workers 2
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+WorkingDirectory=/var/lib/lattice
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lattice-miner
+
+[Install]
+WantedBy=multi-user.target

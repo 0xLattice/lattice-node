@@ -1,1 +1,0 @@
-{"nonce":1,"signers":["alice"],"fee":0,"accountActions":[{"owner":"alice","delta":1}],"depositActions":[{"nonce":"01","demander":"bob","amountDemanded":1,"amountDeposited":1}],"chainPath":["Nexus"]}

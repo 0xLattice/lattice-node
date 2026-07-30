@@ -1,78 +1,81 @@
-# Chain Addressing Model
+# Chain addressing
 
-> This addressing model is the names-layer expression of Lattice's broader [fractal structure](fractal-structure.md) — the organizing protocol that secures heterogeneous chains via PoW. Read that first for the operational principle; this document is the addressing specifics.
+## Rule
 
-## Summary
+A chain's public and internal identity is one absolute path from the single
+Nexus root. Every chain path includes `Nexus` as its first component.
 
-A **Lattice chain** is both a root chain and the tree of chains rooted at it; **Lattice** is the protocol that defines this. The **Nexus** is the single root and the primary entry from outside; every other chain is a descendant spawned beneath it (see [process trust model](process-trust-model.md)). A `directory` is not a globally unique chain identity; it is an edge label used to move from one chain node to one of its children.
-
-```
-external client
-  |
-  v
+```text
 Nexus
-  | Payments
-  v
-child chain
-  | Rollups
-  v
-grandchild chain
-```
-
-In this example, `Payments` and `Rollups` are directories: relative edge labels. The canonical address of the grandchild chain is the full path:
-
-```
+Nexus/Payments
 Nexus/Payments/Rollups
 ```
 
-## Terms
+`Payments` and `Payments/Rollups` are invalid as chain paths even when sent to a
+Nexus process. The `Nexus` component is never implicit.
+This keeps process configuration, transaction replay protection, peer
+handshakes, storage scopes, metrics, and API payloads on one representation.
+
+## Directory versus chain path
+
+A `directory` is a single edge label chosen under an already known parent. It
+is intentionally parent-relative:
+
+```text
+parent path:     Nexus/Games
+child directory: Payments
+child path:      Nexus/Games/Payments
+```
+
+The same directory may exist under another parent, so `Payments` is never a
+globally unique chain identity.
 
 | Term | Meaning |
-|------|---------|
-| Lattice | The protocol: every chain is both a root chain and the tree of chains rooted at it |
-| Nexus | The single root — the primary entry from outside; every other chain is a descendant |
-| Chain node | A node in the tree with its own state, blocks, mempool, and network |
-| Directory | The edge label from a parent chain to a child chain |
-| Relative path | A sequence of directory edges interpreted from the chain node being queried |
-| Chain path | The normalized route to a target chain; Nexus-rooted form is the canonical global representation |
-| Chain address | The normalized internal representation of a chain path |
+|---|---|
+| Nexus | The single root and first component of every path |
+| Chain path | Complete absolute route beginning with `Nexus` |
+| Chain address | Validated internal representation of a chain path |
+| Directory | One direct parent-to-child edge label |
 
-## Rules
+## Validation
 
-1. **Canonical identity is a chain path.** Internally, a chain is identified by its absolute route from Nexus, not by the final directory component.
+`ChainAddress` accepts a component array or slash-separated string only when:
 
-2. **Directories are relative.** A directory only has meaning relative to a parent chain. `Payments` under `Nexus` and `Payments` under `Nexus/Games` are different edges and may point to different chains.
+1. the first and exact root component is `Nexus`;
+2. its child depth fits Lattice's child-proof bound;
+3. every component is 1–64 bytes of visible ASCII; and
+4. no component contains Lattice's directory separator.
 
-3. **Selectors are relative to the queried chain.** A selector like `Payments/Rollups` is interpreted from the chain node that receives the query. When that node is `Nexus`, the selector may also be written as the Nexus-rooted canonical form `Nexus/Payments/Rollups`.
+`ChainAddress` delegates this grammar to `ChainRuntimeContext`, so node setup,
+transactions, state keys, and child proofs cannot drift. Process configuration
+also requires the complete canonical handshake to fit its wire frame.
 
-4. **The root label is reserved in selectors.** If a selector starts with the current tree's root label, it is interpreted as the Nexus-rooted canonical form rather than as a child edge under the queried chain.
+Consequently, these are invalid:
 
-5. **Relative paths require context.** A relative path like `Payments/Rollups` is valid only when the caller has already selected a parent context.
+```text
+Payments
+/Nexus/Payments
+Nexus/
+Nexus//Payments
+nexus/Payments
+```
 
-6. **No bare-directory public APIs.** External APIs accept chain paths. A bare directory name is valid only inside code that already has an explicit parent-chain context.
+## Where paths are load-bearing
 
-7. **Storage namespaces must not depend on leaf uniqueness.** Per-chain state, mempool persistence, caches, metrics, and peer-tip state should be namespaced by chain path or a stable encoding of chain path.
+- `--chain-path` fixes the one chain owned by a process.
+- `TransactionBody.chainPath` is signed replay protection and must equal that
+  process path exactly.
+- `ChainHello.chainPath` prevents same-overlay peers for different chains from
+  being confused.
+- Mining reward routing uses full paths so each reward reaches one exact chain.
+- Hierarchy messages carry full child paths, while direct-child lookup uses the
+  final directory only after the parent relationship is authenticated.
+- Durable retention scopes combine the pinned Nexus genesis CID with the full
+  path, preventing leaf-name collisions.
 
-## Implementation Implications
+## Nexus root bootstrap
 
-The following should be treated as migration targets:
-
-- Public RPC and CLI surfaces should use `chainPath`; `network(for directory:)` is an internal compatibility shim only.
-- Internal maps such as `networks`, `miners`, `persisters`, `stateStores`, `tipCaches`, `postStateCaches`, `knownPeerTips`, and sync bookkeeping should be keyed by chain address.
-- Iteration should prefer `ChainNetwork` values or chain paths, not leaf directories.
-- Persistence should write under a path-aware namespace such as `chains/Nexus/Payments`, or a stable encoded equivalent if filesystem constraints require it.
-- `ChainSpec.directory` should be read as the child edge label selected by the parent, not as a globally unique chain id.
-- Transaction `chainPath` remains load-bearing replay protection and should compare against the canonical chain address of the validating chain.
-
-## Migration Shape
-
-The safe migration path is incremental:
-
-1. Introduce a small `ChainAddress` type around `[String]`.
-2. Add path-aware lookup and persistence helpers while keeping existing directory APIs.
-3. Convert internal maps and iteration to `ChainAddress`.
-4. Move per-chain disk namespaces to path-aware locations with backward-compatible reads from legacy leaf directories.
-5. Add tests with duplicate edge labels, for example `Nexus/A/Payments` and `Nexus/B/Payments`.
-6. Remove ambiguous bare-directory API surfaces; keep `directory` only for parent-relative edges.
-
-The goal is not to rename every `directory` immediately. The goal is to make every new or changed call site explicit about whether it is handling an edge label, a relative path, or an absolute chain address.
+Nexus has no parent, so an empty store constructs the one pinned unsigned
+genesis locally before configured root bootstrap. It is never accepted from a
+peer. The path representation is not special-cased; Nexus is simply the valid
+one-component absolute path `["Nexus"]`.

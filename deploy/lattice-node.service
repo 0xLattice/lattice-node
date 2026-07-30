@@ -1,0 +1,32 @@
+[Unit]
+Description=Lattice Nexus chain process
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lattice
+Group=lattice
+# The external coordinator in lattice-miner.service uses the loopback API.
+ExecStart=/usr/local/bin/lattice-node \
+  --chain-path Nexus \
+  --data-directory /var/lib/lattice/chains/Nexus \
+  --identity-key /var/lib/lattice/identity/nexus.key \
+  --listen-port 4001 \
+  --fact-listen-port 4002 \
+  --rpc-port 8080 \
+  --rpc-bind 127.0.0.1
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+WorkingDirectory=/var/lib/lattice
+StateDirectory=lattice
+StateDirectoryMode=0750
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lattice-node
+
+[Install]
+WantedBy=multi-user.target

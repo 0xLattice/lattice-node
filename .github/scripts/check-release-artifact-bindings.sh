@@ -12,6 +12,15 @@ json_string() {
     jq -er "$query" "$file"
 }
 
+artifact_path() {
+    local manifest="$1"
+    local reference="$2"
+
+    [[ -n "$reference" && "$reference" != */* ]] \
+        || die "$manifest contains a non-portable artifact path: $reference"
+    printf '%s/%s\n' "$(dirname "$manifest")" "$reference"
+}
+
 write_manifest() {
     local manifest="$1"
     local archive="$2"
@@ -21,20 +30,21 @@ write_manifest() {
     local subject="$6"
 
     jq -n \
-        --arg archivePath "$archive" \
+        --arg archivePath "$(basename "$archive")" \
         --arg archiveName "$(basename "$archive")" \
         --arg archiveSHA256 "$digest" \
-        --arg checksumPath "$checksum" \
+        --arg checksumPath "$(basename "$checksum")" \
         --arg checksumName "$(basename "$checksum")" \
         --arg checksumSubject "$subject" \
-        --arg sbomPath "$sbom" \
+        --arg sbomPath "$(basename "$sbom")" \
         --arg sbomName "$(basename "$sbom")" \
-        --arg manifestPath "$manifest" \
+        --arg sbomSHA256 "$(shasum -a 256 "$sbom" | awk '{print $1}')" \
+        --arg manifestPath "$(basename "$manifest")" \
         --arg manifestName "$(basename "$manifest")" '
 {
   archive: {path: $archivePath, name: $archiveName, sha256: $archiveSHA256},
   checksum: {path: $checksumPath, name: $checksumName, subjectName: $checksumSubject},
-  sbom: {path: $sbomPath, name: $sbomName, subjectName: $archiveName},
+  sbom: {path: $sbomPath, name: $sbomName, sha256: $sbomSHA256, subjectName: $archiveName},
   manifest: {path: $manifestPath, name: $manifestName}
 }
 ' > "$manifest"
@@ -66,6 +76,15 @@ run_self_test() {
     write_manifest "$manifest_a" "$archive_a" "$checksum_a" "$sbom_a" "$digest_a" "$(basename "$archive_a")"
     write_manifest "$manifest_b" "$archive_b" "$checksum_b" "$sbom_b" "$digest_b" "$(basename "$archive_b")"
     check_manifests "$manifest_a" "$manifest_b"
+    if ( check_manifests "$manifest_a" "$manifest_a" ) >/dev/null 2>&1; then
+        die "self-test accepted duplicate artifact subjects"
+    fi
+
+    printf '{"changed":true}\n' > "$sbom_a"
+    if ( check_manifests "$manifest_a" ) >/dev/null 2>&1; then
+        die "self-test accepted a changed SBOM"
+    fi
+    printf '{}\n' > "$sbom_a"
 
     printf '%s  %s\n' "$digest_a" "$(basename "$archive_b")" > "$checksum_a"
     if ( check_manifests "$manifest_a" ) >/dev/null 2>&1; then
@@ -74,24 +93,37 @@ run_self_test() {
 }
 
 check_manifests() {
-    local seen_subjects=""
+    local seen_subjects=$'\n'
     local manifest
     for manifest in "$@"; do
-        local archive_path archive_name archive_sha256 checksum_path checksum_name checksum_subject sbom_path sbom_subject
-        archive_path="$(json_string "$manifest" '.archive.path')"
+        local archive_reference archive_path archive_name archive_sha256
+        local checksum_reference checksum_path checksum_name checksum_subject
+        local sbom_reference sbom_path sbom_name sbom_sha256 sbom_subject
+        local manifest_reference manifest_name
+        archive_reference="$(json_string "$manifest" '.archive.path')"
+        archive_path="$(artifact_path "$manifest" "$archive_reference")"
         archive_name="$(json_string "$manifest" '.archive.name')"
         archive_sha256="$(json_string "$manifest" '.archive.sha256')"
-        checksum_path="$(json_string "$manifest" '.checksum.path')"
+        checksum_reference="$(json_string "$manifest" '.checksum.path')"
+        checksum_path="$(artifact_path "$manifest" "$checksum_reference")"
         checksum_name="$(json_string "$manifest" '.checksum.name')"
         checksum_subject="$(json_string "$manifest" '.checksum.subjectName')"
-        sbom_path="$(json_string "$manifest" '.sbom.path')"
+        sbom_reference="$(json_string "$manifest" '.sbom.path')"
+        sbom_path="$(artifact_path "$manifest" "$sbom_reference")"
+        sbom_name="$(json_string "$manifest" '.sbom.name')"
+        sbom_sha256="$(json_string "$manifest" '.sbom.sha256')"
         sbom_subject="$(json_string "$manifest" '.sbom.subjectName')"
+        manifest_reference="$(json_string "$manifest" '.manifest.path')"
+        manifest_name="$(json_string "$manifest" '.manifest.name')"
 
         [[ -f "$archive_path" ]] || die "$manifest references missing archive: $archive_path"
         [[ -f "$checksum_path" ]] || die "$manifest references missing checksum: $checksum_path"
         [[ -f "$sbom_path" ]] || die "$manifest references missing SBOM: $sbom_path"
-        [[ "$(basename "$archive_path")" == "$archive_name" ]] || die "$manifest archive name does not match archive path"
-        [[ "$(basename "$checksum_path")" == "$checksum_name" ]] || die "$manifest checksum name does not match checksum path"
+        [[ "$archive_reference" == "$archive_name" ]] || die "$manifest archive name does not match archive path"
+        [[ "$checksum_reference" == "$checksum_name" ]] || die "$manifest checksum name does not match checksum path"
+        [[ "$sbom_reference" == "$sbom_name" ]] || die "$manifest SBOM name does not match SBOM path"
+        [[ "$manifest_reference" == "$manifest_name" ]] || die "$manifest name does not match manifest path"
+        [[ "$(basename "$manifest")" == "$manifest_name" ]] || die "$manifest does not match its manifest name"
         [[ "$checksum_name" == "${archive_name}.sha256" ]] || die "$manifest checksum file is not named after its archive"
         [[ "$checksum_subject" == "$archive_name" ]] || die "$manifest checksum subject is not the archive name"
         [[ "$sbom_subject" == "$archive_name" ]] || die "$manifest SBOM subject is not the archive name"
@@ -103,6 +135,8 @@ check_manifests() {
         [[ "$digest" == "$archive_sha256" ]] || die "$checksum_path digest does not match manifest digest"
         computed="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
         [[ "$computed" == "$archive_sha256" ]] || die "$archive_path digest does not match manifest"
+        computed="$(shasum -a 256 "$sbom_path" | awk '{print $1}')"
+        [[ "$computed" == "$sbom_sha256" ]] || die "$sbom_path digest does not match manifest"
 
         case "${seen_subjects}" in
             *"

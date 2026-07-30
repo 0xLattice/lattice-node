@@ -1,76 +1,68 @@
 import Foundation
+import Lattice
 import UInt256
 
-// Pure, dependency-light decision logic for the external miner's poll loop,
-// extracted from the `lattice-miner` executable so it can be unit-tested (SPM
-// can't `@testable import` an executable target). The executable wires real
-// HTTP/Ivy I/O around these decisions; the decisions themselves — dedup,
-// stale/503 abort, and when to record a completed template — are the bug-prone
-// parts (two were caught only in review) and live here, fully covered by tests.
-
-/// The block template the node serves to the miner.
+/// Exact miner-facing template returned by `POST /v1/mining/templates`.
+/// The coordinator keeps canonical block bytes internally because workers are
+/// deliberately transport-agnostic nonce searchers.
 public struct TemplateResponse: Decodable, Sendable, Equatable {
-    /// CID of the nonce-0 candidate returned by the node. Coordinators submit
-    /// this plus a nonce to the node-owned solution API.
-    public let workId: String?
+    public let workID: String
     public let blockHex: String
-    public let childBlocks: [String: String]?
-    /// Easiest PoW target across the parent + embedded child blocks, computed
-    /// authoritatively by the node (hex `UInt256`). Optional for older nodes
-    /// that don't return it.
-    public let effectiveTarget: String?
-    /// Stable freshness token (the node returns the current tip hash). Invariant
-    /// to timestamp-only template rebuilds, so a coordinator can tell genuine
-    /// staleness (tip advanced) from the volatile workId. Optional for older
-    /// nodes that don't return it.
-    public let staleToken: String?
+    public let searchTarget: String
+    public let chainPath: [String]
+    public let expiresInMilliseconds: UInt64
+    public let staleToken: String
 
-    public init(workId: String? = nil, blockHex: String, childBlocks: [String: String]? = nil, effectiveTarget: String? = nil, staleToken: String? = nil) {
-        self.workId = workId
+    public init(
+        workID: String,
+        blockHex: String,
+        searchTarget: String,
+        chainPath: [String] = ["Nexus"],
+        expiresInMilliseconds: UInt64 = 30_000,
+        staleToken: String? = nil
+    ) {
+        self.workID = workID
         self.blockHex = blockHex
-        self.childBlocks = childBlocks
-        self.effectiveTarget = effectiveTarget
-        self.staleToken = staleToken
+        self.searchTarget = searchTarget
+        self.chainPath = chainPath
+        self.expiresInMilliseconds = expiresInMilliseconds
+        self.staleToken = staleToken ?? workID
     }
-}
 
-/// What the poll loop should do with a freshly fetched template.
-public enum MinerStep: Equatable, Sendable {
-    /// Sleep briefly and poll again (no usable / no new work).
-    case backoff
-    /// Search for a nonce on the template with this `blockHex`.
-    case mine(blockHex: String)
+    private enum CodingKeys: String, CodingKey {
+        case workID
+        case block
+        case searchTarget
+        case chainPath
+        case expiresInMilliseconds
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        workID = try container.decode(String.self, forKey: .workID)
+        let block = try container.decode(Block.self, forKey: .block)
+        guard let data = block.toData() else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .block,
+                in: container,
+                debugDescription: "Block is not canonically serializable"
+            )
+        }
+        blockHex = data.map { String(format: "%02x", $0) }.joined()
+        searchTarget = try container.decode(
+            UInt256.self,
+            forKey: .searchTarget
+        ).toHexString()
+        chainPath = try container.decode([String].self, forKey: .chainPath)
+        expiresInMilliseconds = try container.decode(
+            UInt64.self,
+            forKey: .expiresInMilliseconds
+        )
+        staleToken = block.parent?.rawCID ?? workID
+    }
 }
 
 public enum MinerLoopLogic {
-    /// Decide what to do with a freshly fetched template:
-    /// - `nil` (node unavailable / 503 while syncing) → back off.
-    /// - same `blockHex` as the last *sealed* template → back off (dedup: don't
-    ///   re-mine a block while waiting for the tip to advance).
-    /// - otherwise → mine it.
-    public static func decideFetch(template: TemplateResponse?, lastBlockHex: String) -> MinerStep {
-        guard let template else { return .backoff }
-        if template.blockHex == lastBlockHex { return .backoff }
-        return .mine(blockHex: template.blockHex)
-    }
-
-    /// During a nonce search, decide whether to abandon the current template.
-    /// A failed re-poll (`nil` — e.g. the node started returning 503 because the
-    /// chain is syncing) counts as stale, so the miner stops grinding a
-    /// soon-to-be-doomed pre-sync block; a changed `blockHex` does too.
-    public static func shouldAbortSearch(freshTemplate: TemplateResponse?, currentBlockHex: String) -> Bool {
-        return freshTemplate == nil || freshTemplate?.blockHex != currentBlockHex
-    }
-
-    /// New value of `lastBlockHex` after a solve attempt. Record the template as
-    /// done only once the sealed block was actually `published` to the network —
-    /// an aborted search (503 / stale) or a block that was never gossiped (e.g.
-    /// no P2P channel) must leave the template eligible for retry, otherwise the
-    /// dedup in `decideFetch` would skip it forever and permanently stall mining.
-    public static func recordAfterSolve(published: Bool, blockHex: String, lastBlockHex: String) -> String {
-        return published ? blockHex : lastBlockHex
-    }
-
     /// Parse a hex `UInt256` target (as produced by `UInt256.toHexString()`:
     /// four big-endian 64-bit words, most-significant first). Left-pads short
     /// strings and accepts an optional `0x` prefix. Inverse of `toHexString()`.

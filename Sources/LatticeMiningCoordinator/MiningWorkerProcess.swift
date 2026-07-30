@@ -28,7 +28,6 @@ struct MiningWorkerProcessResult: Decodable {
     let workId: String
     let status: String
     let nonce: UInt64?
-    let hash: String?
     let rangeStart: UInt64
     let rangeCount: UInt64
 }
@@ -60,24 +59,12 @@ public struct MiningWorkerProcessClient: Sendable {
             "--target", work.targetHex,
             "--start-nonce", String(range.startNonce),
             "--count", String(range.count),
-        ] + (work.prefixHex.isEmpty ? [] : ["--prefix-hex", work.prefixHex])
+        ]
 
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
-        // Close both ends of both pipes on every exit path (success, not-found,
-        // cancellation, error). swift-corelibs-foundation does not reliably close
-        // a Pipe's fds on FileHandle deinit, so without this each spawn leaks pipe
-        // fds; at ~1 worker/sec the coordinator exhausts RLIMIT_NOFILE and the
-        // next spawn fails with EBADF ("Bad file descriptor"). The reads below run
-        // before this defer fires.
-        defer {
-            try? stdout.fileHandleForReading.close()
-            try? stdout.fileHandleForWriting.close()
-            try? stderr.fileHandleForReading.close()
-            try? stderr.fileHandleForWriting.close()
-        }
 
         try await handle.run()
 
@@ -100,8 +87,7 @@ public struct MiningWorkerProcessClient: Sendable {
         return MiningWorkerResult(
             workerId: workerId,
             workId: result.workId,
-            nonce: nonce,
-            hash: result.hash
+            nonce: nonce
         )
     }
 }
@@ -113,7 +99,7 @@ private final class MiningWorkerSubprocess: @unchecked Sendable {
     /// (e.g. dash `sh -c`) don't reliably propagate SIGTERM to their children,
     /// and on swift-corelibs-foundation a bare `terminate()` does not promptly
     /// reap such a child, so we force-kill after a short grace period.
-    private static let terminationGrace: Duration = .milliseconds(200)
+    private static let terminationGraceNanoseconds: UInt64 = 200_000_000
 
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Void, Never>?
@@ -182,7 +168,9 @@ private final class MiningWorkerSubprocess: @unchecked Sendable {
         // immediately.
         let pid = process.processIdentifier
         Task.detached { [weak self] in
-            try? await Task.sleep(for: MiningWorkerSubprocess.terminationGrace)
+            try? await Task.sleep(
+                nanoseconds: MiningWorkerSubprocess.terminationGraceNanoseconds
+            )
             guard let self else { return }
             let finished = self.withLock { self.didFinish }
             if !finished, self.process.isRunning {
