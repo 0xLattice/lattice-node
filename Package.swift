@@ -18,6 +18,10 @@ let package = Package(
             name: "lattice-proof-verifier",
             targets: ["LatticeProofVerifier"]
         ),
+        .executable(
+            name: "lattice-rewards",
+            targets: ["LatticeRewardsTool"]
+        ),
     ],
     dependencies: [
         .package(
@@ -103,10 +107,19 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]),
         .executableTarget(
+            name: "LatticeRewardsTool",
+            dependencies: [
+                "LatticeNode",
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "cashew", package: "cashew"),
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ]),
+        .executableTarget(
             name: "LatticeMiner",
             dependencies: [
                 "LatticeMinerCore",
                 .product(name: "Lattice", package: "lattice"),
+                .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]),
         .testTarget(
@@ -114,6 +127,7 @@ let package = Package(
             dependencies: [
                 "LatticeNode",
                 "LatticeNodeDaemon",
+                "LatticeMinerCore",
                 "CSQLite",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy"),

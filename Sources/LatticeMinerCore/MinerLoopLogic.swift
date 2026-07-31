@@ -8,6 +8,10 @@ import UInt256
 public struct TemplateResponse: Decodable, Sendable, Equatable {
     public let workID: String
     public let blockHex: String
+    /// Consensus PoW preimage prefix (hex), so transport-agnostic workers can
+    /// search without parsing block bytes. Empty only for hand-built values
+    /// whose blockHex is not a decodable Block.
+    public let prefixHex: String
     public let searchTarget: String
     public let chainPath: [String]
     public let expiresInMilliseconds: UInt64
@@ -23,10 +27,19 @@ public struct TemplateResponse: Decodable, Sendable, Equatable {
     ) {
         self.workID = workID
         self.blockHex = blockHex
+        self.prefixHex = Self.derivePrefixHex(blockHex: blockHex)
         self.searchTarget = searchTarget
         self.chainPath = chainPath
         self.expiresInMilliseconds = expiresInMilliseconds
         self.staleToken = staleToken ?? workID
+    }
+
+    public static func derivePrefixHex(blockHex: String) -> String {
+        guard let data = Data(hex: blockHex), let block = Block(data: data) else {
+            return ""
+        }
+        return Block.makeProofOfWorkPreimagePrefix(block: block)
+            .map { String(format: "%02x", $0) }.joined()
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -49,6 +62,8 @@ public struct TemplateResponse: Decodable, Sendable, Equatable {
             )
         }
         blockHex = data.map { String(format: "%02x", $0) }.joined()
+        prefixHex = Block.makeProofOfWorkPreimagePrefix(block: block)
+            .map { String(format: "%02x", $0) }.joined()
         searchTarget = try container.decode(
             UInt256.self,
             forKey: .searchTarget

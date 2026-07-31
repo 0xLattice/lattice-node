@@ -77,8 +77,11 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
 
         if once {
             let result = await coordinator.runBatch()
-            try failClosedIfNeeded(result)
+            // Emit the JSON result before failing closed so supervisors can
+            // distinguish workerFailed/nodeFailed from a template refusal;
+            // advancing a reward cursor on the wrong one strands the batch.
             try printJSONResult(result)
+            try failClosedIfNeeded(result)
             return
         }
 

@@ -33,6 +33,7 @@ Start here, then follow the path that matches what you're doing.
 | Understand parent authority and process boundaries | [Process trust model](design/process-trust-model.md) |
 | Follow the work-proof collapse implementation | [Work-proof collapse north star](design/work-proof-collapse-north-star.md) |
 | Understand mining roles and worker boundaries | [Mining role boundaries](design/mining-role-boundaries.md) |
+| Build an external (GPU/remote) mining worker | [Mining workers](mining-workers.md) |
 | Build, test, or reproduce CI locally | [Development](development.md) |
 | Write or run tests | [Testing](testing.md) |
 

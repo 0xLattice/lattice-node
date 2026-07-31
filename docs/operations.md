@@ -53,6 +53,9 @@ lattice-mining-coordinator \
   --workers 4
 ```
 
+Custom workers (GPU or remote hardware) implement the contract in
+[mining-workers.md](mining-workers.md) and slot in via `--worker-executable`.
+
 If block production stalls:
 
 1. Confirm the Nexus node is `active`.
@@ -61,6 +64,44 @@ If block production stalls:
    failure.
 4. Check the worker executable path and permissions.
 5. Confirm the submitted work satisfies at least one assembled chain target.
+
+Do not daemonize the coordinator behind `nohup`+shell backgrounding on Linux:
+a shell that forks with `SIGCHLD` blocked wedges Foundation's child reaping —
+the coordinator hangs after one batch with zombie workers and an empty log.
+Use a supervisor that spawns it with a clean signal mask (systemd, or the
+reference [deploy/mine-supervisor.py](../deploy/mine-supervisor.py)).
+
+## Mining rewards
+
+Without a rewards file the coordinator requests empty rewards and mined blocks
+pay nobody. Rewards are ordinary signed transactions validated by consensus:
+credit-only account actions, fee 0, total claimed at most the spec reward at
+the mined height, and the signer's nonces strictly sequential — so one signed
+reward transaction is valid in exactly one block, in nonce order. Unsigned
+credits exist only in genesis.
+
+`lattice-rewards` keeps the reward key off the mining host:
+
+```bash
+lattice-rewards generate-key --out reward-key.json
+lattice-rewards emit-batch \
+  --key reward-key.json \
+  --count 10000 \
+  --out reward-batch.jsonl
+```
+
+Ship only `reward-batch.jsonl` to the miner. Each line is one complete
+`--rewards-file` payload; feed line `i`, and advance to `i + 1` only after the
+block paying it is accepted. A spent nonce is refused at template build
+(HTTP 400 `invalidRewardTransaction`) — a supervisor's signal that the cursor
+is behind, never a reason to skip ahead on other failures: a skipped nonce
+permanently invalidates every later line. The reference
+[deploy/mine-supervisor.py](../deploy/mine-supervisor.py) implements this
+loop. Re-emit the batch before it is exhausted, and before a halving boundary
+makes its amount exceed the allowed reward. Cursor advancement reflects the
+current tip: a deep reorg that reverts a paid reward strands the tail of the
+batch on a nonce gap — recover by re-emitting from the key's next expected
+nonce.
 
 ## Child chains
 

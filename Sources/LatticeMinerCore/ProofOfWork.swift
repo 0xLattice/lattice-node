@@ -39,8 +39,13 @@ public enum ProofOfWork {
     }
 
     public static func midstate(for block: Block) -> SHA256 {
-        let prefixBytes = proofOfWorkHashPrefixBytes(block)
-        return prefixBytes.withUnsafeBufferPointer { ptr in
+        midstate(prefixBytes: proofOfWorkHashPrefixBytes(block))
+    }
+
+    public static func midstate(
+        prefixBytes: ContiguousArray<UInt8>
+    ) -> SHA256 {
+        prefixBytes.withUnsafeBufferPointer { ptr in
             var hasher = SHA256()
             hasher.update(bufferPointer: UnsafeRawBufferPointer(ptr))
             return hasher

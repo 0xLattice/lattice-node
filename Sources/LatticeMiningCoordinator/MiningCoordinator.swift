@@ -9,12 +9,17 @@ import UInt256
 public struct MiningCoordinatorWork: Sendable, Equatable {
     public let workId: String
     public let blockHex: String
+    /// Consensus PoW preimage prefix (hex). Workers receive it alongside the
+    /// block bytes so non-Swift workers never re-derive the preimage layout.
+    /// Empty only for hand-built work whose blockHex is not a decodable Block.
+    public let prefixHex: String
     public let targetHex: String
     public let staleToken: String
 
     public init(workId: String, blockHex: String, targetHex: String, staleToken: String? = nil) {
         self.workId = workId
         self.blockHex = blockHex
+        self.prefixHex = TemplateResponse.derivePrefixHex(blockHex: blockHex)
         self.targetHex = targetHex
         self.staleToken = staleToken ?? workId
     }

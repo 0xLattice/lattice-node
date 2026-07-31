@@ -6,6 +6,7 @@
 
 import Foundation
 import ArgumentParser
+import Crypto
 import Lattice
 import LatticeMinerCore
 
@@ -30,7 +31,10 @@ struct LatticeMiner: ParsableCommand {
     var workId: String
 
     @Option(name: .long, help: "Hex-encoded serialized nonce-0 Block node.")
-    var blockHex: String
+    var blockHex: String?
+
+    @Option(name: .long, help: "Hex-encoded consensus PoW preimage prefix. Preferred over --block-hex: searching needs no block parse.")
+    var prefixHex: String?
 
     @Option(name: .long, help: "Hex-encoded PoW target.")
     var target: String
@@ -42,13 +46,20 @@ struct LatticeMiner: ParsableCommand {
     var count: UInt64
 
     func run() throws {
-        guard let blockData = Data(hex: blockHex),
-              let block = Block(data: blockData),
-              let parsedTarget = MinerLoopLogic.parseTarget(target) else {
-            throw ValidationError("Invalid blockHex or target")
+        guard let parsedTarget = MinerLoopLogic.parseTarget(target) else {
+            throw ValidationError("Invalid target")
+        }
+        let midstate: SHA256
+        if let prefixHex, let prefix = Data(hex: prefixHex), !prefix.isEmpty {
+            midstate = ProofOfWork.midstate(prefixBytes: ContiguousArray(prefix))
+        } else if let blockHex,
+                  let blockData = Data(hex: blockHex),
+                  let block = Block(data: blockData) {
+            midstate = ProofOfWork.midstate(for: block)
+        } else {
+            throw ValidationError("Supply --prefix-hex or a decodable --block-hex")
         }
 
-        let midstate = ProofOfWork.midstate(for: block)
         let nonce = ProofOfWork.searchBatch(
             midstate: midstate,
             target: parsedTarget,
@@ -57,12 +68,14 @@ struct LatticeMiner: ParsableCommand {
         )
         let result: WorkerResult
         if let nonce {
-            let sealed = ProofOfWork.withNonce(block, nonce: nonce)
             result = WorkerResult(
                 workId: workId,
                 status: "found",
                 nonce: nonce,
-                hash: sealed.proofOfWorkHash().toHexString(),
+                hash: ProofOfWork.hash(
+                    midstate: midstate,
+                    nonce: nonce
+                ).toHexString(),
                 rangeStart: startNonce,
                 rangeCount: count
             )

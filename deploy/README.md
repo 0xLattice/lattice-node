@@ -31,6 +31,11 @@ sudo install -m 0755 .build/release/lattice-mining-coordinator \
 sudo install -m 0755 .build/release/lattice-miner /usr/local/bin/lattice-miner
 ```
 
+To pay mining rewards, generate a key and a pre-signed batch with
+`lattice-rewards` on a trusted machine (the key never ships to the miner) and
+run [mine-supervisor.py](mine-supervisor.py) beside the coordinator; see the
+"Mining rewards" section of [docs/operations.md](../docs/operations.md).
+
 Then install [lattice-node.service](lattice-node.service) and
 [lattice-miner.service](lattice-miner.service). The latter runs the coordinator
 and launches external workers; its historical filename remains only so existing
