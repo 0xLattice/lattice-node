@@ -161,6 +161,53 @@ jobs:
           path: e2e-failure-artifacts
           if-no-files-found: ignore
 
+  operator-cli-e2e:
+    runs-on: ubuntu-latest
+    container: swift:6.1-jammy
+    timeout-minutes: 90
+    env:
+      E2E_TIME_SCALE: 3
+      E2E_CTL: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies for Linux
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev procps
+
+      - name: Build
+        run: swift build -c release -Xswiftc -warnings-as-errors
+
+      - name: Build test targets
+        run: swift build --build-tests -Xswiftc -warnings-as-errors
+
+      # These drive real multi-chain CPU mining; a dedicated runner keeps
+      # them from starving (and being starved by) the rest of the E2Es.
+      - name: Run operator-CLI E2Es
+        env:
+          E2E_NODE_BIN: ${{ github.workspace }}/.build/release/lattice-node
+          E2E_COORDINATOR_BIN: ${{ github.workspace }}/.build/release/lattice-mining-coordinator
+          E2E_MINER_BIN: ${{ github.workspace }}/.build/release/lattice-miner
+          E2E_CTL_BIN: ${{ github.workspace }}/.build/release/lattice
+          E2E_REWARDS_BIN: ${{ github.workspace }}/.build/release/lattice-rewards
+        run: swift test --skip-build --filter LatticeCtlE2ETests
+
+      - name: Collect retained E2E artifacts
+        if: failure()
+        run: |
+          mkdir -p e2e-failure-artifacts
+          for d in /tmp/lattice-node-e2e-* "${TMPDIR:-/tmp}"/lattice-node-e2e-*; do
+            [ -d "$d" ] && cp -R "$d" e2e-failure-artifacts/ || true
+          done
+
+      - name: Upload retained E2E artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-failure-artifacts-${{ github.job }}
+          path: e2e-failure-artifacts
+          if-no-files-found: ignore
+
   thread-sanitizer:
     runs-on: macos-15
     timeout-minutes: 90

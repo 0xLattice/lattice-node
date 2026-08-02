@@ -22,6 +22,7 @@ Start here, then follow the path that matches what you're doing.
 | Understand what Lattice is and why it exists | [Lattice philosophy](https://github.com/adalinxx/Lattice/blob/26.0.1/docs/philosophy.md) · [README](../README.md) |
 | Run a node for the first time | [Getting started](getting-started.md) |
 | Call the HTTP API | [RPC API reference](rpc-api.md) |
+| Bring up and operate a multi-chain host | [Operator CLI](operator-cli.md) |
 | Operate a node in production | [Operations runbook](operations.md) · [Deployment](../deploy/README.md) |
 | Deploy or manage child chains | [Deployment runbook](../deploy/README.md) |
 | Understand the protocol in depth | [Lattice specification](https://github.com/adalinxx/Lattice/blob/26.0.1/docs/spec.md) · [Node boundary](protocol.md) |

@@ -11,3 +11,5 @@ Tests/LatticeMiningCoordinatorTests/MiningCoordinatorTests.swift|nonisolated(uns
 Tests/LatticeNodeTests/Architecture/NetworkTrustTests.swift|private nonisolated(unsafe) static var allocated = Set<UInt16>()|The issued test port set is read and mutated only while holding its static NSLock.
 Tests/LatticeNodeE2ETests/ParentChildE2ETests.swift|private final class LoopbackTCPFaultProxy: @unchecked Sendable {|All proxy lifecycle, listener, counters, and session-map mutation is guarded by the proxy's NSLock.
 Tests/LatticeNodeE2ETests/ParentChildE2ETests.swift|private final class Session: @unchecked Sendable {|Socket descriptors are immutable and exactly-once close state is guarded by the session's NSLock.
+Sources/LatticeCtl/Mine.swift|final class InterruptFlag: @unchecked Sendable {|All access to the boolean is guarded by InterruptFlag's NSLock; raised only from the SIGTERM dispatch source.
+Sources/LatticeCtl/Mine.swift|final class OutputCollector: @unchecked Sendable {|All access to the accumulated output is guarded by OutputCollector's NSLock.
