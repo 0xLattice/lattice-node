@@ -134,12 +134,21 @@ struct Mine: AsyncParsableCommand {
             source.resume()
             log("mining loop start at reward cursor \(cursor)")
             while !stopRequested.isRaised {
-                let rewardsFile = try prepareRewardsFile(
-                    settings, cursor: cursor, layout: layout
-                )
-                let outcome = try await runCoordinatorOnce(
-                    settings, rewardsFile: rewardsFile, layout: layout
-                )
+                let outcome: CoordinatorOutcome
+                do {
+                    let rewardsFile = try prepareRewardsFile(
+                        settings, cursor: cursor, layout: layout
+                    )
+                    outcome = try await runCoordinatorOnce(
+                        settings, rewardsFile: rewardsFile, layout: layout
+                    )
+                } catch {
+                    // A spawn/IO failure proves nothing about the reward and
+                    // must never advance the cursor or kill the loop: retry.
+                    log("reward \(cursor) retrying after spawn error: \(error)")
+                    try? await Task.sleep(for: .seconds(5))
+                    continue
+                }
                 switch outcome {
                 case .accepted(let tip):
                     log("reward \(cursor) accepted tip=\(tip.prefix(24))")
@@ -274,23 +283,6 @@ final class InterruptFlag: @unchecked Sendable {
     }
 }
 
-final class OutputCollector: @unchecked Sendable {
-    private let lock = NSLock()
-    private var data = Data()
-
-    func append(_ chunk: Data) {
-        lock.lock()
-        data.append(chunk)
-        lock.unlock()
-    }
-
-    func snapshot() -> Data {
-        lock.lock()
-        defer { lock.unlock() }
-        return data
-    }
-}
-
 func runCoordinatorOnce(
     _ settings: MinerSettings, rewardsFile: URL?, layout: HostLayout
 ) async throws -> CoordinatorOutcome {
@@ -308,37 +300,18 @@ func runCoordinatorOnce(
         arguments += ["--rewards-file", rewardsFile.path]
     }
     process.arguments = arguments
-    let stdout = Pipe()
-    process.standardOutput = stdout
-    process.standardError = FileHandle.nullDevice
-    // terminationHandler-based reaping: on Linux, parking a thread in
-    // waitUntilExit can hang forever on a missed SIGCHLD (the same
-    // corelibs wedge documented for daemonized coordinators).
-    let collector = OutputCollector()
-    stdout.fileHandleForReading.readabilityHandler = { handle in
-        collector.append(handle.availableData)
-    }
-    try await withCheckedThrowingContinuation { (
-        continuation: CheckedContinuation<Void, Error>
-    ) in
-        process.terminationHandler = { _ in continuation.resume() }
-        do {
-            try process.run()
+    // Delegate to the shared spawn path (fresh /dev/null per spawn +
+    // terminationHandler reaping) that ProcessSpawnTests pins.
+    let data = try await spawnCollectingOutput(
+        executable: process.executableURL!,
+        arguments: arguments,
+        onSpawn: { pid in
             try? writePidFile(
                 layout, "mine-coordinator",
-                pid: process.processIdentifier,
-                name: "lattice-mining-coordinator"
+                pid: pid, name: "lattice-mining-coordinator"
             )
-        } catch {
-            process.terminationHandler = nil
-            continuation.resume(throwing: error)
         }
-    }
-    stdout.fileHandleForReading.readabilityHandler = nil
-    collector.append(
-        stdout.fileHandleForReading.readDataToEndOfFile()
     )
-    let data = collector.snapshot()
     try? FileManager.default.removeItem(
         at: layout.pidFile(for: "mine-coordinator")
     )

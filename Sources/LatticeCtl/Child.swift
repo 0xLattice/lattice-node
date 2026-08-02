@@ -173,10 +173,15 @@ struct Child: AsyncParsableCommand {
                     "--worker-executable", worker.path,
                     "--workers", "1", "--once", "--deployment",
                 ]
-                coordinator.standardOutput = FileHandle.nullDevice
-                coordinator.standardError = FileHandle.nullDevice
+                // Fresh /dev/null per spawn: corelibs closes the shared
+                // nullDevice singleton's fd after a process exits, so
+                // reusing it across the 20-round loop throws EBADF.
+                let devNull = FileHandle(forWritingAtPath: "/dev/null")
+                coordinator.standardOutput = devNull ?? FileHandle.nullDevice
+                coordinator.standardError = devNull ?? FileHandle.nullDevice
                 try coordinator.run()
                 coordinator.waitUntilExit()
+                try? devNull?.close()
                 if let health = await health(rpc: parentChain.rpc),
                    health["mempoolCount"] as? Int == 0,
                    (health["height"] as? Int ?? 0) > heightBefore {

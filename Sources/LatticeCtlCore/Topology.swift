@@ -123,7 +123,7 @@ public struct CtlError: Error, CustomStringConvertible {
 
 /// Filesystem layout under the data root. Identity keys live OUTSIDE the
 /// wipeable chain directories so a flag-day wipe never destroys identity.
-public struct HostLayout {
+public struct HostLayout: Sendable {
     public let root: URL
 
     public init(root: String?) {
