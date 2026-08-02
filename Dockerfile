@@ -28,6 +28,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /build/.build/release/lattice-node /usr/local/bin/lattice-node
 COPY --from=builder /build/.build/release/lattice-mining-coordinator /usr/local/bin/lattice-mining-coordinator
 COPY --from=builder /build/.build/release/lattice-miner /usr/local/bin/lattice-miner
+COPY --from=builder /build/.build/release/lattice /usr/local/bin/lattice
+COPY --from=builder /build/.build/release/lattice-rewards /usr/local/bin/lattice-rewards
 COPY deploy/entrypoint.sh /usr/local/bin/lattice-entrypoint
 RUN chmod +x /usr/local/bin/lattice-entrypoint
 
