@@ -286,8 +286,7 @@ final class InterruptFlag: @unchecked Sendable {
 func runCoordinatorOnce(
     _ settings: MinerSettings, rewardsFile: URL?, layout: HostLayout
 ) async throws -> CoordinatorOutcome {
-    let process = Process()
-    process.executableURL = try nodeBinary().deletingLastPathComponent()
+    let executable = try nodeBinary().deletingLastPathComponent()
         .appendingPathComponent("lattice-mining-coordinator")
     var arguments = [
         "--node", "http://127.0.0.1:\(settings.rpc)",
@@ -299,11 +298,10 @@ func runCoordinatorOnce(
     if let rewardsFile {
         arguments += ["--rewards-file", rewardsFile.path]
     }
-    process.arguments = arguments
     // Delegate to the shared spawn path (fresh /dev/null per spawn +
     // terminationHandler reaping) that ProcessSpawnTests pins.
     let data = try await spawnCollectingOutput(
-        executable: process.executableURL!,
+        executable: executable,
         arguments: arguments,
         onSpawn: { pid in
             try? writePidFile(
@@ -338,7 +336,7 @@ func runCoordinatorOnce(
             return .refusal
         }
     }
-    return .workerTrouble("exit=\(process.terminationStatus)")
+    return .workerTrouble("coordinator produced no result line")
 }
 
 enum ProbeResult { case accepted, refused, unavailable }

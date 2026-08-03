@@ -1,13 +1,10 @@
 import Foundation
+#if canImport(Glibc)
+import Glibc
+#endif
 import XCTest
 @testable import LatticeCtlCore
 
-/// The `lattice mine` loop calls `spawnCollectingOutput` once per block,
-/// forever. This exercises that exact spawn-and-reap path across many
-/// sequential spawns — the condition the fleet migration hit an hour in,
-/// where a reused `FileHandle.nullDevice` singleton's closed fd made a
-/// later spawn throw EBADF and (before the fix) killed the miner. A revert
-/// to the singleton fails here on Linux.
 private final class PidCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
@@ -15,6 +12,15 @@ private final class PidCounter: @unchecked Sendable {
     var value: Int { lock.lock(); defer { lock.unlock() }; return count }
 }
 
+/// The `lattice mine` loop calls `spawnCollectingOutput` once per block,
+/// forever. Two Linux-only corelibs hazards it must survive, both hit in
+/// production and neither caught before:
+///   - reusing the FileHandle.nullDevice singleton → EBADF on a later spawn;
+///   - not closing a Pipe's fds → a two-per-spawn leak → EMFILE.
+/// This spawns under a DELIBERATELY LOW fd limit so a per-spawn fd leak
+/// exhausts it and fails fast, rather than needing thousands of spawns.
+/// (Verified on Linux to fail without the pipe-close fix; a macOS run passes
+/// either way because real Foundation reclaims Pipe fds on dealloc.)
 final class ProcessSpawnTests: XCTestCase {
     private func stubEmitter() throws -> URL {
         let script = FileManager.default.temporaryDirectory
@@ -30,28 +36,41 @@ final class ProcessSpawnTests: XCTestCase {
         return script
     }
 
-    func testManySequentialSpawnsSurviveAndCollectOutput() async throws {
+    func testManySpawnsSurviveUnderALowFdLimit() async throws {
         let stub = try stubEmitter()
         defer { try? FileManager.default.removeItem(at: stub) }
+
+        // RLIMIT_NOFILE is a plain Int32 on Darwin but a __rlimit_resource
+        // enum on Glibc, which getrlimit/setrlimit take as Int32.
+        #if canImport(Glibc)
+        let nofile = __rlimit_resource_t(RLIMIT_NOFILE.rawValue)
+        #else
+        let nofile = RLIMIT_NOFILE
+        #endif
+        var original = rlimit()
+        XCTAssertEqual(getrlimit(nofile, &original), 0)
+        var capped = original
+        capped.rlim_cur = min(original.rlim_max, 128)
+        XCTAssertEqual(setrlimit(nofile, &capped), 0)
+        defer { setrlimit(nofile, &original) }
+
         let pidCounter = PidCounter()
-        for iteration in 0..<60 {
+        for iteration in 0..<300 {
             let output: Data
             do {
                 output = try await spawnCollectingOutput(
-                    executable: stub,
-                    arguments: [],
+                    executable: stub, arguments: [],
                     onSpawn: { _ in pidCounter.bump() }
                 )
             } catch {
-                XCTFail("spawn \(iteration) threw: \(error)")
+                XCTFail("spawn \(iteration) threw (fd leak?): \(error)")
                 return
             }
-            let text = String(decoding: output, as: UTF8.self)
             XCTAssertTrue(
-                text.contains("noSolution"),
-                "spawn \(iteration) lost stdout: \(text)"
+                String(decoding: output, as: UTF8.self).contains("noSolution"),
+                "spawn \(iteration) lost stdout"
             )
         }
-        XCTAssertEqual(pidCounter.value, 60)
+        XCTAssertEqual(pidCounter.value, 300)
     }
 }
