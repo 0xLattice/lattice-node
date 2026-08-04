@@ -1,4 +1,5 @@
 import Foundation
+import Ivy
 import Lattice
 import UInt256
 import VolumeBroker
@@ -394,6 +395,7 @@ public actor ChainService {
     private static let templateLifetimeSeconds: Int64 = 30
     private static let templateLifetimeMilliseconds: UInt64 = 30_000
     private static let templateCapacity = 16
+    private static let maximumReadResponseBytes = Int(IvyConfig.defaultProtocolMaxFrameSize)
 
     private let process: ChainProcess
     private let pool: TransactionPool
@@ -485,6 +487,53 @@ public actor ChainService {
             mempoolBytes: mempoolAvailable ? await pool.byteCount : 0,
             pendingChildIntents: childIntents.count
         )
+    }
+
+    /// Ungated mirror of `status()` for public read RPC: no `acquireOperation()`,
+    /// no `prepareMempoolLocked()` (which mutates the pool via `pool.expire()`),
+    /// no `removeStaleChildIntents()` — every read is non-mutating.
+    public func readSnapshot() async -> ChainServiceStatusResponse {
+        let status = await process.readSnapshot()
+        let phase: ChainServicePhase = status.phase == .active
+            ? .active
+            : .awaitingGenesis
+        return ChainServiceStatusResponse(
+            phase: phase,
+            chainPath: status.chainPath,
+            nexusGenesisCID: status.nexusGenesisCID,
+            tipCID: status.tipCID,
+            height: status.height,
+            revision: status.revision,
+            mempoolCount: await pool.count,
+            mempoolBytes: await pool.byteCount,
+            pendingChildIntents: childIntents.count
+        )
+    }
+
+    /// Bounded public read: a decoded, content-verified block, gated to only
+    /// what this node has durably accepted. Never takes the operation gate —
+    /// reads only ChainProcess's ungated CAS path.
+    public func block(cid: String) async -> Block? {
+        guard await process.hasAcceptedBlock(cid) else { return nil }
+        guard let data = await process.content([cid])[cid],
+              data.count <= Self.maximumReadResponseBytes else {
+            return nil
+        }
+        return _contentBoundBlock(cid: cid, data: data)
+    }
+
+    /// Bounded public read: a decoded, content-verified transaction. Resolving
+    /// and content-binding as a `Transaction` is itself the gate that keeps
+    /// internal (non-transaction) objects from being served by CID.
+    public func transaction(cid: String) async -> Transaction? {
+        guard let data = await process.content([cid])[cid],
+              data.count <= Self.maximumReadResponseBytes else {
+            return nil
+        }
+        guard let transaction = Transaction(data: data),
+              (try? VolumeImpl<Transaction>(node: transaction).rawCID) == cid
+        else { return nil }
+        return transaction
     }
 
     /// Appends a canonical commit while ChainProcess still owns mutation order.

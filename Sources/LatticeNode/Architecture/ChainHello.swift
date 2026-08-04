@@ -1,4 +1,5 @@
 import Foundation
+import Lattice
 
 public enum ChainHelloError: Error, Equatable, Sendable {
     case oversized
@@ -105,6 +106,13 @@ func _isBoundedWireAtom(_ value: String, maximumBytes: Int = _wireAtomCapacity) 
 /// the node validates locally, bounded by the same wire capacity.
 func _isBoundedDirectoryAtom(_ value: String, maximumBytes: Int = _wireAtomCapacity) -> Bool {
     _isBoundedWireAtom(value, maximumBytes: maximumBytes) && !value.contains("/")
+}
+
+/// Bounds an untrusted path parameter (e.g. a public read RPC's `{cid}`) to a
+/// plausible CID BEFORE any storage lookup: non-empty, within wire capacity,
+/// and a canonical CID round-trip.
+public func isPlausibleCID(_ value: String) -> Bool {
+    _isBoundedWireAtom(value) && CIDIdentity.isCanonical(value)
 }
 
 func _canonicalJSONEncode<T: Encodable>(_ value: T) throws -> Data {

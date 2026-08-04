@@ -830,6 +830,12 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         await fetch(cids)
     }
 
+    /// Ungated: whether `cid` is a durably accepted block. Public read RPC uses
+    /// this as the canonical-data gate before serving decoded block content.
+    public func hasAcceptedBlock(_ cid: String) async -> Bool {
+        (try? await store.hasAcceptedBlock(cid)) ?? false
+    }
+
     public func fetch(_ cids: Set<String>) async -> [String: Data] {
         await broker.fetchDataLocal(cids: cids)
     }
@@ -1448,6 +1454,30 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     public func status() async -> ChainProcessStatus {
         await acquireOperation()
         defer { releaseOperation() }
+        guard case .active(let level) = runtimePhase else {
+            return ChainProcessStatus(
+                phase: .awaitingGenesis,
+                chainPath: configuration.chainPath,
+                nexusGenesisCID: configuration.nexusGenesisCID,
+                tipCID: nil,
+                height: nil,
+                revision: nil
+            )
+        }
+        return ChainProcessStatus(
+            phase: .active,
+            chainPath: configuration.chainPath,
+            nexusGenesisCID: configuration.nexusGenesisCID,
+            tipCID: await level.chain.getMainChainTip(),
+            height: await level.chain.getHighestBlockHeight(),
+            revision: await level.chain.currentRevision()
+        )
+    }
+
+    /// Ungated mirror of `status()` for public read RPC: identical projection,
+    /// but never takes the consensus operation gate, so a read can never be
+    /// blocked behind (or block) an in-flight mutating operation.
+    public func readSnapshot() async -> ChainProcessStatus {
         guard case .active(let level) = runtimePhase else {
             return ChainProcessStatus(
                 phase: .awaitingGenesis,
