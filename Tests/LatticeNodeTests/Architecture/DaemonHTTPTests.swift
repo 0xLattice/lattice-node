@@ -366,6 +366,202 @@ final class DaemonHTTPTests: XCTestCase {
         }
     }
 
+    func testAccountsRouteReturnsBalanceAndNonceForKnownFundedAccountAndValidatesInputs() async throws {
+        let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-http-accounts-test-\(UUID().uuidString)"
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storage) }
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: storage,
+            privateKeyHex: String(repeating: "01", count: 32)
+        )
+        let process = try await ChainProcess.open(configuration: configuration)
+        let service = ChainService(
+            process: process,
+            childCandidateProvider: { _ in [] },
+            childProofPublisher: { _ in },
+            acceptedBlockPublisher: { _ in },
+        )
+        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
+        // Nexus genesis premines to this fixed owner address — a known funded
+        // account at an accepted block (genesis) with no code needed to mine.
+        let owner = NexusGenesis.ownerAddress
+        let genesisCID = configuration.nexusGenesisCID
+
+        // A syntactically valid CID that was never accepted as a block.
+        let unknownCID = try VolumeImpl<Transaction>(node: Transaction(
+            signatures: [:],
+            body: try HeaderImpl(node: TransactionBody(
+                accountActions: [],
+                actions: [],
+                depositActions: [],
+                genesisActions: [],
+                receiptActions: [],
+                withdrawalActions: [],
+                signers: [],
+                fee: 0,
+                nonce: 98,
+                chainPath: ["Nexus"]
+            ))
+        )).rawCID
+
+        try await app.test(.router) { client in
+            try await client.execute(
+                uri: "/v1/accounts/\(owner)?block=\(genesisCID)",
+                method: .get
+            ) { response in
+                XCTAssertEqual(response.status, .ok)
+                XCTAssertEqual(response.headers[.cacheControl], immutableCacheControl)
+                let decoded = try JSONDecoder().decode(
+                    AccountResponse.self,
+                    from: Data(response.body.readableBytesView)
+                )
+                XCTAssertEqual(decoded.owner, owner)
+                XCTAssertEqual(decoded.block, genesisCID)
+                XCTAssertEqual(decoded.balance, NexusGenesis.spec.premineAmount())
+                XCTAssertEqual(decoded.nonce, 0)
+            }
+
+            // `block` is required.
+            try await client.execute(uri: "/v1/accounts/\(owner)", method: .get) { response in
+                XCTAssertEqual(response.status, .badRequest)
+            }
+
+            // Well-formed CID, never accepted as a block.
+            try await client.execute(
+                uri: "/v1/accounts/\(owner)?block=\(unknownCID)",
+                method: .get
+            ) { response in
+                XCTAssertEqual(response.status, .notFound)
+            }
+
+            // Malformed owner / block.
+            try await client.execute(
+                uri: "/v1/accounts/not-a-real-cid?block=\(genesisCID)",
+                method: .get
+            ) { response in
+                XCTAssertEqual(response.status, .badRequest)
+            }
+            try await client.execute(
+                uri: "/v1/accounts/\(owner)?block=not-a-real-cid",
+                method: .get
+            ) { response in
+                XCTAssertEqual(response.status, .badRequest)
+            }
+        }
+    }
+
+    func testRecentBlocksRouteWalksFromTipRespectsLimitCapAndBeforeCursorHeadersOnly() async throws {
+        let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-http-recent-blocks-test-\(UUID().uuidString)"
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storage) }
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: storage,
+            privateKeyHex: String(repeating: "01", count: 32)
+        )
+        let process = try await ChainProcess.open(configuration: configuration)
+        let service = ChainService(
+            process: process,
+            childCandidateProvider: { _ in [] },
+            childProofPublisher: { _ in },
+            acceptedBlockPublisher: { _ in },
+        )
+        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
+        let genesisCID = configuration.nexusGenesisCID
+
+        // A syntactically valid CID that was never accepted as a block.
+        let unknownCID = try VolumeImpl<Transaction>(node: Transaction(
+            signatures: [:],
+            body: try HeaderImpl(node: TransactionBody(
+                accountActions: [],
+                actions: [],
+                depositActions: [],
+                genesisActions: [],
+                receiptActions: [],
+                withdrawalActions: [],
+                signers: [],
+                fee: 0,
+                nonce: 97,
+                chainPath: ["Nexus"]
+            ))
+        )).rawCID
+
+        try await app.test(.router) { client in
+            let block1 = try await mineOneBlock(client: client)
+            let block2 = try await mineOneBlock(client: client)
+            let block3 = try await mineOneBlock(client: client)
+
+            try await client.execute(uri: "/v1/blocks", method: .get) { response in
+                XCTAssertEqual(response.status, .ok)
+                XCTAssertEqual(response.headers[.cacheControl], statusCacheControl)
+                // Headers only: never the full body's "transactions" dictionary.
+                let bodyText = String(decoding: response.body.readableBytesView, as: UTF8.self)
+                XCTAssertFalse(bodyText.contains("\"transactions\""))
+                let summaries = try JSONDecoder().decode(
+                    [BlockSummary].self,
+                    from: Data(response.body.readableBytesView)
+                )
+                XCTAssertEqual(summaries.map(\.cid), [block3, block2, block1, genesisCID])
+                XCTAssertEqual(summaries.map(\.height), [3, 2, 1, 0])
+                XCTAssertEqual(summaries[0].parentCID, block2)
+                XCTAssertNil(summaries[3].parentCID)
+            }
+
+            try await client.execute(uri: "/v1/blocks?limit=2", method: .get) { response in
+                XCTAssertEqual(response.status, .ok)
+                let summaries = try JSONDecoder().decode(
+                    [BlockSummary].self,
+                    from: Data(response.body.readableBytesView)
+                )
+                XCTAssertEqual(summaries.map(\.cid), [block3, block2])
+            }
+
+            try await client.execute(
+                uri: "/v1/blocks?before=\(block2)&limit=2",
+                method: .get
+            ) { response in
+                XCTAssertEqual(response.status, .ok)
+                XCTAssertEqual(response.headers[.cacheControl], immutableCacheControl)
+                let summaries = try JSONDecoder().decode(
+                    [BlockSummary].self,
+                    from: Data(response.body.readableBytesView)
+                )
+                XCTAssertEqual(summaries.map(\.cid), [block2, block1])
+            }
+
+            try await client.execute(uri: "/v1/blocks?before=not-a-real-cid", method: .get) { response in
+                XCTAssertEqual(response.status, .badRequest)
+            }
+            try await client.execute(
+                uri: "/v1/blocks?before=\(unknownCID)",
+                method: .get
+            ) { response in
+                XCTAssertEqual(response.status, .notFound)
+            }
+            try await client.execute(uri: "/v1/blocks?limit=0", method: .get) { response in
+                XCTAssertEqual(response.status, .badRequest)
+            }
+            try await client.execute(uri: "/v1/blocks?limit=-1", method: .get) { response in
+                XCTAssertEqual(response.status, .badRequest)
+            }
+            try await client.execute(uri: "/v1/blocks?limit=abc", method: .get) { response in
+                XCTAssertEqual(response.status, .badRequest)
+            }
+            // Above the hard cap: clamped, not rejected.
+            try await client.execute(uri: "/v1/blocks?limit=999", method: .get) { response in
+                XCTAssertEqual(response.status, .ok)
+                let summaries = try JSONDecoder().decode(
+                    [BlockSummary].self,
+                    from: Data(response.body.readableBytesView)
+                )
+                XCTAssertLessThanOrEqual(summaries.count, 50)
+            }
+        }
+    }
+
     func testReadSnapshotMatchesStatusAndNeverBlocksBehindTheOperationGate() async throws {
         let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-http-readsnapshot-test-\(UUID().uuidString)"
@@ -508,6 +704,42 @@ final class DaemonHTTPTests: XCTestCase {
             }
         }
     }
+}
+
+/// Mines exactly one block atop the current tip via the public template/work
+/// routes (target is genesis-max, so nonce 0 always satisfies it) and returns
+/// the new tip's CID.
+private func mineOneBlock(client: some TestClientProtocol) async throws -> String {
+    var template: MiningTemplateResponse?
+    try await client.execute(
+        uri: "/v1/mining/templates",
+        method: .post,
+        headers: [.contentType: "application/json"],
+        body: ByteBuffer(bytes: try JSONEncoder().encode(MiningTemplateRequest()))
+    ) { response in
+        template = try JSONDecoder().decode(
+            MiningTemplateResponse.self,
+            from: Data(response.body.readableBytesView)
+        )
+    }
+    let issued = try XCTUnwrap(template)
+    var tipCID: String?
+    try await client.execute(
+        uri: "/v1/mining/work",
+        method: .post,
+        headers: [.contentType: "application/json"],
+        body: ByteBuffer(bytes: try JSONEncoder().encode(
+            SubmitWorkRequest(workID: issued.workID, nonce: 0)
+        ))
+    ) { response in
+        let submitted = try JSONDecoder().decode(
+            SubmitWorkResponse.self,
+            from: Data(response.body.readableBytesView)
+        )
+        XCTAssertTrue(submitted.accepted)
+        tipCID = submitted.tipCID
+    }
+    return try XCTUnwrap(tipCID)
 }
 
 private actor MaintenanceInvocationCounter {

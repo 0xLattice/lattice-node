@@ -345,6 +345,63 @@ func makeApplication(
             context: context
         )
     }
+    router.get("v1/accounts/:owner") { request, context in
+        guard let owner = context.parameters.get("owner"), isPlausibleCID(owner) else {
+            throw HTTPError(.badRequest)
+        }
+        guard let block = request.uri.queryParameters["block"].map(String.init),
+              isPlausibleCID(block) else {
+            throw HTTPError(.badRequest)
+        }
+        guard let account = await service.account(owner: owner, blockCID: block) else {
+            throw HTTPError(.notFound)
+        }
+        return try jsonCached(
+            AccountResponse(
+                owner: owner,
+                block: block,
+                balance: account.balance,
+                nonce: account.nonce
+            ),
+            cacheControl: immutableCacheControl,
+            request: request,
+            context: context
+        )
+    }
+    router.get("v1/blocks") { request, context in
+        let query = request.uri.queryParameters
+        var before: String?
+        if let cid = query["before"] {
+            let value = String(cid)
+            guard isPlausibleCID(value) else { throw HTTPError(.badRequest) }
+            before = value
+        }
+        let limit: Int
+        if let requested = query["limit"] {
+            guard let parsed = Int(requested), parsed > 0 else {
+                throw HTTPError(.badRequest)
+            }
+            limit = parsed
+        } else {
+            limit = 20
+        }
+        guard let blocks = await service.recentBlocks(before: before, limit: limit) else {
+            throw HTTPError(.notFound)
+        }
+        // A `before` walk is immutable ONLY when it is complete — it returned
+        // the full (capped) limit or reached genesis. If it truncated early
+        // because a parent body was pruned/temporarily unavailable, the list
+        // can grow later, so it must not be cached as immutable for a year.
+        let cappedLimit = min(limit, ChainService.maximumRecentBlocksLimit)
+        let complete = blocks.count >= cappedLimit || blocks.last?.parentCID == nil
+        return try jsonCached(
+            blocks,
+            cacheControl: (before != nil && complete)
+                ? immutableCacheControl : statusCacheControl,
+            request: request,
+            context: context
+        )
+    }
     router.post("v1/transactions") { request, context in
         let input: SubmitTransactionRequest = try await decode(request, context: context)
         return try await serviceCall(request: request, context: context) {
@@ -472,6 +529,21 @@ struct BlockResponse: Codable {
 struct TransactionResponse: Codable {
     let cid: String
     let transaction: Transaction
+}
+
+/// GET /v1/accounts/:owner?block=:cid response: the balance and next-expected
+/// nonce as of `block`'s post-state, echoing the requested owner/block CIDs.
+///
+/// NODE-ATTESTED, not proof-backed: unlike by-CID block/tx bytes (which a
+/// client can re-hash), these values are read from the node's content-verified
+/// post-state and returned as plain fields — a client cannot independently
+/// verify them without a sparse-Merkle proof (LatticeLightClient is kept out of
+/// the daemon). Trust rests on the replica being a full verifier.
+struct AccountResponse: Codable {
+    let owner: String
+    let block: String
+    let balance: UInt64
+    let nonce: UInt64
 }
 
 private extension Data {

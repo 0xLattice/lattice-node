@@ -314,6 +314,18 @@ public struct ChainServiceStatusResponse: Codable, Sendable, Equatable {
     public let pendingChildIntents: Int
 }
 
+/// One accepted block's header/summary: enough to build a recent-blocks index
+/// without serving the full body (whose transactions could each be up to
+/// `ChainServiceLimits.maximumPayloadBytes` — an N-block walk that fetched full
+/// bodies would amplify to N × maxBlockSize).
+public struct BlockSummary: Codable, Sendable, Equatable {
+    public let cid: String
+    public let height: UInt64
+    public let parentCID: String?
+    public let timestamp: Int64
+    public let transactionCount: Int
+}
+
 public enum ChainServiceError: Error, Equatable, Sendable {
     case unresolvedChainSpec
     case invalidRewardTransaction
@@ -396,6 +408,7 @@ public actor ChainService {
     private static let templateLifetimeMilliseconds: UInt64 = 30_000
     private static let templateCapacity = 16
     private static let maximumReadResponseBytes = Int(IvyConfig.defaultProtocolMaxFrameSize)
+    public static let maximumRecentBlocksLimit = 50
 
     private let process: ChainProcess
     private let pool: TransactionPool
@@ -534,6 +547,81 @@ public actor ChainService {
               (try? VolumeImpl<Transaction>(node: transaction).rawCID) == cid
         else { return nil }
         return transaction
+    }
+
+    /// Bounded public read: an account's balance and next-expected nonce as of
+    /// one accepted block's post-state. Never takes the operation gate — reads
+    /// only ChainProcess's ungated CAS path plus targeted trie resolution.
+    public func account(
+        owner: String,
+        blockCID: String
+    ) async -> (balance: UInt64, nonce: UInt64)? {
+        guard await process.hasAcceptedBlock(blockCID) else { return nil }
+        guard let data = await process.content([blockCID])[blockCID],
+              data.count <= Self.maximumReadResponseBytes,
+              let block = _contentBoundBlock(cid: blockCID, data: data) else {
+            return nil
+        }
+        guard let state = try? await block.postState.resolve(fetcher: process).node else {
+            return nil
+        }
+        guard let nonce = try? await state.accountState.nextExpectedNonce(
+                for: owner,
+                fetcher: process
+              ),
+              let resolved = try? await state.accountState.resolve(
+                paths: [[owner]: .targeted],
+                fetcher: process
+              ),
+              let accountNode = resolved.node else {
+            return nil
+        }
+        let balance: UInt64 = (try? accountNode.get(key: owner)) ?? 0
+        return (balance: balance, nonce: nonce)
+    }
+
+    /// Bounded public read: recent block headers walking parent links from
+    /// `startCID` (or the current tip when `nil`) for up to `limit` steps
+    /// (hard-capped at `maximumRecentBlocksLimit`). Each step is one bounded
+    /// content fetch for the block plus one bounded content fetch for its
+    /// transactions-dictionary header (to read its count) — full transaction
+    /// bodies are never fetched. Never takes the operation gate. Returns nil
+    /// when `startCID` is given but is not an accepted block.
+    public func recentBlocks(before startCID: String?, limit: Int) async -> [BlockSummary]? {
+        let boundedLimit = min(max(limit, 0), Self.maximumRecentBlocksLimit)
+        guard boundedLimit > 0 else { return [] }
+
+        var cid: String
+        if let startCID {
+            guard await process.hasAcceptedBlock(startCID) else { return nil }
+            cid = startCID
+        } else {
+            guard let tip = await process.readSnapshot().tipCID else { return [] }
+            cid = tip
+        }
+
+        var summaries: [BlockSummary] = []
+        summaries.reserveCapacity(boundedLimit)
+        for _ in 0..<boundedLimit {
+            guard let data = await process.content([cid])[cid],
+                  data.count <= Self.maximumReadResponseBytes,
+                  let block = _contentBoundBlock(cid: cid, data: data) else {
+                break
+            }
+            let transactionCount = (try? await block.transactions.resolve(
+                fetcher: process
+            ))?.node?.count ?? 0
+            summaries.append(BlockSummary(
+                cid: cid,
+                height: block.height,
+                parentCID: block.parent?.rawCID,
+                timestamp: block.timestamp,
+                transactionCount: transactionCount
+            ))
+            guard let parent = block.parent else { break }
+            cid = parent.rawCID
+        }
+        return summaries
     }
 
     /// Appends a canonical commit while ChainProcess still owns mutation order.
