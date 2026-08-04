@@ -148,6 +148,19 @@ struct NodeNetworkPlaneConfigurations {
                 signingKey: configuration.signingKey,
                 listenPort: configuration.listenPort,
                 bootstrapPeers: configuration.bootstrapPeers,
+                // Always keep headroom for outbound dials so an inbound burst from
+                // a single source cannot exhaust total capacity and starve the
+                // dials a node needs to bootstrap/cold-sync. Matters most when the
+                // per-netgroup cap is relaxed (proxy-fronted nodes, below).
+                reservedOutboundConnectionSlots: min(
+                    NodeConfiguration.overlayReservedOutboundSlots,
+                    IvyConfig.defaultMaxConnections - 1
+                ),
+                // Operator-chosen (default: Ivy's conservative value). Nodes behind
+                // an L4 proxy see every inbound as the proxy's one address, so the
+                // netgroup cap collapses all inbound onto one bucket and must be
+                // raised for the mesh to form and peers to cold-sync.
+                maxConnectionsPerNetgroup: configuration.overlayMaxConnectionsPerNetgroup,
                 minPeerKeyBits: configuration.minPeerKeyBits,
                 mode: .overlay
             ),

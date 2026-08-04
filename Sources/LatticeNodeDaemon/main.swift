@@ -70,6 +70,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Minimum overlay peer-key work bits")
     var minimumPeerKeyBits = 0
 
+    @Option(help: "Per-netgroup overlay connection cap; raise on proxy-fronted nodes where all inbound share one source address")
+    var overlayMaxConnectionsPerNetgroup = 2
+
     mutating func run() async throws {
         guard let address = ChainAddress(string: chainPath) else {
             throw ValidationError("--chain-path must be absolute and begin with Nexus")
@@ -94,7 +97,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             rpcPort: rpcPort,
             bootstrapPeers: overlayPeers,
             parentEndpoint: parentEndpoint,
-            minPeerKeyBits: minimumPeerKeyBits
+            minPeerKeyBits: minimumPeerKeyBits,
+            overlayMaxConnectionsPerNetgroup: overlayMaxConnectionsPerNetgroup
         )
 
         let network = try NodeNetworkRuntime(configuration: configuration)

@@ -79,7 +79,20 @@ public struct NodeConfiguration: Sendable {
     public let bootstrapPeers: [PeerEndpoint]
     public let parentEndpoint: ParentEndpoint?
     public let minPeerKeyBits: Int
+    /// Per-netgroup inbound/outbound overlay connection cap. Ivy buckets peers by
+    /// the connection's observed remote host (/16), an anti-eclipse defense that
+    /// assumes distinct source IPs. Nodes fronted by an L4 proxy (e.g. fly-proxy)
+    /// see every inbound connection as the proxy's single address, collapsing all
+    /// inbound onto one netgroup; such deployments must raise this. Default keeps
+    /// Ivy's conservative value for direct-IP nodes.
+    public let overlayMaxConnectionsPerNetgroup: Int
     public let resourcePolicy: NodeResourcePolicy
+
+    /// Overlay slots kept in reserve for outbound dials so a burst of inbound
+    /// connections (from one source, especially behind a proxy where the
+    /// per-netgroup cap cannot discriminate) can never exhaust total capacity and
+    /// starve the outbound dials a node needs to bootstrap and cold-sync.
+    public static let overlayReservedOutboundSlots = 16
 
     public init(
         chainPath: [String],
@@ -91,6 +104,7 @@ public struct NodeConfiguration: Sendable {
         bootstrapPeers: [PeerEndpoint] = [],
         parentEndpoint: ParentEndpoint? = nil,
         minPeerKeyBits: Int = 0,
+        overlayMaxConnectionsPerNetgroup: Int = 2,
         resourcePolicy: NodeResourcePolicy = .default
     ) throws {
         guard let address = ChainAddress(chainPath) else {
@@ -147,6 +161,7 @@ public struct NodeConfiguration: Sendable {
         self.bootstrapPeers = bootstrapPeers
         self.parentEndpoint = normalizedParentEndpoint
         self.minPeerKeyBits = minPeerKeyBits
+        self.overlayMaxConnectionsPerNetgroup = max(1, overlayMaxConnectionsPerNetgroup)
         self.resourcePolicy = resourcePolicy
     }
 
