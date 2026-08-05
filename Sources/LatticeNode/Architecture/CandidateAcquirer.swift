@@ -278,6 +278,9 @@ struct CandidateAcquirer {
         }
     }
 
+    /// Number of candidates currently queued ready-to-fetch.
+    var readyDepth: Int { readyOrder.count }
+
     mutating func next() -> Candidate? {
         guard active == nil else { return nil }
         while !readyOrder.isEmpty {

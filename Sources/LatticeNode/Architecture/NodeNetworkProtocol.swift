@@ -16,6 +16,8 @@ enum NodeNetworkTopic {
         "lattice.overlay.transaction.inventory.response.v1"
     static let acceptedLeavesRequest = "lattice.overlay.accepted-leaves.request.v1"
     static let acceptedLeavesResponse = "lattice.overlay.accepted-leaves.response.v1"
+    static let forwardRangeRequest = "lattice.overlay.forward-range.request.v1"
+    static let forwardRangeResponse = "lattice.overlay.forward-range.response.v1"
     static let portableAttachmentAvailable =
         "lattice.overlay.portable-attachment.available.v1"
     static let portableAttachmentIndexRequest =
@@ -42,6 +44,7 @@ enum NodeNetworkTopic {
         case overlayHello, blockAnnouncement, transactionAvailable,
              transactionInventoryRequest, transactionInventoryResponse,
              acceptedLeavesRequest, acceptedLeavesResponse,
+             forwardRangeRequest, forwardRangeResponse,
              portableAttachmentAvailable,
              portableAttachmentIndexRequest,
              portableAttachmentIndexResponse: .overlay
@@ -126,6 +129,15 @@ extension NodeJSONMessage {
 
 struct BlockAnnouncementMessage: NodeJSONMessage, Equatable, Sendable {
     let blockCID: String
+    /// The announcer's height for `blockCID`. Lets a receiver tell a shallow
+    /// propagation (handled by an ordinary predecessor pull) from a deep gap
+    /// that warrants forward-apply range sync. Optional for wire compatibility.
+    let height: UInt64?
+
+    init(blockCID: String, height: UInt64? = nil) {
+        self.blockCID = blockCID
+        self.height = height
+    }
 
     func validate() throws {
         guard _isBoundedWireAtom(blockCID) else {
@@ -245,6 +257,54 @@ struct AcceptedLeavesResponseMessage: NodeJSONMessage, Equatable, Sendable {
               blockCIDs.allSatisfy({ _isBoundedWireAtom($0) }),
               blockCIDs.allSatisfy({ cid in afterCID.map({ cid > $0 }) ?? true }),
               !hasMore || blockCIDs.count == Self.maximumLeaves else {
+            throw NodeNetworkWireError.malformed
+        }
+    }
+}
+
+/// Requests the next contiguous, chain-ordered slice of a peer's MAIN chain
+/// going FORWARD from `afterCID` (a block the requester already holds — its own
+/// frontier). Unlike the leaves inventory (which ships only tips and forces one
+/// predecessor pull per block), and unlike a tip-anchored backward walk (which
+/// would force a receiver to buffer the whole gap before applying), this lets a
+/// receiver pull one bounded page, apply it genesis-ward immediately, advance
+/// its frontier, and page again — O(page) working set at any chain depth.
+/// Ordering is only a hint: the receiver still verifies each fetched block's
+/// parent linkage, proof-of-work, and re-executed state, so a lying peer only
+/// wastes bounded, self-limited work.
+struct ForwardRangeRequestMessage: NodeJSONMessage, Equatable, Sendable {
+    let requestID: UInt64
+    /// The requester's current frontier; the response starts at its child.
+    let afterCID: String
+
+    func validate() throws {
+        guard requestID != 0, _isBoundedWireAtom(afterCID) else {
+            throw NodeNetworkWireError.malformed
+        }
+    }
+}
+
+struct ForwardRangeResponseMessage: NodeJSONMessage, Equatable, Sendable {
+    /// One page's worth of block CIDs. Small enough that block-apply time (not
+    /// round-trips) dominates a deep catch-up, and that a modest chain already
+    /// exercises multi-page paging.
+    static let maximumBlocks = 64
+
+    let requestID: UInt64
+    let afterCID: String
+    /// Main-chain blocks forward from `afterCID`, genesis-ward first:
+    /// `[child(afterCID), grandchild(afterCID), …]`. Empty when the responder
+    /// has nothing after `afterCID` (caught up, or `afterCID` off its chain).
+    let blockCIDs: [String]
+    /// True when the responder holds more blocks beyond this page.
+    let hasMore: Bool
+
+    func validate() throws {
+        guard requestID != 0,
+              _isBoundedWireAtom(afterCID),
+              blockCIDs.count <= Self.maximumBlocks,
+              blockCIDs.allSatisfy({ _isBoundedWireAtom($0) }),
+              !hasMore || blockCIDs.count == Self.maximumBlocks else {
             throw NodeNetworkWireError.malformed
         }
     }
