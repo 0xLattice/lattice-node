@@ -813,6 +813,38 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         )
     }
 
+    /// One page of this node's MAIN chain going forward from `afterCID` (a block
+    /// the caller already holds): `[child(afterCID), …]`, genesis-ward first,
+    /// with `hasMore` when the canonical chain extends past the page. Serves
+    /// forward-apply sync so a receiver can apply a bounded page and page again,
+    /// never buffering the whole gap. Empty when `afterCID` is not on our main
+    /// chain or we have nothing after it.
+    func forwardMainChainRange(
+        afterCID: String,
+        limit: Int
+    ) async -> (blockCIDs: [String], hasMore: Bool) {
+        guard limit > 0, case .active(let level) = runtimePhase else {
+            return ([], false)
+        }
+        guard let meta = await level.chain.getConsensusBlock(hash: afterCID),
+              await level.chain.getMainChainBlockHash(atIndex: meta.blockHeight) == afterCID
+        else {
+            return ([], false)
+        }
+        let highest = await level.chain.getHighestBlockHeight()
+        var blockCIDs: [String] = []
+        var height = meta.blockHeight + 1
+        while blockCIDs.count < limit, height <= highest {
+            guard let cid = await level.chain.getMainChainBlockHash(atIndex: height) else {
+                break
+            }
+            blockCIDs.append(cid)
+            height += 1
+        }
+        let hasMore = meta.blockHeight + UInt64(blockCIDs.count) < highest
+        return (blockCIDs, hasMore)
+    }
+
     func portableEvidenceVolumeCID(
         scope: IssuedChildProofScope,
         edgeCID: String,

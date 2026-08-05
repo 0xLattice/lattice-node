@@ -277,6 +277,92 @@ final class ParentChildE2ETests: XCTestCase {
         passed = true
     }
 
+    /// A fresh node must cold-sync a chain far deeper than any fixed working-set
+    /// bound. The previous backward-gather sync retained every disconnected
+    /// block until the whole chain connected to genesis and capped that
+    /// retention at 64, so it stalled and crashed cold-syncing anything much
+    /// deeper (~122 blocks observed). Forward-apply pulls the ordered ancestor
+    /// range and applies genesis-ward with a bounded look-ahead, so there is no
+    /// chain-depth ceiling. This mines a Nexus chain past that old cap and past
+    /// one full ancestor-range page (256), then joins a brand-new node over the
+    /// real overlay and requires it to reach the exact tip.
+    func testFreshNodeColdSyncsDeepNexusChainOverOverlay() async throws {
+        let workspace = try E2EWorkspace()
+        let cluster = E2ECluster()
+        var passed = false
+        defer {
+            cluster.forceTerminateAll()
+            if passed {
+                try? workspace.remove()
+            } else {
+                print("lattice-node E2E artifacts retained at \(workspace.url.path)")
+            }
+        }
+
+        let binary = try E2EBinary.latticeNode()
+        let sourceIdentity = try workspace.makeIdentity(named: "source")
+        let joinerIdentity = try workspace.makeIdentity(named: "joiner")
+        let ports = try E2EPorts.allocate(count: 6)
+        let source = nexusNode(
+            binary: binary,
+            workspace: workspace,
+            name: "source",
+            identity: sourceIdentity,
+            overlayPort: ports[0],
+            factPort: ports[1],
+            rpcPort: ports[2]
+        )
+        let joiner = nexusNode(
+            binary: binary,
+            workspace: workspace,
+            name: "joiner",
+            identity: joinerIdentity,
+            overlayPort: ports[3],
+            factPort: ports[4],
+            rpcPort: ports[5]
+        )
+        joiner.setOverlayPeers([
+            try overlayPeer(identity: sourceIdentity, port: ports[0])
+        ])
+        cluster.add(source)
+        cluster.add(joiner)
+
+        // Build a Nexus chain past the old retained-candidate cap (64): the
+        // previous backward-gather sync could not hold more than 64 disconnected
+        // blocks, so it never connected — height stayed 0 — for any chain deeper
+        // than that. Depth stays inside the first difficulty-retarget window
+        // (120) so mining does not become a retarget benchmark, and keeps the
+        // per-run mining cost bounded on slow CI. With a 64-CID forward page this
+        // depth still spans multiple pages, exercising the receiver's page-pump
+        // and the responder's hasMore across pages.
+        let depth: UInt64 = 70
+        try source.start()
+        _ = try await waitForNexus(source)
+        for _ in 0..<depth {
+            let work = try await mine(source)
+            XCTAssertTrue(work.accepted)
+        }
+        let sourceTip = try await source.waitForStatus {
+            ($0.height ?? 0) == depth
+        }
+        let tipCID = try XCTUnwrap(sourceTip.tipCID)
+
+        // A brand-new node joins and must forward-apply the whole chain to tip.
+        // The deadline is generous: on a slow, CPU-contended runner a content
+        // fetch can wedge mid-apply and the range-sync watchdog re-drives it,
+        // which adds bounded recovery pauses. The wait returns the instant the
+        // tip matches, so headroom costs a passing run nothing.
+        try joiner.start()
+        let synced = try await joiner.waitForStatus(
+            timeout: e2eScaled(.seconds(420))
+        ) { $0.phase == .active && $0.tipCID == tipCID }
+        XCTAssertEqual(synced.height, depth)
+        XCTAssertEqual(synced.tipCID, tipCID)
+
+        try await cluster.stopAll()
+        passed = true
+    }
+
     func testNestedHardGenesisConstrainsRootSearchAndActivates() async throws {
         let workspace = try E2EWorkspace()
         let cluster = E2ECluster()
