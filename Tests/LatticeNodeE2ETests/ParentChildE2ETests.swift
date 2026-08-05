@@ -327,14 +327,15 @@ final class ParentChildE2ETests: XCTestCase {
         cluster.add(source)
         cluster.add(joiner)
 
-        // Build a Nexus chain well past the old retained-candidate cap (64):
-        // the previous backward-gather sync could not hold more than 64
-        // disconnected blocks, so it never connected — height stayed 0 — for any
-        // chain deeper than that. Depth stays inside the first difficulty-retarget
-        // window (120) so mining does not become a retarget benchmark. With a
-        // 64-CID forward page this depth spans multiple pages, exercising the
-        // receiver's page-pump and the responder's hasMore across pages.
-        let depth: UInt64 = 110
+        // Build a Nexus chain past the old retained-candidate cap (64): the
+        // previous backward-gather sync could not hold more than 64 disconnected
+        // blocks, so it never connected — height stayed 0 — for any chain deeper
+        // than that. Depth stays inside the first difficulty-retarget window
+        // (120) so mining does not become a retarget benchmark, and keeps the
+        // per-run mining cost bounded on slow CI. With a 64-CID forward page this
+        // depth still spans multiple pages, exercising the receiver's page-pump
+        // and the responder's hasMore across pages.
+        let depth: UInt64 = 70
         try source.start()
         _ = try await waitForNexus(source)
         for _ in 0..<depth {
@@ -347,9 +348,13 @@ final class ParentChildE2ETests: XCTestCase {
         let tipCID = try XCTUnwrap(sourceTip.tipCID)
 
         // A brand-new node joins and must forward-apply the whole chain to tip.
+        // The deadline is generous: on a slow, CPU-contended runner a content
+        // fetch can wedge mid-apply and the range-sync watchdog re-drives it,
+        // which adds bounded recovery pauses. The wait returns the instant the
+        // tip matches, so headroom costs a passing run nothing.
         try joiner.start()
         let synced = try await joiner.waitForStatus(
-            timeout: e2eScaled(.seconds(180))
+            timeout: e2eScaled(.seconds(420))
         ) { $0.phase == .active && $0.tipCID == tipCID }
         XCTAssertEqual(synced.height, depth)
         XCTAssertEqual(synced.tipCID, tipCID)

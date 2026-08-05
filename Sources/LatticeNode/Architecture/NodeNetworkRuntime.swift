@@ -2137,6 +2137,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                    announced > ourHeight + Self.rangeSyncDepthThreshold {
                     await startRangeSync(
                         peer: peer,
+                        targetHeight: announced,
                         generation: generation,
                         process: process
                     )
@@ -4334,8 +4335,18 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// the last we have applied — so paging pipelines ahead of application.
         var requestedAfterCID: String
         var requestedHeight: UInt64
+        /// The peer's advertised height when this sync began: paging is only
+        /// DONE once our applied tip reaches it. Every requested page can be
+        /// enqueued while the applied tip is still far behind, so we cannot
+        /// treat "no more pages to request" as "caught up".
+        var targetHeight: UInt64
         var progressEpoch: UInt64
         var progressBaselineHeight: UInt64
+        /// Consecutive re-drives that produced no applied progress. Reset every
+        /// time the applied tip climbs; once it hits the cap the slot is released
+        /// so a peer that advertises a tall tip but withholds one block cannot
+        /// occupy the single sync slot indefinitely.
+        var redriveAttempts: Int
         var responseTimeout: Task<Void, Never>?
         var progressTimeout: Task<Void, Never>?
     }
@@ -4344,8 +4355,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// more than this window no matter how far behind we are.
     private static let rangeSyncMaxPagesAhead: UInt64 = 2
 
+    /// Consecutive no-progress re-drives before the sync slot is released for a
+    /// different peer. Any applied progress resets the count, so this only trips
+    /// on a peer that has genuinely stopped advancing our tip.
+    private static let rangeSyncMaxRedrives: Int = 8
+
     private func startRangeSync(
         peer: AuthenticatedPeer,
+        targetHeight: UInt64,
         generation: UInt64,
         process: ChainProcess
     ) async {
@@ -4363,8 +4380,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             hasMore: true,
             requestedAfterCID: status.tipCID ?? configuration.nexusGenesisCID,
             requestedHeight: status.height ?? 0,
+            targetHeight: targetHeight,
             progressEpoch: 0,
             progressBaselineHeight: status.height ?? 0,
+            redriveAttempts: 0,
             responseTimeout: nil,
             progressTimeout: nil
         )
@@ -4467,15 +4486,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         current.requestedAfterCID = lastCID
         current.requestedHeight += enqueued
-        // Reached the peer's tip: the final page is enqueued and applies through
-        // the worker, so paging is done — release the slot immediately instead
-        // of lingering until the progress deadline (which would block the next
-        // range sync and stall block-heavy operation).
-        guard current.hasMore else {
-            clearRangeSync()
-            serviceCandidateAcquirer()
-            return
-        }
+        // Reached the peer's tip: every page is REQUESTED, but the blocks still
+        // have to be fetched and applied through the single-active worker. Keep
+        // the sync (and its progress watchdog) alive until the applied tip
+        // actually reaches the target — a single wedged content fetch mid-apply
+        // would otherwise strand catch-up with no path to re-request the block.
         rangeSync = current
         serviceCandidateAcquirer()
         await pumpRangeSync(generation: generation, process: process)
@@ -4526,19 +4541,76 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let status = await process.status()
         guard var current = rangeSync, current.progressEpoch == epoch,
               isCurrentGeneration(generation) else { return }
-        if (status.height ?? 0) > current.progressBaselineHeight {
-            current.progressBaselineHeight = status.height ?? 0
+        let applied = status.height ?? 0
+        if applied >= current.targetHeight {
+            // Caught up to the peer's advertised tip: release the slot so the
+            // next deep peer can drive, and let direct propagation carry any
+            // blocks the peer has mined since.
+            clearRangeSync()
+            return
+        }
+        guard overlayPeers[current.peer.key]?.sessionID == current.peer.sessionID
+        else {
+            // The peer went away before we caught up: release the slot so a new
+            // deep peer can take over instead of re-driving into a dead session.
+            clearRangeSync()
+            return
+        }
+        if applied > current.progressBaselineHeight {
+            // The applied tip is still climbing — the worker is draining the
+            // enqueued pages. Re-arm and keep watching; do not re-request.
+            current.progressBaselineHeight = applied
+            current.redriveAttempts = 0
             rangeSync = current
             scheduleRangeSyncProgress(generation: generation, process: process)
-        } else {
-            clearRangeSync()
+            return
         }
+        guard current.redriveAttempts < Self.rangeSyncMaxRedrives else {
+            // Re-driving this peer has not advanced our tip across the cap: it is
+            // withholding a block we need. Release the slot so a different deep
+            // peer's announcement can drive catch-up instead.
+            clearRangeSync()
+            return
+        }
+        current.redriveAttempts += 1
+        // Stalled below the target with no applied progress in a full window:
+        // a content fetch has wedged (e.g. its only provider was dropped as
+        // deficient), and every already-enqueued successor is blocked behind
+        // it. Rewind the request anchor to the current applied tip and page
+        // forward again — re-delivering the wedged block re-attaches its
+        // provider (bumping providerRevision re-readies the waiting candidate),
+        // and rotates onto whatever the peer still serves.
+        current.requestedAfterCID = status.tipCID ?? configuration.nexusGenesisCID
+        current.requestedHeight = applied
+        current.progressBaselineHeight = applied
+        current.hasMore = true
+        current.awaiting = false
+        current.responseTimeout?.cancel()
+        current.responseTimeout = nil
+        rangeSync = current
+        scheduleRangeSyncProgress(generation: generation, process: process)
+        await pumpRangeSync(generation: generation, process: process)
     }
 
-    private func rangeSyncTimedOut(requestID: UInt64, generation: UInt64) {
+    private func rangeSyncTimedOut(requestID: UInt64, generation: UInt64) async {
         guard let sync = rangeSync, sync.requestID == requestID, sync.awaiting,
-              isCurrentGeneration(generation) else { return }
-        clearRangeSync()
+              isCurrentGeneration(generation), let process else { return }
+        guard overlayPeers[sync.peer.key]?.sessionID == sync.peer.sessionID else {
+            // Peer we were paging from is gone: release the slot so another
+            // deep peer's announcement can start a fresh sync.
+            clearRangeSync()
+            return
+        }
+        // The page request went unanswered but the peer is still connected —
+        // clear the awaiting latch and re-issue it rather than tearing down the
+        // whole sync (the progress watchdog remains the backstop for a peer that
+        // has genuinely stopped serving).
+        var current = sync
+        current.awaiting = false
+        current.responseTimeout?.cancel()
+        current.responseTimeout = nil
+        rangeSync = current
+        await pumpRangeSync(generation: generation, process: process)
     }
 
     private func clearRangeSync() {
