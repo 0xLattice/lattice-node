@@ -845,6 +845,21 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         return (blockCIDs, hasMore)
     }
 
+    /// Main-chain block CID at `height`, or nil when the process is not active
+    /// or the height is past the tip. Ungated explorer read over the in-memory
+    /// height index (same source as `forwardMainChainRange`), so a by-height
+    /// lookup never walks parents or touches the operation gate.
+    func mainChainBlockCID(atHeight height: UInt64) async -> String? {
+        guard case .active(let level) = runtimePhase else { return nil }
+        return await level.chain.getMainChainBlockHash(atIndex: height)
+    }
+
+    /// The current main-chain tip height, or nil when not active.
+    func highestBlockHeight() async -> UInt64? {
+        guard case .active(let level) = runtimePhase else { return nil }
+        return await level.chain.getHighestBlockHeight()
+    }
+
     func portableEvidenceVolumeCID(
         scope: IssuedChildProofScope,
         edgeCID: String,
