@@ -471,10 +471,23 @@ public struct ExplorerChainChildren: Codable, Sendable, Equatable {
     public let children: [ExplorerChainChild]
 }
 
-public struct ExplorerEndpoints: Codable, Sendable, Equatable {
-    public let endpoints: [String]
+public struct ExplorerEndpoint: Codable, Sendable, Equatable {
+    /// A reachable HTTP(S) read URL for a node serving the child chain. By
+    /// convention (A) this is `https://<provider-host>` — the child node serves
+    /// its public read API over HTTPS on the same host it announced as a DHT
+    /// provider of the child's genesis. The explorer connects here and
+    /// genesis-verifies it against the parent's anchored genesisCID.
+    public let rpcUrl: String
 
-    public init(endpoints: [String]) {
+    public init(rpcUrl: String) {
+        self.rpcUrl = rpcUrl
+    }
+}
+
+public struct ExplorerEndpoints: Codable, Sendable, Equatable {
+    public let endpoints: [ExplorerEndpoint]
+
+    public init(endpoints: [ExplorerEndpoint]) {
         self.endpoints = endpoints
     }
 }
@@ -1034,23 +1047,35 @@ public actor ChainService {
         let base = process.configuration.chainPath
         var seen = Set<String>()
         var children: [ExplorerChainChild] = []
+        // Canonical source: the committed `genesisState` subtrie of the tip's
+        // post-state maps every anchored child's directory -> its genesisCID.
+        // Anchoring a child (a GenesisAction in a parent block) writes this
+        // entry, so this trie IS the permissionless child index — no registry.
+        // The genesisCID is what a client uses to (a) genesis-verify any node it
+        // later discovers as a DHT provider of that CID and (b) resolve the
+        // child's spec; walk it in one bounded enumeration.
         if let tip = await process.readSnapshot().tipCID,
            let block = await block(cid: tip),
-           let dictionary = (try? await block.children.resolve(
+           let state = try? await block.postState.resolve(
+               fetcher: process
+           ).node,
+           let genesis = (try? await state.genesisState.resolve(
                fetcher: process
            ))?.node,
-           let entries = try? await dictionary.boundedKeysAndValues(
+           let entries = try? await genesis.boundedKeysAndValues(
                limit: boundedLimit,
                fetcher: process
            ) {
-            for (directory, _) in entries {
+            for (directory, genesisCID) in entries {
+                guard children.count < boundedLimit else { break }
                 guard seen.insert(directory).inserted else { continue }
                 children.append(ExplorerChainChild(
                     chainPath: base + [directory],
-                    genesisHash: nil
+                    genesisHash: genesisCID
                 ))
             }
         }
+        // Supplement with pending local deploys not yet anchored into state.
         for (directory, intent) in childIntents {
             guard children.count < boundedLimit else { break }
             guard seen.insert(directory).inserted else { continue }
@@ -1060,6 +1085,26 @@ public actor ChainService {
             ))
         }
         return ExplorerChainChildren(children: Array(children.prefix(boundedLimit)))
+    }
+
+    /// The anchored genesisCID of a direct child `directory` of this chain, read
+    /// from the committed `genesisState` subtrie (targeted, single-key). nil if
+    /// no such child is anchored. The daemon uses this to turn a `?chainPath=`
+    /// into the CID it then runs a DHT provider discovery on for /api/chain/endpoints.
+    public func explorerChildGenesisCID(directory: String) async -> String? {
+        guard let tip = await process.readSnapshot().tipCID,
+              let block = await block(cid: tip),
+              let state = try? await block.postState.resolve(
+                  fetcher: process
+              ).node,
+              let resolved = try? await state.genesisState.resolve(
+                  paths: [[directory]: .targeted],
+                  fetcher: process
+              ),
+              let node = resolved.node else {
+            return nil
+        }
+        return (try? node.get(key: directory)) ?? nil
     }
 
     /// Appends a canonical commit while ChainProcess still owns mutation order.

@@ -180,6 +180,12 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                     return ExplorerPeersResponse(count: 0, peers: [])
                 }
                 return await network.peerSummaries(limit: 200)
+            },
+            discoverProviders: { [weak network] genesisCID in
+                guard let network else { return [] }
+                return await network.discoverProviderReadURLs(
+                    genesisCID: genesisCID
+                )
             }
         )
 
@@ -297,7 +303,8 @@ func makeApplication(
     port: Int,
     peers: @Sendable @escaping () async -> ExplorerPeersResponse = {
         ExplorerPeersResponse(count: 0, peers: [])
-    }
+    },
+    discoverProviders: @Sendable @escaping (String) async -> [String] = { _ in [] }
 ) -> Application<RouterResponder<BasicRequestContext>> {
     let router = Router()
     // CORS is scoped to READ methods only. The POST write routes stay off the
@@ -602,9 +609,38 @@ func makeApplication(
             context: context
         )
     }
+    // Permissionless child discovery: `?chainPath=<parent>/<dir>` names a DIRECT
+    // child of this node's chain. We resolve that child's anchored genesisCID
+    // from our own genesisState, then DHT-discover nodes providing that CID and
+    // return them as read URLs (convention A). No registry: a child node becomes
+    // discoverable purely by announcing itself as a provider of its genesis.
     router.get("api/chain/endpoints") { request, context in
-        try jsonCached(
-            ExplorerEndpoints(endpoints: []),
+        guard let requested = request.uri.queryParameters["chainPath"]
+            .map(String.init) else {
+            throw HTTPError(.badRequest)
+        }
+        let own = service.explorerChainPath()
+        let parts = requested.split(separator: "/").map(String.init)
+        guard parts.count == own.count + 1,
+              Array(parts.prefix(own.count)) == own else {
+            // Only direct children of THIS node's chain are resolvable here.
+            throw HTTPError(.notFound)
+        }
+        let directory = parts[own.count]
+        guard let genesisCID = await service.explorerChildGenesisCID(
+            directory: directory
+        ) else {
+            // Not anchored (yet): no error — the explorer treats empty as offline.
+            return try jsonCached(
+                ExplorerEndpoints(endpoints: []),
+                cacheControl: statusCacheControl,
+                request: request,
+                context: context
+            )
+        }
+        let urls = await discoverProviders(genesisCID)
+        return try jsonCached(
+            ExplorerEndpoints(endpoints: urls.map { ExplorerEndpoint(rpcUrl: $0) }),
             cacheControl: statusCacheControl,
             request: request,
             context: context
