@@ -117,3 +117,25 @@ sudo systemctl start lattice-node lattice-miner
 Do not keep a legacy database, `state.db`, or `volumes.db` across this migration.
 Nexus recreates the exact pinned genesis; child processes return to
 `awaitingGenesis` and reacquire an authenticated parent link.
+
+## Read replica (public read surface)
+
+`read-replica/` is the public read surface for the explorer (lattice.build).
+It is a normal lattice-node — dialing the backbones and syncing — with an nginx
+**allowlist** proxy in front: the node's HTTP API stays loopback-only (rule 3),
+and nginx exposes ONLY the bounded GET read routes (`/health`, `/v1/blocks*`,
+`/v1/transactions/:cid`, `/v1/accounts/:owner`, `/api/*`), returning 403 for
+everything else — crucially `/v1/status` (gated + mutating) and every write POST.
+
+- `Dockerfile` — `FROM ghcr.io/adalinxx/lattice-node:sha-<...>` + nginx. Bump the
+  pinned sha on each read-RPC release so the allowlist matches the node's routes.
+- `nginx.conf` — the allowlist itself (the auditor-required public/internal
+  boundary). Any route change must land with its allowlist change in the same diff.
+- `entrypoint.sh` — starts nginx, then the node in the foreground.
+- `fly.toml` — the fly app (`lattice-mainnet-read`); 443/80 → nginx (8081).
+- `test-allowlist.sh` — asserts the boundary (allowed routes proxy through, denied
+  routes 403) by running the real `nginx.conf` against a stub upstream in Docker.
+  Runs in CI (`read-replica-allowlist` job); run locally with
+  `bash deploy/read-replica/test-allowlist.sh`.
+
+Deploy: `flyctl deploy ./deploy/read-replica --config ./deploy/read-replica/fly.toml -a lattice-mainnet-read`.
