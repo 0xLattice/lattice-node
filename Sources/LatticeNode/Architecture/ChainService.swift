@@ -326,6 +326,159 @@ public struct BlockSummary: Codable, Sendable, Equatable {
     public let transactionCount: Int
 }
 
+// MARK: - Explorer read API DTOs
+//
+// Rich, public, ungated read responses for the static browser explorer's
+// `/api/...` surface. Defined here (module LatticeNode) so both ChainService
+// and the daemon's HTTP handlers (module LatticeNodeDaemon) can see them —
+// the handlers only `json()` these. Field names are the explorer's wire
+// contract and must not change. Every producing method mirrors the existing
+// by-CID read path (content-verified, size-bounded) and never takes the
+// operation gate.
+
+public struct ExplorerLatestBlock: Codable, Sendable, Equatable {
+    public let height: UInt64
+    public let hash: String
+    public let transactionCount: Int
+    public let timestamp: Int64
+    public let previousBlock: String?
+}
+
+public struct ExplorerBlock: Codable, Sendable, Equatable {
+    public let height: UInt64
+    public let hash: String
+    public let timestamp: Int64
+    public let previousBlock: String?
+    public let transactionCount: Int
+    public let childBlockCount: Int
+    public let nonce: UInt64
+    public let version: UInt16
+    public let target: UInt256
+    public let nextTarget: UInt256
+    public let transactionsCID: String
+    public let postStateCID: String
+    public let chain: [String]
+}
+
+public struct ExplorerTransactionSummary: Codable, Sendable, Equatable {
+    public let txCID: String
+    public let signers: [String]
+    public let fee: UInt64
+    public let accountActionCount: Int
+    public let depositActionCount: Int
+    public let receiptActionCount: Int
+    public let withdrawalActionCount: Int
+}
+
+public struct ExplorerBlockTransactions: Codable, Sendable, Equatable {
+    public let transactions: [ExplorerTransactionSummary]
+    public let nextOffset: Int?
+}
+
+public struct ExplorerChildBlock: Codable, Sendable, Equatable {
+    public let directory: String
+    public let blockHash: String
+    public let height: UInt64
+    public let transactionCount: Int
+}
+
+public struct ExplorerBlockChildren: Codable, Sendable, Equatable {
+    public let children: [ExplorerChildBlock]
+}
+
+public struct ExplorerAccountAction: Codable, Sendable, Equatable {
+    public let owner: String
+    public let delta: Int64
+}
+
+public struct ExplorerDepositAction: Codable, Sendable, Equatable {
+    public let nonce: String
+    public let demander: String
+    public let amountDemanded: UInt64
+    public let amountDeposited: UInt64
+}
+
+public struct ExplorerReceiptAction: Codable, Sendable, Equatable {
+    public let withdrawer: String
+    public let nonce: String
+    public let demander: String
+    public let amountDemanded: UInt64
+    public let directory: String
+}
+
+public struct ExplorerWithdrawalAction: Codable, Sendable, Equatable {
+    public let withdrawer: String
+    public let nonce: String
+    public let demander: String
+    public let amountDemanded: UInt64
+    public let amountWithdrawn: UInt64
+}
+
+public struct ExplorerTransaction: Codable, Sendable, Equatable {
+    public let txCID: String
+    public let blockHeight: UInt64?
+    public let blockHash: String?
+    public let timestamp: Int64?
+    public let fee: UInt64
+    public let nonce: UInt64
+    public let signers: [String]
+    public let chainPath: [String]
+    public let chain: [String]
+    public let accountActions: [ExplorerAccountAction]
+    public let depositActions: [ExplorerDepositAction]
+    public let receiptActions: [ExplorerReceiptAction]
+    public let withdrawalActions: [ExplorerWithdrawalAction]
+}
+
+public struct ExplorerAccount: Codable, Sendable, Equatable {
+    public let owner: String
+    public let balance: UInt64
+    public let nonce: UInt64
+}
+
+public struct ExplorerMempool: Codable, Sendable, Equatable {
+    public let count: Int
+    public let transactions: [String]
+}
+
+public struct ExplorerChainInfo: Codable, Sendable, Equatable {
+    public let genesisHash: String?
+    public let height: UInt64?
+    public let tipCID: String?
+    public let chain: [String]
+}
+
+public struct ExplorerChainSpec: Codable, Sendable, Equatable {
+    public let targetBlockTime: UInt64
+    public let initialReward: UInt64
+    public let halvingInterval: UInt64
+    public let maxBlockSize: Int
+    public let maxNumberOfTransactionsPerBlock: UInt64
+    public let premine: UInt64
+    public let retargetWindow: UInt64
+}
+
+public struct ExplorerChainGenesis: Codable, Sendable, Equatable {
+    public let genesisHash: String
+}
+
+public struct ExplorerChainChild: Codable, Sendable, Equatable {
+    public let chainPath: [String]
+    public let genesisHash: String?
+}
+
+public struct ExplorerChainChildren: Codable, Sendable, Equatable {
+    public let children: [ExplorerChainChild]
+}
+
+public struct ExplorerEndpoints: Codable, Sendable, Equatable {
+    public let endpoints: [String]
+
+    public init(endpoints: [String]) {
+        self.endpoints = endpoints
+    }
+}
+
 public enum ChainServiceError: Error, Equatable, Sendable {
     case unresolvedChainSpec
     case invalidRewardTransaction
@@ -622,6 +775,291 @@ public actor ChainService {
             cid = parent.rawCID
         }
         return summaries
+    }
+
+    // MARK: - Explorer read API
+    //
+    // Ungated public reads for the browser explorer. Each mirrors the bounded,
+    // content-verified by-CID path above and never takes the operation gate.
+
+    /// This node's own absolute chain path — the single chain it serves. Used
+    /// by the daemon to answer the explorer's optional `?chainPath=` filter.
+    public nonisolated func explorerChainPath() -> [String] {
+        process.configuration.chainPath
+    }
+
+    /// Main-chain block CID at `height` (ungated height-index lookup), so the
+    /// daemon can resolve a numeric `:id` to a CID before reading.
+    public func explorerMainChainBlockCID(atHeight height: UInt64) async -> String? {
+        await process.mainChainBlockCID(atHeight: height)
+    }
+
+    public func explorerLatestBlock() async -> ExplorerLatestBlock? {
+        guard let summary = (await recentBlocks(before: nil, limit: 1))?.first else {
+            return nil
+        }
+        return ExplorerLatestBlock(
+            height: summary.height,
+            hash: summary.cid,
+            transactionCount: summary.transactionCount,
+            timestamp: summary.timestamp,
+            previousBlock: summary.parentCID
+        )
+    }
+
+    public func explorerBlock(cid: String) async -> ExplorerBlock? {
+        guard let block = await block(cid: cid) else { return nil }
+        let transactionCount = (try? await block.transactions.resolve(
+            fetcher: process
+        ))?.node?.count ?? 0
+        let childBlockCount = (try? await block.children.resolve(
+            fetcher: process
+        ))?.node?.count ?? 0
+        return ExplorerBlock(
+            height: block.height,
+            hash: cid,
+            timestamp: block.timestamp,
+            previousBlock: block.parent?.rawCID,
+            transactionCount: transactionCount,
+            childBlockCount: childBlockCount,
+            nonce: block.nonce,
+            version: block.version,
+            target: block.target,
+            nextTarget: block.nextTarget,
+            transactionsCID: block.transactions.rawCID,
+            postStateCID: block.postState.rawCID,
+            chain: process.configuration.chainPath
+        )
+    }
+
+    /// Page over an accepted block's transaction dictionary by numeric index
+    /// [offset, offset+limit). Each index is a *targeted* resolution of just
+    /// that key — never a full `boundedKeysAndValues(limit: count)` fan-out —
+    /// so an untrusted request cannot force materializing the whole dictionary.
+    public func explorerBlockTransactions(
+        cid: String,
+        offset: Int,
+        limit: Int
+    ) async -> ExplorerBlockTransactions? {
+        guard offset >= 0 else { return nil }
+        guard let block = await block(cid: cid) else { return nil }
+        guard let dictionary = (try? await block.transactions.resolve(
+            fetcher: process
+        ))?.node else { return nil }
+        let total = dictionary.count
+        let boundedLimit = min(max(limit, 0), 100)
+        // Short-circuit before the addition: a public caller controls `offset`,
+        // and `offset + boundedLimit` would be a checked-arithmetic TRAP (an
+        // uncatchable crash, not a throwable) for an offset near Int.max. With
+        // offset < total (a small, consensus-bounded count) the add is safe.
+        guard offset < total else {
+            return ExplorerBlockTransactions(transactions: [], nextOffset: nil)
+        }
+        let end = min(offset + boundedLimit, total)
+        var summaries: [ExplorerTransactionSummary] = []
+        if offset < end {
+            for index in offset..<end {
+                let key = String(index)
+                guard let node = (try? await block.transactions.resolve(
+                        paths: [[key]: .targeted],
+                        fetcher: process
+                      ))?.node,
+                      let volume = (try? node.get(key: key)) ?? nil else {
+                    continue
+                }
+                guard let transaction = try? await volume.resolve(
+                        fetcher: process
+                      ).node,
+                      let body = try? await transaction.body.resolve(
+                        fetcher: process
+                      ).node else {
+                    continue
+                }
+                summaries.append(ExplorerTransactionSummary(
+                    txCID: volume.rawCID,
+                    signers: body.signers,
+                    fee: body.fee,
+                    accountActionCount: body.accountActions.count,
+                    depositActionCount: body.depositActions.count,
+                    receiptActionCount: body.receiptActions.count,
+                    withdrawalActionCount: body.withdrawalActions.count
+                ))
+            }
+        }
+        return ExplorerBlockTransactions(
+            transactions: summaries,
+            nextOffset: end < total ? end : nil
+        )
+    }
+
+    public func explorerBlockChildren(
+        cid: String,
+        limit: Int
+    ) async -> ExplorerBlockChildren? {
+        guard let block = await block(cid: cid) else { return nil }
+        guard let dictionary = (try? await block.children.resolve(
+            fetcher: process
+        ))?.node else { return nil }
+        let boundedLimit = min(max(limit, 0), 100)
+        guard boundedLimit > 0 else { return ExplorerBlockChildren(children: []) }
+        guard let entries = try? await dictionary.boundedKeysAndValues(
+            limit: boundedLimit,
+            fetcher: process
+        ) else { return nil }
+        var children: [ExplorerChildBlock] = []
+        for (directory, volume) in entries {
+            guard let child = try? await volume.resolve(fetcher: process).node else {
+                continue
+            }
+            let transactionCount = (try? await child.transactions.resolve(
+                fetcher: process
+            ))?.node?.count ?? 0
+            children.append(ExplorerChildBlock(
+                directory: directory,
+                blockHash: volume.rawCID,
+                height: child.height,
+                transactionCount: transactionCount
+            ))
+        }
+        return ExplorerBlockChildren(children: children)
+    }
+
+    public func explorerTransaction(cid: String) async -> ExplorerTransaction? {
+        guard let transaction = await transaction(cid: cid) else { return nil }
+        guard let body = try? await transaction.body.resolve(fetcher: process).node else {
+            return nil
+        }
+        return ExplorerTransaction(
+            txCID: cid,
+            blockHeight: nil,
+            blockHash: nil,
+            timestamp: nil,
+            fee: body.fee,
+            nonce: body.nonce,
+            signers: body.signers,
+            chainPath: body.chainPath,
+            chain: body.chainPath,
+            accountActions: body.accountActions.map {
+                ExplorerAccountAction(owner: $0.owner, delta: $0.delta)
+            },
+            depositActions: body.depositActions.map {
+                ExplorerDepositAction(
+                    nonce: String($0.nonce),
+                    demander: $0.demander,
+                    amountDemanded: $0.amountDemanded,
+                    amountDeposited: $0.amountDeposited
+                )
+            },
+            receiptActions: body.receiptActions.map {
+                ExplorerReceiptAction(
+                    withdrawer: $0.withdrawer,
+                    nonce: String($0.nonce),
+                    demander: $0.demander,
+                    amountDemanded: $0.amountDemanded,
+                    directory: $0.directory
+                )
+            },
+            withdrawalActions: body.withdrawalActions.map {
+                ExplorerWithdrawalAction(
+                    withdrawer: $0.withdrawer,
+                    nonce: String($0.nonce),
+                    demander: $0.demander,
+                    amountDemanded: $0.amountDemanded,
+                    amountWithdrawn: $0.amountWithdrawn
+                )
+            }
+        )
+    }
+
+    public func explorerAccount(owner: String) async -> ExplorerAccount? {
+        guard let tip = await process.readSnapshot().tipCID else { return nil }
+        guard let account = await account(owner: owner, blockCID: tip) else { return nil }
+        return ExplorerAccount(
+            owner: owner,
+            balance: account.balance,
+            nonce: account.nonce
+        )
+    }
+
+    /// Ungated mempool snapshot: the pool's live CIDs (never the gated,
+    /// mempool-reconciling `transactionInventoryRoots()`), hard-capped at 200.
+    public func explorerMempool() async -> ExplorerMempool {
+        let cids = await pool.snapshot().map(\.cid)
+        return ExplorerMempool(
+            count: await pool.count,
+            transactions: Array(cids.prefix(200))
+        )
+    }
+
+    public func explorerChainInfo() async -> ExplorerChainInfo {
+        let snapshot = await process.readSnapshot()
+        return ExplorerChainInfo(
+            genesisHash: await process.mainChainBlockCID(atHeight: 0),
+            height: snapshot.height,
+            tipCID: snapshot.tipCID,
+            chain: process.configuration.chainPath
+        )
+    }
+
+    public func explorerChainSpec() async -> ExplorerChainSpec? {
+        guard let tip = await process.readSnapshot().tipCID,
+              let block = await block(cid: tip),
+              let spec = try? await block.spec.resolve(fetcher: process).node else {
+            return nil
+        }
+        return ExplorerChainSpec(
+            targetBlockTime: spec.targetBlockTime,
+            initialReward: spec.initialReward,
+            halvingInterval: spec.halvingInterval,
+            maxBlockSize: spec.maxBlockSize,
+            maxNumberOfTransactionsPerBlock: spec.maxNumberOfTransactionsPerBlock,
+            premine: spec.premine,
+            retargetWindow: spec.retargetWindow
+        )
+    }
+
+    public func explorerChainGenesis() async -> ExplorerChainGenesis {
+        ExplorerChainGenesis(
+            genesisHash: await process.readSnapshot().nexusGenesisCID
+        )
+    }
+
+    /// Best-effort child directory listing from the tip block's children plus
+    /// any pending deploy intents, capped at 100. On-chain child genesis is not
+    /// cheaply available for the tip-block entries, so `genesisHash` is null
+    /// there and carries the intent's genesis CID for pending entries.
+    public func explorerChainChildren(limit: Int) async -> ExplorerChainChildren {
+        let boundedLimit = min(max(limit, 0), 100)
+        guard boundedLimit > 0 else { return ExplorerChainChildren(children: []) }
+        let base = process.configuration.chainPath
+        var seen = Set<String>()
+        var children: [ExplorerChainChild] = []
+        if let tip = await process.readSnapshot().tipCID,
+           let block = await block(cid: tip),
+           let dictionary = (try? await block.children.resolve(
+               fetcher: process
+           ))?.node,
+           let entries = try? await dictionary.boundedKeysAndValues(
+               limit: boundedLimit,
+               fetcher: process
+           ) {
+            for (directory, _) in entries {
+                guard seen.insert(directory).inserted else { continue }
+                children.append(ExplorerChainChild(
+                    chainPath: base + [directory],
+                    genesisHash: nil
+                ))
+            }
+        }
+        for (directory, intent) in childIntents {
+            guard children.count < boundedLimit else { break }
+            guard seen.insert(directory).inserted else { continue }
+            children.append(ExplorerChainChild(
+                chainPath: base + [directory],
+                genesisHash: intent.genesisCID
+            ))
+        }
+        return ExplorerChainChildren(children: Array(children.prefix(boundedLimit)))
     }
 
     /// Appends a canonical commit while ChainProcess still owns mutation order.

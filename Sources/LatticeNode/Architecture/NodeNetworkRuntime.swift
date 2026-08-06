@@ -6,6 +6,24 @@ import UInt256
 import VolumeBroker
 import cashew
 
+/// Public explorer peer DTOs. Defined here (module LatticeNode) so both the
+/// runtime and the daemon's HTTP handlers (module LatticeNodeDaemon) can see
+/// them; the handlers only `json()` these.
+public struct ExplorerPeerSummary: Codable, Sendable, Equatable {
+    public let key: String
+    public let role: String
+}
+
+public struct ExplorerPeersResponse: Codable, Sendable, Equatable {
+    public let count: Int
+    public let peers: [ExplorerPeerSummary]
+
+    public init(count: Int, peers: [ExplorerPeerSummary]) {
+        self.count = count
+        self.peers = peers
+    }
+}
+
 public typealias ContextualChildCandidateBuilder = @Sendable (
     _ context: ChildCandidateRequestContext,
     _ parentContentSource: any ContentSource
@@ -910,6 +928,21 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 throw NodeNetworkRuntimeError.notRunning
             }
         }
+    }
+
+    /// Ungated overlay-peer summary for the public explorer API. Reads only the
+    /// in-memory authenticated overlay set — no mutation, no gate. Hard-capped
+    /// at `limit` (the daemon passes ≤ 200).
+    public func peerSummaries(limit: Int) async -> ExplorerPeersResponse {
+        let boundedLimit = min(max(limit, 0), 200)
+        let peers = overlayPeers.values
+        let summaries = peers.prefix(boundedLimit).map { peer in
+            ExplorerPeerSummary(
+                key: peer.key.hex,
+                role: peer.role == .carrier ? "carrier" : "endpoint"
+            )
+        }
+        return ExplorerPeersResponse(count: peers.count, peers: Array(summaries))
     }
 
     /// Called after the process canonicalizes a new tip. Overlay peers learn

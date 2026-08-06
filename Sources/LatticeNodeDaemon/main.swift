@@ -174,7 +174,13 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         let app = makeApplication(
             service: service,
             host: rpcBind,
-            port: Int(rpcPort)
+            port: Int(rpcPort),
+            peers: { [weak network] in
+                guard let network else {
+                    return ExplorerPeersResponse(count: 0, peers: [])
+                }
+                return await network.peerSummaries(limit: 200)
+            }
         )
 
         print("lattice-node \(address.key)")
@@ -288,7 +294,10 @@ private func parseEndpoint(_ value: String) throws -> (key: String, host: String
 func makeApplication(
     service: ChainService,
     host: String,
-    port: Int
+    port: Int,
+    peers: @Sendable @escaping () async -> ExplorerPeersResponse = {
+        ExplorerPeersResponse(count: 0, peers: [])
+    }
 ) -> Application<RouterResponder<BasicRequestContext>> {
     let router = Router()
     // CORS is scoped to READ methods only. The POST write routes stay off the
@@ -406,6 +415,202 @@ func makeApplication(
             context: context
         )
     }
+    // MARK: - Explorer read API (/api/*)
+    //
+    // Ungated, read-only surface for the static browser explorer. Every handler
+    // mirrors a `/v1/*` read: content-verified, size-bounded, never touching the
+    // operation gate (no status()/transactionInventoryRoots()). Served to the
+    // public internet via a read-replica.
+
+    router.get("api/block/latest") { request, context in
+        guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
+            throw HTTPError(.notFound)
+        }
+        guard let latest = await service.explorerLatestBlock() else {
+            throw HTTPError(.notFound)
+        }
+        return try jsonCached(
+            latest,
+            cacheControl: statusCacheControl,
+            request: request,
+            context: context
+        )
+    }
+    router.get("api/block/:id") { request, context in
+        guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
+            throw HTTPError(.notFound)
+        }
+        guard let id = context.parameters.get("id") else {
+            throw HTTPError(.badRequest)
+        }
+        let cid: String
+        let byCID: Bool
+        if isPlausibleCID(id) {
+            cid = id
+            byCID = true
+        } else if let height = UInt64(id) {
+            guard let resolved = await service.explorerMainChainBlockCID(
+                atHeight: height
+            ) else {
+                throw HTTPError(.notFound)
+            }
+            cid = resolved
+            byCID = false
+        } else {
+            throw HTTPError(.badRequest)
+        }
+        guard let block = await service.explorerBlock(cid: cid) else {
+            throw HTTPError(.notFound)
+        }
+        return try jsonCached(
+            block,
+            cacheControl: byCID ? immutableCacheControl : statusCacheControl,
+            request: request,
+            context: context
+        )
+    }
+    router.get("api/block/:id/transactions") { request, context in
+        guard let id = context.parameters.get("id"), isPlausibleCID(id) else {
+            throw HTTPError(.badRequest)
+        }
+        let limit = try explorerParseLimit(request, defaultValue: 20, cap: 100)
+        let offset = try explorerParseOffset(request)
+        guard let page = await service.explorerBlockTransactions(
+            cid: id,
+            offset: offset,
+            limit: limit
+        ) else {
+            throw HTTPError(.notFound)
+        }
+        return try jsonCached(
+            page,
+            cacheControl: immutableCacheControl,
+            request: request,
+            context: context
+        )
+    }
+    router.get("api/block/:id/children") { request, context in
+        guard let id = context.parameters.get("id"), isPlausibleCID(id) else {
+            throw HTTPError(.badRequest)
+        }
+        let limit = try explorerParseLimit(request, defaultValue: 100, cap: 100)
+        guard let children = await service.explorerBlockChildren(
+            cid: id,
+            limit: limit
+        ) else {
+            throw HTTPError(.notFound)
+        }
+        return try jsonCached(
+            children,
+            cacheControl: immutableCacheControl,
+            request: request,
+            context: context
+        )
+    }
+    router.get("api/transaction/:cid") { request, context in
+        guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
+            throw HTTPError(.notFound)
+        }
+        guard let cid = context.parameters.get("cid"), isPlausibleCID(cid) else {
+            throw HTTPError(.badRequest)
+        }
+        guard let transaction = await service.explorerTransaction(cid: cid) else {
+            throw HTTPError(.notFound)
+        }
+        return try jsonCached(
+            transaction,
+            cacheControl: immutableCacheControl,
+            request: request,
+            context: context
+        )
+    }
+    router.get("api/state/account/:addr") { request, context in
+        guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
+            throw HTTPError(.notFound)
+        }
+        guard let addr = context.parameters.get("addr"), isPlausibleCID(addr) else {
+            throw HTTPError(.badRequest)
+        }
+        guard let account = await service.explorerAccount(owner: addr) else {
+            throw HTTPError(.notFound)
+        }
+        return try jsonCached(
+            account,
+            cacheControl: statusCacheControl,
+            request: request,
+            context: context
+        )
+    }
+    router.get("api/mempool") { request, context in
+        try jsonCached(
+            await service.explorerMempool(),
+            cacheControl: statusCacheControl,
+            request: request,
+            context: context
+        )
+    }
+    router.get("api/peers") { request, context in
+        try jsonCached(
+            await peers(),
+            cacheControl: statusCacheControl,
+            request: request,
+            context: context
+        )
+    }
+    router.get("api/chain/info") { request, context in
+        guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
+            throw HTTPError(.notFound)
+        }
+        return try jsonCached(
+            await service.explorerChainInfo(),
+            cacheControl: statusCacheControl,
+            request: request,
+            context: context
+        )
+    }
+    router.get("api/chain/spec") { request, context in
+        guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
+            throw HTTPError(.notFound)
+        }
+        guard let spec = await service.explorerChainSpec() else {
+            throw HTTPError(.notFound)
+        }
+        return try jsonCached(
+            spec,
+            cacheControl: statusCacheControl,
+            request: request,
+            context: context
+        )
+    }
+    router.get("api/chain/genesis") { request, context in
+        try jsonCached(
+            await service.explorerChainGenesis(),
+            cacheControl: immutableCacheControl,
+            request: request,
+            context: context
+        )
+    }
+    router.get("api/chain/children") { request, context in
+        guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
+            throw HTTPError(.notFound)
+        }
+        let limit = try explorerParseLimit(request, defaultValue: 100, cap: 100)
+        return try jsonCached(
+            await service.explorerChainChildren(limit: limit),
+            cacheControl: statusCacheControl,
+            request: request,
+            context: context
+        )
+    }
+    router.get("api/chain/endpoints") { request, context in
+        try jsonCached(
+            ExplorerEndpoints(endpoints: []),
+            cacheControl: statusCacheControl,
+            request: request,
+            context: context
+        )
+    }
+
     router.post("v1/transactions") { request, context in
         let input: SubmitTransactionRequest = try await decode(request, context: context)
         return try await serviceCall(request: request, context: context) {
@@ -503,6 +708,32 @@ private func json<Value: Encodable, Context: RequestContext>(
     context: Context
 ) throws -> Response {
     try context.responseEncoder.encode(value, from: request, context: context)
+}
+
+/// The explorer's optional `?chainPath=` filter: this node serves exactly one
+/// chain, so a request naming a different path gets a 404. Absent = serve.
+private func explorerChainPathAllows(_ request: Request, own: [String]) -> Bool {
+    guard let requested = request.uri.queryParameters["chainPath"] else { return true }
+    return String(requested) == own.joined(separator: "/")
+}
+
+/// Parse and bound a `?limit=` query: reject non-positive/non-numeric with 400,
+/// then clamp to the server cap.
+private func explorerParseLimit(
+    _ request: Request,
+    defaultValue: Int,
+    cap: Int
+) throws -> Int {
+    guard let raw = request.uri.queryParameters["limit"] else { return defaultValue }
+    guard let parsed = Int(raw), parsed > 0 else { throw HTTPError(.badRequest) }
+    return min(parsed, cap)
+}
+
+/// Parse a `?offset=` query: reject negative/non-numeric with 400.
+private func explorerParseOffset(_ request: Request) throws -> Int {
+    guard let raw = request.uri.queryParameters["offset"] else { return 0 }
+    guard let parsed = Int(raw), parsed >= 0 else { throw HTTPError(.badRequest) }
+    return parsed
 }
 
 /// A block or transaction served by CID never changes once accepted.
