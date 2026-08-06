@@ -490,6 +490,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private static let rangeSyncDepthThreshold: UInt64 = 64
     private var childProofRecoveryTask: Task<Void, Never>?
     private var childProofRecoveryGeneration: UInt64?
+    /// Periodically re-announces this node as a DHT provider of its chain's
+    /// genesis block, so other nodes (and the explorer's /api/chain/endpoints)
+    /// can discover it via `findProviders(genesisCID)` with no registry.
+    private var genesisAnnounceTask: Task<Void, Never>?
     private var childProofRecoveryNeedsRefresh = false
     private var candidateAcquirer = CandidateAcquirer()
     private var candidateWorker: Task<Void, Never>?
@@ -734,6 +738,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 generation: runtimeGeneration,
                 process: process
             )
+            scheduleGenesisProviderAnnounce(
+                generation: runtimeGeneration,
+                process: process
+            )
         } catch {
             isRunning = false
             _ = callbackEpoch.advance()
@@ -843,6 +851,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         acceptedLeavesRetryTask = nil
         childProofRecoveryTask?.cancel()
         childProofRecoveryTask = nil
+        genesisAnnounceTask?.cancel()
+        genesisAnnounceTask = nil
         childProofRecoveryGeneration = nil
         childProofRecoveryNeedsRefresh = false
         servingAcceptedLeaves.removeAll()
@@ -943,6 +953,26 @@ public actor NodeNetworkRuntime: IvyDelegate {
             )
         }
         return ExplorerPeersResponse(count: peers.count, peers: Array(summaries))
+    }
+
+    /// Discover nodes serving the chain whose genesis is `genesisCID` via the
+    /// DHT (Ivy caches, else walks), and map each to a public read URL under
+    /// convention A: the child node serves its read API over HTTPS on the same
+    /// host it announced as the genesis provider. Deduped by host, bounded.
+    public func discoverProviderReadURLs(genesisCID: String) async -> [String] {
+        guard CIDIdentity.isCanonical(genesisCID) else { return [] }
+        let endpoints = await overlay.discoverProviders(rootCID: genesisCID)
+        var seen: Set<String> = []
+        var urls: [String] = []
+        for endpoint in endpoints {
+            let host = endpoint.host
+            guard !host.isEmpty, seen.insert(host).inserted else { continue }
+            // Bracket IPv6 literals so the authority parses (host:port ambiguity).
+            let authority = host.contains(":") ? "[\(host)]" : host
+            urls.append("https://\(authority)")
+            if urls.count >= 32 { break }
+        }
+        return urls
     }
 
     /// Called after the process canonicalizes a new tip. Overlay peers learn
@@ -3568,6 +3598,72 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 generation: generation,
                 process: process
             )
+        }
+    }
+
+    private func scheduleGenesisProviderAnnounce(
+        generation: UInt64,
+        process: ChainProcess
+    ) {
+        guard genesisAnnounceTask == nil else { return }
+        genesisAnnounceTask = Task { [weak self] in
+            await self?.announceGenesisProviderLoop(
+                generation: generation,
+                process: process
+            )
+        }
+    }
+
+    /// Announce this chain's genesis to the provider DHT and re-announce before
+    /// the record's TTL lapses. Content-addressed and permissionless: a node
+    /// becomes a discoverable "node of this chain" purely by serving its genesis
+    /// — the CID is self-verifying, so a stale or lying announce is harmless.
+    private func announceGenesisProviderLoop(
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        let ttl = min(
+            UInt64(20 * 60),
+            planeConfigurations.overlay.maxProviderTTLSeconds
+        )
+        // Re-announce well within the TTL, and often enough to pick up a
+        // newly-wired child within a minute (records are small).
+        let interval = max(UInt64(30), min(ttl / 2, UInt64(60)))
+        while isRunning, runtimeGeneration == generation {
+            let expiresAt = UInt64(Date().timeIntervalSince1970) + ttl
+            // (1) This node's own chain genesis, on its own overlay — peers of
+            // this chain can find providers of it.
+            if let ownGenesis = await process.mainChainBlockCID(atHeight: 0) {
+                await overlay.announceProvider(
+                    rootCID: ownGenesis,
+                    expiresAt: expiresAt
+                )
+            }
+            // (2) Parent rendezvous: for every child ALREADY WIRED to this node
+            // (a child that co-runs alongside its parent connects here), announce
+            // that child's genesis on THIS parent overlay. Any node on the parent
+            // chain can then discoverProviders(childGenesis) and reach a node
+            // serving the child — permissionless, no registry, and discovery is
+            // the global overlay DHT (not this node's connected-peer list).
+            let anchored = await process.anchoredChildGenesisCIDs(limit: 200)
+            var announcedChildren: Set<String> = []
+            for role in hierarchyPeers.values {
+                guard case .child(let path) = role,
+                      let directory = path.last,
+                      let childGenesis = anchored[directory],
+                      announcedChildren.insert(childGenesis).inserted else {
+                    continue
+                }
+                await overlay.announceProvider(
+                    rootCID: childGenesis,
+                    expiresAt: expiresAt
+                )
+            }
+            do {
+                try await Task.sleep(nanoseconds: interval &* 1_000_000_000)
+            } catch {
+                return
+            }
         }
     }
 

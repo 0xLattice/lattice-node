@@ -860,6 +860,32 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         return await level.chain.getHighestBlockHeight()
     }
 
+    /// Anchored `directory -> genesisCID` map from the committed `genesisState`
+    /// subtrie of the tip's post-state (one bounded, ungated resolve). Lets the
+    /// runtime announce every wired+anchored child's genesis on this (parent)
+    /// overlay for the permissionless child-bootstrap rendezvous in a single
+    /// pass — no per-child re-resolve, and unanchored fake `.child` peers just
+    /// miss the map.
+    func anchoredChildGenesisCIDs(limit: Int) async -> [String: String] {
+        guard case .active(let level) = runtimePhase, limit > 0 else { return [:] }
+        let tip = await level.chain.getMainChainTip()
+        let header = BlockHeader(rawCID: tip, node: nil, encryptionInfo: nil)
+        guard let block = try? await header.resolve(fetcher: localFetcher).node,
+              let state = try? await block.postState.resolve(
+                  fetcher: localFetcher
+              ).node,
+              let genesis = (try? await state.genesisState.resolve(
+                  fetcher: localFetcher
+              ))?.node,
+              let entries = try? await genesis.boundedKeysAndValues(
+                  limit: limit,
+                  fetcher: localFetcher
+              ) else {
+            return [:]
+        }
+        return Dictionary(entries.map { ($0.key, $0.value) }) { first, _ in first }
+    }
+
     func portableEvidenceVolumeCID(
         scope: IssuedChildProofScope,
         edgeCID: String,
