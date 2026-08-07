@@ -669,7 +669,7 @@ public actor ChainService {
     }
 
     /// Ungated mirror of `status()` for public read RPC: no `acquireOperation()`,
-    /// no `prepareMempoolLocked()` (which mutates the pool via `pool.expire()`),
+    /// no `prepareMempoolLocked()` (which may restore durable local transactions),
     /// no `removeStaleChildIntents()` — every read is non-mutating.
     public func readSnapshot() async -> ChainServiceStatusResponse {
         let status = await process.readSnapshot()
@@ -1381,30 +1381,6 @@ public actor ChainService {
                 mempoolUnavailable = true
                 throw ChainServiceError.mempoolUnavailable
             }
-        }
-        let expiration = await pool.expire()
-        guard !expiration.expired.isEmpty else { return }
-        let durableBefore: [String: Int64]
-        do {
-            durableBefore = try await process.localTransactionTimestamps()
-        } catch {
-            await pool.rollback(expiration)
-            throw error
-        }
-        do {
-            let roots = Set(await pool.snapshot().map(\.cid))
-            try await pruneDurableLocalTransactionsLocked(keeping: roots)
-            try await syncLiveMempoolRootsLocked(roots)
-        } catch {
-            await pool.rollback(expiration)
-            try await restoreLocalDurabilityLocked(
-                durableBefore,
-                mutation: expiration
-            )
-            try await syncLiveMempoolRootsLocked(
-                Set(await pool.snapshot().map(\.cid))
-            )
-            throw error
         }
     }
 
