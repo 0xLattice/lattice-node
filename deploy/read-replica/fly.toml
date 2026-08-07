@@ -1,0 +1,37 @@
+app = "lattice-mainnet-read"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[[mounts]]
+  source = "lattice_read_data"
+  destination = "/data"
+
+# Node overlay (dials the 3 backbones to sync; inbound peering optional).
+[[services]]
+  protocol = "tcp"
+  internal_port = 4001
+  [[services.ports]]
+    port = 4001
+
+# Public read surface: 443/80 -> nginx (8081), which allowlists GET reads to the
+# loopback node and denies /v1/status + writes.
+[[services]]
+  protocol = "tcp"
+  internal_port = 8081
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+  [[services.http_checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "30s"
+    path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

@@ -263,3 +263,11 @@ jobs:
 
       - name: Run Clang analyzer seed/smoke
         run: scripts/run-clang-analyzer.sh
+
+  read-replica-allowlist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert the read-replica nginx allowlist boundary
+        run: bash deploy/read-replica/test-allowlist.sh
