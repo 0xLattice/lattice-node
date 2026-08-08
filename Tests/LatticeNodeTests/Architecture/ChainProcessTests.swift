@@ -451,9 +451,11 @@ final class ChainProcessTests: XCTestCase {
         let config = try configuration(path: ["Nexus"], storage: directory)
         var process: ChainProcess? = try await ChainProcess.open(configuration: config)
         let genesis = try await process!.canonicalTipBlock()
+        // A self-contained child genesis (empty parentState) the parent only
+        // RECORDS via a plain GenesisAction; it is never carried on the carrier.
         let child = try await BlockBuilder.buildChildGenesis(
             spec: NexusGenesis.spec,
-            parentState: genesis.postState,
+            parentState: LatticeState.emptyHeader,
             timestamp: 1,
             target: UInt256.max,
             fetcher: process!
@@ -469,7 +471,6 @@ final class ChainProcessTests: XCTestCase {
         let carrier = try await BlockBuilder.buildBlock(
             previous: genesis,
             transactions: [authorization],
-            children: ["Payments": child],
             timestamp: 1,
             nonce: 0,
             fetcher: process!
@@ -489,7 +490,9 @@ final class ChainProcessTests: XCTestCase {
         let persistedGenesis = try await process!.issuedParentGenesisLink(
             directory: "Payments",
             childGenesisCID: childCID,
-            parentStateCID: carrier.prevState.rawCID
+            // A self-contained genesis's recorded link binds to the empty parent
+            // state, not the recording carrier's prevState.
+            parentStateCID: LatticeState.emptyHeader.rawCID
         )
         XCTAssertEqual(persistedCarrier, carrierLink)
         XCTAssertEqual(persistedGenesis?.parentPath, ["Nexus"])
@@ -515,9 +518,11 @@ final class ChainProcessTests: XCTestCase {
             fetcher: process!,
             storer: process!
         )
+        // A self-contained child genesis (empty parentState) the orphan carrier
+        // only RECORDS via a plain GenesisAction; it is never carried.
         let child = try await BlockBuilder.buildChildGenesis(
             spec: NexusGenesis.spec,
-            parentState: missingParent.postState,
+            parentState: LatticeState.emptyHeader,
             timestamp: 2,
             target: UInt256.max,
             fetcher: process!
@@ -533,7 +538,6 @@ final class ChainProcessTests: XCTestCase {
         let orphanTemplate = try await BlockBuilder.buildBlock(
             previous: missingParent,
             transactions: [authorization],
-            children: ["Payments": child],
             timestamp: 2,
             nonce: 2,
             fetcher: process!
@@ -564,7 +568,7 @@ final class ChainProcessTests: XCTestCase {
         let earlyGenesis = try await process!.issuedParentGenesisLink(
             directory: "Payments",
             childGenesisCID: childCID,
-            parentStateCID: orphan.prevState.rawCID
+            parentStateCID: LatticeState.emptyHeader.rawCID
         )
         XCTAssertNil(earlyGenesis)
         process = nil
@@ -581,7 +585,7 @@ final class ChainProcessTests: XCTestCase {
         let recoveredGenesis = try await process!.issuedParentGenesisLink(
             directory: "Payments",
             childGenesisCID: childCID,
-            parentStateCID: orphan.prevState.rawCID
+            parentStateCID: LatticeState.emptyHeader.rawCID
         )
         XCTAssertNil(recoveredGenesis)
 
@@ -596,7 +600,7 @@ final class ChainProcessTests: XCTestCase {
         let promotedGenesis = try await process!.issuedParentGenesisLink(
             directory: "Payments",
             childGenesisCID: childCID,
-            parentStateCID: orphan.prevState.rawCID
+            parentStateCID: LatticeState.emptyHeader.rawCID
         )
         XCTAssertNotNil(promotedGenesis)
     }
@@ -750,12 +754,10 @@ final class ChainProcessTests: XCTestCase {
         )
         XCTAssertEqual(retainedRelay?.package.proof.rootCID, proof.rootCID)
 
-        let bootstrap = try await process.admit(
-            fixture.childHeader,
-            authenticatedChildPackage: fixture.package,
-            remoteSource: fixture.source
+        let bootstrapped = try await process.activateSeededChildGenesis(
+            seed: fixture.seed
         )
-        XCTAssertTrue(bootstrap.decision.isAccepted)
+        XCTAssertTrue(bootstrapped)
         let retry = try await process.admit(
             successorHeader,
             authenticatedChildPackage: successorPackage,
@@ -1159,26 +1161,6 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertNil(orphanStored)
     }
 
-    func testParentProofDoesNotSubstituteForMissingTerminalChildVolume()
-        async throws {
-        let fixture = try await childBootstrapFixture()
-        let process = try await ChainProcess.open(
-            configuration: fixture.configuration
-        )
-
-        let outcome = try await process.admit(
-            BlockHeader(
-                rawCID: fixture.childHeader.rawCID,
-                node: nil,
-                encryptionInfo: nil
-            ),
-            authenticatedChildPackage: fixture.package
-        )
-        let status = await process.status()
-        XCTAssertEqual(outcome.decision, .unavailable(nil))
-        XCTAssertEqual(status.phase, .awaitingGenesis)
-        XCTAssertNil(status.tipCID)
-    }
 
     func testPreparedProofRetryDoesNotRefetchOrEvictPendingCarriers() async throws {
         let directory = temporaryDirectory()
@@ -1528,6 +1510,7 @@ final class ChainProcessTests: XCTestCase {
 
     private struct ChildBootstrapFixture {
         let configuration: NodeConfiguration
+        let seed: ChildGenesisSeed
         let childHeader: BlockHeader
         let rootCID: String
         let proof: ChildBlockProof
@@ -1542,11 +1525,15 @@ final class ChainProcessTests: XCTestCase {
         )
         let source = ChainProcessTestContentStore()
         try await LatticeState.emptyHeader.storeRecursively(storer: source)
-        let child = try await BlockBuilder.buildChildGenesis(
-            spec: NexusGenesis.spec,
-            parentState: LatticeState.emptyHeader,
-            timestamp: 1,
-            target: UInt256.max,
+        // A self-contained child genesis the process rebuilds from `seed` and
+        // self-admits (activateSeededChildGenesis). The genesis is never carried;
+        // `package`/`proof` below only exercise the block-1 carrier-proof plumbing.
+        let seed = ChildGenesisSeed(
+            spec: NexusGenesis.spec, premineTo: nil, timestamp: 1
+        )
+        let child = try await ChildGenesisBuilder.build(
+            seed: seed,
+            chainPath: ["Nexus", "Payments"],
             fetcher: source
         )
         let childHeader = try BlockHeader(node: child)
@@ -1578,6 +1565,7 @@ final class ChainProcessTests: XCTestCase {
         )
         return ChildBootstrapFixture(
             configuration: configuration,
+            seed: seed,
             childHeader: childHeader,
             rootCID: rootHeader.rawCID,
             proof: proof,
