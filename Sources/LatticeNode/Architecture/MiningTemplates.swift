@@ -12,21 +12,16 @@ public struct DirectChildCandidate: Sendable {
     public let directory: String
     public let block: Block
     let searchWitness: ChildSchedulingWitness?
-    let deploymentWitness: ChildSchedulingWitness?
-    let parentCreatedGenesis: Bool
     let advertiserPeerKey: PeerKey?
 
     public init(
         directory: String,
         block: Block,
-        searchWitness: ChildSchedulingWitness? = nil,
-        deploymentWitness: ChildSchedulingWitness? = nil
+        searchWitness: ChildSchedulingWitness? = nil
     ) {
         self.directory = directory
         self.block = block
         self.searchWitness = searchWitness
-        self.deploymentWitness = deploymentWitness
-        parentCreatedGenesis = false
         advertiserPeerKey = nil
     }
 
@@ -34,15 +29,11 @@ public struct DirectChildCandidate: Sendable {
         directory: String,
         block: Block,
         searchWitness: ChildSchedulingWitness? = nil,
-        deploymentWitness: ChildSchedulingWitness? = nil,
-        parentCreatedGenesis: Bool,
-        advertiserPeerKey: PeerKey? = nil
+        advertiserPeerKey: PeerKey?
     ) {
         self.directory = directory
         self.block = block
         self.searchWitness = searchWitness
-        self.deploymentWitness = deploymentWitness
-        self.parentCreatedGenesis = parentCreatedGenesis
         self.advertiserPeerKey = advertiserPeerKey
     }
 }
@@ -59,45 +50,25 @@ public struct ChildSchedulingWitness: Sendable {
 
 func schedulingTargets(
     for candidate: DirectChildCandidate
-) async -> (search: UInt256, deployment: UInt256?)? {
-    let search: UInt256
+) async -> UInt256? {
     if let witness = candidate.searchWitness {
         guard let targets = await witness.proof.schedulingTargets(
             root: candidate.block,
             terminal: witness.terminal
         ) else { return nil }
-        search = targets.searchTarget
-    } else {
-        search = candidate.block.target
+        return targets.searchTarget
     }
-
-    let deployment: UInt256?
-    if let witness = candidate.deploymentWitness {
-        guard let targets = await witness.proof.schedulingTargets(
-            root: candidate.block,
-            terminal: witness.terminal
-        ), let target = targets.deploymentTarget else {
-            return nil
-        }
-        deployment = target
-    } else {
-        deployment = candidate.block.parent == nil
-            ? candidate.block.target
-            : nil
-    }
-    return (search, deployment)
+    return candidate.block.target
 }
 
 public struct MiningTemplate: Sendable {
     public let workID: String
     public let block: Block
     public let searchTarget: UInt256
-    public let deploymentTarget: UInt256?
     public let chainPath: [String]
     public let expiresAt: ContinuousClock.Instant
     let childCandidates: [DirectChildCandidate]
     let searchWitness: ChildSchedulingWitness?
-    let deploymentWitness: ChildSchedulingWitness?
 
     var remainingLifetimeMilliseconds: UInt64 {
         let components = ContinuousClock.now.duration(to: expiresAt).components
@@ -240,9 +211,7 @@ public actor MiningTemplateBook {
     ) async throws -> MiningTemplate {
         precondition(transactionLimit >= 0)
         var childBlocks: [String: Block] = [:]
-        var childTargets: [
-            String: (search: UInt256, deployment: UInt256?)
-        ] = [:]
+        var childTargets: [String: UInt256] = [:]
         for child in children {
             guard _isBoundedDirectoryAtom(child.directory) else {
                 throw MiningTemplateError.invalidChildDirectory
@@ -250,11 +219,11 @@ public actor MiningTemplateBook {
             guard childBlocks[child.directory] == nil else {
                 throw MiningTemplateError.duplicateChildDirectory
             }
-            guard let targets = await schedulingTargets(for: child) else {
+            guard let searchTarget = await schedulingTargets(for: child) else {
                 throw MiningCandidateValidationError.invalid
             }
             childBlocks[child.directory] = child.block
-            childTargets[child.directory] = targets
+            childTargets[child.directory] = searchTarget
         }
         // A stale/conflicting pool entry must never suppress all external work.
         // Accept valid chunks greedily and bisect only the chunks that fail the
@@ -309,20 +278,14 @@ public actor MiningTemplateBook {
             targets: childTargets,
             fetcher: fetcher
         )
-        let searchTarget = min(
-            scheduling.searchTarget,
-            scheduling.deploymentTarget ?? .max
-        )
         let template = MiningTemplate(
             workID: workID,
             block: candidate,
-            searchTarget: searchTarget,
-            deploymentTarget: scheduling.deploymentTarget,
+            searchTarget: scheduling.searchTarget,
             chainPath: chainPath,
             expiresAt: ContinuousClock.now + lifetime,
             childCandidates: children,
-            searchWitness: scheduling.searchWitness,
-            deploymentWitness: scheduling.deploymentWitness
+            searchWitness: scheduling.searchWitness
         )
         return template
     }
@@ -330,22 +293,18 @@ public actor MiningTemplateBook {
     private nonisolated static func scheduling(
         root: Block,
         children: [DirectChildCandidate],
-        targets: [String: (search: UInt256, deployment: UInt256?)],
+        targets: [String: UInt256],
         fetcher: any Fetcher
     ) async throws -> (
         searchTarget: UInt256,
-        deploymentTarget: UInt256?,
-        searchWitness: ChildSchedulingWitness?,
-        deploymentWitness: ChildSchedulingWitness?
+        searchWitness: ChildSchedulingWitness?
     ) {
         let rootHeader = try BlockHeader(node: root)
         var searchTarget = root.target
         var searchWitness: ChildSchedulingWitness?
-        var deploymentTarget = root.parent == nil ? root.target : nil
-        var deploymentWitness: ChildSchedulingWitness?
 
         for child in children.sorted(by: { $0.directory < $1.directory }) {
-            guard let childTargets = targets[child.directory] else {
+            guard let childSearchTarget = targets[child.directory] else {
                 throw MiningCandidateValidationError.invalid
             }
             let direct = try await ChildBlockProof.generate(
@@ -353,8 +312,8 @@ public actor MiningTemplateBook {
                 childDirectory: child.directory,
                 fetcher: fetcher
             )
-            if childTargets.search > searchTarget {
-                searchTarget = childTargets.search
+            if childSearchTarget > searchTarget {
+                searchTarget = childSearchTarget
                 if let descendant = child.searchWitness {
                     searchWitness = ChildSchedulingWitness(
                         proof: direct.composing(hop: descendant.proof),
@@ -367,30 +326,8 @@ public actor MiningTemplateBook {
                     )
                 }
             }
-            if let childDeployment = childTargets.deployment {
-                let target = min(root.target, childDeployment)
-                if deploymentTarget == nil || target < deploymentTarget! {
-                    deploymentTarget = target
-                    if let descendant = child.deploymentWitness {
-                        deploymentWitness = ChildSchedulingWitness(
-                            proof: direct.composing(hop: descendant.proof),
-                            terminal: descendant.terminal
-                        )
-                    } else {
-                        deploymentWitness = ChildSchedulingWitness(
-                            proof: direct,
-                            terminal: child.block
-                        )
-                    }
-                }
-            }
         }
-        return (
-            searchTarget,
-            deploymentTarget,
-            searchWitness,
-            deploymentWitness
-        )
+        return (searchTarget, searchWitness)
     }
 
     private nonisolated static func makeCandidate(

@@ -123,6 +123,8 @@ let package = Package(
                 "LatticeCtlCore",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy"),
+                .product(name: "VolumeBroker", package: "VolumeBroker"),
+                .product(name: "cashew", package: "cashew"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]),

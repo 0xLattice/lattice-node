@@ -516,7 +516,6 @@ struct ChildCandidateRequestMessage: Sendable {
 
     let requestID: UInt64
     let budgetMilliseconds: UInt32
-    let mode: MiningMode
     let childPath: [String]
     let parentCID: String
     let parentData: Data
@@ -525,7 +524,6 @@ struct ChildCandidateRequestMessage: Sendable {
     init(
         requestID: UInt64,
         budgetMilliseconds: UInt32,
-        mode: MiningMode = .normal,
         childPath: [String],
         parentCID: String,
         parentData: Data,
@@ -533,7 +531,6 @@ struct ChildCandidateRequestMessage: Sendable {
     ) {
         self.requestID = requestID
         self.budgetMilliseconds = budgetMilliseconds
-        self.mode = mode
         self.childPath = childPath
         self.parentCID = parentCID
         self.parentData = parentData
@@ -560,7 +557,7 @@ struct ChildCandidateRequestMessage: Sendable {
               rewardBytes.count <= Int(UInt32.max) else {
             throw NodeNetworkWireError.malformed
         }
-        let size = 13 + 2 + pathBytes.reduce(0) { $0 + 2 + $1.count }
+        let size = 12 + 2 + pathBytes.reduce(0) { $0 + 2 + $1.count }
             + 2 + parentBytes.count + 4 + rewardBytes.count
             + 4 + parentData.count
         guard size <= Self.maximumEncodedBytes else {
@@ -569,7 +566,6 @@ struct ChildCandidateRequestMessage: Sendable {
         var data = Data(capacity: size)
         data.appendUInt64(requestID)
         data.appendUInt32(budgetMilliseconds)
-        data.append(mode == .normal ? 0 : 1)
         data.appendUInt16(UInt16(pathBytes.count))
         for component in pathBytes {
             data.appendUInt16(UInt16(component.count))
@@ -591,17 +587,6 @@ struct ChildCandidateRequestMessage: Sendable {
         var position = data.startIndex
         guard let requestID = data.readUInt64(at: &position), requestID != 0,
               let budgetMilliseconds = data.readUInt32(at: &position),
-              position < data.endIndex else {
-            throw NodeNetworkWireError.malformed
-        }
-        let mode: MiningMode
-        switch data[position] {
-        case 0: mode = .normal
-        case 1: mode = .deployment
-        default: throw NodeNetworkWireError.malformed
-        }
-        position = data.index(after: position)
-        guard
               let pathCount = data.readUInt16(at: &position), pathCount > 1 else {
             throw NodeNetworkWireError.malformed
         }
@@ -655,7 +640,6 @@ struct ChildCandidateRequestMessage: Sendable {
         let message = Self(
             requestID: requestID,
             budgetMilliseconds: budgetMilliseconds,
-            mode: mode,
             childPath: childPath,
             parentCID: parentCID,
             parentData: Data(data[position...]),
@@ -677,7 +661,6 @@ struct ChildCandidateResponseMessage: Sendable {
     let childCID: String
     let blockData: Data
     let searchWitness: ChildSchedulingWitness?
-    let deploymentWitness: ChildSchedulingWitness?
 
     init(
         requestID: UInt64,
@@ -685,8 +668,7 @@ struct ChildCandidateResponseMessage: Sendable {
         parentCID: String,
         childCID: String,
         blockData: Data,
-        searchWitness: ChildSchedulingWitness?,
-        deploymentWitness: ChildSchedulingWitness?
+        searchWitness: ChildSchedulingWitness?
     ) {
         self.requestID = requestID
         self.childPath = childPath
@@ -694,7 +676,6 @@ struct ChildCandidateResponseMessage: Sendable {
         self.childCID = childCID
         self.blockData = blockData
         self.searchWitness = searchWitness
-        self.deploymentWitness = deploymentWitness
     }
 
     func encoded() throws -> Data {
@@ -710,8 +691,7 @@ struct ChildCandidateResponseMessage: Sendable {
         let parentBytes = Data(parentCID.utf8)
         let childBytes = Data(childCID.utf8)
         let witnesses = try Self.encodedWitnesses(
-            search: searchWitness,
-            deployment: deploymentWitness
+            search: searchWitness
         )
         var size = 8 + 2 + pathBytes.reduce(0) { $0 + 2 + $1.count }
         size += 2 + parentBytes.count + 2 + childBytes.count
@@ -764,7 +744,7 @@ struct ChildCandidateResponseMessage: Sendable {
         let blockEnd = data.index(position, offsetBy: Int(blockLength))
         let blockData = Data(data[position..<blockEnd])
         position = blockEnd
-        guard let witnesses = readWitnesses(data, at: &position),
+        guard let searchWitness = readWitnesses(data, at: &position),
               position == data.endIndex else {
             throw NodeNetworkWireError.malformed
         }
@@ -774,8 +754,7 @@ struct ChildCandidateResponseMessage: Sendable {
             parentCID: parentCID,
             childCID: childCID,
             blockData: blockData,
-            searchWitness: witnesses.search,
-            deploymentWitness: witnesses.deployment
+            searchWitness: searchWitness
         )
         guard try message.encoded() == data else {
             throw NodeNetworkWireError.nonCanonical
@@ -787,7 +766,6 @@ struct ChildCandidateResponseMessage: Sendable {
         let roles: UInt8
         let proof: Data
         let terminal: Data
-        let directoryPath: [String]
     }
 
     private static func encoded(
@@ -806,88 +784,41 @@ struct ChildCandidateResponseMessage: Sendable {
         return EncodedWitness(
             roles: roles,
             proof: proof,
-            terminal: terminal,
-            directoryPath: witness.proof.directoryPath
+            terminal: terminal
         )
     }
 
     private static func encodedWitnesses(
-        search: ChildSchedulingWitness?,
-        deployment: ChildSchedulingWitness?
+        search: ChildSchedulingWitness?
     ) throws -> [EncodedWitness] {
-        switch (search, deployment) {
-        case (nil, nil):
-            return []
-        case (.some(let search), nil):
-            return [try encoded(search, roles: 1)]
-        case (nil, .some(let deployment)):
-            return [try encoded(deployment, roles: 2)]
-        case (.some(let search), .some(let deployment)):
-            let encodedSearch = try encoded(search, roles: 1)
-            let encodedDeployment = try encoded(deployment, roles: 2)
-            if encodedSearch.proof == encodedDeployment.proof,
-               encodedSearch.terminal == encodedDeployment.terminal {
-                return [try encoded(search, roles: 3)]
-            }
-            guard encodedSearch.directoryPath != encodedDeployment.directoryPath else {
-                throw NodeNetworkWireError.malformed
-            }
-            return [encodedSearch, encodedDeployment]
-        }
+        guard let search else { return [] }
+        return [try encoded(search, roles: 1)]
     }
 
+    /// Outer nil signals a malformed frame; inner nil means no witness present.
     private static func readWitnesses(
         _ data: Data,
         at position: inout Data.Index
-    ) -> (
-        search: ChildSchedulingWitness?,
-        deployment: ChildSchedulingWitness?
-    )? {
+    ) -> ChildSchedulingWitness?? {
         guard position < data.endIndex else { return nil }
         let count = Int(data[position])
         position = data.index(after: position)
-        guard count <= 2 else { return nil }
-        var search: ChildSchedulingWitness?
-        var deployment: ChildSchedulingWitness?
-        var paths: Set<[String]> = []
-        for index in 0..<count {
-            guard position < data.endIndex else { return nil }
-            let roles = data[position]
-            position = data.index(after: position)
-            guard roles > 0, roles <= 3,
-                  let proofBytes = data.readUInt32Bytes(at: &position),
-                  let terminalBytes = data.readUInt32Bytes(at: &position),
-                  !proofBytes.isEmpty, !terminalBytes.isEmpty,
-                  let proof = ChildBlockProof.deserialize(proofBytes),
-                  (try? proof.serialize()) == proofBytes,
-                  let terminal = Block(data: terminalBytes),
-                  terminal.toData() == terminalBytes,
-                  paths.insert(proof.directoryPath).inserted else {
-                return nil
-            }
-            let witness = ChildSchedulingWitness(
-                proof: proof,
-                terminal: terminal
-            )
-            if roles & 1 != 0 {
-                guard search == nil else { return nil }
-                search = witness
-            }
-            if roles & 2 != 0 {
-                guard deployment == nil else { return nil }
-                deployment = witness
-            }
-            if count == 2 && roles != UInt8(index + 1) {
-                return nil
-            }
-        }
-        if count == 1, search != nil, deployment != nil {
-            return (search, deployment)
-        }
-        if count == 1, search == nil, deployment == nil {
+        guard count <= 1 else { return nil }
+        guard count == 1 else { return .some(nil) }
+        guard position < data.endIndex else { return nil }
+        let roles = data[position]
+        position = data.index(after: position)
+        guard roles == 1,
+              let proofBytes = data.readUInt32Bytes(at: &position),
+              let terminalBytes = data.readUInt32Bytes(at: &position),
+              !proofBytes.isEmpty, !terminalBytes.isEmpty,
+              let proof = ChildBlockProof.deserialize(proofBytes),
+              (try? proof.serialize()) == proofBytes,
+              let terminal = Block(data: terminalBytes),
+              terminal.toData() == terminalBytes else {
             return nil
         }
-        return (search, deployment)
+        return .some(ChildSchedulingWitness(proof: proof, terminal: terminal))
     }
 }
 

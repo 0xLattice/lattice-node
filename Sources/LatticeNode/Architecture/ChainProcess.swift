@@ -555,11 +555,27 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     : nil
             )
         }
+        // A self-contained child genesis is authorized solely by the parent
+        // RECORDING its CID (a GenesisAction -> genesisState). The authenticated
+        // package carries the parent-issued ParentGenesisLink; without it the
+        // parent has not yet recorded this genesis, so defer (retriable).
+        guard let parentGenesisLink = package.parentGenesisLink else {
+            return NodeAdmissionOutcome(
+                decision: .unavailable(.parentGenesis(
+                    parentPath: Array(configuration.chainPath.dropLast()),
+                    directory: configuration.chainPath.last ?? "",
+                    childGenesisCID: blockHeader.rawCID,
+                    parentStateCID: LatticeState.emptyHeader.rawCID
+                )),
+                parentCarrierLink: nil,
+                sameChainPredecessor: nil
+            )
+        }
         let result = try await ChainLevel.bootstrap(
             context: configuration.runtimeContext,
             genesisHeader: blockHeader,
             fetcher: attemptFetcher,
-            childPackage: package,
+            parentGenesisLink: parentGenesisLink,
             validationContentStorer: admissionStorage,
             materializedVolumeStorer: admissionStorage,
             stage: stage
@@ -1269,19 +1285,9 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 }
             }
             let isChildGenesis = child.parent == nil
-            let bootstrapRoots: [String]
-            if isChildGenesis && selected[directory]?.parentCreatedGenesis == true {
-                let bootstrapStorage = NodeAdmissionStorage(
-                    storage: broker
-                )
-                try await childHeader.storeBlock(
-                    fetcher: localFetcher,
-                    storer: bootstrapStorage
-                )
-                bootstrapRoots = await bootstrapStorage.takeStoredVolumeRoots()
-            } else {
-                bootstrapRoots = []
-            }
+            // Child geneses are self-contained and self-mined; a parent never
+            // carries a child genesis, so no bootstrap volume roots are staged.
+            let bootstrapRoots: [String] = []
             prepared.append(try PreparedChildProof(
                 directory: directory,
                 childCID: childCID,

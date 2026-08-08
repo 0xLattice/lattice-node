@@ -142,8 +142,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                 return try await service.miningCandidate(
                     parentCarrier: context.parentCarrier,
                     parentContentSource: parentContentSource,
-                    rewards: context.rewards,
-                    mode: context.mode
+                    rewards: context.rewards
                 )
             },
             candidateReservations: { [weak service] update in
@@ -665,16 +664,6 @@ func makeApplication(
             try await service.submitWork(input)
         }
     }
-    router.post("v1/children/intents") { request, context in
-        let input: ChildDeployIntentRequest = try await decode(
-            request,
-            upTo: ChainServiceLimits.maximumChildIntentPayloadBytes
-        )
-        return try await serviceCall(request: request, context: context) {
-            try await service.createChildDeployIntent(input)
-        }
-    }
-
     return Application(
         responder: router.buildResponder(),
         configuration: .init(address: .hostname(host, port: port))

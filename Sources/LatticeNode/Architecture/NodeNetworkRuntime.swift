@@ -1092,7 +1092,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
                         parentCID: parentCID,
                         parentData: parentData,
                         rewards: rewards,
-                        mode: context.mode,
                         deadline: deadline,
                         generation: generation,
                         process: process
@@ -3402,8 +3401,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 directory: directory,
                 block: block,
                 searchWitness: response.searchWitness,
-                deploymentWitness: response.deploymentWitness,
-                parentCreatedGenesis: false,
                 advertiserPeerKey: peer.key
             )
             guard await schedulingTargets(for: candidate) != nil else {
@@ -5220,7 +5217,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         parentCID: String,
         parentData: Data,
         rewards: [MiningReward],
-        mode: MiningMode,
         deadline: ContinuousClock.Instant,
         generation: UInt64,
         process: ChainProcess
@@ -5255,7 +5251,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let request = ChildCandidateRequestMessage(
             requestID: makeRequestID(),
             budgetMilliseconds: remoteBudget,
-            mode: mode,
             childPath: childPath,
             parentCID: parentCID,
             parentData: parentData,
@@ -5693,8 +5688,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     try await builder(
                         ChildCandidateRequestContext(
                             parentCarrier: parent,
-                            rewards: request.rewards,
-                            mode: request.mode
+                            rewards: request.rewards
                         ),
                         session
                     )
@@ -5716,8 +5710,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 parentCID: request.parentCID,
                 childCID: childCID,
                 blockData: blockData,
-                searchWitness: candidate.searchWitness,
-                deploymentWitness: candidate.deploymentWitness
+                searchWitness: candidate.searchWitness
             ).encoded() else { return }
         _ = await hierarchy.sendMessage(
             to: peer,
