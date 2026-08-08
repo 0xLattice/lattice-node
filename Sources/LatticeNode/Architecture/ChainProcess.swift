@@ -391,13 +391,18 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// holds the genesis bytes (the parent only RECORDED the CID via a
     /// GenesisAction); the child node rebuilds the identical genesis from the
     /// seed and bootstraps it locally, exactly as the Nexus root bootstraps
-    /// `NexusGenesis`. The empty-bound `ParentGenesisLink` the child constructs
-    /// here is the same one the parent's record commits to; the parent enforces
-    /// the record at block 1, so a genesis the parent never recorded simply
-    /// cannot co-mine forward. Returns whether the genesis became active. Idempotent:
-    /// returns false (no-op) once the chain is past `awaitingGenesis`.
+    /// `NexusGenesis`. Before activating, `confirmParentRecordedGenesis` must
+    /// confirm the parent actually recorded THIS rebuilt CID (the parent holds
+    /// the committed `genesisState`, not this child node, so the confirmation is
+    /// verify-not-trust over the authenticated parent fact plane). Fail-closed: a
+    /// genesis the parent never recorded — or a CID that differs from the record —
+    /// yields `false` and the chain stays `awaitingGenesis` for the caller to
+    /// retry, so no honest node self-admits an unrecorded fork. Returns whether the
+    /// genesis became active. Idempotent: returns false (no-op) once the chain is
+    /// past `awaitingGenesis`.
     public func activateSeededChildGenesis(
-        seed: ChildGenesisSeed
+        seed: ChildGenesisSeed,
+        confirmParentRecordedGenesis: (_ childGenesisCID: String) async -> Bool
     ) async throws -> Bool {
         try await acquireMutationOperation()
         defer { releaseOperation() }
@@ -413,6 +418,14 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             fetcher: localFetcher
         )
         let header = try BlockHeader(node: genesis)
+        // Fail-closed gate: only self-admit a genesis the parent actually
+        // recorded. This node holds no local copy of the parent's committed
+        // genesisState, so it asks the parent (over the authenticated fact plane)
+        // whether it recorded exactly this rebuilt CID for this directory. A
+        // negative or absent answer leaves the chain awaiting for the retry path.
+        guard await confirmParentRecordedGenesis(header.rawCID) else {
+            return false
+        }
         let parentGenesisLink = ParentGenesisLink(
             parentPath: Array(context.path.dropLast()),
             directory: directory,

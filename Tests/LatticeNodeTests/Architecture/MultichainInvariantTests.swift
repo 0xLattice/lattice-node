@@ -204,7 +204,10 @@ final class MultichainInvariantTests: XCTestCase {
             configuration: paymentsConfiguration
         )
         let paymentsBootstrapped = try await payments!
-            .activateSeededChildGenesis(seed: seed)
+            .activateSeededChildGenesis(
+                seed: seed,
+                confirmParentRecordedGenesis: { _ in true }
+            )
         XCTAssertTrue(paymentsBootstrapped)
         let accepted = try await payments!.admit(
             childBlockHeader,

@@ -327,6 +327,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let request: PortableAttachmentIndexRequestMessage
     }
 
+    private struct PendingGenesisVerification: Sendable {
+        let peer: AuthenticatedPeer
+        let request: ParentChainFactMessage
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+
     private struct EvidenceVolumeLease: Hashable {
         let plane: CandidateSourcePlane
         let sessionID: Data
@@ -501,6 +507,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private var pendingEvidenceIndexes: [UInt64: PendingChildEvidenceIndex] = [:]
     private var pendingParentChainFacts:
         [UInt64: PendingParentChainFact] = [:]
+    private var pendingGenesisVerifications:
+        [UInt64: PendingGenesisVerification] = [:]
     private var parentStateQueryGuard = ParentStateQueryGuard(
         capacity: NodeNetworkRuntime.maximumConcurrentParentStateQueries
     )
@@ -867,6 +875,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         )
         pendingEvidenceIndexes.removeAll()
         pendingParentChainFacts.removeAll()
+        for pending in pendingGenesisVerifications.values {
+            pending.continuation.resume(returning: false)
+        }
+        pendingGenesisVerifications.removeAll()
         parentStateQueryGuard.removeAll()
         pendingPortableAttachmentIndexes.removeAll()
         activeEvidenceVolumes.removeAll()
@@ -3247,8 +3259,19 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard let response = try?
                     ParentChainFactMessage.decoded(
                         message.payload
-                    ),
-                  let pending = pendingParentChainFacts[
+                    ) else { return }
+            if let verification = pendingGenesisVerifications[
+                response.requestID
+            ], verification.peer.key == peer.key,
+               verification.peer.sessionID == peer.sessionID,
+               response == verification.request {
+                resolveGenesisVerification(
+                    response.requestID,
+                    confirmed: true
+                )
+                return
+            }
+            guard let pending = pendingParentChainFacts[
                     response.requestID
                   ],
                   pending.peer.key == peer.key,
@@ -4970,6 +4993,64 @@ public actor NodeNetworkRuntime: IvyDelegate {
             generation: generation,
             process: process
         )
+    }
+
+    /// Verify-not-trust gate for deployer-seeded self-admission: ask the
+    /// authenticated immediate parent whether it recorded exactly this child
+    /// genesis CID (bound to the empty parent state a self-contained genesis
+    /// commits to). The parent answers only on a positive match and stays silent
+    /// otherwise, so an unrecorded — or mismatched — CID resolves `false` when the
+    /// request times out. `false` on a missing parent session too; the caller
+    /// retries until the parent connects and confirms.
+    public func confirmParentRecordedChildGenesis(
+        childGenesisCID: String
+    ) async -> Bool {
+        guard !configuration.address.isNexus,
+              pendingGenesisVerifications.count < Self.maximumPendingRequests,
+              let parent = configuredParentPeer() else {
+            return false
+        }
+        let request = ParentChainFactMessage(
+            requestID: makeRequestID(),
+            fact: .genesis(
+                childGenesisCID: childGenesisCID,
+                parentStateCID: LatticeState.emptyHeader.rawCID
+            )
+        )
+        guard let payload = try? request.encoded() else { return false }
+        let delay = Self.nanoseconds(
+            planeConfigurations.hierarchy.requestTimeout
+        )
+        return await withCheckedContinuation { continuation in
+            pendingGenesisVerifications[request.requestID] =
+                PendingGenesisVerification(
+                    peer: parent,
+                    request: request,
+                    continuation: continuation
+                )
+            Task { [weak self] in
+                _ = await self?.hierarchy.sendMessage(
+                    to: parent,
+                    topic: NodeNetworkTopic.parentChainFactRequest,
+                    payload: payload
+                )
+                try? await Task.sleep(nanoseconds: delay)
+                await self?.resolveGenesisVerification(
+                    request.requestID,
+                    confirmed: false
+                )
+            }
+        }
+    }
+
+    private func resolveGenesisVerification(
+        _ requestID: UInt64,
+        confirmed: Bool
+    ) {
+        guard let pending = pendingGenesisVerifications.removeValue(
+            forKey: requestID
+        ) else { return }
+        pending.continuation.resume(returning: confirmed)
     }
 
     private func requestParentChainFact(

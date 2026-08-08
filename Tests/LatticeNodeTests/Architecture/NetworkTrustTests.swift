@@ -4244,7 +4244,10 @@ final class NetworkTrustTests: XCTestCase {
         var process: ChainProcess? = try await ChainProcess.open(
             configuration: configuration
         )
-        let activated = try await process!.activateSeededChildGenesis(seed: seed)
+        let activated = try await process!.activateSeededChildGenesis(
+            seed: seed,
+            confirmParentRecordedGenesis: { _ in true }
+        )
         XCTAssertTrue(activated)
         let genesis = try await process!.canonicalTipBlock()
         let predecessor = try await BlockBuilder.buildBlock(
@@ -5752,7 +5755,8 @@ final class NetworkTrustTests: XCTestCase {
         let carrierAdmission = try await parentProcess.admit(carrierHeader)
         XCTAssertTrue(carrierAdmission.decision.isAccepted)
         let activated = try await childProcess.activateSeededChildGenesis(
-            seed: seed
+            seed: seed,
+            confirmParentRecordedGenesis: { _ in true }
         )
         XCTAssertTrue(activated)
 

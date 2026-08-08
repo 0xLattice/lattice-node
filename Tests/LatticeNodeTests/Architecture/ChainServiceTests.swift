@@ -1472,7 +1472,8 @@ final class ChainServiceTests: XCTestCase {
             )
         ))
         let activated = try await childProcess.activateSeededChildGenesis(
-            seed: seed
+            seed: seed,
+            confirmParentRecordedGenesis: { _ in true }
         )
         XCTAssertTrue(
             activated,
@@ -1978,7 +1979,8 @@ final class ChainServiceTests: XCTestCase {
             )
         ))
         let activated = try await process.activateSeededChildGenesis(
-            seed: child.seed
+            seed: child.seed,
+            confirmParentRecordedGenesis: { _ in true }
         )
         XCTAssertTrue(
             activated,

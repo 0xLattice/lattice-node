@@ -755,7 +755,8 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertEqual(retainedRelay?.package.proof.rootCID, proof.rootCID)
 
         let bootstrapped = try await process.activateSeededChildGenesis(
-            seed: fixture.seed
+            seed: fixture.seed,
+            confirmParentRecordedGenesis: { _ in true }
         )
         XCTAssertTrue(bootstrapped)
         let retry = try await process.admit(
@@ -765,6 +766,22 @@ final class ChainProcessTests: XCTestCase {
         )
         XCTAssertTrue(retry.decision.isAccepted)
         XCTAssertNil(retry.sameChainPredecessor)
+    }
+
+    func testSeededChildGenesisIsNotActivatedWithoutTheParentRecord() async throws {
+        let fixture = try await childBootstrapFixture()
+        let process = try await ChainProcess.open(
+            configuration: fixture.configuration
+        )
+        // Fail-closed: with no parent record confirming this genesis CID, the
+        // node must refuse to self-admit and stay awaiting for the retry path.
+        let activated = try await process.activateSeededChildGenesis(
+            seed: fixture.seed,
+            confirmParentRecordedGenesis: { _ in false }
+        )
+        XCTAssertFalse(activated)
+        let phase = await process.status().phase
+        XCTAssertEqual(phase, .awaitingGenesis)
     }
 
     func testSecondProcessCannotOpenTheSameStorageDirectory() async throws {
