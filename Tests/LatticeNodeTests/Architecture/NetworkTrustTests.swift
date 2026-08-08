@@ -5719,11 +5719,15 @@ final class NetworkTrustTests: XCTestCase {
         )
         let parentGenesis = try await parentProcess.canonicalTipBlock()
         let timestamp = parentGenesis.timestamp + 3_600_000
-        let childGenesis = try await BlockBuilder.buildChildGenesis(
-            spec: NexusGenesis.spec,
-            parentState: parentGenesis.postState,
-            timestamp: timestamp,
-            target: UInt256.max,
+        // A self-contained child genesis (empty parentState): the parent only
+        // RECORDS its CID via a plain GenesisAction; the child rebuilds it from
+        // the same seed and self-admits it. It is never carried on the carrier.
+        let seed = ChildGenesisSeed(
+            spec: NexusGenesis.spec, premineTo: nil, timestamp: timestamp
+        )
+        let childGenesis = try await ChildGenesisBuilder.build(
+            seed: seed,
+            chainPath: childConfiguration.chainPath,
             fetcher: parentProcess
         )
         let childHeader = try BlockHeader(node: childGenesis)
@@ -5738,35 +5742,34 @@ final class NetworkTrustTests: XCTestCase {
         let carrier = try await BlockBuilder.buildBlock(
             previous: parentGenesis,
             transactions: [authorization],
-            children: ["Payments": childGenesis],
             timestamp: timestamp,
             nonce: 1,
             fetcher: parentProcess
         )
-        _ = try await parentProcess.prepareChildProofs(for: carrier, capacity: 16)
         let carrierHeader = try BlockHeader(node: carrier)
         let carrierAdmission = try await parentProcess.admit(carrierHeader)
         XCTAssertTrue(carrierAdmission.decision.isAccepted)
-        let childPackage = try await networkChildPackage(
-            parent: parentProcess,
-            carrierCID: carrierHeader.rawCID,
-            rootCID: carrierHeader.rawCID,
-            directory: "Payments",
-            childCID: childHeader.rawCID,
-            parentStateCID: carrier.prevState.rawCID
+        let activated = try await childProcess.activateSeededChildGenesis(
+            seed: seed
         )
-        let childBootstrap = try await childProcess.admit(
-            childHeader,
-            authenticatedChildPackage: childPackage,
-            remoteSource: FetcherContentSource(parentProcess)
-        )
-        XCTAssertTrue(childBootstrap.decision.isAccepted)
+        XCTAssertTrue(activated)
 
         let provisional = try await BlockBuilder.buildBlock(
             previous: carrier,
             timestamp: timestamp + 3_600_000,
             nonce: 2,
             fetcher: parentProcess
+        )
+        // The fixture candidate is a co-mined height-1 child block bound to the
+        // provisional parent carrier (a genesis is never a candidate).
+        let candidateBlock = try await BlockBuilder.buildBlock(
+            previous: childGenesis,
+            parentChainBlock: provisional,
+            timestamp: provisional.timestamp,
+            target: .max,
+            fetcher: CoalescingFetcher(CompositeContentSource([
+                childProcess, parentProcess,
+            ]))
         )
         return ProvisionalRootFixture(
             childConfiguration: childConfiguration,
@@ -5780,7 +5783,7 @@ final class NetworkTrustTests: XCTestCase {
             ),
             candidate: DirectChildCandidate(
                 directory: "Payments",
-                block: childGenesis
+                block: candidateBlock
             )
         )
     }
@@ -6112,44 +6115,6 @@ final class NetworkTrustTests: XCTestCase {
         return Transaction(
             signatures: [key.publicKey: signature],
             body: bodyHeader
-        )
-    }
-
-    private func networkChildPackage(
-        parent: ChainProcess,
-        carrierCID: String,
-        rootCID: String,
-        directory: String,
-        childCID: String,
-        parentStateCID: String
-    ) async throws -> AuthenticatedChildPackage {
-        guard try await parent.issuedParentCarrierLink(
-            carrierCID: carrierCID,
-            rootCID: rootCID
-        ) != nil, let genesisLink = try await parent.issuedParentGenesisLink(
-            directory: directory,
-            childGenesisCID: childCID,
-            parentStateCID: parentStateCID
-        ) else {
-            throw NetworkTestError.failedStart
-        }
-        _ = try await parent.retryPendingChildProofs(
-            carrierCID: carrierCID
-        )
-        let proofs = try await parent.durableDirectChildProofs(
-            carrierCID: carrierCID,
-            rootCID: rootCID
-        )
-        guard let proof = proofs.first(where: {
-            $0.directory == directory && $0.childCID == childCID
-        }) else {
-            throw NetworkTestError.failedStart
-        }
-        return AuthenticatedChildPackage(
-            package: ChildValidationPackage(
-                proof: proof.proof,
-                parentGenesisLink: genesisLink
-            )
         )
     }
 
