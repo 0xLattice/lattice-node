@@ -442,6 +442,171 @@ final class ParentChildE2ETests: XCTestCase {
         passed = true
     }
 
+    /// Phase 4 deploy arc on the self-contained-genesis model: anchor a child by
+    /// RECORDING a plain GenesisAction on the parent, bring the child up from a
+    /// deployer-seeded genesis it SELF-ADMITS, then co-mine its block 1 by mining
+    /// the parent (whose template collects the child's candidate).
+    func testChildDeploysViaGenesisActionAndCominesBlockOne() async throws {
+        let workspace = try E2EWorkspace()
+        let cluster = E2ECluster()
+        var passed = false
+        defer {
+            cluster.forceTerminateAll()
+            if passed {
+                try? workspace.remove()
+            } else {
+                print("lattice-node E2E artifacts retained at \(workspace.url.path)")
+            }
+        }
+
+        let binary = try E2EBinary.latticeNode()
+        let nexusIdentity = try workspace.makeIdentity(named: "nexus")
+        let childIdentity = try workspace.makeIdentity(named: "payments")
+        let ports = try E2EPorts.allocate(count: 6)
+        let nexus = nexusNode(
+            binary: binary,
+            workspace: workspace,
+            name: "nexus",
+            identity: nexusIdentity,
+            overlayPort: ports[0],
+            factPort: ports[1],
+            rpcPort: ports[2]
+        )
+        cluster.add(nexus)
+        try nexus.start()
+        _ = try await waitForNexus(nexus)
+
+        // Build the self-contained child genesis OFFLINE (empty parentState). The
+        // deployer records only its CID; the child node rebuilds the identical
+        // genesis from the same seed and self-admits it.
+        let seed = ChildGenesisSeed(
+            spec: NexusGenesis.spec,
+            premineTo: nil,
+            timestamp: 1_000
+        )
+        let genesisStore = E2EDeployContentStore()
+        try await LatticeState.emptyHeader.storeRecursively(storer: genesisStore)
+        let childGenesis = try await ChildGenesisBuilder.build(
+            seed: seed,
+            chainPath: ["Nexus", "Payments"],
+            fetcher: genesisStore
+        )
+        let genesisCID = try BlockHeader(node: childGenesis).rawCID
+
+        // Anchor the child: ONE signed GenesisAction recording the CID in the
+        // parent's genesisState. No carrier attachment.
+        let deployer = try workspace.makeIdentity(named: "deployer")
+        let anchor = try signedTransaction(
+            key: (privateKey: deployer.privateKey, publicKey: deployer.publicKey),
+            chainPath: ["Nexus"],
+            genesisActions: [GenesisAction(
+                directory: "Payments",
+                blockCID: genesisCID
+            )],
+            nonce: 0
+        )
+        let _: SubmitTransactionResponse = try await nexus.post(
+            "/v1/transactions",
+            body: SubmitTransactionRequest(transaction: anchor)
+        )
+        let carrier = try await mineBlock(nexus)
+        XCTAssertTrue(carrier.response.accepted)
+
+        // The parent has durably recorded `Payments -> genesisCID`.
+        let recorded = try await waitForRecordedChild(
+            nexus,
+            directory: "Payments",
+            genesisCID: genesisCID
+        )
+        XCTAssertEqual(recorded.chainPath.last, "Payments")
+        XCTAssertEqual(recorded.genesisHash, genesisCID)
+
+        // Bring the child node up via the seed + self-admit path: seed
+        // `child-genesis.json` into its data directory, then start it.
+        let childStorage = workspace.url.appendingPathComponent(
+            "payments",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: childStorage,
+            withIntermediateDirectories: true
+        )
+        try JSONEncoder().encode(seed).write(
+            to: childStorage.appendingPathComponent("child-genesis.json")
+        )
+        let child = childNode(
+            binary: binary,
+            workspace: workspace,
+            name: "payments",
+            directory: "Payments",
+            identity: childIdentity,
+            parentPublicKey: nexusIdentity.publicKey,
+            parentFactPort: ports[1],
+            overlayPort: ports[3],
+            factPort: ports[4],
+            rpcPort: ports[5]
+        )
+        cluster.add(child)
+        try child.start()
+
+        // The child self-admits its genesis and is active at height 0.
+        let active = try await child.waitForStatus { status in
+            status.phase == .active
+                && status.chainPath == ["Nexus", "Payments"]
+                && status.tipCID == genesisCID
+        }
+        XCTAssertEqual(active.height, 0)
+
+        // Co-mine block 1: mining the parent collects the child's candidate into
+        // the parent template; the co-mined block promotes the child to height 1.
+        let clock = ContinuousClock()
+        let deadline = clock.now + e2eScaled(.seconds(90))
+        var childHeight = active.height ?? 0
+        while clock.now < deadline && childHeight < 1 {
+            _ = try? await mineBlock(nexus, requestTimeout: 30)
+            if let status = try? await child.waitForStatus(
+                timeout: .seconds(3),
+                where: { ($0.height ?? 0) >= 1 }
+            ) {
+                childHeight = status.height ?? 0
+                break
+            }
+        }
+
+        let final = try await child.waitForStatus { status in
+            status.phase == .active && (status.height ?? 0) >= 1
+        }
+        XCTAssertEqual(final.phase, .active)
+        XCTAssertEqual(final.height, 1)
+        XCTAssertEqual(final.chainPath, ["Nexus", "Payments"])
+
+        try await cluster.stopAll()
+        passed = true
+    }
+
+    private func waitForRecordedChild(
+        _ node: E2ENode,
+        directory: String,
+        genesisCID: String
+    ) async throws -> ExplorerChainChild {
+        let clock = ContinuousClock()
+        let deadline = clock.now + e2eScaled(.seconds(30))
+        while clock.now < deadline {
+            if let listing: ExplorerChainChildren = try? await node.get(
+                "/api/chain/children?limit=100"
+            ), let match = listing.children.first(where: {
+                $0.chainPath.last == directory && $0.genesisHash == genesisCID
+            }) {
+                return match
+            }
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        throw E2EHTTPError(
+            status: 0,
+            body: "parent did not record child \(directory) -> \(genesisCID)"
+        )
+    }
+
     private func nexusNode(
         binary: URL,
         workspace: E2EWorkspace,
@@ -1599,6 +1764,24 @@ private final class E2ENode {
         )
     }
 
+    func get<Response: Decodable>(
+        _ path: String,
+        timeout: TimeInterval? = nil,
+        caller: String = #fileID,
+        line: UInt = #line
+    ) async throws -> Response {
+        guard let url = URL(string: baseURL.absoluteString + path) else {
+            throw E2EHTTPError(status: 0, body: "bad URL: \(path)")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        return try await send(
+            request,
+            timeout: timeout,
+            caller: "\(caller):\(line)"
+        )
+    }
+
     var rpcURL: URL {
         baseURL
     }
@@ -1726,6 +1909,31 @@ private struct E2EIdentity {
     let privateKey: String
     let publicKey: String
     let file: URL
+}
+
+/// A minimal in-memory content store for building the child genesis offline
+/// (to compute its CID before anchoring it).
+private actor E2EDeployContentStore: Storer, Fetcher, ContentSource, VolumeStorer {
+    private var entries: [String: Data] = [:]
+
+    func store(entries: [String: Data]) async throws {
+        self.entries.merge(entries) { _, new in new }
+    }
+
+    func store(volume: SerializedVolume) async throws {
+        entries.merge(volume.entries) { existing, _ in existing }
+    }
+
+    func fetch(_ cids: Set<String>) async -> [String: Data] {
+        entries.filter { cids.contains($0.key) }
+    }
+
+    func fetch(rawCid: String) async throws -> Data {
+        guard let data = entries[rawCid] else {
+            throw E2EHTTPError(status: 0, body: "missing content: \(rawCid)")
+        }
+        return data
+    }
 }
 
 private final class E2EWorkspace {
