@@ -38,6 +38,10 @@ enum NodeNetworkTopic {
         "lattice.hierarchy.parent-chain-fact.request.v1"
     static let parentChainFactResponse =
         "lattice.hierarchy.parent-chain-fact.response.v1"
+    static let childGenesisAnchorRequest =
+        "lattice.hierarchy.child-genesis-anchor.request.v1"
+    static let childGenesisAnchorResponse =
+        "lattice.hierarchy.child-genesis-anchor.response.v1"
 
     static func plane(for topic: String) -> Plane? {
         switch topic {
@@ -52,7 +56,8 @@ enum NodeNetworkTopic {
              childEvidenceIndexRequest, childEvidenceIndexResponse,
              childCandidateRequest, childCandidateResponse,
              childCandidateReservationRequest, childCandidateReservationResponse,
-             parentChainFactRequest, parentChainFactResponse: .hierarchy
+             parentChainFactRequest, parentChainFactResponse,
+             childGenesisAnchorRequest, childGenesisAnchorResponse: .hierarchy
         default: nil
         }
     }
@@ -86,6 +91,33 @@ struct ParentChainFactMessage: NodeJSONMessage, Equatable, Sendable {
                   fromStateCID != toStateCID else {
                 throw NodeNetworkWireError.malformed
             }
+        }
+    }
+}
+
+/// An adopting child still `awaitingGenesis` asks its authenticated immediate
+/// parent for the genesis CID the parent recorded for the child's OWN directory
+/// (the parent knows the directory from the authenticated `.child` role, so the
+/// request carries none). The child learns the CID verify-not-trust off the
+/// parent's committed record — it never guesses it — and re-confirms the CID
+/// before admitting the fetched, self-verifying genesis.
+struct ChildGenesisAnchorRequestMessage: NodeJSONMessage, Equatable, Sendable {
+    let requestID: UInt64
+
+    func validate() throws {
+        guard requestID != 0 else {
+            throw NodeNetworkWireError.malformed
+        }
+    }
+}
+
+struct ChildGenesisAnchorResponseMessage: NodeJSONMessage, Equatable, Sendable {
+    let requestID: UInt64
+    let genesisCID: String
+
+    func validate() throws {
+        guard requestID != 0, _isCanonicalWireCID(genesisCID) else {
+            throw NodeNetworkWireError.malformed
         }
     }
 }

@@ -418,11 +418,75 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             fetcher: localFetcher
         )
         let header = try BlockHeader(node: genesis)
-        // Fail-closed gate: only self-admit a genesis the parent actually
-        // recorded. This node holds no local copy of the parent's committed
-        // genesisState, so it asks the parent (over the authenticated fact plane)
-        // whether it recorded exactly this rebuilt CID for this directory. A
-        // negative or absent answer leaves the chain awaiting for the retry path.
+        return try await bootstrapSelfContainedGenesis(
+            header: header,
+            context: context,
+            directory: directory,
+            fetcher: localFetcher,
+            confirmParentRecordedGenesis: confirmParentRecordedGenesis
+        )
+    }
+
+    /// Self-admit an ADOPTED self-contained child genesis: this node did not
+    /// deploy the child and holds no seed, so it FETCHES the genesis block by the
+    /// parent-recorded `genesisCID` (content-addressed and self-verifying)
+    /// through `remoteSource` — a child-overlay provider serves the bytes — and
+    /// bootstraps it under the same fail-closed parent-record gate as the seeded
+    /// path. This is the no-seed follower counterpart the candidate machinery
+    /// cannot carry (a self-contained genesis has no `ChildBlockProof` to
+    /// package). Returns whether the genesis became active; a fetch miss, a CID
+    /// that fails to hash back, or a genesis the parent never recorded yields
+    /// `false` for the caller to retry. Idempotent past `awaitingGenesis`.
+    public func activateAdoptedChildGenesis(
+        genesisCID: String,
+        remoteSource: any ContentSource,
+        confirmParentRecordedGenesis: (_ childGenesisCID: String) async -> Bool
+    ) async throws -> Bool {
+        try await acquireMutationOperation()
+        defer { releaseOperation() }
+        guard case .awaitingGenesis = runtimePhase,
+              !configuration.address.isNexus else {
+            return false
+        }
+        let context = try configuration.runtimeContext
+        guard let directory = context.path.last else { return false }
+        let fetcher = try Self.attemptFetcher(
+            package: nil,
+            fallback: CompositeContentSource([broker, remoteSource])
+        )
+        guard let node = try? await BlockHeader(
+            rawCID: genesisCID, node: nil, encryptionInfo: nil
+        ).resolve(fetcher: fetcher).node else {
+            return false
+        }
+        let header = try BlockHeader(node: node)
+        // Content addressing is self-verifying: a fetched volume that does not
+        // hash back to the requested CID is not this genesis.
+        guard header.rawCID == genesisCID else { return false }
+        return try await bootstrapSelfContainedGenesis(
+            header: header,
+            context: context,
+            directory: directory,
+            fetcher: fetcher,
+            confirmParentRecordedGenesis: confirmParentRecordedGenesis
+        )
+    }
+
+    /// Bootstrap a resolved self-contained child genesis (seed-built or
+    /// adopted-by-fetch). Fail-closed gate: only admits a genesis the parent
+    /// actually recorded for this directory — this node holds no local copy of
+    /// the parent's committed genesisState, so it asks the parent (over the
+    /// authenticated fact plane) whether it recorded exactly this CID, bound to
+    /// the empty parent state a self-contained genesis commits to. A negative or
+    /// absent answer leaves the chain awaiting for the retry path. The caller
+    /// holds the mutation operation and has confirmed `.awaitingGenesis`.
+    private func bootstrapSelfContainedGenesis(
+        header: BlockHeader,
+        context: ChainRuntimeContext,
+        directory: String,
+        fetcher: any Fetcher,
+        confirmParentRecordedGenesis: (_ childGenesisCID: String) async -> Bool
+    ) async throws -> Bool {
         guard await confirmParentRecordedGenesis(header.rawCID) else {
             return false
         }
@@ -436,7 +500,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         let result = try await ChainLevel.bootstrap(
             context: context,
             genesisHeader: header,
-            fetcher: localFetcher,
+            fetcher: fetcher,
             parentGenesisLink: parentGenesisLink,
             validationContentStorer: admissionStorage,
             materializedVolumeStorer: admissionStorage,
