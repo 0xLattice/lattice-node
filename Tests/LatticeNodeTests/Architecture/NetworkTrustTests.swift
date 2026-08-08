@@ -951,11 +951,6 @@ private actor HierarchyVolumeProbe: IvyDelegate, IvyContentSource {
     func volumeRequestCount() -> Int { volumeRequests }
 }
 
-private struct NetworkChildGenesisCandidate {
-    let header: BlockHeader
-    let package: AuthenticatedChildPackage
-}
-
 private struct NetworkHierarchyBranch {
     let rootHeader: BlockHeader
     let middle: Block
@@ -4232,18 +4227,25 @@ final class NetworkTrustTests: XCTestCase {
         )
         let source = NetworkTestContentStore()
         try await LatticeState.emptyHeader.storeRecursively(storer: source)
-        let genesisCandidate = try await networkChildGenesisCandidate(
-            timestamp: 1,
-            source: source
+        // Self-contained child genesis: the child rebuilds it from the seed and
+        // self-admits it (never bootstrapped from a carried-genesis proof).
+        let seed = ChildGenesisSeed(
+            spec: NexusGenesis.spec, premineTo: nil, timestamp: 1
+        )
+        let childGenesis = try await ChildGenesisBuilder.build(
+            seed: seed,
+            chainPath: configuration.chainPath,
+            fetcher: source
+        )
+        try await BlockHeader(node: childGenesis).storeBlock(
+            fetcher: source,
+            storer: source
         )
         var process: ChainProcess? = try await ChainProcess.open(
             configuration: configuration
         )
-        let bootstrap = try await process!.admit(
-            genesisCandidate.header,
-            authenticatedChildPackage: genesisCandidate.package
-        )
-        XCTAssertTrue(bootstrap.decision.isAccepted)
+        let activated = try await process!.activateSeededChildGenesis(seed: seed)
+        XCTAssertTrue(activated)
         let genesis = try await process!.canonicalTipBlock()
         let predecessor = try await BlockBuilder.buildBlock(
             previous: genesis,
@@ -5814,51 +5816,6 @@ final class NetworkTrustTests: XCTestCase {
         )
     }
 
-    private func networkChildGenesisCandidate(
-        timestamp: Int64,
-        source: NetworkTestContentStore
-    ) async throws -> NetworkChildGenesisCandidate {
-        let child = try await BlockBuilder.buildChildGenesis(
-            spec: NexusGenesis.spec,
-            parentState: LatticeState.emptyHeader,
-            timestamp: timestamp,
-            target: UInt256.max,
-            fetcher: source
-        )
-        let header = try BlockHeader(node: child)
-        let carrier = try await BlockBuilder.buildGenesis(
-            spec: NexusGenesis.spec,
-            children: ["Payments": child],
-            timestamp: timestamp + 1,
-            target: UInt256.max,
-            fetcher: source
-        )
-        let carrierHeader = try BlockHeader(node: carrier)
-        try await carrierHeader.storeRecursively(storer: source as any Storer)
-        let proof = try await ChildBlockProof.generate(
-            rootHeader: carrierHeader,
-            childDirectory: "Payments",
-            fetcher: source
-        )
-        let collector = NetworkTestContentStore()
-        try await header.storeBlock(fetcher: source, storer: collector)
-        var entries = await collector.allEntries()
-        entries[carrierHeader.rawCID] = try XCTUnwrap(carrier.toData())
-        return NetworkChildGenesisCandidate(
-            header: header,
-            package: AuthenticatedChildPackage(
-                package: ChildValidationPackage(
-                    proof: proof,
-                    parentGenesisLink: try genesisLink(
-                        parentPath: ["Nexus"],
-                        directory: "Payments",
-                        cid: header.rawCID,
-                        parentStateCID: child.parentState.rawCID
-                    )
-                )
-            )
-        )
-    }
 
     private func envelope(parentPath: [String]) throws -> ChildValidationPackageEnvelope {
         try ChildValidationPackageEnvelope(ChildValidationPackage(
@@ -6199,22 +6156,37 @@ final class NetworkTrustTests: XCTestCase {
             throw NetworkTestError.failedPhase("side fixture predecessor")
         }
 
-        let childBlock = try await BlockBuilder.buildChildGenesis(
+        // A self-contained child genesis (empty parentState) the side carrier
+        // RECORDS via a GenesisAction while co-mining the child's height-1 block.
+        let childGenesis = try await BlockBuilder.buildChildGenesis(
             spec: NexusGenesis.spec,
-            parentState: sidePredecessor.postState,
+            parentState: LatticeState.emptyHeader,
             timestamp: 7_200_000,
             target: UInt256.max,
             fetcher: process
         )
-        let childHeader = try BlockHeader(node: childBlock)
         let authorization = try signedGenesisAnchorTransaction(
             directory: "Payments",
-            childGenesisCID: childHeader.rawCID,
+            childGenesisCID: try BlockHeader(node: childGenesis).rawCID,
             chainPath: configuration.chainPath
         )
         try await VolumeImpl<Transaction>(node: authorization).storeRecursively(
             storer: process
         )
+        let provisional = try await BlockBuilder.buildBlock(
+            previous: sidePredecessor,
+            timestamp: 7_200_000,
+            nonce: 101,
+            fetcher: process
+        )
+        let childBlock = try await BlockBuilder.buildBlock(
+            previous: childGenesis,
+            parentChainBlock: provisional,
+            timestamp: 7_200_000,
+            target: UInt256.max,
+            fetcher: process
+        )
+        let childHeader = try BlockHeader(node: childBlock)
         let carrier = try await BlockBuilder.buildBlock(
             previous: sidePredecessor,
             transactions: [authorization],
