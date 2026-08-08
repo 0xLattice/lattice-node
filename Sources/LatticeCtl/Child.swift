@@ -69,42 +69,23 @@ struct Child: AsyncParsableCommand {
                 from: Data(contentsOf: URL(fileURLWithPath: spec))
             )
 
-            var genesisTransactions: [Transaction] = []
-            if let premineTo {
-                let premineBody = TransactionBody(
-                    accountActions: [AccountAction(
-                        owner: premineTo,
-                        delta: Int64(chainSpec.premineAmount())
-                    )],
-                    actions: [],
-                    depositActions: [],
-                    genesisActions: [],
-                    receiptActions: [],
-                    withdrawalActions: [],
-                    signers: [],
-                    fee: 0,
-                    nonce: 0,
-                    chainPath: [parent, directory].joined(separator: "/")
-                        .components(separatedBy: "/")
-                )
-                genesisTransactions.append(Transaction(
-                    signatures: [:],
-                    body: try HeaderImpl(node: premineBody)
-                ))
-            }
             // Build the self-contained child genesis OFFLINE: empty parentState,
             // like a root genesis. The parent only RECORDS its CID; it never
-            // carries the genesis. The genesisCID is deterministic in the spec,
-            // premine, timestamp and target.
-            let genesisTimestamp = Int64(Date().timeIntervalSince1970 * 1000)
+            // carries the genesis. The genesisCID is deterministic in the seed
+            // (spec + premine + timestamp + max target); the child node rebuilds
+            // the identical genesis from the same seed and self-admits it.
+            let childComponents = parent.components(separatedBy: "/") + [directory]
+            let seed = ChildGenesisSeed(
+                spec: chainSpec,
+                premineTo: premineTo,
+                timestamp: Int64(Date().timeIntervalSince1970 * 1000)
+            )
             let genesisFetcher = CoalescingFetcher(
                 CompositeContentSource([MemoryBroker()])
             )
-            let genesis = try await BlockBuilder.buildGenesis(
-                spec: chainSpec,
-                transactions: genesisTransactions,
-                timestamp: genesisTimestamp,
-                target: UInt256.max,
+            let genesis = try await ChildGenesisBuilder.build(
+                seed: seed,
+                chainPath: childComponents,
                 fetcher: genesisFetcher
             )
             let genesisCID = try BlockHeader(node: genesis).rawCID
@@ -178,6 +159,16 @@ struct Child: AsyncParsableCommand {
                 listen: ports.0, fact: ports.1, rpc: ports.2, peers: nil
             )
             try topology.validated().save(root: layout.root)
+            // Seed the child's data directory with the genesis inputs so its node
+            // rebuilds the identical self-contained genesis and self-admits it on
+            // startup (the parent has already recorded the CID above).
+            let childData = layout.chainDirectory(for: childPath)
+            try FileManager.default.createDirectory(
+                at: childData, withIntermediateDirectories: true
+            )
+            try JSONEncoder().encode(seed).write(
+                to: childData.appendingPathComponent("child-genesis.json")
+            )
             try spawnChain(childPath, topology: topology, layout: layout)
             try await waitActive(
                 childPath, rpc: ports.2, expectedTip: genesisCID

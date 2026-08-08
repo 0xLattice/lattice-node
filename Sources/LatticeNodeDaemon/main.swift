@@ -170,6 +170,34 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             }
         )
         try await network.start(process: process, handlers: handlers)
+
+        // A deployed child holds its own self-contained genesis bytes: the
+        // parent only RECORDED the CID. If the deployer seeded `child-genesis.json`
+        // into this data directory, rebuild the identical genesis and self-admit
+        // it (the parent enforces the record at block 1). Retry until active so a
+        // child spawned slightly ahead of its parent's anchor still comes up.
+        let genesisSeedURL = storage.appendingPathComponent("child-genesis.json")
+        let genesisSeedTask: Task<Void, Never>?
+        if address.components.count > 1,
+           let seedData = try? Data(contentsOf: genesisSeedURL),
+           let seed = try? JSONDecoder().decode(
+               ChildGenesisSeed.self, from: seedData
+           ) {
+            genesisSeedTask = Task {
+                while !Task.isCancelled {
+                    if await process.status().phase == .active { return }
+                    if (try? await process.activateSeededChildGenesis(
+                        seed: seed
+                    )) == true {
+                        return
+                    }
+                    try? await Task.sleep(for: .seconds(1))
+                }
+            }
+        } else {
+            genesisSeedTask = nil
+        }
+
         let app = makeApplication(
             service: service,
             host: rpcBind,
@@ -201,11 +229,13 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         do {
             try await app.runService()
         } catch {
+            genesisSeedTask?.cancel()
             volumeMaintenance.cancel()
             await volumeMaintenance.value
             await network.stop()
             throw error
         }
+        genesisSeedTask?.cancel()
         volumeMaintenance.cancel()
         await volumeMaintenance.value
         await network.stop()

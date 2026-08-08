@@ -387,6 +387,71 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         )
     }
 
+    /// Self-admit a deployer-seeded, self-contained child genesis. The deployer
+    /// holds the genesis bytes (the parent only RECORDED the CID via a
+    /// GenesisAction); the child node rebuilds the identical genesis from the
+    /// seed and bootstraps it locally, exactly as the Nexus root bootstraps
+    /// `NexusGenesis`. The empty-bound `ParentGenesisLink` the child constructs
+    /// here is the same one the parent's record commits to; the parent enforces
+    /// the record at block 1, so a genesis the parent never recorded simply
+    /// cannot co-mine forward. Returns whether the genesis became active. Idempotent:
+    /// returns false (no-op) once the chain is past `awaitingGenesis`.
+    public func activateSeededChildGenesis(
+        seed: ChildGenesisSeed
+    ) async throws -> Bool {
+        try await acquireMutationOperation()
+        defer { releaseOperation() }
+        guard case .awaitingGenesis = runtimePhase,
+              !configuration.address.isNexus else {
+            return false
+        }
+        let context = try configuration.runtimeContext
+        guard let directory = context.path.last else { return false }
+        let genesis = try await ChildGenesisBuilder.build(
+            seed: seed,
+            chainPath: context.path,
+            fetcher: localFetcher
+        )
+        let header = try BlockHeader(node: genesis)
+        let parentGenesisLink = ParentGenesisLink(
+            parentPath: Array(context.path.dropLast()),
+            directory: directory,
+            childGenesisCID: header.rawCID,
+            parentStateCID: LatticeState.emptyHeader.rawCID
+        )
+        let admissionStorage = NodeAdmissionStorage(storage: broker)
+        let result = try await ChainLevel.bootstrap(
+            context: context,
+            genesisHeader: header,
+            fetcher: localFetcher,
+            parentGenesisLink: parentGenesisLink,
+            validationContentStorer: admissionStorage,
+            materializedVolumeStorer: admissionStorage,
+            stage: { context in
+                let hierarchyArtifacts = context.issuedCarrierLink.map {
+                    AdmissionHierarchyArtifacts(
+                        carrierLink: $0,
+                        carrierEvidence: nil,
+                        parentGenesisLinks: context.parentGenesisLinks
+                    )
+                }
+                try await Self.persist(
+                    context.batch,
+                    admissionStorage: admissionStorage,
+                    store: self.store,
+                    broker: self.broker,
+                    retentionScope: self.retentionScope,
+                    pendingChildProofRoutes: [],
+                    pendingChildProofCapacity: Self.preparedChildProofCapacity,
+                    hierarchyArtifacts: hierarchyArtifacts
+                )
+            }
+        )
+        guard case .accepted(let acceptance) = result else { return false }
+        runtimePhase = .active(acceptance.level)
+        return true
+    }
+
     func admit(
         _ blockHeader: BlockHeader,
         authenticatedChildPackage suppliedAuthenticatedChildPackage:
