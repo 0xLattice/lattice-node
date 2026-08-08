@@ -1118,13 +1118,21 @@ actor NodeStore {
                 "issued hierarchy artifacts are outside their admission batch"
             )
         }
-        if chainPath.count == 1,
-           (link.rootCID != link.carrierCID || artifacts.carrierEvidence != nil) {
+        if link.rootCID == link.carrierCID {
+            // A self-rooted carrier is a self-contained genesis (the Nexus root
+            // OR a self-mined child genesis): it satisfies its own PoW and is
+            // authorized by the parent's recorded GenesisAction, never by a
+            // carrier proof. It must therefore carry no evidence.
+            if artifacts.carrierEvidence != nil {
+                throw NodeStoreError.invalidConfiguration(
+                    "a self-rooted carrier must not carry parent evidence"
+                )
+            }
+        } else if chainPath.count == 1 {
             throw NodeStoreError.invalidConfiguration(
                 "Nexus carrier evidence must be rooted at its carrier"
             )
-        }
-        if chainPath.count > 1, artifacts.carrierEvidence == nil {
+        } else if artifacts.carrierEvidence == nil {
             throw NodeStoreError.invalidConfiguration(
                 "child carrier evidence requires its authenticated parent proof"
             )

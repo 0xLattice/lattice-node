@@ -1423,12 +1423,16 @@ final class ChainServiceTests: XCTestCase {
             initialReward: 10,
             halvingInterval: 100
         )
-        let childGenesis = try await BlockBuilder.buildChildGenesis(
-            spec: childSpec,
-            parentState: parentGenesis.postState,
-            transactions: [],
-            timestamp: 1,
-            target: UInt256.max,
+        // A self-contained child genesis (empty parentState): the parent only
+        // RECORDS its CID via a plain GenesisAction; the child rebuilds it from
+        // the seed and self-admits it. It is never carried on the carrier's
+        // children.
+        let seed = ChildGenesisSeed(
+            spec: childSpec, premineTo: nil, timestamp: 1
+        )
+        let childGenesis = try await ChildGenesisBuilder.build(
+            seed: seed,
+            chainPath: ["Nexus", "Payments"],
             fetcher: parentProcess
         )
         let childHeader = try BlockHeader(node: childGenesis)
@@ -1446,7 +1450,6 @@ final class ChainServiceTests: XCTestCase {
         let firstCarrier = try await BlockBuilder.buildBlock(
             previous: parentGenesis,
             transactions: [anchor],
-            children: ["Payments": childGenesis],
             timestamp: parentGenesis.timestamp + 1,
             nonce: 0,
             fetcher: parentProcess
@@ -1454,19 +1457,6 @@ final class ChainServiceTests: XCTestCase {
         let firstCarrierHeader = try BlockHeader(node: firstCarrier)
         let parentOutcome = try await parentProcess.admit(firstCarrierHeader)
         XCTAssertNotNil(parentOutcome.parentCarrierLink)
-        let issuedGenesisLink = try await parentProcess.issuedParentGenesisLink(
-            directory: "Payments",
-            childGenesisCID: childHeader.rawCID,
-            // A self-contained genesis's recorded link binds to the empty parent
-            // state, not the recording carrier's prevState.
-            parentStateCID: LatticeState.emptyHeader.rawCID
-        )
-        let genesisLink = try XCTUnwrap(issuedGenesisLink)
-        let proof = try await ChildBlockProof.generate(
-            rootHeader: firstCarrierHeader,
-            childDirectory: "Payments",
-            fetcher: parentProcess
-        )
 
         let childDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-child-service-\(UUID().uuidString)")
@@ -1481,23 +1471,12 @@ final class ChainServiceTests: XCTestCase {
                 port: 4002
             )
         ))
-        try await childHeader.storeBlock(
-            fetcher: childProcess,
-            storer: childProcess
-        )
-        try await childGenesis.postState.storeRecursively(storer: childProcess)
-        let bootstrap = try await childProcess.admit(
-            childHeader,
-            authenticatedChildPackage: AuthenticatedChildPackage(
-                package: ChildValidationPackage(
-                    proof: proof,
-                    parentGenesisLink: genesisLink
-                )
-            )
+        let activated = try await childProcess.activateSeededChildGenesis(
+            seed: seed
         )
         XCTAssertTrue(
-            bootstrap.decision.isAccepted,
-            "unexpected bootstrap decision: \(bootstrap.decision)"
+            activated,
+            "the seeded child genesis must self-admit"
         )
 
         let nextParentCarrier = try await BlockBuilder.buildBlock(
