@@ -73,12 +73,10 @@ final class MiningWorkerContractTests: XCTestCase {
                 workID: try BlockHeader(node: genesis.block).rawCID,
                 block: genesis.block,
                 searchTarget: .max,
-                deploymentTarget: nil,
                 chainPath: ["Nexus"],
                 expiresAt: ContinuousClock.now + .seconds(30),
                 childCandidates: [],
-                searchWitness: nil,
-                deploymentWitness: nil
+                searchWitness: nil
             ),
             maximumLifetimeMilliseconds: 30_000
         )

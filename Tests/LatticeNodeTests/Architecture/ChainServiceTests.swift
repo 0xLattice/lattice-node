@@ -40,64 +40,6 @@ final class ChainServiceTests: XCTestCase {
         )
         XCTAssertNotNil(reward.transaction.body.node)
         XCTAssertEqual(reward.transaction.body.rawCID, transaction.body.rawCID)
-
-        let intent = ChildDeployIntentRequest(
-            directory: "Sandbox",
-            spec: ChainSpec(
-                maxNumberOfTransactionsPerBlock: 100,
-                maxStateGrowth: 100_000,
-                premine: 1,
-                targetBlockTime: 1_000,
-                initialReward: 10,
-                halvingInterval: 100
-            ),
-            genesisTransactions: [transaction],
-            target: UInt256.max,
-            timestamp: 1
-        )
-        let decodedIntent = try decoder.decode(
-            ChildDeployIntentRequest.self,
-            from: encoder.encode(intent)
-        )
-        XCTAssertNotNil(decodedIntent.genesisTransactions.first?.body.node)
-        XCTAssertEqual(
-            decodedIntent.genesisTransactions.first?.body.rawCID,
-            transaction.body.rawCID
-        )
-    }
-
-    func testChildIntentPolicyModuleRemainsContentBoundThroughJSON() throws {
-        let module = try wasmPolicyModule(accepts: true)
-        let request = ChildDeployIntentRequest(
-            directory: "Sandbox",
-            spec: childSpec(policyModule: module),
-            genesisTransactions: [],
-            policyModules: [module],
-            target: .max,
-            timestamp: 1
-        )
-        let encoded = try JSONEncoder().encode(request)
-        let decoded = try JSONDecoder().decode(
-            ChildDeployIntentRequest.self,
-            from: encoded
-        )
-        XCTAssertEqual(decoded.policyModules.first?.rootCID, module.rootCID)
-        XCTAssertEqual(decoded.policyModules.first?.bytes, module.bytes)
-
-        var object = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
-        )
-        var modules = try XCTUnwrap(
-            object["policyModules"] as? [[String: Any]]
-        )
-        modules[0]["rootCID"] = NexusGenesis.expectedBlockHash
-        object["policyModules"] = modules
-        XCTAssertThrowsError(
-            try JSONDecoder().decode(
-                ChildDeployIntentRequest.self,
-                from: JSONSerialization.data(withJSONObject: object)
-            )
-        )
     }
 
     func testRequestPayloadCeilingIsInclusive() async throws {
@@ -166,18 +108,30 @@ final class ChainServiceTests: XCTestCase {
                 await publishedBlocks.record(blockCID)
             }
         )
-        let intent = try await simpleChildIntent(
-            service: service,
-            directory: "Sandbox",
-            timestamp: 1
+        let parent = try await process.canonicalTipBlock()
+        let childGenesis = try await BlockBuilder.buildChildGenesis(
+            spec: ChainSpec(
+                maxNumberOfTransactionsPerBlock: 100,
+                maxStateGrowth: 100_000,
+                premine: 0,
+                targetBlockTime: 1_000,
+                initialReward: 10,
+                halvingInterval: 100
+            ),
+            parentState: parent.postState,
+            transactions: [],
+            timestamp: 1,
+            target: UInt256.max,
+            fetcher: process
         )
+        let genesisCID = try BlockHeader(node: childGenesis).rawCID
         _ = try await service.submitTransaction(SubmitTransactionRequest(
             transaction: try signedTransaction(
                 key: CryptoUtils.generateKeyPair(),
                 chainPath: ["Nexus"],
                 genesisActions: [GenesisAction(
-                    directory: intent.directory,
-                    blockCID: intent.genesisCID
+                    directory: "Sandbox",
+                    blockCID: genesisCID
                 )]
             )
         ))
@@ -622,11 +576,6 @@ final class ChainServiceTests: XCTestCase {
             )
         ))
         let stale = try await service.miningTemplate(MiningTemplateRequest())
-        _ = try await simpleChildIntent(
-            service: service,
-            directory: "Sandbox",
-            timestamp: 1
-        )
 
         let receipt = await service.enqueueCanonicalCommit(ChainCommit(
             tipHash: "missing-block",
@@ -644,7 +593,6 @@ final class ChainServiceTests: XCTestCase {
 
         let status = await service.status()
         XCTAssertEqual(status.mempoolCount, 1)
-        XCTAssertEqual(status.pendingChildIntents, 0)
         let template = try await laterTemplate.value
         XCTAssertEqual(
             try template.block.transactions.node?.allKeysAndValues().count,
@@ -876,407 +824,6 @@ final class ChainServiceTests: XCTestCase {
         // without changing the real canonical state. Authoritative Lattice
         // preflight therefore rejects it instead of resurrecting it.
         XCTAssertEqual(status.mempoolCount, 0)
-    }
-
-    func testChildIntentRequiresUnsignedGenesisAndParentAnchor() async throws {
-        let process = try await nexusProcess()
-        let publishedProofs = PublishedProofs()
-        let service = makeService(
-            process: process,
-            childProofPublisher: { await publishedProofs.record($0) }
-        )
-        let childKey = CryptoUtils.generateKeyPair()
-        let childOwner = CryptoUtils.createAddress(from: childKey.publicKey)
-        let spec = ChainSpec(
-            maxNumberOfTransactionsPerBlock: 100,
-            maxStateGrowth: 100_000,
-            premine: 1,
-            targetBlockTime: 1_000,
-            initialReward: 10,
-            halvingInterval: 100
-        )
-        let premineActions = [AccountAction(
-            owner: childOwner,
-            delta: Int64(spec.premineAmount())
-        )]
-        let signedPremine = try signedTransaction(
-            key: childKey,
-            chainPath: ["Nexus", "Sandbox"],
-            accountActions: premineActions
-        )
-        let signedRequest = ChildDeployIntentRequest(
-            directory: "Sandbox",
-            spec: spec,
-            genesisTransactions: [signedPremine],
-            target: UInt256.max,
-            timestamp: 1
-        )
-        await XCTAssertThrowsErrorAsync(
-            try await service.createChildDeployIntent(signedRequest)
-        ) { error in
-            XCTAssertEqual(error as? ChainServiceError, .invalidChildGenesis)
-        }
-
-        let premine = Transaction(
-            signatures: [:],
-            body: try HeaderImpl(node: TransactionBody(
-                accountActions: premineActions,
-                actions: [],
-                depositActions: [],
-                genesisActions: [],
-                receiptActions: [],
-                withdrawalActions: [],
-                signers: [],
-                fee: 0,
-                nonce: 0,
-                chainPath: ["Nexus", "Sandbox"]
-            ))
-        )
-        let intent = try await service.createChildDeployIntent(
-            ChildDeployIntentRequest(
-                directory: "Sandbox",
-                spec: spec,
-                genesisTransactions: [premine],
-                target: UInt256.max,
-                timestamp: 1
-            )
-        )
-        XCTAssertEqual(intent.chainPath, ["Nexus", "Sandbox"])
-        XCTAssertEqual(intent.genesisBlock.parentState.rawCID, intent.parentStateCID)
-
-        let beforeAnchor = try await service.miningTemplate(
-            MiningTemplateRequest()
-        )
-        XCTAssertEqual(beforeAnchor.block.children.node?.count, 0)
-
-        let anchorKey = CryptoUtils.generateKeyPair()
-        let anchor = try signedTransaction(
-            key: anchorKey,
-            chainPath: ["Nexus"],
-            genesisActions: [GenesisAction(
-                directory: intent.directory,
-                blockCID: intent.genesisCID
-            )]
-        )
-        _ = try await service.submitTransaction(
-            SubmitTransactionRequest(transaction: anchor)
-        )
-
-        let normal = try await service.miningTemplate(MiningTemplateRequest())
-        XCTAssertEqual(normal.block.children.node?.count, 0)
-        let template = try await service.miningTemplate(
-            MiningTemplateRequest(mode: .deployment)
-        )
-        let children = try XCTUnwrap(template.block.children.node)
-        XCTAssertEqual(children.count, 1)
-        XCTAssertEqual(
-            try children.allKeysAndValues()["Sandbox"]?.rawCID,
-            intent.genesisCID
-        )
-
-        let submitted = try await service.submitWork(SubmitWorkRequest(
-            workID: template.workID,
-            nonce: 0
-        ))
-        XCTAssertTrue(submitted.accepted)
-        XCTAssertEqual(submitted.parentGenesisLinks.count, 1)
-        XCTAssertEqual(submitted.parentGenesisLinks[0].parentPath, ["Nexus"])
-        XCTAssertEqual(submitted.parentGenesisLinks[0].directory, "Sandbox")
-        XCTAssertEqual(
-            submitted.parentGenesisLinks[0].childGenesisCID,
-            intent.genesisCID
-        )
-        let proofSummary = try XCTUnwrap(submitted.durableChildProofs.first)
-        for _ in 0..<500 {
-            if await publishedProofs.first() != nil { break }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        let recordedPublication = await publishedProofs.first()
-        let publication = try XCTUnwrap(recordedPublication)
-        XCTAssertEqual(proofSummary.directory, "Sandbox")
-        XCTAssertEqual(proofSummary.childCID, intent.genesisCID)
-        XCTAssertEqual(publication.directory, "Sandbox")
-        XCTAssertEqual(publication.childCID, intent.genesisCID)
-        let proof = publication.proof
-        XCTAssertEqual(proof.directoryPath, ["Sandbox"])
-        let responseJSON = try JSONEncoder().encode(submitted)
-        XCTAssertFalse(String(decoding: responseJSON, as: UTF8.self).contains(
-            "serializedProof"
-        ))
-        let status = await service.status()
-        XCTAssertEqual(status.pendingChildIntents, 0)
-    }
-
-    func testChildIntentRejectsMissingAndMismatchedPolicyModules() async throws {
-        let service = makeService(process: try await nexusProcess())
-        let required = try wasmPolicyModule(accepts: true)
-        let other = try wasmPolicyModule(accepts: false)
-        let spec = childSpec(policyModule: required)
-
-        for modules in [[], [other]] {
-            await XCTAssertThrowsErrorAsync(
-                try await service.createChildDeployIntent(
-                    ChildDeployIntentRequest(
-                        directory: "Sandbox",
-                        spec: spec,
-                        genesisTransactions: [],
-                        policyModules: modules,
-                        target: .max,
-                        timestamp: 1
-                    )
-                )
-            ) { error in
-                XCTAssertEqual(
-                    error as? ChainServiceError,
-                    .invalidChildPolicyModules
-                )
-            }
-        }
-    }
-
-    func testChildIntentRetainsNovelPolicyModuleUntilReplacementAndStaleness()
-        async throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("lattice-child-intent-\(UUID().uuidString)")
-        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
-        let process = try await ChainProcess.open(configuration: NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: directory,
-            privateKeyHex: String(repeating: "01", count: 32)
-        ))
-        let service = makeService(process: process)
-        let eviction = try DiskBroker(
-            path: directory.appendingPathComponent("volumes.db").path,
-            evictUnpinnedGraceSeconds: 0
-        )
-        let original = try wasmPolicyModule(accepts: true)
-        let replacement = try wasmPolicyModule(accepts: false)
-        let absentOriginal = await process.volume(original.rootCID)
-        XCTAssertNil(absentOriginal)
-
-        let originalIntent = try await service.createChildDeployIntent(
-            ChildDeployIntentRequest(
-                directory: "Sandbox",
-                spec: childSpec(policyModule: original),
-                genesisTransactions: [],
-                policyModules: [original],
-                target: .max,
-                timestamp: 1
-            )
-        )
-        _ = try await eviction.evictUnpinned()
-        let retainedOriginal = await eviction.fetchVolumeLocal(
-            root: original.rootCID
-        )
-        let retainedOriginalGenesis = await eviction.fetchVolumeLocal(
-            root: originalIntent.genesisCID
-        )
-        XCTAssertNotNil(retainedOriginal)
-        XCTAssertNotNil(retainedOriginalGenesis)
-
-        let replacementIntent = try await service.createChildDeployIntent(
-            ChildDeployIntentRequest(
-                directory: "Sandbox",
-                spec: childSpec(policyModule: replacement),
-                genesisTransactions: [],
-                policyModules: [replacement],
-                target: .max,
-                timestamp: 2
-            )
-        )
-        _ = try await eviction.evictUnpinned()
-        let releasedOriginal = await eviction.fetchVolumeLocal(
-            root: original.rootCID
-        )
-        let retainedReplacement = await eviction.fetchVolumeLocal(
-            root: replacement.rootCID
-        )
-        let releasedOriginalGenesis = await eviction.fetchVolumeLocal(
-            root: originalIntent.genesisCID
-        )
-        let retainedReplacementGenesis = await eviction.fetchVolumeLocal(
-            root: replacementIntent.genesisCID
-        )
-        XCTAssertNil(releasedOriginal)
-        XCTAssertNotNil(retainedReplacement)
-        XCTAssertNil(releasedOriginalGenesis)
-        XCTAssertNotNil(retainedReplacementGenesis)
-
-        let miner = CryptoUtils.generateKeyPair()
-        let reward = try signedTransaction(
-            key: miner,
-            chainPath: ["Nexus"],
-            accountActions: [AccountAction(
-                owner: CryptoUtils.createAddress(from: miner.publicKey),
-                delta: 1
-            )]
-        )
-        let template = try await service.miningTemplate(
-            MiningTemplateRequest(rewards: [MiningReward(
-                chainPath: ["Nexus"],
-                transaction: reward
-            )])
-        )
-        _ = try await service.submitWork(SubmitWorkRequest(
-            workID: template.workID,
-            nonce: 0
-        ))
-        let status = await service.status()
-        XCTAssertEqual(status.pendingChildIntents, 0)
-        _ = try await eviction.evictUnpinned()
-        let releasedReplacement = await eviction.fetchVolumeLocal(
-            root: replacement.rootCID
-        )
-        let releasedReplacementGenesis = await eviction.fetchVolumeLocal(
-            root: replacementIntent.genesisCID
-        )
-        XCTAssertNil(releasedReplacement)
-        XCTAssertNil(releasedReplacementGenesis)
-    }
-
-    func testReplacingIntentDoesNotDeleteUserOwnedAnchor() async throws {
-        let service = makeService(process: try await nexusProcess())
-        let original = try await simpleChildIntent(
-            service: service,
-            directory: "Sandbox",
-            timestamp: 1
-        )
-        let key = CryptoUtils.generateKeyPair()
-        _ = try await service.submitTransaction(SubmitTransactionRequest(
-            transaction: try signedTransaction(
-                key: key,
-                chainPath: ["Nexus"],
-                genesisActions: [GenesisAction(
-                    directory: original.directory,
-                    blockCID: original.genesisCID
-                )]
-            )
-        ))
-
-        let replacement = try await simpleChildIntent(
-            service: service,
-            directory: "Sandbox",
-            timestamp: 2
-        )
-        XCTAssertNotEqual(replacement.genesisCID, original.genesisCID)
-        let status = await service.status()
-        XCTAssertEqual(status.mempoolCount, 1)
-        XCTAssertEqual(status.pendingChildIntents, 1)
-
-        let normal = try await service.miningTemplate(MiningTemplateRequest())
-        await XCTAssertThrowsErrorAsync(
-            try await service.miningTemplate(
-                MiningTemplateRequest(mode: .deployment)
-            )
-        ) { error in
-            XCTAssertEqual(error as? ChainServiceError, .noDeploymentAvailable)
-        }
-        XCTAssertEqual(normal.block.transactions.node?.count, 0)
-        XCTAssertEqual(normal.block.children.node?.count, 0)
-    }
-
-    func testDeploymentAnchorMustMatchPreparedGenesisCID() async throws {
-        let service = makeService(process: try await nexusProcess())
-        let intent = try await simpleChildIntent(
-            service: service,
-            directory: "Sandbox",
-            timestamp: 1
-        )
-        let signer = CryptoUtils.generateKeyPair()
-        _ = try await service.submitTransaction(SubmitTransactionRequest(
-            transaction: try signedTransaction(
-                key: signer,
-                chainPath: ["Nexus"],
-                genesisActions: [GenesisAction(
-                    directory: intent.directory,
-                    blockCID: NexusGenesis.expectedBlockHash
-                )]
-            )
-        ))
-
-        await XCTAssertThrowsErrorAsync(
-            try await service.miningTemplate(
-                MiningTemplateRequest(mode: .deployment)
-            )
-        ) { error in
-            XCTAssertEqual(error as? ChainServiceError, .noDeploymentAvailable)
-        }
-        let unmatchedStatus = await service.status()
-        XCTAssertEqual(unmatchedStatus.pendingChildIntents, 1)
-
-        _ = try await service.submitTransaction(SubmitTransactionRequest(
-            transaction: try signedTransaction(
-                key: CryptoUtils.generateKeyPair(),
-                chainPath: ["Nexus"],
-                genesisActions: [GenesisAction(
-                    directory: intent.directory,
-                    blockCID: intent.genesisCID
-                )]
-            )
-        ))
-        let matched = try await service.miningTemplate(
-            MiningTemplateRequest(mode: .deployment)
-        )
-        XCTAssertEqual(matched.block.transactions.node?.count, 1)
-        XCTAssertEqual(
-            try matched.block.children.node?.allKeysAndValues()["Sandbox"]?
-                .rawCID,
-            intent.genesisCID
-        )
-    }
-
-    func testRewardCannotSilentlyDisplacePendingDeploymentAtTransactionLimit()
-        async throws
-    {
-        let fixture = try await activeChildService(spec: ChainSpec(
-            maxNumberOfTransactionsPerBlock: 1,
-            maxStateGrowth: 100_000,
-            premine: 0,
-            targetBlockTime: 1_000,
-            initialReward: 10,
-            halvingInterval: 100
-        ))
-        let intent = try await simpleChildIntent(
-            service: fixture.service,
-            directory: "Grandchild",
-            timestamp: 2
-        )
-        _ = try await fixture.service.submitTransaction(
-            SubmitTransactionRequest(transaction: try signedTransaction(
-                key: CryptoUtils.generateKeyPair(),
-                chainPath: ["Nexus", "Payments"],
-                genesisActions: [GenesisAction(
-                    directory: intent.directory,
-                    blockCID: intent.genesisCID
-                )]
-            ))
-        )
-        let miner = CryptoUtils.generateKeyPair()
-        let reward = try signedTransaction(
-            key: miner,
-            chainPath: ["Nexus", "Payments"],
-            accountActions: [AccountAction(
-                owner: CryptoUtils.createAddress(from: miner.publicKey),
-                delta: 1
-            )]
-        )
-
-        await XCTAssertThrowsErrorAsync(
-            try await fixture.service.miningCandidate(
-                parentCarrier: fixture.parentCarrier,
-                parentContentSource: FetcherContentSource(fixture.parent),
-                rewards: [MiningReward(
-                    chainPath: ["Nexus", "Payments"],
-                    transaction: reward
-                )],
-                mode: .deployment
-            )
-        ) { error in
-            XCTAssertEqual(error as? ChainServiceError, .templateTooLarge)
-        }
-        let status = await fixture.service.status()
-        XCTAssertEqual(status.pendingChildIntents, 1)
-        XCTAssertEqual(status.mempoolCount, 1)
     }
 
     func testTemplateUsesLogicalBlockVolumeSizeAtExactBoundary() async throws {
@@ -1594,107 +1141,6 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertEqual(firstDirectory, secondDirectory)
     }
 
-    func testChildDeploymentRejectsParentOnlyHitBeforeAnchorCanStrand()
-        async throws
-    {
-        let process = try await nexusProcess()
-        let service = makeService(process: process)
-        let childTarget = UInt256.max / UInt256(256)
-        let intent = try await simpleChildIntent(
-            service: service,
-            directory: "Sandbox",
-            timestamp: 1,
-            target: childTarget
-        )
-        let key = CryptoUtils.generateKeyPair()
-        _ = try await service.submitTransaction(SubmitTransactionRequest(
-            transaction: try signedTransaction(
-                key: key,
-                chainPath: ["Nexus"],
-                genesisActions: [GenesisAction(
-                    directory: intent.directory,
-                    blockCID: intent.genesisCID
-                )]
-            )
-        ))
-        let tipBefore = try BlockHeader(
-            node: try await process.canonicalTipBlock()
-        ).rawCID
-        let template = try await service.miningTemplate(
-            MiningTemplateRequest(mode: .deployment)
-        )
-        XCTAssertEqual(template.searchTarget, childTarget)
-
-        var missNonce: UInt64 = 0
-        while template.block.replacingNonce(missNonce).proofOfWorkHash()
-            <= childTarget {
-            missNonce += 1
-        }
-        await XCTAssertThrowsErrorAsync(
-            try await service.submitWork(SubmitWorkRequest(
-                workID: template.workID,
-                nonce: missNonce
-            ))
-        ) { error in
-            XCTAssertEqual(error as? MiningTemplateError, .missesSearchTarget)
-        }
-        let tipAfterMiss = try BlockHeader(
-            node: try await process.canonicalTipBlock()
-        ).rawCID
-        XCTAssertEqual(tipAfterMiss, tipBefore)
-        var status = await service.status()
-        XCTAssertEqual(status.mempoolCount, 1)
-        XCTAssertEqual(status.pendingChildIntents, 1)
-
-        var hitNonce: UInt64 = 0
-        while template.block.replacingNonce(hitNonce).proofOfWorkHash()
-            > childTarget {
-            hitNonce += 1
-        }
-        let submitted = try await service.submitWork(SubmitWorkRequest(
-            workID: template.workID,
-            nonce: hitNonce
-        ))
-        XCTAssertTrue(submitted.accepted)
-        XCTAssertEqual(submitted.parentGenesisLinks.map(\.childGenesisCID), [
-            intent.genesisCID
-        ])
-        status = await service.status()
-        XCTAssertEqual(status.mempoolCount, 0)
-        XCTAssertEqual(status.pendingChildIntents, 0)
-    }
-
-    func testCanonicalStateChangeExpiresStaleChildIntent() async throws {
-        let service = makeService(process: try await nexusProcess())
-        _ = try await simpleChildIntent(
-            service: service,
-            directory: "Sandbox",
-            timestamp: 1
-        )
-        let miner = CryptoUtils.generateKeyPair()
-        let reward = try signedTransaction(
-            key: miner,
-            chainPath: ["Nexus"],
-            accountActions: [AccountAction(
-                owner: CryptoUtils.createAddress(from: miner.publicKey),
-                delta: 1
-            )]
-        )
-        let template = try await service.miningTemplate(
-            MiningTemplateRequest(rewards: [MiningReward(
-                chainPath: ["Nexus"],
-                transaction: reward
-            )])
-        )
-        _ = try await service.submitWork(SubmitWorkRequest(
-            workID: template.workID,
-            nonce: 0
-        ))
-
-        let status = await service.status()
-        XCTAssertEqual(status.pendingChildIntents, 0)
-    }
-
     func testParentTargetMissKeepsDurableProofWhenPublicationFails() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-target-miss-\(UUID().uuidString)")
@@ -1709,7 +1155,6 @@ final class ChainServiceTests: XCTestCase {
         let activeChild = try await anchoredChildGenesis(
             parent: process,
             parentGenesis: genesis,
-            transactions: [],
             childTimestamp: 1,
             carrierNonce: 0
         )
@@ -1961,133 +1406,10 @@ final class ChainServiceTests: XCTestCase {
         )
 
         let template = try await service.miningTemplate(
-            MiningTemplateRequest(mode: .deployment)
+            MiningTemplateRequest()
         )
         let children = try XCTUnwrap(template.block.children.node)
         XCTAssertEqual(Set(try children.allKeysAndValues().keys), ["A"])
-    }
-
-    func testSchedulingComesFromCommittedCandidateContent()
-        async throws
-    {
-        let process = try await nexusProcess()
-        let service = makeService(
-            process: process,
-            childCandidateProvider: { context in
-                let child = try await BlockBuilder.buildChildGenesis(
-                    spec: NexusGenesis.spec,
-                    parentState: context.parentCarrier.prevState,
-                    timestamp: context.parentCarrier.timestamp,
-                    target: .max,
-                    fetcher: process
-                )
-                return [
-                    DirectChildCandidate(
-                        directory: "Healthy",
-                        block: child
-                    ),
-                    DirectChildCandidate(
-                        directory: "Poisoned",
-                        block: child
-                    ),
-                    DirectChildCandidate(
-                        directory: "Viable",
-                        block: child
-                    ),
-                ]
-            }
-        )
-
-        let normal = try await service.miningTemplate(MiningTemplateRequest())
-        XCTAssertEqual(
-            Set(try XCTUnwrap(normal.block.children.node).allKeysAndValues().keys),
-            []
-        )
-        XCTAssertEqual(normal.searchTarget, .max)
-
-        let first = try await service.miningTemplate(
-            MiningTemplateRequest(mode: .deployment)
-        )
-        let second = try await service.miningTemplate(
-            MiningTemplateRequest(mode: .deployment)
-        )
-        XCTAssertEqual(first.searchTarget, .max)
-        XCTAssertEqual(second.searchTarget, .max)
-        let firstDirectories = Set(
-            try XCTUnwrap(first.block.children.node).allKeysAndValues().keys
-        )
-        let secondDirectories = Set(
-            try XCTUnwrap(second.block.children.node).allKeysAndValues().keys
-        )
-        XCTAssertNotEqual(firstDirectories, secondDirectories)
-        for template in [first, second] {
-            let directories = Set(
-                try XCTUnwrap(template.block.children.node)
-                    .allKeysAndValues().keys
-            )
-            XCTAssertEqual(directories.count, 1)
-        }
-    }
-
-    func testDeploymentRoundsAlternateLocalAndDescendantSources() async throws {
-        let process = try await nexusProcess()
-        let service = makeService(
-            process: process,
-            childCandidateProvider: { context in
-                let child = try await BlockBuilder.buildChildGenesis(
-                    spec: NexusGenesis.spec,
-                    parentState: context.parentCarrier.prevState,
-                    timestamp: context.parentCarrier.timestamp,
-                    target: UInt256.max / UInt256(2),
-                    fetcher: process
-                )
-                return [DirectChildCandidate(
-                    directory: "Existing",
-                    block: child
-                )]
-            }
-        )
-        let intent = try await simpleChildIntent(
-            service: service,
-            directory: "Local",
-            timestamp: 1
-        )
-        _ = try await service.submitTransaction(SubmitTransactionRequest(
-            transaction: try signedTransaction(
-                key: CryptoUtils.generateKeyPair(),
-                chainPath: ["Nexus"],
-                genesisActions: [GenesisAction(
-                    directory: intent.directory,
-                    blockCID: intent.genesisCID
-                )]
-            )
-        ))
-
-        let local = try await service.miningTemplate(
-            MiningTemplateRequest(mode: .deployment)
-        )
-        let descendant = try await service.miningTemplate(
-            MiningTemplateRequest(mode: .deployment)
-        )
-        let localAgain = try await service.miningTemplate(
-            MiningTemplateRequest(mode: .deployment)
-        )
-
-        XCTAssertEqual(
-            Set(try XCTUnwrap(local.block.children.node).allKeysAndValues().keys),
-            ["Local"]
-        )
-        XCTAssertEqual(local.block.transactions.node?.count, 1)
-        XCTAssertEqual(
-            Set(try XCTUnwrap(descendant.block.children.node).allKeysAndValues().keys),
-            ["Existing"]
-        )
-        XCTAssertEqual(descendant.block.transactions.node?.count, 0)
-        XCTAssertEqual(
-            Set(try XCTUnwrap(localAgain.block.children.node).allKeysAndValues().keys),
-            ["Local"]
-        )
-        XCTAssertEqual(localAgain.block.transactions.node?.count, 1)
     }
 
     func testContextualChildCandidateBindsNewParentCarrierState() async throws {
@@ -2135,7 +1457,9 @@ final class ChainServiceTests: XCTestCase {
         let issuedGenesisLink = try await parentProcess.issuedParentGenesisLink(
             directory: "Payments",
             childGenesisCID: childHeader.rawCID,
-            parentStateCID: firstCarrier.prevState.rawCID
+            // A self-contained genesis's recorded link binds to the empty parent
+            // state, not the recording carrier's prevState.
+            parentStateCID: LatticeState.emptyHeader.rawCID
         )
         let genesisLink = try XCTUnwrap(issuedGenesisLink)
         let proof = try await ChildBlockProof.generate(
@@ -2375,7 +1699,6 @@ final class ChainServiceTests: XCTestCase {
                 return [DirectChildCandidate(
                     directory: "Child",
                     block: child,
-                    parentCreatedGenesis: false,
                     advertiserPeerKey: peer
                 )]
             },
@@ -2439,7 +1762,6 @@ final class ChainServiceTests: XCTestCase {
                     candidates.append(DirectChildCandidate(
                         directory: directory,
                         block: child,
-                        parentCreatedGenesis: false,
                         advertiserPeerKey: peer
                     ))
                 }
@@ -2583,7 +1905,6 @@ final class ChainServiceTests: XCTestCase {
         let candidate = DirectChildCandidate(
             directory: "Child",
             block: block,
-            parentCreatedGenesis: false,
             advertiserPeerKey: peer
         )
         let handoff = ChildCandidateReservationReference(
@@ -2638,75 +1959,11 @@ final class ChainServiceTests: XCTestCase {
         )
     }
 
-    private func simpleChildIntent(
-        service: ChainService,
-        directory: String,
-        timestamp: Int64,
-        target: UInt256 = .max
-    ) async throws -> ChildDeployIntentResponse {
-        try await service.createChildDeployIntent(ChildDeployIntentRequest(
-            directory: directory,
-            spec: ChainSpec(
-                maxNumberOfTransactionsPerBlock: 100,
-                maxStateGrowth: 100_000,
-                premine: 0,
-                targetBlockTime: 1_000,
-                initialReward: 10,
-                halvingInterval: 100
-            ),
-            genesisTransactions: [],
-            target: target,
-            timestamp: timestamp
-        ))
-    }
-
-    private func childSpec(
-        policyModule: ContentBoundWasmPolicyModule
-    ) -> ChainSpec {
-        ChainSpec(
-            maxNumberOfTransactionsPerBlock: 100,
-            maxStateGrowth: 100_000,
-            premine: 0,
-            targetBlockTime: 1_000,
-            initialReward: 10,
-            halvingInterval: 100,
-            wasmPolicies: [WasmPolicyRef(
-                moduleCID: policyModule.rootCID,
-                scope: .transaction
-            )]
-        )
-    }
-
-    private func wasmPolicyModule(
-        accepts: Bool
-    ) throws -> ContentBoundWasmPolicyModule {
-        // Minimal module: one memory, allocator, and transaction validator.
-        try ContentBoundWasmPolicyModule(bytes: Data([
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
-            0x01, 0x0c, 0x02,
-            0x60, 0x01, 0x7f, 0x01, 0x7f,
-            0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f,
-            0x03, 0x03, 0x02, 0x00, 0x01,
-            0x05, 0x03, 0x01, 0x00, 0x01,
-            0x07, 0x39, 0x03,
-            0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00,
-            0x0d, 0x6c, 0x61, 0x74, 0x74, 0x69, 0x63, 0x65, 0x5f,
-            0x61, 0x6c, 0x6c, 0x6f, 0x63, 0x00, 0x00,
-            0x1c, 0x6c, 0x61, 0x74, 0x74, 0x69, 0x63, 0x65, 0x5f,
-            0x76, 0x61, 0x6c, 0x69, 0x64, 0x61, 0x74, 0x65, 0x5f,
-            0x74, 0x72, 0x61, 0x6e, 0x73, 0x61, 0x63, 0x74, 0x69,
-            0x6f, 0x6e, 0x00, 0x01,
-            0x0a, 0x0b, 0x02,
-            0x04, 0x00, 0x41, 0x00, 0x0b,
-            0x04, 0x00, 0x41, accepts ? 0x01 : 0x00, 0x0b,
-        ]))
-    }
-
     private struct AnchoredChildGenesis {
         let block: Block
         let header: BlockHeader
         let carrierCID: String
-        let package: AuthenticatedChildPackage
+        let seed: ChildGenesisSeed
     }
 
     private struct ActiveChildServiceFixture {
@@ -2724,7 +1981,6 @@ final class ChainServiceTests: XCTestCase {
         let child = try await anchoredChildGenesis(
             parent: parent,
             parentGenesis: parentGenesis,
-            transactions: [],
             childTimestamp: 1,
             carrierNonce: 0,
             spec: spec
@@ -2742,14 +1998,12 @@ final class ChainServiceTests: XCTestCase {
                 port: 4002
             )
         ))
-        try await storeChildGenesis(child, in: process)
-        let bootstrap = try await process.admit(
-            child.header,
-            authenticatedChildPackage: child.package
+        let activated = try await process.activateSeededChildGenesis(
+            seed: child.seed
         )
         XCTAssertTrue(
-            bootstrap.decision.isAccepted,
-            "unexpected bootstrap decision for maxBlockSize \(spec.maxBlockSize): \(bootstrap.decision)"
+            activated,
+            "the seeded child genesis must self-admit for maxBlockSize \(spec.maxBlockSize)"
         )
         let resolvedParentCarrier = try await BlockHeader(
             rawCID: child.carrierCID,
@@ -2770,22 +2024,20 @@ final class ChainServiceTests: XCTestCase {
     private func anchoredChildGenesis(
         parent: ChainProcess,
         parentGenesis: Block,
-        transactions: [Transaction],
         childTimestamp: Int64,
         carrierNonce: UInt64,
         spec: ChainSpec = NexusGenesis.spec
     ) async throws -> AnchoredChildGenesis {
-        for transaction in transactions {
-            try await VolumeImpl<Transaction>(node: transaction).storeRecursively(
-                storer: parent
-            )
-        }
-        let block = try await BlockBuilder.buildChildGenesis(
-            spec: spec,
-            parentState: parentGenesis.postState,
-            transactions: transactions,
-            timestamp: childTimestamp,
-            target: UInt256.max,
+        // A self-contained child genesis (empty parentState) recorded on the
+        // parent by a plain GenesisAction — never carried on the carrier's
+        // children. The child rebuilds this identical genesis from `seed` and
+        // self-admits it (activateSeededChildGenesis).
+        let seed = ChildGenesisSeed(
+            spec: spec, premineTo: nil, timestamp: childTimestamp
+        )
+        let block = try await ChildGenesisBuilder.build(
+            seed: seed,
+            chainPath: ["Nexus", "Payments"],
             fetcher: parent
         )
         let header = try BlockHeader(node: block)
@@ -2803,7 +2055,6 @@ final class ChainServiceTests: XCTestCase {
         let carrier = try await BlockBuilder.buildBlock(
             previous: parentGenesis,
             transactions: [authorization],
-            children: ["Payments": block],
             timestamp: parentGenesis.timestamp + 1,
             nonce: carrierNonce,
             fetcher: parent
@@ -2811,36 +2062,12 @@ final class ChainServiceTests: XCTestCase {
         let carrierHeader = try BlockHeader(node: carrier)
         let parentAdmission = try await parent.admit(carrierHeader)
         XCTAssertNotNil(parentAdmission.parentCarrierLink)
-        let issuedGenesisLink = try await parent.issuedParentGenesisLink(
-            directory: "Payments",
-            childGenesisCID: header.rawCID,
-            parentStateCID: carrier.prevState.rawCID
-        )
-        let genesisLink = try XCTUnwrap(issuedGenesisLink)
-        let proof = try await ChildBlockProof.generate(
-            rootHeader: carrierHeader,
-            childDirectory: "Payments",
-            fetcher: parent
-        )
         return AnchoredChildGenesis(
             block: block,
             header: header,
             carrierCID: carrierHeader.rawCID,
-            package: AuthenticatedChildPackage(
-                package: ChildValidationPackage(
-                    proof: proof,
-                    parentGenesisLink: genesisLink
-                )
-            )
+            seed: seed
         )
-    }
-
-    private func storeChildGenesis(
-        _ child: AnchoredChildGenesis,
-        in process: ChainProcess
-    ) async throws {
-        try await child.header.storeBlock(fetcher: process, storer: process)
-        try await child.block.postState.storeRecursively(storer: process)
     }
 
 }

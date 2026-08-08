@@ -75,21 +75,18 @@ final class DaemonHTTPTests: XCTestCase {
         }
     }
 
-    func testMiningTemplateRequestJSONDefaultsAndDeploymentMode() throws {
+    func testMiningTemplateRequestJSONDefaults() throws {
         let legacy = try JSONDecoder().decode(
             MiningTemplateRequest.self,
             from: Data("{}".utf8)
         )
         XCTAssertTrue(legacy.rewards.isEmpty)
-        XCTAssertEqual(legacy.mode, .normal)
 
-        let deployment = MiningTemplateRequest(mode: .deployment)
         let decoded = try JSONDecoder().decode(
             MiningTemplateRequest.self,
-            from: JSONEncoder().encode(deployment)
+            from: JSONEncoder().encode(MiningTemplateRequest())
         )
         XCTAssertTrue(decoded.rewards.isEmpty)
-        XCTAssertEqual(decoded.mode, .deployment)
     }
 
     func testMiningTemplateAndWorkRoutesRoundTrip() async throws {
@@ -152,18 +149,6 @@ final class DaemonHTTPTests: XCTestCase {
                 XCTAssertTrue(submitted.accepted)
                 XCTAssertEqual(submitted.disposition, .canonicalized)
                 XCTAssertNotNil(submitted.tipCID)
-            }
-
-            let deploymentRequest = try JSONEncoder().encode(
-                MiningTemplateRequest(mode: .deployment)
-            )
-            try await client.execute(
-                uri: "/v1/mining/templates",
-                method: .post,
-                headers: [.contentType: "application/json"],
-                body: ByteBuffer(bytes: deploymentRequest)
-            ) { response in
-                XCTAssertEqual(response.status, .conflict)
             }
         }
     }

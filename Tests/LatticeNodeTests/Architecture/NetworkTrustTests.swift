@@ -1777,7 +1777,6 @@ final class NetworkTrustTests: XCTestCase {
         let request = ChildCandidateRequestMessage(
             requestID: 11,
             budgetMilliseconds: 750,
-            mode: .deployment,
             childPath: ["Nexus", "Payments"],
             parentCID: parentCID,
             parentData: parentData,
@@ -1787,7 +1786,6 @@ final class NetworkTrustTests: XCTestCase {
             request.encoded()
         )
         XCTAssertEqual(decodedRequest.budgetMilliseconds, 750)
-        XCTAssertEqual(decodedRequest.mode, .deployment)
         XCTAssertEqual(decodedRequest.rewards.map(\.chainPath), [
             ["Nexus", "Payments"],
             ["Nexus", "Payments", "Receipts"],
@@ -1800,15 +1798,13 @@ final class NetworkTrustTests: XCTestCase {
             parentCID: parentCID,
             childCID: parentCID,
             blockData: parentData,
-            searchWitness: nil,
-            deploymentWitness: nil
+            searchWitness: nil
         )
         let decodedResponse = try ChildCandidateResponseMessage.decoded(
             response.encoded()
         )
         XCTAssertEqual(decodedResponse.parentCID, parentCID)
         XCTAssertNil(decodedResponse.searchWitness)
-        XCTAssertNil(decodedResponse.deploymentWitness)
 
         var forgedTarget = try response.encoded()
         let targetOffset = 8 + 2
@@ -1848,8 +1844,7 @@ final class NetworkTrustTests: XCTestCase {
                 parentCID: childCID,
                 childCID: childCID,
                 blockData: data,
-                searchWitness: nil,
-                deploymentWitness: nil
+                searchWitness: nil
             )
         }
 
@@ -1868,128 +1863,6 @@ final class NetworkTrustTests: XCTestCase {
         ).encoded()) { error in
             XCTAssertEqual(error as? NodeNetworkWireError, .malformed)
         }
-    }
-
-    func testCandidateWireCanonicalizesSharedSchedulingWitness() async throws {
-        let source = NetworkTestContentStore()
-        try await LatticeState.emptyHeader.storeRecursively(
-            storer: source as any Storer
-        )
-        let child = try await BlockBuilder.buildChildGenesis(
-            spec: NexusGenesis.spec,
-            parentState: LatticeState.emptyHeader,
-            timestamp: 1,
-            target: .max,
-            fetcher: source
-        )
-        let carrier = try await BlockBuilder.buildGenesis(
-            spec: NexusGenesis.spec,
-            children: ["Payments": child],
-            timestamp: 2,
-            target: .max,
-            fetcher: source
-        )
-        let carrierHeader = try BlockHeader(node: carrier)
-        let childCID = try BlockHeader(node: child).rawCID
-        let witness = ChildSchedulingWitness(
-            proof: try await ChildBlockProof.generate(
-                rootHeader: carrierHeader,
-                childDirectory: "Payments",
-                fetcher: source
-            ),
-            terminal: child
-        )
-        let message = ChildCandidateResponseMessage(
-            requestID: 20,
-            childPath: ["Nexus", "Payments"],
-            parentCID: carrierHeader.rawCID,
-            childCID: carrierHeader.rawCID,
-            blockData: try XCTUnwrap(carrier.toData()),
-            searchWitness: witness,
-            deploymentWitness: witness
-        )
-
-        let decoded = try ChildCandidateResponseMessage.decoded(message.encoded())
-        XCTAssertEqual(
-            try decoded.searchWitness?.proof.serialize(),
-            try witness.proof.serialize()
-        )
-        XCTAssertEqual(
-            try decoded.deploymentWitness?.proof.serialize(),
-            try witness.proof.serialize()
-        )
-        XCTAssertEqual(
-            try BlockHeader(node: decoded.searchWitness!.terminal).rawCID,
-            childCID
-        )
-
-        XCTAssertThrowsError(try ChildCandidateResponseMessage(
-            requestID: 21,
-            childPath: ["Nexus", "Payments"],
-            parentCID: carrierHeader.rawCID,
-            childCID: carrierHeader.rawCID,
-            blockData: try XCTUnwrap(carrier.toData()),
-            searchWitness: witness,
-            deploymentWitness: ChildSchedulingWitness(
-                proof: witness.proof,
-                terminal: carrier
-            )
-        ).encoded())
-    }
-
-    func testCandidateWireAllowsContextualPathsToTheSameTerminal() async throws {
-        let source = NetworkTestContentStore()
-        try await LatticeState.emptyHeader.storeRecursively(
-            storer: source as any Storer
-        )
-        let child = try await BlockBuilder.buildChildGenesis(
-            spec: NexusGenesis.spec,
-            parentState: LatticeState.emptyHeader,
-            timestamp: 1,
-            target: .max,
-            fetcher: source
-        )
-        let carrier = try await BlockBuilder.buildGenesis(
-            spec: NexusGenesis.spec,
-            children: ["Alpha": child, "Beta": child],
-            timestamp: 2,
-            target: .max,
-            fetcher: source
-        )
-        let carrierHeader = try BlockHeader(node: carrier)
-        let alpha = ChildSchedulingWitness(
-            proof: try await ChildBlockProof.generate(
-                rootHeader: carrierHeader,
-                childDirectory: "Alpha",
-                fetcher: source
-            ),
-            terminal: child
-        )
-        let beta = ChildSchedulingWitness(
-            proof: try await ChildBlockProof.generate(
-                rootHeader: carrierHeader,
-                childDirectory: "Beta",
-                fetcher: source
-            ),
-            terminal: child
-        )
-        let message = ChildCandidateResponseMessage(
-            requestID: 22,
-            childPath: ["Nexus", "Alpha"],
-            parentCID: carrierHeader.rawCID,
-            childCID: carrierHeader.rawCID,
-            blockData: try XCTUnwrap(carrier.toData()),
-            searchWitness: alpha,
-            deploymentWitness: beta
-        )
-
-        let decoded = try ChildCandidateResponseMessage.decoded(message.encoded())
-        XCTAssertEqual(decoded.searchWitness?.proof.directoryPath, ["Alpha"])
-        XCTAssertEqual(decoded.deploymentWitness?.proof.directoryPath, ["Beta"])
-        XCTAssertEqual(
-            try BlockHeader(node: decoded.searchWitness!.terminal).rawCID,
-            try BlockHeader(node: decoded.deploymentWitness!.terminal).rawCID
-        )
     }
 
     func testCandidateRequestEnforcesHierarchyRewardAndFrameBounds() async throws {
@@ -5086,8 +4959,7 @@ final class NetworkTrustTests: XCTestCase {
                 return try await childService.miningCandidate(
                     parentCarrier: context.parentCarrier,
                     parentContentSource: parentSource,
-                    rewards: context.rewards,
-                    mode: context.mode
+                    rewards: context.rewards
                 )
             },
             candidateReservations: { [weak reservationGate] update in
