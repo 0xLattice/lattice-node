@@ -1167,25 +1167,39 @@ final class ChainProcessTests: XCTestCase {
         let config = try configuration(path: ["Nexus"], storage: directory)
         var process: ChainProcess? = try await ChainProcess.open(configuration: config)
         let genesis = try await process!.canonicalTipBlock()
-        let child = try await BlockBuilder.buildChildGenesis(
+        // A self-contained child genesis (empty parentState) the carrier RECORDS
+        // via a GenesisAction while co-mining the child's height-1 block.
+        let childGenesis = try await BlockBuilder.buildChildGenesis(
             spec: NexusGenesis.spec,
-            parentState: genesis.postState,
+            parentState: LatticeState.emptyHeader,
             timestamp: 1,
             target: UInt256.max,
             fetcher: process!
         )
-        let childCID = try BlockHeader(node: child).rawCID
         let authorization = try signedGenesisAnchorTransaction(
             directory: "Payments",
-            childGenesisCID: childCID
+            childGenesisCID: try BlockHeader(node: childGenesis).rawCID
         )
         try await VolumeImpl<Transaction>(node: authorization).storeRecursively(
             storer: process!
         )
+        let provisional = try await BlockBuilder.buildBlock(
+            previous: genesis,
+            timestamp: 2,
+            fetcher: process!
+        )
+        let childBlock = try await BlockBuilder.buildBlock(
+            previous: childGenesis,
+            parentChainBlock: provisional,
+            timestamp: 2,
+            target: UInt256.max,
+            fetcher: process!
+        )
+        let childCID = try BlockHeader(node: childBlock).rawCID
         let carrier = try await BlockBuilder.buildBlock(
             previous: genesis,
             transactions: [authorization],
-            children: ["Payments": child],
+            children: ["Payments": childBlock],
             timestamp: 2,
             fetcher: process!
         )
@@ -1215,7 +1229,7 @@ final class ChainProcessTests: XCTestCase {
             proofs: [try PreparedChildProof(
                 directory: "Payments",
                 childCID: childCID,
-                isChildGenesis: true,
+                isChildGenesis: false,
                 proof: hop
             )],
             capacity: 16
@@ -1268,10 +1282,7 @@ final class ChainProcessTests: XCTestCase {
             rootCID: carrierHeader.rawCID
         )
         XCTAssertEqual(recovered.map(\.directory), ["Payments"])
-        XCTAssertEqual(
-            recovered.map(\.childCID),
-            [try BlockHeader(node: child).rawCID]
-        )
+        XCTAssertEqual(recovered.map(\.childCID), [childCID])
         XCTAssertEqual(recovered.first?.proof.rootCID, carrierHeader.rawCID)
     }
 
@@ -1403,25 +1414,42 @@ final class ChainProcessTests: XCTestCase {
             configuration: config
         )
         let genesis = try await live!.canonicalTipBlock()
-        let child = try await BlockBuilder.buildChildGenesis(
+        // A self-contained child genesis (empty parentState) the parent RECORDS
+        // via a plain GenesisAction; the co-mined height-1 child block below is
+        // what a carrier actually carries (a genesis is never a candidate).
+        let childGenesis = try await BlockBuilder.buildChildGenesis(
             spec: NexusGenesis.spec,
-            parentState: genesis.postState,
+            parentState: LatticeState.emptyHeader,
             timestamp: 1,
             target: UInt256.max,
             fetcher: live!
         )
-        let childHeader = try BlockHeader(node: child)
         let authorization = try signedGenesisAnchorTransaction(
             directory: "Leaf",
-            childGenesisCID: childHeader.rawCID
+            childGenesisCID: try BlockHeader(node: childGenesis).rawCID
         )
         try await VolumeImpl<Transaction>(node: authorization).storeRecursively(
             storer: live!
         )
+        // The co-mined child block-1 binds to the carrier's pre-state. The same
+        // carrier RECORDS the genesis (GenesisAction) and CARRIES block-1.
+        let provisional = try await BlockBuilder.buildBlock(
+            previous: genesis,
+            timestamp: 2,
+            fetcher: live!
+        )
+        let childBlock = try await BlockBuilder.buildBlock(
+            previous: childGenesis,
+            parentChainBlock: provisional,
+            timestamp: 2,
+            target: UInt256.max,
+            fetcher: live!
+        )
+        let childHeader = try BlockHeader(node: childBlock)
         let carrier = try await BlockBuilder.buildBlock(
             previous: genesis,
             transactions: [authorization],
-            children: ["Leaf": child],
+            children: ["Leaf": childBlock],
             timestamp: 2,
             fetcher: live!
         )
