@@ -134,13 +134,46 @@ struct Child: AsyncParsableCommand {
             )
             print("anchor \(submitted.transactionCID)")
 
-            // The anchor is now an ordinary mempool transaction. Wait for the
-            // parent to MINE it into a block, which writes `directory ->
-            // genesisCID` into its committed genesisState. An external parent
-            // miner advances the block; the child is recorded only once the
-            // parent has durably recorded the genesis CID.
+            // The anchor is now an ordinary mempool transaction: a NORMAL
+            // parent block writes `directory -> genesisCID` into the parent's
+            // committed genesisState. Nothing else mines it here, so the CLI
+            // drives that mining itself — one NORMAL-mode `--once` round per
+            // iteration (no `--deployment`: a self-contained genesis is not a
+            // deployment subtree) — until the parent has durably recorded the
+            // CID. The child is recorded only then.
+            //
+            // Mine the TREE ROOT, not the immediate parent: a child chain's
+            // block is co-mined from the root, whose round cascades carriers
+            // down to the immediate parent (where the anchor mempool and the
+            // genesisState record live). For a direct child root == parent;
+            // for a grandchild they differ, so mining the parent would never
+            // advance it. The gate below still checks the immediate parent.
+            let rootPath = parent.components(separatedBy: "/")[0]
+            guard let rootChain = topology.chains[rootPath] else {
+                throw CtlError("the tree has no \(rootPath) root to mine from")
+            }
+            let worker = try nodeBinary().deletingLastPathComponent()
+                .appendingPathComponent("lattice-miner")
             var recorded = false
-            for _ in 0..<60 {
+            for _ in 0..<20 {
+                let coordinator = Process()
+                coordinator.executableURL = try nodeBinary()
+                    .deletingLastPathComponent()
+                    .appendingPathComponent("lattice-mining-coordinator")
+                coordinator.arguments = [
+                    "--node", "http://127.0.0.1:\(rootChain.rpc)",
+                    "--worker-executable", worker.path,
+                    "--workers", "1", "--once",
+                ]
+                // Fresh /dev/null per spawn: corelibs closes the shared
+                // nullDevice singleton's fd after a process exits, so
+                // reusing it across the loop throws EBADF.
+                let devNull = FileHandle(forWritingAtPath: "/dev/null")
+                coordinator.standardOutput = devNull ?? FileHandle.nullDevice
+                coordinator.standardError = devNull ?? FileHandle.nullDevice
+                try coordinator.run()
+                coordinator.waitUntilExit()
+                try? devNull?.close()
                 if await parentRecordedGenesis(
                     rpc: parentChain.rpc,
                     directory: directory,
