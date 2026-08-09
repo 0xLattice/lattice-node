@@ -768,6 +768,79 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertNil(retry.sameChainPredecessor)
     }
 
+    func testSelfContainedGenesisSurvivesRestartAsValidatedAncestry() async throws {
+        let fixture = try await childBootstrapFixture()
+        let parentSource = fixture.source
+        let sameChainSource = ChainProcessTestContentStore()
+        let genesis = try XCTUnwrap(fixture.childHeader.node)
+        let successor = try await BlockBuilder.buildBlock(
+            previous: genesis,
+            timestamp: 2,
+            nonce: 1,
+            fetcher: parentSource
+        )
+        let successorHeader = try BlockHeader(node: successor)
+        try await successorHeader.storeBlock(
+            fetcher: parentSource,
+            storer: parentSource
+        )
+        try await successorHeader.storeBlock(
+            fetcher: parentSource,
+            storer: sameChainSource
+        )
+        let parentCarrier = try await BlockBuilder.buildGenesis(
+            spec: NexusGenesis.spec,
+            children: ["Payments": successor],
+            timestamp: 3,
+            target: UInt256.max,
+            fetcher: parentSource
+        )
+        let parentCarrierHeader = try BlockHeader(node: parentCarrier)
+        let proof = try await ChildBlockProof.generate(
+            rootHeader: parentCarrierHeader,
+            childDirectory: "Payments",
+            fetcher: parentSource
+        )
+        let successorPackage = AuthenticatedChildPackage(
+            package: ChildValidationPackage(
+                proof: proof,
+                parentGenesisLink: nil
+            )
+        )
+
+        var process: ChainProcess? = try await ChainProcess.open(
+            configuration: fixture.configuration
+        )
+        let bootstrapped = try await process!.activateSeededChildGenesis(
+            seed: fixture.seed,
+            confirmParentRecordedGenesis: { _ in true }
+        )
+        XCTAssertTrue(bootstrapped)
+        let phaseBefore = await process!.status().phase
+        XCTAssertEqual(phaseBefore, .active)
+
+        // Restart: a self-bootstrapped genesis must recover as validated
+        // ancestry, so a block-1 successor still connects after reopen.
+        process = nil
+        process = try await ChainProcess.open(configuration: fixture.configuration)
+        let phaseAfter = await process!.status().phase
+        XCTAssertEqual(
+            phaseAfter, .active,
+            "self-contained genesis did not recover active across restart"
+        )
+        let retry = try await process!.admit(
+            successorHeader,
+            authenticatedChildPackage: successorPackage,
+            remoteSource: sameChainSource
+        )
+        XCTAssertTrue(
+            retry.decision.isAccepted,
+            "block-1 rejected after restart (\(retry.decision)); "
+                + "genesis lost validated ancestry"
+        )
+        XCTAssertNil(retry.sameChainPredecessor)
+    }
+
     func testSeededChildGenesisIsNotActivatedWithoutTheParentRecord() async throws {
         let fixture = try await childBootstrapFixture()
         let process = try await ChainProcess.open(
