@@ -4440,7 +4440,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
             )
         }
         let resolution: CandidateAcquirer.Resolution
-        if let predecessor = outcome.sameChainPredecessor {
+        if let predecessor = outcome.sameChainPredecessor,
+           await process.hasAcceptedBlock(predecessor.predecessorCID) == false {
+            // Park only when the predecessor is genuinely still missing. An
+            // already-accepted predecessor already fired its one-shot connect
+            // signal, so parking on it now would wedge this candidate forever.
             resolution = .predecessor(predecessor.predecessorCID)
         } else if outcome.decision.isAccepted {
             resolution = .connected

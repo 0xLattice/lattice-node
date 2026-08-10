@@ -19,8 +19,12 @@ public enum NodeAdmissionDecision: Sendable, Equatable {
                 : .acceptedSide(acceptance.commit)
         case .carrier:
             self = .carrier
-        case .duplicate:
-            self = .duplicate
+        case .duplicate(_, _, let promotedCommit):
+            if let promotedCommit, promotedCommit.canonicalChanged {
+                self = .canonicalized(promotedCommit)
+            } else {
+                self = .duplicate
+            }
         case .rejected(let failure, _, _):
             self.init(failure)
         }
