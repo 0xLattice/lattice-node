@@ -358,6 +358,39 @@ final class PortableEvidenceProtocolTests: XCTestCase {
         }
     }
 
+    func testPortableAttachmentLocateRequestIsCanonicalAndCIDBound() throws {
+        let request = PortableAttachmentLocateRequestMessage(
+            requestID: 9,
+            childCID: protocolCID("locate-child")
+        )
+        XCTAssertEqual(
+            try PortableAttachmentLocateRequestMessage.decoded(request.encoded()),
+            request
+        )
+        XCTAssertEqual(
+            NodeNetworkTopic.plane(
+                for: NodeNetworkTopic.portableAttachmentLocateRequest
+            ),
+            .overlay
+        )
+        XCTAssertThrowsError(try PortableAttachmentLocateRequestMessage(
+            requestID: 0,
+            childCID: protocolCID("locate-child")
+        ).encoded())
+        XCTAssertThrowsError(try PortableAttachmentLocateRequestMessage(
+            requestID: 9,
+            childCID: "not-a-canonical-cid"
+        ).encoded())
+
+        var nonCanonical = try request.encoded()
+        nonCanonical.append(0x20)
+        XCTAssertThrowsError(
+            try PortableAttachmentLocateRequestMessage.decoded(nonCanonical)
+        ) { error in
+            XCTAssertEqual(error as? NodeNetworkWireError, .nonCanonical)
+        }
+    }
+
     private func evidenceFixture() async throws
         -> (envelope: Data, childCID: String) {
         let source = MemoryBroker()

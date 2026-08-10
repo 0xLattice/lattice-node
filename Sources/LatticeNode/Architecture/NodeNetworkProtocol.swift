@@ -24,6 +24,8 @@ enum NodeNetworkTopic {
         "lattice.overlay.portable-attachment.index.request.v1"
     static let portableAttachmentIndexResponse =
         "lattice.overlay.portable-attachment.index.response.v1"
+    static let portableAttachmentLocateRequest =
+        "lattice.overlay.portable-attachment.locate.request.v1"
     static let hierarchyHello = "lattice.hierarchy.hello.v1"
     static let childEvidenceAvailable = "lattice.hierarchy.evidence.available.v4"
     static let childEvidenceIndexRequest = "lattice.hierarchy.evidence.index.request.v4"
@@ -51,7 +53,8 @@ enum NodeNetworkTopic {
              forwardRangeRequest, forwardRangeResponse,
              portableAttachmentAvailable,
              portableAttachmentIndexRequest,
-             portableAttachmentIndexResponse: .overlay
+             portableAttachmentIndexResponse,
+             portableAttachmentLocateRequest: .overlay
         case hierarchyHello, childEvidenceAvailable,
              childEvidenceIndexRequest, childEvidenceIndexResponse,
              childCandidateRequest, childCandidateResponse,
@@ -408,6 +411,24 @@ struct PortableAttachmentIndexResponseMessage: NodeJSONMessage, Equatable, Senda
                   }) ?? true)
               }),
               !hasMore || !entries.isEmpty else {
+            throw NodeNetworkWireError.malformed
+        }
+    }
+}
+
+/// Solicits the portable child-evidence a peer holds for ONE specific child
+/// block CID. A peer that mined (or relayed with a package) the carrier can
+/// recover the block's `ChildValidationPackage`; it answers by sending the
+/// requester a `PortableAttachmentAvailableMessage` for that block, which the
+/// requester recovers through the ordinary portable-evidence path. This lets a
+/// cold-syncing adopter obtain per-block evidence directly from the block's
+/// supplier, instead of relying on its own parent having mined the carriers.
+struct PortableAttachmentLocateRequestMessage: NodeJSONMessage, Equatable, Sendable {
+    let requestID: UInt64
+    let childCID: String
+
+    func validate() throws {
+        guard requestID != 0, _isCanonicalWireCID(childCID) else {
             throw NodeNetworkWireError.malformed
         }
     }

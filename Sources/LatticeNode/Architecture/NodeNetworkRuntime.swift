@@ -2206,6 +2206,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 generation: generation,
                 process: process
             )
+        case NodeNetworkTopic.portableAttachmentLocateRequest:
+            guard let request = try? PortableAttachmentLocateRequestMessage
+                .decoded(message.payload) else { return }
+            await servePortableAttachmentLocate(
+                request,
+                to: peer,
+                generation: generation,
+                process: process
+            )
         case NodeNetworkTopic.blockAnnouncement:
             guard let announcement = try? BlockAnnouncementMessage.decoded(message.payload) else {
                 return
@@ -2786,6 +2795,87 @@ public actor NodeNetworkRuntime: IvyDelegate {
             topic: NodeNetworkTopic.portableAttachmentIndexResponse,
             payload: payload
         )
+    }
+
+    /// Answer a per-block evidence request: if this process holds the recovered
+    /// incoming-carrier package for the asked child block, tell the requester the
+    /// attachment is available (the same message the live announce path emits), so
+    /// it recovers the package through the ordinary portable-evidence path. A peer
+    /// that cannot recover the block stays silent.
+    private func servePortableAttachmentLocate(
+        _ request: PortableAttachmentLocateRequestMessage,
+        to peer: AuthenticatedPeer,
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        guard !configuration.address.isNexus,
+              let package = try? await process
+                .recoveredAuthenticatedChildPackage(for: request.childCID),
+              let edge = await DirectChildEdge.derive(from: package.package.proof),
+              let edgeCID = edge.edgeCID,
+              let attachmentCID = try? await process.portableEvidenceVolumeCID(
+                scope: .incomingCarrier,
+                edgeCID: edgeCID,
+                rootCID: package.package.proof.rootCID
+              ),
+              isCurrentRuntime(generation: generation, process: process),
+              overlayPeers[peer.key]?.sessionID == peer.sessionID,
+              let payload = try? PortableAttachmentAvailableMessage(
+                edgeCID: edgeCID,
+                rootCID: package.package.proof.rootCID,
+                attachmentCID: attachmentCID
+              ).encoded()
+        else { return }
+        _ = await overlay.sendMessage(
+            to: peer,
+            topic: NodeNetworkTopic.portableAttachmentAvailable,
+            payload: payload
+        )
+    }
+
+    /// Solicit per-block evidence from the peers that can serve the block: the
+    /// candidate's advertisers and the peer that supplied its content. Used when a
+    /// cold-synced block needs a child proof this node cannot recover locally
+    /// (its own parent never mined the carriers), so the block's supplier conveys
+    /// the portable package the live path would have carried.
+    private func requestPortableAttachmentLocate(
+        for childCID: String,
+        candidate: Candidate,
+        supplierPublicKey: String?,
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        guard !configuration.address.isNexus else { return }
+        var peers: [AuthenticatedPeer] = candidate.providers
+            .compactMap(overlayPeer(for:))
+        if let supplierPublicKey, let key = try? PeerKey(supplierPublicKey),
+           let peer = overlayPeers[key],
+           !peers.contains(where: { $0.key == key }) {
+            peers.append(peer)
+        }
+        // Blocks reached through the predecessor walk carry no advertiser, and
+        // pin-resolved content need not attribute a sole supplier. Fall back to
+        // the current overlay peers so the block's holder is still asked; each
+        // peer either has the package or stays silent (same reach as the live
+        // announce broadcast), bounded by the exact-source cap.
+        if peers.isEmpty {
+            peers = Array(overlayPeers.values)
+        }
+        guard !peers.isEmpty,
+              let payload = try? PortableAttachmentLocateRequestMessage(
+                requestID: makeRequestID(),
+                childCID: childCID
+              ).encoded() else { return }
+        for peer in peers.prefix(Self.maximumExactContentSources) {
+            guard isCurrentRuntime(generation: generation, process: process) else {
+                return
+            }
+            _ = await overlay.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.portableAttachmentLocateRequest,
+                payload: payload
+            )
+        }
     }
 
     private func schedulePortableAttachmentIndex(
@@ -4334,6 +4424,20 @@ public actor NodeNetworkRuntime: IvyDelegate {
             default:
                 break
             }
+        }
+        // A cold-synced block arrives without the portable package the live path
+        // carries. When it needs a child proof this node cannot recover locally
+        // (its own parent never mined the carriers), solicit the package from the
+        // block's supplier so the retry admits it exactly like the live path.
+        if authenticatedPackage == nil,
+           case .unavailable(.childProof(_, let childCID)?) = outcome.decision {
+            await requestPortableAttachmentLocate(
+                for: childCID,
+                candidate: candidate,
+                supplierPublicKey: attempt.attribution.soleRemoteSupplierPublicKey,
+                generation: generation,
+                process: process
+            )
         }
         let resolution: CandidateAcquirer.Resolution
         if let predecessor = outcome.sameChainPredecessor {
