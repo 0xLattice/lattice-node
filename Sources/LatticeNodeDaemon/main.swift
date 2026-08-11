@@ -142,8 +142,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                 return try await service.miningCandidate(
                     parentCarrier: context.parentCarrier,
                     parentContentSource: parentContentSource,
-                    rewards: context.rewards,
-                    mode: context.mode
+                    rewards: context.rewards
                 )
             },
             candidateReservations: { [weak service] update in
@@ -171,6 +170,46 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             }
         )
         try await network.start(process: process, handlers: handlers)
+
+        // A deployed child holds its own self-contained genesis bytes: the
+        // parent only RECORDED the CID. If the deployer seeded `child-genesis.json`
+        // into this data directory, rebuild the identical genesis and self-admit
+        // it — but only after confirming, over the authenticated parent fact plane,
+        // that the parent actually recorded THIS CID. That is the same record
+        // honest followers demand before admitting the genesis, so a genesis the
+        // parent never recorded cannot self-activate here either. Retry until
+        // active so a child spawned slightly ahead of its parent's anchor (or its
+        // parent connection) still comes up once the record lands.
+        let genesisSeedURL = storage.appendingPathComponent("child-genesis.json")
+        let genesisSeedTask: Task<Void, Never>?
+        if address.components.count > 1,
+           let seedData = try? Data(contentsOf: genesisSeedURL),
+           let seed = try? JSONDecoder().decode(
+               ChildGenesisSeed.self, from: seedData
+           ) {
+            genesisSeedTask = Task {
+                while !Task.isCancelled {
+                    if await process.status().phase == .active { return }
+                    if (try? await process.activateSeededChildGenesis(
+                        seed: seed,
+                        confirmParentRecordedGenesis: {
+                            [weak network] childGenesisCID in
+                            guard let network else { return false }
+                            return await network
+                                .confirmParentRecordedChildGenesis(
+                                    childGenesisCID: childGenesisCID
+                                )
+                        }
+                    )) == true {
+                        return
+                    }
+                    try? await Task.sleep(for: .seconds(1))
+                }
+            }
+        } else {
+            genesisSeedTask = nil
+        }
+
         let app = makeApplication(
             service: service,
             host: rpcBind,
@@ -202,11 +241,13 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         do {
             try await app.runService()
         } catch {
+            genesisSeedTask?.cancel()
             volumeMaintenance.cancel()
             await volumeMaintenance.value
             await network.stop()
             throw error
         }
+        genesisSeedTask?.cancel()
         volumeMaintenance.cancel()
         await volumeMaintenance.value
         await network.stop()
@@ -665,16 +706,6 @@ func makeApplication(
             try await service.submitWork(input)
         }
     }
-    router.post("v1/children/intents") { request, context in
-        let input: ChildDeployIntentRequest = try await decode(
-            request,
-            upTo: ChainServiceLimits.maximumChildIntentPayloadBytes
-        )
-        return try await serviceCall(request: request, context: context) {
-            try await service.createChildDeployIntent(input)
-        }
-    }
-
     return Application(
         responder: router.buildResponder(),
         configuration: .init(address: .hostname(host, port: port))

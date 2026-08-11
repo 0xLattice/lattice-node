@@ -515,6 +515,18 @@ struct CandidateAcquirer {
         return true
     }
 
+    /// Wake successors parked behind `predecessorCID` when it became canonical
+    /// through a path OUTSIDE candidate admission — e.g. an adopted, self-contained
+    /// child genesis that bootstraps directly to active. Such a predecessor never
+    /// resolves `.connected` through `complete`, so its one-shot connect signal is
+    /// never fired and every successor that parked on it while `awaitingGenesis`
+    /// (see ChainProcess successor-before-genesis handling) is stranded, orphaning
+    /// the entire chain above the genesis.
+    mutating func predecessorConnectedOutOfBand(_ predecessorCID: String) {
+        connectPredecessor(predecessorCID)
+        fillReadyCapacity()
+    }
+
     private mutating func connectPredecessor(_ blockCID: String) {
         let waiting = waitingOn.removeValue(forKey: blockCID) ?? []
         for key in waiting {

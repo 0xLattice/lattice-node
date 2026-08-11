@@ -327,6 +327,17 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let request: PortableAttachmentIndexRequestMessage
     }
 
+    private struct PendingGenesisVerification: Sendable {
+        let peer: AuthenticatedPeer
+        let request: ParentChainFactMessage
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+
+    private struct PendingGenesisResolve: Sendable {
+        let peer: AuthenticatedPeer
+        let continuation: CheckedContinuation<String?, Never>
+    }
+
     private struct EvidenceVolumeLease: Hashable {
         let plane: CandidateSourcePlane
         let sessionID: Data
@@ -494,6 +505,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// genesis block, so other nodes (and the explorer's /api/chain/endpoints)
     /// can discover it via `findProviders(genesisCID)` with no registry.
     private var genesisAnnounceTask: Task<Void, Never>?
+    /// Drives a child this node ADOPTED (no local genesis seed) out of
+    /// `awaitingGenesis` by resolving its recorded genesis CID off the
+    /// authenticated parent and fetching+admitting the self-contained genesis.
+    private var adoptedGenesisTask: Task<Void, Never>?
     private var childProofRecoveryNeedsRefresh = false
     private var candidateAcquirer = CandidateAcquirer()
     private var candidateWorker: Task<Void, Never>?
@@ -501,6 +516,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private var pendingEvidenceIndexes: [UInt64: PendingChildEvidenceIndex] = [:]
     private var pendingParentChainFacts:
         [UInt64: PendingParentChainFact] = [:]
+    private var pendingGenesisVerifications:
+        [UInt64: PendingGenesisVerification] = [:]
+    private var pendingGenesisResolves:
+        [UInt64: PendingGenesisResolve] = [:]
     private var parentStateQueryGuard = ParentStateQueryGuard(
         capacity: NodeNetworkRuntime.maximumConcurrentParentStateQueries
     )
@@ -742,6 +761,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 generation: runtimeGeneration,
                 process: process
             )
+            scheduleAdoptedGenesisBootstrap(
+                generation: runtimeGeneration,
+                process: process
+            )
         } catch {
             isRunning = false
             _ = callbackEpoch.advance()
@@ -853,6 +876,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         childProofRecoveryTask = nil
         genesisAnnounceTask?.cancel()
         genesisAnnounceTask = nil
+        adoptedGenesisTask?.cancel()
+        adoptedGenesisTask = nil
         childProofRecoveryGeneration = nil
         childProofRecoveryNeedsRefresh = false
         servingAcceptedLeaves.removeAll()
@@ -867,6 +892,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
         )
         pendingEvidenceIndexes.removeAll()
         pendingParentChainFacts.removeAll()
+        for pending in pendingGenesisVerifications.values {
+            pending.continuation.resume(returning: false)
+        }
+        pendingGenesisVerifications.removeAll()
+        for pending in pendingGenesisResolves.values {
+            pending.continuation.resume(returning: nil)
+        }
+        pendingGenesisResolves.removeAll()
         parentStateQueryGuard.removeAll()
         pendingPortableAttachmentIndexes.removeAll()
         activeEvidenceVolumes.removeAll()
@@ -1092,7 +1125,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
                         parentCID: parentCID,
                         parentData: parentData,
                         rewards: rewards,
-                        mode: context.mode,
                         deadline: deadline,
                         generation: generation,
                         process: process
@@ -2174,6 +2206,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 generation: generation,
                 process: process
             )
+        case NodeNetworkTopic.portableAttachmentLocateRequest:
+            guard let request = try? PortableAttachmentLocateRequestMessage
+                .decoded(message.payload) else { return }
+            await servePortableAttachmentLocate(
+                request,
+                to: peer,
+                generation: generation,
+                process: process
+            )
         case NodeNetworkTopic.blockAnnouncement:
             guard let announcement = try? BlockAnnouncementMessage.decoded(message.payload) else {
                 return
@@ -2756,6 +2797,87 @@ public actor NodeNetworkRuntime: IvyDelegate {
         )
     }
 
+    /// Answer a per-block evidence request: if this process holds the recovered
+    /// incoming-carrier package for the asked child block, tell the requester the
+    /// attachment is available (the same message the live announce path emits), so
+    /// it recovers the package through the ordinary portable-evidence path. A peer
+    /// that cannot recover the block stays silent.
+    private func servePortableAttachmentLocate(
+        _ request: PortableAttachmentLocateRequestMessage,
+        to peer: AuthenticatedPeer,
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        guard !configuration.address.isNexus,
+              let package = try? await process
+                .recoveredAuthenticatedChildPackage(for: request.childCID),
+              let edge = await DirectChildEdge.derive(from: package.package.proof),
+              let edgeCID = edge.edgeCID,
+              let attachmentCID = try? await process.portableEvidenceVolumeCID(
+                scope: .incomingCarrier,
+                edgeCID: edgeCID,
+                rootCID: package.package.proof.rootCID
+              ),
+              isCurrentRuntime(generation: generation, process: process),
+              overlayPeers[peer.key]?.sessionID == peer.sessionID,
+              let payload = try? PortableAttachmentAvailableMessage(
+                edgeCID: edgeCID,
+                rootCID: package.package.proof.rootCID,
+                attachmentCID: attachmentCID
+              ).encoded()
+        else { return }
+        _ = await overlay.sendMessage(
+            to: peer,
+            topic: NodeNetworkTopic.portableAttachmentAvailable,
+            payload: payload
+        )
+    }
+
+    /// Solicit per-block evidence from the peers that can serve the block: the
+    /// candidate's advertisers and the peer that supplied its content. Used when a
+    /// cold-synced block needs a child proof this node cannot recover locally
+    /// (its own parent never mined the carriers), so the block's supplier conveys
+    /// the portable package the live path would have carried.
+    private func requestPortableAttachmentLocate(
+        for childCID: String,
+        candidate: Candidate,
+        supplierPublicKey: String?,
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        guard !configuration.address.isNexus else { return }
+        var peers: [AuthenticatedPeer] = candidate.providers
+            .compactMap(overlayPeer(for:))
+        if let supplierPublicKey, let key = try? PeerKey(supplierPublicKey),
+           let peer = overlayPeers[key],
+           !peers.contains(where: { $0.key == key }) {
+            peers.append(peer)
+        }
+        // Blocks reached through the predecessor walk carry no advertiser, and
+        // pin-resolved content need not attribute a sole supplier. Fall back to
+        // the current overlay peers so the block's holder is still asked; each
+        // peer either has the package or stays silent (same reach as the live
+        // announce broadcast), bounded by the exact-source cap.
+        if peers.isEmpty {
+            peers = Array(overlayPeers.values)
+        }
+        guard !peers.isEmpty,
+              let payload = try? PortableAttachmentLocateRequestMessage(
+                requestID: makeRequestID(),
+                childCID: childCID
+              ).encoded() else { return }
+        for peer in peers.prefix(Self.maximumExactContentSources) {
+            guard isCurrentRuntime(generation: generation, process: process) else {
+                return
+            }
+            _ = await overlay.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.portableAttachmentLocateRequest,
+                payload: payload
+            )
+        }
+    }
+
     private func schedulePortableAttachmentIndex(
         _ response: PortableAttachmentIndexResponseMessage,
         from peer: AuthenticatedPeer,
@@ -3248,8 +3370,19 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard let response = try?
                     ParentChainFactMessage.decoded(
                         message.payload
-                    ),
-                  let pending = pendingParentChainFacts[
+                    ) else { return }
+            if let verification = pendingGenesisVerifications[
+                response.requestID
+            ], verification.peer.key == peer.key,
+               verification.peer.sessionID == peer.sessionID,
+               response == verification.request {
+                resolveGenesisVerification(
+                    response.requestID,
+                    confirmed: true
+                )
+                return
+            }
+            guard let pending = pendingParentChainFacts[
                     response.requestID
                   ],
                   pending.peer.key == peer.key,
@@ -3264,6 +3397,44 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 pending: pending,
                 generation: generation,
                 process: process
+            )
+
+        case (NodeNetworkTopic.childGenesisAnchorRequest,
+              .child(let childPath)):
+            guard let request = try?
+                    ChildGenesisAnchorRequestMessage.decoded(message.payload),
+                  let directory = childPath.last,
+                  parentStateQueryGuard.acquire(peer.key)
+            else { return }
+            defer {
+                parentStateQueryGuard.release(peer.key)
+            }
+            // Read the CID the parent committed for this child's directory from
+            // its own genesisState. Silence (not an error) when unanchored, so
+            // an adopting child that raced ahead of the parent's anchor just
+            // retries once the record lands.
+            guard let genesisCID = await process
+                    .anchoredChildGenesisCIDs(limit: 200)[directory],
+                  let payload = try? ChildGenesisAnchorResponseMessage(
+                      requestID: request.requestID,
+                      genesisCID: genesisCID
+                  ).encoded() else { return }
+            _ = await hierarchy.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.childGenesisAnchorResponse,
+                payload: payload
+            )
+
+        case (NodeNetworkTopic.childGenesisAnchorResponse, .parent):
+            guard let response = try?
+                    ChildGenesisAnchorResponseMessage.decoded(message.payload),
+                  let pending = pendingGenesisResolves[response.requestID],
+                  pending.peer.key == peer.key,
+                  pending.peer.sessionID == peer.sessionID else {
+                return
+            }
+            resolveGenesisAnchor(
+                response.requestID, genesisCID: response.genesisCID
             )
 
         case (NodeNetworkTopic.childEvidenceAvailable, .parent):
@@ -3402,8 +3573,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 directory: directory,
                 block: block,
                 searchWitness: response.searchWitness,
-                deploymentWitness: response.deploymentWitness,
-                parentCreatedGenesis: false,
                 advertiserPeerKey: peer.key
             )
             guard await schedulingTargets(for: candidate) != nil else {
@@ -4256,8 +4425,26 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 break
             }
         }
+        // A cold-synced block arrives without the portable package the live path
+        // carries. When it needs a child proof this node cannot recover locally
+        // (its own parent never mined the carriers), solicit the package from the
+        // block's supplier so the retry admits it exactly like the live path.
+        if authenticatedPackage == nil,
+           case .unavailable(.childProof(_, let childCID)?) = outcome.decision {
+            await requestPortableAttachmentLocate(
+                for: childCID,
+                candidate: candidate,
+                supplierPublicKey: attempt.attribution.soleRemoteSupplierPublicKey,
+                generation: generation,
+                process: process
+            )
+        }
         let resolution: CandidateAcquirer.Resolution
-        if let predecessor = outcome.sameChainPredecessor {
+        if let predecessor = outcome.sameChainPredecessor,
+           await process.hasAcceptedBlock(predecessor.predecessorCID) == false {
+            // Park only when the predecessor is genuinely still missing. An
+            // already-accepted predecessor already fired its one-shot connect
+            // signal, so parking on it now would wedge this candidate forever.
             resolution = .predecessor(predecessor.predecessorCID)
         } else if outcome.decision.isAccepted {
             resolution = .connected
@@ -4975,6 +5162,182 @@ public actor NodeNetworkRuntime: IvyDelegate {
         )
     }
 
+    /// Verify-not-trust gate for deployer-seeded self-admission: ask the
+    /// authenticated immediate parent whether it recorded exactly this child
+    /// genesis CID (bound to the empty parent state a self-contained genesis
+    /// commits to). The parent answers only on a positive match and stays silent
+    /// otherwise, so an unrecorded — or mismatched — CID resolves `false` when the
+    /// request times out. `false` on a missing parent session too; the caller
+    /// retries until the parent connects and confirms.
+    public func confirmParentRecordedChildGenesis(
+        childGenesisCID: String
+    ) async -> Bool {
+        guard !configuration.address.isNexus,
+              pendingGenesisVerifications.count < Self.maximumPendingRequests,
+              let parent = configuredParentPeer() else {
+            return false
+        }
+        let request = ParentChainFactMessage(
+            requestID: makeRequestID(),
+            fact: .genesis(
+                childGenesisCID: childGenesisCID,
+                parentStateCID: LatticeState.emptyHeader.rawCID
+            )
+        )
+        guard let payload = try? request.encoded() else { return false }
+        let delay = Self.nanoseconds(
+            planeConfigurations.hierarchy.requestTimeout
+        )
+        return await withCheckedContinuation { continuation in
+            pendingGenesisVerifications[request.requestID] =
+                PendingGenesisVerification(
+                    peer: parent,
+                    request: request,
+                    continuation: continuation
+                )
+            Task { [weak self] in
+                _ = await self?.hierarchy.sendMessage(
+                    to: parent,
+                    topic: NodeNetworkTopic.parentChainFactRequest,
+                    payload: payload
+                )
+                try? await Task.sleep(nanoseconds: delay)
+                await self?.resolveGenesisVerification(
+                    request.requestID,
+                    confirmed: false
+                )
+            }
+        }
+    }
+
+    private func resolveGenesisVerification(
+        _ requestID: UInt64,
+        confirmed: Bool
+    ) {
+        guard let pending = pendingGenesisVerifications.removeValue(
+            forKey: requestID
+        ) else { return }
+        pending.continuation.resume(returning: confirmed)
+    }
+
+    /// Ask the authenticated immediate parent for the genesis CID it recorded for
+    /// THIS child's own directory (read from the parent's committed genesisState).
+    /// Returns nil on a missing parent session or timeout, for the caller to
+    /// retry. Verify-not-trust: the CID is content-addressed and re-confirmed
+    /// against the parent record before any admission.
+    private func resolveParentAnchoredGenesis() async -> String? {
+        guard !configuration.address.isNexus,
+              pendingGenesisResolves.count < Self.maximumPendingRequests,
+              let parent = configuredParentPeer() else {
+            return nil
+        }
+        let requestID = makeRequestID()
+        guard let payload = try? ChildGenesisAnchorRequestMessage(
+            requestID: requestID
+        ).encoded() else { return nil }
+        let delay = Self.nanoseconds(
+            planeConfigurations.hierarchy.requestTimeout
+        )
+        return await withCheckedContinuation { continuation in
+            pendingGenesisResolves[requestID] = PendingGenesisResolve(
+                peer: parent,
+                continuation: continuation
+            )
+            Task { [weak self] in
+                _ = await self?.hierarchy.sendMessage(
+                    to: parent,
+                    topic: NodeNetworkTopic.childGenesisAnchorRequest,
+                    payload: payload
+                )
+                try? await Task.sleep(nanoseconds: delay)
+                await self?.resolveGenesisAnchor(requestID, genesisCID: nil)
+            }
+        }
+    }
+
+    private func resolveGenesisAnchor(
+        _ requestID: UInt64,
+        genesisCID: String?
+    ) {
+        guard let pending = pendingGenesisResolves.removeValue(
+            forKey: requestID
+        ) else { return }
+        pending.continuation.resume(returning: genesisCID)
+    }
+
+    private func scheduleAdoptedGenesisBootstrap(
+        generation: UInt64,
+        process: ChainProcess
+    ) {
+        guard !configuration.address.isNexus,
+              adoptedGenesisTask == nil else { return }
+        adoptedGenesisTask = Task { [weak self] in
+            await self?.adoptedGenesisBootstrapLoop(
+                generation: generation,
+                process: process
+            )
+        }
+    }
+
+    /// A child this node ADOPTED (no local genesis seed) sits `awaitingGenesis`
+    /// until it obtains its self-contained genesis: resolve the recorded CID off
+    /// the authenticated parent, fetch the genesis volume from a child-overlay
+    /// provider, and self-admit it (fail-closed on the parent record). A seeded
+    /// deployer activates from its local seed before this ever fires; this drives
+    /// the no-seed follower case the candidate machinery cannot (a self-contained
+    /// genesis carries no ChildBlockProof to package). Once active, kick the
+    /// ordinary follower sync so the child catches up to the parent's tip.
+    private func adoptedGenesisBootstrapLoop(
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        while isRunning, runtimeGeneration == generation {
+            if await process.status().phase != .awaitingGenesis { return }
+            if let genesisCID = await resolveParentAnchoredGenesis() {
+                let activated = (try? await remoteContentSource.withRoot(
+                    genesisCID
+                ) { session in
+                    try await process.activateAdoptedChildGenesis(
+                        genesisCID: genesisCID,
+                        remoteSource: session,
+                        confirmParentRecordedGenesis: { [weak self] cid in
+                            await self?.confirmParentRecordedChildGenesis(
+                                childGenesisCID: cid
+                            ) ?? false
+                        }
+                    )
+                }) ?? false
+                guard isCurrentRuntime(
+                    generation: generation, process: process
+                ) else { return }
+                if activated {
+                    // The genesis just bootstrapped to active OUT OF BAND (not via
+                    // candidate admission), so it never fired its one-shot connect
+                    // signal. Wake the successors that parked behind it while
+                    // awaitingGenesis, or the whole chain above the genesis stays
+                    // orphaned and the child never canonicalizes past height 0.
+                    candidateAcquirer.predecessorConnectedOutOfBand(genesisCID)
+                    serviceCandidateAcquirer()
+                    restartAcceptedLeavesSync()
+                    await resumeAcceptedLeavesSync(
+                        generation: generation,
+                        process: process
+                    )
+                    await requestEvidenceIndex(
+                        generation: generation,
+                        process: process
+                    )
+                    return
+                }
+            }
+            do {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            } catch {
+                return
+            }
+        }
+    }
+
     private func requestParentChainFact(
         _ fact: ParentChainFact,
         for blockCID: String,
@@ -5220,7 +5583,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         parentCID: String,
         parentData: Data,
         rewards: [MiningReward],
-        mode: MiningMode,
         deadline: ContinuousClock.Instant,
         generation: UInt64,
         process: ChainProcess
@@ -5255,7 +5617,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let request = ChildCandidateRequestMessage(
             requestID: makeRequestID(),
             budgetMilliseconds: remoteBudget,
-            mode: mode,
             childPath: childPath,
             parentCID: parentCID,
             parentData: parentData,
@@ -5693,8 +6054,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     try await builder(
                         ChildCandidateRequestContext(
                             parentCarrier: parent,
-                            rewards: request.rewards,
-                            mode: request.mode
+                            rewards: request.rewards
                         ),
                         session
                     )
@@ -5716,8 +6076,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 parentCID: request.parentCID,
                 childCID: childCID,
                 blockData: blockData,
-                searchWitness: candidate.searchWitness,
-                deploymentWitness: candidate.deploymentWitness
+                searchWitness: candidate.searchWitness
             ).encoded() else { return }
         _ = await hierarchy.sendMessage(
             to: peer,

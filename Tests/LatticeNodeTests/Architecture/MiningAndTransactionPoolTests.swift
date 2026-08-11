@@ -115,8 +115,7 @@ final class MiningTemplateBookTests: XCTestCase {
             children: [DirectChildCandidate(
                 directory: "Middle",
                 block: middle.block,
-                searchWitness: middle.searchWitness,
-                deploymentWitness: middle.deploymentWitness
+                searchWitness: middle.searchWitness
             )],
             timestamp: 2,
             fetcher: hard.store
@@ -124,81 +123,6 @@ final class MiningTemplateBookTests: XCTestCase {
 
         XCTAssertEqual(root.block.target, UInt256(4))
         XCTAssertEqual(root.searchTarget, UInt256.max)
-    }
-
-    func testPendingGenesisRequiresOneParentAndChildTargetHit() async throws {
-        let parent = try await chainFixture(target: UInt256(4))
-        let child = try await chainFixture(target: UInt256(8))
-        let book = MiningTemplateBook(
-            chainPath: ["Nexus"],
-        )
-        let template = try await book.build(
-            previous: parent.genesis,
-            transactions: [],
-            children: [DirectChildCandidate(
-                directory: "Payments",
-                block: child.genesis
-            )],
-            timestamp: 1,
-            fetcher: parent.store
-        )
-
-        XCTAssertEqual(template.searchTarget, UInt256(4))
-        XCTAssertEqual(template.deploymentTarget, UInt256(4))
-    }
-
-    func testDeploymentBarrierIncludesEveryCarrierOnCommittedPath()
-        async throws
-    {
-        let parent = try await chainFixture(target: UInt256(4))
-        let middleGenesis = try await BlockBuilder.buildChildGenesis(
-            spec: NexusGenesis.spec,
-            parentState: parent.genesis.postState,
-            timestamp: 1,
-            target: UInt256(8),
-            fetcher: parent.store
-        )
-        let leafGenesis = try await BlockBuilder.buildChildGenesis(
-            spec: NexusGenesis.spec,
-            parentState: middleGenesis.postState,
-            timestamp: 1,
-            target: UInt256(16),
-            fetcher: parent.store
-        )
-        let middleBlock = try await BlockBuilder.buildBlock(
-            previous: middleGenesis,
-            children: ["Leaf": leafGenesis],
-            timestamp: 2,
-            fetcher: parent.store
-        )
-        let leafProof = try await ChildBlockProof.generate(
-            rootHeader: BlockHeader(node: middleBlock),
-            childDirectory: "Leaf",
-            fetcher: parent.store
-        )
-        let leafWitness = ChildSchedulingWitness(
-            proof: leafProof,
-            terminal: leafGenesis
-        )
-        let book = MiningTemplateBook(
-            chainPath: ["Nexus"],
-        )
-        let template = try await book.build(
-            previous: parent.genesis,
-            transactions: [],
-            children: [DirectChildCandidate(
-                directory: "Middle",
-                block: middleBlock,
-                searchWitness: leafWitness,
-                deploymentWitness: leafWitness
-            )],
-            timestamp: 1,
-            fetcher: parent.store
-        )
-
-        XCTAssertEqual(template.block.target, UInt256(4))
-        XCTAssertEqual(template.searchTarget, UInt256(4))
-        XCTAssertEqual(template.deploymentTarget, UInt256(4))
     }
 
     func testStateInvalidTransactionDoesNotSuppressWork() async throws {
@@ -425,12 +349,10 @@ final class MiningTemplateBookTests: XCTestCase {
             workID: first.workID,
             block: first.block,
             searchTarget: UInt256(7),
-            deploymentTarget: first.deploymentTarget,
             chainPath: first.chainPath,
             expiresAt: ContinuousClock.now + .seconds(30),
             childCandidates: first.childCandidates,
-            searchWitness: nil,
-            deploymentWitness: nil
+            searchWitness: nil
         )
 
         let issued = await book.issue(conflicting)
@@ -441,24 +363,20 @@ final class MiningTemplateBookTests: XCTestCase {
             workID: first.workID,
             block: first.block,
             searchTarget: first.searchTarget,
-            deploymentTarget: first.deploymentTarget,
             chainPath: first.chainPath,
             expiresAt: ContinuousClock.now + .milliseconds(250),
             childCandidates: first.childCandidates,
-            searchWitness: first.searchWitness,
-            deploymentWitness: first.deploymentWitness
+            searchWitness: first.searchWitness
         )
         _ = await book.issue(shortLived)
         let reused = await book.issue(MiningTemplate(
             workID: conflicting.workID,
             block: conflicting.block,
             searchTarget: conflicting.searchTarget,
-            deploymentTarget: conflicting.deploymentTarget,
             chainPath: conflicting.chainPath,
             expiresAt: ContinuousClock.now + .seconds(30),
             childCandidates: conflicting.childCandidates,
-            searchWitness: conflicting.searchWitness,
-            deploymentWitness: conflicting.deploymentWitness
+            searchWitness: conflicting.searchWitness
         ))
         let response = MiningTemplateResponse(
             template: reused,
@@ -471,23 +389,19 @@ final class MiningTemplateBookTests: XCTestCase {
             workID: first.workID,
             block: first.block,
             searchTarget: first.searchTarget,
-            deploymentTarget: first.deploymentTarget,
             chainPath: first.chainPath,
             expiresAt: ContinuousClock.now - .seconds(1),
             childCandidates: first.childCandidates,
-            searchWitness: first.searchWitness,
-            deploymentWitness: first.deploymentWitness
+            searchWitness: first.searchWitness
         ))
         let replacement = await book.issue(MiningTemplate(
             workID: conflicting.workID,
             block: conflicting.block,
             searchTarget: conflicting.searchTarget,
-            deploymentTarget: conflicting.deploymentTarget,
             chainPath: conflicting.chainPath,
             expiresAt: ContinuousClock.now + .seconds(30),
             childCandidates: conflicting.childCandidates,
-            searchWitness: conflicting.searchWitness,
-            deploymentWitness: conflicting.deploymentWitness
+            searchWitness: conflicting.searchWitness
         ))
         XCTAssertEqual(replacement.searchTarget, conflicting.searchTarget)
     }

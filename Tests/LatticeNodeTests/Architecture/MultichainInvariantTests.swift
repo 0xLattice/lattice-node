@@ -33,32 +33,66 @@ final class MultichainInvariantTests: XCTestCase {
             configuration: parentConfiguration
         )
         let parentGenesis = try await parent!.canonicalTipBlock()
-        let childGenesis = try await BlockBuilder.buildChildGenesis(
-            spec: NexusGenesis.spec,
-            parentState: parentGenesis.postState,
-            timestamp: 1,
-            target: .max,
+        // A self-contained child genesis (empty parentState) the parent RECORDS
+        // via a GenesisAction. The Payments node rebuilds it from `seed` and
+        // self-admits it.
+        let seed = ChildGenesisSeed(
+            spec: NexusGenesis.spec, premineTo: nil, timestamp: 1
+        )
+        let childGenesis = try await ChildGenesisBuilder.build(
+            seed: seed,
+            chainPath: ["Nexus", "Payments"],
             fetcher: parent!
         )
-        let childHeader = try BlockHeader(node: childGenesis)
+        let childGenesisCID = try BlockHeader(node: childGenesis).rawCID
         let authorization = try signedGenesisAnchorTransaction(
             directory: "Payments",
-            childGenesisCID: childHeader.rawCID
+            childGenesisCID: childGenesisCID
         )
         try await VolumeImpl<Transaction>(node: authorization).storeRecursively(
             storer: parent!
         )
-        let unminedCarrier = try await BlockBuilder.buildBlock(
+        // The genesis is recorded in this carrier; the child's height-1 block is
+        // co-mined in the NEXT carrier, whose pre-state (this carrier's post-state)
+        // already records the genesis — that is block-1's parentState.
+        let unminedRecordingCarrier = try await BlockBuilder.buildBlock(
             previous: parentGenesis,
             transactions: [authorization],
-            children: ["Payments": childGenesis],
             timestamp: 1,
+            nonce: 0,
+            fetcher: parent!
+        )
+        let recordingCarrier = try XCTUnwrap(BlockBuilder.mine(
+            block: unminedRecordingCarrier,
+            target: unminedRecordingCarrier.target
+        ))
+        let recordingOutcome = try await parent!.admit(
+            try BlockHeader(node: recordingCarrier)
+        )
+        XCTAssertTrue(recordingOutcome.decision.isAccepted)
+        let provisional = try await BlockBuilder.buildBlock(
+            previous: recordingCarrier,
+            timestamp: 2,
+            nonce: 0,
+            fetcher: parent!
+        )
+        let childBlock = try await BlockBuilder.buildBlock(
+            previous: childGenesis,
+            parentChainBlock: provisional,
+            timestamp: 2,
+            fetcher: parent!
+        )
+        let childHeader = try BlockHeader(node: childBlock)
+        let unminedCarrier = try await BlockBuilder.buildBlock(
+            previous: recordingCarrier,
+            children: ["Payments": childBlock],
+            timestamp: 2,
             nonce: 0,
             fetcher: parent!
         )
         let carrier = try XCTUnwrap(BlockBuilder.mine(
             block: unminedCarrier,
-            target: min(unminedCarrier.target, childGenesis.target)
+            target: min(unminedCarrier.target, childBlock.target)
         ))
         _ = try await parent!.prepareChildProofs(
             for: carrier,
@@ -100,8 +134,10 @@ final class MultichainInvariantTests: XCTestCase {
         let carrierLink = try XCTUnwrap(reopenedCarrierLink)
         let reopenedGenesisLink = try await parent!.issuedParentGenesisLink(
             directory: "Payments",
-            childGenesisCID: childHeader.rawCID,
-            parentStateCID: carrier.prevState.rawCID
+            childGenesisCID: childGenesisCID,
+            // A self-contained genesis's recorded link binds to the empty parent
+            // state, not the recording carrier's prevState.
+            parentStateCID: LatticeState.emptyHeader.rawCID
         )
         let genesisLink = try XCTUnwrap(reopenedGenesisLink)
         XCTAssertEqual(carrierLink.parentPath, ["Nexus"])
@@ -109,7 +145,7 @@ final class MultichainInvariantTests: XCTestCase {
         XCTAssertEqual(carrierLink.rootCID, carrierHeader.rawCID)
         XCTAssertEqual(genesisLink.parentPath, ["Nexus"])
         XCTAssertEqual(genesisLink.directory, "Payments")
-        XCTAssertEqual(genesisLink.childGenesisCID, childHeader.rawCID)
+        XCTAssertEqual(genesisLink.childGenesisCID, childGenesisCID)
         XCTAssertEqual(
             try evidence.proof.serialize(),
             try beforeRestart.proof.serialize()
@@ -117,13 +153,16 @@ final class MultichainInvariantTests: XCTestCase {
         XCTAssertEqual(evidence.proof.rootCID, carrierHeader.rawCID)
         XCTAssertEqual(evidence.proof.directoryPath, ["Payments"])
 
+        // A co-mined height-1 block is authenticated by its carrier proof alone;
+        // the genesis link is only for genesis admission (the child already
+        // self-admitted its genesis). validateParentFacts requires a nil link here.
         let package = AuthenticatedChildPackage(
             package: ChildValidationPackage(
                 proof: evidence.proof,
-                parentGenesisLink: genesisLink
+                parentGenesisLink: nil
             )
         )
-        let childGenesisHeader = BlockHeader(
+        let childBlockHeader = BlockHeader(
             rawCID: childHeader.rawCID,
             node: nil,
             encryptionInfo: nil
@@ -134,22 +173,20 @@ final class MultichainInvariantTests: XCTestCase {
             storer: childContent
         )
 
+        // A descendant (Receipts) must not be bootstrapped by an ancestor's
+        // (Payments') child package, even after self-admitting nothing yet.
         var receipts: ChainProcess? = try await ChainProcess.open(
             configuration: receiptsConfiguration
         )
-        do {
-            _ = try await receipts!.admit(
-                childGenesisHeader,
-                authenticatedChildPackage: package,
-                remoteSource: childContent
-            )
-            XCTFail("an ancestor package must not bootstrap a descendant")
-        } catch {
-            XCTAssertEqual(
-                error as? ChainAdmissionFailure,
-                .providerMalformedEvidence
-            )
-        }
+        let receiptsOutcome = try await receipts!.admit(
+            childBlockHeader,
+            authenticatedChildPackage: package,
+            remoteSource: childContent
+        )
+        XCTAssertFalse(
+            receiptsOutcome.decision.isAccepted,
+            "an ancestor package must not bootstrap a descendant: \(receiptsOutcome.decision)"
+        )
         let receiptsStatus = await receipts!.status()
         XCTAssertEqual(receiptsStatus.phase, .awaitingGenesis)
         XCTAssertEqual(receiptsStatus.chainPath, ["Nexus", "Payments", "Receipts"])
@@ -161,11 +198,19 @@ final class MultichainInvariantTests: XCTestCase {
         XCTAssertEqual(reopenedReceiptsStatus.phase, .awaitingGenesis)
         XCTAssertNil(reopenedReceiptsStatus.tipCID)
 
+        // Payments self-admits its self-contained genesis from the seed, then the
+        // parent package co-mines its height-1 block onto that genesis.
         var payments: ChainProcess? = try await ChainProcess.open(
             configuration: paymentsConfiguration
         )
+        let paymentsBootstrapped = try await payments!
+            .activateSeededChildGenesis(
+                seed: seed,
+                confirmParentRecordedGenesis: { _ in true }
+            )
+        XCTAssertTrue(paymentsBootstrapped)
         let accepted = try await payments!.admit(
-            childGenesisHeader,
+            childBlockHeader,
             authenticatedChildPackage: package,
             remoteSource: childContent
         )

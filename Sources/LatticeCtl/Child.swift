@@ -1,10 +1,12 @@
 // Chain-tree evolution: the only two legitimate ways a child exists.
 //
-// `deploy` runs the full arc against the LOCAL parent process: intent →
-// signed GenesisAction anchor → one deployment-mode mining round → child
-// process active — then records the child in the topology. `adopt` joins an
-// EXISTING child permissionlessly: the child process re-derives its genesis
-// through the authenticated parent link, never from "a node that tracks it".
+// `deploy` runs the full arc against the LOCAL parent process: build the
+// self-contained child genesis OFFLINE (empty parentState) → submit ONE signed
+// GenesisAction anchor recording its CID in the parent's genesisState → wait for
+// the parent to record it → child process active — then records the child in the
+// topology. `adopt` joins an EXISTING child permissionlessly: the child process
+// re-derives its genesis through the authenticated parent link, never from "a
+// node that tracks it".
 
 import Foundation
 #if canImport(FoundationNetworking)
@@ -15,6 +17,7 @@ import Lattice
 import LatticeCtlCore
 import LatticeNode
 import UInt256
+import VolumeBroker
 import cashew
 
 struct Child: AsyncParsableCommand {
@@ -66,40 +69,27 @@ struct Child: AsyncParsableCommand {
                 from: Data(contentsOf: URL(fileURLWithPath: spec))
             )
 
-            var genesisTransactions: [Transaction] = []
-            if let premineTo {
-                let premineBody = TransactionBody(
-                    accountActions: [AccountAction(
-                        owner: premineTo,
-                        delta: Int64(chainSpec.premineAmount())
-                    )],
-                    actions: [],
-                    depositActions: [],
-                    genesisActions: [],
-                    receiptActions: [],
-                    withdrawalActions: [],
-                    signers: [],
-                    fee: 0,
-                    nonce: 0,
-                    chainPath: [parent, directory].joined(separator: "/")
-                        .components(separatedBy: "/")
-                )
-                genesisTransactions.append(Transaction(
-                    signatures: [:],
-                    body: try HeaderImpl(node: premineBody)
-                ))
-            }
-            let intent: ChildDeployIntentResponse = try await post(
-                rpc: parentChain.rpc, path: "v1/children/intents",
-                body: ChildDeployIntentRequest(
-                    directory: directory,
-                    spec: chainSpec,
-                    genesisTransactions: genesisTransactions,
-                    target: .max,
-                    timestamp: Int64(Date().timeIntervalSince1970 * 1000)
-                )
+            // Build the self-contained child genesis OFFLINE: empty parentState,
+            // like a root genesis. The parent only RECORDS its CID; it never
+            // carries the genesis. The genesisCID is deterministic in the seed
+            // (spec + premine + timestamp + max target); the child node rebuilds
+            // the identical genesis from the same seed and self-admits it.
+            let childComponents = parent.components(separatedBy: "/") + [directory]
+            let seed = ChildGenesisSeed(
+                spec: chainSpec,
+                premineTo: premineTo,
+                timestamp: Int64(Date().timeIntervalSince1970 * 1000)
             )
-            print("genesis \(intent.genesisCID)")
+            let genesisFetcher = CoalescingFetcher(
+                CompositeContentSource([MemoryBroker()])
+            )
+            let genesis = try await ChildGenesisBuilder.build(
+                seed: seed,
+                chainPath: childComponents,
+                fetcher: genesisFetcher
+            )
+            let genesisCID = try BlockHeader(node: genesis).rawCID
+            print("genesis \(genesisCID)")
 
             struct KeyFile: Decodable {
                 let privateKey: String
@@ -117,7 +107,7 @@ struct Child: AsyncParsableCommand {
                 actions: [],
                 depositActions: [],
                 genesisActions: [GenesisAction(
-                    directory: directory, blockCID: intent.genesisCID
+                    directory: directory, blockCID: genesisCID
                 )],
                 receiptActions: [],
                 withdrawalActions: [],
@@ -144,25 +134,27 @@ struct Child: AsyncParsableCommand {
             )
             print("anchor \(submitted.transactionCID)")
 
-            // Deployment templates are the only ones that include genesis
-            // actions. NOTE: the drain+height gate assumes no concurrent
-            // parent miner (deploy-before-mine on one host); with outside
-            // traffic, gate on the anchor CID landing in a block instead.
-            // Success is "the anchor left the parent mempool and a
-            // block landed", never "a mining round exited cleanly" — only
-            // then is the child recorded and spawned.
+            // The anchor is now an ordinary mempool transaction: a NORMAL
+            // parent block writes `directory -> genesisCID` into the parent's
+            // committed genesisState. Nothing else mines it here, so the CLI
+            // drives that mining itself — one NORMAL-mode `--once` round per
+            // iteration (no `--deployment`: a self-contained genesis is not a
+            // deployment subtree) — until the parent has durably recorded the
+            // CID. The child is recorded only then.
+            //
+            // Mine the TREE ROOT, not the immediate parent: a child chain's
+            // block is co-mined from the root, whose round cascades carriers
+            // down to the immediate parent (where the anchor mempool and the
+            // genesisState record live). For a direct child root == parent;
+            // for a grandchild they differ, so mining the parent would never
+            // advance it. The gate below still checks the immediate parent.
+            let rootPath = parent.components(separatedBy: "/")[0]
+            guard let rootChain = topology.chains[rootPath] else {
+                throw CtlError("the tree has no \(rootPath) root to mine from")
+            }
             let worker = try nodeBinary().deletingLastPathComponent()
                 .appendingPathComponent("lattice-miner")
-            // Templates come only from the tree root: a deployment round
-            // there cascades carriers down to the immediate parent, which is
-            // where the anchor and the mempool/height gate live.
-            guard let rootChain = topology.chains["Nexus"] else {
-                throw CtlError("the tree has no Nexus root to mine from")
-            }
-            let heightBefore = await health(
-                rpc: parentChain.rpc
-            )?["height"] as? Int ?? 0
-            var anchored = false
+            var recorded = false
             for _ in 0..<20 {
                 let coordinator = Process()
                 coordinator.executableURL = try nodeBinary()
@@ -171,36 +163,48 @@ struct Child: AsyncParsableCommand {
                 coordinator.arguments = [
                     "--node", "http://127.0.0.1:\(rootChain.rpc)",
                     "--worker-executable", worker.path,
-                    "--workers", "1", "--once", "--deployment",
+                    "--workers", "1", "--once",
                 ]
                 // Fresh /dev/null per spawn: corelibs closes the shared
                 // nullDevice singleton's fd after a process exits, so
-                // reusing it across the 20-round loop throws EBADF.
+                // reusing it across the loop throws EBADF.
                 let devNull = FileHandle(forWritingAtPath: "/dev/null")
                 coordinator.standardOutput = devNull ?? FileHandle.nullDevice
                 coordinator.standardError = devNull ?? FileHandle.nullDevice
                 try coordinator.run()
                 coordinator.waitUntilExit()
                 try? devNull?.close()
-                if let health = await health(rpc: parentChain.rpc),
-                   health["mempoolCount"] as? Int == 0,
-                   (health["height"] as? Int ?? 0) > heightBefore {
-                    anchored = true
+                if await parentRecordedGenesis(
+                    rpc: parentChain.rpc,
+                    directory: directory,
+                    genesisCID: genesisCID
+                ) {
+                    recorded = true
                     break
                 }
                 try await Task.sleep(for: .seconds(2))
             }
-            guard anchored else {
-                throw CtlError("the genesis anchor was not mined; the child was NOT added — check the parent's mining and the funding key nonce, then retry")
+            guard recorded else {
+                throw CtlError("the genesis anchor was not recorded; the child was NOT added — check the parent's mining and the funding key nonce, then retry")
             }
             let ports = nextFreePorts(topology)
             topology.chains[childPath] = TopologyChain(
                 listen: ports.0, fact: ports.1, rpc: ports.2, peers: nil
             )
             try topology.validated().save(root: layout.root)
+            // Seed the child's data directory with the genesis inputs so its node
+            // rebuilds the identical self-contained genesis and self-admits it on
+            // startup (the parent has already recorded the CID above).
+            let childData = layout.chainDirectory(for: childPath)
+            try FileManager.default.createDirectory(
+                at: childData, withIntermediateDirectories: true
+            )
+            try JSONEncoder().encode(seed).write(
+                to: childData.appendingPathComponent("child-genesis.json")
+            )
             try spawnChain(childPath, topology: topology, layout: layout)
             try await waitActive(
-                childPath, rpc: ports.2, expectedTip: intent.genesisCID
+                childPath, rpc: ports.2, expectedTip: genesisCID
             )
             print("\(childPath): active")
         }
@@ -269,6 +273,29 @@ func portIsBindable(_ port: UInt16) -> Bool {
             )
         }
     } == 0
+}
+
+/// True once the parent has committed `directory -> genesisCID` into its
+/// genesisState, exposed through the `api/chain/children` explorer listing.
+func parentRecordedGenesis(
+    rpc: UInt16, directory: String, genesisCID: String
+) async -> Bool {
+    guard let url = URL(
+        string: "http://127.0.0.1:\(rpc)/api/chain/children?limit=100"
+    ) else { return false }
+    var request = URLRequest(url: url)
+    request.timeoutInterval = 5
+    guard let (data, response) = try? await URLSession.shared.data(for: request),
+          let http = response as? HTTPURLResponse,
+          (200..<300).contains(http.statusCode),
+          let listing = try? JSONDecoder().decode(
+              ExplorerChainChildren.self, from: data
+          ) else {
+        return false
+    }
+    return listing.children.contains {
+        $0.chainPath.last == directory && $0.genesisHash == genesisCID
+    }
 }
 
 func waitActive(
