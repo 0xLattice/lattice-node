@@ -5311,6 +5311,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     generation: generation, process: process
                 ) else { return }
                 if activated {
+                    // The genesis just bootstrapped to active OUT OF BAND (not via
+                    // candidate admission), so it never fired its one-shot connect
+                    // signal. Wake the successors that parked behind it while
+                    // awaitingGenesis, or the whole chain above the genesis stays
+                    // orphaned and the child never canonicalizes past height 0.
+                    candidateAcquirer.predecessorConnectedOutOfBand(genesisCID)
+                    serviceCandidateAcquirer()
                     restartAcceptedLeavesSync()
                     await resumeAcceptedLeavesSync(
                         generation: generation,
