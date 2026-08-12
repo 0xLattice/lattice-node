@@ -240,6 +240,72 @@ final class DaemonHTTPTests: XCTestCase {
         }
     }
 
+    func testPublicReadApplicationServesOnlyTheReadSurface() async throws {
+        let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-http-public-read-test-\(UUID().uuidString)"
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storage) }
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: storage,
+            privateKeyHex: String(repeating: "01", count: 32)
+        )
+        let process = try await ChainProcess.open(configuration: configuration)
+        let service = ChainService(
+            process: process,
+            childCandidateProvider: { _ in [] },
+            childProofPublisher: { _ in },
+            acceptedBlockPublisher: { _ in },
+        )
+
+        let publicApp = makePublicReadApplication(
+            service: service,
+            host: "127.0.0.1",
+            port: 8081
+        )
+        try await publicApp.test(.router) { client in
+            // The bounded read surface is served.
+            for uri in [
+                "/health", "/v1/blocks", "/api/chain/info", "/api/chain/spec",
+                "/api/block/latest", "/api/peers", "/api/mempool"
+            ] {
+                try await client.execute(uri: uri, method: .get) { response in
+                    XCTAssertEqual(response.status, .ok, uri)
+                }
+            }
+            // The operator surface does not exist here — not merely forbidden.
+            try await client.execute(uri: "/v1/status", method: .get) { response in
+                XCTAssertEqual(response.status, .notFound)
+            }
+            for uri in ["/v1/transactions", "/v1/mining/templates", "/v1/mining/work"] {
+                try await client.execute(
+                    uri: uri,
+                    method: .post,
+                    headers: [.contentType: "application/json"],
+                    body: ByteBuffer(bytes: Data("{}".utf8))
+                ) { response in
+                    XCTAssertEqual(response.status, .notFound, uri)
+                }
+            }
+        }
+
+        // The loopback application still serves the full operator surface.
+        let loopback = makeApplication(service: service, host: "127.0.0.1", port: 8080)
+        try await loopback.test(.router) { client in
+            try await client.execute(uri: "/v1/status", method: .get) { response in
+                XCTAssertEqual(response.status, .ok)
+            }
+            try await client.execute(
+                uri: "/v1/mining/templates",
+                method: .post,
+                headers: [.contentType: "application/json"],
+                body: ByteBuffer(bytes: try JSONEncoder().encode(MiningTemplateRequest()))
+            ) { response in
+                XCTAssertEqual(response.status, .ok)
+            }
+        }
+    }
+
     func testExplorerBlockIDDispatchPrefersHeightOverAmbiguousCID() {
         // The premise: "161" genuinely round-trips as a canonical CID (base58
         // CIDv0, identity multihash [0x00, 0x01, 0x22]), so CID-first dispatch

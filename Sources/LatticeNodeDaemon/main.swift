@@ -73,12 +73,20 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Per-netgroup overlay connection cap; raise on proxy-fronted nodes where all inbound share one source address")
     var overlayMaxConnectionsPerNetgroup = 2
 
+    @Option(help: "Public read-only HTTP port; binds all interfaces and serves ONLY the bounded GET read routes (the read-replica allowlist, enforced in code). Chain data is public; this exposes no operator or write surface.")
+    var publicReadPort: UInt16?
+
     mutating func run() async throws {
         guard let address = ChainAddress(string: chainPath) else {
             throw ValidationError("--chain-path must be absolute and begin with Nexus")
         }
         guard ["127.0.0.1", "::1", "localhost"].contains(rpcBind.lowercased()) else {
             throw ValidationError("the unauthenticated HTTP API may bind only to loopback")
+        }
+        if let publicReadPort {
+            guard publicReadPort != rpcPort else {
+                throw ValidationError("--public-read-port must differ from --rpc-port")
+            }
         }
 
         let storage = try storageURL(for: address)
@@ -210,28 +218,42 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             genesisSeedTask = nil
         }
 
+        let peersProvider: @Sendable () async -> ExplorerPeersResponse = { [weak network] in
+            guard let network else {
+                return ExplorerPeersResponse(count: 0, peers: [])
+            }
+            return await network.peerSummaries(limit: 200)
+        }
+        let providerDiscovery: @Sendable (String) async -> [String] = { [weak network] genesisCID in
+            guard let network else { return [] }
+            return await network.discoverProviderReadURLs(
+                genesisCID: genesisCID
+            )
+        }
         let app = makeApplication(
             service: service,
             host: rpcBind,
             port: Int(rpcPort),
-            peers: { [weak network] in
-                guard let network else {
-                    return ExplorerPeersResponse(count: 0, peers: [])
-                }
-                return await network.peerSummaries(limit: 200)
-            },
-            discoverProviders: { [weak network] genesisCID in
-                guard let network else { return [] }
-                return await network.discoverProviderReadURLs(
-                    genesisCID: genesisCID
-                )
-            }
+            peers: peersProvider,
+            discoverProviders: providerDiscovery
         )
+        let publicReadApp = publicReadPort.map { port in
+            makePublicReadApplication(
+                service: service,
+                host: "0.0.0.0",
+                port: Int(port),
+                peers: peersProvider,
+                discoverProviders: providerDiscovery
+            )
+        }
 
         print("lattice-node \(address.key)")
         print("  process: \(configuration.processPublicKey)")
         print("  nexus:   \(configuration.nexusGenesisCID)")
         print("  rpc:     http://\(rpcBind):\(rpcPort)")
+        if let publicReadPort {
+            print("  public-read: http://0.0.0.0:\(publicReadPort)")
+        }
 
         let volumeMaintenance = Task {
             await runVolumeMaintenance {
@@ -239,7 +261,21 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             }
         }
         do {
-            try await app.runService()
+            if let publicReadApp {
+                try await withThrowingTaskGroup(of: Void.self) { group in
+                    group.addTask { try await app.runService() }
+                    group.addTask { try await publicReadApp.runService() }
+                    do {
+                        _ = try await group.next()
+                    } catch {
+                        group.cancelAll()
+                        throw error
+                    }
+                    group.cancelAll()
+                }
+            } else {
+                try await app.runService()
+            }
         } catch {
             genesisSeedTask?.cancel()
             volumeMaintenance.cancel()
@@ -348,6 +384,60 @@ func makeApplication(
     discoverProviders: @Sendable @escaping (String) async -> [String] = { _ in [] }
 ) -> Application<RouterResponder<BasicRequestContext>> {
     let router = Router()
+    addPublicReadRoutes(
+        to: router,
+        service: service,
+        peers: peers,
+        discoverProviders: discoverProviders
+    )
+    // Operator surface below: registered ONLY on this loopback application.
+    // /v1/status stays on the reconciling status() (expires the mempool, prunes
+    // stale child-intents) — existing operational clients poll it to observe
+    // mempool drain, and depend on that reconciliation. It is an internal
+    // endpoint; the public status surface is /health.
+    router.get("v1/status") { request, context in
+        try json(await service.status(), request: request, context: context)
+    }
+    addOperatorWriteRoutes(to: router, service: service)
+    return Application(
+        responder: router.buildResponder(),
+        configuration: .init(address: .hostname(host, port: port))
+    )
+}
+
+/// The public read application: exactly the bounded, non-mutating GET routes
+/// the read-replica nginx allowlist exposes (/health, /v1/blocks*,
+/// /v1/transactions/:cid, /v1/accounts/:owner, /api/*), enforced in code.
+/// Registered from the same function as the loopback application's read
+/// surface so the two cannot drift apart.
+func makePublicReadApplication(
+    service: ChainService,
+    host: String,
+    port: Int,
+    peers: @Sendable @escaping () async -> ExplorerPeersResponse = {
+        ExplorerPeersResponse(count: 0, peers: [])
+    },
+    discoverProviders: @Sendable @escaping (String) async -> [String] = { _ in [] }
+) -> Application<RouterResponder<BasicRequestContext>> {
+    let router = Router()
+    addPublicReadRoutes(
+        to: router,
+        service: service,
+        peers: peers,
+        discoverProviders: discoverProviders
+    )
+    return Application(
+        responder: router.buildResponder(),
+        configuration: .init(address: .hostname(host, port: port))
+    )
+}
+
+private func addPublicReadRoutes(
+    to router: Router<BasicRequestContext>,
+    service: ChainService,
+    peers: @Sendable @escaping () async -> ExplorerPeersResponse,
+    discoverProviders: @Sendable @escaping (String) async -> [String]
+) {
     // CORS is scoped to READ methods only. The POST write routes stay off the
     // allow-list on purpose: they consume application/json, so a cross-origin
     // browser POST needs a preflight — denying .post here keeps those routes
@@ -370,13 +460,6 @@ func makeApplication(
             request: request,
             context: context
         )
-    }
-    // /v1/status stays on the reconciling status() (expires the mempool, prunes
-    // stale child-intents) — existing operational clients poll it to observe
-    // mempool drain, and depend on that reconciliation. It is an internal
-    // endpoint; the public status surface is /health above.
-    router.get("v1/status") { request, context in
-        try json(await service.status(), request: request, context: context)
     }
     router.get("v1/blocks/:cid") { request, context in
         guard let cid = context.parameters.get("cid"), isPlausibleCID(cid) else {
@@ -689,6 +772,14 @@ func makeApplication(
         )
     }
 
+}
+
+/// Unauthenticated writes: registered only on the loopback application, never
+/// on the public read application.
+private func addOperatorWriteRoutes(
+    to router: Router<BasicRequestContext>,
+    service: ChainService
+) {
     router.post("v1/transactions") { request, context in
         let input: SubmitTransactionRequest = try await decode(request, context: context)
         return try await serviceCall(request: request, context: context) {
@@ -707,10 +798,6 @@ func makeApplication(
             try await service.submitWork(input)
         }
     }
-    return Application(
-        responder: router.buildResponder(),
-        configuration: .init(address: .hostname(host, port: port))
-    )
 }
 
 private func decode<Value: Decodable>(
