@@ -493,10 +493,8 @@ func makeApplication(
         }
         let cid: String
         let byCID: Bool
-        if isPlausibleCID(id) {
-            cid = id
-            byCID = true
-        } else if let height = UInt64(id) {
+        switch explorerBlockID(id) {
+        case .height(let height):
             guard let resolved = await service.explorerMainChainBlockCID(
                 atHeight: height
             ) else {
@@ -504,7 +502,10 @@ func makeApplication(
             }
             cid = resolved
             byCID = false
-        } else {
+        case .cid(let value):
+            cid = value
+            byCID = true
+        case .invalid:
             throw HTTPError(.badRequest)
         }
         guard let block = await service.explorerBlock(cid: cid) else {

@@ -115,6 +115,24 @@ public func isPlausibleCID(_ value: String) -> Bool {
     _isBoundedWireAtom(value) && CIDIdentity.isCanonical(value)
 }
 
+/// Dispatch for a dual height-or-CID route parameter (the explorer's
+/// `/api/block/:id`). Heights win: digit-only strings like "161" ALSO
+/// round-trip as canonical CIDs (base58 CIDv0 with a 1-byte identity
+/// multihash), so CID-first dispatch would permanently 404 every height
+/// whose decimal form happens to parse that way. Real block CIDs are
+/// digest CIDs, never bare digit runs, so height-first is unambiguous.
+public enum ExplorerBlockID: Equatable {
+    case height(UInt64)
+    case cid(String)
+    case invalid
+}
+
+public func explorerBlockID(_ value: String) -> ExplorerBlockID {
+    if let height = UInt64(value) { return .height(height) }
+    if isPlausibleCID(value) { return .cid(value) }
+    return .invalid
+}
+
 func _canonicalJSONEncode<T: Encodable>(_ value: T) throws -> Data {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
