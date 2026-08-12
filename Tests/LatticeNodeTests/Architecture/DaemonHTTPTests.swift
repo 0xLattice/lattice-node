@@ -240,6 +240,24 @@ final class DaemonHTTPTests: XCTestCase {
         }
     }
 
+    func testExplorerBlockIDDispatchPrefersHeightOverAmbiguousCID() {
+        // The premise: "161" genuinely round-trips as a canonical CID (base58
+        // CIDv0, identity multihash [0x00, 0x01, 0x22]), so CID-first dispatch
+        // would 404 heights 161-169, 171-179, 181-189, 191-199, 1111, ... as
+        // unknown-CID lookups of their own decimal strings.
+        XCTAssertTrue(isPlausibleCID("161"))
+
+        XCTAssertEqual(explorerBlockID("161"), .height(161))
+        XCTAssertEqual(explorerBlockID("0"), .height(0))
+        XCTAssertEqual(explorerBlockID("18446744073709551615"), .height(UInt64.max))
+        XCTAssertEqual(
+            explorerBlockID(NexusGenesis.expectedBlockHash),
+            .cid(NexusGenesis.expectedBlockHash)
+        )
+        XCTAssertEqual(explorerBlockID("not a cid"), .invalid)
+        XCTAssertEqual(explorerBlockID(""), .invalid)
+    }
+
     func testTransactionsRouteReturnsSubmittedTransactionAndRejectsNonTransactionCID() async throws {
         let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-http-transactions-test-\(UUID().uuidString)"
