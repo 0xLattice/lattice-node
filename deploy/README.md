@@ -35,6 +35,13 @@ sudo install -m 0755 .build/release/lattice-mining-coordinator \
 sudo install -m 0755 .build/release/lattice-miner /usr/local/bin/lattice-miner
 ```
 
+Or upgrade a host in place from a released image, no local build or docker
+needed (stop the node/miner first, restart after):
+
+```bash
+bash deploy/upgrade-binaries.sh sha-<release>
+```
+
 To pay mining rewards, generate a key and a pre-signed batch with
 `lattice-rewards` on a trusted machine (the key never ships to the miner) and
 run [mine-supervisor.py](mine-supervisor.py) beside the coordinator; see the
