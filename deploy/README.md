@@ -8,7 +8,11 @@ were removed because those roles do not exist in Lattice.
 
 1. Supply one absolute `--chain-path` beginning with `Nexus`.
 2. Give every child an explicit authenticated immediate parent with `--parent`.
-3. Keep the unauthenticated HTTP API on loopback.
+3. Keep the unauthenticated HTTP API on loopback. To serve public reads
+   directly, use `--public-read-port`: a second listener on all interfaces
+   carrying ONLY the bounded GET read routes (the read-replica allowlist,
+   enforced in code) — chain data is public; the operator/write surface
+   never leaves loopback.
 4. Expose the same-chain overlay and, where required, the parent/child fact
    plane as separate ports.
 5. Run `lattice-mining-coordinator` and external `lattice-miner` workers as
