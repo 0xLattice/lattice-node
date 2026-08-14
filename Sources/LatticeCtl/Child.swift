@@ -54,6 +54,9 @@ struct Child: AsyncParsableCommand {
         @Option(name: .long, help: "Credit the child spec's premine to this address in the child genesis.")
         var premineTo: String?
 
+        @Option(name: .long, help: "Wait this many seconds for EXTERNAL mining (a coordinator already running against the parent) to record the anchor, instead of driving local CPU mining rounds. Use on a real-difficulty network where ad-hoc CPU rounds cannot mine a block.")
+        var externalMiningWaitSeconds: UInt64 = 0
+
         func run() async throws {
             let layout = rootOption.layout
             var topology = try Topology.load(root: layout.root).validated()
@@ -90,6 +93,10 @@ struct Child: AsyncParsableCommand {
             )
             let genesisCID = try BlockHeader(node: genesis).rawCID
             print("genesis \(genesisCID)")
+            // Print the exact seed up front: the genesis CID is deterministic
+            // in it, so if this process dies between anchor submission and the
+            // seed write below, the recorded CID stays activatable by hand.
+            print("seed \(String(decoding: try JSONEncoder().encode(seed), as: UTF8.self))")
 
             struct KeyFile: Decodable {
                 let privateKey: String
@@ -155,34 +162,53 @@ struct Child: AsyncParsableCommand {
             let worker = try nodeBinary().deletingLastPathComponent()
                 .appendingPathComponent("lattice-miner")
             var recorded = false
-            for _ in 0..<20 {
-                let coordinator = Process()
-                coordinator.executableURL = try nodeBinary()
-                    .deletingLastPathComponent()
-                    .appendingPathComponent("lattice-mining-coordinator")
-                coordinator.arguments = [
-                    "--node", "http://127.0.0.1:\(rootChain.rpc)",
-                    "--worker-executable", worker.path,
-                    "--workers", "1", "--once",
-                ]
-                // Fresh /dev/null per spawn: corelibs closes the shared
-                // nullDevice singleton's fd after a process exits, so
-                // reusing it across the loop throws EBADF.
-                let devNull = FileHandle(forWritingAtPath: "/dev/null")
-                coordinator.standardOutput = devNull ?? FileHandle.nullDevice
-                coordinator.standardError = devNull ?? FileHandle.nullDevice
-                try coordinator.run()
-                coordinator.waitUntilExit()
-                try? devNull?.close()
-                if await parentRecordedGenesis(
-                    rpc: parentChain.rpc,
-                    directory: directory,
-                    genesisCID: genesisCID
-                ) {
-                    recorded = true
-                    break
+            if externalMiningWaitSeconds > 0 {
+                // The anchor is an ordinary mempool transaction; on a network
+                // with real miners the next parent block records it. Poll only.
+                let deadline = Date().addingTimeInterval(
+                    TimeInterval(externalMiningWaitSeconds)
+                )
+                while Date() < deadline {
+                    if await parentRecordedGenesis(
+                        rpc: parentChain.rpc,
+                        directory: directory,
+                        genesisCID: genesisCID
+                    ) {
+                        recorded = true
+                        break
+                    }
+                    try await Task.sleep(for: .seconds(10))
                 }
-                try await Task.sleep(for: .seconds(2))
+            } else {
+                for _ in 0..<20 {
+                    let coordinator = Process()
+                    coordinator.executableURL = try nodeBinary()
+                        .deletingLastPathComponent()
+                        .appendingPathComponent("lattice-mining-coordinator")
+                    coordinator.arguments = [
+                        "--node", "http://127.0.0.1:\(rootChain.rpc)",
+                        "--worker-executable", worker.path,
+                        "--workers", "1", "--once",
+                    ]
+                    // Fresh /dev/null per spawn: corelibs closes the shared
+                    // nullDevice singleton's fd after a process exits, so
+                    // reusing it across the loop throws EBADF.
+                    let devNull = FileHandle(forWritingAtPath: "/dev/null")
+                    coordinator.standardOutput = devNull ?? FileHandle.nullDevice
+                    coordinator.standardError = devNull ?? FileHandle.nullDevice
+                    try coordinator.run()
+                    coordinator.waitUntilExit()
+                    try? devNull?.close()
+                    if await parentRecordedGenesis(
+                        rpc: parentChain.rpc,
+                        directory: directory,
+                        genesisCID: genesisCID
+                    ) {
+                        recorded = true
+                        break
+                    }
+                    try await Task.sleep(for: .seconds(2))
+                }
             }
             guard recorded else {
                 throw CtlError("the genesis anchor was not recorded; the child was NOT added — check the parent's mining and the funding key nonce, then retry")
