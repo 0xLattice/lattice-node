@@ -1,0 +1,47 @@
+app = "lattice-mainnet-testnet"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  CHILD_PATH = "Nexus/testnet"
+  NEXUS_PEERS = "139b8f3639e7c515417c63bd3a652a5c6fd4a1a2d0baed8e33ea63047995fe64@lattice-mainnet-iad.fly.dev:4001 35edf67bfe3d612aeb1f0e25da9d3f0ced44dbf79d34f00c548cf9005be6eb7d@lattice-mainnet-ams.fly.dev:4001 9cace839489acb30385a9f20025cb9d6365283c81dce14cadab26507065acd4e@lattice-mainnet-sjc.fly.dev:4001"
+
+[[mounts]]
+  source = "lattice_testnet_data"
+  destination = "/data"
+
+# Nexus overlay (dials the backbones; inbound peering optional).
+[[services]]
+  protocol = "tcp"
+  internal_port = 4001
+  [[services.ports]]
+    port = 4001
+
+# Child overlay: the NAT'd origin child node dials in here.
+[[services]]
+  protocol = "tcp"
+  internal_port = 4101
+  [[services.ports]]
+    port = 4101
+
+# Public read surface for the child chain: 443/80 -> --public-read-port.
+[[services]]
+  protocol = "tcp"
+  internal_port = 8081
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+  [[services.http_checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "60s"
+    path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

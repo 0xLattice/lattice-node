@@ -134,6 +134,9 @@ func spawnChain(
     for peer in chain.peers ?? [] {
         arguments += ["--peer", peer]
     }
+    if let publicRead = chain.publicRead {
+        arguments += ["--public-read-port", String(publicRead)]
+    }
     let process = Process()
     process.executableURL = try nodeBinary()
     process.arguments = arguments
