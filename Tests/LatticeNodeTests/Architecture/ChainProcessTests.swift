@@ -509,7 +509,7 @@ final class ChainProcessTests: XCTestCase {
         let genesis = try await process!.canonicalTipBlock()
         let missingParent = try await BlockBuilder.buildBlock(
             previous: genesis,
-            timestamp: 1,
+            timestamp: 3_600_000,
             nonce: 1,
             fetcher: process!
         )
@@ -538,7 +538,7 @@ final class ChainProcessTests: XCTestCase {
         let orphanTemplate = try await BlockBuilder.buildBlock(
             previous: missingParent,
             transactions: [authorization],
-            timestamp: 2,
+            timestamp: 7_200_000,
             nonce: 2,
             fetcher: process!
         )

@@ -1159,7 +1159,15 @@ final class ChainServiceTests: XCTestCase {
             carrierNonce: 0
         )
         let anchoredParent = try await process.canonicalTipBlock()
-        XCTAssertEqual(anchoredParent.nextTarget, UInt256.max / UInt256(2))
+        // The anchored carrier's next target is the unclamped proportional
+        // retarget for its solve interval (Nexus commits no maxTargetChange).
+        XCTAssertEqual(
+            anchoredParent.nextTarget,
+            NexusGenesis.spec.calculateWindowedTarget(
+                previousTarget: anchoredParent.target,
+                ancestorTimestamps: [anchoredParent.timestamp, genesis.timestamp]
+            )
+        )
         let store = try testNodeStore(
             databasePath: directory.appendingPathComponent("state.db"),
             nexusGenesisCID: configuration.nexusGenesisCID,

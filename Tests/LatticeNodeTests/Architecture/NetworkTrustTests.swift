@@ -4013,7 +4013,7 @@ final class NetworkTrustTests: XCTestCase {
         let genesis = try await stagingProcess!.canonicalTipBlock()
         let predecessorCandidate = try await BlockBuilder.buildBlock(
             previous: genesis,
-            timestamp: 1,
+            timestamp: 3_600_000,
             nonce: 1,
             fetcher: stagingProcess!
         )
@@ -4029,7 +4029,7 @@ final class NetworkTrustTests: XCTestCase {
         )
         let orphanCandidate = try await BlockBuilder.buildBlock(
             previous: predecessor,
-            timestamp: 2,
+            timestamp: 7_200_000,
             nonce: 2,
             fetcher: stagingProcess!
         )
@@ -4045,7 +4045,7 @@ final class NetworkTrustTests: XCTestCase {
         )
         let descendantCandidate = try await BlockBuilder.buildBlock(
             previous: orphan,
-            timestamp: 3,
+            timestamp: 10_800_000,
             nonce: 3,
             fetcher: stagingProcess!
         )
@@ -4252,7 +4252,7 @@ final class NetworkTrustTests: XCTestCase {
         let genesis = try await process!.canonicalTipBlock()
         let predecessor = try await BlockBuilder.buildBlock(
             previous: genesis,
-            timestamp: 2,
+            timestamp: 3_600_001,
             nonce: 1,
             fetcher: process!
         )
@@ -4261,7 +4261,7 @@ final class NetworkTrustTests: XCTestCase {
         try await predecessorHeader.storeBlock(fetcher: process!, storer: source)
         let orphan = try await BlockBuilder.buildBlock(
             previous: predecessor,
-            timestamp: 3,
+            timestamp: 7_200_001,
             nonce: 2,
             fetcher: process!
         )
