@@ -54,6 +54,15 @@ final class LatticeCtlTopologyTests: XCTestCase {
             from: JSONEncoder().encode(Topology(chains: ["Nexus": chain(4001)]))
         )
         XCTAssertNil(legacy.chains["Nexus"]?.publicRead)
+        XCTAssertNil(legacy.chains["Nexus"]?.externalAddress)
+
+        var described = chain(4001)
+        described.externalAddress = "node.example.org"
+        let redecoded = try JSONDecoder().decode(
+            Topology.self,
+            from: JSONEncoder().encode(Topology(chains: ["Nexus": described]))
+        )
+        XCTAssertEqual(redecoded.chains["Nexus"]?.externalAddress, "node.example.org")
 
         // The public read port participates in the uniqueness check.
         var colliding = chain(4101)

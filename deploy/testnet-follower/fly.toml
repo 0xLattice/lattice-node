@@ -6,6 +6,7 @@ primary_region = "iad"
 
 [env]
   CHILD_PATH = "Nexus/testnet"
+  EXTERNAL_HOST = "lattice-mainnet-testnet.fly.dev"
   NEXUS_PEERS = "139b8f3639e7c515417c63bd3a652a5c6fd4a1a2d0baed8e33ea63047995fe64@lattice-mainnet-iad.fly.dev:4001 35edf67bfe3d612aeb1f0e25da9d3f0ced44dbf79d34f00c548cf9005be6eb7d@lattice-mainnet-ams.fly.dev:4001 9cace839489acb30385a9f20025cb9d6365283c81dce14cadab26507065acd4e@lattice-mainnet-sjc.fly.dev:4001"
 
 [[mounts]]

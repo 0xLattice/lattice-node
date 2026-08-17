@@ -21,16 +21,21 @@ public struct TopologyChain: Codable {
     /// all interfaces and serves only the bounded GET read routes. Absent =
     /// no public read listener for this chain's process.
     public var publicRead: UInt16?
+    /// Self-described publicly reachable host (the node's
+    /// `--external-address`) for overlay announcements from NAT/proxy-fronted
+    /// processes. Host only; the chain's listen port applies.
+    public var externalAddress: String?
 
     public init(
         listen: UInt16, fact: UInt16, rpc: UInt16, peers: [String]? = nil,
-        publicRead: UInt16? = nil
+        publicRead: UInt16? = nil, externalAddress: String? = nil
     ) {
         self.listen = listen
         self.fact = fact
         self.rpc = rpc
         self.peers = peers
         self.publicRead = publicRead
+        self.externalAddress = externalAddress
     }
 }
 

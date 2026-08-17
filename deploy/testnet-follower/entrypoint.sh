@@ -17,6 +17,7 @@ ROOT=/data
 CHILD_PATH="${CHILD_PATH:?absolute child path, e.g. Nexus/testnet}"
 CHILD_DIR="$ROOT/chains/$CHILD_PATH"
 NEXUS_PEERS="${NEXUS_PEERS:?space-separated publicKey@host:port peers}"
+EXTERNAL_HOST="${EXTERNAL_HOST:?publicly reachable host, e.g. lattice-mainnet-testnet.fly.dev}"
 
 mkdir -p "$CHILD_DIR"
 
@@ -33,13 +34,15 @@ cat > "$ROOT/lattice.json" <<EOF
       "listen": 4001,
       "fact": 4002,
       "rpc": 8080,
-      "peers": [$peers_json]
+      "peers": [$peers_json],
+      "externalAddress": "$EXTERNAL_HOST"
     },
     "$CHILD_PATH": {
       "listen": 4101,
       "fact": 4102,
       "rpc": 8180,
-      "publicRead": 8081
+      "publicRead": 8081,
+      "externalAddress": "$EXTERNAL_HOST"
     }
   }
 }
