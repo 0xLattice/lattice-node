@@ -76,6 +76,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Public read-only HTTP port; binds all interfaces and serves ONLY the bounded GET read routes (the read-replica allowlist, enforced in code). Chain data is public; this exposes no operator or write surface.")
     var publicReadPort: UInt16?
 
+    @Option(help: "Self-described publicly reachable host for overlay announcements (NAT/proxy-fronted nodes announce an unreachable observed address otherwise). Host only; the overlay listen port applies.")
+    var externalAddress: String?
+
     mutating func run() async throws {
         guard let address = ChainAddress(string: chainPath) else {
             throw ValidationError("--chain-path must be absolute and begin with Nexus")
@@ -106,7 +109,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             bootstrapPeers: overlayPeers,
             parentEndpoint: parentEndpoint,
             minPeerKeyBits: minimumPeerKeyBits,
-            overlayMaxConnectionsPerNetgroup: overlayMaxConnectionsPerNetgroup
+            overlayMaxConnectionsPerNetgroup: overlayMaxConnectionsPerNetgroup,
+            externalAddress: externalAddress
         )
 
         let network = try NodeNetworkRuntime(configuration: configuration)

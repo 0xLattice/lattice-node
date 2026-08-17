@@ -86,6 +86,13 @@ public struct NodeConfiguration: Sendable {
     /// inbound onto one netgroup; such deployments must raise this. Default keeps
     /// Ivy's conservative value for direct-IP nodes.
     public let overlayMaxConnectionsPerNetgroup: Int
+    /// Operator-declared address at which this node is publicly reachable
+    /// (host only; the overlay listen port applies). Behind NAT or an L4
+    /// proxy the OBSERVED address differs from the reachable one, so
+    /// provider announcements built from observation advertise a dead
+    /// address; this is the node's self-description. Optional: direct-IP
+    /// nodes need none.
+    public let externalAddress: String?
     public let resourcePolicy: NodeResourcePolicy
 
     /// Overlay slots kept in reserve for outbound dials so a burst of inbound
@@ -105,6 +112,7 @@ public struct NodeConfiguration: Sendable {
         parentEndpoint: ParentEndpoint? = nil,
         minPeerKeyBits: Int = 0,
         overlayMaxConnectionsPerNetgroup: Int = 2,
+        externalAddress: String? = nil,
         resourcePolicy: NodeResourcePolicy = .default
     ) throws {
         guard let address = ChainAddress(chainPath) else {
@@ -162,6 +170,7 @@ public struct NodeConfiguration: Sendable {
         self.parentEndpoint = normalizedParentEndpoint
         self.minPeerKeyBits = minPeerKeyBits
         self.overlayMaxConnectionsPerNetgroup = max(1, overlayMaxConnectionsPerNetgroup)
+        self.externalAddress = externalAddress
         self.resourcePolicy = resourcePolicy
     }
 

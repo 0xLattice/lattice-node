@@ -180,6 +180,12 @@ struct NodeNetworkPlaneConfigurations {
                 // raised for the mesh to form and peers to cold-sync.
                 maxConnectionsPerNetgroup: configuration.overlayMaxConnectionsPerNetgroup,
                 minPeerKeyBits: configuration.minPeerKeyBits,
+                // Self-described reachable address: provider announcements and
+                // rendezvous records advertise this instead of the observed
+                // (NAT/proxy-mangled) one.
+                externalAddress: configuration.externalAddress.map {
+                    (host: $0, port: configuration.listenPort)
+                },
                 mode: .overlay
             ),
             hierarchy: IvyConfig(
