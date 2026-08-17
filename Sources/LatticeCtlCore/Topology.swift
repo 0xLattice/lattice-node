@@ -17,14 +17,20 @@ public struct TopologyChain: Codable {
     /// entries for this chain's own path; children of a local parent are
     /// wired to it automatically.
     public var peers: [String]?
+    /// Public read-only HTTP port (the node's `--public-read-port`): binds
+    /// all interfaces and serves only the bounded GET read routes. Absent =
+    /// no public read listener for this chain's process.
+    public var publicRead: UInt16?
 
     public init(
-        listen: UInt16, fact: UInt16, rpc: UInt16, peers: [String]? = nil
+        listen: UInt16, fact: UInt16, rpc: UInt16, peers: [String]? = nil,
+        publicRead: UInt16? = nil
     ) {
         self.listen = listen
         self.fact = fact
         self.rpc = rpc
         self.peers = peers
+        self.publicRead = publicRead
     }
 }
 
@@ -103,7 +109,8 @@ public struct Topology: Codable {
                     throw CtlError("\(path) has no local parent \(parent); every child needs its immediate parent in the tree")
                 }
             }
-            for port in [chain.listen, chain.fact, chain.rpc] {
+            for port in [chain.listen, chain.fact, chain.rpc]
+                + (chain.publicRead.map { [$0] } ?? []) {
                 guard ports.insert(port).inserted else {
                     throw CtlError("port \(port) is used twice")
                 }

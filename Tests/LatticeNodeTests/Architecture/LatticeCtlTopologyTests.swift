@@ -39,6 +39,31 @@ final class LatticeCtlTopologyTests: XCTestCase {
         ]).validated())
     }
 
+    func testPublicReadPortRoundTripsAndJoinsPortCollisionCheck() throws {
+        // Round-trips through lattice.json; absent stays nil (existing hosts
+        // are unaffected).
+        var withRead = chain(4001)
+        withRead.publicRead = 8081
+        let encoded = try JSONEncoder().encode(Topology(chains: ["Nexus": withRead]))
+        let decoded = try JSONDecoder().decode(Topology.self, from: encoded)
+        XCTAssertEqual(decoded.chains["Nexus"]?.publicRead, 8081)
+        XCTAssertNoThrow(try decoded.validated())
+
+        let legacy = try JSONDecoder().decode(
+            Topology.self,
+            from: JSONEncoder().encode(Topology(chains: ["Nexus": chain(4001)]))
+        )
+        XCTAssertNil(legacy.chains["Nexus"]?.publicRead)
+
+        // The public read port participates in the uniqueness check.
+        var colliding = chain(4101)
+        colliding.publicRead = 4001
+        XCTAssertThrowsError(try Topology(chains: [
+            "Nexus": chain(4001),
+            "Nexus/Payments": colliding,
+        ]).validated())
+    }
+
     func testValidationRejectsMiningUnknownChain() {
         XCTAssertThrowsError(try Topology(
             chains: ["Nexus": chain(4001)],
