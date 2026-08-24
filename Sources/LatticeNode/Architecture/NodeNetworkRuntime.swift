@@ -1138,11 +1138,16 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         // Declared URLs order first, but fallbacks keep reserved slots: sybil
         // declarations must never evict the conventional URL derived from an
-        // honest provider's announced host.
+        // honest provider's announced host. Only KEPT declared entries enter
+        // the seen-set — a declared URL cut by the cap must not poison the
+        // fallback dedup and vanish a fallback it never displaced.
         var seenURLs: Set<String> = []
-        let declaredUnique = declared
-            .filter { seenURLs.insert($0).inserted }
-            .prefix(16)
+        var declaredUnique: [String] = []
+        for url in declared where declaredUnique.count < 16 {
+            if seenURLs.insert(url).inserted {
+                declaredUnique.append(url)
+            }
+        }
         let fallbackUnique = fallback.filter { seenURLs.insert($0).inserted }
         let bounded = Array((declaredUnique + fallbackUnique).prefix(32))
         guard isCurrentGeneration(generation) else { return bounded }
