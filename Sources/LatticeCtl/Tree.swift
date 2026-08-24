@@ -140,6 +140,9 @@ func spawnChain(
     if let externalAddress = chain.externalAddress {
         arguments += ["--external-address", externalAddress]
     }
+    if let publicReadUrl = chain.publicReadUrl {
+        arguments += ["--public-read-url", publicReadUrl]
+    }
     let process = Process()
     process.executableURL = try nodeBinary()
     process.arguments = arguments

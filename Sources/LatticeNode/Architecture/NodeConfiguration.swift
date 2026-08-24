@@ -53,6 +53,7 @@ public enum NodeConfigurationError: Error, Equatable, CustomStringConvertible {
     case invalidParentEndpoint
     case missingParentEndpoint
     case unexpectedParentEndpoint
+    case invalidPublicReadURL
 
     public var description: String {
         switch self {
@@ -63,6 +64,8 @@ public enum NodeConfigurationError: Error, Equatable, CustomStringConvertible {
         case .invalidParentEndpoint: "the parent endpoint must have a valid peer key, host, and port"
         case .missingParentEndpoint: "a child process requires its authenticated immediate-parent endpoint"
         case .unexpectedParentEndpoint: "the Nexus process has no parent endpoint"
+        case .invalidPublicReadURL:
+            "the public read URL must be an absolute http(s) base URL with a host and no credentials, query, or fragment"
         }
     }
 }
@@ -93,6 +96,15 @@ public struct NodeConfiguration: Sendable {
     /// address; this is the node's self-description. Optional: direct-IP
     /// nodes need none.
     public let externalAddress: String?
+    /// Operator-declared public read URL for THIS chain's browsable HTTP
+    /// surface (e.g. "https://toy.example.com"): a TLS-fronted base a browser
+    /// can dial. Distinct from `externalAddress` on purpose — the P2P plane
+    /// traffics in IP literals (netgroup hardening), which a browser cannot
+    /// use, so browsability is its own self-description. Advertised through
+    /// the parent rendezvous; consumers verify the served genesis against the
+    /// parent's on-chain anchor before trusting it. Optional: nodes without a
+    /// public TLS surface declare nothing and stay non-browsable.
+    public let publicReadURL: String?
     public let resourcePolicy: NodeResourcePolicy
 
     /// Overlay slots kept in reserve for outbound dials so a burst of inbound
@@ -113,6 +125,7 @@ public struct NodeConfiguration: Sendable {
         minPeerKeyBits: Int = 0,
         overlayMaxConnectionsPerNetgroup: Int = 2,
         externalAddress: String? = nil,
+        publicReadURL: String? = nil,
         resourcePolicy: NodeResourcePolicy = .default
     ) throws {
         guard let address = ChainAddress(chainPath) else {
@@ -156,6 +169,17 @@ public struct NodeConfiguration: Sendable {
         } else {
             normalizedParentEndpoint = nil
         }
+        // Operator input fails loudly (unlike wire ingest, which is tolerant):
+        // a declared-but-invalid URL is a deployment mistake, not peer noise.
+        let declaredReadURL: String?
+        if let publicReadURL {
+            guard let normalized = normalizedPublicReadURL(publicReadURL) else {
+                throw NodeConfigurationError.invalidPublicReadURL
+            }
+            declaredReadURL = normalized
+        } else {
+            declaredReadURL = nil
+        }
 
         self.address = address
         self.storagePath = storagePath
@@ -171,6 +195,7 @@ public struct NodeConfiguration: Sendable {
         self.minPeerKeyBits = minPeerKeyBits
         self.overlayMaxConnectionsPerNetgroup = max(1, overlayMaxConnectionsPerNetgroup)
         self.externalAddress = externalAddress
+        self.publicReadURL = declaredReadURL
         self.resourcePolicy = resourcePolicy
     }
 

@@ -26,6 +26,8 @@ enum NodeNetworkTopic {
         "lattice.overlay.portable-attachment.index.response.v1"
     static let portableAttachmentLocateRequest =
         "lattice.overlay.portable-attachment.locate.request.v1"
+    static let readEndpointRequest = "lattice.overlay.read-endpoint.request.v1"
+    static let readEndpointResponse = "lattice.overlay.read-endpoint.response.v1"
     static let hierarchyHello = "lattice.hierarchy.hello.v1"
     static let childEvidenceAvailable = "lattice.hierarchy.evidence.available.v4"
     static let childEvidenceIndexRequest = "lattice.hierarchy.evidence.index.request.v4"
@@ -54,7 +56,8 @@ enum NodeNetworkTopic {
              portableAttachmentAvailable,
              portableAttachmentIndexRequest,
              portableAttachmentIndexResponse,
-             portableAttachmentLocateRequest: .overlay
+             portableAttachmentLocateRequest,
+             readEndpointRequest, readEndpointResponse: .overlay
         case hierarchyHello, childEvidenceAvailable,
              childEvidenceIndexRequest, childEvidenceIndexResponse,
              childCandidateRequest, childCandidateResponse,
@@ -120,6 +123,42 @@ struct ChildGenesisAnchorResponseMessage: NodeJSONMessage, Equatable, Sendable {
 
     func validate() throws {
         guard requestID != 0, _isCanonicalWireCID(genesisCID) else {
+            throw NodeNetworkWireError.malformed
+        }
+    }
+}
+
+/// Asks an overlay peer — typically one DHT-discovered as a provider of
+/// `genesisCID` — for the declared public read URLs of the chain whose genesis
+/// that is. The peer answers from self-description only (its own configured
+/// URL, or ones its wired children declared in their hellos); the answer is
+/// UNVERIFIED — a browser must match the served genesis against the parent's
+/// on-chain anchor before trusting any URL. Unknown to legacy peers, which
+/// drop the topic silently; the asker falls back on timeout.
+struct ReadEndpointRequestMessage: NodeJSONMessage, Equatable, Sendable {
+    let requestID: UInt64
+    let genesisCID: String
+
+    func validate() throws {
+        guard requestID != 0, _isCanonicalWireCID(genesisCID) else {
+            throw NodeNetworkWireError.malformed
+        }
+    }
+}
+
+struct ReadEndpointResponseMessage: NodeJSONMessage, Equatable, Sendable {
+    /// Plenty for one node's self-description while bounding relayed state.
+    static let maximumURLs = 8
+
+    let requestID: UInt64
+    let genesisCID: String
+    let readURLs: [String]
+
+    func validate() throws {
+        guard requestID != 0, _isCanonicalWireCID(genesisCID),
+              readURLs.count <= Self.maximumURLs,
+              readURLs.allSatisfy({ normalizedPublicReadURL($0) == $0 })
+        else {
             throw NodeNetworkWireError.malformed
         }
     }
