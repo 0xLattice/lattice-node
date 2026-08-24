@@ -1283,6 +1283,26 @@ final class NetworkTrustTests: XCTestCase {
                 count: maximumPublicReadURLBytes
             )
         ))
+        // Case variants fold to one base so dedup is real; markup
+        // metacharacters never survive into explorer-facing JSON.
+        XCTAssertEqual(
+            normalizedPublicReadURL("HTTPS://Toy.Example/Read"),
+            "https://toy.example/Read"
+        )
+        XCTAssertNil(normalizedPublicReadURL("https://toy.example/\"><script>"))
+        XCTAssertNil(normalizedPublicReadURL("https://toy.example/'x"))
+        // Every accepted output is a fixed point, so an honestly-normalized
+        // URL can never fail the response wire's round-trip validation.
+        for candidate in [
+            "https://toy.example", " https://toy.example/ ",
+            "HTTPS://Toy.Example/Read", "http://198.51.100.7:8081",
+            "https://[::1]:8081", "https://%74oy.example",
+        ] {
+            guard let normalized = normalizedPublicReadURL(candidate) else {
+                continue
+            }
+            XCTAssertEqual(normalizedPublicReadURL(normalized), normalized)
+        }
     }
 
     func testReadEndpointMessagesAreCanonicalAndBounded() throws {

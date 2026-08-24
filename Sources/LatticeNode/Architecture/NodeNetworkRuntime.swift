@@ -873,6 +873,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
         childDeclaredReadURLs.removeAll()
         servingReadEndpoints.removeAll()
         readURLDiscoveries.removeAll()
+        for inFlight in readURLDiscoveryTasks.values {
+            inFlight.task.cancel()
+        }
         readURLDiscoveryTasks.removeAll()
         let readEndpointWaiters = pendingReadEndpoints.values
         pendingReadEndpoints.removeAll()
@@ -1119,7 +1122,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         var declared: [String] = []
         var fallback: [String] = []
         for (index, endpoint) in candidates.enumerated() {
+            // Per-responder cap: a declaration is self-described hint data,
+            // so one responder must not be able to flood the merged answer.
             let urls = urlsByCandidate[index]
+                .prefix(Self.maximumDeclaredURLsPerResponder)
             if urls.isEmpty {
                 // Bracket IPv6 literals so the authority parses (host:port
                 // ambiguity).
@@ -1130,9 +1136,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 declared.append(contentsOf: urls)
             }
         }
+        // Declared URLs order first, but fallbacks keep reserved slots: sybil
+        // declarations must never evict the conventional URL derived from an
+        // honest provider's announced host.
         var seenURLs: Set<String> = []
-        let merged = (declared + fallback).filter { seenURLs.insert($0).inserted }
-        let bounded = Array(merged.prefix(32))
+        let declaredUnique = declared
+            .filter { seenURLs.insert($0).inserted }
+            .prefix(16)
+        let fallbackUnique = fallback.filter { seenURLs.insert($0).inserted }
+        let bounded = Array((declaredUnique + fallbackUnique).prefix(32))
         guard isCurrentGeneration(generation) else { return bounded }
         let now = Date()
         readURLDiscoveries = readURLDiscoveries.filter { $0.value.expires > now }
@@ -1146,6 +1158,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
 
     private static let maximumReadEndpointAsks = 8
+    private static let maximumDeclaredURLsPerResponder = 2
     private static let maximumReadURLDiscoveryCacheEntries = 64
     private static let readURLDiscoveryCacheSeconds: TimeInterval = 30
     private static let readEndpointAskTimeout: Duration = .seconds(2)
@@ -1168,7 +1181,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
             anchored.filter { $0.value == genesisCID }.map(\.key)
         )
         if !directories.isEmpty {
-            for (key, role) in hierarchyPeers {
+            // Shuffled, not dictionary order: wired-child roles are
+            // permissionless, and a stable iteration order would let a batch
+            // of sybil declarants shadow the honest child's URL from every
+            // answer for the process lifetime. Random selection keeps every
+            // declarant reachable across repeated asks.
+            for (key, role) in hierarchyPeers.shuffled() {
                 guard case .child(let path) = role,
                       let directory = path.last,
                       directories.contains(directory),
@@ -2463,17 +2481,37 @@ public actor NodeNetworkRuntime: IvyDelegate {
         case NodeNetworkTopic.readEndpointRequest:
             guard let request = try? ReadEndpointRequestMessage.decoded(
                     message.payload
-                ), servingReadEndpoints.insert(peer.sessionID).inserted
+                )
             else { return }
-            defer {
-                if isCurrentRuntime(generation: generation, process: process) {
-                    servingReadEndpoints.remove(peer.sessionID)
+            // The state walk behind declaredReadURLs runs only when this node
+            // has anything to declare, single-flight per session, AND under
+            // the same global parent-state query capacity as the
+            // hierarchy-plane resolve of the identical subtrie — an overlay
+            // peer flood cannot multiply tip-state walks. Every other outcome
+            // still answers empty: a fast negative beats making the asker
+            // burn its timeout.
+            var urls: [String] = []
+            if configuration.publicReadURL != nil
+                || !childDeclaredReadURLs.isEmpty,
+                servingReadEndpoints.insert(peer.sessionID).inserted {
+                defer {
+                    if isCurrentRuntime(
+                        generation: generation,
+                        process: process
+                    ) {
+                        servingReadEndpoints.remove(peer.sessionID)
+                    }
+                }
+                if parentStateQueryGuard.acquire(peer.key) {
+                    defer {
+                        parentStateQueryGuard.release(peer.key)
+                    }
+                    urls = await declaredReadURLs(
+                        genesisCID: request.genesisCID,
+                        process: process
+                    )
                 }
             }
-            let urls = await declaredReadURLs(
-                genesisCID: request.genesisCID,
-                process: process
-            )
             guard isCurrentRuntime(generation: generation, process: process),
                   let payload = try? ReadEndpointResponseMessage(
                       requestID: request.requestID,
@@ -2481,8 +2519,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
                       readURLs: urls
                   ).encoded()
             else { return }
-            // An empty answer is still sent: a fast negative lets the asker
-            // fall back immediately instead of burning its timeout.
             _ = await overlay.sendMessage(
                 to: peer,
                 topic: NodeNetworkTopic.readEndpointResponse,

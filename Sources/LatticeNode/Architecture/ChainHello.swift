@@ -127,14 +127,29 @@ public func normalizedPublicReadURL(_ value: String?) -> String? {
     guard let value else { return nil }
     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
     guard _isBoundedWireAtom(trimmed, maximumBytes: maximumPublicReadURLBytes),
-          let components = URLComponents(string: trimmed),
+          // Relayed verbatim into explorer-facing JSON, so beyond the URL
+          // grammar the string must never carry markup metacharacters.
+          !trimmed.contains(where: { "\"'<>`\\".contains($0) }),
+          var components = URLComponents(string: trimmed),
           let scheme = components.scheme?.lowercased(),
           scheme == "http" || scheme == "https",
           let host = components.host, !host.isEmpty,
           components.user == nil, components.password == nil,
           components.query == nil, components.fragment == nil
     else { return nil }
-    var normalized = trimmed
+    // Case-fold scheme and host so equal bases dedupe as equal strings — a
+    // case variant must not consume an extra endpoint slot. Rebuild only on
+    // an actual case change; the common already-lowercase input keeps its
+    // exact bytes (no parser round-trip on the hot path).
+    var normalized: String
+    if components.scheme == scheme, host == host.lowercased() {
+        normalized = trimmed
+    } else {
+        components.scheme = scheme
+        components.host = host.lowercased()
+        guard let rebuilt = components.string else { return nil }
+        normalized = rebuilt
+    }
     while normalized.hasSuffix("/") { normalized.removeLast() }
     return normalized.isEmpty ? nil : normalized
 }
