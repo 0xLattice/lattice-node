@@ -356,6 +356,18 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let timeout: Task<Void, Never>
     }
 
+    private struct PendingReadEndpoint {
+        let peer: AuthenticatedPeer
+        let genesisCID: String
+        let continuation: CheckedContinuation<[String], Never>
+        let timeout: Task<Void, Never>
+    }
+
+    private struct ReadURLDiscovery {
+        let urls: [String]
+        let expires: Date
+    }
+
     private struct PendingTransactionInventory: Sendable {
         let peer: AuthenticatedPeer
         let request: TransactionInventoryRequestMessage
@@ -498,6 +510,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private var nextAcceptedLeavesRetryToken: UInt64 = 0
     private var servingAcceptedLeaves: Set<Data> = []
     private var servingAncestorRange: Set<Data> = []
+    private var servingReadEndpoints: Set<Data> = []
+    /// Public read URLs declared by wired children in their hierarchy hellos,
+    /// per authenticated child connection. Self-declared and unverified — a
+    /// browser verifies the served genesis against the parent's anchor.
+    private var childDeclaredReadURLs: [PeerKey: String] = [:]
+    private var pendingReadEndpoints: [UInt64: PendingReadEndpoint] = [:]
+    private var readURLDiscoveries: [String: ReadURLDiscovery] = [:]
+    private var readURLDiscoveryTasks:
+        [String: (token: UInt64, task: Task<[String], Never>)] = [:]
     private var rangeSync: RangeSyncState?
     /// Monotonic across all range syncs so a stale progress-deadline task from a
     /// previous sync can never alias a new sync's epoch.
@@ -647,7 +668,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         )
         hello = ChainHello(
             nexusGenesisCID: configuration.nexusGenesisCID,
-            chainPath: configuration.chainPath
+            chainPath: configuration.chainPath,
+            publicReadURL: configuration.publicReadURL
         )
     }
 
@@ -848,6 +870,19 @@ public actor NodeNetworkRuntime: IvyDelegate {
         overlayPeers.removeAll()
         hierarchyPeers.removeAll()
         hierarchySessions.removeAll()
+        childDeclaredReadURLs.removeAll()
+        servingReadEndpoints.removeAll()
+        readURLDiscoveries.removeAll()
+        for inFlight in readURLDiscoveryTasks.values {
+            inFlight.task.cancel()
+        }
+        readURLDiscoveryTasks.removeAll()
+        let readEndpointWaiters = pendingReadEndpoints.values
+        pendingReadEndpoints.removeAll()
+        for pending in readEndpointWaiters {
+            pending.timeout.cancel()
+            pending.continuation.resume(returning: [])
+        }
         await provisionalRoots.removeAll()
         childEvidenceReadyPeers.removeAll()
         childEvidenceIndexCompleteSessions.removeAll()
@@ -1000,18 +1035,231 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// host it announced as the genesis provider. Deduped by host, bounded.
     public func discoverProviderReadURLs(genesisCID: String) async -> [String] {
         guard CIDIdentity.isCanonical(genesisCID) else { return [] }
-        let endpoints = await overlay.discoverProviders(rootCID: genesisCID)
-        var seen: Set<String> = []
-        var urls: [String] = []
-        for endpoint in endpoints {
-            let host = endpoint.host
-            guard !host.isEmpty, seen.insert(host).inserted else { continue }
-            // Bracket IPv6 literals so the authority parses (host:port ambiguity).
-            let authority = host.contains(":") ? "[\(host)]" : host
-            urls.append("https://\(authority)")
-            if urls.count >= 32 { break }
+        if let cached = readURLDiscoveries[genesisCID],
+           cached.expires > Date() {
+            return cached.urls
+        }
+        // Coalesce concurrent HTTP callers onto one discovery so a request
+        // burst cannot multiply overlay asks.
+        if let inFlight = readURLDiscoveryTasks[genesisCID] {
+            return await inFlight.task.value
+        }
+        let token = makeRequestID()
+        let task = Task { [weak self] in
+            await self?.performReadURLDiscovery(genesisCID: genesisCID) ?? []
+        }
+        readURLDiscoveryTasks[genesisCID] = (token: token, task: task)
+        let urls = await task.value
+        // Only the creator un-registers, and only its own entry: a stop/start
+        // cycle clears the map, and a fresh discovery registered under the
+        // same key must not be evicted by this stale resume.
+        if readURLDiscoveryTasks[genesisCID]?.token == token {
+            readURLDiscoveryTasks.removeValue(forKey: genesisCID)
         }
         return urls
+    }
+
+    /// Resolve the browsable read URLs for the chain whose genesis is
+    /// `genesisCID`: DHT-discover the provider nodes (Ivy caches, else walks),
+    /// then ask each provider we hold an overlay session with for its
+    /// self-DECLARED public read URL — the P2P plane traffics in IP literals a
+    /// browser cannot dial, so browsability is its own declaration, carried
+    /// from a child's hierarchy hello to its parent and served here. Providers
+    /// that declare nothing (or predate the topic and stay silent until the
+    /// ask times out) fall back to convention A: read API over HTTPS on the
+    /// announced provider host. Declared URLs order first; all self-declared
+    /// and unverified — the consumer verifies the served genesis against the
+    /// parent's on-chain anchor. Deduped, bounded, briefly cached.
+    private func performReadURLDiscovery(genesisCID: String) async -> [String] {
+        let generation = runtimeGeneration
+        let endpoints = await overlay.discoverProviders(rootCID: genesisCID)
+        var seenHosts: Set<String> = []
+        var candidates: [PeerEndpoint] = []
+        for endpoint in endpoints {
+            guard !endpoint.host.isEmpty,
+                  seenHosts.insert(endpoint.host).inserted else { continue }
+            candidates.append(endpoint)
+            if candidates.count >= 32 { break }
+        }
+        var urlsByCandidate = [[String]](
+            repeating: [],
+            count: candidates.count
+        )
+        for (index, endpoint) in candidates.enumerated()
+        where endpoint.publicKey == configuration.processPublicKey {
+            // Our own provider record: answer from our own knowledge.
+            if let process {
+                urlsByCandidate[index] = await declaredReadURLs(
+                    genesisCID: genesisCID,
+                    process: process
+                )
+            }
+        }
+        // Asks run concurrently: a legacy peer never answers (it drops the
+        // unknown topic), so a sequential walk would stall the explorer route
+        // for asks-times-deadline against an unupgraded fleet.
+        await withTaskGroup(of: (Int, [String]).self) { group in
+            var asked = 0
+            for (index, endpoint) in candidates.enumerated() {
+                guard endpoint.publicKey != configuration.processPublicKey,
+                      asked < Self.maximumReadEndpointAsks,
+                      let key = try? PeerKey(endpoint.publicKey),
+                      let peer = overlayPeers[key] else { continue }
+                asked += 1
+                group.addTask { [weak self] in
+                    guard let self else { return (index, []) }
+                    return (index, await self.askDeclaredReadURLs(
+                        genesisCID: genesisCID,
+                        from: peer,
+                        generation: generation
+                    ))
+                }
+            }
+            for await (index, urls) in group {
+                urlsByCandidate[index] = urls
+            }
+        }
+        var declared: [String] = []
+        var fallback: [String] = []
+        for (index, endpoint) in candidates.enumerated() {
+            // Per-responder cap: a declaration is self-described hint data,
+            // so one responder must not be able to flood the merged answer.
+            let urls = urlsByCandidate[index]
+                .prefix(Self.maximumDeclaredURLsPerResponder)
+            if urls.isEmpty {
+                // Bracket IPv6 literals so the authority parses (host:port
+                // ambiguity).
+                let host = endpoint.host
+                let authority = host.contains(":") ? "[\(host)]" : host
+                fallback.append("https://\(authority)")
+            } else {
+                declared.append(contentsOf: urls)
+            }
+        }
+        // Declared URLs order first, but fallbacks keep reserved slots: sybil
+        // declarations must never evict the conventional URL derived from an
+        // honest provider's announced host. Only KEPT declared entries enter
+        // the seen-set — a declared URL cut by the cap must not poison the
+        // fallback dedup and vanish a fallback it never displaced.
+        var seenURLs: Set<String> = []
+        var declaredUnique: [String] = []
+        for url in declared where declaredUnique.count < 16 {
+            if seenURLs.insert(url).inserted {
+                declaredUnique.append(url)
+            }
+        }
+        let fallbackUnique = fallback.filter { seenURLs.insert($0).inserted }
+        let bounded = Array((declaredUnique + fallbackUnique).prefix(32))
+        guard isCurrentGeneration(generation) else { return bounded }
+        let now = Date()
+        readURLDiscoveries = readURLDiscoveries.filter { $0.value.expires > now }
+        if readURLDiscoveries.count < Self.maximumReadURLDiscoveryCacheEntries {
+            readURLDiscoveries[genesisCID] = ReadURLDiscovery(
+                urls: bounded,
+                expires: now.addingTimeInterval(Self.readURLDiscoveryCacheSeconds)
+            )
+        }
+        return bounded
+    }
+
+    private static let maximumReadEndpointAsks = 8
+    private static let maximumDeclaredURLsPerResponder = 2
+    private static let maximumReadURLDiscoveryCacheEntries = 64
+    private static let readURLDiscoveryCacheSeconds: TimeInterval = 30
+    private static let readEndpointAskTimeout: Duration = .seconds(2)
+
+    /// This node's own self-description for `genesisCID`: its configured
+    /// public read URL when that is its own chain's genesis, plus the URLs its
+    /// wired children declared in their hierarchy hellos when the CID is one
+    /// this node anchored for a child directory. Deduped, bounded.
+    private func declaredReadURLs(
+        genesisCID: String,
+        process: ChainProcess
+    ) async -> [String] {
+        var urls: [String] = []
+        if let own = configuration.publicReadURL,
+           await process.mainChainBlockCID(atHeight: 0) == genesisCID {
+            urls.append(own)
+        }
+        let anchored = await process.anchoredChildGenesisCIDs(limit: 200)
+        let directories = Set(
+            anchored.filter { $0.value == genesisCID }.map(\.key)
+        )
+        if !directories.isEmpty {
+            // Shuffled, not dictionary order: wired-child roles are
+            // permissionless, and a stable iteration order would let a batch
+            // of sybil declarants shadow the honest child's URL from every
+            // answer for the process lifetime. Random selection keeps every
+            // declarant reachable across repeated asks.
+            for (key, role) in hierarchyPeers.shuffled() {
+                guard case .child(let path) = role,
+                      let directory = path.last,
+                      directories.contains(directory),
+                      let url = childDeclaredReadURLs[key],
+                      !urls.contains(url) else { continue }
+                urls.append(url)
+                if urls.count >= ReadEndpointResponseMessage.maximumURLs {
+                    break
+                }
+            }
+        }
+        return Array(urls.prefix(ReadEndpointResponseMessage.maximumURLs))
+    }
+
+    /// One bounded ask against an authenticated overlay session. Registered
+    /// before the send so the response can never race the pending entry;
+    /// resolves empty on send failure, timeout (legacy peers drop the topic
+    /// silently), or runtime teardown.
+    private func askDeclaredReadURLs(
+        genesisCID: String,
+        from peer: AuthenticatedPeer,
+        generation: UInt64
+    ) async -> [String] {
+        guard isRunning, isCurrentGeneration(generation) else { return [] }
+        let requestID = makeRequestID()
+        guard let payload = try? ReadEndpointRequestMessage(
+            requestID: requestID,
+            genesisCID: genesisCID
+        ).encoded() else { return [] }
+        // A dedicated short deadline, NOT the overlay's content-pull timeout:
+        // a legacy peer never answers, and this wait sits on the public
+        // explorer route's critical path.
+        let timeoutNanoseconds = Self.nanoseconds(Self.readEndpointAskTimeout)
+        return await withCheckedContinuation { continuation in
+            let timeoutTask = Task { [weak self] in
+                do {
+                    try await Task.sleep(nanoseconds: timeoutNanoseconds)
+                } catch {
+                    return
+                }
+                await self?.readEndpointAskTimedOut(requestID: requestID)
+            }
+            pendingReadEndpoints[requestID] = PendingReadEndpoint(
+                peer: peer,
+                genesisCID: genesisCID,
+                continuation: continuation,
+                timeout: timeoutTask
+            )
+            Task { [weak self] in
+                guard let self else { return }
+                guard case .enqueued = await self.overlay.sendMessage(
+                    to: peer,
+                    topic: NodeNetworkTopic.readEndpointRequest,
+                    payload: payload
+                ) else {
+                    await self.readEndpointAskTimedOut(requestID: requestID)
+                    return
+                }
+            }
+        }
+    }
+
+    private func readEndpointAskTimedOut(requestID: UInt64) {
+        guard let pending = pendingReadEndpoints.removeValue(
+            forKey: requestID
+        ) else { return }
+        pending.timeout.cancel()
+        pending.continuation.resume(returning: [])
     }
 
     /// Called after the process canonicalizes a new tip. Overlay peers learn
@@ -2001,6 +2249,19 @@ public actor NodeNetworkRuntime: IvyDelegate {
             pendingTransactionInventories = pendingTransactionInventories.filter {
                 $0.value.peer.key != key
             }
+            // A response can never arrive on a gone session (a reconnect gets
+            // a fresh sessionID the response guard rejects), so resolve the
+            // ask empty now instead of burning its timeout.
+            let disconnectedReadEndpoints = pendingReadEndpoints.filter {
+                $0.value.peer.key == key
+            }
+            pendingReadEndpoints = pendingReadEndpoints.filter {
+                $0.value.peer.key != key
+            }
+            for pending in disconnectedReadEndpoints.values {
+                pending.timeout.cancel()
+                pending.continuation.resume(returning: [])
+            }
             await resumeAcceptedLeavesSync(
                 generation: generation,
                 process: process
@@ -2021,6 +2282,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         cancelParentEvidence(for: key)
         let removedRole = hierarchyPeers.removeValue(forKey: key)
         hierarchySessions.removeValue(forKey: key)
+        childDeclaredReadURLs.removeValue(forKey: key)
         childEvidenceReadyPeers.remove(key)
         cancelChildEvidenceReadyWaiters(for: key)
         dirtyCandidateReservationPeers.remove(key)
@@ -2221,6 +2483,64 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 generation: generation,
                 process: process
             )
+        case NodeNetworkTopic.readEndpointRequest:
+            guard let request = try? ReadEndpointRequestMessage.decoded(
+                    message.payload
+                )
+            else { return }
+            // The state walk behind declaredReadURLs runs only when this node
+            // has anything to declare, single-flight per session, AND under
+            // the same global parent-state query capacity as the
+            // hierarchy-plane resolve of the identical subtrie — an overlay
+            // peer flood cannot multiply tip-state walks. Every other outcome
+            // still answers empty: a fast negative beats making the asker
+            // burn its timeout.
+            var urls: [String] = []
+            if configuration.publicReadURL != nil
+                || !childDeclaredReadURLs.isEmpty,
+                servingReadEndpoints.insert(peer.sessionID).inserted {
+                defer {
+                    if isCurrentRuntime(
+                        generation: generation,
+                        process: process
+                    ) {
+                        servingReadEndpoints.remove(peer.sessionID)
+                    }
+                }
+                if parentStateQueryGuard.acquire(peer.key) {
+                    defer {
+                        parentStateQueryGuard.release(peer.key)
+                    }
+                    urls = await declaredReadURLs(
+                        genesisCID: request.genesisCID,
+                        process: process
+                    )
+                }
+            }
+            guard isCurrentRuntime(generation: generation, process: process),
+                  let payload = try? ReadEndpointResponseMessage(
+                      requestID: request.requestID,
+                      genesisCID: request.genesisCID,
+                      readURLs: urls
+                  ).encoded()
+            else { return }
+            _ = await overlay.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.readEndpointResponse,
+                payload: payload
+            )
+        case NodeNetworkTopic.readEndpointResponse:
+            guard let response = try? ReadEndpointResponseMessage.decoded(
+                    message.payload
+                ),
+                let pending = pendingReadEndpoints[response.requestID],
+                pending.peer.key == peer.key,
+                pending.peer.sessionID == peer.sessionID,
+                pending.genesisCID == response.genesisCID
+            else { return }
+            pendingReadEndpoints.removeValue(forKey: response.requestID)
+            pending.timeout.cancel()
+            pending.continuation.resume(returning: response.readURLs)
         case NodeNetworkTopic.blockAnnouncement:
             guard let announcement = try? BlockAnnouncementMessage.decoded(message.payload) else {
                 return
@@ -3680,6 +4000,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
         hierarchySessions[peer.key] = peer
         if case .child = role {
             dirtyCandidateReservationPeers.insert(peer.key)
+            // Tolerant ingest of the child's self-declared read URL: invalid
+            // or absent just isn't carried (never a session cost).
+            if let url = normalizedPublicReadURL(remote.publicReadURL) {
+                childDeclaredReadURLs[peer.key] = url
+            } else {
+                childDeclaredReadURLs.removeValue(forKey: peer.key)
+            }
         }
         scheduleHierarchyHelloFollowup(
             role: role,

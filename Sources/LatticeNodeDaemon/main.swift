@@ -79,6 +79,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Self-described publicly reachable host for overlay announcements (NAT/proxy-fronted nodes announce an unreachable observed address otherwise). Host only; the overlay listen port applies.")
     var externalAddress: String?
 
+    @Option(help: "Operator-declared browsable base URL for this chain's public read surface (e.g. https://toy.example.com — a TLS-fronted hostname a browser can dial, distinct from the IP-literal P2P plane). Advertised through the parent rendezvous so explorers can reach this chain; consumers verify the served genesis against the parent's on-chain anchor. Leave unset for nodes without a public TLS surface.")
+    var publicReadUrl: String?
+
     mutating func run() async throws {
         guard let address = ChainAddress(string: chainPath) else {
             throw ValidationError("--chain-path must be absolute and begin with Nexus")
@@ -110,7 +113,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             parentEndpoint: parentEndpoint,
             minPeerKeyBits: minimumPeerKeyBits,
             overlayMaxConnectionsPerNetgroup: overlayMaxConnectionsPerNetgroup,
-            externalAddress: externalAddress
+            externalAddress: externalAddress,
+            publicReadURL: publicReadUrl
         )
 
         let network = try NodeNetworkRuntime(configuration: configuration)
@@ -257,6 +261,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         print("  rpc:     http://\(rpcBind):\(rpcPort)")
         if let publicReadPort {
             print("  public-read: http://0.0.0.0:\(publicReadPort)")
+        }
+        if let declared = configuration.publicReadURL {
+            print("  public-read-url: \(declared)")
         }
 
         let volumeMaintenance = Task {

@@ -17,7 +17,8 @@ ROOT=/data
 CHILD_PATH="${CHILD_PATH:?absolute child path, e.g. Nexus/testnet}"
 CHILD_DIR="$ROOT/chains/$CHILD_PATH"
 NEXUS_PEERS="${NEXUS_PEERS:?space-separated publicKey@host:port peers}"
-EXTERNAL_HOST="${EXTERNAL_HOST:?publicly reachable host, e.g. lattice-mainnet-testnet.fly.dev}"
+EXTERNAL_HOST="${EXTERNAL_HOST:?publicly reachable IP literal (Ivy rejects hostnames), e.g. the app's dedicated IPv4}"
+PUBLIC_READ_URL="${PUBLIC_READ_URL:-}"
 
 mkdir -p "$CHILD_DIR"
 
@@ -26,6 +27,12 @@ for peer in $NEXUS_PEERS; do
     peers_json="$peers_json\"$peer\","
 done
 peers_json="${peers_json%,}"
+
+child_read_url_json=""
+if [ -n "$PUBLIC_READ_URL" ]; then
+    child_read_url_json=",
+      \"publicReadUrl\": \"$PUBLIC_READ_URL\""
+fi
 
 cat > "$ROOT/lattice.json" <<EOF
 {
@@ -42,7 +49,7 @@ cat > "$ROOT/lattice.json" <<EOF
       "fact": 4102,
       "rpc": 8180,
       "publicRead": 8081,
-      "externalAddress": "$EXTERNAL_HOST"
+      "externalAddress": "$EXTERNAL_HOST"$child_read_url_json
     }
   }
 }

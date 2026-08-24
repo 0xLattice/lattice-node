@@ -112,4 +112,35 @@ final class NodeConfigurationTests: XCTestCase {
             XCTAssertEqual(error as? NodeConfigurationError, .invalidParentEndpoint)
         }
     }
+
+    func testPublicReadURLIsNormalizedAndMustBeBrowsable() throws {
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: URL(fileURLWithPath: "/tmp/lattice-node-test"),
+            privateKeyHex: String(repeating: "01", count: 32),
+            publicReadURL: " https://toy.example/ "
+        )
+        XCTAssertEqual(configuration.publicReadURL, "https://toy.example")
+
+        let undeclared = try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: URL(fileURLWithPath: "/tmp/lattice-node-test"),
+            privateKeyHex: String(repeating: "01", count: 32)
+        )
+        XCTAssertNil(undeclared.publicReadURL)
+
+        // Operator input fails loudly: a declared-but-unbrowsable URL is a
+        // deployment mistake, not tolerable wire noise.
+        XCTAssertThrowsError(try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: URL(fileURLWithPath: "/tmp/lattice-node-test"),
+            privateKeyHex: String(repeating: "01", count: 32),
+            publicReadURL: "toy.example"
+        )) { error in
+            XCTAssertEqual(
+                error as? NodeConfigurationError,
+                .invalidPublicReadURL
+            )
+        }
+    }
 }

@@ -108,6 +108,34 @@ private actor AuthenticatedPeerRecorder: IvyDelegate {
     func connectedPeer() -> AuthenticatedPeer? { peer }
 }
 
+private actor PayloadRecorder {
+    private var events: [(topic: String, payload: Data)] = []
+
+    func append(topic: String, payload: Data) {
+        events.append((topic, payload))
+    }
+    func payloads(topic: String) -> [Data] {
+        events.filter { $0.topic == topic }.map(\.payload)
+    }
+    func topics() -> [String] { events.map(\.topic) }
+}
+
+private final class PayloadRecordingPeer: IvyDelegate, Sendable {
+    private let recorder: PayloadRecorder
+
+    init(recorder: PayloadRecorder) {
+        self.recorder = recorder
+    }
+
+    func ivy(
+        _ ivy: Ivy,
+        didReceiveMessage message: PeerMessage,
+        from peer: AuthenticatedPeer
+    ) async {
+        await recorder.append(topic: message.topic, payload: message.payload)
+    }
+}
+
 private final class TopicRecordingPeer: IvyDelegate, Sendable {
     private let recorder: TopicRecorder
 
@@ -1043,7 +1071,8 @@ final class NetworkTrustTests: XCTestCase {
     private func overlayRuntime(
         keyByte: UInt8,
         requestTimeout: Duration,
-        bootstrapPeers: [PeerEndpoint] = []
+        bootstrapPeers: [PeerEndpoint] = [],
+        publicReadURL: String? = nil
     ) async throws -> (
         runtime: NodeNetworkRuntime,
         process: ChainProcess,
@@ -1067,7 +1096,8 @@ final class NetworkTrustTests: XCTestCase {
             ),
             listenPort: overlayPort,
             factListenPort: hierarchyPort,
-            rpcPort: NetworkTransportTestPorts.allocate()
+            rpcPort: NetworkTransportTestPorts.allocate(),
+            publicReadURL: publicReadURL
         )
         let runtime = try NodeNetworkRuntime(
             configuration: configuration,
@@ -1172,6 +1202,266 @@ final class NetworkTrustTests: XCTestCase {
             XCTAssertEqual(error as? ChainHelloError, .incompatibleProtocol)
         }
 
+    }
+
+    func testChainHelloCarriesDeclaredReadURLTolerantly() throws {
+        // Declared: survives the round-trip.
+        let declared = ChainHello(
+            nexusGenesisCID: nexusCID,
+            chainPath: ["Nexus"],
+            publicReadURL: "https://nexus.example"
+        )
+        let decoded = try ChainHello.decode(try declared.encode())
+        XCTAssertEqual(decoded.publicReadURL, "https://nexus.example")
+        XCTAssertNoThrow(try decoded.validateCompatibility(
+            expectedNexusGenesisCID: nexusCID,
+            expectedChainPath: ["Nexus"]
+        ))
+
+        // Undeclared: byte-identical to the legacy wire (a nil optional emits
+        // no key), so legacy peers see exactly the hello they always did.
+        let undeclared = ChainHello(
+            nexusGenesisCID: nexusCID,
+            chainPath: ["Nexus"]
+        )
+        XCTAssertFalse(String(
+            decoding: try undeclared.encode(),
+            as: UTF8.self
+        ).contains("publicReadURL"))
+
+        // Legacy payload without the field decodes to nil.
+        let legacy = try ChainHello.decode(try JSONSerialization.data(
+            withJSONObject: [
+                "version": ChainHello.protocolVersion,
+                "nexusGenesisCID": nexusCID,
+                "chainPath": ["Nexus"],
+            ]
+        ))
+        XCTAssertNil(legacy.publicReadURL)
+
+        // A non-browsable declared value never costs the session: the hello
+        // still decodes and authorizes; ingest just drops the URL.
+        let hostile = try ChainHello.decode(try JSONSerialization.data(
+            withJSONObject: [
+                "version": ChainHello.protocolVersion,
+                "nexusGenesisCID": nexusCID,
+                "chainPath": ["Nexus"],
+                "publicReadURL": "javascript:alert(1)",
+            ]
+        ))
+        XCTAssertNoThrow(try hostile.validateCompatibility(
+            expectedNexusGenesisCID: nexusCID,
+            expectedChainPath: ["Nexus"]
+        ))
+        XCTAssertNil(normalizedPublicReadURL(hostile.publicReadURL))
+    }
+
+    func testDeclaredReadURLNormalizationAdmitsOnlyBrowsableBases() {
+        XCTAssertEqual(
+            normalizedPublicReadURL(" https://toy.example/ "),
+            "https://toy.example"
+        )
+        XCTAssertEqual(
+            normalizedPublicReadURL("http://198.51.100.7:8081"),
+            "http://198.51.100.7:8081"
+        )
+        XCTAssertEqual(
+            normalizedPublicReadURL("https://toy.example/read/"),
+            "https://toy.example/read"
+        )
+        XCTAssertNil(normalizedPublicReadURL(nil))
+        XCTAssertNil(normalizedPublicReadURL(""))
+        XCTAssertNil(normalizedPublicReadURL("toy.example"))
+        XCTAssertNil(normalizedPublicReadURL("ftp://toy.example"))
+        XCTAssertNil(normalizedPublicReadURL("https://user:pw@toy.example"))
+        XCTAssertNil(normalizedPublicReadURL("https://toy.example?x=1"))
+        XCTAssertNil(normalizedPublicReadURL("https://toy.example#frag"))
+        XCTAssertNil(normalizedPublicReadURL("https://"))
+        XCTAssertNil(normalizedPublicReadURL(
+            "https://toy.example/" + String(
+                repeating: "a",
+                count: maximumPublicReadURLBytes
+            )
+        ))
+        // Case variants fold to one base so dedup is real; markup
+        // metacharacters never survive into explorer-facing JSON.
+        XCTAssertEqual(
+            normalizedPublicReadURL("HTTPS://Toy.Example/Read"),
+            "https://toy.example/Read"
+        )
+        XCTAssertNil(normalizedPublicReadURL("https://toy.example/\"><script>"))
+        XCTAssertNil(normalizedPublicReadURL("https://toy.example/'x"))
+        // Every accepted output is a fixed point, so an honestly-normalized
+        // URL can never fail the response wire's round-trip validation.
+        for candidate in [
+            "https://toy.example", " https://toy.example/ ",
+            "HTTPS://Toy.Example/Read", "http://198.51.100.7:8081",
+            "https://[::1]:8081", "https://%74oy.example",
+        ] {
+            guard let normalized = normalizedPublicReadURL(candidate) else {
+                continue
+            }
+            XCTAssertEqual(normalizedPublicReadURL(normalized), normalized)
+        }
+    }
+
+    func testReadEndpointMessagesAreCanonicalAndBounded() throws {
+        let genesis = testCID("read-endpoint")
+        let request = ReadEndpointRequestMessage(
+            requestID: 7,
+            genesisCID: genesis
+        )
+        let decodedRequest = try ReadEndpointRequestMessage.decoded(
+            try request.encoded()
+        )
+        XCTAssertEqual(decodedRequest, request)
+        XCTAssertThrowsError(try ReadEndpointRequestMessage(
+            requestID: 0,
+            genesisCID: genesis
+        ).encoded())
+        XCTAssertThrowsError(try ReadEndpointRequestMessage(
+            requestID: 7,
+            genesisCID: "not-a-cid"
+        ).encoded())
+
+        let response = ReadEndpointResponseMessage(
+            requestID: 7,
+            genesisCID: genesis,
+            readURLs: ["https://toy.example"]
+        )
+        let decodedResponse = try ReadEndpointResponseMessage.decoded(
+            try response.encoded()
+        )
+        XCTAssertEqual(decodedResponse, response)
+        // Empty answers are valid wire: a fast negative beats a timeout.
+        XCTAssertNoThrow(try ReadEndpointResponseMessage(
+            requestID: 7,
+            genesisCID: genesis,
+            readURLs: []
+        ).encoded())
+        // Only normalized browsable bases; count bounded.
+        XCTAssertThrowsError(try ReadEndpointResponseMessage(
+            requestID: 7,
+            genesisCID: genesis,
+            readURLs: ["https://toy.example/"]
+        ).encoded())
+        XCTAssertThrowsError(try ReadEndpointResponseMessage(
+            requestID: 7,
+            genesisCID: genesis,
+            readURLs: (0...ReadEndpointResponseMessage.maximumURLs).map {
+                "https://node\($0).example"
+            }
+        ).encoded())
+        // Non-canonical bytes are rejected wholesale.
+        XCTAssertThrowsError(try ReadEndpointResponseMessage.decoded(
+            try response.encoded() + Data(" ".utf8)
+        ))
+    }
+
+    func testReadEndpointRequestAnsweredFromSelfDescriptionOnly() async throws {
+        let target = try await overlayRuntime(
+            keyByte: 0xc1,
+            requestTimeout: .seconds(2),
+            publicReadURL: "https://nexus.example"
+        )
+        let service = networkService(
+            process: target.process,
+            runtime: target.runtime
+        )
+        let handlers = transactionServiceHandlers(service)
+        let recorder = PayloadRecorder()
+        let observer = Ivy(config: IvyConfig(
+            signingKey: signingKey(0xc2),
+            listenPort: 0,
+            stunServers: [],
+            mode: .overlay
+        ))
+        let observerDelegate = PayloadRecordingPeer(recorder: recorder)
+        await observer.installTestDelegate(observerDelegate)
+        do {
+            try await target.runtime.start(
+                process: target.process,
+                handlers: handlers
+            )
+            try await connectAndHello(
+                observer,
+                peerID: target.peerID,
+                endpoint: target.endpoint,
+                hello: target.hello
+            )
+            // Every overlay topic is gated on a completed hello; the runtime
+            // announces its tip back in the same handling branch, so seeing it
+            // proves the observer's hello landed.
+            for _ in 0..<200 {
+                if await !recorder.payloads(
+                    topic: NodeNetworkTopic.blockAnnouncement
+                ).isEmpty { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let maybeOwnGenesis = await target.process.mainChainBlockCID(
+                atHeight: 0
+            )
+            let ownGenesis = try XCTUnwrap(maybeOwnGenesis)
+            // The node's own genesis: answered with its configured URL.
+            let askOwn = try ReadEndpointRequestMessage(
+                requestID: 7,
+                genesisCID: ownGenesis
+            ).encoded()
+            _ = await observer.sendMessage(
+                to: target.peerID,
+                topic: NodeNetworkTopic.readEndpointRequest,
+                payload: askOwn
+            )
+            let own = try await waitForReadEndpointResponse(
+                requestID: 7,
+                in: recorder
+            )
+            XCTAssertEqual(own.genesisCID, ownGenesis)
+            XCTAssertEqual(own.readURLs, ["https://nexus.example"])
+
+            // A genesis this node knows nothing about: a fast empty negative,
+            // never an invented URL.
+            let askUnknown = try ReadEndpointRequestMessage(
+                requestID: 8,
+                genesisCID: testCID("unknown-chain")
+            ).encoded()
+            _ = await observer.sendMessage(
+                to: target.peerID,
+                topic: NodeNetworkTopic.readEndpointRequest,
+                payload: askUnknown
+            )
+            let unknown = try await waitForReadEndpointResponse(
+                requestID: 8,
+                in: recorder
+            )
+            XCTAssertEqual(unknown.readURLs, [])
+            await observer.stop()
+            await target.runtime.stop()
+        } catch {
+            await observer.stop()
+            await target.runtime.stop()
+            throw error
+        }
+    }
+
+    private func waitForReadEndpointResponse(
+        requestID: UInt64,
+        in recorder: PayloadRecorder
+    ) async throws -> ReadEndpointResponseMessage {
+        for _ in 0..<200 {
+            for payload in await recorder.payloads(
+                topic: NodeNetworkTopic.readEndpointResponse
+            ) {
+                if let response = try? ReadEndpointResponseMessage.decoded(
+                    payload
+                ), response.requestID == requestID {
+                    return response
+                }
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let seen = await recorder.topics()
+        throw NetworkTestError.failedPhase("read endpoint response; saw \(seen)")
     }
 
     func testChildValidationPackageEnvelopeRoundTripsAndRejectsTrailingBytes() throws {

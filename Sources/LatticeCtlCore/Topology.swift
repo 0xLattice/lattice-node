@@ -25,10 +25,16 @@ public struct TopologyChain: Codable {
     /// `--external-address`) for overlay announcements from NAT/proxy-fronted
     /// processes. Host only; the chain's listen port applies.
     public var externalAddress: String?
+    /// Operator-declared browsable base URL (the node's `--public-read-url`)
+    /// for this chain's public read surface: a TLS-fronted hostname a browser
+    /// can dial, advertised through the parent rendezvous. Distinct from
+    /// `externalAddress`, which the P2P plane constrains to IP literals.
+    public var publicReadUrl: String?
 
     public init(
         listen: UInt16, fact: UInt16, rpc: UInt16, peers: [String]? = nil,
-        publicRead: UInt16? = nil, externalAddress: String? = nil
+        publicRead: UInt16? = nil, externalAddress: String? = nil,
+        publicReadUrl: String? = nil
     ) {
         self.listen = listen
         self.fact = fact
@@ -36,6 +42,7 @@ public struct TopologyChain: Codable {
         self.peers = peers
         self.publicRead = publicRead
         self.externalAddress = externalAddress
+        self.publicReadUrl = publicReadUrl
     }
 }
 

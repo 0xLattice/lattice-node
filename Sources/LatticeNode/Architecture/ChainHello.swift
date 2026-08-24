@@ -25,14 +25,23 @@ public struct ChainHello: Codable, Equatable, Sendable {
     public let version: UInt16
     public let nexusGenesisCID: String
     public let chainPath: [String]
+    /// Operator-declared public read URL for this node's chain (the browsable
+    /// HTTPS base a browser can dial — a TLS-fronted hostname, not the P2P
+    /// address, which Ivy constrains to IP literals). Optional and tolerant:
+    /// absent on legacy hellos, ignored by legacy decoders, and self-declared —
+    /// a consumer must verify the served genesis against the parent's on-chain
+    /// anchor before trusting one.
+    public let publicReadURL: String?
 
     public init(
         nexusGenesisCID: String,
-        chainPath: [String]
+        chainPath: [String],
+        publicReadURL: String? = nil
     ) {
         version = Self.protocolVersion
         self.nexusGenesisCID = nexusGenesisCID
         self.chainPath = chainPath
+        self.publicReadURL = publicReadURL
     }
 
     public func encode() throws -> Data {
@@ -107,6 +116,47 @@ func _isBoundedWireAtom(_ value: String, maximumBytes: Int = _wireAtomCapacity) 
 func _isBoundedDirectoryAtom(_ value: String, maximumBytes: Int = _wireAtomCapacity) -> Bool {
     _isBoundedWireAtom(value, maximumBytes: maximumBytes) && !value.contains("/")
 }
+
+/// A declared public read URL, normalized (trimmed, no trailing slash) when it
+/// is a plausible browser-dialable base: absolute http(s), a host, no
+/// credentials/query/fragment, printable ASCII, bounded. Self-declared wire
+/// data flows through here at every ingest point (config flag, hello, overlay
+/// response); invalid values normalize to nil and are simply not carried —
+/// tolerant, so a future grammar widening cannot cost a session.
+public func normalizedPublicReadURL(_ value: String?) -> String? {
+    guard let value else { return nil }
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard _isBoundedWireAtom(trimmed, maximumBytes: maximumPublicReadURLBytes),
+          // Relayed verbatim into explorer-facing JSON, so beyond the URL
+          // grammar the string must never carry markup metacharacters.
+          !trimmed.contains(where: { "\"'<>`\\".contains($0) }),
+          var components = URLComponents(string: trimmed),
+          let scheme = components.scheme?.lowercased(),
+          scheme == "http" || scheme == "https",
+          let host = components.host, !host.isEmpty,
+          components.user == nil, components.password == nil,
+          components.query == nil, components.fragment == nil
+    else { return nil }
+    // Case-fold scheme and host so equal bases dedupe as equal strings — a
+    // case variant must not consume an extra endpoint slot. Rebuild only on
+    // an actual case change; the common already-lowercase input keeps its
+    // exact bytes (no parser round-trip on the hot path).
+    var normalized: String
+    if components.scheme == scheme, host == host.lowercased() {
+        normalized = trimmed
+    } else {
+        components.scheme = scheme
+        components.host = host.lowercased()
+        guard let rebuilt = components.string else { return nil }
+        normalized = rebuilt
+    }
+    while normalized.hasSuffix("/") { normalized.removeLast() }
+    return normalized.isEmpty ? nil : normalized
+}
+
+/// Far above any real base URL while keeping relayed self-declared strings
+/// small on the wire and in per-peer state.
+public let maximumPublicReadURLBytes = 2048
 
 /// Bounds an untrusted path parameter (e.g. a public read RPC's `{cid}`) to a
 /// plausible CID BEFORE any storage lookup: non-empty, within wire capacity,
