@@ -517,7 +517,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private var childDeclaredReadURLs: [PeerKey: String] = [:]
     private var pendingReadEndpoints: [UInt64: PendingReadEndpoint] = [:]
     private var readURLDiscoveries: [String: ReadURLDiscovery] = [:]
-    private var readURLDiscoveryTasks: [String: Task<[String], Never>] = [:]
+    private var readURLDiscoveryTasks:
+        [String: (token: UInt64, task: Task<[String], Never>)] = [:]
     private var rangeSync: RangeSyncState?
     /// Monotonic across all range syncs so a stale progress-deadline task from a
     /// previous sync can never alias a new sync's epoch.
@@ -1038,14 +1039,20 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // Coalesce concurrent HTTP callers onto one discovery so a request
         // burst cannot multiply overlay asks.
         if let inFlight = readURLDiscoveryTasks[genesisCID] {
-            return await inFlight.value
+            return await inFlight.task.value
         }
+        let token = makeRequestID()
         let task = Task { [weak self] in
             await self?.performReadURLDiscovery(genesisCID: genesisCID) ?? []
         }
-        readURLDiscoveryTasks[genesisCID] = task
+        readURLDiscoveryTasks[genesisCID] = (token: token, task: task)
         let urls = await task.value
-        readURLDiscoveryTasks.removeValue(forKey: genesisCID)
+        // Only the creator un-registers, and only its own entry: a stop/start
+        // cycle clears the map, and a fresh discovery registered under the
+        // same key must not be evicted by this stale resume.
+        if readURLDiscoveryTasks[genesisCID]?.token == token {
+            readURLDiscoveryTasks.removeValue(forKey: genesisCID)
+        }
         return urls
     }
 
@@ -1071,29 +1078,48 @@ public actor NodeNetworkRuntime: IvyDelegate {
             candidates.append(endpoint)
             if candidates.count >= 32 { break }
         }
-        var declared: [String] = []
-        var fallback: [String] = []
-        var asked = 0
-        for endpoint in candidates {
-            var urls: [String] = []
-            if endpoint.publicKey == configuration.processPublicKey {
-                // Our own provider record: answer from our own knowledge.
-                if let process {
-                    urls = await declaredReadURLs(
-                        genesisCID: genesisCID,
-                        process: process
-                    )
-                }
-            } else if asked < Self.maximumReadEndpointAsks,
-                      let key = try? PeerKey(endpoint.publicKey),
-                      let peer = overlayPeers[key] {
-                asked += 1
-                urls = await askDeclaredReadURLs(
+        var urlsByCandidate = [[String]](
+            repeating: [],
+            count: candidates.count
+        )
+        for (index, endpoint) in candidates.enumerated()
+        where endpoint.publicKey == configuration.processPublicKey {
+            // Our own provider record: answer from our own knowledge.
+            if let process {
+                urlsByCandidate[index] = await declaredReadURLs(
                     genesisCID: genesisCID,
-                    from: peer,
-                    generation: generation
+                    process: process
                 )
             }
+        }
+        // Asks run concurrently: a legacy peer never answers (it drops the
+        // unknown topic), so a sequential walk would stall the explorer route
+        // for asks-times-deadline against an unupgraded fleet.
+        await withTaskGroup(of: (Int, [String]).self) { group in
+            var asked = 0
+            for (index, endpoint) in candidates.enumerated() {
+                guard endpoint.publicKey != configuration.processPublicKey,
+                      asked < Self.maximumReadEndpointAsks,
+                      let key = try? PeerKey(endpoint.publicKey),
+                      let peer = overlayPeers[key] else { continue }
+                asked += 1
+                group.addTask { [weak self] in
+                    guard let self else { return (index, []) }
+                    return (index, await self.askDeclaredReadURLs(
+                        genesisCID: genesisCID,
+                        from: peer,
+                        generation: generation
+                    ))
+                }
+            }
+            for await (index, urls) in group {
+                urlsByCandidate[index] = urls
+            }
+        }
+        var declared: [String] = []
+        var fallback: [String] = []
+        for (index, endpoint) in candidates.enumerated() {
+            let urls = urlsByCandidate[index]
             if urls.isEmpty {
                 // Bracket IPv6 literals so the authority parses (host:port
                 // ambiguity).
@@ -1122,6 +1148,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private static let maximumReadEndpointAsks = 8
     private static let maximumReadURLDiscoveryCacheEntries = 64
     private static let readURLDiscoveryCacheSeconds: TimeInterval = 30
+    private static let readEndpointAskTimeout: Duration = .seconds(2)
 
     /// This node's own self-description for `genesisCID`: its configured
     /// public read URL when that is its own chain's genesis, plus the URLs its
@@ -1171,9 +1198,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             requestID: requestID,
             genesisCID: genesisCID
         ).encoded() else { return [] }
-        let timeoutNanoseconds = Self.nanoseconds(
-            planeConfigurations.overlay.requestTimeout
-        )
+        // A dedicated short deadline, NOT the overlay's content-pull timeout:
+        // a legacy peer never answers, and this wait sits on the public
+        // explorer route's critical path.
+        let timeoutNanoseconds = Self.nanoseconds(Self.readEndpointAskTimeout)
         return await withCheckedContinuation { continuation in
             let timeoutTask = Task { [weak self] in
                 do {
@@ -2197,6 +2225,19 @@ public actor NodeNetworkRuntime: IvyDelegate {
             }
             pendingTransactionInventories = pendingTransactionInventories.filter {
                 $0.value.peer.key != key
+            }
+            // A response can never arrive on a gone session (a reconnect gets
+            // a fresh sessionID the response guard rejects), so resolve the
+            // ask empty now instead of burning its timeout.
+            let disconnectedReadEndpoints = pendingReadEndpoints.filter {
+                $0.value.peer.key == key
+            }
+            pendingReadEndpoints = pendingReadEndpoints.filter {
+                $0.value.peer.key != key
+            }
+            for pending in disconnectedReadEndpoints.values {
+                pending.timeout.cancel()
+                pending.continuation.resume(returning: [])
             }
             await resumeAcceptedLeavesSync(
                 generation: generation,
