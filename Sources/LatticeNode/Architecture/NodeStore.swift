@@ -779,19 +779,32 @@ actor NodeStore {
             )
         }
 
+        // Startup-bounded attachment audit: shape, edge linkage, and LOCAL
+        // COMPLETENESS of every attachment Volume (the broker's SQL
+        // completeness predicate) — but never materialization. The issued
+        // index grows with every proof issued over the chain's whole life, so
+        // fetching and decoding each attachment here made process startup
+        // O(history x volume-decode) and wedged long-lived nodes for hours;
+        // the full decode-and-bind validation still runs fail-closed at every
+        // actual use (`recoveryVolume`).
         let attachments = try database.query(
-            "SELECT scope, edge_cid, root_cid FROM issued_child_proofs ORDER BY scope, edge_cid, root_cid"
+            """
+            SELECT p.scope, p.root_cid, p.attachment_cid, e.edge_cid
+            FROM issued_child_proofs AS p
+            LEFT JOIN issued_child_edges AS e ON e.edge_cid = p.edge_cid
+            ORDER BY p.scope, p.edge_cid, p.root_cid
+            """
         )
         for row in attachments {
             guard let rawScope = row["scope"]?.textValue,
-                  let scope = IssuedChildProofScope(rawValue: rawScope),
-                  let edgeCID = row["edge_cid"]?.textValue,
+                  IssuedChildProofScope(rawValue: rawScope) != nil,
                   let rootCID = row["root_cid"]?.textValue,
-                  try await issuedChildEvidence(
-                    scope: scope,
-                    edgeCID: edgeCID,
-                    rootCID: rootCID
-                  ) != nil else {
+                  CIDIdentity.isCanonical(rootCID),
+                  let attachmentCID = row["attachment_cid"]?.textValue,
+                  CIDIdentity.isCanonical(attachmentCID),
+                  row["edge_cid"]?.textValue != nil,
+                  await recoveryVolumeBroker.hasVolume(root: attachmentCID)
+            else {
                 throw NodeStoreError.corrupt(
                     "malformed direct-child attachment index"
                 )
