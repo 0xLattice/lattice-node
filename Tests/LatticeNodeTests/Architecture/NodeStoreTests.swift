@@ -1223,11 +1223,20 @@ final class NodeStoreTests: XCTestCase {
             "UPDATE issued_child_edges SET child_cid = ?1",
             params: [.text(try BlockHeader(node: carrier).rawCID)]
         )
+        // The startup audit is deliberately materialization-free (unbounded
+        // issued history made full decode O(hours) on long-lived nodes), so a
+        // corrupted edge-to-attachment BINDING surfaces fail-closed at use,
+        // where the attachment is decoded against the edge's child CID.
+        try await parent.auditNormalizedIndexes()
         await XCTAssertThrowsErrorAsync(
-            try await parent.auditNormalizedIndexes()
+            try await parent.issuedChildEvidence(
+                scope: .outgoingDirectChild,
+                edgeCID: edgeCID,
+                rootCID: missingRootCID
+            )
         ) { error in
             guard case NodeStoreError.corrupt = error else {
-                return XCTFail("expected corrupt edge index, got \(error)")
+                return XCTFail("expected corrupt attachment binding, got \(error)")
             }
         }
     }
