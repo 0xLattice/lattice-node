@@ -4806,6 +4806,19 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // already-accepted predecessor already fired its one-shot connect
             // signal, so parking on it now would wedge this candidate forever.
             resolution = .predecessor(predecessor.predecessorCID)
+        } else if let predecessor = outcome.sameChainPredecessor,
+                  let missing = await process.deepestMissingAncestor(
+                      of: predecessor.predecessorCID
+                  ) {
+            // The immediate predecessor is accepted but itself DISCONNECTED:
+            // its connect signal fired long ago, so parking on it would wedge
+            // — but stopping here wedges just the same, because the segment is
+            // missing a deeper ancestor. Park on the deepest genuinely-missing
+            // block (the wake that actually unblocks this candidate); the park
+            // also seeds its acquisition, and each arrival re-walks one level
+            // until the segment connects and fork choice promotes it. This is
+            // both the gap fast-forward and the fresh deep-sync descent.
+            resolution = .predecessor(missing)
         } else if outcome.decision.isAccepted {
             resolution = .connected
         } else if outcome.decision == .unavailable(nil),

@@ -507,4 +507,92 @@ final class CandidateAcquirerTests: XCTestCase {
         ))
         XCTAssertEqual(acquirer.next()?.blockCID, "D")
     }
+
+    func testLivePredecessorParkEvictsOldestRetainedInsteadOfDropping() throws {
+        // Retention is an operator-budget cache: with the budget full of
+        // stale waits, a live predecessor walk must still be able to park —
+        // the oldest retained entry is evicted (re-derivable via inventory
+        // restart), never the fresh park.
+        var acquirer = CandidateAcquirer()
+        for index in 0..<CandidateAcquirer.retainedCapacity {
+            XCTAssertTrue(acquirer.observe(.init(
+                blockCID: "stale-\(index)",
+                package: nil
+            )).accepted)
+            let candidate = try XCTUnwrap(acquirer.next())
+            XCTAssertTrue(acquirer.complete(
+                candidate.ticket,
+                resolution: .wait(.evidence)
+            ))
+        }
+        XCTAssertTrue(acquirer.observe(.init(
+            blockCID: "descendant",
+            package: nil
+        )).accepted)
+        let descendant = try XCTUnwrap(acquirer.next())
+        XCTAssertTrue(acquirer.complete(
+            descendant.ticket,
+            resolution: .predecessor("missing-ancestor")
+        ))
+        // Eviction requests inventory recovery for the displaced wait.
+        XCTAssertTrue(acquirer.takeInventoryRestart())
+        // The park is live: the seeded predecessor is next, and its
+        // connection wakes the parked descendant.
+        let predecessor = try XCTUnwrap(acquirer.next())
+        XCTAssertEqual(predecessor.blockCID, "missing-ancestor")
+        XCTAssertTrue(acquirer.complete(
+            predecessor.ticket,
+            resolution: .connected
+        ))
+        XCTAssertEqual(acquirer.next()?.blockCID, "descendant")
+    }
+
+    func testRecoverySeedingRespectsTheRetainedBudget() throws {
+        // A history-heavy store can carry thousands of stale unresolved side
+        // edges; seeding them all would exhaust the retained budget from
+        // second zero and starve live walks.
+        var durable: [String: Set<CandidateAcquirer.DurableDescendant>] = [:]
+        for index in 0..<(CandidateAcquirer.retainedCapacity * 3) {
+            durable["pred-\(index)"] = [
+                .init(blockCID: "desc-\(index)", rootCID: nil)
+            ]
+        }
+        var acquirer = CandidateAcquirer()
+        acquirer.reset(retryWindow: .seconds(1), durableDescendants: durable)
+        // The un-seeded remainder is signalled for inventory recovery.
+        XCTAssertTrue(acquirer.takeInventoryRestart())
+        // A live park still succeeds immediately (evicting if needed).
+        XCTAssertTrue(acquirer.observe(.init(
+            blockCID: "live-descendant",
+            package: nil
+        )).accepted)
+        var live: CandidateAcquirer.Candidate?
+        while let candidate = acquirer.next() {
+            if candidate.blockCID == "live-descendant" {
+                live = candidate
+                break
+            }
+            XCTAssertTrue(acquirer.complete(
+                candidate.ticket,
+                resolution: .terminal
+            ))
+        }
+        let ticket = try XCTUnwrap(live).ticket
+        XCTAssertTrue(acquirer.complete(
+            ticket,
+            resolution: .predecessor("live-missing")
+        ))
+        var sawLivePredecessor = false
+        while let candidate = acquirer.next() {
+            if candidate.blockCID == "live-missing" {
+                sawLivePredecessor = true
+                break
+            }
+            XCTAssertTrue(acquirer.complete(
+                candidate.ticket,
+                resolution: .terminal
+            ))
+        }
+        XCTAssertTrue(sawLivePredecessor)
+    }
 }

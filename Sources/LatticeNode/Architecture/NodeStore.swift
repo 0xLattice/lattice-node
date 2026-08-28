@@ -975,6 +975,20 @@ actor NodeStore {
         ).isEmpty
     }
 
+    /// The durable parent edge of an accepted block, or nil when the block is
+    /// unknown or a root. Serves the predecessor descent: locating the deepest
+    /// missing ancestor of an accepted-but-disconnected segment with point
+    /// lookups instead of block materialization.
+    func acceptedBlockParent(_ blockCID: String) throws -> String? {
+        guard CIDIdentity.isCanonical(blockCID) else {
+            throw NodeStoreError.corrupt("invalid accepted block lookup")
+        }
+        return try database.query(
+            "SELECT parent_cid FROM accepted_blocks WHERE block_cid = ?1 LIMIT 1",
+            params: [.text(blockCID)]
+        ).first?["parent_cid"]?.textValue
+    }
+
     private func hasConnectedAcceptedBlock(_ blockCID: String) throws -> Bool {
         guard CIDIdentity.isCanonical(blockCID) else {
             throw NodeStoreError.corrupt("invalid connected block lookup")
