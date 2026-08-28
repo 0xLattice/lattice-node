@@ -3804,6 +3804,76 @@ final class NetworkTrustTests: XCTestCase {
         await fixture.runtime.stop()
     }
 
+    func testAcceptedLeafSyncSkipsBlocksAlreadyAccepted() async throws {
+        // A page of a peer's accepted set is almost entirely shared history.
+        // Already-accepted blocks must be filtered BEFORE they become
+        // admission candidates: re-admitting a known block is a full
+        // (failing) admission attempt, and a node rebooting while behind
+        // would otherwise churn O(chain history) of them, starving fresh
+        // candidates and parent-evidence work.
+        let fixture = try await overlayRuntime(
+            keyByte: 0x79,
+            requestTimeout: .milliseconds(150)
+        )
+        let admitted = NetworkEventRecorder()
+        let handlers = NodeNetworkHandlers(admission: { admission in
+            await admitted.append(admission.header.rawCID)
+            return NodeAdmissionOutcome(
+                decision: .acceptedSide(ChainCommit(
+                    tipHash: admission.header.rawCID
+                )),
+                parentCarrierLink: nil,
+                sameChainPredecessor: nil
+            )
+        })
+        let maybeKnown = await fixture.process.mainChainBlockCID(atHeight: 0)
+        let knownCID = try XCTUnwrap(maybeKnown)
+        let novelVolume = try await canonicalNetworkBlockVolumes(count: 1)[0]
+        let novelCID = novelVolume.root
+        let advertiserDelegate = OverlayInventoryPeer(
+            leaves: [knownCID, novelCID]
+        )
+        let advertiser = Ivy(config: IvyConfig(
+            signingKey: signingKey(0x7a),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        await advertiser.installTestDelegate(advertiserDelegate)
+        await advertiser.setContentSource(NetworkTestVolumeSource(
+            value: novelVolume
+        ))
+        do {
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: handlers
+            )
+            try await connectAndHello(
+                advertiser,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            for _ in 0..<200 {
+                if (await admitted.snapshot()).contains(novelCID) { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let admittedCIDs = await admitted.snapshot()
+            XCTAssertTrue(admittedCIDs.contains(novelCID))
+            XCTAssertFalse(
+                admittedCIDs.contains(knownCID),
+                "an already-accepted block reached admission from a leaf page"
+            )
+        } catch {
+            await advertiser.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await advertiser.stop()
+        await fixture.runtime.stop()
+    }
+
     func testBlockValidationFindsMissingVolumeFromAdvertisedProvider()
         async throws
     {
