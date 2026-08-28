@@ -1067,6 +1067,29 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         (try? await store.hasAcceptedBlock(cid)) ?? false
     }
 
+    /// Walks durable parent edges from `cid` toward genesis and returns the
+    /// first ancestor that is NOT accepted locally — the block an
+    /// accepted-but-disconnected segment is actually missing — or nil when
+    /// every ancestor within the bound is already accepted (connection is
+    /// then a re-admission/fork-choice concern, not an acquisition one).
+    /// Point lookups only, never block materialization.
+    public func deepestMissingAncestor(
+        of cid: String,
+        limit: Int = 4096
+    ) async -> String? {
+        var cursor = cid
+        for _ in 0..<max(0, limit) {
+            guard let parent =
+                ((try? await store.acceptedBlockParent(cursor)) ?? nil)
+            else { return nil }
+            guard (try? await store.hasAcceptedBlock(parent)) == true else {
+                return parent
+            }
+            cursor = parent
+        }
+        return nil
+    }
+
     public func fetch(_ cids: Set<String>) async -> [String: Data] {
         await broker.fetchDataLocal(cids: cids)
     }

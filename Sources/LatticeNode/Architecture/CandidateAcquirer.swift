@@ -133,8 +133,23 @@ struct CandidateAcquirer {
         self = CandidateAcquirer(retryWindow: retryWindow)
         epoch = nextEpoch
         var descendantCIDs = Set<String>()
-        for (predecessorCID, descendants) in durableDescendants {
-            for descendant in descendants {
+        // Recovery seeding respects the SAME retained budget as live parking:
+        // a history-heavy store can carry thousands of stale unresolved side
+        // edges, and seeding them all would exhaust the budget from second
+        // zero (starving live predecessor walks) while making every capacity
+        // check O(thousands). Deterministic order; the remainder re-derives
+        // from the accepted graph at the next restart or resolves organically
+        // through the live walk.
+        var seeded = 0
+        seeding: for (predecessorCID, descendants) in durableDescendants
+            .sorted(by: { $0.key < $1.key }) {
+            for descendant in descendants.sorted(by: {
+                ($0.blockCID, $0.rootCID ?? "") < ($1.blockCID, $1.rootCID ?? "")
+            }) {
+                guard seeded < Self.retainedCapacity else {
+                    inventoryRestartNeeded = true
+                    break seeding
+                }
                 descendantCIDs.insert(descendant.blockCID)
                 let key = observe(Seed(
                     blockCID: descendant.blockCID,
@@ -144,6 +159,7 @@ struct CandidateAcquirer {
                 guard let key else { continue }
                 setState(.predecessor(predecessorCID), for: key)
                 waitingOn[predecessorCID, default: []].insert(key)
+                seeded += 1
             }
         }
         for predecessorCID in durableDescendants.keys.sorted()
@@ -368,12 +384,17 @@ struct CandidateAcquirer {
                 attempt.state = .ready
                 record.attempts[ticket.key.rootCID] = attempt
                 records[ticket.key.blockCID] = record
-            } else if retainedCount() >= Self.retainedCapacity {
+            } else if retainedCount() >= Self.retainedCapacity,
+                      !evictOldestRetained() {
                 record.attempts[ticket.key.rootCID] = attempt
                 records[ticket.key.blockCID] = record
                 removeAttempt(ticket.key)
                 inventoryRestartNeeded = true
             } else {
+                // A successful eviction may have removed a sibling attempt of
+                // THIS block: re-read the record so the pre-eviction snapshot
+                // cannot resurrect the victim on write-back.
+                record = records[ticket.key.blockCID] ?? record
                 if attempt.expiresAt == nil {
                     attempt.expiresAt = now.advanced(
                         by: reason == .later
@@ -394,12 +415,16 @@ struct CandidateAcquirer {
                 record.attempts[ticket.key.rootCID] = attempt
                 records[ticket.key.blockCID] = record
                 removeAttempt(ticket.key)
-            } else if retainedCount() >= Self.retainedCapacity {
+            } else if retainedCount() >= Self.retainedCapacity,
+                      !evictOldestRetained() {
                 record.attempts[ticket.key.rootCID] = attempt
                 records[ticket.key.blockCID] = record
                 removeAttempt(ticket.key)
                 inventoryRestartNeeded = true
             } else {
+                // See the wait branch: never write a pre-eviction snapshot
+                // back over a same-block eviction.
+                record = records[ticket.key.blockCID] ?? record
                 record.predecessorCID = predecessorCID
                 attempt.expiresAt = nil
                 attempt.state = .predecessor(predecessorCID)
@@ -591,6 +616,34 @@ struct CandidateAcquirer {
         case .active, .predecessor:
             break
         }
+    }
+
+    /// Reclaims one retained slot by evicting the oldest waiting or parked
+    /// attempt. Retention is an operator-budget cache, never a protocol rule:
+    /// a live predecessor walk must always be able to park, and an evicted
+    /// obligation is re-derivable (durable recovery edges re-derive from the
+    /// accepted graph at restart; inventory restart re-supplies live waits).
+    private mutating func evictOldestRetained() -> Bool {
+        var victim: (key: AttemptKey, order: UInt64)?
+        for (blockCID, record) in records {
+            for (rootCID, attempt) in record.attempts {
+                switch attempt.state {
+                case .waiting, .predecessor:
+                    if victim == nil || attempt.order < victim!.order {
+                        victim = (
+                            AttemptKey(blockCID: blockCID, rootCID: rootCID),
+                            attempt.order
+                        )
+                    }
+                default:
+                    break
+                }
+            }
+        }
+        guard let victim else { return false }
+        removeAttempt(victim.key)
+        inventoryRestartNeeded = true
+        return true
     }
 
     private mutating func removeAttempt(_ key: AttemptKey) {
