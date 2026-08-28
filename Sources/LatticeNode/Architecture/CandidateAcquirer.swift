@@ -391,6 +391,10 @@ struct CandidateAcquirer {
                 removeAttempt(ticket.key)
                 inventoryRestartNeeded = true
             } else {
+                // A successful eviction may have removed a sibling attempt of
+                // THIS block: re-read the record so the pre-eviction snapshot
+                // cannot resurrect the victim on write-back.
+                record = records[ticket.key.blockCID] ?? record
                 if attempt.expiresAt == nil {
                     attempt.expiresAt = now.advanced(
                         by: reason == .later
@@ -418,6 +422,9 @@ struct CandidateAcquirer {
                 removeAttempt(ticket.key)
                 inventoryRestartNeeded = true
             } else {
+                // See the wait branch: never write a pre-eviction snapshot
+                // back over a same-block eviction.
+                record = records[ticket.key.blockCID] ?? record
                 record.predecessorCID = predecessorCID
                 attempt.expiresAt = nil
                 attempt.state = .predecessor(predecessorCID)
