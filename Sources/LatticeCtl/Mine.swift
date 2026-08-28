@@ -326,6 +326,12 @@ func runCoordinatorOnce(
             return .accepted(tip: object["tipCID"] as? String ?? "")
         case "noSolution", "stale":
             return .harmless
+        case "submitted" where object["disposition"] as? String == "carrier":
+            // The solution cleared only a child chain's target: the child
+            // advances, no parent block was mined, and the reward line is
+            // untouched. Routine on a merged-mining chain whose child target
+            // is easier than the parent's — never a refusal signal.
+            return .harmless
         case "submitted":
             // Accepted was handled above: a rejected submission behaves like
             // a refusal so the paired probe can heal an accept-then-crash.

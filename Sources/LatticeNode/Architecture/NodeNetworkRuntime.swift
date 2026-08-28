@@ -2681,12 +2681,33 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard takeAcceptedLeavesRequest(
                 releasingReservation: false
             ) != nil else { return }
-            let candidates = response.blockCIDs.map {
-                CandidateSeed(
-                    blockCID: $0,
+            // Skip blocks this node already accepted: a page of a peer's
+            // accepted set is almost entirely shared history, and re-admitting
+            // a known block costs a full (failing) admission attempt. Without
+            // this filter a node rebooting while behind churns O(chain
+            // history) expensive no-ops through the candidate lane, starving
+            // fresh candidates and parent-evidence work for minutes to hours —
+            // on a merged-mining child that starvation stalls the tip while
+            // every mining round mints another same-height sibling, flooding
+            // the network's accepted sets with garbage that other nodes then
+            // churn through in turn.
+            var candidates: [CandidateSeed] = []
+            for cid in response.blockCIDs {
+                if await process.hasAcceptedBlock(cid) { continue }
+                candidates.append(CandidateSeed(
+                    blockCID: cid,
                     package: nil,
                     provider: candidateProvider(peer)
+                ))
+            }
+            // The has-block checks suspend: re-validate the session so a page
+            // from a replaced connection cannot consume the fresh reservation.
+            guard isCurrentRuntime(generation: generation, process: process),
+                  overlayPeers[peer.key]?.sessionID == peer.sessionID else {
+                candidateAcquirer.releaseAcceptedLeafPage(
+                    AcceptedLeavesResponseMessage.maximumLeaves
                 )
+                return
             }
             guard candidateAcquirer.consumeAcceptedLeafPage(candidates) else {
                 assertionFailure("accepted-leaf page exceeded its reservation")

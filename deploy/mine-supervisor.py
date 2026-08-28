@@ -157,6 +157,13 @@ def main():
         if kind in ("noSolution", "stale"):
             refused_streak = 0
             continue
+        if kind == "submitted" and result.get("disposition") == "carrier":
+            # The solution cleared only a child chain's target: the child
+            # advances, no parent block was mined, and the reward line is
+            # untouched. Routine on a merged-mining chain whose child target
+            # is easier than the parent's -- never a refusal signal.
+            refused_streak = 0
+            continue
         if kind in ("workerFailed", "nodeFailed") or kind.startswith("exit="):
             # Worker or coordinator trouble proves nothing about the reward.
             # Retry in place forever; advancing here strands the batch.
