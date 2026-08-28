@@ -2700,13 +2700,19 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     provider: candidateProvider(peer)
                 ))
             }
-            // The has-block checks suspend: re-validate the session so a page
-            // from a replaced connection cannot consume the fresh reservation.
-            guard isCurrentRuntime(generation: generation, process: process),
-                  overlayPeers[peer.key]?.sessionID == peer.sessionID else {
+            // The has-block checks suspend: re-validate before consuming the
+            // reservation. A stopped/replaced RUNTIME must return WITHOUT
+            // releasing — reset() already rebuilt the acquirer (releasing here
+            // would trap the exact-count precondition, or free a restarted
+            // runtime's fresh reservation). Only a same-runtime session
+            // replacement still owns the reservation and must release it.
+            guard isCurrentRuntime(generation: generation, process: process)
+            else { return }
+            guard overlayPeers[peer.key]?.sessionID == peer.sessionID else {
                 candidateAcquirer.releaseAcceptedLeafPage(
                     AcceptedLeavesResponseMessage.maximumLeaves
                 )
+                serviceCandidateAcquirer()
                 return
             }
             guard candidateAcquirer.consumeAcceptedLeafPage(candidates) else {
