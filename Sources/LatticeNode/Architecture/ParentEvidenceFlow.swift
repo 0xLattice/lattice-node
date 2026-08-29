@@ -49,7 +49,13 @@ struct ParentEvidenceFlow {
     ) -> Append? {
         guard !failed.contains(session) else { return nil }
         guard operationCount + competingOperationCount < capacity else {
-            failed.insert(session)
+            // Capacity is LOCAL backpressure, never the session's fault: mark
+            // it backpressured (cleared by capacityBecameAvailable) so a
+            // retry succeeds once the lane drains. Marking it failed here
+            // poisoned the session permanently — every later append returned
+            // nil forever, severing eager delivery after the first congested
+            // moment.
+            backpressured.insert(session)
             return nil
         }
         nextToken &+= 1
