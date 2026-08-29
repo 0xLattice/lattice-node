@@ -658,7 +658,22 @@ final class LatticeCtlE2ETests: XCTestCase {
             )],
             nonce: 0
         )
-        try await submit(withdrawal, rpc: stallsRPC, label: "grandchild-withdrawal")
+        // The grandchild validates the withdrawal against its PARENT-chain
+        // receipt state, which lags the receipt's mining on the middle chain
+        // until a subsequent carrier links it — the node correctly fail-closed
+        // 400s a withdrawal it cannot yet prove. Retry the submit until the
+        // grandchild's parent view includes the receipt (the recurring
+        // 2-core-runner flake was this race).
+        try await waitFor("grandchild accepts the withdrawal", seconds: 240) {
+            do {
+                try await self.submit(
+                    withdrawal, rpc: stallsRPC, label: "grandchild-withdrawal"
+                )
+                return true
+            } catch {
+                return false
+            }
+        }
         try await waitFor("withdrawal mined on the grandchild", seconds: 300) {
             await drained(stallsRPC)
         }
