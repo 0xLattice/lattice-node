@@ -34,6 +34,43 @@ final class ParentEvidenceFlowTests: XCTestCase {
         flow.finishReservation(for: session)
     }
 
+    func testCapacityRefusalIsBackpressureNotFailure() throws {
+        // A lane at capacity is LOCAL congestion: the session must stay
+        // usable, and an append must succeed again once the lane drains.
+        // (Marking the session failed here poisoned it permanently: every
+        // later append returned nil forever, severing eager delivery after
+        // the first congested moment.)
+        let session = session(byte: 0x43)
+        var flow = ParentEvidenceFlow()
+        XCTAssertNil(flow.beginAppend(
+            for: session,
+            competingOperationCount: 8,
+            capacity: 8
+        ))
+        // Retry after the lane drains: the refusal was not a failure.
+        let retried = try XCTUnwrap(flow.beginAppend(
+            for: session,
+            competingOperationCount: 0,
+            capacity: 8
+        ))
+        XCTAssertFalse(flow.finish(
+            token: retried.token,
+            result: .handled,
+            for: session
+        ))
+        // The capacity refusal reads as backpressure for reservations, and
+        // clears through the same capacity signal as post-admission
+        // backpressure.
+        XCTAssertNil(flow.beginAppend(
+            for: session,
+            competingOperationCount: 8,
+            capacity: 8
+        ))
+        XCTAssertFalse(flow.allowsReservation(for: session, after: .handled))
+        flow.capacityBecameAvailable(for: session)
+        XCTAssertTrue(flow.allowsReservation(for: session, after: .handled))
+    }
+
     func testUnavailabilityStopsSequenceWithoutFailureOrBackpressure() throws {
         let session = session(byte: 0x61)
         var flow = ParentEvidenceFlow()
