@@ -1650,6 +1650,18 @@ public actor NodeNetworkRuntime: IvyDelegate {
         )
     }
 
+    /// Outcome of scheduling a batch of parent-announced evidence. LOCAL
+    /// backpressure is deliberately distinct from rejection: recycling the
+    /// authenticated parent link because THIS node's evidence lane is busy
+    /// severs the only eager delivery path and caps recovery at one scan per
+    /// reconnect — the announcement is droppable (the durable index re-serves
+    /// it), the session is not.
+    private enum ParentEvidenceAppend {
+        case scheduled(Task<ParentEvidenceResult, Never>)
+        case backpressured
+        case rejected
+    }
+
     private func appendParentEvidence(
         _ summaries: [IssuedChildEvidenceSummary],
         sourceID: String,
@@ -1657,11 +1669,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         from peer: AuthenticatedPeer,
         generation: UInt64,
         process: ChainProcess
-    ) -> Task<ParentEvidenceResult, Never>? {
-        guard !summaries.isEmpty else { return nil }
+    ) -> ParentEvidenceAppend {
+        guard !summaries.isEmpty else { return .backpressured }
         guard isCurrentRuntime(generation: generation, process: process),
               let session = parentEvidenceSession(for: peer) else {
-            return nil
+            return .rejected
         }
         let activePortable = activeEvidenceVolumes.lazy.filter {
             $0.plane == .overlay
@@ -1671,7 +1683,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             competingOperationCount: portableEvidenceWork.count
                 + activePortable,
             capacity: Self.maximumEvidenceCandidates
-        ) else { return nil }
+        ) else { return .backpressured }
         let task = Task { [weak self] in
             guard let self else { return ParentEvidenceResult.failed }
             var result = if let predecessor = append.predecessor {
@@ -1705,7 +1717,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             token: append.token,
             for: session
         )
-        return task
+        return .scheduled(task)
     }
 
     private func finishParentEvidence(
@@ -3504,20 +3516,40 @@ public actor NodeNetworkRuntime: IvyDelegate {
         if response.entries.isEmpty {
             tail = nil
         } else {
-            guard let appended = appendParentEvidence(
+            switch appendParentEvidence(
                 response.entries,
                 sourceID: response.sourceID,
                 advanceScan: true,
                 from: peer,
                 generation: generation,
                 process: process
-            ) else {
+            ) {
+            case .scheduled(let appended):
+                tail = appended
+            case .backpressured:
+                // The evidence lane is momentarily full. Keep the session and
+                // retry THIS page after a beat — the scan must make progress
+                // through congestion, not restart from a fresh reconnect.
+                Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: Self.nanoseconds(
+                        self?.planeConfigurations.hierarchy.requestTimeout
+                            ?? .seconds(15)
+                    ))
+                    await self?.requestEvidenceIndex(
+                        sourceID: response.sourceID,
+                        cursor: response.cursor,
+                        through: response.through,
+                        generation: generation,
+                        process: process
+                    )
+                }
+                return
+            case .rejected:
                 Task { [hierarchy] in
                     await hierarchy.recycleSession(ifCurrent: peer)
                 }
                 return
             }
-            tail = appended
         }
         Task { [weak self] in
             guard let self else { return }
@@ -3809,7 +3841,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 generation: generation,
                 process: process
             )
-            if handled == nil {
+            // A backpressured announcement is simply dropped: the parent's
+            // durable index re-serves it on the next scan. Only a rejected
+            // session (stale/unknown) is recycle-worthy.
+            if case .rejected = handled {
                 await hierarchy.recycleSession(ifCurrent: peer)
             }
 
