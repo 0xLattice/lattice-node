@@ -97,12 +97,12 @@ head: the competing fringe nearest the head is the last thing released. An
 adversary can still consume the budget — but only with PoW-valid blocks, so
 not cheaply — and can never make the node release what it most needs first;
 the ordering guarantees the retained set is always the most reorg-relevant
-slice of whatever budget the operator chose. A branch just re-acquired is deprioritized for eviction — but this
-grace changes eviction *order* only; it never raises the operator's ceiling,
-or forced re-acquisitions would become remote control of the budget instead
-of the horizon. The success metric is net exchanged volume, not retained
-bytes; an eviction policy that induces evict/re-acquire thrash has failed
-even if the disk stays small.
+slice of whatever budget the operator chose. A branch just re-acquired is
+deprioritized for eviction — but this grace changes eviction *order* only;
+it never raises the operator's ceiling, or forced re-acquisitions would
+become remote control of the budget instead of the horizon. The success
+metric is net exchanged volume, not retained bytes; an eviction policy that
+induces evict/re-acquire thrash has failed even if the disk stays small.
 
 ### Cross-chain obligations are not junk
 
