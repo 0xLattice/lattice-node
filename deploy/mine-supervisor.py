@@ -151,6 +151,7 @@ def main():
             except Exception:
                 continue
         kind = result.get("result", "exit=%d" % run.returncode)
+        log("round: %s %s" % (kind, result.get("disposition")))
         if kind == "submitted" and result.get("accepted"):
             log("reward %d accepted tip=%s"
                 % (index, str(result.get("tipCID", ""))[:24]))
