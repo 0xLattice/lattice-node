@@ -17,7 +17,8 @@ forever:
 - **Acquisition effort.** A bare advertised CID gives a node no way to decline
   work, so every hoarded sibling costs every peer a content fetch, an evidence
   solicitation, and a full admission attempt — competing for the same bounded
-  lanes that deliver live blocks.
+  lanes that deliver live blocks. (This surface is addressed by the companion
+  direction at the end, not by the present concept.)
 
 Two distinct causes deserve separation. Sibling *production* is driven by
 block interval versus propagation-and-adoption latency; retention does not
@@ -32,17 +33,20 @@ perpetuation only.
 **The operator's eviction choice is that node's finality.** There is no
 protocol finality and no network constant — consensus remains pure heaviest
 selection, and exported work can always return. Each operator instead chooses
-how much losing-fork state their node retains, and that choice bounds — for
-that node only — how *expensively* it follows a deep reorg, never *whether*
-it will:
+how much losing-fork state their node keeps materialized, and that choice
+bounds — for that node only — how *expensively* it can act on a deep reorg,
+never *whether* its fork choice follows one:
 
-- Within the operator's retention horizon, competing forks are held locally
-  and fork choice switches between them freely.
-- Below the horizon, losing forks are evicted. The node has de facto
-  finalized its own view to that depth in the pruning-node sense: it is not
-  a guarantee about outcomes, only a bound on what the node keeps on hand to
-  reverse cheaply. No external consumer (explorer, replica, wallet) may treat
-  any node's horizon as a confirmation depth.
+- Within the operator's retention horizon, a competing fork can be adopted
+  without re-acquiring anything: the node holds it in full.
+- Below the horizon, losing forks are evicted. The node's head may still
+  move to an evicted branch — it kept the weight facts (see below) — but
+  *adopting* that head requires re-acquiring the branch from the network
+  first. "Finality" is the operator-facing name for this materialization
+  boundary, in the pruning-node sense: it is not a guarantee about outcomes,
+  only a bound on what the node keeps on hand to reverse cheaply. No
+  external consumer (explorer, replica, wallet) may treat any node's horizon
+  as a confirmation depth.
 - A deeper reorg remains protocol-legal and followable: the heavier branch
   re-enters through ordinary verified acquisition from any peer that kept it.
   Eviction removes willingness to store, never validity. Eviction is never
@@ -57,20 +61,28 @@ re-examine.
 
 Fork choice weighs whole subtrees, so a losing sibling is not weight-neutral:
 its work contributes to every ancestor's total. If eviction silently removed
-weight the node had already counted, nodes would compute different heaviest
-branches purely as a function of their retention policy, and the
-equal-work-holds-incumbent rule would make that split sticky — the network
-would partition along retention class with no attacker and no protocol
-change. Therefore:
+weight the node had already counted, nodes could compute different heaviest
+branches purely as a function of their retention policy — and where the
+omitted weight is pivotal, the equal-work-holds-incumbent rule makes that
+split sticky: a partition along retention class with no attacker and no
+protocol change. Therefore:
 
 - **Eviction discards stored bytes and service willingness, never verified
   work facts or graph edges the node has already counted.** A node's fork
   choice must be identical to that of a node which retained everything it
   has ever verified.
+- The retained skeleton of work facts and edges is consequently permanent
+  and grows with the total DAG, not the chain. Bounding *it* is a different
+  problem this design deliberately does not solve — and no future
+  optimization may solve it by quietly dropping counted edges.
 - The effect of an eviction is immediate and identical before and after a
   restart; no node's head may change across a restart without new facts.
 - Retention changes what a node stores and serves, never what it produces:
   a miner-serving node templates on the same head regardless of its horizon.
+- A node may select a head it has not yet re-acquired. In that interval it
+  stays honest about the gap: it continues serving its last materialized
+  view, never wedges waiting for the network, and never presents
+  unmaterialized or unverified state as current.
 
 ### The adversary must not set the horizon
 
@@ -79,23 +91,27 @@ budget filled in arrival order collapses the horizon exactly when churn is
 highest. Eviction priority is therefore ordered by distance from the current
 head: the competing fringe nearest the head is the last thing released, and
 no remote party can shrink another node's effective horizon by producing
-volume. A branch just re-acquired is not immediately re-evictable — the
-success metric is net exchanged volume, not retained bytes; an eviction
-policy that induces evict/re-acquire thrash has failed even if the disk
-stays small.
+volume. A branch just re-acquired is deprioritized for eviction — but this
+grace changes eviction *order* only; it never raises the operator's ceiling,
+or forced re-acquisitions would become remote control of the budget instead
+of the horizon. The success metric is net exchanged volume, not retained
+bytes; an eviction policy that induces evict/re-acquire thrash has failed
+even if the disk stays small.
 
 ### Cross-chain obligations are not junk
 
-A chain's retention policy governs only state no other chain has committed
-to. Child blocks bind themselves to parent facts — inherited-weight evidence,
+Child blocks bind themselves to parent facts — inherited-weight evidence,
 and the carrier's pre-state, where the carrier may be a *non-canonical*
 parent block (parent canonicity alone can never change child validity). A
 parent that evicted those facts as "losing-fork junk" would re-introduce
-canonicity-dependence through availability. Evidence and carrier pre-state
-that a tracked child has bound itself to are child-chain obligations,
-retained independently of the parent's own fork choice. This means a
-meaningful fraction of the parent evidence archive is load-bearing for
-someone else and is not reclaimable by this design.
+canonicity-dependence through availability. So evidence and carrier
+pre-state that a child the parent *tracks* has bound itself to are
+child-chain obligations, retained independently of the parent's own fork
+choice. For children the parent does not track, no such promise is possible;
+those chains get the general guarantee only — their facts survive as long as
+someone chooses to keep them. This means a meaningful fraction of the parent
+evidence archive is load-bearing for someone else and is not reclaimable by
+this design.
 
 ### You serve what you keep
 
@@ -115,10 +131,12 @@ honestly offer. Two consequences must be stated:
 - A query for evicted data answers "not retained here" — it never errors and
   never asserts nonexistence.
 
-Operator retention governs *non-canonical* state. The canonical
-genesis-to-tip closure is a distinct axis: fresh nodes re-execute from
-genesis by design, so joinability depends on canonical closure remaining
-available somewhere, and no local knob decides that for the network.
+Operator retention governs *non-canonical* state only; this design never
+evicts canonical genesis-to-tip closure, and whether canonical pruning is
+ever offered is out of scope here. That closure is a distinct axis: fresh
+nodes re-execute from genesis by design, so joinability depends on canonical
+closure remaining available somewhere, and no local knob decides that for
+the network.
 
 ## Companion direction (separate design): declining work cheaply
 
