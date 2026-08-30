@@ -77,21 +77,27 @@ protocol change. Therefore:
   optimization may solve it by quietly dropping counted edges.
 - The effect of an eviction is immediate and identical before and after a
   restart; no node's head may change across a restart without new facts.
-- Retention changes what a node stores and serves, never what it produces:
-  a miner-serving node templates on the same head regardless of its horizon.
+- Retention changes what a node stores and serves, never which head it
+  *selects*: a miner-serving node selects the same head regardless of its
+  horizon.
 - A node may select a head it has not yet re-acquired. In that interval it
   stays honest about the gap: it continues serving its last materialized
   view, never wedges waiting for the network, and never presents
-  unmaterialized or unverified state as current.
+  unmaterialized or unverified state as current. It also produces nothing on
+  an unmaterialized head — templating requires that head's state, and
+  silently templating on a stale head would make production a function of
+  the horizon.
 
 ### The adversary must not set the horizon
 
 Losing-fork volume is produced by whoever finds it cheapest to produce, so a
 budget filled in arrival order collapses the horizon exactly when churn is
 highest. Eviction priority is therefore ordered by distance from the current
-head: the competing fringe nearest the head is the last thing released, and
-no remote party can shrink another node's effective horizon by producing
-volume. A branch just re-acquired is deprioritized for eviction — but this
+head: the competing fringe nearest the head is the last thing released. An
+adversary can still consume the budget — but only with PoW-valid blocks, so
+not cheaply — and can never make the node release what it most needs first;
+the ordering guarantees the retained set is always the most reorg-relevant
+slice of whatever budget the operator chose. A branch just re-acquired is deprioritized for eviction — but this
 grace changes eviction *order* only; it never raises the operator's ceiling,
 or forced re-acquisitions would become remote control of the budget instead
 of the horizon. The success metric is net exchanged volume, not retained
