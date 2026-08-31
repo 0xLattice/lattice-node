@@ -350,6 +350,10 @@ struct CandidateAcquirer {
             record.providers.removeValue(forKey: provider.publicKey)
             record.providerRevision &+= 1
         }
+        // Persist the removal now: the wait/predecessor branches re-read the
+        // stored record (post-eviction safety), which would otherwise revive
+        // the deficient providers — and hand them to the predecessor seed.
+        records[ticket.key.blockCID] = record
         active = nil
 
         switch resolution {
@@ -435,6 +439,20 @@ struct CandidateAcquirer {
                     blockCID: predecessorCID,
                     package: nil
                 ), retainingOverflow: true)
+                // Carry the descendant's providers onto the predecessor seed:
+                // a provider-less candidate can only be fetched by dialing a
+                // pin holder, which is unreachable when the sole holder is
+                // behind NAT and dials us. Whoever supplied the descendant is
+                // the best-known holder of its ancestry.
+                for provider in record.providers.values.sorted(by: {
+                    $0.publicKey < $1.publicKey
+                }) {
+                    _ = observe(Seed(
+                        blockCID: predecessorCID,
+                        package: nil,
+                        provider: provider
+                    ), retainingOverflow: true)
+                }
                 fillReadyCapacity()
                 return true
             }
@@ -469,9 +487,24 @@ struct CandidateAcquirer {
                 guard attempt.expiresAt != nil else { continue }
                 if deadline <= now {
                     if waitingOn[blockCID]?.isEmpty == false {
-                        attempt.expiresAt = nil
-                        record.attempts[rootCID] = attempt
-                        inventoryRestartNeeded = true
+                        if reason == .evidence {
+                            // The evidence solicitation is a lossy single
+                            // round-trip fired only from inside an admission
+                            // attempt: the locate send, the remote reply, and
+                            // the session it rides can each drop silently. A
+                            // depended-upon candidate must therefore re-enter
+                            // admission (re-firing the solicitation) when its
+                            // window expires — fossilizing it would wedge the
+                            // whole successor chain behind one lost message.
+                            // A fresh window is armed at the next park.
+                            attempt.expiresAt = nil
+                            attempt.state = .ready
+                            record.attempts[rootCID] = attempt
+                        } else {
+                            attempt.expiresAt = nil
+                            record.attempts[rootCID] = attempt
+                            inventoryRestartNeeded = true
+                        }
                     } else {
                         record.attempts.removeValue(forKey: rootCID)
                     }
