@@ -13,7 +13,12 @@ struct CandidateProvider: Hashable, Sendable {
 /// runtime as effects of `next()`.
 struct CandidateAcquirer {
     static let readyCapacity = 1_024
-    static let retainedCapacity = 64
+    // Must exceed the forward-range working set (rangeSyncMaxPagesAhead
+    // pages x 64 CIDs, each occupying up to two retained slots in sequence)
+    // or catch-up thrashes: min-order eviction discards exactly the
+    // tip-adjacent parks the connect cascade needs next, collapsing
+    // throughput to one block per watchdog kick.
+    static let retainedCapacity = 256
 
     enum WaitReason: Equatable, Sendable {
         case evidence
