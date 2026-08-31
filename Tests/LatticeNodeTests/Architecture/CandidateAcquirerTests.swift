@@ -678,4 +678,32 @@ final class CandidateAcquirerTests: XCTestCase {
             "the predecessor seed must inherit the descendant's providers"
         )
     }
+
+    func testDeficientProviderIsNotInheritedByThePredecessorSeed() throws {
+        // Deficient-provider removal must persist through the predecessor
+        // branch's stored-record re-read, or the known-bad provider is both
+        // revived on the descendant and copied onto the predecessor seed.
+        let good = provider("good-supplier", session: 1)
+        let bad = provider("bad-supplier", session: 2)
+        var acquirer = CandidateAcquirer()
+        XCTAssertTrue(acquirer.observe(.init(
+            blockCID: "descendant",
+            package: nil,
+            provider: good
+        )).accepted)
+        _ = acquirer.observe(.init(
+            blockCID: "descendant",
+            package: nil,
+            provider: bad
+        ))
+        let descendant = try XCTUnwrap(acquirer.next())
+        XCTAssertTrue(acquirer.complete(
+            descendant.ticket,
+            resolution: .predecessor("hole"),
+            deficientProviders: [bad]
+        ))
+        let hole = try XCTUnwrap(acquirer.next())
+        XCTAssertEqual(hole.blockCID, "hole")
+        XCTAssertEqual(hole.providers, [good])
+    }
 }

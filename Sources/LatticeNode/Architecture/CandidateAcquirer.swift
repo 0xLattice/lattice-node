@@ -350,6 +350,10 @@ struct CandidateAcquirer {
             record.providers.removeValue(forKey: provider.publicKey)
             record.providerRevision &+= 1
         }
+        // Persist the removal now: the wait/predecessor branches re-read the
+        // stored record (post-eviction safety), which would otherwise revive
+        // the deficient providers — and hand them to the predecessor seed.
+        records[ticket.key.blockCID] = record
         active = nil
 
         switch resolution {
