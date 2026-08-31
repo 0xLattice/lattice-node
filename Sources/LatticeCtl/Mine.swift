@@ -157,6 +157,11 @@ struct Mine: AsyncParsableCommand {
                     refusedStreak = 0
                 case .harmless:
                     refusedStreak = 0
+                case .carrier:
+                    // A child chain advanced; no reward consumed. The
+                    // windowed retarget finds the target block time on its
+                    // own — no miner-side pacing needed.
+                    refusedStreak = 0
                 case .workerTrouble(let detail):
                     log("reward \(cursor) retrying after \(detail)")
                     try await Task.sleep(for: .seconds(5))
@@ -262,6 +267,7 @@ func prepareRewardsFile(
 enum CoordinatorOutcome {
     case accepted(tip: String)
     case harmless
+    case carrier
     case refusal
     case workerTrouble(String)
 }
@@ -331,7 +337,7 @@ func runCoordinatorOnce(
             // advances, no parent block was mined, and the reward line is
             // untouched. Routine on a merged-mining chain whose child target
             // is easier than the parent's — never a refusal signal.
-            return .harmless
+            return .carrier
         case "submitted":
             // Accepted was handled above: a rejected submission behaves like
             // a refusal so the paired probe can heal an accept-then-crash.

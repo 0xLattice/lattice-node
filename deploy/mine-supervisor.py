@@ -25,6 +25,9 @@ Configuration (environment):
   REWARD_BATCH  default /var/lib/lattice/reward-batch.jsonl
   CURSOR_FILE   default /var/lib/lattice/reward-cursor
   LOG_FILE      default /var/log/lattice-mining.log
+  CARRIER_PACE_SECONDS  optional sleep after a carrier round, default 0
+                        (an operator damper; the windowed retarget finds the
+                        ~target-block-time equilibrium on its own)
 """
 import json
 import os
@@ -45,6 +48,7 @@ REWARD_BATCH = os.environ.get(
     "REWARD_BATCH", "/var/lib/lattice/reward-batch.jsonl"
 )
 CURSOR_FILE = os.environ.get("CURSOR_FILE", "/var/lib/lattice/reward-cursor")
+CARRIER_PACE_SECONDS = float(os.environ.get("CARRIER_PACE_SECONDS", "0"))
 LOG_FILE = os.environ.get("LOG_FILE", "/var/log/lattice-mining.log")
 REWARDS_FILE = CURSOR_FILE + ".current-rewards.json"
 
@@ -147,6 +151,7 @@ def main():
             except Exception:
                 continue
         kind = result.get("result", "exit=%d" % run.returncode)
+        log("round: %s %s" % (kind, result.get("disposition")))
         if kind == "submitted" and result.get("accepted"):
             log("reward %d accepted tip=%s"
                 % (index, str(result.get("tipCID", ""))[:24]))
@@ -162,7 +167,16 @@ def main():
             # advances, no parent block was mined, and the reward line is
             # untouched. Routine on a merged-mining chain whose child target
             # is easier than the parent's -- never a refusal signal.
+            #
+            # Optional operator damper (default off): the windowed retarget
+            # converges to the chain's target block time on its own — fast
+            # round-bound windows walk the target down until hashing time
+            # dominates, then one or two windows settle the equilibrium.
+            # Pacing exists for operators who prefer to pin a chain's cadence
+            # at an easy target instead of letting difficulty find hashrate.
             refused_streak = 0
+            if CARRIER_PACE_SECONDS > 0:
+                time.sleep(CARRIER_PACE_SECONDS)
             continue
         if kind in ("workerFailed", "nodeFailed") or kind.startswith("exit="):
             # Worker or coordinator trouble proves nothing about the reward.
