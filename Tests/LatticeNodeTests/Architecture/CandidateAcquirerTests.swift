@@ -353,7 +353,7 @@ final class CandidateAcquirerTests: XCTestCase {
 
         let predecessor = try XCTUnwrap(acquirer.next())
         XCTAssertEqual(predecessor.blockCID, "P")
-        XCTAssertTrue(predecessor.providers.isEmpty)
+        XCTAssertEqual(predecessor.providers, [exact])
         XCTAssertTrue(acquirer.complete(
             predecessor.ticket,
             resolution: .predecessor("Q")
@@ -594,5 +594,88 @@ final class CandidateAcquirerTests: XCTestCase {
             ))
         }
         XCTAssertTrue(sawLivePredecessor)
+    }
+
+    func testExpiredEvidenceWaitWithDependentsReentersAdmission() throws {
+        // The evidence solicitation is a lossy single round-trip fired only
+        // from inside an admission attempt. A depended-upon candidate whose
+        // wait window expires must become ready again (re-firing the
+        // solicitation on its next admission) — fossilizing it wedges the
+        // whole successor chain behind one lost message.
+        var acquirer = CandidateAcquirer(retryWindow: .seconds(1))
+        XCTAssertTrue(acquirer.observe(.init(
+            blockCID: "hole",
+            package: nil
+        )).accepted)
+        let start = ContinuousClock.now
+        let hole = try XCTUnwrap(acquirer.next())
+        XCTAssertTrue(acquirer.complete(
+            hole.ticket,
+            resolution: .wait(.evidence),
+            now: start
+        ))
+        // A successor parks on the hole, making it depended-upon.
+        XCTAssertTrue(acquirer.observe(.init(
+            blockCID: "successor",
+            package: nil
+        )).accepted)
+        while let next = acquirer.next() {
+            if next.blockCID == "successor" {
+                XCTAssertTrue(acquirer.complete(
+                    next.ticket,
+                    resolution: .predecessor("hole"),
+                    now: start
+                ))
+                break
+            }
+            XCTAssertTrue(acquirer.complete(
+                next.ticket,
+                resolution: .wait(.evidence),
+                now: start
+            ))
+        }
+        // Window expires: the depended-upon evidence wait re-readies instead
+        // of fossilizing.
+        acquirer.retry(now: start.advanced(by: .seconds(2)))
+        let retried = try XCTUnwrap(
+            acquirer.next(),
+            "expired depended-upon evidence wait must re-enter admission"
+        )
+        XCTAssertEqual(retried.blockCID, "hole")
+        // The renewed park arms a FRESH window, so the cycle is unbounded:
+        // park again, expire again, re-ready again.
+        XCTAssertTrue(acquirer.complete(
+            retried.ticket,
+            resolution: .wait(.evidence),
+            now: start.advanced(by: .seconds(2))
+        ))
+        acquirer.retry(now: start.advanced(by: .seconds(4)))
+        XCTAssertEqual(acquirer.next()?.blockCID, "hole")
+    }
+
+    func testPredecessorSeedInheritsDescendantProviders() throws {
+        // A provider-less seed can only be fetched by dialing a pin holder —
+        // unreachable when the sole holder is behind NAT and dials us. The
+        // predecessor walk must carry the descendant's providers onto the
+        // seed it creates.
+        let supplier = provider("descendant-supplier", session: 7)
+        var acquirer = CandidateAcquirer()
+        XCTAssertTrue(acquirer.observe(.init(
+            blockCID: "descendant",
+            package: nil,
+            provider: supplier
+        )).accepted)
+        let descendant = try XCTUnwrap(acquirer.next())
+        XCTAssertTrue(acquirer.complete(
+            descendant.ticket,
+            resolution: .predecessor("hole")
+        ))
+        let hole = try XCTUnwrap(acquirer.next())
+        XCTAssertEqual(hole.blockCID, "hole")
+        XCTAssertEqual(
+            hole.providers,
+            [supplier],
+            "the predecessor seed must inherit the descendant's providers"
+        )
     }
 }
