@@ -556,7 +556,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private var portableEvidenceOrder: [EvidenceVolumeLease] = []
     private var portableEvidenceWork:
         [EvidenceVolumeLease: PortableEvidenceWork] = [:]
-    private var portableEvidenceRecycle: [PeerKey: AuthenticatedPeer] = [:]
     private var portableEvidenceWorker: Task<Void, Never>?
     /// Orders parent evidence and reservation transfer within one authenticated
     /// session. Transport effects remain in this actor.
@@ -948,7 +947,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         portableEvidenceWorker = nil
         portableEvidenceOrder.removeAll()
         portableEvidenceWork.removeAll()
-        portableEvidenceRecycle.removeAll()
         parentEvidence.reset()
         let pendingChildCandidates = Array(self.pendingChildCandidates.values)
         self.pendingChildCandidates.removeAll()
@@ -3318,8 +3316,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard portableEvidenceWork.count + parentEvidence.activeOperationCount
                 + activePortable
                 < Self.maximumEvidenceCandidates - 1 else {
-            portableEvidenceRecycle[peer.key] = peer
-            startPortableEvidenceWorker()
+            // Overflow drops the item, never the session: for a NATed
+            // follower the announcing peer may be the ONLY session, and a
+            // catch-up burst would tear down its own evidence source. The
+            // dropped item is re-solicited when the waiting candidate's
+            // window expires and re-enters admission.
             return true
         }
         portableEvidenceWork[lease] = work
@@ -3338,7 +3339,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private func drainPortableEvidence() async {
         defer {
             portableEvidenceWorker = nil
-            if !portableEvidenceOrder.isEmpty || !portableEvidenceRecycle.isEmpty {
+            if !portableEvidenceOrder.isEmpty {
                 startPortableEvidenceWorker()
             }
         }
@@ -3355,11 +3356,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
             if !handled {
                 await overlay.recycleSession(ifCurrent: work.peer)
             }
-        }
-        let recycle = Array(portableEvidenceRecycle.values)
-        portableEvidenceRecycle.removeAll()
-        for peer in recycle {
-            await overlay.recycleSession(ifCurrent: peer)
         }
     }
 
