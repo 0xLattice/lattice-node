@@ -13,12 +13,15 @@ struct CandidateProvider: Hashable, Sendable {
 /// runtime as effects of `next()`.
 struct CandidateAcquirer {
     static let readyCapacity = 1_024
-    // Must exceed the forward-range working set (rangeSyncMaxPagesAhead
-    // pages x 64 CIDs, each occupying up to two retained slots in sequence)
-    // or catch-up thrashes: min-order eviction discards exactly the
-    // tip-adjacent parks the connect cascade needs next, collapsing
-    // throughput to one block per watchdog kick.
-    static let retainedCapacity = 256
+    // Must exceed the forward-range working set or catch-up thrashes:
+    // min-order eviction discards exactly the tip-adjacent parks the
+    // connect cascade needs next, collapsing throughput to one block per
+    // watchdog kick. The set can reach ~(rangeSyncMaxPagesAhead + 1) pages
+    // x 64 CIDs x 2 simultaneous retained slots per block (the rootless
+    // .predecessor park is NOT superseded by the rooted evidence attempt,
+    // which then parks on the same predecessor) ~= 384; 512 leaves real
+    // headroom for the announcement descent on top.
+    static let retainedCapacity = 512
 
     enum WaitReason: Equatable, Sendable {
         case evidence
@@ -167,12 +170,22 @@ struct CandidateAcquirer {
                 seeded += 1
             }
         }
+        // The missing-predecessor frontier is ready-pool work and respects
+        // the same budget: an uncapped flood of stale roots would exhaust
+        // the ready pool from second zero and reject live observes. The
+        // remainder re-derives through inventory recovery.
+        var frontierSeeded = 0
         for predecessorCID in durableDescendants.keys.sorted()
             where !descendantCIDs.contains(predecessorCID) {
+            guard frontierSeeded < Self.retainedCapacity else {
+                inventoryRestartNeeded = true
+                break
+            }
             _ = observe(Seed(
                 blockCID: predecessorCID,
                 package: nil
             ), retainingOverflow: true)
+            frontierSeeded += 1
         }
     }
 
