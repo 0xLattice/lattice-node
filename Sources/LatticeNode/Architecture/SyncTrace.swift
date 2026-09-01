@@ -17,7 +17,7 @@ enum SyncTrace {
         if value == "1" { return FileHandle.standardError }
         let path = "\(value).\(ProcessInfo.processInfo.processIdentifier)"
         if !FileManager.default.fileExists(atPath: path) {
-            FileManager.default.createFile(atPath: path, contents: nil)
+            _ = FileManager.default.createFile(atPath: path, contents: nil)
         }
         guard let handle = FileHandle(forWritingAtPath: path) else {
             return FileHandle.standardError
