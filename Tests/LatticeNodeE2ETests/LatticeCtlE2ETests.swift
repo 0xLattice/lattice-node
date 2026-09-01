@@ -641,7 +641,20 @@ final class LatticeCtlE2ETests: XCTestCase {
             )],
             nonce: 0
         )
-        try await submit(receipt, rpc: marketRPC, label: "child-receipt")
+        // Same fail-closed race as the withdrawal below: the middle chain
+        // validates the receipt against its recorded grandchild state, which
+        // lags the deposit's mining until a carrier links it — retry until
+        // the middle chain's child view includes the deposit.
+        try await waitFor("middle chain accepts the receipt", seconds: 240) {
+            do {
+                try await self.submit(
+                    receipt, rpc: marketRPC, label: "child-receipt"
+                )
+                return true
+            } catch {
+                return false
+            }
+        }
         try await waitFor("receipt mined on the middle chain", seconds: 240) {
             await drained(marketRPC)
         }
