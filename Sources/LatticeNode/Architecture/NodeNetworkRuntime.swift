@@ -3171,8 +3171,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         generation: UInt64,
         process: ChainProcess
     ) async {
-        guard !configuration.address.isNexus,
-              let package = try? await process
+        guard !configuration.address.isNexus else { return }
+        guard let package = try? await process
                 .recoveredAuthenticatedChildPackage(for: request.childCID),
               let edge = await DirectChildEdge.derive(from: package.package.proof),
               let edgeCID = edge.edgeCID,
@@ -3180,8 +3180,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 scope: .incomingCarrier,
                 edgeCID: edgeCID,
                 rootCID: package.package.proof.rootCID
-              ),
-              isCurrentRuntime(generation: generation, process: process),
+              )
+        else {
+            // A silent miss here on a block only this node can prove is a
+            // chain-liveness event: no follower can ever cross that block.
+            SyncTrace.log("locate-serve \(request.childCID) miss")
+            return
+        }
+        SyncTrace.log("locate-serve \(request.childCID) hit")
+        guard isCurrentRuntime(generation: generation, process: process),
               overlayPeers[peer.key]?.sessionID == peer.sessionID,
               let payload = try? PortableAttachmentAvailableMessage(
                 edgeCID: edgeCID,
@@ -3233,10 +3240,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard isCurrentRuntime(generation: generation, process: process) else {
                 return
             }
-            _ = await overlay.sendMessage(
+            let sent = await overlay.sendMessage(
                 to: peer,
                 topic: NodeNetworkTopic.portableAttachmentLocateRequest,
                 payload: payload
+            )
+            SyncTrace.log(
+                "locate-request \(childCID) "
+                    + "peer=\(peer.key.hex.prefix(8)) sent=\(sent)"
             )
         }
     }
@@ -3321,6 +3332,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // catch-up burst would tear down its own evidence source. The
             // dropped item is re-solicited when the waiting candidate's
             // window expires and re-enters admission.
+            SyncTrace.log(
+                "evidence-overflow drop \(summary.attachmentCID)"
+            )
             return true
         }
         portableEvidenceWork[lease] = work
@@ -3352,6 +3366,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 from: work.peer,
                 generation: work.generation,
                 process: work.process
+            )
+            SyncTrace.log(
+                "evidence-recover \(work.summary.attachmentCID) "
+                    + "handled=\(handled)"
             )
             if !handled {
                 await overlay.recycleSession(ifCurrent: work.peer)
@@ -4461,6 +4479,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         resolution: CandidateAcquirer.Resolution,
         deficientProviders: Set<CandidateProvider> = []
     ) {
+        SyncTrace.log(
+            "complete \(candidate.blockCID) \(resolution) "
+                + "deficient=\(deficientProviders.count)"
+        )
         _ = candidateAcquirer.complete(
             candidate.ticket,
             resolution: resolution,
@@ -5093,6 +5115,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard isCurrentRuntime(generation: generation, process: process),
               rangeSync == nil,
               overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+        SyncTrace.log(
+            "range-sync start target=\(targetHeight) "
+                + "peer=\(peer.key.hex.prefix(8))"
+        )
         rangeSync = RangeSyncState(
             peer: peer,
             requestID: 0,
@@ -5334,6 +5360,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
 
     private func clearRangeSync() {
+        SyncTrace.log("range-sync clear")
         rangeSync?.responseTimeout?.cancel()
         rangeSync?.progressTimeout?.cancel()
         rangeSync = nil
