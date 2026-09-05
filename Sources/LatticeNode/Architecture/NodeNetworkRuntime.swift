@@ -5166,8 +5166,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
         deferredSessionSweeps.removeAll()
         for (key, peer) in deferred {
             guard rangeSync == nil else {
-                // A new deep catch-up started mid-resume: re-defer the rest.
-                deferredSessionSweeps[key] = peer
+                // A new deep catch-up started mid-resume: re-defer the rest —
+                // unless the session churned during our awaits, in which case
+                // the fresh hello owns the entry.
+                if overlayPeers[key]?.sessionID == peer.sessionID {
+                    deferredSessionSweeps[key] = peer
+                }
                 continue
             }
             guard isCurrentRuntime(generation: generation, process: process),
