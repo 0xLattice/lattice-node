@@ -62,10 +62,9 @@ re-examine.
 Fork choice weighs whole subtrees, so a losing sibling is not weight-neutral:
 its work contributes to every ancestor's total. If eviction silently removed
 weight the node had already counted, nodes could compute different heaviest
-branches purely as a function of their retention policy — and where the
-omitted weight is pivotal, the equal-work-holds-incumbent rule makes that
-split sticky: a partition along retention class with no attacker and no
-protocol change. Therefore:
+branches purely as a function of their retention policy — a partition along
+retention class with no attacker and no protocol change, healed only when
+the omitted weight is re-learned. Therefore:
 
 - **Eviction discards stored bytes and service willingness, never verified
   work facts or graph edges the node has already counted.** A node's fork
