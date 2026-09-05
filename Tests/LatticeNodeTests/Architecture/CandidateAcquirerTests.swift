@@ -706,4 +706,30 @@ final class CandidateAcquirerTests: XCTestCase {
         XCTAssertEqual(hole.blockCID, "hole")
         XCTAssertEqual(hole.providers, [good])
     }
+
+    func testContentRetriesArePacedNotPerTick() throws {
+        // During bulk catch-up thousands of guaranteed-to-park waiters must
+        // not cycle the single admission slot every tick — a content wait
+        // re-readies at most once per retryWindow/64.
+        let exact = provider("provider", session: 1)
+        var acquirer = CandidateAcquirer(retryWindow: .seconds(64))
+        XCTAssertTrue(acquirer.observe(.init(
+            blockCID: "block",
+            package: nil,
+            provider: exact
+        )).accepted)
+        let start = ContinuousClock.now
+        let first = try XCTUnwrap(acquirer.next())
+        XCTAssertTrue(acquirer.complete(
+            first.ticket,
+            resolution: .wait(.content),
+            now: start
+        ))
+        // Immediately after the park the wait is paced, not ready.
+        acquirer.retry(now: start.advanced(by: .milliseconds(100)))
+        XCTAssertNil(acquirer.next(), "a fresh content wait must not re-ready on the next tick")
+        // One pace interval later it re-readies.
+        acquirer.retry(now: start.advanced(by: .seconds(2)))
+        XCTAssertEqual(acquirer.next()?.blockCID, "block")
+    }
 }

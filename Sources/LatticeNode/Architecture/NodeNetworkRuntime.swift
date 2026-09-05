@@ -550,6 +550,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private var parentStateQueryGuard = ParentStateQueryGuard(
         capacity: NodeNetworkRuntime.maximumConcurrentParentStateQueries
     )
+    private var portableIndexCursors: [PeerKey: PortableAttachmentSummary] = [:]
+    private var deferredSessionSweeps: [PeerKey: AuthenticatedPeer] = [:]
     private var pendingPortableAttachmentIndexes:
         [UInt64: PendingPortableAttachmentIndex] = [:]
     private var activeEvidenceVolumes = Set<EvidenceVolumeLease>()
@@ -2396,21 +2398,31 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard isCurrentRuntime(generation: generation, process: process) else {
                 return
             }
-            enqueueAcceptedLeavesSession(peer)
-            await resumeAcceptedLeavesSync(
-                generation: generation,
-                process: process
-            )
+            // During deep catch-up the height-blind session sweeps (index
+            // walk, leaves descent) only pollute the admission pipeline with
+            // guaranteed-to-park candidates; defer them until the range sync
+            // catches up. The walk resumes from the persisted cursor.
+            if rangeSync == nil {
+                enqueueAcceptedLeavesSession(peer)
+                await resumeAcceptedLeavesSync(
+                    generation: generation,
+                    process: process
+                )
+            } else {
+                deferredSessionSweeps[peer.key] = peer
+            }
             scheduleChildProofRecovery(
                 generation: generation,
                 process: process
             )
-            await requestPortableAttachmentIndex(
-                from: peer,
-                after: nil,
-                generation: generation,
-                process: process
-            )
+            if rangeSync == nil {
+                await requestPortableAttachmentIndex(
+                    from: peer,
+                    after: portableIndexCursors[peer.key],
+                    generation: generation,
+                    process: process
+                )
+            }
             await requestTransactionInventory(
                 from: peer,
                 after: nil,
@@ -2578,6 +2590,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     await startRangeSync(
                         peer: peer,
                         targetHeight: announced,
+                        generation: generation,
+                        process: process
+                    )
+                    guard isCurrentRuntime(generation: generation, process: process),
+                          overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+                } else if rangeSync == nil {
+                    // Caught up (or the sync ended some other way): run the
+                    // sweeps that were deferred during deep catch-up.
+                    await resumeDeferredSessionSweeps(
                         generation: generation,
                         process: process
                     )
@@ -3278,7 +3299,16 @@ public actor NodeNetworkRuntime: IvyDelegate {
         generation: UInt64,
         process: ChainProcess
     ) async {
-        guard let entry = response.entries.first else { return }
+        guard let entry = response.entries.first else {
+            portableIndexCursors.removeValue(forKey: peer.key)
+            return
+        }
+        // Persist the walk cursor per PEER (not per session): a churned
+        // session must resume where it left off, or the walk restarts from
+        // the lexicographic beginning forever and never completes. A
+        // finished walk clears the cursor so a later session re-checks the
+        // full index (new entries sort anywhere).
+        portableIndexCursors[peer.key] = entry
         let handled = await recoverPortableAttachment(
             entry,
             from: peer,
@@ -3294,6 +3324,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 generation: generation,
                 process: process
             )
+        } else {
+            portableIndexCursors.removeValue(forKey: peer.key)
         }
     }
 
@@ -3429,12 +3461,17 @@ public actor NodeNetworkRuntime: IvyDelegate {
             ), overlayPeers[peer.key]?.sessionID == peer.sessionID else {
                 return true
             }
-            return enqueueCandidate(CandidateSeed(
+            // A rejected enqueue is LOCAL congestion (ready pool full), not
+            // peer misbehavior: the recovery succeeded, so never let callers
+            // recycle the session over it. The rejection already requested
+            // inventory recovery, which re-derives the item later.
+            _ = enqueueCandidate(CandidateSeed(
                 blockCID: evidence.edge.childCID,
                 package: AuthenticatedChildPackage(
                     package: ChildValidationPackage(proof: evidence.proof)
                 )
             ))
+            return true
         }
         // The peer advertising an attachment is responsible for serving its
         // immutable CAS graph. Binding resolution to that exact authenticated
@@ -3500,10 +3537,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
             return false
         }
         let gated = AuthenticatedChildPackage(package: package)
-        return enqueueCandidate(CandidateSeed(
+        // See above: a rejected enqueue after a VERIFIED recovery is local
+        // congestion; only verification failures return false (and recycle).
+        _ = enqueueCandidate(CandidateSeed(
             blockCID: edge.childCID,
             package: gated
         ))
+        return true
     }
 
     private nonisolated static func resolveEvidenceVolume(
@@ -5102,6 +5142,34 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// on a peer that has genuinely stopped advancing our tip.
     private static let rangeSyncMaxRedrives: Int = 8
 
+    /// Run the session sweeps (accepted-leaves descent, portable-index walk)
+    /// that were deferred while a deep range sync was draining the pipeline.
+    private func resumeDeferredSessionSweeps(
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        guard rangeSync == nil, !deferredSessionSweeps.isEmpty else { return }
+        let deferred = deferredSessionSweeps
+        deferredSessionSweeps.removeAll()
+        for (key, peer) in deferred {
+            guard isCurrentRuntime(generation: generation, process: process),
+                  overlayPeers[key]?.sessionID == peer.sessionID else {
+                continue
+            }
+            enqueueAcceptedLeavesSession(peer)
+            await resumeAcceptedLeavesSync(
+                generation: generation,
+                process: process
+            )
+            await requestPortableAttachmentIndex(
+                from: peer,
+                after: portableIndexCursors[key],
+                generation: generation,
+                process: process
+            )
+        }
+    }
+
     private func startRangeSync(
         peer: AuthenticatedPeer,
         targetHeight: UInt64,
@@ -5119,6 +5187,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
             "range-sync start target=\(targetHeight) "
                 + "peer=\(peer.key.hex.prefix(8))"
         )
+        // Deep catch-up begins: stop this peer's height-blind index walk
+        // (cursor persists; it resumes after catch-up) so the range pages
+        // are not buried under lexicographic-order parks.
+        for (requestID, pending) in pendingPortableAttachmentIndexes
+            where pending.peer.key == peer.key {
+            pendingPortableAttachmentIndexes.removeValue(forKey: requestID)
+        }
+        deferredSessionSweeps[peer.key] = peer
         rangeSync = RangeSyncState(
             peer: peer,
             requestID: 0,
@@ -5228,6 +5304,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // every entry was non-canonical — nothing more to pull here.
         guard enqueued > 0, let lastCID else {
             clearRangeSync()
+            await resumeDeferredSessionSweeps(
+                generation: generation,
+                process: process
+            )
             return
         }
         current.requestedAfterCID = lastCID

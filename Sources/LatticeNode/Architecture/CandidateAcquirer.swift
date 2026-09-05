@@ -95,6 +95,7 @@ struct CandidateAcquirer {
         var revision: UInt64
         let order: UInt64
         var expiresAt: ContinuousClock.Instant?
+        var nextRetryAt: ContinuousClock.Instant?
         var state: AttemptState
     }
 
@@ -424,6 +425,11 @@ struct CandidateAcquirer {
                             : retryWindow
                     )
                 }
+                // Pace the wall-clock retry: without this, every waiting
+                // candidate cycles the single admission slot once per tick,
+                // and during bulk catch-up thousands of guaranteed-to-park
+                // waiters starve the one frontier block that can connect.
+                attempt.nextRetryAt = now.advanced(by: retryWindow / 64)
                 attempt.state = .waiting(
                     reason,
                     attempt.expiresAt!
@@ -526,7 +532,9 @@ struct CandidateAcquirer {
                     } else {
                         record.attempts.removeValue(forKey: rootCID)
                     }
-                } else if reason == .content || reason == .later {
+                } else if reason == .content || reason == .later,
+                          (attempt.nextRetryAt ?? now) <= now {
+                    attempt.nextRetryAt = nil
                     attempt.state = .ready
                     record.attempts[rootCID] = attempt
                 }
