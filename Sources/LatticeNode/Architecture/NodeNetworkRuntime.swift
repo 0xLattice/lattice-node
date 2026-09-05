@@ -944,6 +944,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         pendingGenesisResolves.removeAll()
         parentStateQueryGuard.removeAll()
         pendingPortableAttachmentIndexes.removeAll()
+        portableIndexCursors.removeAll()
+        deferredSessionSweeps.removeAll()
         activeEvidenceVolumes.removeAll()
         portableEvidenceWorker?.cancel()
         portableEvidenceWorker = nil
@@ -2422,6 +2424,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     generation: generation,
                     process: process
                 )
+            } else {
+                deferredSessionSweeps[peer.key] = peer
             }
             await requestTransactionInventory(
                 from: peer,
@@ -3315,8 +3319,17 @@ public actor NodeNetworkRuntime: IvyDelegate {
             generation: generation,
             process: process
         )
+        guard isCurrentRuntime(generation: generation, process: process) else {
+            return
+        }
         if !handled {
             await overlay.recycleSession(ifCurrent: peer)
+        } else if rangeSync != nil {
+            // A deep catch-up began while this page was in flight (the
+            // start-time purge cannot see a walk between its page-response
+            // and its continuation): defer here, at the one choke point
+            // every walk passes through. The cursor above already persisted.
+            deferredSessionSweeps[peer.key] = peer
         } else if response.hasMore {
             await requestPortableAttachmentIndex(
                 from: peer,
@@ -5152,6 +5165,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let deferred = deferredSessionSweeps
         deferredSessionSweeps.removeAll()
         for (key, peer) in deferred {
+            guard rangeSync == nil else {
+                // A new deep catch-up started mid-resume: re-defer the rest.
+                deferredSessionSweeps[key] = peer
+                continue
+            }
             guard isCurrentRuntime(generation: generation, process: process),
                   overlayPeers[key]?.sessionID == peer.sessionID else {
                 continue
@@ -5373,6 +5391,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // next deep peer can drive, and let direct propagation carry any
             // blocks the peer has mined since.
             clearRangeSync()
+            await resumeDeferredSessionSweeps(
+                generation: generation,
+                process: process
+            )
             return
         }
         guard overlayPeers[current.peer.key]?.sessionID == current.peer.sessionID
@@ -5380,6 +5402,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // The peer went away before we caught up: release the slot so a new
             // deep peer can take over instead of re-driving into a dead session.
             clearRangeSync()
+            await resumeDeferredSessionSweeps(
+                generation: generation,
+                process: process
+            )
             return
         }
         if applied > current.progressBaselineHeight {
@@ -5396,6 +5422,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // withholding a block we need. Release the slot so a different deep
             // peer's announcement can drive catch-up instead.
             clearRangeSync()
+            await resumeDeferredSessionSweeps(
+                generation: generation,
+                process: process
+            )
             return
         }
         current.redriveAttempts += 1
