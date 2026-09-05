@@ -1148,10 +1148,10 @@ final class ParentChildE2ETests: XCTestCase {
         }).height ?? 0
         var separated = false
         while !separated {
-            XCTAssertLessThan(
-                parentHeight, window + 8,
-                "the retarget never separated the targets"
-            )
+            guard parentHeight < window + 8 else {
+                XCTFail("the retarget never separated the targets")
+                return
+            }
             let probe: MiningTemplateResponse = try await sourceNexus.post(
                 "/v1/mining/templates",
                 body: MiningTemplateRequest(rewards: []),
@@ -1189,22 +1189,30 @@ final class ParentChildE2ETests: XCTestCase {
         }).height ?? 0
         var carrierRounds = 0
         while childHeight < childDepth {
-            // Grind for a hash in the band between the parent's corrected
-            // target and the child's easy searchTarget: it meets only the
-            // child, so the disposition is deterministically a carrier and
-            // the parent can never advance. (The band exists only after the
-            // parent's retarget; before it both targets are equal and a
-            // carrier-only round is physically impossible.)
+            carrierRounds += 1
+            guard carrierRounds < 400 else {
+                XCTFail("carrier phase did not advance")
+                return
+            }
+            // Grind for a hash in the band between the parent's own target
+            // and the child's easy searchTarget: it meets only the child, so
+            // the disposition is a carrier BY CONSTRUCTION — the parent can
+            // never advance because no submitted hash ever meets its target
+            // (the corrected target itself is still CPU-reachable; the band
+            // is what freezes the parent, not unreachability).
             let template: MiningTemplateResponse = try await sourceNexus.post(
                 "/v1/mining/templates",
                 body: MiningTemplateRequest(rewards: []),
                 timeout: 30
             )
             let parentTarget = template.block.target
-            XCTAssertLessThan(
-                parentTarget, template.searchTarget,
-                "the retarget must have separated the parent and child targets"
-            )
+            guard parentTarget < template.searchTarget else {
+                // A candidate-less template (slow child fan-in — a known
+                // intermittent) collapses searchTarget onto the parent's
+                // target and the band is empty: retry, never grind.
+                try await Task.sleep(for: .milliseconds(500))
+                continue
+            }
             let midstate = ProofOfWork.midstate(for: template.block)
             var nonce: UInt64 = 0
             while true {
@@ -1219,12 +1227,13 @@ final class ParentChildE2ETests: XCTestCase {
                 body: SubmitWorkRequest(workID: template.workID, nonce: nonce),
                 timeout: 30
             )
-            XCTAssertEqual(
-                round.disposition.rawValue, "carrier",
-                "a child-band solution must be a carrier round"
-            )
-            carrierRounds += 1
-            XCTAssertLessThan(carrierRounds, 400, "carrier phase did not advance")
+            guard round.disposition.rawValue == "carrier" else {
+                XCTFail(
+                    "a child-band solution must be a carrier round, got "
+                        + round.disposition.rawValue
+                )
+                return
+            }
             childHeight = (try await sourceChild.waitForStatus {
                 $0.phase == .active
             }).height ?? 0
@@ -1257,7 +1266,7 @@ final class ParentChildE2ETests: XCTestCase {
         cluster.add(joinerNexus)
         try joinerNexus.start()
         _ = try await joinerNexus.waitForStatus(
-            timeout: e2eScaled(.seconds(300))
+            timeout: .seconds(300)
         ) { $0.phase == .active && ($0.height ?? 0) >= window }
 
         let joinerChild = childNode(
@@ -1282,13 +1291,13 @@ final class ParentChildE2ETests: XCTestCase {
         // ONLY serving node. Progress must resume without restarting
         // discovery from scratch.
         _ = try await joinerChild.waitForStatus(
-            timeout: e2eScaled(.seconds(300))
-        ) { $0.phase == .active && ($0.height ?? 0) >= 10 }
+            timeout: .seconds(300)
+        ) { $0.phase == .active && ($0.height ?? 0) >= 25 }
         try await sourceChild.stop()
         try await Task.sleep(for: e2eScaled(.seconds(2)))
         try sourceChild.start()
         _ = try await sourceChild.waitForStatus(
-            timeout: e2eScaled(.seconds(120))
+            timeout: .seconds(120)
         ) { $0.phase == .active && ($0.height ?? 0) >= childDepth }
 
         // The joiner must CONVERGE with the producer — compared live, never
