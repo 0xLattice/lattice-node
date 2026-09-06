@@ -1922,6 +1922,12 @@ private final class E2ENode {
         let next = Process()
         next.executableURL = binary
         next.arguments = launchArguments()
+        // Field-diagnosis traces land in the per-node stderr log, which the
+        // harness already retains and CI uploads on failure — without this,
+        // a wedged phase (e.g. awaitingGenesis) leaves blind artifacts.
+        var environment = ProcessInfo.processInfo.environment
+        environment["LATTICE_SYNC_TRACE"] = "1"
+        next.environment = environment
         next.standardOutput = stdout
         next.standardError = stderr
         do {
