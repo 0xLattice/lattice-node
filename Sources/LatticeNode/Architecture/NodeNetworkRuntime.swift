@@ -5340,8 +5340,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
         current.responseTimeout = nil
         current.hasMore = response.hasMore
         // Empty page: caught up, our frontier is off this peer's main chain, or
-        // every entry was non-canonical — nothing more to pull here.
+        // every entry was non-canonical — nothing more to pull here. Demote
+        // the peer's recorded claim so the re-entry probe falls through to
+        // the next-tallest recorded tip instead of re-picking this peer
+        // every backoff forever (a fresh announcement re-records it — a liar
+        // must keep actively re-announcing to re-capture the slot).
         guard enqueued > 0, let lastCID else {
+            if announcedTips[peer.key]?.peer.sessionID == peer.sessionID {
+                announcedTips.removeValue(forKey: peer.key)
+            }
             clearRangeSync()
             await resumeDeferredSessionSweeps(
                 generation: generation,
@@ -5440,8 +5447,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         guard current.redriveAttempts < Self.rangeSyncMaxRedrives else {
             // Re-driving this peer has not advanced our tip across the cap: it is
-            // withholding a block we need. Release the slot so a different deep
-            // peer's announcement can drive catch-up instead.
+            // withholding a block we need. Demote its recorded claim (see the
+            // empty-page site) and release the slot so a different deep
+            // peer can drive catch-up instead.
+            if announcedTips[current.peer.key]?.peer.sessionID
+                == current.peer.sessionID {
+                announcedTips.removeValue(forKey: current.peer.key)
+            }
             clearRangeSync()
             await resumeDeferredSessionSweeps(
                 generation: generation,
