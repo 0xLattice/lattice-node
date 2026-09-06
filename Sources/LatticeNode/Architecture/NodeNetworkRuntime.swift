@@ -5906,9 +5906,16 @@ public actor NodeNetworkRuntime: IvyDelegate {
         generation: UInt64,
         process: ChainProcess
     ) async {
+        var lastTraced = ""
+        func traceOnce(_ outcome: String) {
+            guard outcome != lastTraced else { return }
+            lastTraced = outcome
+            SyncTrace.log("adopt-genesis \(outcome)")
+        }
         while isRunning, runtimeGeneration == generation {
             if await process.status().phase != .awaitingGenesis { return }
             if let genesisCID = await resolveParentAnchoredGenesis() {
+                traceOnce("resolved \(genesisCID)")
                 let activated = (try? await remoteContentSource.withRoot(
                     genesisCID
                 ) { session in
@@ -5922,6 +5929,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
                         }
                     )
                 }) ?? false
+                traceOnce(activated
+                    ? "activated \(genesisCID)"
+                    : "fetch-or-confirm failed \(genesisCID)")
                 guard isCurrentRuntime(
                     generation: generation, process: process
                 ) else { return }
@@ -5944,6 +5954,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     )
                     return
                 }
+            } else {
+                traceOnce("parent record unresolved")
             }
             do {
                 try await Task.sleep(nanoseconds: 1_000_000_000)
