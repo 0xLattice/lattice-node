@@ -556,7 +556,19 @@ final class LatticeCtlE2ETests: XCTestCase {
             nonce: 1
         )
         let heightBeforeSpend = await childHeight()
-        try await submit(spend, rpc: childRPC, label: "spend")
+        // Each dependent submit validates against the PRIOR tx's applied,
+        // queryable state; mempool-drained only proves the prior tx left the
+        // mempool, not that its credit is visible, so a submit can fail-closed
+        // 400 until the credit lands. Retry until accepted (same race as the
+        // withdrawal submit).
+        try await waitFor("child accepts the spend", seconds: 240) {
+            do {
+                try await self.submit(spend, rpc: childRPC, label: "spend")
+                return true
+            } catch {
+                return false
+            }
+        }
         try await waitFor("dependent spend mined", seconds: 240) {
             let height = await childHeight()
             let drained = await mempoolDrained(childRPC)
@@ -576,7 +588,14 @@ final class LatticeCtlE2ETests: XCTestCase {
             nonce: 0
         )
         let heightBeforeSinkSpend = await childHeight()
-        try await submit(sinkSpend, rpc: childRPC, label: "sink-spend")
+        try await waitFor("child accepts the sink spend", seconds: 240) {
+            do {
+                try await self.submit(sinkSpend, rpc: childRPC, label: "sink-spend")
+                return true
+            } catch {
+                return false
+            }
+        }
         try await waitFor("sink spend proves the credited state", seconds: 240) {
             let height = await childHeight()
             let drained = await mempoolDrained(childRPC)
