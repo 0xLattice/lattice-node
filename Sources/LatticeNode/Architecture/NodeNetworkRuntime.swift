@@ -174,10 +174,12 @@ struct NodeNetworkPlaneConfigurations {
                     NodeConfiguration.overlayReservedOutboundSlots,
                     IvyConfig.defaultMaxConnections - 1
                 ),
-                // Operator-chosen (default: Ivy's conservative value). Nodes behind
-                // an L4 proxy see every inbound as the proxy's one address, so the
-                // netgroup cap collapses all inbound onto one bucket and must be
-                // raised for the mesh to form and peers to cold-sync.
+                // Default: permissive (= the total connection cap), matching the
+                // hierarchy plane. An inbound per-netgroup cap is weak eclipse
+                // defense — outbound dials are separately reserved above — and
+                // behind an L4 proxy every inbound shares one address, so a low
+                // cap collapses all inbound onto one bucket and strangles the
+                // mesh. Operator-tunable stricter for direct-IP nodes.
                 maxConnectionsPerNetgroup: configuration.overlayMaxConnectionsPerNetgroup,
                 minPeerKeyBits: configuration.minPeerKeyBits,
                 // Self-described reachable address: provider announcements and

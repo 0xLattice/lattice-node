@@ -86,8 +86,13 @@ public struct NodeConfiguration: Sendable {
     /// the connection's observed remote host (/16), an anti-eclipse defense that
     /// assumes distinct source IPs. Nodes fronted by an L4 proxy (e.g. fly-proxy)
     /// see every inbound connection as the proxy's single address, collapsing all
-    /// inbound onto one netgroup; such deployments must raise this. Default keeps
-    /// Ivy's conservative value for direct-IP nodes.
+    /// inbound onto one netgroup and strangling the mesh. An INBOUND per-netgroup
+    /// cap is weak eclipse defense regardless: the outbound dials that decide who
+    /// a node syncs from are protected by `overlayReservedOutboundSlots`, total
+    /// inbound is bounded by `maxConnections`, and PoW is objective. The default
+    /// therefore matches the hierarchy plane's permissive setting (= the total
+    /// connection cap, no effective inbound throttle); operators who run on
+    /// direct IPs and want stricter inbound bucketing may lower it.
     public let overlayMaxConnectionsPerNetgroup: Int
     /// Operator-declared address at which this node is publicly reachable
     /// (host only; the overlay listen port applies). Behind NAT or an L4
@@ -123,7 +128,7 @@ public struct NodeConfiguration: Sendable {
         bootstrapPeers: [PeerEndpoint] = [],
         parentEndpoint: ParentEndpoint? = nil,
         minPeerKeyBits: Int = 0,
-        overlayMaxConnectionsPerNetgroup: Int = 2,
+        overlayMaxConnectionsPerNetgroup: Int = IvyConfig.defaultMaxConnections,
         externalAddress: String? = nil,
         publicReadURL: String? = nil,
         resourcePolicy: NodeResourcePolicy = .default

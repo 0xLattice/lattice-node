@@ -70,8 +70,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Minimum overlay peer-key work bits")
     var minimumPeerKeyBits = 0
 
-    @Option(help: "Per-netgroup overlay connection cap; raise on proxy-fronted nodes where all inbound share one source address")
-    var overlayMaxConnectionsPerNetgroup = 2
+    @Option(help: "Per-netgroup overlay INBOUND connection cap. Defaults to the total connection cap (no effective throttle) — an inbound netgroup cap is weak eclipse defense (outbound dials are separately reserved) and breaks proxy-fronted nodes where all inbound share one address. Lower it only on a direct-IP node that wants stricter inbound bucketing.")
+    var overlayMaxConnectionsPerNetgroup = IvyConfig.defaultMaxConnections
 
     @Option(help: "Public read-only HTTP port; binds all interfaces and serves ONLY the bounded GET read routes (the read-replica allowlist, enforced in code). Chain data is public; this exposes no operator or write surface.")
     var publicReadPort: UInt16?
