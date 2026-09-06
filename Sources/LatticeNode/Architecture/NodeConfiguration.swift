@@ -85,14 +85,16 @@ public struct NodeConfiguration: Sendable {
     /// Per-netgroup inbound/outbound overlay connection cap. Ivy buckets peers by
     /// the connection's observed remote host (/16), an anti-eclipse defense that
     /// assumes distinct source IPs. Nodes fronted by an L4 proxy (e.g. fly-proxy)
-    /// see every inbound connection as the proxy's single address, collapsing all
-    /// inbound onto one netgroup and strangling the mesh. An INBOUND per-netgroup
-    /// cap is weak eclipse defense regardless: the outbound dials that decide who
-    /// a node syncs from are protected by `overlayReservedOutboundSlots`, total
-    /// inbound is bounded by `maxConnections`, and PoW is objective. The default
-    /// therefore matches the hierarchy plane's permissive setting (= the total
-    /// connection cap, no effective inbound throttle); operators who run on
-    /// direct IPs and want stricter inbound bucketing may lower it.
+    /// see every connection as the proxy's single address, collapsing the whole
+    /// mesh onto one netgroup and strangling it. This cap governs per-netgroup
+    /// connections in BOTH directions. A low value buys little here: bad data is
+    /// rejected on CID/PoW verification, not on connection policy (no
+    /// assumevalid); the reserved outbound slots that carry a node's own sync
+    /// are protected by a separate inbound ceiling regardless of this value; so
+    /// slot-flooding an unauthenticated peer can only withhold or delay, never
+    /// feed a false chain. The default is therefore permissive. A public
+    /// direct-IP node that wants a real per-source admission COST should set
+    /// `minPeerKeyBits > 0` (a grinding price) rather than rely on this bucket.
     public let overlayMaxConnectionsPerNetgroup: Int
     /// Operator-declared address at which this node is publicly reachable
     /// (host only; the overlay listen port applies). Behind NAT or an L4
