@@ -331,10 +331,22 @@ final class PortableEvidenceProtocolTests: XCTestCase {
             available
         )
 
+        // Over the page cap throws — built cap-relative so it survives page-size
+        // changes (canonical CIDs distinct per index so the entries stay sorted
+        // and unique, the other bounds validate() enforces).
+        let overCap = (0...PortableAttachmentIndexResponseMessage.maximumEntries)
+            .map { i in
+                PortableAttachmentSummary(
+                    edgeCID: protocolCID("overcap-edge-\(i)"),
+                    rootCID: protocolCID("overcap-root-\(i)"),
+                    attachmentCID: protocolCID("overcap-attachment-\(i)")
+                )
+            }
+            .sorted { ($0.edgeCID, $0.rootCID) < ($1.edgeCID, $1.rootCID) }
         XCTAssertThrowsError(try PortableAttachmentIndexResponseMessage(
             requestID: 1,
             after: cursor,
-            entries: Array(attachments.dropFirst()),
+            entries: overCap,
             hasMore: false
         ).encoded())
         XCTAssertThrowsError(try PortableAttachmentIndexResponseMessage(

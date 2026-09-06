@@ -427,7 +427,12 @@ struct PortableAttachmentIndexRequestMessage: NodeJSONMessage, Equatable, Sendab
 }
 
 struct PortableAttachmentIndexResponseMessage: NodeJSONMessage, Equatable, Sendable {
-    static let maximumEntries = 1
+    // Page size matches the sibling index/range messages (accepted-leaves,
+    // child-evidence index, forward-range all page at 64). A page of 1 made
+    // the incoming-carrier attachment walk advance one entry per round trip —
+    // an arbitrary throttle, not a size bound, that crawled deep child-evidence
+    // sync. `hasMore` pagination is unchanged.
+    static let maximumEntries = 64
 
     let requestID: UInt64
     let after: PortableAttachmentSummary?
