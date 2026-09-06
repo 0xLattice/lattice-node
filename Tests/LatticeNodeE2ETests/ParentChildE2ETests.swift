@@ -1017,6 +1017,323 @@ final class ParentChildE2ETests: XCTestCase {
         )
         return Transaction(signatures: [key.publicKey: signature], body: header)
     }
+
+    /// Decentralized deep-catch-up validation, reproducing the LIVE production
+    /// regime end to end: the parent freezes at its own retarget window (blocks
+    /// mined at CPU speed make the corrected target unreachable — exactly the
+    /// production flag-day history), the child then advances by carrier-only
+    /// rounds, so its deep tail has NO parent anchors and portable evidence is
+    /// the only proof source. A brand-new permissionless joiner — which ADOPTS
+    /// the genesis from its parent's on-chain directory rather than being
+    /// seeded — must reach the producer's exact child tip over the real
+    /// overlay, surviving a restart of the serving node mid-sync (session
+    /// churn must not reset catch-up progress or discovery cursors).
+    func testFreshChildJoinerCatchesUpThroughCarrierOnlyHistoryAcrossChurn()
+        async throws
+    {
+        let workspace = try E2EWorkspace()
+        let cluster = E2ECluster()
+        var passed = false
+        defer {
+            cluster.forceTerminateAll()
+            if passed {
+                try? workspace.remove()
+            } else {
+                print("lattice-node E2E artifacts retained at \(workspace.url.path)")
+            }
+        }
+
+        let binary = try E2EBinary.latticeNode()
+        let sourceNexusIdentity = try workspace.makeIdentity(named: "src-nexus")
+        let sourceChildIdentity = try workspace.makeIdentity(named: "src-child")
+        let joinerNexusIdentity = try workspace.makeIdentity(named: "join-nexus")
+        let joinerChildIdentity = try workspace.makeIdentity(named: "join-child")
+        let ports = try E2EPorts.allocate(count: 12)
+
+        let sourceNexus = nexusNode(
+            binary: binary,
+            workspace: workspace,
+            name: "src-nexus",
+            identity: sourceNexusIdentity,
+            overlayPort: ports[0],
+            factPort: ports[1],
+            rpcPort: ports[2]
+        )
+        cluster.add(sourceNexus)
+        try sourceNexus.start()
+        _ = try await waitForNexus(sourceNexus)
+
+        // Mine the parent close to its retarget window solo (fast: max-easy
+        // genesis target), leaving room to anchor the child and co-mine a
+        // handful of early child blocks before the window closes.
+        let window: UInt64 = 120
+        for _ in 0..<(window - 10) {
+            let work = try await mine(sourceNexus)
+            XCTAssertTrue(work.accepted)
+        }
+
+        // Deploy the child: offline genesis, one anchoring GenesisAction.
+        let seed = ChildGenesisSeed(
+            spec: NexusGenesis.spec,
+            premineTo: nil,
+            timestamp: 1_000
+        )
+        let genesisStore = E2EDeployContentStore()
+        try await LatticeState.emptyHeader.storeRecursively(storer: genesisStore)
+        let childGenesis = try await ChildGenesisBuilder.build(
+            seed: seed,
+            chainPath: ["Nexus", "Deep"],
+            fetcher: genesisStore
+        )
+        let genesisCID = try BlockHeader(node: childGenesis).rawCID
+        let deployer = try workspace.makeIdentity(named: "deployer")
+        let anchor = try signedTransaction(
+            key: (privateKey: deployer.privateKey, publicKey: deployer.publicKey),
+            chainPath: ["Nexus"],
+            genesisActions: [GenesisAction(
+                directory: "Deep",
+                blockCID: genesisCID
+            )],
+            nonce: 0
+        )
+        let _: SubmitTransactionResponse = try await sourceNexus.post(
+            "/v1/transactions",
+            body: SubmitTransactionRequest(transaction: anchor)
+        )
+        let carrier = try await mineBlock(sourceNexus)
+        XCTAssertTrue(carrier.response.accepted)
+        _ = try await waitForRecordedChild(
+            sourceNexus,
+            directory: "Deep",
+            genesisCID: genesisCID
+        )
+
+        // The source child is deployer-seeded; the joiner later ADOPTS.
+        let sourceChildStorage = workspace.url.appendingPathComponent(
+            "src-child",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: sourceChildStorage,
+            withIntermediateDirectories: true
+        )
+        try JSONEncoder().encode(seed).write(
+            to: sourceChildStorage.appendingPathComponent("child-genesis.json")
+        )
+        let sourceChild = childNode(
+            binary: binary,
+            workspace: workspace,
+            name: "src-child",
+            directory: "Deep",
+            identity: sourceChildIdentity,
+            parentPublicKey: sourceNexusIdentity.publicKey,
+            parentFactPort: ports[1],
+            overlayPort: ports[3],
+            factPort: ports[4],
+            rpcPort: ports[5]
+        )
+        cluster.add(sourceChild)
+        try sourceChild.start()
+        _ = try await sourceChild.waitForStatus { status in
+            status.phase == .active && status.tipCID == genesisCID
+        }
+
+        // Close the retarget window co-mining (early child blocks DO have
+        // parent anchors — matching production's mixed history), and keep
+        // mining until the parent template's own target actually separates
+        // from the child's easy searchTarget: the retarget boundary is a
+        // consensus detail this test must not assume, only observe.
+        var parentHeight = (try await sourceNexus.waitForStatus {
+            $0.phase == .active
+        }).height ?? 0
+        var separated = false
+        while !separated {
+            guard parentHeight < window + 8 else {
+                XCTFail("the retarget never separated the targets")
+                return
+            }
+            let probe: MiningTemplateResponse = try await sourceNexus.post(
+                "/v1/mining/templates",
+                body: MiningTemplateRequest(rewards: []),
+                timeout: 30
+            )
+            if probe.block.target < probe.searchTarget {
+                separated = true
+                break
+            }
+            let midstate = ProofOfWork.midstate(for: probe.block)
+            var nonce: UInt64 = 0
+            while ProofOfWork.hash(midstate: midstate, nonce: nonce)
+                > probe.searchTarget
+            {
+                nonce += 1
+            }
+            let _: SubmitWorkResponse = try await sourceNexus.post(
+                "/v1/mining/work",
+                body: SubmitWorkRequest(workID: probe.workID, nonce: nonce),
+                timeout: 30
+            )
+            parentHeight = (try await sourceNexus.waitForStatus {
+                $0.phase == .active
+            }).height ?? 0
+        }
+
+        // Carrier-only phase: the corrected parent target is unreachable at
+        // CPU speed, so every round meets only the child target — the child
+        // grows a deep anchorless tail while the parent stays frozen. Depth
+        // stays inside the CHILD's own retarget window and spans multiple
+        // forward-range pages (64).
+        let childDepth: UInt64 = 70
+        var childHeight = (try await sourceChild.waitForStatus {
+            $0.phase == .active
+        }).height ?? 0
+        var carrierRounds = 0
+        while childHeight < childDepth {
+            carrierRounds += 1
+            guard carrierRounds < 400 else {
+                XCTFail("carrier phase did not advance")
+                return
+            }
+            // Grind for a hash in the band between the parent's own target
+            // and the child's easy searchTarget: it meets only the child, so
+            // the disposition is a carrier BY CONSTRUCTION — the parent can
+            // never advance because no submitted hash ever meets its target
+            // (the corrected target itself is still CPU-reachable; the band
+            // is what freezes the parent, not unreachability).
+            let template: MiningTemplateResponse = try await sourceNexus.post(
+                "/v1/mining/templates",
+                body: MiningTemplateRequest(rewards: []),
+                timeout: 30
+            )
+            let parentTarget = template.block.target
+            guard parentTarget < template.searchTarget else {
+                // A candidate-less template (slow child fan-in — a known
+                // intermittent) collapses searchTarget onto the parent's
+                // target and the band is empty: retry, never grind.
+                try await Task.sleep(for: .milliseconds(500))
+                continue
+            }
+            let midstate = ProofOfWork.midstate(for: template.block)
+            var nonce: UInt64 = 0
+            while true {
+                let hash = ProofOfWork.hash(midstate: midstate, nonce: nonce)
+                if hash <= template.searchTarget && hash > parentTarget {
+                    break
+                }
+                nonce += 1
+            }
+            let round: SubmitWorkResponse = try await sourceNexus.post(
+                "/v1/mining/work",
+                body: SubmitWorkRequest(workID: template.workID, nonce: nonce),
+                timeout: 30
+            )
+            guard round.disposition.rawValue == "carrier" else {
+                XCTFail(
+                    "a child-band solution must be a carrier round, got "
+                        + round.disposition.rawValue
+                )
+                return
+            }
+            childHeight = (try await sourceChild.waitForStatus {
+                $0.phase == .active
+            }).height ?? 0
+        }
+        let parentAfterCarriers = (try await sourceNexus.waitForStatus {
+            $0.phase == .active
+        }).height ?? 0
+        XCTAssertEqual(
+            parentAfterCarriers, parentHeight,
+            "carrier rounds must never advance the parent"
+        )
+        _ = try await sourceChild.waitForStatus {
+            ($0.height ?? 0) >= childDepth
+        }
+
+        // The permissionless joiner: its own parent node first, then a child
+        // that ADOPTS the genesis from that parent's directory (no seed file).
+        let joinerNexus = nexusNode(
+            binary: binary,
+            workspace: workspace,
+            name: "join-nexus",
+            identity: joinerNexusIdentity,
+            overlayPort: ports[6],
+            factPort: ports[7],
+            rpcPort: ports[8]
+        )
+        joinerNexus.setOverlayPeers([
+            try overlayPeer(identity: sourceNexusIdentity, port: ports[0])
+        ])
+        cluster.add(joinerNexus)
+        try joinerNexus.start()
+        _ = try await joinerNexus.waitForStatus(
+            timeout: .seconds(300)
+        ) { $0.phase == .active && ($0.height ?? 0) >= window }
+
+        let joinerChild = childNode(
+            binary: binary,
+            workspace: workspace,
+            name: "join-child",
+            directory: "Deep",
+            identity: joinerChildIdentity,
+            parentPublicKey: joinerNexusIdentity.publicKey,
+            parentFactPort: ports[7],
+            overlayPort: ports[9],
+            factPort: ports[10],
+            rpcPort: ports[11],
+            overlayPeers: [
+                try overlayPeer(identity: sourceChildIdentity, port: ports[3])
+            ]
+        )
+        cluster.add(joinerChild)
+        try joinerChild.start()
+
+        // Mid-sync churn: once catch-up is visibly under way, bounce the
+        // ONLY serving node. Progress must resume without restarting
+        // discovery from scratch.
+        _ = try await joinerChild.waitForStatus(
+            timeout: .seconds(300)
+        ) { $0.phase == .active && ($0.height ?? 0) >= 25 }
+        try await sourceChild.stop()
+        try await Task.sleep(for: e2eScaled(.seconds(2)))
+        try sourceChild.start()
+        _ = try await sourceChild.waitForStatus(
+            timeout: .seconds(120)
+        ) { $0.phase == .active && ($0.height ?? 0) >= childDepth }
+
+        // The joiner must CONVERGE with the producer — compared live, never
+        // against a pre-churn snapshot: an equal-work same-height sibling
+        // (candidate relay races mint them) can deterministically replace
+        // the tip on BOTH nodes via the lexicographic tie-break, and that
+        // is consensus working, not sync failing.
+        let clock2 = ContinuousClock()
+        let convergenceDeadline = clock2.now + e2eScaled(.seconds(600))
+        var converged = false
+        while clock2.now < convergenceDeadline {
+            let sourceStatus = try? await sourceChild.waitForStatus(
+                timeout: .seconds(2)
+            ) { $0.phase == .active }
+            let joinerStatus = try? await joinerChild.waitForStatus(
+                timeout: .seconds(2)
+            ) { $0.phase == .active }
+            if let sourceStatus, let joinerStatus,
+               let tip = sourceStatus.tipCID,
+               tip == joinerStatus.tipCID,
+               (sourceStatus.height ?? 0) >= childDepth,
+               (joinerStatus.height ?? 0) >= childDepth {
+                converged = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        XCTAssertTrue(
+            converged,
+            "joiner and producer did not converge on one tip at depth"
+        )
+
+        try await cluster.stopAll()
+        passed = true
+    }
+
 }
 
 private struct E2EMinedBlock {
