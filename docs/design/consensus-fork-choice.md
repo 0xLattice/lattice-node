@@ -53,8 +53,11 @@ Content addressing does bound the *working set*, not just integrity: canonical
 re-execution fetches sparse state slices verified against each block's
 `prevStateCID`, so it never materializes the full historical state — strictly
 cheaper than an account-trie chain, though CPU over canonical transactions stays
-inherent. The one consensus-neutral lever that remains is skipping execution of
-**abandoned** forks (place side-fork blocks in the DAG on the cheap work path;
-execute state only on canonical membership); its delicate requirement is that a
-heaviest-but-*invalid* canonical path is always demoted to the heaviest *valid*
-one — the invariant any such optimization must be tested against.
+inherent. The remaining lever is skipping execution of **abandoned** forks (place
+side-fork blocks in the DAG on the cheap work path; execute state only on
+load-bearing membership). It is NOT consensus-neutral: it changes what
+acceptance asserts and requires an execution-invalidity exclusion seam —
+the design, its invariants (availability never judges; pivotal weight is
+validated before it decides), and the required spec amendments live in
+weight-first-acquisition.md. Its delicate requirement stands: a
+heaviest-but-*invalid* path is always demoted to the heaviest *valid* one.

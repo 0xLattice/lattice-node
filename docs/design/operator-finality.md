@@ -145,6 +145,11 @@ the network.
 
 ## Companion direction (separate design): declining work cheaply
 
+Deferred execution (weight-first-acquisition.md) narrows this problem
+without closing it: execution and state storage for unselected blocks go
+away, but weighing a child block still requires soliciting its
+securing-work proof, so the per-sibling round trip below is unchanged.
+
 The bounded admission lanes are only relieved if a node can also decline
 acquiring junk, not merely evict it after paying full admission cost.
 Advertisements could carry untrusted hints (height, claimed weight) letting
