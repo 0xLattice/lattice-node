@@ -527,7 +527,19 @@ final class LatticeCtlE2ETests: XCTestCase {
             )],
             nonce: 0
         )
-        try await submit(withdrawal, rpc: childRPC, label: "withdrawal")
+        // The child validates the withdrawal against its parent-receipt state,
+        // which lags the receipt's mining on the parent until a carrier links
+        // it — the node correctly fail-closed 400s a withdrawal it cannot yet
+        // prove. Retry the submit until the child's parent view includes the
+        // receipt (the recurring carrier-link race).
+        try await waitFor("child accepts the withdrawal", seconds: 240) {
+            do {
+                try await self.submit(withdrawal, rpc: childRPC, label: "withdrawal")
+                return true
+            } catch {
+                return false
+            }
+        }
         try await waitFor("withdrawal mined on the child", seconds: 240) {
             await mempoolDrained(childRPC)
         }
