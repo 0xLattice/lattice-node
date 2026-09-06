@@ -552,6 +552,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
     )
     private var portableIndexCursors: [PeerKey: PortableAttachmentSummary] = [:]
     private var deferredSessionSweeps: [PeerKey: AuthenticatedPeer] = [:]
+    private var announcedTips: [PeerKey: (height: UInt64, peer: AuthenticatedPeer)] = [:]
+    private var rangeSyncReentryTask: Task<Void, Never>?
     private var pendingPortableAttachmentIndexes:
         [UInt64: PendingPortableAttachmentIndex] = [:]
     private var activeEvidenceVolumes = Set<EvidenceVolumeLease>()
@@ -946,6 +948,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
         pendingPortableAttachmentIndexes.removeAll()
         portableIndexCursors.removeAll()
         deferredSessionSweeps.removeAll()
+        announcedTips.removeAll()
+        rangeSyncReentryTask?.cancel()
+        rangeSyncReentryTask = nil
         activeEvidenceVolumes.removeAll()
         portableEvidenceWorker?.cancel()
         portableEvidenceWorker = nil
@@ -2250,6 +2255,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             }
             overlaySessions.removeValue(forKey: key)
             overlayPeers.removeValue(forKey: key)
+            announcedTips.removeValue(forKey: key)
             pendingPortableAttachmentIndexes =
                 pendingPortableAttachmentIndexes.filter {
                     $0.value.peer.key != key
@@ -2589,6 +2595,17 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 let ourHeight = await process.status().height ?? 0
                 guard isCurrentRuntime(generation: generation, process: process),
                       overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+                if let announced = announcement.height {
+                    // Remember the claim so a cleared range sync can re-enter
+                    // on the receiver's own initiative: on a quiet network no
+                    // further announcement ever arrives to restart it.
+                    let known = announcedTips[peer.key]?.height ?? 0
+                    if announced > known
+                        || announcedTips[peer.key]?.peer.sessionID
+                            != peer.sessionID {
+                        announcedTips[peer.key] = (announced, peer)
+                    }
+                }
                 if let announced = announcement.height,
                    announced > ourHeight + Self.rangeSyncDepthThreshold {
                     await startRangeSync(
@@ -5478,6 +5495,47 @@ public actor NodeNetworkRuntime: IvyDelegate {
         rangeSync?.responseTimeout?.cancel()
         rangeSync?.progressTimeout?.cancel()
         rangeSync = nil
+        scheduleRangeSyncReentry()
+    }
+
+    /// A cleared sync must not depend on a further announcement to restart:
+    /// on a quiet network (nobody minting) none ever arrives, and a node
+    /// still far behind would idle forever while the height-blind sweeps
+    /// fill the pipeline. Re-entry is the receiver's own assessment, probed
+    /// one request-timeout after each clear.
+    private func scheduleRangeSyncReentry() {
+        guard rangeSyncReentryTask == nil, !announcedTips.isEmpty else {
+            return
+        }
+        let generation = runtimeGeneration
+        let delay = Self.nanoseconds(planeConfigurations.overlay.requestTimeout)
+        rangeSyncReentryTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: delay) } catch { return }
+            await self?.maybeRestartRangeSync(generation: generation)
+        }
+    }
+
+    private func maybeRestartRangeSync(generation: UInt64) async {
+        rangeSyncReentryTask = nil
+        guard isCurrentGeneration(generation), isRunning,
+              rangeSync == nil, let process else { return }
+        let ourHeight = await process.status().height ?? 0
+        guard isCurrentRuntime(generation: generation, process: process),
+              rangeSync == nil else { return }
+        let candidates = announcedTips.filter { key, value in
+            overlayPeers[key]?.sessionID == value.peer.sessionID
+                && value.height > ourHeight + Self.rangeSyncDepthThreshold
+        }
+        guard let best = candidates.max(by: {
+            $0.value.height < $1.value.height
+        }) else { return }
+        await startRangeSync(
+            peer: best.value.peer,
+            targetHeight: best.value.height,
+            generation: generation,
+            process: process
+        )
+        // The peer may refuse or stall again; the next clear re-probes.
     }
 
     private func startAcceptedLeavesRequest(
