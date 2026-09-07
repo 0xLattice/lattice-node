@@ -23,8 +23,13 @@ public struct NodeResourcePolicy: Sendable, Equatable {
 
     public init(
         maximumChainSpecBytes: Int = 1 * 1_024 * 1_024,
+        // The operator's acceptance budget for a fetched child-evidence proof
+        // envelope (which carries the securing-work proof and any parent-state
+        // witness). Defaults just under the transport's volume-archive ceiling
+        // so a deep multi-hop proof is not wedged at one frame; operators lower
+        // it to restrict how much evidence they will accept.
         maximumParentWitnessBytes: Int =
-            Int(IvyConfig.defaultProtocolMaxFrameSize) - 1_024,
+            Int(IvyConfig.defaultProtocolMaxFrameSize) * 15,
         maximumPendingParentEvidence: Int = 64,
         maximumWasmPolicies: Int = 64,
         maximumAcquisitionVolumes: Int = 20_548,
