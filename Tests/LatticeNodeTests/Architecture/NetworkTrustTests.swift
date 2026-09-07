@@ -6488,6 +6488,81 @@ final class NetworkTrustTests: XCTestCase {
         )
     }
 
+    // A node that SYNCED a carrier committing a child — with no child peer
+    // connected at admission and no GenesisAction to auto-seed a route — never
+    // issues that child's securing evidence, though a node that MINED the same
+    // carrier would have issued it eagerly. That is the mining⊥admission gap a
+    // late-connecting (or post-restart-recovered) child hits. The backfill must
+    // self-issue it from the accepted carrier, independent of peer timing.
+    func testBackfillSeedsRoutesForAnUnroutedCommittedChildCarrier() async throws {
+        let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-late-child-backfill-\(UUID().uuidString)", isDirectory: true
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storage) }
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: storage,
+            privateKeyHex: String(repeating: "6b", count: 32),
+            listenPort: NetworkTransportTestPorts.allocate(),
+            factListenPort: NetworkTransportTestPorts.allocate(),
+            rpcPort: NetworkTransportTestPorts.allocate()
+        )
+        let process = try await ChainProcess.open(configuration: configuration)
+        let genesis = try await process.canonicalTipBlock()
+
+        // A carrier that COMMITS a child but carries no GenesisAction — so
+        // admission with no connected child peer seeds no route for it. A node
+        // that MINED this carrier would have issued the child's evidence
+        // eagerly; a node that SYNCED it leaves the child unrouted (the
+        // late-connect / post-restart-recovery gap).
+        try await LatticeState.emptyHeader.storeRecursively(storer: process)
+        let childBlock = try await BlockBuilder.buildChildGenesis(
+            spec: NexusGenesis.spec,
+            parentState: LatticeState.emptyHeader,
+            timestamp: 3_600_000,
+            target: .max,
+            fetcher: process
+        )
+        let carrier = try await BlockBuilder.buildBlock(
+            previous: genesis,
+            children: ["Payments": childBlock],
+            timestamp: 3_600_000,
+            nonce: 1,
+            fetcher: process
+        )
+        let carrierHeader = try BlockHeader(node: carrier)
+        try await carrierHeader.storeBlock(fetcher: process, storer: process)
+
+        let outcome = try await process.admit(
+            BlockHeader(
+                rawCID: carrierHeader.rawCID,
+                node: nil,
+                encryptionInfo: nil
+            ),
+            preparingChildDirectories: []
+        )
+        guard outcome.decision.isAccepted else {
+            throw NetworkTestError.failedPhase("committed-child carrier admission")
+        }
+
+        // Gap: the accepted carrier committed a child, but admission seeded no
+        // proof route for it.
+        let routedBefore = try await process.pendingChildProofCarrierCIDs()
+        XCTAssertTrue(routedBefore.isEmpty, "carrier unrouted before backfill")
+
+        // The backfill closes the gap: it seeds the pending proof route from the
+        // accepted carrier, independent of mining and of peer timing. The
+        // existing acquire/promote pipeline then issues the evidence once the
+        // child content resolves (locally-retained or fetched from any peer).
+        await process.backfillChildProofRoutes(directory: "Payments")
+
+        let routedAfter = try await process.pendingChildProofCarrierCIDs()
+        XCTAssertEqual(
+            routedAfter, [carrierHeader.rawCID],
+            "backfill seeds a proof route for the accepted carrier's committed child"
+        )
+    }
+
     private func pendingSideCarrierFixture(
         keyByte: UInt8,
         rejectAvailability: Bool

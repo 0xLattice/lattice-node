@@ -20,6 +20,13 @@ public struct NodeResourcePolicy: Sendable, Equatable {
     /// consensus commitment: an evicted candidate whose branch returns is
     /// re-acquired through ordinary verified acquisition. Oldest first.
     public let maximumRetainedHandoffCandidates: Int
+    /// How many recent accepted carriers the late-child evidence backfill walks
+    /// when a child connects, self-issuing that child's securing proofs rather
+    /// than relying on a peer to serve them. Not a limit on validity or
+    /// capability: carriers older than this window are still served by the
+    /// verified any-peer proof fallback, so this only tunes how eagerly a node
+    /// self-issues. Operators raise it to self-issue deeper history.
+    public let childEvidenceBackfillCarrierWindow: Int
 
     public init(
         maximumChainSpecBytes: Int = 1 * 1_024 * 1_024,
@@ -36,7 +43,8 @@ public struct NodeResourcePolicy: Sendable, Equatable {
         maximumAcquisitionMembers: Int = Int(UInt16.max),
         maximumAcquisitionStorageBytes: Int = 64 * 1_024 * 1_024,
         maximumContinuityBlockVisits: Int = 4_096,
-        maximumRetainedHandoffCandidates: Int = 1_024
+        maximumRetainedHandoffCandidates: Int = 1_024,
+        childEvidenceBackfillCarrierWindow: Int = 256
     ) {
         precondition(
             maximumChainSpecBytes > 0
@@ -48,6 +56,7 @@ public struct NodeResourcePolicy: Sendable, Equatable {
                 && maximumAcquisitionStorageBytes > 0
                 && maximumContinuityBlockVisits > 0
                 && maximumRetainedHandoffCandidates > 0
+                && childEvidenceBackfillCarrierWindow > 0
         )
         self.maximumChainSpecBytes = maximumChainSpecBytes
         self.maximumParentWitnessBytes = maximumParentWitnessBytes
@@ -58,6 +67,7 @@ public struct NodeResourcePolicy: Sendable, Equatable {
         self.maximumAcquisitionStorageBytes = maximumAcquisitionStorageBytes
         self.maximumContinuityBlockVisits = maximumContinuityBlockVisits
         self.maximumRetainedHandoffCandidates = maximumRetainedHandoffCandidates
+        self.childEvidenceBackfillCarrierWindow = childEvidenceBackfillCarrierWindow
     }
 }
 import Ivy

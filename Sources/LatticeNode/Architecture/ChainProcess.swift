@@ -1513,6 +1513,42 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         )
     }
 
+    /// Backfill securing-evidence issuance for one child directory across the
+    /// recent accepted-carrier window (the operator-configured
+    /// `NodeResourcePolicy.childEvidenceBackfillCarrierWindow`). Called when a
+    /// `.child` connects or a tracked child is recovered. Issuance is a
+    /// consequence of having admitted/validated the carrier — independent of
+    /// mining and of the child being a connected peer at admission. Reuses
+    /// `prepareChildProofs`: a carrier that does not commit the directory
+    /// resolves `.absent` and drops its route (self-cleaning), unavailable
+    /// content is retried by the ordinary pipeline. Never touches validation,
+    /// weight, or fork choice — the proof is still verified from content.
+    func backfillChildProofRoutes(
+        directory: String,
+        carrierLimit: Int? = nil,
+        remoteSource: (any ContentSource)? = nil
+    ) async {
+        let carrierLimit = carrierLimit
+            ?? configuration.resourcePolicy.childEvidenceBackfillCarrierWindow
+        let carriers: [String]
+        do {
+            carriers = try await store.recentAcceptedBlockCIDs(limit: carrierLimit)
+        } catch {
+            return
+        }
+        for carrierCID in carriers {
+            try? await prepareChildProofs(
+                for: BlockHeader(
+                    rawCID: carrierCID,
+                    node: nil,
+                    encryptionInfo: nil
+                ),
+                directories: [directory],
+                remoteSource: remoteSource
+            )
+        }
+    }
+
     func pendingChildProofCarrierCIDs() async throws -> [String] {
         await acquireOperation()
         defer { releaseOperation() }

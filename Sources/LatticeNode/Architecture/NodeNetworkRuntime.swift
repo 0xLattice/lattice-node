@@ -586,6 +586,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private var childPeerRotation: [String: Int] = [:]
     private var childPathRotation = 0
     private var childProofPathRotation = 0
+    /// Directories already backfilled this generation, so the late-child
+    /// evidence backfill runs once per connection instead of on every recovery
+    /// pass (which would churn routes for non-committing carriers). Cleared when
+    /// a directory's last child peer disconnects and on generation reset.
+    private var backfilledChildDirectories: Set<String> = []
     private var nextRequestID: UInt64 = 0
     private var nextHelloDeadlineToken: UInt64 = 0
     private var nextChildCandidateBuildToken: UInt64 = 0
@@ -982,6 +987,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         childPeerRotation.removeAll()
         childPathRotation = 0
         childProofPathRotation = 0
+        backfilledChildDirectories.removeAll()
         handlers = nil
     }
 
@@ -2319,6 +2325,16 @@ public actor NodeNetworkRuntime: IvyDelegate {
             &childPeerRotation,
             activeRoles: Array(hierarchyPeers.values)
         )
+        if case .child(let path)? = removedRole, let directory = path.last,
+           !hierarchyPeers.values.contains(where: { role in
+               guard case .child(let other) = role else { return false }
+               return other.last == directory
+           }) {
+            // Last peer for this directory left: let a reconnecting child
+            // re-run the late-child backfill for carriers admitted while it was
+            // gone (those got no admission-time route seeded for it).
+            backfilledChildDirectories.remove(directory)
+        }
         if case .parent? = removedRole {
             pendingEvidenceIndexes.removeAll()
             let interrupted = pendingParentChainFacts.values.filter {
@@ -4325,6 +4341,34 @@ public actor NodeNetworkRuntime: IvyDelegate {
         generation: UInt64,
         process: ChainProcess
     ) async {
+        // Late-child backfill: a child that connected AFTER its carriers were
+        // admitted — or whose carriers were recovered durably on restart rather
+        // than re-admitted — has no pending proof route for those historical
+        // carriers, so the retry loop below would have nothing to issue. A node
+        // that MINED a carrier issues for every child eagerly; this restores the
+        // same for a node that SYNCED it. Seed routes across the recent
+        // accepted-carrier window for every connected direct child (the whole
+        // set, not the rotated serving subset); the retry loop then generates
+        // and announces them from local or peer content. Carriers older than the
+        // window rely on the verified any-peer proof fallback — a bounded
+        // window, not silent completeness.
+        let connectedChildDirectories = Set(
+            hierarchyPeers.values.compactMap { role -> String? in
+                guard case .child(let path) = role else { return nil }
+                return path.last
+            }
+        ).sorted()
+        for directory in connectedChildDirectories
+        where !backfilledChildDirectories.contains(directory) {
+            guard !Task.isCancelled,
+                  isCurrentRuntime(generation: generation, process: process) else {
+                break
+            }
+            await process.backfillChildProofRoutes(directory: directory)
+            // Mark only after completion, so an interrupted backfill retries on
+            // the next recovery pass rather than being skipped as done.
+            backfilledChildDirectories.insert(directory)
+        }
         repeat {
             childProofRecoveryNeedsRefresh = false
             guard !Task.isCancelled,
