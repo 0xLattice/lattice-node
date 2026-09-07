@@ -403,6 +403,27 @@ final class PortableEvidenceProtocolTests: XCTestCase {
         }
     }
 
+    func testEvidenceProofCapMatchesTransportCapacityNotOneFrame() {
+        let frame = Int(IvyConfig.defaultProtocolMaxFrameSize)
+        // The old cap was a single frame — the original wedge. A legitimate
+        // deep multi-hop proof exceeds one frame; the volume-archive transport
+        // chunks the evidence across frames, so the hard proof cap must exceed
+        // one frame...
+        XCTAssertGreaterThan(
+            ChildValidationPackageEnvelope.maximumEncodedSize, frame
+        )
+        // ...and so must the operator acceptance budget, or the receiver's
+        // decode (the min of the two) still wedges at one frame.
+        XCTAssertGreaterThan(
+            NodeResourcePolicy.default.maximumParentWitnessBytes, frame
+        )
+        // The wrapped evidence Volume must stay under the transport's archive
+        // ceiling (16 frames) so the archive never rejects it.
+        XCTAssertLessThanOrEqual(
+            ChildEvidenceVolume.maximumArchiveBytes, frame * 16
+        )
+    }
+
     private func evidenceFixture() async throws
         -> (envelope: Data, childCID: String) {
         let source = MemoryBroker()
