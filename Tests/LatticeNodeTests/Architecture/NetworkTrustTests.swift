@@ -1938,6 +1938,55 @@ final class NetworkTrustTests: XCTestCase {
         XCTAssertEqual(complete?.package.parentGenesisLink, genesis)
     }
 
+    // A parent verdict (genesis/continuity link) is attached only through the
+    // gated merge, and the merge is content-bound to the exact proof it was
+    // confirmed against. This locks the "authenticated => authorized" boundary:
+    // a link may never be grafted onto a different proof, and a conflicting
+    // second link never silently overwrites the first. If a future path tries
+    // to smuggle a wire-supplied verdict onto a candidate, it fails here.
+    func testEvidenceMergeRejectsCrossProofAndConflictingLinks() throws {
+        let proofA = proof()
+        let proofB = ChildBlockProof(
+            rootCID: "different-proof-root",
+            directoryPath: ["Payments"],
+            entries: []
+        )
+        let genesis = try genesisLink(
+            parentPath: ["Nexus"], directory: "Payments", cid: "child-genesis"
+        )
+        let otherGenesis = try genesisLink(
+            parentPath: ["Nexus"], directory: "Payments", cid: "other-child-genesis"
+        )
+
+        // A link confirmed against proofB cannot attach to proofA's candidate.
+        let proofOnlyA = AuthenticatedChildPackage(
+            package: ChildValidationPackage(proof: proofA)
+        )
+        let genesisOnB = AuthenticatedChildPackage(
+            package: ChildValidationPackage(proof: proofB, parentGenesisLink: genesis)
+        )
+        XCTAssertNil(NodeNetworkRuntime.merging(proofOnlyA, with: genesisOnB))
+
+        // Conflicting genesis facts for the same proof are rejected outright,
+        // never overwritten — a second (attacker) verdict cannot replace the first.
+        let genesisA = AuthenticatedChildPackage(
+            package: ChildValidationPackage(proof: proofA, parentGenesisLink: genesis)
+        )
+        let conflictingA = AuthenticatedChildPackage(
+            package: ChildValidationPackage(
+                proof: proofA, parentGenesisLink: otherGenesis
+            )
+        )
+        XCTAssertNil(NodeNetworkRuntime.merging(genesisA, with: conflictingA))
+
+        // The same verdict on the same proof still merges (idempotent).
+        XCTAssertEqual(
+            NodeNetworkRuntime.merging(genesisA, with: genesisA)?
+                .package.parentGenesisLink,
+            genesis
+        )
+    }
+
     func testEvidenceIndexPagesAreCanonicalAndCursorBound() throws {
         let summaries = [
             IssuedChildEvidenceSummary(
