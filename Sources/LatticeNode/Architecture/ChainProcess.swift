@@ -890,6 +890,28 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                         blockCID: blockHeader.rawCID,
                         materializedRoots: roots
                     )
+                    // The weighed tier suppressed hierarchy issuance; validation
+                    // re-derives it, and Lattice hands the carrier link back in the
+                    // staging context. Persist it exactly as the eager path does so
+                    // a cold-synced parent can serve child-proof routes and relay
+                    // securing proofs for children anchored in below-tip blocks.
+                    if let hierarchyArtifacts = context.issuedCarrierLink.map({
+                        AdmissionHierarchyArtifacts(
+                            carrierLink: $0,
+                            carrierEvidence: carrierEvidence,
+                            parentGenesisLinks: context.parentGenesisLinks
+                        )
+                    }) {
+                        try await self.store.persistIssuedHierarchyArtifacts(
+                            hierarchyArtifacts,
+                            pendingChildProofRoutes: Self.pendingChildProofRoutes(
+                                carrierCID: blockHeader.rawCID,
+                                directories: directChildDirectories,
+                                parentGenesisLinks: context.parentGenesisLinks
+                            ),
+                            pendingChildProofCapacity: Self.preparedChildProofCapacity
+                        )
+                    }
                 }
                 return
             }

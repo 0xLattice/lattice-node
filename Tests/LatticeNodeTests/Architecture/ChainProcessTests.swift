@@ -500,6 +500,96 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertEqual(persistedGenesis?.childGenesisCID, childCID)
     }
 
+    func testValidateOnCandidacyPersistsIssuedHierarchyLikeEager() async throws {
+        // A Nexus carrier that RECORDS a self-contained child genesis via a plain
+        // GenesisAction — the same fixture the eager hierarchy test uses.
+        let producerDir = temporaryDirectory()
+        let producer = try await ChainProcess.open(
+            configuration: try configuration(path: ["Nexus"], storage: producerDir)
+        )
+        let genesis = try await producer.canonicalTipBlock()
+        let child = try await BlockBuilder.buildChildGenesis(
+            spec: NexusGenesis.spec,
+            parentState: LatticeState.emptyHeader,
+            timestamp: 1,
+            target: UInt256.max,
+            fetcher: producer
+        )
+        let childCID = try BlockHeader(node: child).rawCID
+        let authorization = try signedGenesisAnchorTransaction(
+            directory: "Payments",
+            childGenesisCID: childCID
+        )
+        try await VolumeImpl<Transaction>(node: authorization).storeRecursively(
+            storer: producer
+        )
+        let carrier = try await BlockBuilder.buildBlock(
+            previous: genesis,
+            transactions: [authorization],
+            timestamp: 1,
+            nonce: 0,
+            fetcher: producer
+        )
+        let carrierHeader = try BlockHeader(node: carrier)
+
+        // EAGER baseline: admission issues and persists the parent-genesis link.
+        let eagerOutcome = try await producer.admit(carrierHeader)
+        XCTAssertTrue(eagerOutcome.decision.isAccepted)
+        let eagerGenesisLink = try await producer.issuedParentGenesisLink(
+            directory: "Payments",
+            childGenesisCID: childCID,
+            parentStateCID: LatticeState.emptyHeader.rawCID
+        )
+        XCTAssertNotNil(eagerGenesisLink)
+
+        // DEFERRED: weighed cold-sync of the SAME carrier suppresses issuance,
+        // then validate-on-candidacy must persist it exactly as eager did.
+        let consumerDir = temporaryDirectory()
+        let consumer = try await ChainProcess.open(
+            configuration: try configuration(path: ["Nexus"], storage: consumerDir)
+        )
+        let weighed = try await consumer.admit(
+            carrierHeader,
+            remoteSource: FetcherContentSource(producer),
+            mode: .weighed
+        )
+        XCTAssertTrue(weighed.decision.isAccepted)
+        let weighedGenesisLink = try await consumer.issuedParentGenesisLink(
+            directory: "Payments",
+            childGenesisCID: childCID,
+            parentStateCID: LatticeState.emptyHeader.rawCID
+        )
+        XCTAssertNil(
+            weighedGenesisLink,
+            "a weighed (unexecuted) block must not issue hierarchy"
+        )
+
+        let validated = try await consumer.admit(
+            carrierHeader,
+            remoteSource: FetcherContentSource(producer),
+            mode: .validate
+        )
+        XCTAssertTrue(validated.decision.isAccepted)
+        let validatedGenesisLink = try await consumer.issuedParentGenesisLink(
+            directory: "Payments",
+            childGenesisCID: childCID,
+            parentStateCID: LatticeState.emptyHeader.rawCID
+        )
+        XCTAssertEqual(
+            validatedGenesisLink, eagerGenesisLink,
+            "validate-on-candidacy must persist the same genesis link as eager"
+        )
+        let carrierLink = try XCTUnwrap(validated.parentCarrierLink)
+        let persistedCarrier = try await consumer.issuedParentCarrierLink(
+            carrierCID: carrierHeader.rawCID,
+            rootCID: carrierLink.rootCID
+        )
+        XCTAssertEqual(
+            persistedCarrier, carrierLink,
+            "the validated carrier link must be durably persisted for relay"
+        )
+    }
+
     func testDisconnectedCarrierRelaysBeforeGenesisFactPromotion() async throws {
         let directory = temporaryDirectory()
         let config = try configuration(path: ["Nexus"], storage: directory)

@@ -1823,10 +1823,18 @@ public actor ChainService {
     /// not validated cannot form a valid pre-state. Tip and target are re-read
     /// every iteration so a mid-walk reorg or exclusion re-projection re-targets.
     func runValidateWalkPass() async {
+        // Height of the last admit that returned a non-parking decision. If the
+        // durable validated height does not advance past it on the next read,
+        // park (return) instead of hot-spinning — defence against any future
+        // no-progress case (an exclusion that re-projects re-arms a fresh pass).
+        var lastAdmittedHeight: UInt64?
         while true {
             let validated = await process.deepestValidatedMainChainTip()
             guard let target = await process.canonicalTipHeight() else { return }
             let validatedHeight = validated.map { Int64($0.height) } ?? -1
+            if let lastAdmittedHeight, validatedHeight < Int64(lastAdmittedHeight) {
+                return
+            }
             if validatedHeight >= Int64(target) { return }
             let nextHeight = UInt64(validatedHeight + 1)
             // FORWARD-apply on the CURRENT main chain. The body is already local
@@ -1858,6 +1866,11 @@ public actor ChainService {
                 // re-projected (the excluded block is off the main chain now). Either
                 // way re-read tip/target and continue — never mark an excluded block
                 // validated, and never self-loop.
+                lastAdmittedHeight = nextHeight
+                // Deliver any child-proof routes this block just re-issued on
+                // validation (no-op when it anchors no child), exactly as the
+                // eager admission path publishes them.
+                await publishCarrierChildProofs(header: header, outcome: outcome)
                 continue
             case .unavailable, .temporarilyInvalid, .invalid, .localFailure,
                  .carrier:
