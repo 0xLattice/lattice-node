@@ -1171,37 +1171,56 @@ actor NodeStore {
     /// merely *weighed*. `false` for an unknown block or one recorded weighed.
     /// The tier is a node-side recovery fact, not derivable from the consensus
     /// batch, so it is read straight from the durable accepted-block index.
+    ///
+    /// Tier values: `0` weighed (boundary only, in the batch scope), `1` eager
+    /// (body + state inside `admission_batches.volume_roots`), `2` walk-
+    /// validated (body + state under the block's owner pin). A downgrade that
+    /// only knows `1` reads `2` as "not validated" — the safe direction.
     func blockValidated(_ blockCID: String) throws -> Bool {
-        try database.query(
+        (try database.query(
             "SELECT validated FROM accepted_blocks WHERE block_cid = ?1 LIMIT 1",
             params: [.text(blockCID)]
-        ).first?["validated"]?.intValue == 1
+        ).first?["validated"]?.intValue ?? 0) >= 1
     }
 
-    /// Upgrade an already-weighed accepted block to the *validated* tier: retain
-    /// its materialized post-state Volume roots and flip its durable marker.
+    /// Flip an already-weighed accepted block's durable marker to the walk-
+    /// validated tier. Marker ONLY: the caller pins the materialized body and
+    /// post-state roots under the block's owner FIRST, so a crash between the
+    /// two leaves an orphan pin (reclaimed at boot), never a marker without
+    /// its state.
     ///
     /// The weighed block fact (empty `stateDiff`) is immutable and keyed by
     /// blockHash ONLY, so re-staging the validated fact (its real `stateDiff`)
     /// would collide (`conflictingAdmissionFact`). Deferred execution therefore
     /// never rewrites `admission_facts` on validation: the weighed fact REMAINS
     /// the state-blind consensus-replay record, and the materialized state is a
-    /// node-side availability artifact keyed by this marker plus the retained
-    /// roots. Retention runs first (an orphaned retained root is harmless and
-    /// startup reclaims it; a marker without its state is not), then the marker
-    /// flips in one transaction. Both steps are idempotent, so a re-validation
-    /// (reorg re-projection, crash-retry) is a no-op.
-    func promoteValidated(
-        blockCID: String,
-        materializedRoots: [String]
-    ) async throws {
-        try await recoveryVolumeBroker.mergeRetainedRoots(
-            scope: blockRetentionScope,
-            roots: materializedRoots
-        )
+    /// node-side availability artifact keyed by this marker plus the owner pin.
+    /// Idempotent, so a re-validation (reorg re-projection, crash-retry) is a
+    /// no-op.
+    func promoteValidated(blockCID: String) throws {
         try database.transaction {
             _ = try database.execute(
-                "UPDATE accepted_blocks SET validated = 1 WHERE block_cid = ?1",
+                "UPDATE accepted_blocks SET validated = 2 WHERE block_cid = ?1",
+                params: [.text(blockCID)]
+            )
+        }
+    }
+
+    /// Every block marked walk-validated (tier `2`): the set whose body and
+    /// post-state must be held by a per-block owner pin.
+    func walkValidatedBlockCIDs() throws -> Set<String> {
+        Set(try database.query(
+            "SELECT block_cid FROM accepted_blocks WHERE validated = 2"
+        ).compactMap { $0["block_cid"]?.textValue })
+    }
+
+    /// Return a walk-validated block to the weighed tier (its owner pin is
+    /// gone, so its state may be evicted); the walk re-validates it on
+    /// candidacy.
+    func demoteValidated(blockCID: String) throws {
+        try database.transaction {
+            _ = try database.execute(
+                "UPDATE accepted_blocks SET validated = 0 WHERE block_cid = ?1",
                 params: [.text(blockCID)]
             )
         }

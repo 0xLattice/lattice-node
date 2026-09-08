@@ -114,6 +114,21 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     private static let maximumDirectChildRoutes = 64
     private static let preparedChildProofCapacity = 16
 
+    /// Owner pins holding a walk-validated block's body + post-state, one
+    /// owner per block: `<retentionScope>:validated:<blockCID>`.
+    private nonisolated static func validatedOwnerPrefix(
+        _ retentionScope: String
+    ) -> String {
+        retentionScope + ":validated:"
+    }
+
+    private nonisolated static func validatedOwner(
+        _ retentionScope: String,
+        _ blockCID: String
+    ) -> String {
+        validatedOwnerPrefix(retentionScope) + blockCID
+    }
+
     public nonisolated let configuration: NodeConfiguration
 
     private let store: NodeStore
@@ -274,6 +289,28 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             scope: retentionScope,
             roots: retainedRoots
         )
+        // Walk-validated tier invariant: a block is marked `2` iff its body +
+        // post-state are pinned under its owner. Owner pins persist in
+        // volumes.db (unlike the batch-rebuilt scope above). A marker whose
+        // pin is gone is demoted to weighed so the walk re-validates it; a pin
+        // whose marker never flipped (crash between pin and flip) is released.
+        let walkValidated = try await store.walkValidatedBlockCIDs()
+        let validatedOwnerPrefix = Self.validatedOwnerPrefix(retentionScope)
+        let pinnedOwners = Set(
+            await broker.pinnedOwners(prefix: validatedOwnerPrefix)
+        )
+        for blockCID in walkValidated.sorted()
+        where !pinnedOwners.contains(
+            Self.validatedOwner(retentionScope, blockCID)
+        ) {
+            try await store.demoteValidated(blockCID: blockCID)
+        }
+        for owner in pinnedOwners.sorted()
+        where !walkValidated.contains(
+            String(owner.dropFirst(validatedOwnerPrefix.count))
+        ) {
+            try await broker.unpinAll(owner: owner)
+        }
         let localMempoolRoots = try await store.localMempoolTransactions()
             .map(\.transactionCID)
         for root in localMempoolRoots {
@@ -885,10 +922,19 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                         )
                     )
                 } else {
+                    // Pin BEFORE flipping the marker: a crash between leaves an
+                    // orphan pin that boot reclaims, never a marker without its
+                    // state. The owner pin (not the batch-rebuilt retention
+                    // scope) is what survives a restart.
                     let roots = await admissionStorage.takeStoredVolumeRoots()
+                    try await self.broker.pinBatch(
+                        roots: roots,
+                        owner: Self.validatedOwner(
+                            self.retentionScope, blockHeader.rawCID
+                        )
+                    )
                     try await self.store.promoteValidated(
-                        blockCID: blockHeader.rawCID,
-                        materializedRoots: roots
+                        blockCID: blockHeader.rawCID
                     )
                     // The weighed tier suppressed hierarchy issuance; validation
                     // re-derives it, and Lattice hands the carrier link back in the

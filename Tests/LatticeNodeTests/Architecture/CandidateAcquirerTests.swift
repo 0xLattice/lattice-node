@@ -786,6 +786,77 @@ final class CandidateAcquirerTests: XCTestCase {
         )
     }
 
+    func testRootedPackageSeedInheritsWeighedFromTheRootlessAttemptItSupersedes()
+        throws
+    {
+        // Range-sync seeds a weighed rootless attempt; a recovered portable
+        // attachment then seeds the same CID with its package (rooted, default
+        // flag). The package supersedes the rootless attempt and must inherit
+        // its tier — otherwise every below-tip child block executes eagerly.
+        var acquirer = CandidateAcquirer()
+        XCTAssertTrue(acquirer.observe(.init(
+            blockCID: "block", package: nil, weighed: true
+        )).accepted)
+        _ = acquirer.observe(.init(
+            blockCID: "block", package: try childPackage(rootCID: "root")
+        ))
+        let candidate = try XCTUnwrap(acquirer.next())
+        XCTAssertEqual(candidate.recoveryRootCID, "root")
+        XCTAssertTrue(
+            candidate.weighed,
+            "a package seed superseding a weighed attempt must stay weighed"
+        )
+        XCTAssertNil(acquirer.next(), "the rootless attempt was superseded")
+
+        // Eager-wins still holds: a package seed never UPGRADES an eager
+        // rootless attempt to weighed.
+        var eagerRootless = CandidateAcquirer()
+        XCTAssertTrue(eagerRootless.observe(.init(
+            blockCID: "block", package: nil
+        )).accepted)
+        _ = eagerRootless.observe(.init(
+            blockCID: "block", package: try childPackage(rootCID: "root")
+        ))
+        XCTAssertEqual(
+            eagerRootless.next()?.weighed, false,
+            "inheritance must never turn an eager attempt weighed"
+        )
+    }
+
+    func testSecondPackageSeedNeverDowngradesAWeighedRootedAttempt() throws {
+        // Two peers advertise the same attachment: the second package seed
+        // lands on the EXISTING rooted attempt (the merge branch, not the
+        // creation branch). A package seed carries no tier of its own, so it
+        // must not re-eager the weighed block — otherwise every below-tip child
+        // block seen from more than one peer executes eagerly.
+        var acquirer = CandidateAcquirer()
+        XCTAssertTrue(acquirer.observe(.init(
+            blockCID: "block", package: nil, weighed: true
+        )).accepted)
+        _ = acquirer.observe(.init(
+            blockCID: "block", package: try childPackage(rootCID: "root")
+        ))
+        _ = acquirer.observe(.init(
+            blockCID: "block", package: try childPackage(rootCID: "root")
+        ))
+        XCTAssertEqual(
+            acquirer.next()?.weighed, true,
+            "a second package seed must not downgrade a weighed rooted attempt"
+        )
+
+        // Eager-wins is intact where it belongs: a genuinely eager (rootless,
+        // package-less) seed still downgrades a weighed rootless attempt.
+        var rootless = CandidateAcquirer()
+        XCTAssertTrue(rootless.observe(.init(
+            blockCID: "block", package: nil, weighed: true
+        )).accepted)
+        _ = rootless.observe(.init(blockCID: "block", package: nil))
+        XCTAssertEqual(
+            rootless.next()?.weighed, false,
+            "an eager package-less seed must still downgrade"
+        )
+    }
+
     func testWeighedSurvivesRepeatedWeighedObserves() throws {
         var acquirer = CandidateAcquirer()
         XCTAssertTrue(acquirer.observe(.init(
