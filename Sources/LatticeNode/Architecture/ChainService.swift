@@ -485,6 +485,20 @@ public actor ChainService {
     private var canonicalCommitQueue: [QueuedCanonicalCommit] = []
     private var canonicalCommitWorker: Task<Void, Never>?
     private var canonicalCommitWorkerReserved = false
+    // Validate-on-candidacy walk: a single coalesced worker (mirrors the
+    // canonical-commit worker's reserved-Task + dirty-bit pattern) that executes
+    // the canonical branch FORWARD from the deepest validated ancestor so the
+    // node becomes/stays operable after a weighed (deferred-execution) sync. It
+    // deliberately does NOT hold this actor's operation gate: it re-acquires the
+    // process gate per block, so holding the service gate would head-of-line-block
+    // every other operation for the length of a deep catch-up.
+    private var validateWalkWorker: Task<Void, Never>?
+    private var validateWalkDirty = false
+    #if DEBUG
+    // Test seam: invoked with each height about to be `.validate`-admitted, in
+    // walk order. Lets tests assert strictly-forward progress (never tip-first).
+    var onValidateWalkStep: (@Sendable (UInt64) -> Void)?
+    #endif
     private var transactionPublications = Set<String>()
     private var transactionPublicationWorker: Task<Void, Never>?
 
@@ -1002,13 +1016,15 @@ public actor ChainService {
         _ header: BlockHeader,
         authenticatedChildPackage: AuthenticatedChildPackage?,
         preparingChildDirectories: [String],
-        contentSource: any ContentSource
+        contentSource: any ContentSource,
+        weighed: Bool = false
     ) async throws -> NodeAdmissionOutcome {
         let outcome = try await process.admit(
             header,
             authenticatedChildPackage: authenticatedChildPackage,
             preparingChildDirectories: preparingChildDirectories,
             remoteSource: contentSource,
+            mode: weighed ? .weighed : .eager,
             canonicalCommitPublisher: { [self] commit in
                 await enqueueCanonicalCommit(commit)
             }
@@ -1773,6 +1789,86 @@ public actor ChainService {
         releaseOperation()
     }
 
+    /// Coalescing reserve for the validate-on-candidacy walk. Mirrors
+    /// `reserveCanonicalCommitWorker`'s single-instance-Task + dirty-bit shape: a
+    /// commit that lands mid-walk sets the dirty bit (so the running worker takes
+    /// another pass) rather than spawning a second walk. Unlike the canonical
+    /// worker this does NOT reserve the operation gate — the walk must interleave
+    /// with other operations because it re-takes the process gate per block.
+    private func reserveValidateWalkWorker() {
+        validateWalkDirty = true
+        guard validateWalkWorker == nil else { return }
+        validateWalkWorker = Task { [weak self] in
+            await self?.drainValidateWalk()
+        }
+    }
+
+    private func drainValidateWalk() async {
+        while validateWalkDirty {
+            validateWalkDirty = false
+            await runValidateWalkPass()
+        }
+        validateWalkWorker = nil
+    }
+
+    #if DEBUG
+    func setValidateWalkObserver(_ observer: (@Sendable (UInt64) -> Void)?) {
+        onValidateWalkStep = observer
+    }
+    #endif
+
+    /// One catch-up pass: execute canonical blocks forward from the deepest
+    /// validated ancestor until the validated tier meets the canonical tier.
+    /// FORWARD (+1), never tip-first — a `.validate` on a block whose parent is
+    /// not validated cannot form a valid pre-state. Tip and target are re-read
+    /// every iteration so a mid-walk reorg or exclusion re-projection re-targets.
+    func runValidateWalkPass() async {
+        while true {
+            let validated = await process.deepestValidatedMainChainTip()
+            guard let target = await process.canonicalTipHeight() else { return }
+            let validatedHeight = validated.map { Int64($0.height) } ?? -1
+            if validatedHeight >= Int64(target) { return }
+            let nextHeight = UInt64(validatedHeight + 1)
+            // FORWARD-apply on the CURRENT main chain. The body is already local
+            // (stored by the weighed admit), so the broker serves it — no fetch.
+            guard let next = await process.mainChainBlockCID(atHeight: nextHeight)
+            else { return }
+            #if DEBUG
+            onValidateWalkStep?(nextHeight)
+            #endif
+            let header = BlockHeader(rawCID: next, node: nil, encryptionInfo: nil)
+            let outcome: NodeAdmissionOutcome
+            do {
+                outcome = try await process.admit(
+                    header,
+                    mode: .validate,
+                    canonicalCommitPublisher: { [self] commit in
+                        await enqueueCanonicalCommit(commit)
+                    }
+                )
+            } catch {
+                // A store/durability error is not a verdict: keep acting on the
+                // last validated tip. A later commit re-arms the walk.
+                return
+            }
+            switch outcome.decision {
+            case .canonicalized, .acceptedSide, .duplicate:
+                // SUCCESS promoted weighed->validated (validated height advances),
+                // or a deterministic invalidity staged `.exclusion` and fork choice
+                // re-projected (the excluded block is off the main chain now). Either
+                // way re-read tip/target and continue — never mark an excluded block
+                // validated, and never self-loop.
+                continue
+            case .unavailable, .temporarilyInvalid, .invalid, .localFailure,
+                 .carrier:
+                // Availability/ordering gap: park at the last validated tip. The
+                // same machinery filling the missing body re-arms the walk when
+                // the block becomes admissible.
+                return
+            }
+        }
+    }
+
     private func reconcileCanonicalCommitOrResetLocked(
         _ commit: ChainCommit
     ) async {
@@ -1967,6 +2063,17 @@ public actor ChainService {
         try await syncLiveMempoolRootsLocked(pooledRoots)
         for cid in removedByCID.keys.sorted() where pooledRoots.contains(cid) {
             scheduleTransactionPublication(cid)
+        }
+        // Deferred execution: if the canonical (weighed-inclusive) tip has run
+        // ahead of the validated tier, execute the gap forward so the node stays
+        // operable. Reserve — never run inline: this method holds the service
+        // gate, and the walk re-acquires the process gate per block. `nil`
+        // validated height means nothing on the main chain is validated yet
+        // (below genesis), so treat it as strictly behind any canonical tip.
+        let validatedHeight = await process.deepestValidatedMainChainTip()?.height
+        if let target = await process.canonicalTipHeight(),
+           (validatedHeight.map { Int64($0) } ?? -1) < Int64(target) {
+            reserveValidateWalkWorker()
         }
     }
 

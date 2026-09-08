@@ -732,4 +732,71 @@ final class CandidateAcquirerTests: XCTestCase {
         acquirer.retry(now: start.advanced(by: .seconds(2)))
         XCTAssertEqual(acquirer.next()?.blockCID, "block")
     }
+
+    func testWeighedSeedPromotesOntoCandidate() throws {
+        var acquirer = CandidateAcquirer()
+        XCTAssertTrue(acquirer.observe(.init(
+            blockCID: "weighed-block",
+            package: nil,
+            weighed: true
+        )).accepted)
+        let candidate = try XCTUnwrap(acquirer.next())
+        XCTAssertTrue(
+            candidate.weighed,
+            "a weighed seed must produce a weighed candidate"
+        )
+    }
+
+    func testDefaultSeedIsEager() throws {
+        var acquirer = CandidateAcquirer()
+        XCTAssertTrue(acquirer.observe(.init(
+            blockCID: "eager-block",
+            package: nil
+        )).accepted)
+        let candidate = try XCTUnwrap(acquirer.next())
+        XCTAssertFalse(
+            candidate.weighed,
+            "the default seed must stay on the eager tier"
+        )
+    }
+
+    func testEagerSeedDowngradesAWeighedAttemptMonotonically() throws {
+        // Order 1: weighed first, then an eager seed for the same CID.
+        var weighedFirst = CandidateAcquirer()
+        XCTAssertTrue(weighedFirst.observe(.init(
+            blockCID: "block", package: nil, weighed: true
+        )).accepted)
+        _ = weighedFirst.observe(.init(blockCID: "block", package: nil))
+        XCTAssertEqual(
+            weighedFirst.next()?.weighed, false,
+            "an eager seed touching a weighed CID must downgrade it to eager"
+        )
+
+        // Order 2: eager first, then weighed — still eager (never upgrades).
+        var eagerFirst = CandidateAcquirer()
+        XCTAssertTrue(eagerFirst.observe(.init(
+            blockCID: "block", package: nil
+        )).accepted)
+        _ = eagerFirst.observe(.init(
+            blockCID: "block", package: nil, weighed: true
+        ))
+        XCTAssertEqual(
+            eagerFirst.next()?.weighed, false,
+            "weighed must never override an eager attempt"
+        )
+    }
+
+    func testWeighedSurvivesRepeatedWeighedObserves() throws {
+        var acquirer = CandidateAcquirer()
+        XCTAssertTrue(acquirer.observe(.init(
+            blockCID: "block", package: nil, weighed: true
+        )).accepted)
+        _ = acquirer.observe(.init(
+            blockCID: "block", package: nil, weighed: true
+        ))
+        XCTAssertEqual(
+            acquirer.next()?.weighed, true,
+            "weighed && weighed stays weighed"
+        )
+    }
 }

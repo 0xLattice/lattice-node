@@ -20,6 +20,7 @@ func testNodeStore(
         nexusGenesisCID: nexusGenesisCID,
         chainPath: chainPath,
         recoveryVolumeBroker: broker,
+        blockRetentionScope: "test:blocks",
         issuedRecoveryRetentionScope: "test:issued-hierarchy",
         preparedRecoveryRetentionScope: "test:prepared-hierarchy",
         contextualCandidateOwner: contextualCandidateOwner
