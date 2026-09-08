@@ -2740,6 +2740,46 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 generation: generation,
                 process: process
             )
+        case NodeNetworkTopic.ancestorRangeRequest:
+            guard
+                let request = try? AncestorRangeRequestMessage.decoded(
+                    message.payload
+                ), servingAncestorRange.insert(peer.sessionID).inserted
+            else {
+                return
+            }
+            defer {
+                if isCurrentRuntime(generation: generation, process: process) {
+                    servingAncestorRange.remove(peer.sessionID)
+                }
+            }
+            let page = await process.commonAncestorRange(
+                locator: request.locator,
+                limit: AncestorRangeResponseMessage.maximumBlocks
+            )
+            guard
+                isCurrentRuntime(generation: generation, process: process),
+                let payload = try? AncestorRangeResponseMessage(
+                    requestID: request.requestID,
+                    commonAncestor: page.commonAncestor,
+                    blockCIDs: page.blockCIDs,
+                    hasMore: page.hasMore
+                ).encoded()
+            else {
+                return
+            }
+            _ = await overlay.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.ancestorRangeResponse,
+                payload: payload
+            )
+        case NodeNetworkTopic.ancestorRangeResponse:
+            await handleAncestorRangeResponse(
+                message,
+                from: peer,
+                generation: generation,
+                process: process
+            )
         case NodeNetworkTopic.acceptedLeavesResponse:
             guard
                 let response = try? AcceptedLeavesResponseMessage.decoded(
@@ -5299,7 +5339,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
             progressTimeout: nil
         )
         scheduleRangeSyncProgress(generation: generation, process: process)
-        await pumpRangeSync(generation: generation, process: process)
+        // Negotiate the common ancestor before streaming, so a frontier that
+        // sits on a losing sibling is not told "empty = caught up" and marooned.
+        // A legacy peer never answers this topic; the response timeout then
+        // falls through to the frontier-anchored forward-range pump (exactly the
+        // pre-negotiation behaviour), so legacy peers still serve us.
+        await sendAncestorRangeRequest(generation: generation, process: process)
     }
 
     /// Request the next forward page if one is due: not already awaiting a
@@ -5418,6 +5463,154 @@ public actor NodeNetworkRuntime: IvyDelegate {
         await pumpRangeSync(generation: generation, process: process)
     }
 
+    /// The receiver's block locator: its own accepted main-chain CIDs,
+    /// newest-first at exponentially increasing height gaps back to and
+    /// including genesis. Bounded, so it spans any depth in a handful of
+    /// entries. Every entry is a block THIS node accepted, so the ancestor the
+    /// responder picks can never rewind us past our own verified history.
+    private func buildBlockLocator(process: ChainProcess) async -> [String] {
+        let status = await process.status()
+        guard let tip = status.height else {
+            return [configuration.nexusGenesisCID]
+        }
+        var heights: [UInt64] = []
+        var step: UInt64 = 1
+        var height = tip
+        while heights.count < AncestorRangeRequestMessage.maximumLocatorEntries - 1 {
+            heights.append(height)
+            if height == 0 { break }
+            height = height > step ? height - step : 0
+            step = step > UInt64.max / 2 ? step : step &* 2
+        }
+        if heights.last != 0 { heights.append(0) }
+        var locator: [String] = []
+        for height in heights {
+            if let cid = await process.mainChainBlockCID(atHeight: height) {
+                locator.append(cid)
+            }
+        }
+        return locator.isEmpty ? [configuration.nexusGenesisCID] : locator
+    }
+
+    /// Send the common-ancestor negotiation request that opens a range sync.
+    private func sendAncestorRangeRequest(
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        guard let sync = rangeSync, !sync.awaiting,
+              isCurrentRuntime(generation: generation, process: process),
+              overlayPeers[sync.peer.key]?.sessionID == sync.peer.sessionID else { return }
+        let locator = await buildBlockLocator(process: process)
+        guard var current = rangeSync, current.requestID == sync.requestID,
+              !current.awaiting,
+              isCurrentRuntime(generation: generation, process: process) else { return }
+        let requestID = makeRequestID()
+        guard let payload = try? AncestorRangeRequestMessage(
+            requestID: requestID,
+            locator: locator
+        ).encoded() else {
+            clearRangeSync()
+            return
+        }
+        let timeoutNanoseconds = Self.nanoseconds(
+            planeConfigurations.overlay.requestTimeout
+        )
+        current.requestID = requestID
+        current.awaiting = true
+        current.responseTimeout = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: timeoutNanoseconds) }
+            catch { return }
+            await self?.rangeSyncTimedOut(requestID: requestID, generation: generation)
+        }
+        let peer = current.peer
+        rangeSync = current
+        _ = await overlay.sendMessage(
+            to: peer,
+            topic: NodeNetworkTopic.ancestorRangeRequest,
+            payload: payload
+        )
+    }
+
+    /// Handle the negotiated common-ancestor response — the three outcomes.
+    private func handleAncestorRangeResponse(
+        _ message: PeerMessage,
+        from peer: AuthenticatedPeer,
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        guard let sync = rangeSync, sync.awaiting,
+              isCurrentRuntime(generation: generation, process: process),
+              sync.peer.sessionID == peer.sessionID,
+              let response = try? AncestorRangeResponseMessage.decoded(message.payload),
+              response.requestID == sync.requestID else {
+            return
+        }
+        guard var current = rangeSync, current.requestID == sync.requestID else { return }
+        current.responseTimeout?.cancel()
+        current.awaiting = false
+        current.responseTimeout = nil
+        rangeSync = current
+        // Outcome (c): no locator entry on the peer's main chain — disjoint
+        // retention. End this peer's stream and drop its recorded claim so the
+        // re-entry probe tries the next-tallest peer instead of re-picking it.
+        // Never punish (a slow and a stalling peer are indistinguishable), and
+        // never conclude "caught up" — resume the height-blind sweeps only as
+        // the same background fallback that runs when no streamable peer exists.
+        guard let ancestor = response.commonAncestor else {
+            SyncTrace.log("ancestor-range no-overlap peer=\(peer.key.hex.prefix(8))")
+            if announcedTips[peer.key]?.peer.sessionID == peer.sessionID {
+                announcedTips.removeValue(forKey: peer.key)
+            }
+            clearRangeSync()
+            await resumeDeferredSessionSweeps(generation: generation, process: process)
+            return
+        }
+        // Outcomes (a)/(b): anchor at the negotiated common ancestor — a block
+        // on OUR own accepted chain, so this never rewinds us. Enqueue the first
+        // page, then hand off to the forward-range pump. An empty page here is
+        // now genuinely "caught up", because the anchor is a real common block
+        // rather than our (possibly off-chain) frontier.
+        var lastCID: String?
+        var enqueued: UInt64 = 0
+        for cid in response.blockCIDs where CIDIdentity.isCanonical(cid) {
+            await overlay.rememberProvider(rootCID: cid, peer: peer.id)
+            guard isCurrentRuntime(generation: generation, process: process),
+                  rangeSync?.requestID == sync.requestID else { return }
+            guard overlayPeers[peer.key]?.sessionID == peer.sessionID else {
+                clearRangeSync()
+                return
+            }
+            _ = enqueueCandidate(CandidateSeed(
+                blockCID: cid,
+                package: nil,
+                provider: candidateProvider(peer)
+            ))
+            lastCID = cid
+            enqueued += 1
+        }
+        guard enqueued > 0, let lastCID else {
+            // Caught up to this peer from a real common ancestor.
+            clearRangeSync()
+            await resumeDeferredSessionSweeps(generation: generation, process: process)
+            return
+        }
+        // Anchor the request-height window at the ANCESTOR's height, not our own
+        // frontier: if the frontier is a losing sibling far above the ancestor,
+        // a window measured against the frozen canonical tip would stall the
+        // stream after two pages, before the streamed main chain can outweigh
+        // the sibling. Fall back to the frontier height if the lookup fails.
+        let anchorHeight = await process.acceptedBlockHeight(ancestor)
+        guard var committed = rangeSync, committed.requestID == sync.requestID else { return }
+        let base = anchorHeight ?? committed.requestedHeight
+        committed.requestedAfterCID = lastCID
+        committed.requestedHeight = base + enqueued
+        committed.progressBaselineHeight = min(committed.progressBaselineHeight, base)
+        committed.hasMore = response.hasMore
+        rangeSync = committed
+        serviceCandidateAcquirer()
+        await pumpRangeSync(generation: generation, process: process)
+    }
+
     /// Hooked into the admission drain: as our tip advances, pull more pages.
     private func advanceRangeSync(
         generation: UInt64,
@@ -5528,7 +5721,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
         current.responseTimeout = nil
         rangeSync = current
         scheduleRangeSyncProgress(generation: generation, process: process)
-        await pumpRangeSync(generation: generation, process: process)
+        // Negotiate the common ancestor before streaming, so a frontier that
+        // sits on a losing sibling is not told "empty = caught up" and marooned.
+        // A legacy peer never answers this topic; the response timeout then
+        // falls through to the frontier-anchored forward-range pump (exactly the
+        // pre-negotiation behaviour), so legacy peers still serve us.
+        await sendAncestorRangeRequest(generation: generation, process: process)
     }
 
     private func rangeSyncTimedOut(requestID: UInt64, generation: UInt64) async {
