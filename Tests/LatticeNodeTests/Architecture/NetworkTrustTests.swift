@@ -58,12 +58,11 @@ private actor ContentRequestRecorder {
     func snapshot() -> [String] { values }
 }
 
-private final class AcceptedLeavesPeer: IvyDelegate, Sendable {
-    private let acceptedLeafCID: String
-
-    init(acceptedLeafCID: String) {
-        self.acceptedLeafCID = acceptedLeafCID
-    }
+/// Drops the first common-ancestor negotiation it receives, answers every
+/// later one "caught up at your genesis", and counts forward-range pages.
+private actor RangeNegotiationDroppingPeer: IvyDelegate {
+    private var ancestorRequests = 0
+    private var forwardRequests = 0
 
     func ivy(
         _ ivy: Ivy,
@@ -71,24 +70,31 @@ private final class AcceptedLeavesPeer: IvyDelegate, Sendable {
         from peer: AuthenticatedPeer
     ) async {
         switch message.topic {
-        case NodeNetworkTopic.acceptedLeavesRequest:
-            guard let request = try? AcceptedLeavesRequestMessage.decoded(
-                message.payload
-            ), let response = try? AcceptedLeavesResponseMessage(
-                requestID: request.requestID,
-                afterCID: request.afterCID,
-                snapshotSequence: request.snapshotSequence ?? 1,
-                blockCIDs: [acceptedLeafCID],
-                hasMore: false
-            ).encoded() else { return }
+        case NodeNetworkTopic.ancestorRangeRequest:
+            ancestorRequests += 1
+            guard ancestorRequests > 1,
+                  let request = try? AncestorRangeRequestMessage.decoded(
+                    message.payload
+                  ), let payload = try? AncestorRangeResponseMessage(
+                    requestID: request.requestID,
+                    commonAncestor: request.locator.last,
+                    blockCIDs: [],
+                    hasMore: false
+                  ).encoded() else { return }
             _ = await ivy.sendMessage(
                 to: peer,
-                topic: NodeNetworkTopic.acceptedLeavesResponse,
-                payload: response
+                topic: NodeNetworkTopic.ancestorRangeResponse,
+                payload: payload
             )
+        case NodeNetworkTopic.forwardRangeRequest:
+            forwardRequests += 1
         default:
             break
         }
+    }
+
+    func counts() -> (ancestor: Int, forward: Int) {
+        (ancestorRequests, forwardRequests)
     }
 }
 
@@ -219,12 +225,16 @@ private actor EchoInventoryPeer: IvyDelegate {
     }
 }
 
-private actor OverlayInventoryPeer: IvyDelegate {
-    private let leaves: [String]?
-    private var requestSessions: [Data] = []
+/// A scripted overlay peer that announces its blocks once the runtime has
+/// authorized the session. The runtime answers a hello with its own tip
+/// announcement — the one wire-visible sign that the hello landed — and
+/// each session is served exactly once.
+private actor OverlayAnnouncingPeer: IvyDelegate {
+    private let blocks: [String]
+    private var authorizedSessions: [Data] = []
 
-    init(leaves: [String]?) {
-        self.leaves = leaves
+    init(announcing blocks: [String]) {
+        self.blocks = blocks
     }
 
     func ivy(
@@ -232,43 +242,22 @@ private actor OverlayInventoryPeer: IvyDelegate {
         didReceiveMessage message: PeerMessage,
         from peer: AuthenticatedPeer
     ) async {
-        if message.topic == NodeNetworkTopic.acceptedLeavesRequest {
-            guard let request = try? AcceptedLeavesRequestMessage.decoded(
-                message.payload
-            ) else { return }
-            requestSessions.append(peer.sessionID)
-            guard let leaves,
-                  let payload = try? AcceptedLeavesResponseMessage(
-                requestID: request.requestID,
-                afterCID: request.afterCID,
-                snapshotSequence: request.snapshotSequence ?? 1,
-                blockCIDs: leaves,
-                hasMore: false
-            ).encoded() else { return }
+        guard message.topic == NodeNetworkTopic.blockAnnouncement,
+              !authorizedSessions.contains(peer.sessionID) else { return }
+        authorizedSessions.append(peer.sessionID)
+        for blockCID in blocks {
+            guard let payload = try? BlockAnnouncementMessage(
+                blockCID: blockCID
+            ).encoded() else { continue }
             _ = await ivy.sendMessage(
                 to: peer,
-                topic: NodeNetworkTopic.acceptedLeavesResponse,
-                payload: payload
-            )
-        } else if message.topic
-            == NodeNetworkTopic.portableAttachmentIndexRequest {
-            guard let request = try? PortableAttachmentIndexRequestMessage
-                .decoded(message.payload),
-                  let payload = try? PortableAttachmentIndexResponseMessage(
-                    requestID: request.requestID,
-                    after: request.after,
-                    entries: [],
-                    hasMore: false
-                  ).encoded() else { return }
-            _ = await ivy.sendMessage(
-                to: peer,
-                topic: NodeNetworkTopic.portableAttachmentIndexResponse,
+                topic: NodeNetworkTopic.blockAnnouncement,
                 payload: payload
             )
         }
     }
 
-    func requestCount() -> Int { requestSessions.count }
+    func authorizedSessionCount() -> Int { authorizedSessions.count }
 }
 
 private struct PortableAttachmentTestPayload: Sendable {
@@ -280,7 +269,6 @@ private actor PortableAttachmentQueuePeer: IvyDelegate, IvyContentSource {
     private let attachments: [PortableAttachmentTestPayload]
     private let firstAdmissionGate: CandidateBuildGate
     private var servedAttachments = Set<String>()
-    private var portableIndexRequests = 0
 
     init(
         attachments: [PortableAttachmentTestPayload],
@@ -291,55 +279,6 @@ private actor PortableAttachmentQueuePeer: IvyDelegate, IvyContentSource {
                 < ($1.summary.edgeCID, $1.summary.rootCID)
         }
         self.firstAdmissionGate = firstAdmissionGate
-    }
-
-    func ivy(
-        _ ivy: Ivy,
-        didReceiveMessage message: PeerMessage,
-        from peer: AuthenticatedPeer
-    ) async {
-        switch message.topic {
-        case NodeNetworkTopic.acceptedLeavesRequest:
-            guard let request = try? AcceptedLeavesRequestMessage.decoded(
-                message.payload
-            ), let payload = try? AcceptedLeavesResponseMessage(
-                requestID: request.requestID,
-                afterCID: request.afterCID,
-                snapshotSequence: request.snapshotSequence ?? 1,
-                blockCIDs: [],
-                hasMore: false
-            ).encoded() else { return }
-            _ = await ivy.sendMessage(
-                to: peer,
-                topic: NodeNetworkTopic.acceptedLeavesResponse,
-                payload: payload
-            )
-        case NodeNetworkTopic.portableAttachmentIndexRequest:
-            guard let request = try? PortableAttachmentIndexRequestMessage
-                .decoded(message.payload) else { return }
-            portableIndexRequests += 1
-            await sendEmptyPortablePage(request, ivy: ivy, peer: peer)
-        default:
-            break
-        }
-    }
-
-    private func sendEmptyPortablePage(
-        _ request: PortableAttachmentIndexRequestMessage,
-        ivy: Ivy,
-        peer: AuthenticatedPeer
-    ) async {
-        guard let payload = try? PortableAttachmentIndexResponseMessage(
-            requestID: request.requestID,
-            after: request.after,
-            entries: [],
-            hasMore: false
-        ).encoded() else { return }
-        _ = await ivy.sendMessage(
-            to: peer,
-            topic: NodeNetworkTopic.portableAttachmentIndexResponse,
-            payload: payload
-        )
     }
 
     func content(
@@ -373,7 +312,6 @@ private actor PortableAttachmentQueuePeer: IvyDelegate, IvyContentSource {
     }
 
     func servedRoots() -> Set<String> { servedAttachments }
-    func indexRequestCount() -> Int { portableIndexRequests }
 }
 
 private actor HierarchyRetryRecorder {
@@ -2285,28 +2223,6 @@ final class NetworkTrustTests: XCTestCase {
         )).accepted)
     }
 
-    func testCandidateAcquirerReservesOneAcceptedLeafPage() {
-        var acquirer = CandidateAcquirer()
-        let pageSize = AcceptedLeavesResponseMessage.maximumLeaves
-        for index in 0..<(CandidateAcquirer.readyCapacity - pageSize) {
-            XCTAssertTrue(acquirer.observe(.init(
-                blockCID: "cid-\(index)",
-                package: nil
-            )).accepted)
-        }
-        XCTAssertTrue(acquirer.reserveAcceptedLeafPage(pageSize))
-        XCTAssertFalse(acquirer.reserveAcceptedLeafPage(pageSize))
-        XCTAssertFalse(acquirer.observe(.init(
-            blockCID: "gossip-overflow",
-            package: nil
-        )).accepted)
-        acquirer.releaseAcceptedLeafPage(pageSize)
-        XCTAssertTrue(acquirer.observe(.init(
-            blockCID: "next",
-            package: nil
-        )).accepted)
-    }
-
     func testProofPreparationRotatesAcrossMoreThanSixtyFourChildPaths() {
         let first = NodeNetworkRuntime.rotatedPeerIndices(
             peerCount: 65,
@@ -2629,10 +2545,6 @@ final class NetworkTrustTests: XCTestCase {
             healthConfig: PeerHealthConfig(enabled: false),
             mode: .overlay
         ))
-        let blockDelegate = OverlayInventoryPeer(leaves: [])
-        let replacementDelegate = OverlayInventoryPeer(leaves: [])
-        await blockAdvertiser.installTestDelegate(blockDelegate)
-        await replacement.installTestDelegate(replacementDelegate)
         await blockAdvertiser.setContentSource(
             NetworkTestVolumeSource(value: leafSerializedVolume)
         )
@@ -2710,31 +2622,22 @@ final class NetworkTrustTests: XCTestCase {
                 in: unavailable,
                 phase: "overlay block before portable parent proof"
             )
-            for _ in 0..<300 {
-                if await delegate.indexRequestCount() > 0 { break }
-                try await Task.sleep(for: .milliseconds(10))
-            }
-            guard await delegate.indexRequestCount() > 0 else {
-                throw NetworkTestError.failedPhase(
-                    "initial portable attachment inventory"
-                )
-            }
-            for attachment in attachments {
-                guard case .enqueued = await evidencePeer.sendMessage(
-                    to: PeerID(publicKey: targetConfiguration.processPublicKey),
-                    topic: NodeNetworkTopic.portableAttachmentAvailable,
-                    payload: try PortableAttachmentAvailableMessage(
-                        edgeCID: attachment.summary.edgeCID,
-                        rootCID: attachment.summary.rootCID,
-                        attachmentCID: attachment.summary.attachmentCID
-                    ).encoded()
-                ) else {
-                    throw NetworkTestError.failedSend
-                }
-            }
-            for _ in 0..<2_000 {
+            // Availability hints are dropped until the evidence peer's hello has
+            // been processed on its own session; re-send until both are served.
+            for _ in 0..<200 {
                 if (await delegate.servedRoots()).count == 2 { break }
-                try await Task.sleep(for: .milliseconds(10))
+                for attachment in attachments {
+                    _ = await evidencePeer.sendMessage(
+                        to: PeerID(publicKey: targetConfiguration.processPublicKey),
+                        topic: NodeNetworkTopic.portableAttachmentAvailable,
+                        payload: try PortableAttachmentAvailableMessage(
+                            edgeCID: attachment.summary.edgeCID,
+                            rootCID: attachment.summary.rootCID,
+                            attachmentCID: attachment.summary.attachmentCID
+                        ).encoded()
+                    )
+                }
+                try await Task.sleep(for: .milliseconds(100))
             }
             let initiallyServedRoots = await delegate.servedRoots()
             guard initiallyServedRoots.count == 2 else {
@@ -2767,15 +2670,6 @@ final class NetworkTrustTests: XCTestCase {
                     chainPath: targetConfiguration.chainPath
                 ).encode()
             )
-            for _ in 0..<300 {
-                if await replacementDelegate.requestCount() > 0 { break }
-                try await Task.sleep(for: .milliseconds(10))
-            }
-            guard await replacementDelegate.requestCount() > 0 else {
-                throw NetworkTestError.failedPhase(
-                    "replacement overlay authorization"
-                )
-            }
             guard case .enqueued = await replacement.sendMessage(
                 to: PeerID(publicKey: targetConfiguration.processPublicKey),
                 topic: NodeNetworkTopic.blockAnnouncement,
@@ -3702,224 +3596,67 @@ final class NetworkTrustTests: XCTestCase {
         await fixture.runtime.stop()
     }
 
-    func testAcceptedLeafSyncRotatesPastSilentOverlayPeer() async throws {
+    func testAncestorNegotiationTimeoutRenegotiatesInsteadOfPagingFromFrontier()
+        async throws
+    {
+        // A range sync whose common ancestor was never negotiated must not
+        // fall through to a forward page anchored at the receiver's own
+        // frontier: on a losing sibling that frontier is off the peer's main
+        // chain, the empty page reads as "caught up", and one dropped packet
+        // maroons the follower. The timeout re-sends the locator instead.
         let fixture = try await overlayRuntime(
             keyByte: 0x75,
             requestTimeout: .milliseconds(150)
         )
-        let admitted = NetworkEventRecorder()
-        let handlers = NodeNetworkHandlers(admission: { admission in
-            await admitted.append(admission.header.rawCID)
-            return NodeAdmissionOutcome(
-                decision: .acceptedSide(ChainCommit(
-                    tipHash: admission.header.rawCID
-                )),
-                parentCarrierLink: nil,
-                sameChainPredecessor: nil
-            )
-        })
-
-        let silentDelegate = OverlayInventoryPeer(leaves: nil)
-        let silent = Ivy(config: IvyConfig(
+        let scripted = RangeNegotiationDroppingPeer()
+        let peer = Ivy(config: IvyConfig(
             signingKey: signingKey(0x76),
             listenPort: 0,
             stunServers: [],
             healthConfig: PeerHealthConfig(enabled: false),
             mode: .overlay
         ))
-        await silent.installTestDelegate(silentDelegate)
-        let honestVolume = try await canonicalNetworkBlockVolumes(count: 1)[0]
-        let honestCID = honestVolume.root
-        let honestDelegate = OverlayInventoryPeer(leaves: [honestCID])
-        let honest = Ivy(config: IvyConfig(
-            signingKey: signingKey(0x77),
-            listenPort: 0,
-            stunServers: [],
-            healthConfig: PeerHealthConfig(enabled: false),
-            mode: .overlay
-        ))
-        await honest.installTestDelegate(honestDelegate)
-        await honest.setContentSource(NetworkTestVolumeSource(
-            value: honestVolume
-        ))
+        await peer.installTestDelegate(scripted)
 
         do {
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: handlers
+                handlers: inertNetworkHandlers()
             )
             try await connectAndHello(
-                silent,
+                peer,
                 peerID: fixture.peerID,
                 endpoint: fixture.endpoint,
                 hello: fixture.hello
             )
-            for _ in 0..<100 {
-                if await silentDelegate.requestCount() >= 1 { break }
-                try await Task.sleep(for: .milliseconds(10))
+            // A claim far past the range-sync threshold opens a range sync,
+            // which begins with the locator negotiation the peer drops.
+            guard case .enqueued = await peer.sendMessage(
+                to: fixture.peerID,
+                topic: NodeNetworkTopic.blockAnnouncement,
+                payload: try BlockAnnouncementMessage(
+                    blockCID: testCID("deep-tip"),
+                    height: 100
+                ).encoded()
+            ) else {
+                throw NetworkTestError.failedSend
             }
-            let silentRequests = await silentDelegate.requestCount()
-            XCTAssertGreaterThanOrEqual(silentRequests, 1)
-
-            try await connectAndHello(
-                honest,
-                peerID: fixture.peerID,
-                endpoint: fixture.endpoint,
-                hello: fixture.hello
-            )
-            for _ in 0..<200 {
-                if (await admitted.snapshot()).contains(honestCID) { break }
-                try await Task.sleep(for: .milliseconds(10))
-            }
-            let honestRequests = await honestDelegate.requestCount()
-            let admittedCIDs = await admitted.snapshot()
-            XCTAssertGreaterThanOrEqual(honestRequests, 1)
-            XCTAssertEqual(admittedCIDs, [honestCID])
-        } catch {
-            await honest.stop()
-            await silent.stop()
-            await fixture.runtime.stop()
-            throw error
-        }
-        await honest.stop()
-        await silent.stop()
-        await fixture.runtime.stop()
-    }
-
-    func testAcceptedLeafRetriesTransientEmptyAdvertiserWithoutReconnect()
-        async throws {
-        let fixture = try await overlayRuntime(
-            keyByte: 0x7b,
-            requestTimeout: .milliseconds(100)
-        )
-        let volume = try await canonicalNetworkBlockVolumes(count: 1)[0]
-        let source = BlockingNetworkTestVolumeSource(value: volume)
-        let inventory = OverlayInventoryPeer(leaves: [volume.root])
-        let advertiser = Ivy(config: IvyConfig(
-            signingKey: signingKey(0x7c),
-            listenPort: 0,
-            stunServers: [],
-            healthConfig: PeerHealthConfig(enabled: false),
-            mode: .overlay
-        ))
-        await advertiser.installTestDelegate(inventory)
-        await advertiser.setContentSource(source)
-        let admitted = NetworkEventRecorder()
-        let handlers = NodeNetworkHandlers(admission: { admission in
-            await admitted.append(admission.header.rawCID)
-            return NodeAdmissionOutcome(
-                decision: .duplicate,
-                parentCarrierLink: nil,
-                sameChainPredecessor: nil
-            )
-        })
-
-        do {
-            try await fixture.runtime.start(
-                process: fixture.process,
-                handlers: handlers
-            )
-            try await connectAndHello(
-                advertiser,
-                peerID: fixture.peerID,
-                endpoint: fixture.endpoint,
-                hello: fixture.hello
-            )
-            for _ in 0..<200 {
-                if await source.didStart() { break }
-                try await Task.sleep(for: .milliseconds(10))
-            }
-            let firstRequestStarted = await source.didStart()
-            XCTAssertTrue(firstRequestStarted)
-
-            // Ivy's first exact request expires as an unattributed `.empty`.
-            // The same session then serves the same advertised Volume.
-            try await Task.sleep(for: .milliseconds(200))
-            await source.release()
             for _ in 0..<300 {
-                if (await admitted.snapshot()).contains(volume.root) { break }
+                if (await scripted.counts()).ancestor >= 2 { break }
                 try await Task.sleep(for: .milliseconds(10))
             }
-            let admittedCIDs = await admitted.snapshot()
-            let inventoryRequests = await inventory.requestCount()
-            XCTAssertEqual(admittedCIDs, [volume.root])
-            XCTAssertEqual(inventoryRequests, 1)
+            let counts = await scripted.counts()
+            XCTAssertGreaterThanOrEqual(counts.ancestor, 2)
+            XCTAssertEqual(
+                counts.forward, 0,
+                "a timed-out negotiation paged forward from the frontier"
+            )
         } catch {
-            await advertiser.stop()
+            await peer.stop()
             await fixture.runtime.stop()
             throw error
         }
-        await advertiser.stop()
-        await fixture.runtime.stop()
-    }
-
-    func testAcceptedLeafSyncSkipsBlocksAlreadyAccepted() async throws {
-        // A page of a peer's accepted set is almost entirely shared history.
-        // Already-accepted blocks must be filtered BEFORE they become
-        // admission candidates: re-admitting a known block is a full
-        // (failing) admission attempt, and a node rebooting while behind
-        // would otherwise churn O(chain history) of them, starving fresh
-        // candidates and parent-evidence work.
-        let fixture = try await overlayRuntime(
-            keyByte: 0x79,
-            requestTimeout: .milliseconds(150)
-        )
-        let admitted = NetworkEventRecorder()
-        let handlers = NodeNetworkHandlers(admission: { admission in
-            await admitted.append(admission.header.rawCID)
-            return NodeAdmissionOutcome(
-                decision: .acceptedSide(ChainCommit(
-                    tipHash: admission.header.rawCID
-                )),
-                parentCarrierLink: nil,
-                sameChainPredecessor: nil
-            )
-        })
-        let maybeKnown = await fixture.process.mainChainBlockCID(atHeight: 0)
-        let knownCID = try XCTUnwrap(maybeKnown)
-        let novelVolume = try await canonicalNetworkBlockVolumes(count: 1)[0]
-        let novelCID = novelVolume.root
-        let advertiserDelegate = OverlayInventoryPeer(
-            leaves: [knownCID, novelCID]
-        )
-        let advertiser = Ivy(config: IvyConfig(
-            signingKey: signingKey(0x7a),
-            listenPort: 0,
-            stunServers: [],
-            healthConfig: PeerHealthConfig(enabled: false),
-            mode: .overlay
-        ))
-        await advertiser.installTestDelegate(advertiserDelegate)
-        await advertiser.setContentSource(NetworkTestVolumeSource(
-            value: novelVolume
-        ))
-        do {
-            try await fixture.runtime.start(
-                process: fixture.process,
-                handlers: handlers
-            )
-            try await connectAndHello(
-                advertiser,
-                peerID: fixture.peerID,
-                endpoint: fixture.endpoint,
-                hello: fixture.hello
-            )
-            for _ in 0..<200 {
-                if (await admitted.snapshot()).contains(novelCID) { break }
-                try await Task.sleep(for: .milliseconds(10))
-            }
-            let admittedCIDs = await admitted.snapshot()
-            XCTAssertTrue(admittedCIDs.contains(novelCID))
-            XCTAssertFalse(
-                admittedCIDs.contains(knownCID),
-                "an already-accepted block reached admission from a leaf page"
-            )
-        } catch {
-            await advertiser.stop()
-            await fixture.runtime.stop()
-            throw error
-        }
-        await advertiser.stop()
+        await peer.stop()
         await fixture.runtime.stop()
     }
 
@@ -4077,7 +3814,7 @@ final class NetworkTrustTests: XCTestCase {
         })
 
         let attackerKey = signingKey(0x79)
-        let firstDelegate = OverlayInventoryPeer(leaves: [])
+        let firstDelegate = OverlayAnnouncingPeer(announcing: [])
         let first = Ivy(config: IvyConfig(
             signingKey: attackerKey,
             listenPort: 0,
@@ -4087,7 +3824,7 @@ final class NetworkTrustTests: XCTestCase {
         ))
         await first.installTestDelegate(firstDelegate)
         await first.setContentSource(NetworkTestVolumeSource(value: volumes[0]))
-        let replacementDelegate = OverlayInventoryPeer(leaves: [replacementCID])
+        let replacementDelegate = OverlayAnnouncingPeer(announcing: [replacementCID])
         let replacement = Ivy(config: IvyConfig(
             signingKey: attackerKey,
             listenPort: 0,
@@ -4097,7 +3834,7 @@ final class NetworkTrustTests: XCTestCase {
         ))
         await replacement.installTestDelegate(replacementDelegate)
         await replacement.setContentSource(NetworkTestVolumeSource(value: volumes[1]))
-        let honestDelegate = OverlayInventoryPeer(leaves: [honestCID])
+        let honestDelegate = OverlayAnnouncingPeer(announcing: [honestCID])
         let honest = Ivy(config: IvyConfig(
             signingKey: signingKey(0x7a),
             listenPort: 0,
@@ -4120,10 +3857,10 @@ final class NetworkTrustTests: XCTestCase {
                 hello: fixture.hello
             )
             for _ in 0..<100 {
-                if await firstDelegate.requestCount() == 1 { break }
+                if await firstDelegate.authorizedSessionCount() == 1 { break }
                 try await Task.sleep(for: .milliseconds(10))
             }
-            let firstRequests = await firstDelegate.requestCount()
+            let firstRequests = await firstDelegate.authorizedSessionCount()
             XCTAssertEqual(firstRequests, 1)
             guard case .enqueued = await first.sendMessage(
                 to: fixture.peerID,
@@ -4149,10 +3886,10 @@ final class NetworkTrustTests: XCTestCase {
                 hello: fixture.hello
             )
             for _ in 0..<100 {
-                if await replacementDelegate.requestCount() == 1 { break }
+                if await replacementDelegate.authorizedSessionCount() == 1 { break }
                 try await Task.sleep(for: .milliseconds(10))
             }
-            let replacementRequests = await replacementDelegate.requestCount()
+            let replacementRequests = await replacementDelegate.authorizedSessionCount()
             XCTAssertEqual(replacementRequests, 1)
             try await connectAndHello(
                 honest,
@@ -4161,10 +3898,10 @@ final class NetworkTrustTests: XCTestCase {
                 hello: fixture.hello
             )
             for _ in 0..<100 {
-                if await honestDelegate.requestCount() == 1 { break }
+                if await honestDelegate.authorizedSessionCount() == 1 { break }
                 try await Task.sleep(for: .milliseconds(10))
             }
-            let honestRequests = await honestDelegate.requestCount()
+            let honestRequests = await honestDelegate.authorizedSessionCount()
             XCTAssertEqual(honestRequests, 1)
 
             await gate.release(1)
@@ -4210,7 +3947,7 @@ final class NetworkTrustTests: XCTestCase {
             healthConfig: PeerHealthConfig(enabled: false),
             mode: .overlay
         ))
-        let authorizedDelegate = OverlayInventoryPeer(leaves: [])
+        let authorizedDelegate = OverlayAnnouncingPeer(announcing: [])
         let authorized = Ivy(config: IvyConfig(
             signingKey: signingKey(0x7d),
             listenPort: 0,
@@ -4250,10 +3987,10 @@ final class NetworkTrustTests: XCTestCase {
                 hello: fixture.hello
             )
             for _ in 0..<100 {
-                if await authorizedDelegate.requestCount() == 1 { break }
+                if await authorizedDelegate.authorizedSessionCount() == 1 { break }
                 try await Task.sleep(for: .milliseconds(10))
             }
-            let initialRequests = await authorizedDelegate.requestCount()
+            let initialRequests = await authorizedDelegate.authorizedSessionCount()
             XCTAssertEqual(initialRequests, 1)
 
             guard case .enqueued = await authorized.sendMessage(
@@ -4264,7 +4001,7 @@ final class NetworkTrustTests: XCTestCase {
                 throw NetworkTestError.failedSend
             }
             try await Task.sleep(for: .milliseconds(300))
-            let finalRequests = await authorizedDelegate.requestCount()
+            let finalRequests = await authorizedDelegate.authorizedSessionCount()
             let authorizedConnected = await authorized.connectedPeers
                 .contains(fixture.peerID)
             XCTAssertEqual(finalRequests, 1)
@@ -4551,8 +4288,8 @@ final class NetworkTrustTests: XCTestCase {
                 remoteSource: admission.contentSource
             )
         })
-        let clientDelegate = AcceptedLeavesPeer(
-            acceptedLeafCID: descendantHeader.rawCID
+        let clientDelegate = OverlayAnnouncingPeer(
+            announcing: [descendantHeader.rawCID]
         )
         let client = Ivy(config: IvyConfig(
             signingKey: signingKey(96),

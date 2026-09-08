@@ -164,10 +164,11 @@ Use VolumeBroker for all verified local materialization and retention.
 
 ### 6. Integrate the runtime
 
-Route block announcements, accepted-leaf inventory, portable evidence, parent
+Route block announcements, range-sync pages, portable evidence, parent
 evidence, provider disconnects, and recovered predecessor obligations into the
-acquirer. Inject `ChainService` admission without moving consensus into the
-module.
+acquirer. (The accepted-leaf inventory and portable-attachment index walks
+that once fed it are receiver-retired; both stay served for older peers.)
+Inject `ChainService` admission without moving consensus into the module.
 
 ### 7. Delete legacy orchestration
 
