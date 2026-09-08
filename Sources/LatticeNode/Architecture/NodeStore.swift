@@ -368,6 +368,12 @@ actor NodeStore {
             switch fact {
             case .block(let block): block.blockHash
             case .work(let work): work.blockHash
+            // An exclusion is a standalone verdict on an already-durable block
+            // (no routes, artifacts, or carrier evidence ride with it), so its
+            // subject hash is inert for route gating here; carry it for
+            // consistency. The fact itself is still persisted via normalizedFacts
+            // so recovery replays it and rebuilds the excluded set.
+            case .exclusion(let fact): fact.blockHash
             }
         })
         guard pendingRoutes.allSatisfy({
