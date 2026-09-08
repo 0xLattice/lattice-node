@@ -1090,7 +1090,7 @@ public actor ChainService {
             try await syncLiveMempoolRootsLocked([])
             return
         }
-        let tip = try await process.canonicalTipBlock()
+        let tip = try await process.validatedTipBlock()
         let spec = try await chainSpec(for: tip)
         for item in durable {
             let disposition = Self.poolDisposition(
@@ -1119,7 +1119,7 @@ public actor ChainService {
         persistLocal: Bool
     ) async throws -> (cid: String, inserted: Bool) {
         try await prepareMempoolLocked()
-        let previous = try await process.canonicalTipBlock()
+        let previous = try await process.validatedTipBlock()
         let spec = try await chainSpec(for: previous)
         guard let envelope = transaction.toData(),
               envelope.count <= spec.maxBlockSize,
@@ -1436,7 +1436,7 @@ public actor ChainService {
         fetcher: (any Fetcher)? = nil
     ) async throws -> MiningTemplate {
         let fetcher: any Fetcher = fetcher ?? process
-        let previous = try await process.canonicalTipBlock()
+        let previous = try await process.validatedTipBlock()
         let spec = try await chainSpec(for: previous)
         let rewardPlan = try await validatedRewardPlan(rewards)
         let reward = try await validatedRewardTransaction(
@@ -1927,7 +1927,7 @@ public actor ChainService {
         let removedTransactions = try await transactions(
             inBlocks: commit.mainChainBlocksRemoved.sorted()
         )
-        let tip = try await process.canonicalTipBlock()
+        let tip = try await process.validatedTipBlock()
         let spec = try await chainSpec(for: tip)
 
         let addedCIDs = Set(addedTransactions.compactMap {

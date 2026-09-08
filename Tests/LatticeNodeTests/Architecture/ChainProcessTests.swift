@@ -1607,6 +1607,119 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertEqual(durable.childCID, childHeader.rawCID)
     }
 
+    func testDeepestValidatedTipDegradesToValidatedAncestorAcrossReorg()
+        async throws
+    {
+        let directory = temporaryDirectory()
+        let config = try configuration(path: ["Nexus"], storage: directory)
+
+        // genesis -> A canonicalizes; a competing genesis -> B -> C fork then
+        // outweighs A and reorgs the main chain onto B -> C.
+        var process: ChainProcess? = try await ChainProcess.open(
+            configuration: config
+        )
+        let genesis = try await process!.canonicalTipBlock()
+
+        let a = try await mineChild(
+            of: genesis, timestamp: 3_600_000, nonce: 1, on: process!
+        )
+        let aCID = try BlockHeader(node: a).rawCID
+        guard case .canonicalized = try await process!.admit(
+            BlockHeader(node: a)
+        ).decision else {
+            return XCTFail("expected A to canonicalize on genesis")
+        }
+
+        let b = try await mineChild(
+            of: genesis, timestamp: 3_600_001, nonce: 2, on: process!
+        )
+        let bCID = try BlockHeader(node: b).rawCID
+        guard case .acceptedSide = try await process!.admit(
+            BlockHeader(node: b)
+        ).decision else {
+            return XCTFail("expected B to be an accepted side block")
+        }
+
+        let c = try await mineChild(
+            of: b, timestamp: 7_200_000, nonce: 3, on: process!
+        )
+        let cCID = try BlockHeader(node: c).rawCID
+        guard case .canonicalized = try await process!.admit(
+            BlockHeader(node: c)
+        ).decision else {
+            return XCTFail("expected B -> C to reorg the main chain")
+        }
+
+        // All-eager: the deepest validated tip IS the reorged canonical tip.
+        let reorgedTip = await process!.deepestValidatedMainChainTip()
+        let tip = try XCTUnwrap(reorgedTip)
+        XCTAssertEqual(tip.cid, cCID)
+        XCTAssertEqual(tip.height, 2)
+        let reorgedStatusTip = await process!.status().tipCID
+        XCTAssertEqual(reorgedStatusTip, cCID)
+        let reorgedValidatedTip = try BlockHeader(
+            node: try await process!.validatedTipBlock()
+        ).rawCID
+        XCTAssertEqual(reorgedValidatedTip, cCID)
+
+        process = nil
+
+        // Demote the reorged tip C to the weighed tier in the durable store.
+        do {
+            let database = try NodeSQLite(
+                path: directory.appendingPathComponent("state.db").path
+            )
+            try database.execute(
+                "UPDATE accepted_blocks SET validated = 0 WHERE block_cid = ?1",
+                params: [.text(cCID)]
+            )
+        }
+
+        process = try await ChainProcess.open(configuration: config)
+
+        // C is now merely weighed: every act-on read must DEGRADE to B — the
+        // deepest validated ancestor of the CURRENT (reorged) main chain —
+        // never the weighed tip C and never A (off the main chain).
+        let degradedTip = await process!.deepestValidatedMainChainTip()
+        let degraded = try XCTUnwrap(degradedTip)
+        XCTAssertEqual(degraded.cid, bCID)
+        XCTAssertEqual(degraded.height, 1)
+        XCTAssertNotEqual(degraded.cid, aCID)
+
+        let status = await process!.status()
+        XCTAssertEqual(status.tipCID, bCID)
+        XCTAssertEqual(status.height, 1)
+
+        let degradedValidatedTip = try BlockHeader(
+            node: try await process!.validatedTipBlock()
+        ).rawCID
+        XCTAssertEqual(degradedValidatedTip, bCID)
+    }
+
+    private func mineChild(
+        of previous: Block,
+        timestamp: Int64,
+        nonce: UInt64,
+        on process: ChainProcess
+    ) async throws -> Block {
+        let candidate = try await BlockBuilder.buildBlock(
+            previous: previous,
+            timestamp: timestamp,
+            nonce: nonce,
+            fetcher: process
+        )
+        let mined = try XCTUnwrap(BlockBuilder.mine(
+            block: candidate,
+            target: candidate.target,
+            maxAttempts: 4_096
+        ))
+        try await BlockHeader(node: mined).storeBlock(
+            fetcher: process,
+            storer: process
+        )
+        return mined
+    }
+
     private func configuration(path: [String], storage: URL) throws -> NodeConfiguration {
         let parentKey = try Curve25519.Signing.PrivateKey(
             rawRepresentation: Data(repeating: 2, count: 32)
