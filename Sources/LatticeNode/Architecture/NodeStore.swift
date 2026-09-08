@@ -233,6 +233,7 @@ actor NodeStore {
     private let nexusGenesisCID: String
     private let chainPath: [String]
     private let recoveryVolumeBroker: any RetainedRootMergeBroker
+    private let blockRetentionScope: String
     private let issuedRecoveryRetentionScope: String
     private let preparedRecoveryRetentionScope: String
     private let parentEvidenceInboxRetentionScope: String
@@ -247,6 +248,7 @@ actor NodeStore {
         nexusGenesisCID: String,
         chainPath: [String],
         recoveryVolumeBroker: any RetainedRootMergeBroker,
+        blockRetentionScope: String,
         issuedRecoveryRetentionScope: String,
         preparedRecoveryRetentionScope: String,
         parentEvidenceInboxRetentionScope: String = "parent-evidence-inbox",
@@ -260,7 +262,8 @@ actor NodeStore {
         guard chainPath.first == "Nexus", chainPath.allSatisfy({ !$0.isEmpty }) else {
             throw NodeStoreError.invalidConfiguration("chainPath must be absolute and begin with Nexus")
         }
-        guard !issuedRecoveryRetentionScope.isEmpty,
+        guard !blockRetentionScope.isEmpty,
+              !issuedRecoveryRetentionScope.isEmpty,
               !preparedRecoveryRetentionScope.isEmpty,
               !parentEvidenceInboxRetentionScope.isEmpty,
               parentEvidenceInboxCapacity > 0,
@@ -305,6 +308,7 @@ actor NodeStore {
         self.nexusGenesisCID = nexusGenesisCID
         self.chainPath = chainPath
         self.recoveryVolumeBroker = recoveryVolumeBroker
+        self.blockRetentionScope = blockRetentionScope
         self.issuedRecoveryRetentionScope = issuedRecoveryRetentionScope
         self.preparedRecoveryRetentionScope = preparedRecoveryRetentionScope
         self.parentEvidenceInboxRetentionScope =
@@ -1172,6 +1176,35 @@ actor NodeStore {
             "SELECT validated FROM accepted_blocks WHERE block_cid = ?1 LIMIT 1",
             params: [.text(blockCID)]
         ).first?["validated"]?.intValue == 1
+    }
+
+    /// Upgrade an already-weighed accepted block to the *validated* tier: retain
+    /// its materialized post-state Volume roots and flip its durable marker.
+    ///
+    /// The weighed block fact (empty `stateDiff`) is immutable and keyed by
+    /// blockHash ONLY, so re-staging the validated fact (its real `stateDiff`)
+    /// would collide (`conflictingAdmissionFact`). Deferred execution therefore
+    /// never rewrites `admission_facts` on validation: the weighed fact REMAINS
+    /// the state-blind consensus-replay record, and the materialized state is a
+    /// node-side availability artifact keyed by this marker plus the retained
+    /// roots. Retention runs first (an orphaned retained root is harmless and
+    /// startup reclaims it; a marker without its state is not), then the marker
+    /// flips in one transaction. Both steps are idempotent, so a re-validation
+    /// (reorg re-projection, crash-retry) is a no-op.
+    func promoteValidated(
+        blockCID: String,
+        materializedRoots: [String]
+    ) async throws {
+        try await recoveryVolumeBroker.mergeRetainedRoots(
+            scope: blockRetentionScope,
+            roots: materializedRoots
+        )
+        try database.transaction {
+            _ = try database.execute(
+                "UPDATE accepted_blocks SET validated = 1 WHERE block_cid = ?1",
+                params: [.text(blockCID)]
+            )
+        }
     }
 
     private func prepareHierarchyArtifacts(

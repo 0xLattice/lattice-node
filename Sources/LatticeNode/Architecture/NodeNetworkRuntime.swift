@@ -34,17 +34,23 @@ public struct NetworkCandidateAdmission: Sendable {
     public let authenticatedChildPackage: AuthenticatedChildPackage?
     public let preparingChildDirectories: [String]
     public let contentSource: any ContentSource
+    /// Admit on the weighed (deferred-execution) tier: enter fork choice on
+    /// verified work without executing. True only for below-tip range-sync
+    /// candidates; live gossip and self-admit stay eager.
+    public let weighed: Bool
 
     public init(
         header: BlockHeader,
         authenticatedChildPackage: AuthenticatedChildPackage?,
         preparingChildDirectories: [String],
-        contentSource: any ContentSource
+        contentSource: any ContentSource,
+        weighed: Bool = false
     ) {
         self.header = header
         self.authenticatedChildPackage = authenticatedChildPackage
         self.preparingChildDirectories = preparingChildDirectories
         self.contentSource = contentSource
+        self.weighed = weighed
     }
 }
 
@@ -4822,7 +4828,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
                         header: header,
                         authenticatedChildPackage: authenticatedPackage,
                         preparingChildDirectories: childDirectories,
-                        contentSource: session
+                        contentSource: session,
+                        weighed: candidate.weighed
                     ))
                     return admitted
                 }
@@ -5421,10 +5428,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 clearRangeSync()
                 return
             }
+            // Below-tip range-sync page: admit on the weighed tier so a fresh
+            // node catches its header chain up to the tip without executing every
+            // historical block inline. The validate-on-candidacy walk executes
+            // them forward once the branch is canonical.
             _ = enqueueCandidate(CandidateSeed(
                 blockCID: cid,
                 package: nil,
-                provider: candidateProvider(peer)
+                provider: candidateProvider(peer),
+                weighed: true
             ))
             lastCID = cid
             enqueued += 1
@@ -5580,10 +5592,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 clearRangeSync()
                 return
             }
+            // First page of a range sync anchored at the negotiated common
+            // ancestor: below-tip, so weighed like the forward-range pages that
+            // follow it.
             _ = enqueueCandidate(CandidateSeed(
                 blockCID: cid,
                 package: nil,
-                provider: candidateProvider(peer)
+                provider: candidateProvider(peer),
+                weighed: true
             ))
             lastCID = cid
             enqueued += 1

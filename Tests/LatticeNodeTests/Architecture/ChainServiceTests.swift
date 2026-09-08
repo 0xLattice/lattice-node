@@ -2012,6 +2012,183 @@ final class ChainServiceTests: XCTestCase {
     private let testOffChainCID =
         "bafyreib4ovbxjaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+    /// Thread-safe recorder for the walk's per-height instrumentation.
+    private final class ValidateStepRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _heights: [UInt64] = []
+        func record(_ height: UInt64) {
+            lock.lock(); defer { lock.unlock() }
+            _heights.append(height)
+        }
+        var heights: [UInt64] {
+            lock.lock(); defer { lock.unlock() }
+            return _heights
+        }
+    }
+
+    /// Mine `depth` blocks on `producer` (Nexus genesis target is max, so PoW is
+    /// trivial) and return them in ascending-height order.
+    private func mineNexusChain(
+        on producer: ChainProcess,
+        depth: Int
+    ) async throws -> [Block] {
+        let producerService = makeService(process: producer)
+        var blocks: [Block] = []
+        for _ in 0..<depth {
+            let template = try await producerService
+                .miningTemplate(MiningTemplateRequest())
+            let outcome = try await producer.admit(
+                BlockHeader(node: template.block)
+            )
+            XCTAssertTrue(
+                outcome.decision.isAccepted,
+                "producer block must be accepted"
+            )
+            blocks.append(template.block)
+        }
+        return blocks
+    }
+
+    /// Deferred execution turning ON: a node that weighed-syncs a chain below its
+    /// tip is NON-operable (weighed tip, validated tier at genesis) until the
+    /// validate-on-candidacy walk executes the branch FORWARD and makes it
+    /// operable. Folds in the forward-order assertion (strictly increasing from
+    /// lastValidated+1, never tip-first).
+    func testWeighedColdSyncBecomesOperableViaForwardValidateWalk() async throws {
+        let depth = 6
+        let producer = try await nexusProcess()
+        let chain = try await mineNexusChain(on: producer, depth: depth)
+
+        let consumerProcess = try await nexusProcess()
+        let consumer = makeService(process: consumerProcess)
+        let genesisCID = try BlockHeader(
+            node: await consumerProcess.canonicalTipBlock()
+        ).rawCID
+
+        // Weighed cold-sync: enter every below-tip block into fork choice on
+        // verified work WITHOUT executing it. Driven straight at the process (no
+        // canonical-commit publisher), so the walk does not auto-fire and the
+        // intermediate non-operable state is observable.
+        for block in chain {
+            let outcome = try await consumerProcess.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producer),
+                mode: .weighed
+            )
+            XCTAssertTrue(
+                outcome.decision.isAccepted,
+                "weighed admit must enter fork choice"
+            )
+        }
+
+        // INTERMEDIATE: the header chain reached the tip, but nothing above
+        // genesis is validated, so every act-on read still projects genesis.
+        let weighedTipHeight = await consumerProcess.canonicalTipHeight()
+        XCTAssertEqual(weighedTipHeight, UInt64(depth))
+        let intermediateValidated = await consumerProcess
+            .deepestValidatedMainChainTip()
+        XCTAssertEqual(intermediateValidated?.height, 0)
+        XCTAssertEqual(intermediateValidated?.cid, genesisCID)
+        let intermediateStatus = await consumer.status()
+        XCTAssertEqual(intermediateStatus.tipCID, genesisCID)
+        let intermediateTemplate = try await consumer
+            .miningTemplate(MiningTemplateRequest())
+        XCTAssertEqual(
+            intermediateTemplate.block.parent?.rawCID, genesisCID,
+            "a merely-weighed tip must not be a mining parent"
+        )
+
+        // Run the walk, recording each validated height to prove forward order.
+        let recorder = ValidateStepRecorder()
+        await consumer.setValidateWalkObserver { recorder.record($0) }
+        await consumer.runValidateWalkPass()
+        await consumer.setValidateWalkObserver(nil)
+
+        XCTAssertEqual(
+            recorder.heights, (1...UInt64(depth)).map { $0 },
+            "validate heights must be strictly increasing from genesis+1, "
+                + "never tip-first"
+        )
+
+        // OPERABILITY: the validated tier now meets the canonical tier.
+        let operableValidated = await consumerProcess
+            .deepestValidatedMainChainTip()
+        let canonicalTipCID = try BlockHeader(
+            node: await consumerProcess.canonicalTipBlock()
+        ).rawCID
+        XCTAssertEqual(operableValidated?.height, UInt64(depth))
+        let validatedTipCID = try BlockHeader(
+            node: await consumerProcess.validatedTipBlock()
+        ).rawCID
+        XCTAssertEqual(validatedTipCID, canonicalTipCID)
+        let operableTemplate = try await consumer
+            .miningTemplate(MiningTemplateRequest())
+        XCTAssertEqual(
+            operableTemplate.block.parent?.rawCID, canonicalTipCID,
+            "once validated, the mining template must build on the canonical tip"
+        )
+    }
+
+    /// A gap in the below-tip range parks the walk at gap-1: the node keeps
+    /// acting on the last validated tip (no wedge) and resumes to the tip once
+    /// the missing block becomes admissible.
+    func testValidateWalkParksAtGapAndResumesOnRelease() async throws {
+        let depth = 6
+        let gapAt = 3 // heights 1,2 available; 3 withheld; 4,5,6 blocked behind it
+        let producer = try await nexusProcess()
+        let chain = try await mineNexusChain(on: producer, depth: depth)
+
+        let consumerProcess = try await nexusProcess()
+        let consumer = makeService(process: consumerProcess)
+
+        // Weighed-admit only the blocks below the gap (heights 1..gapAt-1).
+        for block in chain.prefix(gapAt - 1) {
+            let outcome = try await consumerProcess.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producer),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+
+        // The walk validates up to the last contiguous weighed block and parks.
+        await consumer.runValidateWalkPass()
+        let parked = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(
+            parked?.height, UInt64(gapAt - 1),
+            "the walk must park one block below the gap"
+        )
+        // Still operable on the parked tip: a template builds on it, no wedge.
+        let parkedTipCID = try BlockHeader(
+            node: await consumerProcess.validatedTipBlock()
+        ).rawCID
+        let parkedTemplate = try await consumer
+            .miningTemplate(MiningTemplateRequest())
+        XCTAssertEqual(parkedTemplate.block.parent?.rawCID, parkedTipCID)
+
+        // Release the withheld block and the rest of the range.
+        for block in chain.suffix(from: gapAt - 1) {
+            let outcome = try await consumerProcess.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producer),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+
+        // The walk resumes and reaches the tip.
+        await consumer.runValidateWalkPass()
+        let resumed = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(resumed?.height, UInt64(depth))
+        let resumedTipCID = try BlockHeader(
+            node: await consumerProcess.validatedTipBlock()
+        ).rawCID
+        let resumedCanonicalCID = try BlockHeader(
+            node: await consumerProcess.canonicalTipBlock()
+        ).rawCID
+        XCTAssertEqual(resumedTipCID, resumedCanonicalCID)
+    }
+
     private func nexusProcess() async throws -> ChainProcess {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-chain-service-\(UUID().uuidString)")

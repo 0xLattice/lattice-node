@@ -207,6 +207,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             nexusGenesisCID: configuration.nexusGenesisCID,
             chainPath: configuration.chainPath,
             recoveryVolumeBroker: broker,
+            blockRetentionScope: retentionScope,
             issuedRecoveryRetentionScope: issuedHierarchyRetentionScope,
             preparedRecoveryRetentionScope: preparedHierarchyRetentionScope,
             parentEvidenceInboxRetentionScope:
@@ -535,6 +536,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             AuthenticatedChildPackage? = nil,
         preparingChildDirectories: [String] = [],
         remoteSource: (any ContentSource)? = nil,
+        mode: AdmissionMode = .eager,
         canonicalCommitPublisher: CanonicalCommitPublisher? = nil
     ) async throws -> NodeAdmissionOutcome {
         let authenticatedChildPackage: AuthenticatedChildPackage?
@@ -568,6 +570,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 attemptFetcher: attemptFetcher,
                 directChildDirectories: directChildDirectories,
                 pendingChildProofRoutes: pendingChildProofRoutes,
+                mode: mode,
                 canonicalCommitPublisher: canonicalCommitPublisher
             )
         }
@@ -587,6 +590,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 attemptFetcher: attemptFetcher,
                 directChildDirectories: directChildDirectories,
                 pendingChildProofRoutes: pendingChildProofRoutes,
+                mode: mode,
                 canonicalCommitPublisher: canonicalCommitPublisher
             )
         }
@@ -816,6 +820,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         attemptFetcher: any Fetcher,
         directChildDirectories: [String],
         pendingChildProofRoutes: [PendingChildProofRoute],
+        mode: AdmissionMode = .eager,
         canonicalCommitPublisher: CanonicalCommitPublisher?
     ) async throws -> NodeAdmissionOutcome {
         let package = authenticatedPackage?.package
@@ -824,7 +829,8 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             blockHeader,
             fetcher: attemptFetcher,
             childPackage: package,
-            validationContentStorer: admissionStorage
+            validationContentStorer: admissionStorage,
+            mode: mode
         )
         // Keep all remote acquisition before the one serial durability lane.
         // A ready token may gain a carrier link when its predecessor commits.
@@ -853,6 +859,62 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         }
         let stage: @Sendable (ChainAdmissionStagingContext) async throws -> Void = {
             context in
+            try Task.checkCancellation()
+            // Validated tier (deferred execution): the block was already weighed,
+            // and its weighed block fact (empty stateDiff) is immutable and keyed
+            // by blockHash only. Re-staging the validated fact's real stateDiff
+            // would collide, so a validate SUCCESS never rewrites `admission_facts`
+            // — it retains the freshly materialized post-state and flips the durable
+            // marker. A validate EXCLUSION is a brand-new fact and stages normally.
+            if case .validate = mode {
+                let isExclusion = context.batch.facts.contains {
+                    if case .exclusion = $0 { return true }
+                    return false
+                }
+                if isExclusion {
+                    try await Self.persist(
+                        context.batch,
+                        admissionStorage: admissionStorage,
+                        store: self.store,
+                        broker: self.broker,
+                        retentionScope: self.retentionScope,
+                        pendingChildProofRoutes: [],
+                        pendingChildProofCapacity: Self.preparedChildProofCapacity,
+                        consensusRevisionFloor: try Self.nextConsensusRevision(
+                            await level.chain.currentRevision()
+                        )
+                    )
+                } else {
+                    let roots = await admissionStorage.takeStoredVolumeRoots()
+                    try await self.store.promoteValidated(
+                        blockCID: blockHeader.rawCID,
+                        materializedRoots: roots
+                    )
+                    // The weighed tier suppressed hierarchy issuance; validation
+                    // re-derives it, and Lattice hands the carrier link back in the
+                    // staging context. Persist it exactly as the eager path does so
+                    // a cold-synced parent can serve child-proof routes and relay
+                    // securing proofs for children anchored in below-tip blocks.
+                    if let hierarchyArtifacts = context.issuedCarrierLink.map({
+                        AdmissionHierarchyArtifacts(
+                            carrierLink: $0,
+                            carrierEvidence: carrierEvidence,
+                            parentGenesisLinks: context.parentGenesisLinks
+                        )
+                    }) {
+                        try await self.store.persistIssuedHierarchyArtifacts(
+                            hierarchyArtifacts,
+                            pendingChildProofRoutes: Self.pendingChildProofRoutes(
+                                carrierCID: blockHeader.rawCID,
+                                directories: directChildDirectories,
+                                parentGenesisLinks: context.parentGenesisLinks
+                            ),
+                            pendingChildProofCapacity: Self.preparedChildProofCapacity
+                        )
+                    }
+                }
+                return
+            }
             let hierarchyArtifacts = context.issuedCarrierLink.map {
                 AdmissionHierarchyArtifacts(
                     carrierLink: $0,
@@ -860,7 +922,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     parentGenesisLinks: context.parentGenesisLinks
                 )
             }
-            try Task.checkCancellation()
             try await Self.persist(
                 context.batch,
                 admissionStorage: admissionStorage,
@@ -875,6 +936,14 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                         parentGenesisLinks: context.parentGenesisLinks
                 ),
                 pendingChildProofCapacity: Self.preparedChildProofCapacity,
+                // A weighed admission enters fork choice on verified work but
+                // is not executed: record it below the validated tier so the
+                // validate-on-candidacy walk (and every act-on read) knows to
+                // execute it before building on it.
+                validated: {
+                    if case .weighed = mode { return false }
+                    return true
+                }(),
                 hierarchyArtifacts: hierarchyArtifacts,
                 incomingCarrierEvidence: hierarchyArtifacts == nil
                     ? carrierEvidence
@@ -1051,6 +1120,17 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     func highestBlockHeight() async -> UInt64? {
         guard case .active(let level) = runtimePhase else { return nil }
         return await level.chain.getHighestBlockHeight()
+    }
+
+    /// Height of the CURRENT canonical (weighed-inclusive) main-chain tip, or nil
+    /// when not active. The validate-on-candidacy walk targets this: it executes
+    /// forward from the deepest validated ancestor until the validated tier meets
+    /// the canonical tier. Re-read every walk iteration so a mid-walk reorg or
+    /// exclusion re-projection re-targets rather than chasing a stale frontier.
+    func canonicalTipHeight() async -> UInt64? {
+        guard case .active(let level) = runtimePhase else { return nil }
+        let tip = await level.chain.getMainChainTip()
+        return await level.chain.getConsensusBlock(hash: tip)?.blockHeight
     }
 
     /// Anchored `directory -> genesisCID` map from the committed `genesisState`

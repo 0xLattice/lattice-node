@@ -472,6 +472,79 @@ final class NodeStoreTests: XCTestCase {
         try await recovered.auditNormalizedIndexes()
     }
 
+    func testPromoteValidatedRetainsStateAndSurvivesRecovery() async throws {
+        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let broker = try DiskBroker(
+            path: path.deletingLastPathComponent()
+                .appendingPathComponent("volumes.db").path
+        )
+        let store = try makeStore(path: path, broker: broker)
+        // The materialized post-state must be a real stored volume for retention
+        // to accept its root (retention pins existing CAS content).
+        let storer = NodeAdmissionStorage(storage: broker)
+        try await LatticeState.emptyHeader.storeRecursively(
+            storer: storer as any VolumeStorer
+        )
+        let materializedRoot = LatticeState.emptyHeader.rawCID
+        // A weighed child: enters the accepted index below the validated tier,
+        // carrying the empty-stateDiff block fact.
+        try await store.stage(
+            blockBatch(postStateCID: "root-state", blockHash: "root"),
+            volumeRoots: []
+        )
+        try await store.stage(
+            blockBatch(
+                postStateCID: "child-state",
+                blockHash: "child",
+                parentBlockHash: "root",
+                blockHeight: 1
+            ),
+            volumeRoots: [],
+            validated: false
+        )
+        let weighedChild = try await store.blockValidated("child")
+        XCTAssertFalse(weighedChild)
+
+        // Validate-on-candidacy promotes it: the materialized post-state root is
+        // retained and the durable marker flips WITHOUT rewriting admission_facts.
+        try await store.promoteValidated(
+            blockCID: "child",
+            materializedRoots: [materializedRoot]
+        )
+        let validatedChild = try await store.blockValidated("child")
+        XCTAssertTrue(validatedChild)
+        let retainedAfterPromote = try await broker.retainedRoots(
+            scope: "test:blocks"
+        )
+        XCTAssertTrue(
+            retainedAfterPromote.contains(materializedRoot),
+            "the materialized post-state root must be retained"
+        )
+
+        // Idempotent: a re-validation (reorg re-projection / crash retry) is a
+        // no-op and never throws a fact conflict.
+        try await store.promoteValidated(
+            blockCID: "child",
+            materializedRoots: [materializedRoot]
+        )
+        let revalidatedChild = try await store.blockValidated("child")
+        XCTAssertTrue(revalidatedChild)
+
+        // Crash recovery: a fresh store over the same durable files keeps the
+        // block validated and its materialized state retained, and the tier does
+        // not perturb the batch-derived index audit.
+        let recovered = try makeStore(path: path, broker: broker)
+        let recoveredChildValidated = try await recovered.blockValidated("child")
+        XCTAssertTrue(recoveredChildValidated)
+        let retainedAfterRecovery = try await broker.retainedRoots(
+            scope: "test:blocks"
+        )
+        XCTAssertTrue(
+            retainedAfterRecovery.contains(materializedRoot)
+        )
+        try await recovered.auditNormalizedIndexes()
+    }
+
     func testNormalizedIndexAuditRequiresExactBatchDerivedRows() async throws {
         let path = temporaryDirectory().appendingPathComponent("state.db")
         let store = try makeStore(path: path)
@@ -2637,6 +2710,7 @@ final class NodeStoreTests: XCTestCase {
             nexusGenesisCID: genesisCID ?? self.genesisCID,
             chainPath: chainPath,
             recoveryVolumeBroker: broker,
+            blockRetentionScope: "test:blocks",
             issuedRecoveryRetentionScope: "test:issued-hierarchy",
             preparedRecoveryRetentionScope: "test:prepared-hierarchy",
             parentEvidenceInboxCapacity: parentEvidenceInboxCapacity,

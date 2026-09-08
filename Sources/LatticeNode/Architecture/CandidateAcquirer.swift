@@ -48,6 +48,10 @@ struct CandidateAcquirer {
         let recoveryRootCID: String?
         let package: AuthenticatedChildPackage?
         let providers: [CandidateProvider]
+        /// Admit this candidate on the weighed tier (deferred execution): enter
+        /// fork choice on verified work without executing it. Set only for
+        /// below-tip range-sync candidates; eager-wins (see `Seed.weighed`).
+        let weighed: Bool
     }
 
     struct Seed: Sendable {
@@ -55,18 +59,25 @@ struct CandidateAcquirer {
         let recoveryRootCID: String?
         let package: AuthenticatedChildPackage?
         let provider: CandidateProvider?
+        /// Request weighed (deferred-execution) admission for this candidate.
+        /// Monotone eager-wins: once ANY eager seed touches a CID the block
+        /// stays eager, so a below-tip range-sync flag never downgrades a block
+        /// a live/self-admit path needs executed now.
+        let weighed: Bool
 
         init(
             blockCID: String,
             package: AuthenticatedChildPackage?,
             recoveryRootCID: String? = nil,
-            provider: CandidateProvider? = nil
+            provider: CandidateProvider? = nil,
+            weighed: Bool = false
         ) {
             self.blockCID = blockCID
             self.package = package
             self.recoveryRootCID = package?.package.proof.rootCID
                 ?? recoveryRootCID
             self.provider = provider
+            self.weighed = weighed
         }
     }
 
@@ -97,6 +108,7 @@ struct CandidateAcquirer {
         var expiresAt: ContinuousClock.Instant?
         var nextRetryAt: ContinuousClock.Instant?
         var state: AttemptState
+        var weighed: Bool
     }
 
     private struct BlockRecord {
@@ -232,6 +244,10 @@ struct CandidateAcquirer {
         let created: Bool
         if var attempt = record.attempts[rootCID] {
             created = false
+            // Eager-wins: an eager (default) seed touching a weighed attempt
+            // downgrades it to eager so a block anyone needs executed is never
+            // pinned to the deferred tier. Monotone — weighed never overrides.
+            attempt.weighed = attempt.weighed && seed.weighed
             let previous = attempt.package
             if let package = seed.package,
                let merged = Self.mergePackages(previous, package) {
@@ -255,7 +271,8 @@ struct CandidateAcquirer {
                 revision: 1,
                 order: nextOrder,
                 expiresAt: nil,
-                state: .ready
+                state: .ready,
+                weighed: seed.weighed
             )
         }
         records[seed.blockCID] = record
@@ -343,7 +360,8 @@ struct CandidateAcquirer {
                 package: attempt.package,
                 providers: record.providers.values.sorted {
                     $0.publicKey < $1.publicKey
-                }
+                },
+                weighed: attempt.weighed
             )
         }
         return nil

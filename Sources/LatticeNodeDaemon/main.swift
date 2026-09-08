@@ -173,7 +173,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                     admission.header,
                     authenticatedChildPackage: admission.authenticatedChildPackage,
                     preparingChildDirectories: admission.preparingChildDirectories,
-                    contentSource: admission.contentSource
+                    contentSource: admission.contentSource,
+                    weighed: admission.weighed
                 )
             },
             transaction: { [weak service] transaction in
