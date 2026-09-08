@@ -1003,6 +1003,41 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         return (blockCIDs, hasMore)
     }
 
+    /// Resolve the negotiated stream start from a receiver's block locator: the
+    /// highest locator entry that lies on this node's main chain, then the page
+    /// of main-chain blocks forward from it. The locator is newest-first, so the
+    /// first entry on our chain is the highest common block. A `nil` common
+    /// ancestor means no locator entry is on the main chain (disjoint
+    /// retention) — distinct from a present ancestor with an empty page, which
+    /// is "the receiver is caught up to us." The start is one of the receiver's
+    /// own accepted CIDs by construction, so this never rewinds it past its own
+    /// verified history. Same main-chain test as `forwardMainChainRange`.
+    func commonAncestorRange(
+        locator: [String],
+        limit: Int
+    ) async -> (commonAncestor: String?, blockCIDs: [String], hasMore: Bool) {
+        guard limit > 0, case .active(let level) = runtimePhase else {
+            return (nil, [], false)
+        }
+        for cid in locator {
+            guard let meta = await level.chain.getConsensusBlock(hash: cid),
+                  await level.chain.getMainChainBlockHash(atIndex: meta.blockHeight) == cid
+            else { continue }
+            let page = await forwardMainChainRange(afterCID: cid, limit: limit)
+            return (cid, page.blockCIDs, page.hasMore)
+        }
+        return (nil, [], false)
+    }
+
+    /// Height of an accepted block by CID, or nil when the process is not active
+    /// or the block is unknown. Used to anchor a range sync's request-height
+    /// window at a negotiated common ancestor rather than the receiver's own
+    /// (possibly off-chain) frontier height.
+    func acceptedBlockHeight(_ cid: String) async -> UInt64? {
+        guard case .active(let level) = runtimePhase else { return nil }
+        return await level.chain.getConsensusBlock(hash: cid)?.blockHeight
+    }
+
     /// Main-chain block CID at `height`, or nil when the process is not active
     /// or the height is past the tip. Ungated explorer read over the in-memory
     /// height index (same source as `forwardMainChainRange`), so a by-height

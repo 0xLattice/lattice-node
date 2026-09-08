@@ -18,6 +18,8 @@ enum NodeNetworkTopic {
     static let acceptedLeavesResponse = "lattice.overlay.accepted-leaves.response.v1"
     static let forwardRangeRequest = "lattice.overlay.forward-range.request.v1"
     static let forwardRangeResponse = "lattice.overlay.forward-range.response.v1"
+    static let ancestorRangeRequest = "lattice.overlay.ancestor-range.request.v1"
+    static let ancestorRangeResponse = "lattice.overlay.ancestor-range.response.v1"
     static let portableAttachmentAvailable =
         "lattice.overlay.portable-attachment.available.v1"
     static let portableAttachmentIndexRequest =
@@ -53,6 +55,7 @@ enum NodeNetworkTopic {
              transactionInventoryRequest, transactionInventoryResponse,
              acceptedLeavesRequest, acceptedLeavesResponse,
              forwardRangeRequest, forwardRangeResponse,
+             ancestorRangeRequest, ancestorRangeResponse,
              portableAttachmentAvailable,
              portableAttachmentIndexRequest,
              portableAttachmentIndexResponse,
@@ -378,6 +381,60 @@ struct ForwardRangeResponseMessage: NodeJSONMessage, Equatable, Sendable {
               _isBoundedWireAtom(afterCID),
               blockCIDs.count <= Self.maximumBlocks,
               blockCIDs.allSatisfy({ _isBoundedWireAtom($0) }),
+              !hasMore || blockCIDs.count == Self.maximumBlocks else {
+            throw NodeNetworkWireError.malformed
+        }
+    }
+}
+
+/// Negotiates the common ancestor before streaming, so a receiver whose
+/// frontier sits on a losing sibling is not told "empty = caught up" and
+/// marooned. The `locator` is the receiver's own accepted main-chain CIDs,
+/// newest-first at exponentially increasing height gaps back to (and
+/// including) genesis — Bitcoin `getblocks` style. The responder answers with
+/// the highest locator entry that lies on ITS main chain: because every entry
+/// is a block the receiver itself accepted, the negotiated start can never
+/// rewind the receiver past its own verified history.
+struct AncestorRangeRequestMessage: NodeJSONMessage, Equatable, Sendable {
+    /// A bounded locator: log-spaced, so it covers any depth in a handful of
+    /// entries. 32 comfortably spans a chain far past any realistic height.
+    static let maximumLocatorEntries = 32
+
+    let requestID: UInt64
+    let locator: [String]
+
+    func validate() throws {
+        guard requestID != 0,
+              !locator.isEmpty,
+              locator.count <= Self.maximumLocatorEntries,
+              locator.allSatisfy({ _isBoundedWireAtom($0) }) else {
+            throw NodeNetworkWireError.malformed
+        }
+    }
+}
+
+struct AncestorRangeResponseMessage: NodeJSONMessage, Equatable, Sendable {
+    /// Same page cap and `hasMore` semantics as the forward-range page.
+    static let maximumBlocks = ForwardRangeResponseMessage.maximumBlocks
+
+    let requestID: UInt64
+    /// The highest locator entry on the responder's main chain — the negotiated
+    /// stream start. `nil` means NONE of the locator entries are on its main
+    /// chain (disjoint retention): distinct from "caught up", which is a
+    /// present `commonAncestor` with an empty `blockCIDs`.
+    let commonAncestor: String?
+    /// Main-chain blocks forward FROM `commonAncestor`, genesis-ward first.
+    /// Empty with a present `commonAncestor` means the receiver is caught up to
+    /// this responder. Always empty when `commonAncestor` is nil.
+    let blockCIDs: [String]
+    let hasMore: Bool
+
+    func validate() throws {
+        guard requestID != 0,
+              blockCIDs.count <= Self.maximumBlocks,
+              blockCIDs.allSatisfy({ _isBoundedWireAtom($0) }),
+              commonAncestor.map({ _isBoundedWireAtom($0) }) ?? true,
+              !(commonAncestor == nil && !blockCIDs.isEmpty),
               !hasMore || blockCIDs.count == Self.maximumBlocks else {
             throw NodeNetworkWireError.malformed
         }
