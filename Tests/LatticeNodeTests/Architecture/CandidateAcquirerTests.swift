@@ -823,6 +823,40 @@ final class CandidateAcquirerTests: XCTestCase {
         )
     }
 
+    func testSecondPackageSeedNeverDowngradesAWeighedRootedAttempt() throws {
+        // Two peers advertise the same attachment: the second package seed
+        // lands on the EXISTING rooted attempt (the merge branch, not the
+        // creation branch). A package seed carries no tier of its own, so it
+        // must not re-eager the weighed block — otherwise every below-tip child
+        // block seen from more than one peer executes eagerly.
+        var acquirer = CandidateAcquirer()
+        XCTAssertTrue(acquirer.observe(.init(
+            blockCID: "block", package: nil, weighed: true
+        )).accepted)
+        _ = acquirer.observe(.init(
+            blockCID: "block", package: try childPackage(rootCID: "root")
+        ))
+        _ = acquirer.observe(.init(
+            blockCID: "block", package: try childPackage(rootCID: "root")
+        ))
+        XCTAssertEqual(
+            acquirer.next()?.weighed, true,
+            "a second package seed must not downgrade a weighed rooted attempt"
+        )
+
+        // Eager-wins is intact where it belongs: a genuinely eager (rootless,
+        // package-less) seed still downgrades a weighed rootless attempt.
+        var rootless = CandidateAcquirer()
+        XCTAssertTrue(rootless.observe(.init(
+            blockCID: "block", package: nil, weighed: true
+        )).accepted)
+        _ = rootless.observe(.init(blockCID: "block", package: nil))
+        XCTAssertEqual(
+            rootless.next()?.weighed, false,
+            "an eager package-less seed must still downgrade"
+        )
+    }
+
     func testWeighedSurvivesRepeatedWeighedObserves() throws {
         var acquirer = CandidateAcquirer()
         XCTAssertTrue(acquirer.observe(.init(

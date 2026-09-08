@@ -247,7 +247,11 @@ struct CandidateAcquirer {
             // Eager-wins: an eager (default) seed touching a weighed attempt
             // downgrades it to eager so a block anyone needs executed is never
             // pinned to the deferred tier. Monotone — weighed never overrides.
-            attempt.weighed = attempt.weighed && seed.weighed
+            // A package seed carries no tier of its own (it only delivers
+            // evidence), so it never downgrades — otherwise a second peer
+            // advertising the same attachment would re-eager a weighed block.
+            attempt.weighed = attempt.weighed
+                && (seed.weighed || seed.package != nil)
             let previous = attempt.package
             if let package = seed.package,
                let merged = Self.mergePackages(previous, package) {
