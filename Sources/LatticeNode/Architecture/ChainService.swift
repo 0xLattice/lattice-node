@@ -201,6 +201,19 @@ public typealias AcceptedBlockPublisher = @Sendable (_ blockCID: String) async t
 public typealias AcceptedTransactionPublisher = @Sendable (
     _ volumeRootCID: String
 ) async throws -> Void
+/// Opens a network body-acquisition session bound to one block's root and runs
+/// the caller's admission inside it. A weighed admit (deferred execution) stores
+/// only the block boundary, so the validate-on-candidacy walk must pull the
+/// deferred body (tier-3: tx bodies, validation-path states, WASM modules) over
+/// the network before it can execute the block. The session composes broker-first
+/// under `admit`, so an already-local boundary is served free and only the missing
+/// body is fetched. Nil in unit contexts that admit broker-only (empty blocks,
+/// whose boundary already is the whole block).
+public typealias ValidateBodyAdmission = @Sendable (
+    _ blockCID: String,
+    _ admit: @Sendable (_ remoteSource: any ContentSource) async throws
+        -> NodeAdmissionOutcome
+) async throws -> NodeAdmissionOutcome
 
 private struct AdmissionEffects: Sendable {
     let parentGenesisLinks: [ParentGenesisLink]
@@ -494,6 +507,15 @@ public actor ChainService {
     // every other operation for the length of a deep catch-up.
     private var validateWalkWorker: Task<Void, Never>?
     private var validateWalkDirty = false
+    // Network body acquisition for the validate walk (see ValidateBodyAdmission).
+    // When present the walk pulls a weighed block's deferred body over the network;
+    // when the body is temporarily unavailable the walk parks and a single delayed
+    // retry re-arms it — there is no push signal on body arrival, and once weighed
+    // sync completes the acquirer may hold no timed wait to re-drive it, so the
+    // walk owns its own liveness retry rather than borrowing the acquirer's.
+    private let validateBodySource: ValidateBodyAdmission?
+    private let validateWalkRetryInterval: Duration
+    private var validateWalkRetryTask: Task<Void, Never>?
     #if DEBUG
     // Test seam: invoked with each height about to be `.validate`-admitted, in
     // walk order. Lets tests assert strictly-forward progress (never tip-first).
@@ -517,6 +539,8 @@ public actor ChainService {
         childProofPublisher: @escaping ChildProofPublisher,
         acceptedBlockPublisher: @escaping AcceptedBlockPublisher,
         acceptedTransactionPublisher: @escaping AcceptedTransactionPublisher = { _ in },
+        validateBodySource: ValidateBodyAdmission? = nil,
+        validateWalkRetryInterval: Duration = .seconds(4),
         mempoolMaxCount: Int = 10_000,
         mempoolMaxNonReadyPerSigner: Int = 64,
         maximumChildCandidates: Int = 64
@@ -525,6 +549,8 @@ public actor ChainService {
             mempoolMaxCount > 0 && mempoolMaxNonReadyPerSigner > 0
                 && maximumChildCandidates > 0
         )
+        self.validateBodySource = validateBodySource
+        self.validateWalkRetryInterval = validateWalkRetryInterval
         self.process = process
         self.childCandidateProvider = childCandidateProvider
         self.childCandidateReservationReconciler =
@@ -1811,6 +1837,27 @@ public actor ChainService {
         validateWalkWorker = nil
     }
 
+    /// Arm one delayed re-drive of the validate walk after it parks on a network
+    /// availability gap. A withheld body has no arrival signal and — once weighed
+    /// sync has completed — may leave no canonical commit to re-arm the walk, so a
+    /// single coalesced timer polls until the body is servable. Only meaningful
+    /// when a body source is wired; a broker-only walk never parks on a fetch.
+    private func scheduleValidateWalkRetry() {
+        guard validateBodySource != nil, validateWalkRetryTask == nil else {
+            return
+        }
+        validateWalkRetryTask = Task { [weak self, validateWalkRetryInterval] in
+            try? await Task.sleep(for: validateWalkRetryInterval)
+            guard !Task.isCancelled else { return }
+            await self?.fireValidateWalkRetry()
+        }
+    }
+
+    private func fireValidateWalkRetry() {
+        validateWalkRetryTask = nil
+        reserveValidateWalkWorker()
+    }
+
     #if DEBUG
     func setValidateWalkObserver(_ observer: (@Sendable (UInt64) -> Void)?) {
         onValidateWalkStep = observer
@@ -1837,23 +1884,45 @@ public actor ChainService {
             }
             if validatedHeight >= Int64(target) { return }
             let nextHeight = UInt64(validatedHeight + 1)
-            // FORWARD-apply on the CURRENT main chain. The body is already local
-            // (stored by the weighed admit), so the broker serves it — no fetch.
+            // FORWARD-apply on the CURRENT main chain. A weighed admit stored only
+            // this block's boundary, so its body (tier-3) is NOT local: pull it over
+            // the network via the injected body source. `admit` composes [broker,
+            // session], so the local boundary is served free and only the missing
+            // body is fetched. With no source wired (empty-block unit contexts whose
+            // boundary already is the whole block), admit broker-only as before.
             guard let next = await process.mainChainBlockCID(atHeight: nextHeight)
             else { return }
             #if DEBUG
             onValidateWalkStep?(nextHeight)
             #endif
             let header = BlockHeader(rawCID: next, node: nil, encryptionInfo: nil)
-            let outcome: NodeAdmissionOutcome
-            do {
-                outcome = try await process.admit(
+            let admitValidate: @Sendable (
+                any ContentSource
+            ) async throws -> NodeAdmissionOutcome = { [self] remoteSource in
+                try await process.admit(
                     header,
+                    remoteSource: remoteSource,
                     mode: .validate,
                     canonicalCommitPublisher: { [self] commit in
                         await enqueueCanonicalCommit(commit)
                     }
                 )
+            }
+            let outcome: NodeAdmissionOutcome
+            do {
+                if let validateBodySource {
+                    outcome = try await validateBodySource(next) { remoteSource in
+                        try await admitValidate(remoteSource)
+                    }
+                } else {
+                    outcome = try await process.admit(
+                        header,
+                        mode: .validate,
+                        canonicalCommitPublisher: { [self] commit in
+                            await enqueueCanonicalCommit(commit)
+                        }
+                    )
+                }
             } catch {
                 // A store/durability error is not a verdict: keep acting on the
                 // last validated tip. A later commit re-arms the walk.
@@ -1872,11 +1941,18 @@ public actor ChainService {
                 // eager admission path publishes them.
                 await publishCarrierChildProofs(header: header, outcome: outcome)
                 continue
-            case .unavailable, .temporarilyInvalid, .invalid, .localFailure,
-                 .carrier:
-                // Availability/ordering gap: park at the last validated tip. The
-                // same machinery filling the missing body re-arms the walk when
-                // the block becomes admissible.
+            case .unavailable:
+                // Availability gap: the body is not yet fetchable. Park at the last
+                // validated tip (still fully operable) and arm a single delayed
+                // retry — the body arrives over the network with no local signal, so
+                // the walk polls until it is present. A later canonical commit also
+                // re-arms the walk.
+                scheduleValidateWalkRetry()
+                return
+            case .temporarilyInvalid, .invalid, .localFailure, .carrier:
+                // Ordering / non-availability park: keep acting on the last
+                // validated tip. A later commit re-arms the walk; no self-retry
+                // (retrying an invalidity with no new fact would hot-loop).
                 return
             }
         }

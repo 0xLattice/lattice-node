@@ -149,6 +149,18 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             acceptedTransactionPublisher: { [weak network] rootCID in
                 guard let network else { throw CancellationError() }
                 try await network.publishTransaction(rootCID)
+            },
+            validateBodySource: { [weak network] blockCID, admit in
+                // A weighed admit stored only the boundary; pull the deferred body
+                // over the network by opening a root session on the block CID (the
+                // same public-pin resolution the candidate acquirer falls back to),
+                // and admit `.validate` inside it so [broker, session] serves the
+                // local boundary free and fetches only the missing body.
+                guard let network else { throw CancellationError() }
+                return try await network.remoteContentSource
+                    .withRoot(blockCID) { session in
+                        try await admit(session)
+                    }
             }
         )
         try await service.restoreLocalTransactions()
