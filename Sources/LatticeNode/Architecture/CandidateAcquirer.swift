@@ -265,6 +265,11 @@ struct CandidateAcquirer {
         } else {
             created = true
             nextOrder &+= 1
+            // A rooted package seed supersedes the rootless attempt for this
+            // CID (below). It carries the default (eager) flag only because a
+            // package has no tier of its own, so it INHERITS weighed from the
+            // rootless attempt it replaces; a genuinely eager seed on the same
+            // key still downgrades via the eager-wins rule above.
             record.attempts[rootCID] = Attempt(
                 package: seed.package,
                 recoveryRootCID: seed.recoveryRootCID,
@@ -273,6 +278,7 @@ struct CandidateAcquirer {
                 expiresAt: nil,
                 state: .ready,
                 weighed: seed.weighed
+                    || (record.attempts[nil]?.weighed ?? false)
             )
         }
         records[seed.blockCID] = record
