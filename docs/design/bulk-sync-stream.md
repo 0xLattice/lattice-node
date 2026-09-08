@@ -1,148 +1,161 @@
-# Bulk Sync Is a Stream
+# Sync Is Header-Graph Acquisition; Bodies Are Deferred
+
+> **Supersedes** the earlier "ordered stream" framing of this document. The
+> stream framing solved the right diagnosis (below-the-tip is not the live
+> edge) with a heavier mechanism than needed. The model here is simpler and
+> composes with two designs already in the repo:
+> [weight-first-acquisition](weight-first-acquisition.md) (deferred execution)
+> and cashew's targeted retrieval.
 
 ## Model
 
 Any peer may lie, withhold, stall, serve valid-but-irrelevant data, or be
 honestly pruned; there is no honest-majority assumption among peers, and
 security comes from per-item verification plus objectively comparable
-cumulative work — under a partially synchronous network, in which a slow
-peer and a stalling peer are indistinguishable, so rotation is a local
-timing policy that never implies blame. The one non-peer trust edge is
-the receiver's own configured immediate parent, which alone answers
-genesis and parent-state
+cumulative work, under partial synchrony — in which a slow peer and a
+stalling peer are indistinguishable, so rotation is a local timing policy
+that never implies blame. The one non-peer trust edge is the receiver's own
+configured immediate parent, which alone answers genesis and parent-state
 continuity questions on the hierarchy plane.
 
-## Problem
+## The insight
 
-An ordered forward path for deep history already exists — ascending pages,
-bounded pipelining, rotation on no progress. The defect is that a node far
-behind almost never *runs* it, and the fallback machinery it lands in is
-quadratically wrong for bulk transfer:
+A block has two independent halves, and consensus only ever needed the first:
 
-- The ordered path is entered only when an inbound announcement carries a
-  height and claims a gap past a fixed depth. It is never entered at
-  session establishment — the moment a joining node actually learns it is
-  deep. Instead, session establishment immediately starts the height-blind
-  sweeps (an evidence-index walk paging in content-address order — random
-  height order — and an accepted-leaves descent), committing the node to
-  convergence machinery before it has determined whether it is deep.
-- An empty ordered-path response is conflated with "caught up". A receiver
-  whose frontier sits on a losing sibling gets an empty page, concludes it
-  is done, and falls back to the sweeps — indistinguishable from success.
-  This is the live marooned-follower incident.
-- The fallback treats every historical block as a live-edge event:
-  individually discovered, individually solicited (one evidence round trip
-  per block, fired only from inside a failed admission attempt),
-  individually admitted through a single-slot FIFO shared with live
-  traffic, and parked whenever it arrives out of order — which for
-  random-order discovery is always. Each item is handled correctly; the
-  whole is pathological. Measured live on a fresh child against one
-  healthy, complete, low-latency peer: two connected blocks out of ~3,500
-  admission attempts in two hours, with the peer answering every one of
-  917 evidence requests. The node even responded to its own congestion by
-  recycling the serving session, resetting every sweep to its beginning.
+- A **header** — the block's cashew *root node*: parent CID, target,
+  `nextTarget`, height, timestamp, nonce, and the CIDs of its sub-bodies
+  (transactions, state roots, children trie). One targeted content-addressed
+  retrieval. Proof of work is computable from the root alone (the PoW preimage
+  hashes the inline scalars plus the *CID strings* of the references, never
+  their contents). The consensus graph is **already header-only**:
+  `ConsensusBlockInput`/`submitBlock`/fork choice read the header fields and
+  the claimed state CIDs, and never the body or materialized state.
+- A **body** — transactions, the executed state transition, the children
+  trie. Needed to *validate* the block (re-execute and check the declared
+  `postState`) and to *use* it (build on its tip, serve its state).
 
-Candidate acquisition exists to converge under adversarial, partial,
-out-of-order arrival — the live edge's properties. Bulk history along one
-chain is totally ordered, contiguously available over whatever range a
-given peer retained, and verifiable strictly in sequence. Convergence
-apparatus applied to that is O(total DAG) work per O(1) frontier progress.
+So a block can **count for fork choice on its header alone** — possess the
+root, verify PoW, its work is real — while its body is fetched and executed
+**later, and only if the block turns out to matter**. Below the tip, most
+accepted blocks are losing siblings (measured ~74% on the live child): they
+are weighed from headers and their bodies are **never retrieved or executed**.
 
-## Concept
+This is exactly [weight-first-acquisition](weight-first-acquisition.md)'s two
+tiers — **weighed** (possess + structurally verify, work counts) and
+**validated** (executed, may be acted on) — with the weighed tier resolved at
+*header* granularity. Headers-first is the download half; deferred execution
+is the execution half; together they are the whole model. Neither is a
+foreign graft — both are already the design's own.
 
-**Below the tip, sync is a stream; live gossip is the special case reserved
-for the last few blocks.** The decision to stream is made when the node
-learns a peer holds a substantially heavier chain — at session
-establishment or on any announcement — and the height-blind sweeps do not
-start until that determination is made (or resume until the stream ends).
-A streaming receiver asks the peer for the chain in ascending order and
-receives items that are self-sufficient in the common case — each block
-together with the portable evidence that admits it — verifying and
-applying each item strictly in sequence.
+## What sync becomes
 
-- **The stream starts at a common ancestor, not at the receiver's
-  frontier.** Establishing that point is part of establishing the stream. A
-  proposed start point is valid only if the receiver has already accepted
-  that block itself, so negotiation can never rewind a receiver past its
-  own verified history. Two honest nodes with disjoint retention may find
-  no common point: that ends the stream and never lowers the peer's
-  standing. An empty response is always distinguishable from "you are
-  caught up".
-- **The unit of transfer is the unit of admission — where a peer can
-  portably supply it.** In the common case (an item whose carrier did not
-  advance the parent state — measured as the overwhelming majority on the
-  live child) the item is admissible on arrival. Where admission
-  additionally requires a fact only the receiver's own immediate parent can
-  authenticate, that fact is obtained on the hierarchy plane, pipelined
-  ahead of application; a child stream therefore advances no faster than
-  the receiver's own parent chain has been carried, and an item blocked on
-  a parent fact is a local dependency, never a served fault.
-- **Three outcomes per item, not two.** An item is admissible now; or it is
-  a served fault (wrong bytes, out of order, failed verification), which
-  ends the stream and rotates; or a *part* of an otherwise well-formed item
-  is absent — an availability gap, sourced elsewhere at item granularity
-  while the stream continues. Only an unsourceable gap ends the stream, and
-  it still costs the peer nothing. A peer holds a block's portable
-  evidence in the common case, not by construction — a miner, or a node
-  that admitted via locally recovered parent evidence, may hold the block
-  and no portable artifact.
-- **Rotation is judged on progress, not validity.** A stream that verifies
-  perfectly but does not move the receiver toward the heaviest chain it has
-  heard of — a relayed abandoned branch, correct in every byte — is
-  rotated away from exactly like a stalling peer. Correctness of items is
-  not evidence of relevance. Which branch the receiver chases, and how
-  heavy it claims to be, is derived from announcements observed across
-  peers and weighed locally; the stream only fetches, it never decides. A
-  single peer can determine what bytes arrive next, never which chain the
-  receiver is trying to reach.
-- **Trust does not change.** Every item is verified on arrival exactly as
-  the live path verifies it; the stream changes when bytes move, never what
-  is believed. No assumevalid, no checkpoint, no honest-serving assumption.
-- **The live machinery stands down while the stream runs — and its return
-  is load-bearing.** The height-blind sweeps pause during a stream and
-  resume from persisted cursors, never from the beginning. Resumption is
-  driven by the receiver's own assessment of its distance to the tip, not
-  gated on a further peer message arriving. The sweeps are not mere gap
-  healing: a stream conveys one chain, while fork choice weighs whole
-  subtrees, so a freshly streamed node is
-  fork-choice-under-informed until the sweeps
-  backfill sibling work. No future simplification may drop them.
-- **Congestion is local.** A receiver that cannot keep up slows its own
-  requests. Buffer pressure never restarts, resets, or re-sessions a
-  discovery walk, and never punishes the serving session.
+Sync stops being a subsystem. It is: **acquire headers into the weight graph;
+let fork choice run on them; retrieve and execute a body only when its fork is
+a canonical candidate.** The height-blind sweeps, the per-block evidence
+solicitation fired from inside failed admissions, and the single admission
+slot shared with live traffic all exist because sync today acquires and
+*executes* whole blocks through the live-edge machinery. When the weighed tier
+is header-only, that machinery is not needed for bulk: sync unifies with the
+live edge, and root sync and child sync are the same operation — the
+"unified adopt" principle.
 
-A stream ends when the receiver is within the live edge's reach of the
-chain it is chasing — the target moves as the producer mints; there is no
-fixed captured height. A receiver that cannot close the distance is not
-viable on that chain, and that condition is surfaced, never retried
-silently. The handover distance between stream and live gossip is operator
-policy with a sane default: two nodes that choose different distances are
-both fully conforming, and no peer can observe or depend on another's
-choice.
+### 1. Establish the start: common-ancestor negotiation
 
-The end state matches the unified-adopt principle: child sync and root sync
-are the same operation — stream to the tip, then let pure heaviest-selection
-gossip take over — differing in whether a given item needs a hierarchy-plane
-parent fact alongside its portable evidence.
+Sync begins by negotiating a **common ancestor**, not at the receiver's
+frontier. The receiver offers a **locator** — its own accepted main-chain CIDs
+newest-first at exponentially widening gaps, genesis last — and the peer
+returns the highest entry on *its* main chain plus the headers forward from
+it. A proposed start is valid only because it is one of the receiver's own
+accepted blocks, so negotiation can never rewind a receiver past its verified
+history. Three outcomes, distinct on the wire: a shared ancestor with headers
+forward (stream), a shared ancestor with nothing forward (genuinely caught
+up), or no shared ancestor at all (disjoint retention — end this peer, rotate,
+never punish). An empty page is never again conflated with "caught up." This
+is the Bitcoin block-locator convention, and it is the mandatory, SOTA-shared
+part of the design regardless of everything below.
+
+### 2. Acquire the header graph and weigh it
+
+From the common ancestor, retrieve block **headers** (targeted root
+retrievals) and, per header, verify proof of work. A verified header's work
+enters fork choice immediately — no body, no execution. Headers may be
+acquired from many peers in parallel and out of order; a header's *place* is
+its parent CID, so assembly is trivial. Fork choice ranks whole subtrees over
+this header/weight graph exactly as it does today (it is already state-blind).
+
+For a **root** chain a header's own PoW is its work, self-contained. For a
+**child** chain a header's weight is *inherited* — it is the securing work of
+the parent grind that committed to it, which needs the securing proof. That
+proof is not fetched per child block: the child's securing weight is
+**regenerated locally from the parent carriers** the node holds
+("proofs are regenerated from the retained closure when it exists"). So the
+hierarchy syncs **top-down** — acquire the Nexus header graph first; a child
+header is then weighed against the Nexus carriers already held. Regenerating a
+securing proof does read parent carrier *sub-bodies* (the children trie of the
+committing carrier), so child weighing is heavier than root weighing, but far
+cheaper than a per-block child-evidence download, and it is the carrier owner's
+own retained data.
+
+### 3. Retrieve and execute a body only on candidacy
+
+Fork choice selects a branch from the header graph. **Only then** are that
+branch's bodies retrieved (independently, per block, in parallel) and executed
+forward from the last validated ancestor — the **validated** tier. Losing
+forks are weighed and never touched. A body that is a canonical candidate but
+whose parts are not yet available is an **availability gap**: retried
+indefinitely, never a verdict, and the node keeps acting on its last validated
+tip meanwhile. Execution that completes and *fails* — a deterministic mismatch
+of the declared `postState`, or a committed validity rule — records an
+**invalidity exclusion**: the proven-invalid subtree is removed from this
+chain's own effective weight and fork choice re-projects.
+
+### The data-availability linchpin
+
+Header-weight **ranks**; only **validated** blocks are **acted on** — built
+upon, served, exported, asserted as head (the acted-on set is enumerated in
+[weight-first-acquisition](weight-first-acquisition.md)). A miner can publish a
+heavy header chain (real work) and withhold its bodies; it ranks first but is
+**never acted on** — the node keeps building on its heaviest *validated* tip
+and retries the missing bodies as an availability gap. This is the *same*
+withholding surface as a secret-then-released heavy chain today; header-weight
+adds **no new attack**, *provided* "rank on headers, act only on validated" is
+implemented exactly. Get it wrong and a heaviest-but-invalid or
+heaviest-but-unavailable path could be acted on, or nodes with different body
+availability could split. This is the one part to model adversarially first.
 
 ## Boundaries
 
-- Consensus is untouched: admission validity, weight comparison, and fork
-  choice are identical for streamed and gossiped blocks. The stream is a
-  transport arrangement.
-- Wire compatibility is additive: peers that do not speak the
-  evidence-carrying stream still serve the existing pages, and receivers
-  fall back to per-block solicitation — slow, never wrong.
-- The stream serves the retained view, at item granularity (see the
-  three-outcome rule). A child chain whose facts no parent tracks and no
-  peer retained is unsyncable by the same rule that makes it unsyncable
-  today — the stream changes the cost of availability, never its existence.
-- Live blocks arriving during a stream are parked and admitted when the
-  stream reaches them; a parked announcement released under pressure is
-  never absorbed into a seen set — it stays re-announceable and
-  re-solicitable — and on stream completion the receiver re-establishes the
-  tip by asking rather than waiting for the next announcement.
-- Blocks delivered by an active stream are treated as just-re-acquired for
-  eviction ordering (operator-finality), so a stream cannot evict its own
-  prefix; the operator's ceiling is unchanged, and a stream that does not
-  fit under it fails visibly rather than thrashing.
+- **Consensus is untouched at the machinery level.** The consensus graph is
+  already header-only (`ConsensusBlockInput` excludes the body and state). The
+  only coupling is that admission (`ChainLocalAdmission.prepare`) refuses to
+  emit a block's weight fact until its execution succeeds. The change is to
+  split that: emit a *weighed* block fact from root + PoW with the declared
+  `postState` recorded as an unverified claim, and add the invalidity-exclusion
+  fact and a validated-subgraph notion. This is consensus-adjacent and is
+  treated with that gravity — the spec (§9) is amended: "accepted" means
+  *weighed*; validity is a second recorded, deterministic judgment; continuity
+  is computed over the validated subgraph; exclusion is not pruning and
+  excluded facts remain served.
+- **Deferral without the exclusion seam is forbidden.** Weight may not enter
+  fork choice pre-execution unless a proven-invalid subtree can be excluded
+  from what the chain acts on. The two land as one unit.
+- **Availability never judges.** Failure to obtain a body is an availability
+  gap, retried forever, excluding nothing. Only a *completed* deterministic
+  check records invalidity.
+- **Wire compatibility is additive.** The strict-canonical wire evolves by new
+  message types, never mutated ones. Peers that do not speak the new topics
+  keep serving the existing pages; receivers fall back — slow, never wrong.
+- **Possession stays ungated.** Serving a block whose bytes match their CID is
+  never a fault, validated or not; possession/serving surfaces
+  (`forwardMainChainRange`, by-CID reads) are not gated on validation.
+- **The unavailable tail is unsyncable by the same rule as today.** A chain
+  whose facts no parent tracks and no peer retained cannot be synced; the model
+  changes the *cost* of availability, never its existence.
+
+## Composition
+
+The three designs compose: **eviction is weight-preserving**
+(operator-finality), **acquisition is header-first with a negotiated start**
+(this document), and **execution is deferred to load-bearing blocks**
+(weight-first-acquisition). Acquire headers, rank on work, execute exactly the
+chain that matters.
