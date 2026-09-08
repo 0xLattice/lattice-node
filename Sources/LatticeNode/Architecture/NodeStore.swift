@@ -1200,7 +1200,7 @@ actor NodeStore {
             roots: materializedRoots
         )
         try database.transaction {
-            try database.execute(
+            _ = try database.execute(
                 "UPDATE accepted_blocks SET validated = 1 WHERE block_cid = ?1",
                 params: [.text(blockCID)]
             )
