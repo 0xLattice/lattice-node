@@ -9,11 +9,16 @@ forever:
   losing sibling — stays in its accepted set permanently, and accepted-leaf
   pages serve the whole set to every peer. A live testnet child measured 74%
   losing siblings: roughly three units of junk exchanged and re-validated for
-  every unit of chain.
+  every unit of chain. (Receiver retired: a node no longer walks a peer's
+  accepted leaves — header-graph range sync, live announcements and the
+  predecessor walk replaced the descent; the pages are still served for
+  older peers.)
 - **The parent's evidence archive.** Every child block a parent ever carried
   keeps its proof and edge rows durably, and the portable-attachment index
   re-advertises all of it to every syncing child, forever (measured: 13.5
-  evidence rows per canonical child block).
+  evidence rows per canonical child block). (Receiver retired: a child no
+  longer walks the index — proofs are solicited per block through the locate
+  path; the index is still served for older children.)
 - **Acquisition effort.** A bare advertised CID gives a node no way to decline
   work, so every hoarded sibling costs every peer a content fetch, an evidence
   solicitation, and a full admission attempt — competing for the same bounded
@@ -120,8 +125,9 @@ this design.
 
 ### You serve what you keep
 
-Served surfaces — accepted-leaf pages, the portable-attachment index, content
-exchange — advertise the operator's retained set, nothing more. An archive
+Served surfaces — accepted-leaf pages and the portable-attachment index
+(both legacy-served only), content exchange — advertise the operator's
+retained set, nothing more. An archive
 node that keeps everything serves everything; a lean node serves the
 canonical chain plus its retained fringe. Availability, like finality, is
 operator choice; a fork survives network-wide exactly as long as someone

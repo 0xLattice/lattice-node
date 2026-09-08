@@ -13,14 +13,15 @@ struct CandidateProvider: Hashable, Sendable {
 /// runtime as effects of `next()`.
 struct CandidateAcquirer {
     static let readyCapacity = 1_024
-    // Must exceed the forward-range working set or catch-up thrashes:
-    // min-order eviction discards exactly the tip-adjacent parks the
-    // connect cascade needs next, collapsing throughput to one block per
-    // watchdog kick. The set can reach ~(rangeSyncMaxPagesAhead + 1) pages
-    // x 64 CIDs x 2 simultaneous retained slots per block (the rootless
-    // .predecessor park is NOT superseded by the rooted evidence attempt,
-    // which then parks on the same predecessor) ~= 384; 512 leaves real
-    // headroom for the announcement descent on top.
+    // Operator budget for parked/waiting attempts: the live-edge predecessor
+    // walk (a chain of parks from an announced tip down to the first block
+    // we hold, each block possibly holding a rootless .predecessor park AND a
+    // rooted evidence wait at once) plus durable-descendant seeding at
+    // restart. Must comfortably exceed a shallow-gap walk (rangeSyncDepthThreshold
+    // x 2 slots); deeper gaps go through range sync, which admits parent-first
+    // and retains nothing. Over budget, the oldest park is evicted, never the
+    // fresh one — an evicted obligation re-enters through a later announcement
+    // or a range-sync page.
     static let retainedCapacity = 512
 
     enum WaitReason: Equatable, Sendable {
@@ -109,6 +110,10 @@ struct CandidateAcquirer {
         var nextRetryAt: ContinuousClock.Instant?
         var state: AttemptState
         var weighed: Bool
+        /// Dependent-less evidence re-fires so far. Bounds the re-solicitation
+        /// of a park nothing waits on: enough to survive a lost locate (the head
+        /// the node syncs toward), then reclaimed like any unneeded park.
+        var evidenceRetries: Int = 0
     }
 
     private struct BlockRecord {
@@ -126,12 +131,27 @@ struct CandidateAcquirer {
     private var readySet = Set<AttemptKey>()
     private var waitingOn: [String: Set<AttemptKey>] = [:]
     private var active: Ticket?
-    private var reservedReadySlots = 0
-    private var inventoryRestartNeeded = false
     private var retryWindow: Duration
 
-    init(retryWindow: Duration = .seconds(64)) {
+    /// How long an evidence park waits before re-firing its locate. The
+    /// evidence solicitation is a lossy single round-trip and, with the legacy
+    /// sweeps retired, the only path by which a child block obtains its
+    /// securing proof — so a lost locate must re-fire in seconds, not the
+    /// 64 s content window. A locate is small and idempotent; this only bounds
+    /// how often one is re-sent while the evidence is still missing.
+    private var evidenceRetryWindow: Duration
+    /// How many times a dependent-less evidence park re-fires before it is
+    /// reclaimed. Enough to survive a lost locate on the head the node syncs
+    /// toward; small enough that an unresolvable losing-sibling park stops
+    /// cycling through the single admission slot instead of starving it.
+    private static let maxDependentlessEvidenceRetries = 5
+
+    init(
+        retryWindow: Duration = .seconds(64),
+        evidenceRetryWindow: Duration = .seconds(4)
+    ) {
         self.retryWindow = retryWindow
+        self.evidenceRetryWindow = evidenceRetryWindow
     }
 
     var hasReadyCandidate: Bool { !readySet.isEmpty }
@@ -151,7 +171,10 @@ struct CandidateAcquirer {
     ) {
         var nextEpoch = epoch &+ 1
         if nextEpoch == 0 { nextEpoch = 1 }
-        self = CandidateAcquirer(retryWindow: retryWindow)
+        self = CandidateAcquirer(
+            retryWindow: retryWindow,
+            evidenceRetryWindow: evidenceRetryWindow
+        )
         epoch = nextEpoch
         var descendantCIDs = Set<String>()
         // Recovery seeding respects the SAME retained budget as live parking:
@@ -167,10 +190,7 @@ struct CandidateAcquirer {
             for descendant in descendants.sorted(by: {
                 ($0.blockCID, $0.rootCID ?? "") < ($1.blockCID, $1.rootCID ?? "")
             }) {
-                guard seeded < Self.retainedCapacity else {
-                    inventoryRestartNeeded = true
-                    break seeding
-                }
+                guard seeded < Self.retainedCapacity else { break seeding }
                 descendantCIDs.insert(descendant.blockCID)
                 let key = observe(Seed(
                     blockCID: descendant.blockCID,
@@ -186,14 +206,11 @@ struct CandidateAcquirer {
         // The missing-predecessor frontier is ready-pool work and respects
         // the same budget: an uncapped flood of stale roots would exhaust
         // the ready pool from second zero and reject live observes. The
-        // remainder re-derives through inventory recovery.
+        // remainder re-derives at the next restart.
         var frontierSeeded = 0
         for predecessorCID in durableDescendants.keys.sorted()
             where !descendantCIDs.contains(predecessorCID) {
-            guard frontierSeeded < Self.retainedCapacity else {
-                inventoryRestartNeeded = true
-                break
-            }
+            guard frontierSeeded < Self.retainedCapacity else { break }
             _ = observe(Seed(
                 blockCID: predecessorCID,
                 package: nil
@@ -293,7 +310,6 @@ struct CandidateAcquirer {
         let accepted = scheduleIfReady(key)
         if !accepted, created, !retainingOverflow {
             removeAttempt(key)
-            inventoryRestartNeeded = true
             return (false, nil)
         }
         fillReadyCapacity()
@@ -440,7 +456,6 @@ struct CandidateAcquirer {
                 record.attempts[ticket.key.rootCID] = attempt
                 records[ticket.key.blockCID] = record
                 removeAttempt(ticket.key)
-                inventoryRestartNeeded = true
             } else {
                 // A successful eviction may have removed a sibling attempt of
                 // THIS block: re-read the record so the pre-eviction snapshot
@@ -450,7 +465,9 @@ struct CandidateAcquirer {
                     attempt.expiresAt = now.advanced(
                         by: reason == .later
                             ? .seconds(2 * 60 * 60)
-                            : retryWindow
+                            : reason == .evidence
+                                ? evidenceRetryWindow
+                                : retryWindow
                     )
                 }
                 // Pace the wall-clock retry: without this, every waiting
@@ -476,7 +493,6 @@ struct CandidateAcquirer {
                 record.attempts[ticket.key.rootCID] = attempt
                 records[ticket.key.blockCID] = record
                 removeAttempt(ticket.key)
-                inventoryRestartNeeded = true
             } else {
                 // See the wait branch: never write a pre-eviction snapshot
                 // back over a same-block eviction.
@@ -555,8 +571,20 @@ struct CandidateAcquirer {
                         } else {
                             attempt.expiresAt = nil
                             record.attempts[rootCID] = attempt
-                            inventoryRestartNeeded = true
                         }
+                    } else if reason == .evidence,
+                              attempt.evidenceRetries
+                                < Self.maxDependentlessEvidenceRetries {
+                        // A dependent-less evidence park is the head the node
+                        // is syncing toward (nothing waits on the tip). It must
+                        // re-fire too: removing it on the first expiry
+                        // fossilized the sync one block short after a single
+                        // lost locate. The retry budget keeps an unresolvable
+                        // park from cycling through the admission slot forever.
+                        attempt.evidenceRetries += 1
+                        attempt.expiresAt = nil
+                        attempt.state = .ready
+                        record.attempts[rootCID] = attempt
                     } else {
                         record.attempts.removeValue(forKey: rootCID)
                     }
@@ -586,45 +614,6 @@ struct CandidateAcquirer {
         record.attempts[rootCID] = attempt
         records[blockCID] = record
         _ = scheduleIfReady(key)
-    }
-
-    mutating func takeInventoryRestart() -> Bool {
-        defer { inventoryRestartNeeded = false }
-        return inventoryRestartNeeded
-    }
-
-    mutating func reserveAcceptedLeafPage(_ count: Int) -> Bool {
-        guard reservedReadySlots == 0,
-              readySet.count <= Self.readyCapacity - count else {
-            return false
-        }
-        reservedReadySlots = count
-        return true
-    }
-
-    mutating func releaseAcceptedLeafPage(_ count: Int) {
-        precondition(reservedReadySlots == count)
-        reservedReadySlots = 0
-        fillReadyCapacity()
-    }
-
-    mutating func consumeAcceptedLeafPage(_ seeds: [Seed]) -> Bool {
-        guard seeds.count <= reservedReadySlots else {
-            reservedReadySlots = 0
-            fillReadyCapacity()
-            return false
-        }
-        for seed in seeds {
-            reservedReadySlots -= 1
-            guard observe(seed).accepted else {
-                reservedReadySlots = 0
-                fillReadyCapacity()
-                return false
-            }
-        }
-        reservedReadySlots = 0
-        fillReadyCapacity()
-        return true
     }
 
     /// Wake successors parked behind `predecessorCID` when it became canonical
@@ -660,7 +649,7 @@ struct CandidateAcquirer {
             return true
         }
         guard !readySet.contains(key) else { return true }
-        guard readySet.count + reservedReadySlots < Self.readyCapacity else {
+        guard readySet.count < Self.readyCapacity else {
             return false
         }
         readySet.insert(key)
@@ -709,7 +698,8 @@ struct CandidateAcquirer {
     /// attempt. Retention is an operator-budget cache, never a protocol rule:
     /// a live predecessor walk must always be able to park, and an evicted
     /// obligation is re-derivable (durable recovery edges re-derive from the
-    /// accepted graph at restart; inventory restart re-supplies live waits).
+    /// accepted graph at restart; a live wait re-enters through a later
+    /// announcement or range-sync page).
     private mutating func evictOldestRetained() -> Bool {
         var victim: (key: AttemptKey, order: UInt64)?
         for (blockCID, record) in records {
@@ -729,7 +719,6 @@ struct CandidateAcquirer {
         }
         guard let victim else { return false }
         removeAttempt(victim.key)
-        inventoryRestartNeeded = true
         return true
     }
 
