@@ -1909,6 +1909,109 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertEqual(ownership.handoffs, [handoff])
     }
 
+    // MARK: - Bulk-sync common-ancestor negotiation (Stage 1)
+
+    /// THE marooned-follower case: a receiver whose frontier is an off-chain
+    /// losing sibling must resolve to the deepest common main-chain ancestor and
+    /// receive the main-chain blocks forward from it — NOT get an empty page that
+    /// forward-range conflates with "caught up".
+    func testCommonAncestorResolvesDeepAncestorWhenFrontierIsOffChainSibling() async throws {
+        let process = try await nexusProcess()
+        let service = makeService(process: process)
+        var mainCIDs: [String] = []
+        for _ in 0..<3 {
+            let template = try await service.miningTemplate(MiningTemplateRequest())
+            let submitted = try await service.submitWork(
+                SubmitWorkRequest(workID: template.workID, nonce: 0)
+            )
+            XCTAssertTrue(submitted.accepted)
+            mainCIDs.append(try XCTUnwrap(submitted.tipCID))
+        }
+        // Fork at height 3: two competing height-4 blocks; one is canonical, the
+        // other is the off-chain sibling a marooned receiver would sit on.
+        let templateA = try await service.miningTemplate(MiningTemplateRequest())
+        let templateB = try await service.miningTemplate(MiningTemplateRequest())
+        let cidA = try BlockHeader(node: templateA.block).rawCID
+        let cidB = try BlockHeader(node: templateB.block).rawCID
+        let submittedA = try await service.submitWork(
+            SubmitWorkRequest(workID: templateA.workID, nonce: 0)
+        )
+        XCTAssertTrue(submittedA.accepted)
+        let submittedB = try await service.submitWork(
+            SubmitWorkRequest(workID: templateB.workID, nonce: 0)
+        )
+        XCTAssertTrue(submittedB.accepted)
+        let canonical4Opt = await process.mainChainBlockCID(atHeight: 4)
+        let canonical4 = try XCTUnwrap(canonical4Opt)
+        let sibling4 = canonical4 == cidA ? cidB : cidA
+        let deepAncestor = mainCIDs[2] // canonical height-3 block
+
+        // Locator front is the off-chain sibling; the resolver must skip it and
+        // find the deep on-chain ancestor, returning the main-chain block forward.
+        let resolved = await process.commonAncestorRange(
+            locator: [sibling4, deepAncestor, mainCIDs[1], mainCIDs[0]],
+            limit: ForwardRangeResponseMessage.maximumBlocks
+        )
+        XCTAssertEqual(resolved.commonAncestor, deepAncestor)
+        XCTAssertEqual(resolved.blockCIDs, [canonical4])
+
+        // All-off-chain locator → no common ancestor (distinct from caught-up).
+        let disjoint = await process.commonAncestorRange(
+            locator: [sibling4, testOffChainCID],
+            limit: ForwardRangeResponseMessage.maximumBlocks
+        )
+        XCTAssertNil(disjoint.commonAncestor)
+        XCTAssertTrue(disjoint.blockCIDs.isEmpty)
+
+        // Highest on-chain entry == tip → caught up (ancestor present, empty).
+        let caughtUp = await process.commonAncestorRange(
+            locator: [canonical4],
+            limit: ForwardRangeResponseMessage.maximumBlocks
+        )
+        XCTAssertEqual(caughtUp.commonAncestor, canonical4)
+        XCTAssertTrue(caughtUp.blockCIDs.isEmpty)
+    }
+
+    func testAncestorRangeMessagesRoundTripAndBound() throws {
+        let genesis = "bafyreiayw4z5qz4lt2sljf2enzn7uol3qa6bebadav7qwnqz7agxkiuwhq"
+        let request = AncestorRangeRequestMessage(requestID: 7, locator: [genesis])
+        XCTAssertEqual(
+            try AncestorRangeRequestMessage.decoded(request.encoded()), request
+        )
+        // commonAncestor present + blocks.
+        let withAncestor = AncestorRangeResponseMessage(
+            requestID: 7, commonAncestor: genesis, blockCIDs: [genesis], hasMore: false
+        )
+        XCTAssertEqual(
+            try AncestorRangeResponseMessage.decoded(withAncestor.encoded()), withAncestor
+        )
+        // commonAncestor nil + empty (no overlap) round-trips.
+        let noOverlap = AncestorRangeResponseMessage(
+            requestID: 7, commonAncestor: nil, blockCIDs: [], hasMore: false
+        )
+        XCTAssertEqual(
+            try AncestorRangeResponseMessage.decoded(noOverlap.encoded()), noOverlap
+        )
+        // Bounds: empty locator, oversized locator, and nil-ancestor-with-blocks
+        // are all rejected.
+        XCTAssertThrowsError(
+            try AncestorRangeRequestMessage(requestID: 1, locator: []).encoded()
+        )
+        let tooMany = (0...AncestorRangeRequestMessage.maximumLocatorEntries)
+            .map { _ in genesis }
+        XCTAssertThrowsError(
+            try AncestorRangeRequestMessage(requestID: 1, locator: tooMany).encoded()
+        )
+        XCTAssertThrowsError(
+            try AncestorRangeResponseMessage(
+                requestID: 1, commonAncestor: nil, blockCIDs: [genesis], hasMore: false
+            ).encoded()
+        )
+    }
+
+    private let testOffChainCID =
+        "bafyreib4ovbxjaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
     private func nexusProcess() async throws -> ChainProcess {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-chain-service-\(UUID().uuidString)")
