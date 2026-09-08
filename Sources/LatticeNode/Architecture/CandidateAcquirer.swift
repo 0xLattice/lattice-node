@@ -110,6 +110,10 @@ struct CandidateAcquirer {
         var nextRetryAt: ContinuousClock.Instant?
         var state: AttemptState
         var weighed: Bool
+        /// Dependent-less evidence re-fires so far. Bounds the re-solicitation
+        /// of a park nothing waits on: enough to survive a lost locate (the head
+        /// the node syncs toward), then reclaimed like any unneeded park.
+        var evidenceRetries: Int = 0
     }
 
     private struct BlockRecord {
@@ -129,8 +133,25 @@ struct CandidateAcquirer {
     private var active: Ticket?
     private var retryWindow: Duration
 
-    init(retryWindow: Duration = .seconds(64)) {
+    /// How long an evidence park waits before re-firing its locate. The
+    /// evidence solicitation is a lossy single round-trip and, with the legacy
+    /// sweeps retired, the only path by which a child block obtains its
+    /// securing proof — so a lost locate must re-fire in seconds, not the
+    /// 64 s content window. A locate is small and idempotent; this only bounds
+    /// how often one is re-sent while the evidence is still missing.
+    private var evidenceRetryWindow: Duration
+    /// How many times a dependent-less evidence park re-fires before it is
+    /// reclaimed. Enough to survive a lost locate on the head the node syncs
+    /// toward; small enough that an unresolvable losing-sibling park stops
+    /// cycling through the single admission slot instead of starving it.
+    private static let maxDependentlessEvidenceRetries = 5
+
+    init(
+        retryWindow: Duration = .seconds(64),
+        evidenceRetryWindow: Duration = .seconds(4)
+    ) {
         self.retryWindow = retryWindow
+        self.evidenceRetryWindow = evidenceRetryWindow
     }
 
     var hasReadyCandidate: Bool { !readySet.isEmpty }
@@ -150,7 +171,10 @@ struct CandidateAcquirer {
     ) {
         var nextEpoch = epoch &+ 1
         if nextEpoch == 0 { nextEpoch = 1 }
-        self = CandidateAcquirer(retryWindow: retryWindow)
+        self = CandidateAcquirer(
+            retryWindow: retryWindow,
+            evidenceRetryWindow: evidenceRetryWindow
+        )
         epoch = nextEpoch
         var descendantCIDs = Set<String>()
         // Recovery seeding respects the SAME retained budget as live parking:
@@ -441,7 +465,9 @@ struct CandidateAcquirer {
                     attempt.expiresAt = now.advanced(
                         by: reason == .later
                             ? .seconds(2 * 60 * 60)
-                            : retryWindow
+                            : reason == .evidence
+                                ? evidenceRetryWindow
+                                : retryWindow
                     )
                 }
                 // Pace the wall-clock retry: without this, every waiting
@@ -546,6 +572,19 @@ struct CandidateAcquirer {
                             attempt.expiresAt = nil
                             record.attempts[rootCID] = attempt
                         }
+                    } else if reason == .evidence,
+                              attempt.evidenceRetries
+                                < Self.maxDependentlessEvidenceRetries {
+                        // A dependent-less evidence park is the head the node
+                        // is syncing toward (nothing waits on the tip). It must
+                        // re-fire too: removing it on the first expiry
+                        // fossilized the sync one block short after a single
+                        // lost locate. The retry budget keeps an unresolvable
+                        // park from cycling through the admission slot forever.
+                        attempt.evidenceRetries += 1
+                        attempt.expiresAt = nil
+                        attempt.state = .ready
+                        record.attempts[rootCID] = attempt
                     } else {
                         record.attempts.removeValue(forKey: rootCID)
                     }

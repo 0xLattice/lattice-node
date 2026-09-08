@@ -540,7 +540,10 @@ final class CandidateAcquirerTests: XCTestCase {
         // wait window expires must become ready again (re-firing the
         // solicitation on its next admission) — fossilizing it wedges the
         // whole successor chain behind one lost message.
-        var acquirer = CandidateAcquirer(retryWindow: .seconds(1))
+        var acquirer = CandidateAcquirer(
+            retryWindow: .seconds(1),
+            evidenceRetryWindow: .seconds(1)
+        )
         XCTAssertTrue(acquirer.observe(.init(
             blockCID: "hole",
             package: nil
@@ -792,6 +795,92 @@ final class CandidateAcquirerTests: XCTestCase {
         XCTAssertEqual(
             rootless.next()?.weighed, false,
             "an eager package-less seed must still downgrade"
+        )
+    }
+
+    func testExpiredEvidenceWaitWithoutDependentsReentersAdmission() throws {
+        // The head a node syncs toward has no successor waiting on it. If its
+        // single locate round-trip is lost, the park must still re-fire when
+        // its window expires. The old behaviour REMOVED a dependent-less park
+        // on expiry, which fossilized a child cold-sync one block short of the
+        // tip — the only path to that block's securing proof once the legacy
+        // sweeps were retired.
+        var acquirer = CandidateAcquirer(
+            retryWindow: .seconds(64),
+            evidenceRetryWindow: .seconds(1)
+        )
+        XCTAssertTrue(acquirer.observe(.init(
+            blockCID: "tip", package: nil
+        )).accepted)
+        let start = ContinuousClock.now
+        let tip = try XCTUnwrap(acquirer.next())
+        XCTAssertTrue(acquirer.complete(
+            tip.ticket, resolution: .wait(.evidence), now: start
+        ))
+        XCTAssertNil(acquirer.next(), "parked until the evidence window expires")
+        acquirer.retry(now: start.advanced(by: .seconds(2)))
+        XCTAssertEqual(
+            acquirer.next()?.blockCID, "tip",
+            "a dependent-less evidence park must re-enter admission, not be dropped"
+        )
+    }
+
+    func testEvidenceParkExpiresOnItsOwnShortWindow() throws {
+        // A lost locate must re-fire in seconds: evidence parks expire on the
+        // dedicated evidence window, not the 64 s content window.
+        var acquirer = CandidateAcquirer(
+            retryWindow: .seconds(64),
+            evidenceRetryWindow: .seconds(4)
+        )
+        XCTAssertTrue(acquirer.observe(.init(
+            blockCID: "ev", package: nil
+        )).accepted)
+        let start = ContinuousClock.now
+        let ev = try XCTUnwrap(acquirer.next())
+        XCTAssertTrue(acquirer.complete(
+            ev.ticket, resolution: .wait(.evidence), now: start
+        ))
+        acquirer.retry(now: start.advanced(by: .seconds(2)))
+        XCTAssertNil(acquirer.next(), "still inside the 4 s evidence window")
+        acquirer.retry(now: start.advanced(by: .seconds(5)))
+        XCTAssertEqual(
+            acquirer.next()?.blockCID, "ev",
+            "re-fires after the evidence window, long before the content window"
+        )
+    }
+
+    func testDependentlessEvidenceParkRefiresWithinBudgetThenIsReclaimed() throws {
+        // A dependent-less evidence park re-fires a bounded number of times —
+        // enough to survive a lost locate on the head the node syncs toward —
+        // and is then reclaimed, so an unresolvable losing-sibling park cannot
+        // cycle through the single admission slot forever and starve it.
+        var acquirer = CandidateAcquirer(
+            retryWindow: .seconds(64),
+            evidenceRetryWindow: .seconds(1)
+        )
+        XCTAssertTrue(acquirer.observe(.init(
+            blockCID: "dead", package: nil
+        )).accepted)
+        let start = ContinuousClock.now
+        let first = try XCTUnwrap(acquirer.next())
+        XCTAssertTrue(acquirer.complete(
+            first.ticket, resolution: .wait(.evidence), now: start
+        ))
+        for i in 1...5 {
+            let now = start.advanced(by: .seconds(2 * i))
+            acquirer.retry(now: now)
+            let refired = try XCTUnwrap(
+                acquirer.next(), "re-fire \(i) is within the budget"
+            )
+            XCTAssertEqual(refired.blockCID, "dead")
+            XCTAssertTrue(acquirer.complete(
+                refired.ticket, resolution: .wait(.evidence), now: now
+            ))
+        }
+        acquirer.retry(now: start.advanced(by: .seconds(12)))
+        XCTAssertNil(
+            acquirer.next(),
+            "past the budget a dependent-less evidence park is reclaimed"
         )
     }
 
