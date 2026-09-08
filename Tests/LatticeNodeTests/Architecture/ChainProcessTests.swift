@@ -1938,6 +1938,193 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertEqual(validated?.height, 0, "the block stays weighed")
     }
 
+    /// The budgeted eviction rule (fork loss = cache eviction): a walk-validated
+    /// block that lost its fork is demoted to weighed and its owner pin
+    /// released, so the next unpinned-volume pass reclaims exactly its body +
+    /// post-state. Consensus facts and the accepted-block row are untouched
+    /// (the block stays accepted and its boundary still serves), the canonical
+    /// closure stays validated, and a reopen agrees with the demoted set.
+    func testEvictionDemotesOffChainWalkValidatedBlockBeyondBudget() async throws {
+        let directory = temporaryDirectory()
+        let config = try configuration(
+            path: ["Nexus"],
+            storage: directory,
+            resourcePolicy: NodeResourcePolicy(
+                maximumRetainedOffChainValidatedBlocks: 0,
+                offChainValidatedRetentionDepth: 0
+            )
+        )
+        // genesis -> A canonicalizes and is walk-validated; a heavier
+        // genesis -> B -> C then reorgs the main chain onto C and is walk-
+        // validated too, leaving A off-chain at the validated tier.
+        let (producerA, aChain) = try await minedRewardChain(depth: 1)
+        let (producerB, bChain) = try await minedRewardChain(depth: 2)
+        let a = try XCTUnwrap(aChain.first)
+        let aCID = try BlockHeader(node: a).rawCID
+        let bCID = try BlockHeader(node: bChain[0]).rawCID
+        let cCID = try BlockHeader(node: bChain[1]).rawCID
+
+        var process: ChainProcess? = try await ChainProcess.open(
+            configuration: config
+        )
+        try await weighThenValidate(aChain, from: producerA, into: process!)
+        try await weighThenValidate(bChain, from: producerB, into: process!)
+        var tip = await process!.deepestValidatedMainChainTip()
+        XCTAssertEqual(tip?.cid, cCID)
+        XCTAssertEqual(tip?.height, 2)
+        XCTAssertEqual(
+            try validatedTiers(for: config),
+            [aCID: 2, bCID: 2, cCID: 2]
+        )
+        let factsBefore = try admissionFactCount(in: directory)
+
+        _ = try await process!.evictUnretainedVolumes()
+        process = nil
+
+        XCTAssertEqual(
+            try validatedTiers(for: config),
+            [aCID: 0, bCID: 2, cCID: 2],
+            "only the off-chain block is demoted"
+        )
+        XCTAssertEqual(try admissionFactCount(in: directory), factsBefore)
+        let ownerPrefix = [config.nexusGenesisCID, config.address.key]
+            .joined(separator: ":") + ":validated:"
+        let broker = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let owners = await broker.pinnedOwners(prefix: ownerPrefix)
+        XCTAssertEqual(Set(owners), [ownerPrefix + bCID, ownerPrefix + cCID])
+        _ = try await broker.evictUnpinned(graceSeconds: 0)
+        let aPostState = await broker.hasVolume(root: a.postState.rawCID)
+        XCTAssertFalse(aPostState, "the demoted block's post-state is reclaimed")
+        for block in bChain {
+            let retained = await broker.hasVolume(root: block.postState.rawCID)
+            XCTAssertTrue(retained, "the canonical closure stays retained")
+        }
+
+        // Boot reconciliation agrees with the demotion: same head, same
+        // validated set, and A is still accepted with a serving boundary.
+        process = try await ChainProcess.open(configuration: config)
+        tip = await process!.deepestValidatedMainChainTip()
+        XCTAssertEqual(tip?.cid, cCID)
+        XCTAssertEqual(tip?.height, 2)
+        XCTAssertEqual(
+            try validatedTiers(for: config),
+            [aCID: 0, bCID: 2, cCID: 2]
+        )
+        let aHeight = await process!.acceptedBlockHeight(aCID)
+        XCTAssertEqual(aHeight, 1, "the demoted block stays accepted")
+        let aBoundary = try await BlockHeader(
+            rawCID: aCID, node: nil, encryptionInfo: nil
+        ).resolve(fetcher: process!).node
+        XCTAssertNotNil(aBoundary, "the demoted block's boundary still serves")
+        let cBlock = try await process!.validatedTipBlock()
+        let cPostState = try await cBlock.postState.resolve(fetcher: process!)
+        XCTAssertNotNil(cPostState.node)
+    }
+
+    /// With several off-chain walk-validated blocks and budget N, exactly the
+    /// N nearest the validated head keep their state.
+    func testEvictionKeepsTheBudgetedNearestOffChainValidatedBlocks() async throws {
+        let fixture = try await offChainValidatedFixture(
+            policy: NodeResourcePolicy(
+                maximumRetainedOffChainValidatedBlocks: 1,
+                offChainValidatedRetentionDepth: 0
+            )
+        )
+        let tiers = try validatedTiers(for: fixture.configuration)
+        XCTAssertEqual(tiers[fixture.losers[0]], 0, "A1 is beyond the budget")
+        XCTAssertEqual(tiers[fixture.losers[1]], 0, "A2 is beyond the budget")
+        XCTAssertEqual(tiers[fixture.losers[2]], 2, "A3 is the nearest kept")
+        for winner in fixture.winners {
+            XCTAssertEqual(tiers[winner], 2, "canonical blocks are never demoted")
+        }
+    }
+
+    /// A block within the retention depth of the validated tip is never a
+    /// demotion candidate, whatever the budget.
+    func testEvictionSparesOffChainValidatedBlocksWithinRetentionDepth() async throws {
+        let fixture = try await offChainValidatedFixture(
+            policy: NodeResourcePolicy(
+                maximumRetainedOffChainValidatedBlocks: 0,
+                offChainValidatedRetentionDepth: 2
+            )
+        )
+        let tiers = try validatedTiers(for: fixture.configuration)
+        XCTAssertEqual(tiers[fixture.losers[0]], 0, "A1 (height 1) is below 4 - 2")
+        XCTAssertEqual(tiers[fixture.losers[1]], 2, "A2 (height 2) is within depth")
+        XCTAssertEqual(tiers[fixture.losers[2]], 2, "A3 (height 3) is within depth")
+        for winner in fixture.winners {
+            XCTAssertEqual(tiers[winner], 2)
+        }
+    }
+
+    private struct OffChainValidatedFixture {
+        let configuration: NodeConfiguration
+        /// A1, A2, A3: the walk-validated losing fork, ascending height.
+        let losers: [String]
+        /// B1...B4: the walk-validated canonical chain, ascending height.
+        let winners: [String]
+    }
+
+    /// genesis -> A1 -> A2 -> A3 walk-validated, then a heavier genesis ->
+    /// B1 -> ... -> B4 reorgs and is walk-validated (validated tip height 4),
+    /// then one maintenance pass under `policy`. The process is closed.
+    private func offChainValidatedFixture(
+        policy: NodeResourcePolicy
+    ) async throws -> OffChainValidatedFixture {
+        let directory = temporaryDirectory()
+        let config = try configuration(
+            path: ["Nexus"], storage: directory, resourcePolicy: policy
+        )
+        let (producerA, aChain) = try await minedRewardChain(depth: 3)
+        let (producerB, bChain) = try await minedRewardChain(depth: 4)
+        let process = try await ChainProcess.open(configuration: config)
+        try await weighThenValidate(aChain, from: producerA, into: process)
+        try await weighThenValidate(bChain, from: producerB, into: process)
+        let tip = await process.deepestValidatedMainChainTip()
+        XCTAssertEqual(tip?.height, 4)
+        let losers = try aChain.map { try BlockHeader(node: $0).rawCID }
+        let winners = try bChain.map { try BlockHeader(node: $0).rawCID }
+        XCTAssertEqual(
+            try validatedTiers(for: config),
+            Dictionary(uniqueKeysWithValues: (losers + winners).map { ($0, 2) })
+        )
+        _ = try await process.evictUnretainedVolumes()
+        return OffChainValidatedFixture(
+            configuration: config, losers: losers, winners: winners
+        )
+    }
+
+    /// `block_cid -> validated` tier for every accepted block but the eager
+    /// genesis in `config`'s state.db, read through a separate connection.
+    private func validatedTiers(
+        for config: NodeConfiguration
+    ) throws -> [String: Int64] {
+        let database = try NodeSQLite(
+            path: config.storagePath.appendingPathComponent("state.db").path
+        )
+        var tiers: [String: Int64] = [:]
+        for row in try database.query(
+            "SELECT block_cid, validated FROM accepted_blocks WHERE block_cid <> ?1",
+            params: [.text(config.nexusGenesisCID)]
+        ) {
+            tiers[try XCTUnwrap(row["block_cid"]?.textValue)] =
+                try XCTUnwrap(row["validated"]?.intValue)
+        }
+        return tiers
+    }
+
+    private func admissionFactCount(in directory: URL) throws -> Int64 {
+        let database = try NodeSQLite(
+            path: directory.appendingPathComponent("state.db").path
+        )
+        return try XCTUnwrap(
+            try database.query("SELECT COUNT(*) AS n FROM admission_facts")
+                .first?["n"]?.intValue
+        )
+    }
+
     /// Mine `depth` reward-carrying blocks on a fresh producer (each credits a
     /// fresh key, so every post-state is a NEW volume that only execution
     /// materializes — an empty block's post-state is genesis state, which the
@@ -1948,6 +2135,20 @@ final class ChainProcessTests: XCTestCase {
         configuration config: NodeConfiguration,
         depth: Int
     ) async throws -> [Block] {
+        let (producer, chain) = try await minedRewardChain(depth: depth)
+        let consumer = try await ChainProcess.open(configuration: config)
+        try await weighThenValidate(chain, from: producer, into: consumer)
+        let validatedTip = await consumer.deepestValidatedMainChainTip()
+        XCTAssertEqual(validatedTip?.height, UInt64(depth))
+        return chain
+    }
+
+    /// Mine `depth` reward-carrying blocks on a fresh producer; returns the
+    /// producer (the consumer's remote source) and the chain in ascending-
+    /// height order.
+    private func minedRewardChain(
+        depth: Int
+    ) async throws -> (producer: ChainProcess, chain: [Block]) {
         let producer = try await ChainProcess.open(
             configuration: try configuration(
                 path: ["Nexus"], storage: temporaryDirectory()
@@ -1973,8 +2174,16 @@ final class ChainProcessTests: XCTestCase {
             XCTAssertTrue(outcome.decision.isAccepted)
             chain.append(template.block)
         }
+        return (producer, chain)
+    }
 
-        let consumer = try await ChainProcess.open(configuration: config)
+    /// Weighed-admit every block of `chain` into `consumer` from `producer`,
+    /// then validate each in order (the walk's promotion).
+    private func weighThenValidate(
+        _ chain: [Block],
+        from producer: ChainProcess,
+        into consumer: ChainProcess
+    ) async throws {
         for block in chain {
             let weighed = try await consumer.admit(
                 BlockHeader(node: block),
@@ -1991,9 +2200,6 @@ final class ChainProcessTests: XCTestCase {
             )
             XCTAssertTrue(validated.decision.isAccepted)
         }
-        let validatedTip = await consumer.deepestValidatedMainChainTip()
-        XCTAssertEqual(validatedTip?.height, UInt64(depth))
-        return chain
     }
 
     private func mineChild(
@@ -2020,7 +2226,11 @@ final class ChainProcessTests: XCTestCase {
         return mined
     }
 
-    private func configuration(path: [String], storage: URL) throws -> NodeConfiguration {
+    private func configuration(
+        path: [String],
+        storage: URL,
+        resourcePolicy: NodeResourcePolicy = .default
+    ) throws -> NodeConfiguration {
         let parentKey = try Curve25519.Signing.PrivateKey(
             rawRepresentation: Data(repeating: 2, count: 32)
         )
@@ -2035,7 +2245,8 @@ final class ChainProcessTests: XCTestCase {
             chainPath: path,
             storagePath: storage,
             privateKeyHex: String(repeating: "01", count: 32),
-            parentEndpoint: parentEndpoint
+            parentEndpoint: parentEndpoint,
+            resourcePolicy: resourcePolicy
         )
     }
 

@@ -208,7 +208,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             configuration.nexusGenesisCID,
             configuration.address.key,
         ].joined(separator: ":")
-        let legacyMempoolRetentionScope = retentionScope + ":mempool"
         let issuedHierarchyRetentionScope = retentionScope + ":issued-hierarchy"
         let preparedHierarchyRetentionScope = retentionScope + ":prepared-hierarchy"
         let parentEvidenceInboxRetentionScope =
@@ -264,8 +263,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 throw ChainProcessError.missingMaterializedVolume(root)
             }
         }
-        // Populate the new exact hierarchy scopes before removing their roots
-        // from the legacy admission scope.
         try await broker.advanceRetainedRoots(
             scope: issuedHierarchyRetentionScope,
             roots: issuedRecoveryRoots
@@ -326,10 +323,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         try await broker.pinBatch(
             roots: localMempoolRoots,
             owner: durableMempoolOwner
-        )
-        try await broker.advanceRetainedRoots(
-            scope: legacyMempoolRetentionScope,
-            roots: []
         )
         // The live pool is operational cache, not restart authority. Owner
         // pins support O(changes) updates and are cleared for each process.
@@ -2013,7 +2006,50 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         try await acquireMutationOperation()
         defer { releaseOperation() }
         try Task.checkCancellation()
+        try await evictDemotableValidatedBlocks()
         return try await broker.evictUnpinned()
+    }
+
+    /// Budgeted eviction-by-demotion of walk-validated state (fork loss = cache
+    /// eviction): a walk-validated block OFF the current main chain and more
+    /// than `offChainValidatedRetentionDepth` below the validated head is a
+    /// candidate; the `maximumRetainedOffChainValidatedBlocks` nearest the head
+    /// are kept and the rest demoted. Demotion flips the marker to weighed
+    /// FIRST and then releases the owner pin (a crash between leaves an orphan
+    /// pin that boot reclaims, never a marker pointing at evicted state), so the
+    /// following unpinned pass reclaims exactly that block's body + post-state.
+    /// Consensus facts, the accepted-block row and the batch-scoped boundary
+    /// are untouched: the block stays accepted and served by CID, and if its
+    /// fork returns the walk simply re-validates it. Canonical blocks are never
+    /// demoted here.
+    private func evictDemotableValidatedBlocks() async throws {
+        guard case .active(let level) = runtimePhase,
+              let validatedTip = await deepestValidatedMainChainTip(level: level)
+        else { return }
+        let policy = configuration.resourcePolicy
+        let depth = UInt64(policy.offChainValidatedRetentionDepth)
+        guard validatedTip.height > depth else { return }
+        let candidateCeiling = validatedTip.height - depth
+        var candidates: [(cid: String, height: UInt64)] = []
+        for blockCID in try await store.walkValidatedBlockCIDs() {
+            guard let height = await level.chain
+                .getConsensusBlock(hash: blockCID)?.blockHeight,
+                  height < candidateCeiling,
+                  await level.chain.getMainChainBlockHash(atIndex: height)
+                    != blockCID
+            else { continue }
+            candidates.append((blockCID, height))
+        }
+        // Nearest the head first; CID order only makes ties deterministic.
+        candidates.sort { ($0.height, $0.cid) > ($1.height, $1.cid) }
+        for candidate in candidates.dropFirst(
+            policy.maximumRetainedOffChainValidatedBlocks
+        ) {
+            try await store.demoteValidated(blockCID: candidate.cid)
+            try await broker.unpinAll(
+                owner: Self.validatedOwner(retentionScope, candidate.cid)
+            )
+        }
     }
 
     private func acquireOperation() async {
