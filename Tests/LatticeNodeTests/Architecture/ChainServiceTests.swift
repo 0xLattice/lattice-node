@@ -2189,6 +2189,262 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertEqual(resumedTipCID, resumedCanonicalCID)
     }
 
+    /// Deferred execution + boundary-only weighed store (Lattice 30.3.0): a
+    /// weighed admit no longer stores the block BODY, so the validate walk must
+    /// FETCH each canonical block's body over the network. Proven with a
+    /// fetch-granularity counter — body (tier-3) fetches equal the CANONICAL
+    /// length, never the total weighed block count (canonical + losing siblings):
+    /// the below-tip saving. The joiner still reaches its validated tip and builds
+    /// a template on the canonical tip. Also folds in the forward-order assertion.
+    func testValidateWalkFetchesBodyForCanonicalOnlyNotSiblings() async throws {
+        let depth = 6
+        let siblingDepth = 4
+        let miner = CryptoUtils.generateKeyPair()
+        let sibMiner = CryptoUtils.generateKeyPair()
+        let producer = try await nexusProcess()
+        let canonical = try await mineNexusRewardChain(
+            on: producer, depth: depth, miner: miner
+        )
+        // A strictly shorter competing fork from genesis: less work, so it stays a
+        // below-tip loser the walk never validates.
+        let siblingProducer = try await nexusProcess()
+        let siblings = try await mineNexusRewardChain(
+            on: siblingProducer, depth: siblingDepth, miner: sibMiner
+        )
+
+        let consumerProcess = try await nexusProcess()
+        let bodySource = CountingValidateBodySource(producer: producer)
+        let consumer = makeService(
+            process: consumerProcess,
+            validateBodySource: bodySource.admission()
+        )
+
+        // Weighed cold-sync the canonical chain FIRST (incumbent), then the losing
+        // fork — every admit stores only the boundary (a boundary fetch), no body.
+        var boundaryFetches = 0
+        for block in canonical {
+            let outcome = try await consumerProcess.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producer),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted, "canonical weighed admit")
+            boundaryFetches += 1
+        }
+        for block in siblings {
+            let outcome = try await consumerProcess.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(siblingProducer),
+                mode: .weighed
+            )
+            XCTAssertTrue(
+                outcome.decision.isAccepted, "sibling weighed admit (side block)"
+            )
+            boundaryFetches += 1
+        }
+
+        // Not operable yet: canonical tip at depth, validated tier still genesis.
+        let preWalkCanonical = await consumerProcess.canonicalTipHeight()
+        XCTAssertEqual(preWalkCanonical, UInt64(depth))
+        let preWalkValidated = await consumerProcess
+            .deepestValidatedMainChainTip()?.height
+        XCTAssertEqual(preWalkValidated, 0)
+
+        // Run the walk. It fetches ONLY canonical bodies, strictly forward.
+        let recorder = ValidateStepRecorder()
+        await consumer.setValidateWalkObserver { recorder.record($0) }
+        await consumer.runValidateWalkPass()
+        await consumer.setValidateWalkObserver(nil)
+
+        XCTAssertEqual(
+            recorder.heights, (1...UInt64(depth)).map { $0 },
+            "validate heights strictly forward from genesis+1, never tip-first"
+        )
+
+        // Fetch granularity: body fetches == canonical length, NOT total blocks.
+        let canonicalCIDs = try canonical.map { try BlockHeader(node: $0).rawCID }
+        XCTAssertEqual(
+            bodySource.fetchedBlockCIDs.count, depth,
+            "exactly one body fetch per canonical block"
+        )
+        XCTAssertEqual(
+            Set(bodySource.fetchedBlockCIDs), Set(canonicalCIDs),
+            "only canonical bodies fetched; no losing-sibling body fetched"
+        )
+        XCTAssertEqual(boundaryFetches, depth + siblingDepth)
+        XCTAssertLessThan(
+            bodySource.fetchedBlockCIDs.count, boundaryFetches,
+            "body fetches must be far fewer than total (boundary) fetches"
+        )
+
+        // Operable: the validated tier meets the canonical tier.
+        let canonicalTipCID = try BlockHeader(
+            node: await consumerProcess.canonicalTipBlock()
+        ).rawCID
+        let operableValidated = await consumerProcess
+            .deepestValidatedMainChainTip()?.height
+        XCTAssertEqual(operableValidated, UInt64(depth))
+        let template = try await consumer
+            .miningTemplate(MiningTemplateRequest())
+        XCTAssertEqual(
+            template.block.parent?.rawCID, canonicalTipCID,
+            "once validated, the mining template builds on the canonical tip"
+        )
+    }
+
+    /// Liveness for the network-fetch case: a validate whose body is WITHHELD
+    /// parks the validated tip at gap-1 (node stays operable on that tip, no
+    /// wedge), and releasing the body lets the walk's OWN retry timer re-drive it
+    /// to the tip with no new canonical commit. Extends the 3a.2 park-and-resume
+    /// test for bodies pulled over the network.
+    func testValidateWalkParksOnWithheldBodyAndAutoResumesOnRelease()
+        async throws {
+        let depth = 6
+        let gapAt: UInt64 = 3
+        let miner = CryptoUtils.generateKeyPair()
+        let producer = try await nexusProcess()
+        let canonical = try await mineNexusRewardChain(
+            on: producer, depth: depth, miner: miner
+        )
+        let gapCID = try BlockHeader(node: canonical[Int(gapAt) - 1]).rawCID
+
+        let consumerProcess = try await nexusProcess()
+        let bodySource = CountingValidateBodySource(producer: producer)
+        bodySource.withhold(gapCID)
+        let consumer = makeService(
+            process: consumerProcess,
+            validateBodySource: bodySource.admission(),
+            validateWalkRetryInterval: .milliseconds(20)
+        )
+
+        for block in canonical {
+            let outcome = try await consumerProcess.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producer),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+
+        // Walk parks one block below the withheld body; still operable there.
+        await consumer.runValidateWalkPass()
+        let parkedHeight = await consumerProcess
+            .deepestValidatedMainChainTip()?.height
+        XCTAssertEqual(
+            parkedHeight, gapAt - 1,
+            "the walk parks one block below the withheld body"
+        )
+        let parkedTipCID = try BlockHeader(
+            node: await consumerProcess.validatedTipBlock()
+        ).rawCID
+        let parkedTemplate = try await consumer
+            .miningTemplate(MiningTemplateRequest())
+        XCTAssertEqual(
+            parkedTemplate.block.parent?.rawCID, parkedTipCID,
+            "operable on the parked tip, no wedge"
+        )
+
+        // Release the body: the park armed a retry, so the walk re-drives itself
+        // to the tip without any new canonical commit.
+        bodySource.release(gapCID)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        var resumed = await consumerProcess
+            .deepestValidatedMainChainTip()?.height
+        while resumed != UInt64(depth), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+            resumed = await consumerProcess
+                .deepestValidatedMainChainTip()?.height
+        }
+        XCTAssertEqual(
+            resumed, UInt64(depth),
+            "the walk auto-resumes to the tip once the body is released"
+        )
+        let resumedTipCID = try BlockHeader(
+            node: await consumerProcess.validatedTipBlock()
+        ).rawCID
+        let canonicalTipCID = try BlockHeader(
+            node: await consumerProcess.canonicalTipBlock()
+        ).rawCID
+        XCTAssertEqual(resumedTipCID, canonicalTipCID)
+    }
+
+    /// Injectable validate-body source that records every block whose body it is
+    /// asked to fetch and can withhold a specific block's body (serving an empty
+    /// source so the deferred body stays missing → `.unavailable`).
+    private final class CountingValidateBodySource: @unchecked Sendable {
+        private let producer: ChainProcess
+        private let lock = NSLock()
+        private var _fetched: [String] = []
+        private var _withheld: Set<String> = []
+
+        init(producer: ChainProcess) { self.producer = producer }
+
+        var fetchedBlockCIDs: [String] {
+            lock.withLock { _fetched }
+        }
+
+        func withhold(_ blockCID: String) {
+            lock.withLock { _ = _withheld.insert(blockCID) }
+        }
+
+        func release(_ blockCID: String) {
+            lock.withLock { _ = _withheld.remove(blockCID) }
+        }
+
+        func admission() -> ValidateBodyAdmission {
+            { [self] blockCID, admit in
+                lock.withLock { _fetched.append(blockCID) }
+                let withheld = lock.withLock { _withheld.contains(blockCID) }
+                let source: any ContentSource = withheld
+                    ? EmptyContentSource()
+                    : FetcherContentSource(producer)
+                return try await admit(source)
+            }
+        }
+    }
+
+    private struct EmptyContentSource: ContentSource {
+        func fetch(_ cids: Set<String>) async -> [String: Data] { [:] }
+    }
+
+    /// Mine `depth` blocks on `producer`, each carrying a reward transaction (so
+    /// each block has a real, boundary-excluded BODY the validate walk must
+    /// fetch), returned in ascending-height order.
+    private func mineNexusRewardChain(
+        on producer: ChainProcess,
+        depth: Int,
+        miner: (privateKey: String, publicKey: String)
+    ) async throws -> [Block] {
+        let service = makeService(process: producer)
+        var blocks: [Block] = []
+        for index in 0..<depth {
+            let reward = try signedTransaction(
+                key: miner,
+                chainPath: ["Nexus"],
+                accountActions: [AccountAction(
+                    owner: CryptoUtils.createAddress(from: miner.publicKey),
+                    delta: 1
+                )],
+                nonce: UInt64(index)
+            )
+            let template = try await service.miningTemplate(
+                MiningTemplateRequest(rewards: [MiningReward(
+                    chainPath: ["Nexus"],
+                    transaction: reward
+                )])
+            )
+            let outcome = try await producer.admit(
+                BlockHeader(node: template.block)
+            )
+            XCTAssertTrue(
+                outcome.decision.isAccepted,
+                "reward block \(index) must be accepted"
+            )
+            blocks.append(template.block)
+        }
+        return blocks
+    }
+
     private func nexusProcess() async throws -> ChainProcess {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-chain-service-\(UUID().uuidString)")
@@ -2213,6 +2469,8 @@ final class ChainServiceTests: XCTestCase {
         acceptedBlockPublisher: @escaping AcceptedBlockPublisher = { _ in },
         acceptedTransactionPublisher:
             @escaping AcceptedTransactionPublisher = { _ in },
+        validateBodySource: ValidateBodyAdmission? = nil,
+        validateWalkRetryInterval: Duration = .seconds(4),
         mempoolMaxCount: Int = 10_000
     ) -> ChainService {
         ChainService(
@@ -2223,6 +2481,8 @@ final class ChainServiceTests: XCTestCase {
             childProofPublisher: childProofPublisher,
             acceptedBlockPublisher: acceptedBlockPublisher,
             acceptedTransactionPublisher: acceptedTransactionPublisher,
+            validateBodySource: validateBodySource,
+            validateWalkRetryInterval: validateWalkRetryInterval,
             mempoolMaxCount: mempoolMaxCount
         )
     }

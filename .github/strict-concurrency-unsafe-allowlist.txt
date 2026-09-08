@@ -14,3 +14,4 @@ Tests/LatticeNodeE2ETests/ParentChildE2ETests.swift|private final class Session:
 Sources/LatticeCtl/Mine.swift|final class InterruptFlag: @unchecked Sendable {|All access to the boolean is guarded by InterruptFlag's NSLock; raised only from the SIGTERM dispatch source.
 Tests/LatticeNodeTests/Architecture/ProcessStderrReuseTests.swift|private final class PidCounter: @unchecked Sendable {|Test-only counter; the spawn count is guarded by PidCounter's NSLock.
 Tests/LatticeNodeTests/Architecture/ChainServiceTests.swift|private final class ValidateStepRecorder: @unchecked Sendable {|Test-only recorder of validate-walk step heights; its [UInt64] is guarded by ValidateStepRecorder's NSLock.
+Tests/LatticeNodeTests/Architecture/ChainServiceTests.swift|private final class CountingValidateBodySource: @unchecked Sendable {|Test-only validate-body source; its fetched-list and withheld-set are guarded by CountingValidateBodySource's NSLock.
