@@ -27,6 +27,18 @@ public struct NodeResourcePolicy: Sendable, Equatable {
     /// verified any-peer proof fallback, so this only tunes how eagerly a node
     /// self-issues. Operators raise it to self-issue deeper history.
     public let childEvidenceBackfillCarrierWindow: Int
+    /// Storage budget for walk-validated state OFF the canonical chain (fork
+    /// loss = cache eviction): how many losing-fork blocks keep their
+    /// materialized body + post-state, nearest the validated head first. The
+    /// rest are demoted to weighed and their state reclaimed; the blocks stay
+    /// accepted, and a demoted block whose fork returns is simply re-validated
+    /// by the walk. Operator choice with no protocol meaning; `0` keeps none.
+    public let maximumRetainedOffChainValidatedBlocks: Int
+    /// How far below the validated head an off-chain walk-validated block must
+    /// be before it is a demotion candidate at all, whatever the budget: a
+    /// fork still within this depth may yet win. Operator choice with no
+    /// protocol meaning; `0` makes every block below the head a candidate.
+    public let offChainValidatedRetentionDepth: Int
 
     public init(
         maximumChainSpecBytes: Int = 1 * 1_024 * 1_024,
@@ -44,7 +56,9 @@ public struct NodeResourcePolicy: Sendable, Equatable {
         maximumAcquisitionStorageBytes: Int = 64 * 1_024 * 1_024,
         maximumContinuityBlockVisits: Int = 4_096,
         maximumRetainedHandoffCandidates: Int = 1_024,
-        childEvidenceBackfillCarrierWindow: Int = 256
+        childEvidenceBackfillCarrierWindow: Int = 256,
+        maximumRetainedOffChainValidatedBlocks: Int = 1_024,
+        offChainValidatedRetentionDepth: Int = 256
     ) {
         precondition(
             maximumChainSpecBytes > 0
@@ -57,6 +71,8 @@ public struct NodeResourcePolicy: Sendable, Equatable {
                 && maximumContinuityBlockVisits > 0
                 && maximumRetainedHandoffCandidates > 0
                 && childEvidenceBackfillCarrierWindow > 0
+                && maximumRetainedOffChainValidatedBlocks >= 0
+                && offChainValidatedRetentionDepth >= 0
         )
         self.maximumChainSpecBytes = maximumChainSpecBytes
         self.maximumParentWitnessBytes = maximumParentWitnessBytes
@@ -68,6 +84,9 @@ public struct NodeResourcePolicy: Sendable, Equatable {
         self.maximumContinuityBlockVisits = maximumContinuityBlockVisits
         self.maximumRetainedHandoffCandidates = maximumRetainedHandoffCandidates
         self.childEvidenceBackfillCarrierWindow = childEvidenceBackfillCarrierWindow
+        self.maximumRetainedOffChainValidatedBlocks =
+            maximumRetainedOffChainValidatedBlocks
+        self.offChainValidatedRetentionDepth = offChainValidatedRetentionDepth
     }
 }
 import Ivy
