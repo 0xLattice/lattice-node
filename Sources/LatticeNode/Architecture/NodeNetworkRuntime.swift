@@ -122,11 +122,6 @@ private final class RuntimeCallbackEpoch: @unchecked Sendable {
     }
 }
 
-struct AcceptedLeavesCursor: Sendable, Equatable {
-    let afterCID: String?
-    let snapshotSequence: Int64?
-}
-
 struct ParentStateQueryGuard {
     let capacity: Int
     private(set) var peers = Set<PeerKey>()
@@ -340,11 +335,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let package: AuthenticatedChildPackage
     }
 
-    private struct PendingPortableAttachmentIndex: Sendable {
-        let peer: AuthenticatedPeer
-        let request: PortableAttachmentIndexRequestMessage
-    }
-
     private struct PendingGenesisVerification: Sendable {
         let peer: AuthenticatedPeer
         let request: ParentChainFactMessage
@@ -360,12 +350,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let plane: CandidateSourcePlane
         let sessionID: Data
         let attachmentCID: String
-    }
-
-    private struct PendingAcceptedLeaves: Sendable {
-        let peer: AuthenticatedPeer
-        let request: AcceptedLeavesRequestMessage
-        let timeout: Task<Void, Never>
     }
 
     private struct PendingReadEndpoint {
@@ -391,11 +375,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private struct TransactionVolumeLease: Hashable {
         let sessionID: Data
         let rootCID: String
-    }
-
-    private struct NextAcceptedLeaves: Sendable {
-        let peer: AuthenticatedPeer
-        let cursor: AcceptedLeavesCursor
     }
 
     private struct HelloDeadline {
@@ -512,14 +491,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private var hierarchyHelloDeadlines: [PeerKey: HelloDeadline] = [:]
     private var waitingCandidateRetryTask: Task<Void, Never>?
     private var waitingCandidateRetryGeneration: UInt64?
-    private var pendingAcceptedLeaves: PendingAcceptedLeaves?
     private var pendingTransactionInventories:
         [UInt64: PendingTransactionInventory] = [:]
     private var activeTransactionVolumes = Set<TransactionVolumeLease>()
-    private var nextAcceptedLeaves: NextAcceptedLeaves?
-    private var acceptedLeavesQueue: [AuthenticatedPeer] = []
-    private var acceptedLeavesRetryTask: Task<Void, Never>?
-    private var nextAcceptedLeavesRetryToken: UInt64 = 0
     private var servingAcceptedLeaves: Set<Data> = []
     private var servingAncestorRange: Set<Data> = []
     private var servingReadEndpoints: Set<Data> = []
@@ -562,12 +536,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private var parentStateQueryGuard = ParentStateQueryGuard(
         capacity: NodeNetworkRuntime.maximumConcurrentParentStateQueries
     )
-    private var portableIndexCursors: [PeerKey: PortableAttachmentSummary] = [:]
-    private var deferredSessionSweeps: [PeerKey: AuthenticatedPeer] = [:]
     private var announcedTips: [PeerKey: (height: UInt64, peer: AuthenticatedPeer)] = [:]
     private var rangeSyncReentryTask: Task<Void, Never>?
-    private var pendingPortableAttachmentIndexes:
-        [UInt64: PendingPortableAttachmentIndex] = [:]
     private var activeEvidenceVolumes = Set<EvidenceVolumeLease>()
     private var portableEvidenceOrder: [EvidenceVolumeLease] = []
     private var portableEvidenceWork:
@@ -788,13 +758,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 }
             }
             // A peer may complete its hello while the listeners are starting.
-            // Replay inventory/index pulls after ingress becomes runnable so
+            // Replay the evidence-index pull after ingress becomes runnable so
             // an early response cannot be the only copy we ever request.
-            restartAcceptedLeavesSync()
-            await resumeAcceptedLeavesSync(
-                generation: runtimeGeneration,
-                process: process
-            )
             if !configuration.address.isNexus {
                 await requestEvidenceIndex(
                     generation: runtimeGeneration,
@@ -922,17 +887,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         waitingCandidateRetryTask?.cancel()
         waitingCandidateRetryTask = nil
         waitingCandidateRetryGeneration = nil
-        pendingAcceptedLeaves?.timeout.cancel()
-        pendingAcceptedLeaves = nil
         for pending in pendingTransactionInventories.values {
             pending.timeout.cancel()
         }
         pendingTransactionInventories.removeAll()
         activeTransactionVolumes.removeAll()
-        nextAcceptedLeaves = nil
-        acceptedLeavesQueue.removeAll()
-        acceptedLeavesRetryTask?.cancel()
-        acceptedLeavesRetryTask = nil
         childProofRecoveryTask?.cancel()
         childProofRecoveryTask = nil
         genesisAnnounceTask?.cancel()
@@ -962,9 +921,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         pendingGenesisResolves.removeAll()
         parentStateQueryGuard.removeAll()
-        pendingPortableAttachmentIndexes.removeAll()
-        portableIndexCursors.removeAll()
-        deferredSessionSweeps.removeAll()
         announcedTips.removeAll()
         rangeSyncReentryTask?.cancel()
         rangeSyncReentryTask = nil
@@ -2204,11 +2160,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 candidateAcquirer.disconnect(candidateProvider(previous))
             }
             overlayPeers.removeValue(forKey: peer.key)
-            discardAcceptedLeavesSessions(for: peer.key)
-            pendingPortableAttachmentIndexes =
-                pendingPortableAttachmentIndexes.filter {
-                    $0.value.peer.key != peer.key
-                }
+            discardServingSessions(for: peer.key)
             overlaySessions[peer.key] = peer
             scheduleOverlayHelloDeadline(for: peer, generation: generation)
             topic = NodeNetworkTopic.overlayHello
@@ -2244,12 +2196,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         case .backpressured, .locallyRejected:
             await ivy.recycleSession(ifCurrent: peer)
         }
-        if ivy === overlay {
-            await resumeAcceptedLeavesSync(
-                generation: generation,
-                process: process
-            )
-        }
     }
 
     private func didDisconnect(
@@ -2257,7 +2203,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         peer: PeerID,
         generation: UInt64
     ) async {
-        guard isCurrentGeneration(generation), let process else { return }
+        guard isCurrentGeneration(generation), process != nil else { return }
         guard let key = try? PeerKey(peer.publicKey) else { return }
         if ivy === overlay {
             // A replacement may already be current when the old connection's
@@ -2267,17 +2213,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
             if let disconnected = overlayPeers[key] {
                 candidateAcquirer.disconnect(candidateProvider(disconnected))
             }
-            discardAcceptedLeavesSessions(for: key)
+            discardServingSessions(for: key)
             if rangeSync?.peer.key == key {
                 clearRangeSync()
             }
             overlaySessions.removeValue(forKey: key)
             overlayPeers.removeValue(forKey: key)
             announcedTips.removeValue(forKey: key)
-            pendingPortableAttachmentIndexes =
-                pendingPortableAttachmentIndexes.filter {
-                    $0.value.peer.key != key
-                }
             let disconnectedInventories = pendingTransactionInventories.filter {
                 $0.value.peer.key == key
             }
@@ -2300,10 +2242,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 pending.timeout.cancel()
                 pending.continuation.resume(returning: [])
             }
-            await resumeAcceptedLeavesSync(
-                generation: generation,
-                process: process
-            )
         } else if ivy === hierarchy {
             // Ivy may already have promoted a replacement session for this
             // identity before this asynchronous delegate callback reaches us.
@@ -2434,33 +2372,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard isCurrentRuntime(generation: generation, process: process) else {
                 return
             }
-            // During deep catch-up the height-blind session sweeps (index
-            // walk, leaves descent) only pollute the admission pipeline with
-            // guaranteed-to-park candidates; defer them until the range sync
-            // catches up. The walk resumes from the persisted cursor.
-            if rangeSync == nil {
-                enqueueAcceptedLeavesSession(peer)
-                await resumeAcceptedLeavesSync(
-                    generation: generation,
-                    process: process
-                )
-            } else {
-                deferredSessionSweeps[peer.key] = peer
-            }
             scheduleChildProofRecovery(
                 generation: generation,
                 process: process
             )
-            if rangeSync == nil {
-                await requestPortableAttachmentIndex(
-                    from: peer,
-                    after: portableIndexCursors[peer.key],
-                    generation: generation,
-                    process: process
-                )
-            } else {
-                deferredSessionSweeps[peer.key] = peer
-            }
             await requestTransactionInventory(
                 from: peer,
                 after: nil,
@@ -2522,15 +2437,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
             await servePortableAttachmentIndex(
                 request,
                 to: peer,
-                generation: generation,
-                process: process
-            )
-        case NodeNetworkTopic.portableAttachmentIndexResponse:
-            guard let response = try? PortableAttachmentIndexResponseMessage
-                .decoded(message.payload) else { return }
-            schedulePortableAttachmentIndex(
-                response,
-                from: peer,
                 generation: generation,
                 process: process
             )
@@ -2644,15 +2550,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     )
                     guard isCurrentRuntime(generation: generation, process: process),
                           overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
-                } else if rangeSync == nil {
-                    // Caught up (or the sync ended some other way): run the
-                    // sweeps that were deferred during deep catch-up.
-                    await resumeDeferredSessionSweeps(
-                        generation: generation,
-                        process: process
-                    )
-                    guard isCurrentRuntime(generation: generation, process: process),
-                          overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
                 }
             }
             let candidate = CandidateSeed(
@@ -2660,11 +2557,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 package: nil,
                 provider: candidateProvider(peer)
             )
-            guard enqueueCandidate(candidate) else {
-                restartAcceptedLeavesSync()
-                return
-            }
+            guard enqueueCandidate(candidate) else { return }
         case NodeNetworkTopic.acceptedLeavesRequest:
+            // Legacy-served: this node no longer walks a peer's accepted
+            // forest (header-graph range sync + live announcements + the
+            // predecessor walk replaced the descent), but keeps answering so
+            // an older peer still syncs from it. The four accepted-leaves /
+            // portable-attachment-index message types, both server handlers
+            // and `acceptedLeafPage` are scheduled for deletion the release
+            // after the fleet upgrades past this one.
             guard
                 let request = try? AcceptedLeavesRequestMessage.decoded(
                     message.payload
@@ -2783,79 +2684,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
             await handleAncestorRangeResponse(
                 message,
                 from: peer,
-                generation: generation,
-                process: process
-            )
-        case NodeNetworkTopic.acceptedLeavesResponse:
-            guard
-                let response = try? AcceptedLeavesResponseMessage.decoded(
-                    message.payload
-                ), let pending = pendingAcceptedLeaves,
-                response.requestID == pending.request.requestID,
-                pending.peer.sessionID == peer.sessionID,
-                response.afterCID == pending.request.afterCID,
-                pending.request.snapshotSequence == nil
-                    || pending.request.snapshotSequence
-                        == response.snapshotSequence
-            else { return }
-            guard takeAcceptedLeavesRequest(
-                releasingReservation: false
-            ) != nil else { return }
-            // Skip blocks this node already accepted: a page of a peer's
-            // accepted set is almost entirely shared history, and re-admitting
-            // a known block costs a full (failing) admission attempt. Without
-            // this filter a node rebooting while behind churns O(chain
-            // history) expensive no-ops through the candidate lane, starving
-            // fresh candidates and parent-evidence work for minutes to hours —
-            // on a merged-mining child that starvation stalls the tip while
-            // every mining round mints another same-height sibling, flooding
-            // the network's accepted sets with garbage that other nodes then
-            // churn through in turn.
-            var candidates: [CandidateSeed] = []
-            for cid in response.blockCIDs {
-                if await process.hasAcceptedBlock(cid) { continue }
-                candidates.append(CandidateSeed(
-                    blockCID: cid,
-                    package: nil,
-                    provider: candidateProvider(peer)
-                ))
-            }
-            // The has-block checks suspend: re-validate before consuming the
-            // reservation. A stopped/replaced RUNTIME must return WITHOUT
-            // releasing — reset() already rebuilt the acquirer (releasing here
-            // would trap the exact-count precondition, or free a restarted
-            // runtime's fresh reservation). Only a same-runtime session
-            // replacement still owns the reservation and must release it.
-            guard isCurrentRuntime(generation: generation, process: process)
-            else { return }
-            guard overlayPeers[peer.key]?.sessionID == peer.sessionID else {
-                candidateAcquirer.releaseAcceptedLeafPage(
-                    AcceptedLeavesResponseMessage.maximumLeaves
-                )
-                serviceCandidateAcquirer()
-                return
-            }
-            guard candidateAcquirer.consumeAcceptedLeafPage(candidates) else {
-                assertionFailure("accepted-leaf page exceeded its reservation")
-                restartAcceptedLeavesSync()
-                return
-            }
-            serviceCandidateAcquirer()
-            for cid in response.blockCIDs {
-                await overlay.rememberProvider(rootCID: cid, peer: peer.id)
-            }
-            if response.hasMore {
-                nextAcceptedLeaves = NextAcceptedLeaves(
-                    peer: peer,
-                    cursor: AcceptedLeavesCursor(
-                        afterCID: response.blockCIDs.last,
-                        snapshotSequence: response.snapshotSequence
-                    )
-                )
-            } else {
-                nextAcceptedLeaves = nil
-            }
-            await resumeAcceptedLeavesSync(
                 generation: generation,
                 process: process
             )
@@ -3166,42 +2994,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
     }
 
-    private func requestPortableAttachmentIndex(
-        from peer: AuthenticatedPeer,
-        after: PortableAttachmentSummary?,
-        generation: UInt64,
-        process: ChainProcess
-    ) async {
-        guard !configuration.address.isNexus,
-              isCurrentRuntime(generation: generation, process: process),
-              overlayPeers[peer.key]?.sessionID == peer.sessionID,
-              !pendingPortableAttachmentIndexes.values.contains(where: {
-                  $0.peer.sessionID == peer.sessionID
-              }) else { return }
-        let request = PortableAttachmentIndexRequestMessage(
-            requestID: makeRequestID(),
-            after: after
-        )
-        guard let payload = try? request.encoded() else { return }
-        pendingPortableAttachmentIndexes[request.requestID] = .init(
-            peer: peer,
-            request: request
-        )
-        let result = await overlay.sendMessage(
-            to: peer,
-            topic: NodeNetworkTopic.portableAttachmentIndexRequest,
-            payload: payload
-        )
-        if result == .notConnected {
-            pendingPortableAttachmentIndexes.removeValue(forKey: request.requestID)
-        } else {
-            scheduleRecoveryTimeout(
-                request.requestID,
-                generation: generation
-            )
-        }
-    }
-
     private func announcePortableAttachmentAvailability(
         edgeCID: String,
         rootCID: String,
@@ -3226,6 +3018,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
     }
 
+    /// Legacy-served: this node no longer walks a peer's evidence index (a
+    /// never-validated carrier's proof is solicited per block through the
+    /// locate path instead), but keeps answering so an older child still
+    /// recovers from it. Scheduled for deletion with the accepted-leaves
+    /// server the release after the fleet upgrades past this one.
     private func servePortableAttachmentIndex(
         _ request: PortableAttachmentIndexRequestMessage,
         to peer: AuthenticatedPeer,
@@ -3359,71 +3156,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 "locate-request \(childCID) "
                     + "peer=\(peer.key.hex.prefix(8)) sent=\(sent)"
             )
-        }
-    }
-
-    private func schedulePortableAttachmentIndex(
-        _ response: PortableAttachmentIndexResponseMessage,
-        from peer: AuthenticatedPeer,
-        generation: UInt64,
-        process: ChainProcess
-    ) {
-        guard let pending = pendingPortableAttachmentIndexes[response.requestID],
-              pending.peer.sessionID == peer.sessionID,
-              pending.request.after == response.after else { return }
-        pendingPortableAttachmentIndexes.removeValue(forKey: response.requestID)
-        Task { [weak self] in
-            await self?.finishPortableAttachmentIndex(
-                response,
-                from: peer,
-                generation: generation,
-                process: process
-            )
-        }
-    }
-
-    private func finishPortableAttachmentIndex(
-        _ response: PortableAttachmentIndexResponseMessage,
-        from peer: AuthenticatedPeer,
-        generation: UInt64,
-        process: ChainProcess
-    ) async {
-        guard let entry = response.entries.first else {
-            portableIndexCursors.removeValue(forKey: peer.key)
-            return
-        }
-        // Persist the walk cursor per PEER (not per session): a churned
-        // session must resume where it left off, or the walk restarts from
-        // the lexicographic beginning forever and never completes. A
-        // finished walk clears the cursor so a later session re-checks the
-        // full index (new entries sort anywhere).
-        portableIndexCursors[peer.key] = entry
-        let handled = await recoverPortableAttachment(
-            entry,
-            from: peer,
-            generation: generation,
-            process: process
-        )
-        guard isCurrentRuntime(generation: generation, process: process) else {
-            return
-        }
-        if !handled {
-            await overlay.recycleSession(ifCurrent: peer)
-        } else if rangeSync != nil {
-            // A deep catch-up began while this page was in flight (the
-            // start-time purge cannot see a walk between its page-response
-            // and its continuation): defer here, at the one choke point
-            // every walk passes through. The cursor above already persisted.
-            deferredSessionSweeps[peer.key] = peer
-        } else if response.hasMore {
-            await requestPortableAttachmentIndex(
-                from: peer,
-                after: entry,
-                generation: generation,
-                process: process
-            )
-        } else {
-            portableIndexCursors.removeValue(forKey: peer.key)
         }
     }
 
@@ -4584,9 +4316,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
 
     private func serviceCandidateAcquirer() {
-        if candidateAcquirer.takeInventoryRestart() {
-            restartAcceptedLeavesSync()
-        }
         if candidateAcquirer.hasTimedWait {
             scheduleWaitingCandidateRetry()
         }
@@ -4624,10 +4353,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
             ) else { return }
             serviceCandidateAcquirer()
             await advanceRangeSync(generation: generation, process: process)
-            await resumeAcceptedLeavesSync(
-                generation: generation,
-                process: process
-            )
         }
     }
 
@@ -5256,6 +4981,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// so a peer that advertises a tall tip but withholds one block cannot
         /// occupy the single sync slot indefinitely.
         var redriveAttempts: Int
+        /// Whether `requestedAfterCID` was fixed by a common-ancestor response.
+        /// Until it is, the anchor is only our own frontier — possibly a losing
+        /// sibling off the peer's main chain — so an unanswered request must
+        /// re-negotiate, never page forward from it.
+        var negotiated: Bool
         var responseTimeout: Task<Void, Never>?
         var progressTimeout: Task<Void, Never>?
     }
@@ -5268,43 +4998,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// different peer. Any applied progress resets the count, so this only trips
     /// on a peer that has genuinely stopped advancing our tip.
     private static let rangeSyncMaxRedrives: Int = 8
-
-    /// Run the session sweeps (accepted-leaves descent, portable-index walk)
-    /// that were deferred while a deep range sync was draining the pipeline.
-    private func resumeDeferredSessionSweeps(
-        generation: UInt64,
-        process: ChainProcess
-    ) async {
-        guard rangeSync == nil, !deferredSessionSweeps.isEmpty else { return }
-        let deferred = deferredSessionSweeps
-        deferredSessionSweeps.removeAll()
-        for (key, peer) in deferred {
-            guard rangeSync == nil else {
-                // A new deep catch-up started mid-resume: re-defer the rest —
-                // unless the session churned during our awaits, in which case
-                // the fresh hello owns the entry.
-                if overlayPeers[key]?.sessionID == peer.sessionID {
-                    deferredSessionSweeps[key] = peer
-                }
-                continue
-            }
-            guard isCurrentRuntime(generation: generation, process: process),
-                  overlayPeers[key]?.sessionID == peer.sessionID else {
-                continue
-            }
-            enqueueAcceptedLeavesSession(peer)
-            await resumeAcceptedLeavesSync(
-                generation: generation,
-                process: process
-            )
-            await requestPortableAttachmentIndex(
-                from: peer,
-                after: portableIndexCursors[key],
-                generation: generation,
-                process: process
-            )
-        }
-    }
 
     private func startRangeSync(
         peer: AuthenticatedPeer,
@@ -5323,14 +5016,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
             "range-sync start target=\(targetHeight) "
                 + "peer=\(peer.key.hex.prefix(8))"
         )
-        // Deep catch-up begins: stop this peer's height-blind index walk
-        // (cursor persists; it resumes after catch-up) so the range pages
-        // are not buried under lexicographic-order parks.
-        for (requestID, pending) in pendingPortableAttachmentIndexes
-            where pending.peer.key == peer.key {
-            pendingPortableAttachmentIndexes.removeValue(forKey: requestID)
-        }
-        deferredSessionSweeps[peer.key] = peer
         rangeSync = RangeSyncState(
             peer: peer,
             requestID: 0,
@@ -5342,15 +5027,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
             progressEpoch: 0,
             progressBaselineHeight: status.height ?? 0,
             redriveAttempts: 0,
+            negotiated: false,
             responseTimeout: nil,
             progressTimeout: nil
         )
         scheduleRangeSyncProgress(generation: generation, process: process)
         // Negotiate the common ancestor before streaming, so a frontier that
         // sits on a losing sibling is not told "empty = caught up" and marooned.
-        // A legacy peer never answers this topic; the response timeout then
-        // falls through to the frontier-anchored forward-range pump (exactly the
-        // pre-negotiation behaviour), so legacy peers still serve us.
         await sendAncestorRangeRequest(generation: generation, process: process)
     }
 
@@ -5457,10 +5140,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 announcedTips.removeValue(forKey: peer.key)
             }
             clearRangeSync()
-            await resumeDeferredSessionSweeps(
-                generation: generation,
-                process: process
-            )
             return
         }
         current.requestedAfterCID = lastCID
@@ -5561,20 +5240,19 @@ public actor NodeNetworkRuntime: IvyDelegate {
         current.responseTimeout?.cancel()
         current.awaiting = false
         current.responseTimeout = nil
+        current.negotiated = true
         rangeSync = current
         // Outcome (c): no locator entry on the peer's main chain — disjoint
         // retention. End this peer's stream and drop its recorded claim so the
         // re-entry probe tries the next-tallest peer instead of re-picking it.
         // Never punish (a slow and a stalling peer are indistinguishable), and
-        // never conclude "caught up" — resume the height-blind sweeps only as
-        // the same background fallback that runs when no streamable peer exists.
+        // never conclude "caught up".
         guard let ancestor = response.commonAncestor else {
             SyncTrace.log("ancestor-range no-overlap peer=\(peer.key.hex.prefix(8))")
             if announcedTips[peer.key]?.peer.sessionID == peer.sessionID {
                 announcedTips.removeValue(forKey: peer.key)
             }
             clearRangeSync()
-            await resumeDeferredSessionSweeps(generation: generation, process: process)
             return
         }
         // Outcomes (a)/(b): anchor at the negotiated common ancestor — a block
@@ -5607,7 +5285,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard enqueued > 0, let lastCID else {
             // Caught up to this peer from a real common ancestor.
             clearRangeSync()
-            await resumeDeferredSessionSweeps(generation: generation, process: process)
             return
         }
         // Anchor the request-height window at the ANCESTOR's height, not our own
@@ -5678,10 +5355,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // next deep peer can drive, and let direct propagation carry any
             // blocks the peer has mined since.
             clearRangeSync()
-            await resumeDeferredSessionSweeps(
-                generation: generation,
-                process: process
-            )
             return
         }
         guard overlayPeers[current.peer.key]?.sessionID == current.peer.sessionID
@@ -5689,10 +5362,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // The peer went away before we caught up: release the slot so a new
             // deep peer can take over instead of re-driving into a dead session.
             clearRangeSync()
-            await resumeDeferredSessionSweeps(
-                generation: generation,
-                process: process
-            )
             return
         }
         if applied > current.progressBaselineHeight {
@@ -5714,10 +5383,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 announcedTips.removeValue(forKey: current.peer.key)
             }
             clearRangeSync()
-            await resumeDeferredSessionSweeps(
-                generation: generation,
-                process: process
-            )
             return
         }
         current.redriveAttempts += 1
@@ -5733,15 +5398,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
         current.progressBaselineHeight = applied
         current.hasMore = true
         current.awaiting = false
+        current.negotiated = false
         current.responseTimeout?.cancel()
         current.responseTimeout = nil
         rangeSync = current
         scheduleRangeSyncProgress(generation: generation, process: process)
-        // Negotiate the common ancestor before streaming, so a frontier that
-        // sits on a losing sibling is not told "empty = caught up" and marooned.
-        // A legacy peer never answers this topic; the response timeout then
-        // falls through to the frontier-anchored forward-range pump (exactly the
-        // pre-negotiation behaviour), so legacy peers still serve us.
+        // The rewound anchor is our frontier again: negotiate the common
+        // ancestor before streaming, so a frontier that sits on a losing
+        // sibling is not told "empty = caught up" and marooned.
         await sendAncestorRangeRequest(generation: generation, process: process)
     }
 
@@ -5754,16 +5418,22 @@ public actor NodeNetworkRuntime: IvyDelegate {
             clearRangeSync()
             return
         }
-        // The page request went unanswered but the peer is still connected —
-        // clear the awaiting latch and re-issue it rather than tearing down the
-        // whole sync (the progress watchdog remains the backstop for a peer that
-        // has genuinely stopped serving).
+        // The request went unanswered but the peer is still connected — clear
+        // the awaiting latch and re-issue it rather than tearing down the whole
+        // sync (the progress watchdog remains the backstop for a peer that has
+        // genuinely stopped serving). An unanswered NEGOTIATION is re-sent as a
+        // negotiation: paging forward from the un-negotiated frontier would
+        // re-open the marooned-follower bug on one dropped packet.
         var current = sync
         current.awaiting = false
         current.responseTimeout?.cancel()
         current.responseTimeout = nil
         rangeSync = current
-        await pumpRangeSync(generation: generation, process: process)
+        if current.negotiated {
+            await pumpRangeSync(generation: generation, process: process)
+        } else {
+            await sendAncestorRangeRequest(generation: generation, process: process)
+        }
     }
 
     private func clearRangeSync() {
@@ -5776,9 +5446,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
 
     /// A cleared sync must not depend on a further announcement to restart:
     /// on a quiet network (nobody minting) none ever arrives, and a node
-    /// still far behind would idle forever while the height-blind sweeps
-    /// fill the pipeline. Re-entry is the receiver's own assessment, probed
-    /// one request-timeout after each clear.
+    /// still far behind would idle forever. Re-entry is the receiver's own
+    /// assessment, probed one request-timeout after each clear.
     private func scheduleRangeSyncReentry() {
         guard rangeSyncReentryTask == nil, !announcedTips.isEmpty else {
             return
@@ -5814,180 +5483,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // The peer may refuse or stall again; the next clear re-probes.
     }
 
-    private func startAcceptedLeavesRequest(
-        from peer: AuthenticatedPeer,
-        cursor: AcceptedLeavesCursor,
-        generation: UInt64,
-        process: ChainProcess
-    ) async -> Bool {
-        guard isCurrentRuntime(generation: generation, process: process),
-            pendingAcceptedLeaves == nil,
-            candidateAcquirer.reserveAcceptedLeafPage(
-                AcceptedLeavesResponseMessage.maximumLeaves
-            )
-        else {
-            return false
-        }
-        let request = AcceptedLeavesRequestMessage(
-            requestID: makeRequestID(),
-            afterCID: cursor.afterCID,
-            snapshotSequence: cursor.snapshotSequence
-        )
-        guard let payload = try? request.encoded() else {
-            candidateAcquirer.releaseAcceptedLeafPage(
-                AcceptedLeavesResponseMessage.maximumLeaves
-            )
-            return false
-        }
-        let timeout = planeConfigurations.overlay.requestTimeout
-        let timeoutNanoseconds = Self.nanoseconds(timeout)
-        let timeoutTask = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: timeoutNanoseconds)
-            } catch {
-                return
-            }
-            await self?.acceptedLeavesRequestTimedOut(
-                requestID: request.requestID,
-                generation: generation
-            )
-        }
-        pendingAcceptedLeaves = PendingAcceptedLeaves(
-            peer: peer,
-            request: request,
-            timeout: timeoutTask
-        )
-        guard
-            case .enqueued = await overlay.sendMessage(
-                to: peer,
-                topic: NodeNetworkTopic.acceptedLeavesRequest,
-                payload: payload
-            )
-        else {
-            guard
-                isCurrentRuntime(
-                    generation: generation,
-                    process: process
-                )
-            else {
-                _ = takeAcceptedLeavesRequest()
-                return false
-            }
-            _ = takeAcceptedLeavesRequest()
-            nextAcceptedLeaves = nil
-            enqueueAcceptedLeavesSession(peer)
-            return false
-        }
-        nextAcceptedLeaves = nil
-        acceptedLeavesRetryTask?.cancel()
-        acceptedLeavesRetryTask = nil
-        return true
-    }
-
-    private func acceptedLeavesRequestTimedOut(
-        requestID: UInt64,
-        generation: UInt64
-    ) async {
-        guard isRunning, isCurrentGeneration(generation),
-            let process,
-            let pending = pendingAcceptedLeaves,
-            pending.request.requestID == requestID,
-            takeAcceptedLeavesRequest() != nil
-        else { return }
-        nextAcceptedLeaves = nil
-        enqueueAcceptedLeavesSession(pending.peer)
-        await resumeAcceptedLeavesSync(
-            generation: generation,
-            process: process
-        )
-    }
-
-    @discardableResult
-    private func takeAcceptedLeavesRequest(
-        releasingReservation: Bool = true
-    ) -> PendingAcceptedLeaves? {
-        guard let pending = pendingAcceptedLeaves else {
-            return nil
-        }
-        pendingAcceptedLeaves = nil
-        pending.timeout.cancel()
-        if releasingReservation {
-            candidateAcquirer.releaseAcceptedLeafPage(
-                AcceptedLeavesResponseMessage.maximumLeaves
-            )
-            serviceCandidateAcquirer()
-        }
-        return pending
-    }
-
-    private func resumeAcceptedLeavesSync(
-        generation: UInt64? = nil,
-        process expectedProcess: ChainProcess? = nil
-    ) async {
-        guard
-            isRunning,
-            let fence = resolvedRuntimeFence(
-                generation: generation,
-                process: expectedProcess
-            ), pendingAcceptedLeaves == nil
-        else { return }
-
-        while nextAcceptedLeaves == nil, !acceptedLeavesQueue.isEmpty {
-            let peer = acceptedLeavesQueue.removeFirst()
-            guard overlayPeers[peer.key]?.sessionID == peer.sessionID else {
-                continue
-            }
-            nextAcceptedLeaves = NextAcceptedLeaves(
-                peer: peer,
-                cursor: AcceptedLeavesCursor(
-                    afterCID: nil,
-                    snapshotSequence: nil
-                )
-            )
-        }
-        guard let next = nextAcceptedLeaves,
-              overlayPeers[next.peer.key]?.sessionID == next.peer.sessionID else {
-            nextAcceptedLeaves = nil
-            return
-        }
-        guard
-            await startAcceptedLeavesRequest(
-                from: next.peer,
-                cursor: next.cursor,
-                generation: fence.generation,
-                process: fence.process
-            )
-        else {
-            scheduleAcceptedLeavesRetry(generation: fence.generation)
-            return
-        }
-    }
-
-    private func enqueueAcceptedLeavesSession(_ peer: AuthenticatedPeer) {
-        guard overlayPeers[peer.key]?.sessionID == peer.sessionID,
-              pendingAcceptedLeaves?.peer.sessionID != peer.sessionID,
-              nextAcceptedLeaves?.peer.sessionID != peer.sessionID,
-              !acceptedLeavesQueue.contains(where: {
-                  $0.sessionID == peer.sessionID
-              }) else { return }
-        acceptedLeavesQueue.append(peer)
-    }
-
-    private func discardAcceptedLeavesSessions(for peerKey: PeerKey) {
-        var sessionIDs = Set(
-            acceptedLeavesQueue
-                .filter { $0.key == peerKey }
-                .map(\.sessionID)
-        )
-        acceptedLeavesQueue.removeAll { $0.key == peerKey }
-        if nextAcceptedLeaves?.peer.key == peerKey {
-            sessionIDs.insert(nextAcceptedLeaves!.peer.sessionID)
-            nextAcceptedLeaves = nil
-        }
-        if pendingAcceptedLeaves?.peer.key == peerKey,
-           let pending = takeAcceptedLeavesRequest() {
-            sessionIDs.insert(pending.peer.sessionID)
-        }
+    private func discardServingSessions(for peerKey: PeerKey) {
+        var sessionIDs = Set<Data>()
         if let session = overlaySessions[peerKey] {
             sessionIDs.insert(session.sessionID)
         }
@@ -5998,47 +5495,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
             servingAcceptedLeaves.remove(sessionID)
             servingAncestorRange.remove(sessionID)
         }
-    }
-
-    private func restartAcceptedLeavesSync() {
-        for peer in overlayPeers.values.sorted(by: { $0.key < $1.key }) {
-            enqueueAcceptedLeavesSession(peer)
-        }
-        if isRunning {
-            scheduleAcceptedLeavesRetry(generation: runtimeGeneration)
-        }
-    }
-
-    private func scheduleAcceptedLeavesRetry(generation: UInt64) {
-        guard acceptedLeavesRetryTask == nil else { return }
-        nextAcceptedLeavesRetryToken &+= 1
-        let token = nextAcceptedLeavesRetryToken
-        acceptedLeavesRetryTask = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: 1_000_000_000)
-            } catch {
-                return
-            }
-            await self?.acceptedLeavesRetryTimedOut(
-                token: token,
-                generation: generation
-            )
-        }
-    }
-
-    private func acceptedLeavesRetryTimedOut(
-        token: UInt64,
-        generation: UInt64
-    ) async {
-        guard token == nextAcceptedLeavesRetryToken,
-            isCurrentGeneration(generation),
-            let process
-        else { return }
-        acceptedLeavesRetryTask = nil
-        await resumeAcceptedLeavesSync(
-            generation: generation,
-            process: process
-        )
     }
 
     /// Verify-not-trust gate for deployer-seeded self-admission: ask the
@@ -6207,11 +5663,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     // orphaned and the child never canonicalizes past height 0.
                     candidateAcquirer.predecessorConnectedOutOfBand(genesisCID)
                     serviceCandidateAcquirer()
-                    restartAcceptedLeavesSync()
-                    await resumeAcceptedLeavesSync(
-                        generation: generation,
-                        process: process
-                    )
                     await requestEvidenceIndex(
                         generation: generation,
                         process: process
@@ -7062,38 +6513,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         for requestID in buildIDs {
             childCandidateBuilds.removeValue(forKey: requestID)?.task.cancel()
         }
-    }
-
-    private func scheduleRecoveryTimeout(
-        _ requestID: UInt64,
-        generation: UInt64
-    ) {
-        let timeoutNanoseconds = Self.nanoseconds(
-            planeConfigurations.overlay.requestTimeout
-        )
-        Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: timeoutNanoseconds)
-            } catch {
-                return
-            }
-            await self?.recoveryRequestTimedOut(
-                requestID,
-                generation: generation
-            )
-        }
-    }
-
-    private func recoveryRequestTimedOut(
-        _ requestID: UInt64,
-        generation: UInt64
-    ) async {
-        guard isCurrentGeneration(generation) else { return }
-        let peer = pendingPortableAttachmentIndexes.removeValue(
-            forKey: requestID
-        )?.peer
-        guard let peer else { return }
-        await overlay.recycleSession(ifCurrent: peer)
     }
 
     private func childCandidateRequestDeadline() -> ContinuousClock.Instant? {

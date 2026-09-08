@@ -584,6 +584,242 @@ final class ParentChildE2ETests: XCTestCase {
         passed = true
     }
 
+    /// Default-gate shallow twin of the opt-in deep-churn test below: the same
+    /// permissionless child cold-sync path — adopt the genesis off the parent's
+    /// directory, then catch up over the child overlay from a peer that never
+    /// announced any of it live — at a depth the per-PR budget affords. The
+    /// gap stays under the range-sync threshold, so this exercises the
+    /// announcement-plus-predecessor-walk direct path that replaced the
+    /// accepted-leaves descent, then a bounce of the only serving child.
+    func testFreshChildJoinerColdSyncsShallowHistoryAcrossChurn() async throws {
+        let workspace = try E2EWorkspace()
+        let cluster = E2ECluster()
+        var passed = false
+        defer {
+            cluster.forceTerminateAll()
+            if passed {
+                try? workspace.remove()
+            } else {
+                print("lattice-node E2E artifacts retained at \(workspace.url.path)")
+            }
+        }
+
+        let binary = try E2EBinary.latticeNode()
+        let sourceNexusIdentity = try workspace.makeIdentity(named: "src-nexus")
+        let sourceChildIdentity = try workspace.makeIdentity(named: "src-child")
+        let joinerNexusIdentity = try workspace.makeIdentity(named: "join-nexus")
+        let joinerChildIdentity = try workspace.makeIdentity(named: "join-child")
+        let ports = try E2EPorts.allocate(count: 12)
+
+        let sourceNexus = nexusNode(
+            binary: binary,
+            workspace: workspace,
+            name: "src-nexus",
+            identity: sourceNexusIdentity,
+            overlayPort: ports[0],
+            factPort: ports[1],
+            rpcPort: ports[2]
+        )
+        cluster.add(sourceNexus)
+        try sourceNexus.start()
+        _ = try await waitForNexus(sourceNexus)
+
+        // Deploy the child: offline genesis, one anchoring GenesisAction.
+        let seed = ChildGenesisSeed(
+            spec: NexusGenesis.spec,
+            premineTo: nil,
+            timestamp: 1_000
+        )
+        let genesisStore = E2EDeployContentStore()
+        try await LatticeState.emptyHeader.storeRecursively(storer: genesisStore)
+        let childGenesis = try await ChildGenesisBuilder.build(
+            seed: seed,
+            chainPath: ["Nexus", "Shallow"],
+            fetcher: genesisStore
+        )
+        let genesisCID = try BlockHeader(node: childGenesis).rawCID
+        let deployer = try workspace.makeIdentity(named: "deployer")
+        let anchor = try signedTransaction(
+            key: (privateKey: deployer.privateKey, publicKey: deployer.publicKey),
+            chainPath: ["Nexus"],
+            genesisActions: [GenesisAction(
+                directory: "Shallow",
+                blockCID: genesisCID
+            )],
+            nonce: 0
+        )
+        let _: SubmitTransactionResponse = try await sourceNexus.post(
+            "/v1/transactions",
+            body: SubmitTransactionRequest(transaction: anchor)
+        )
+        let carrier = try await mineBlock(sourceNexus)
+        XCTAssertTrue(carrier.response.accepted)
+        _ = try await waitForRecordedChild(
+            sourceNexus,
+            directory: "Shallow",
+            genesisCID: genesisCID
+        )
+
+        // The source child is deployer-seeded; the joiner later ADOPTS.
+        let sourceChildStorage = workspace.url.appendingPathComponent(
+            "src-child",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: sourceChildStorage,
+            withIntermediateDirectories: true
+        )
+        try JSONEncoder().encode(seed).write(
+            to: sourceChildStorage.appendingPathComponent("child-genesis.json")
+        )
+        let sourceChild = childNode(
+            binary: binary,
+            workspace: workspace,
+            name: "src-child",
+            directory: "Shallow",
+            identity: sourceChildIdentity,
+            parentPublicKey: sourceNexusIdentity.publicKey,
+            parentFactPort: ports[1],
+            overlayPort: ports[3],
+            factPort: ports[4],
+            rpcPort: ports[5]
+        )
+        cluster.add(sourceChild)
+        try sourceChild.start()
+        _ = try await sourceChild.waitForStatus { status in
+            status.phase == .active && status.tipCID == genesisCID
+        }
+
+        // Co-mine the child to depth: each parent round collects the child's
+        // candidate into the template, and the max-easy genesis target means
+        // every solution meets both chains. A candidate-less round (slow child
+        // fan-in, a known intermittent) simply does not count.
+        let childDepth: UInt64 = 20
+        let clock = ContinuousClock()
+        let miningDeadline = clock.now + e2eScaled(.seconds(300))
+        var childHeight: UInt64 = 0
+        while childHeight < childDepth {
+            guard clock.now < miningDeadline else {
+                XCTFail("co-mining did not reach child depth \(childDepth)")
+                return
+            }
+            _ = try? await mineBlock(sourceNexus, requestTimeout: 30)
+            childHeight = (try await sourceChild.waitForStatus {
+                $0.phase == .active
+            }).height ?? 0
+        }
+        let parentHeight = (try await sourceNexus.waitForStatus {
+            $0.phase == .active
+        }).height ?? 0
+
+        // The permissionless joiner: its own parent node first, then a child
+        // that ADOPTS the genesis from that parent's directory (no seed file).
+        let joinerNexus = nexusNode(
+            binary: binary,
+            workspace: workspace,
+            name: "join-nexus",
+            identity: joinerNexusIdentity,
+            overlayPort: ports[6],
+            factPort: ports[7],
+            rpcPort: ports[8]
+        )
+        joinerNexus.setOverlayPeers([
+            try overlayPeer(identity: sourceNexusIdentity, port: ports[0])
+        ])
+        cluster.add(joinerNexus)
+        try joinerNexus.start()
+        _ = try await joinerNexus.waitForStatus(
+            timeout: .seconds(300)
+        ) { $0.phase == .active && ($0.height ?? 0) >= parentHeight }
+
+        let joinerChild = childNode(
+            binary: binary,
+            workspace: workspace,
+            name: "join-child",
+            directory: "Shallow",
+            identity: joinerChildIdentity,
+            parentPublicKey: joinerNexusIdentity.publicKey,
+            parentFactPort: ports[7],
+            overlayPort: ports[9],
+            factPort: ports[10],
+            rpcPort: ports[11],
+            overlayPeers: [
+                try overlayPeer(identity: sourceChildIdentity, port: ports[3])
+            ]
+        )
+        cluster.add(joinerChild)
+        try joinerChild.start()
+        try await waitForConvergence(
+            producer: sourceChild,
+            joiner: joinerChild,
+            atLeast: childDepth,
+            phase: "cold sync"
+        )
+
+        // Churn: bounce the ONLY serving child, extend the chain, and require
+        // the joiner to follow on the fresh session.
+        try await sourceChild.stop()
+        try await Task.sleep(for: e2eScaled(.seconds(2)))
+        try sourceChild.start()
+        _ = try await sourceChild.waitForStatus(
+            timeout: .seconds(120)
+        ) { $0.phase == .active && ($0.height ?? 0) >= childDepth }
+        let extendedDepth = childDepth + 3
+        let extensionDeadline = clock.now + e2eScaled(.seconds(120))
+        while childHeight < extendedDepth {
+            guard clock.now < extensionDeadline else {
+                XCTFail("post-churn co-mining did not extend the child")
+                return
+            }
+            _ = try? await mineBlock(sourceNexus, requestTimeout: 30)
+            childHeight = (try await sourceChild.waitForStatus {
+                $0.phase == .active
+            }).height ?? 0
+        }
+        try await waitForConvergence(
+            producer: sourceChild,
+            joiner: joinerChild,
+            atLeast: extendedDepth,
+            phase: "post-churn"
+        )
+
+        try await cluster.stopAll()
+        passed = true
+    }
+
+    /// The joiner must CONVERGE with the producer — compared live, never
+    /// against a snapshot: an equal-work same-height sibling can replace the
+    /// tip on both nodes via the tie-break, and that is consensus working.
+    private func waitForConvergence(
+        producer: E2ENode,
+        joiner: E2ENode,
+        atLeast depth: UInt64,
+        phase: String
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now + e2eScaled(.seconds(300))
+        while clock.now < deadline {
+            let producerStatus = try? await producer.waitForStatus(
+                timeout: .seconds(2)
+            ) { $0.phase == .active }
+            let joinerStatus = try? await joiner.waitForStatus(
+                timeout: .seconds(2)
+            ) { $0.phase == .active }
+            if let producerStatus, let joinerStatus,
+               let tip = producerStatus.tipCID,
+               tip == joinerStatus.tipCID,
+               (producerStatus.height ?? 0) >= depth,
+               (joinerStatus.height ?? 0) >= depth {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        XCTFail(
+            "\(phase): joiner and producer did not converge on one tip "
+                + "at depth \(depth)"
+        )
+    }
+
     private func waitForRecordedChild(
         _ node: E2ENode,
         directory: String,

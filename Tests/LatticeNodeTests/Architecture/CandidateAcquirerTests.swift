@@ -410,63 +410,6 @@ final class CandidateAcquirerTests: XCTestCase {
         XCTAssertEqual(acquirer.next()?.blockCID, "predecessor")
     }
 
-    func testAcceptedLeafPageConsumesReservationBeforeFrontierCanUseIt()
-        throws
-    {
-        let pageSize = 64
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
-            blockCID: "descendant",
-            package: nil
-        )).accepted)
-        let descendant = try XCTUnwrap(acquirer.next())
-        for index in 0..<(CandidateAcquirer.readyCapacity - pageSize) {
-            XCTAssertTrue(acquirer.observe(.init(
-                blockCID: "queued-\(index)",
-                package: nil
-            )).accepted)
-        }
-        XCTAssertTrue(acquirer.reserveAcceptedLeafPage(pageSize))
-        XCTAssertTrue(acquirer.complete(
-            descendant.ticket,
-            resolution: .predecessor("frontier")
-        ))
-
-        XCTAssertTrue(acquirer.consumeAcceptedLeafPage(
-            (0..<pageSize).map {
-                .init(blockCID: "leaf-\($0)", package: nil)
-            }
-        ))
-    }
-
-    func testRetainedWaitsAreBoundedAndRequestInventoryRecovery() throws {
-        var acquirer = CandidateAcquirer()
-        for index in 0..<CandidateAcquirer.retainedCapacity {
-            XCTAssertTrue(acquirer.observe(.init(
-                blockCID: "waiting-\(index)",
-                package: nil
-            )).accepted)
-            let candidate = try XCTUnwrap(acquirer.next())
-            XCTAssertTrue(acquirer.complete(
-                candidate.ticket,
-                resolution: .wait(.evidence)
-            ))
-        }
-        XCTAssertFalse(acquirer.takeInventoryRestart())
-
-        XCTAssertTrue(acquirer.observe(.init(
-            blockCID: "overflow",
-            package: nil
-        )).accepted)
-        let overflow = try XCTUnwrap(acquirer.next())
-        XCTAssertTrue(acquirer.complete(
-            overflow.ticket,
-            resolution: .wait(.evidence)
-        ))
-        XCTAssertTrue(acquirer.takeInventoryRestart())
-        XCTAssertNil(acquirer.next())
-    }
-
     func testResetRejectsOldAdmissionCompletion() throws {
         var acquirer = CandidateAcquirer()
         XCTAssertTrue(acquirer.observe(.init(
@@ -511,8 +454,7 @@ final class CandidateAcquirerTests: XCTestCase {
     func testLivePredecessorParkEvictsOldestRetainedInsteadOfDropping() throws {
         // Retention is an operator-budget cache: with the budget full of
         // stale waits, a live predecessor walk must still be able to park —
-        // the oldest retained entry is evicted (re-derivable via inventory
-        // restart), never the fresh park.
+        // the oldest retained entry is evicted, never the fresh park.
         var acquirer = CandidateAcquirer()
         for index in 0..<CandidateAcquirer.retainedCapacity {
             XCTAssertTrue(acquirer.observe(.init(
@@ -534,8 +476,6 @@ final class CandidateAcquirerTests: XCTestCase {
             descendant.ticket,
             resolution: .predecessor("missing-ancestor")
         ))
-        // Eviction requests inventory recovery for the displaced wait.
-        XCTAssertTrue(acquirer.takeInventoryRestart())
         // The park is live: the seeded predecessor is next, and its
         // connection wakes the parked descendant.
         let predecessor = try XCTUnwrap(acquirer.next())
@@ -559,8 +499,6 @@ final class CandidateAcquirerTests: XCTestCase {
         }
         var acquirer = CandidateAcquirer()
         acquirer.reset(retryWindow: .seconds(1), durableDescendants: durable)
-        // The un-seeded remainder is signalled for inventory recovery.
-        XCTAssertTrue(acquirer.takeInventoryRestart())
         // A live park still succeeds immediately (evicting if needed).
         XCTAssertTrue(acquirer.observe(.init(
             blockCID: "live-descendant",
