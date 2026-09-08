@@ -207,9 +207,11 @@ enum IssuedChildProofScope: String, Sendable {
 actor NodeStore {
     /// Epoch 38 makes issued and handed-off contextual candidates mutually
     /// exclusive and gives each handoff an age for budgeted eviction.
+    /// Epoch 39 records the deferred-execution tier (weighed vs validated) on
+    /// each accepted block so recovery reconstructs the validated set.
     /// Older stores must be
     /// wiped; Nexus deterministically recreates the configured exact genesis.
-    static let currentSchemaEpoch: Int64 = 38
+    static let currentSchemaEpoch: Int64 = 39
 
     private static func parentGenesisFactKey(
         _ link: ParentGenesisLink
@@ -351,6 +353,7 @@ actor NodeStore {
     func stage(
         _ batch: ChainAdmissionBatch,
         volumeRoots: [String],
+        validated: Bool = true,
         pendingChildProofRoutes: [PendingChildProofRoute] = [],
         pendingChildProofCapacity: Int = 16,
         hierarchyArtifacts: AdmissionHierarchyArtifacts? = nil,
@@ -464,7 +467,8 @@ actor NodeStore {
                     }
                     try persistAcceptedBlockRows(
                         acceptedBlocks,
-                        admissionSequence: admissionSequence
+                        admissionSequence: admissionSequence,
+                        validated: validated
                     )
                 }
                 if let preparedHierarchyArtifacts {
@@ -1130,7 +1134,8 @@ actor NodeStore {
 
     private func persistAcceptedBlockRows(
         _ blocks: [AcceptedBlockRecord],
-        admissionSequence: Int64
+        admissionSequence: Int64,
+        validated: Bool
     ) throws {
         for block in blocks {
             let rows = try database.query(
@@ -1146,14 +1151,27 @@ actor NodeStore {
                 continue
             }
             try database.execute(
-                "INSERT INTO accepted_blocks (block_cid, parent_cid, admission_seq) VALUES (?1, ?2, ?3)",
+                "INSERT INTO accepted_blocks (block_cid, parent_cid, admission_seq, validated) VALUES (?1, ?2, ?3, ?4)",
                 params: [
                     .text(block.blockCID),
                     block.parentCID.map(NodeSQLiteValue.text) ?? .null,
                     .int(admissionSequence),
+                    .int(validated ? 1 : 0),
                 ]
             )
         }
+    }
+
+    /// Whether `blockCID` was admitted at the durable *validated* tier (its
+    /// state transition executed and post-state materialized), as opposed to
+    /// merely *weighed*. `false` for an unknown block or one recorded weighed.
+    /// The tier is a node-side recovery fact, not derivable from the consensus
+    /// batch, so it is read straight from the durable accepted-block index.
+    func blockValidated(_ blockCID: String) throws -> Bool {
+        try database.query(
+            "SELECT validated FROM accepted_blocks WHERE block_cid = ?1 LIMIT 1",
+            params: [.text(blockCID)]
+        ).first?["validated"]?.intValue == 1
     }
 
     private func prepareHierarchyArtifacts(
@@ -3558,7 +3576,8 @@ actor NodeStore {
             CREATE TABLE IF NOT EXISTS accepted_blocks (
                 block_cid TEXT PRIMARY KEY,
                 parent_cid TEXT,
-                admission_seq INTEGER NOT NULL
+                admission_seq INTEGER NOT NULL,
+                validated INTEGER NOT NULL DEFAULT 1
             ) WITHOUT ROWID
             """)
         try database.execute(

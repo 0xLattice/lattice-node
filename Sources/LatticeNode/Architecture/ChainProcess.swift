@@ -1060,8 +1060,9 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// pass — no per-child re-resolve, and unanchored fake `.child` peers just
     /// miss the map.
     func anchoredChildGenesisCIDs(limit: Int) async -> [String: String] {
-        guard case .active(let level) = runtimePhase, limit > 0 else { return [:] }
-        let tip = await level.chain.getMainChainTip()
+        guard case .active(let level) = runtimePhase, limit > 0,
+              let tip = await deepestValidatedMainChainTip(level: level)?.cid
+        else { return [:] }
         let header = BlockHeader(rawCID: tip, node: nil, encryptionInfo: nil)
         guard let block = try? await header.resolve(fetcher: localFetcher).node,
               let state = try? await block.postState.resolve(
@@ -1366,6 +1367,63 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         let header = BlockHeader(rawCID: tip, node: nil, encryptionInfo: nil)
         guard let block = try await header.resolve(fetcher: localFetcher).node else {
             throw ChainProcessError.unresolvedCanonicalTip(tip)
+        }
+        return block
+    }
+
+    /// The deepest block on the CURRENT main chain that carries the durable
+    /// *validated* tier marker (spec §9.9): starting at the canonical tip, walk
+    /// DOWN the main chain and return the first block recorded validated, with
+    /// its height. A node MUST NOT act on a merely *weighed* tip, so every
+    /// act-on read (head/height, mining parent, announcement) uses this instead
+    /// of the raw canonical tip. Re-evaluated against the live main chain on
+    /// every call — never a stored highwater — so after a reorg it returns the
+    /// deepest validated ancestor of the NEW main chain, and it degrades one
+    /// block at a time rather than all-or-nothing when the tip is weighed.
+    /// Under all-eager admission every accepted block is validated, so this is
+    /// the canonical tip. Nil only when the process is inactive or (impossible
+    /// while genesis is eager) no main-chain block is validated.
+    func deepestValidatedMainChainTip() async -> (cid: String, height: UInt64)? {
+        guard case .active(let level) = runtimePhase else { return nil }
+        return await deepestValidatedMainChainTip(level: level)
+    }
+
+    private func deepestValidatedMainChainTip(
+        level: ChainLevel
+    ) async -> (cid: String, height: UInt64)? {
+        let tip = await level.chain.getMainChainTip()
+        guard var height = await level.chain
+            .getConsensusBlock(hash: tip)?.blockHeight
+        else { return nil }
+        while true {
+            if let cid = await level.chain.getMainChainBlockHash(atIndex: height),
+               (try? await store.blockValidated(cid)) == true {
+                return (cid, height)
+            }
+            if height == 0 { return nil }
+            height -= 1
+        }
+    }
+
+    /// The block at the deepest validated main-chain tip. Mirrors
+    /// `canonicalTipBlock()` but honours the deferred-execution gate so callers
+    /// that BUILD ON the tip (mining templates, mempool reconciliation) never
+    /// act on a merely weighed tip. Identical to `canonicalTipBlock()` under
+    /// all-eager admission.
+    public func validatedTipBlock() async throws -> Block {
+        await acquireOperation()
+        defer { releaseOperation() }
+        guard case .active(let level) = runtimePhase,
+              let validated = await deepestValidatedMainChainTip(level: level)
+        else {
+            throw ChainProcessError.chainNotBootstrapped
+        }
+        let header = BlockHeader(
+            rawCID: validated.cid, node: nil, encryptionInfo: nil
+        )
+        guard let block = try await header.resolve(fetcher: localFetcher).node
+        else {
+            throw ChainProcessError.unresolvedCanonicalTip(validated.cid)
         }
         return block
     }
@@ -1779,12 +1837,13 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 revision: nil
             )
         }
+        let validated = await deepestValidatedMainChainTip(level: level)
         return ChainProcessStatus(
             phase: .active,
             chainPath: configuration.chainPath,
             nexusGenesisCID: configuration.nexusGenesisCID,
-            tipCID: await level.chain.getMainChainTip(),
-            height: await level.chain.getHighestBlockHeight(),
+            tipCID: validated?.cid,
+            height: validated?.height,
             revision: await level.chain.currentRevision()
         )
     }
@@ -1803,12 +1862,13 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 revision: nil
             )
         }
+        let validated = await deepestValidatedMainChainTip(level: level)
         return ChainProcessStatus(
             phase: .active,
             chainPath: configuration.chainPath,
             nexusGenesisCID: configuration.nexusGenesisCID,
-            tipCID: await level.chain.getMainChainTip(),
-            height: await level.chain.getHighestBlockHeight(),
+            tipCID: validated?.cid,
+            height: validated?.height,
             revision: await level.chain.currentRevision()
         )
     }
@@ -2341,6 +2401,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         retentionScope: String,
         pendingChildProofRoutes: [PendingChildProofRoute],
         pendingChildProofCapacity: Int,
+        validated: Bool = true,
         hierarchyArtifacts: AdmissionHierarchyArtifacts? = nil,
         incomingCarrierEvidence: AdmissionCarrierEvidence? = nil,
         consensusRevisionFloor: UInt64? = nil,
@@ -2362,6 +2423,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         try await store.stage(
             batch,
             volumeRoots: roots,
+            validated: validated,
             pendingChildProofRoutes: pendingChildProofRoutes,
             pendingChildProofCapacity: pendingChildProofCapacity,
             hierarchyArtifacts: hierarchyArtifacts,

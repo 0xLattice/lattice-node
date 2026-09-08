@@ -437,6 +437,41 @@ final class NodeStoreTests: XCTestCase {
         XCTAssertEqual(refreshed.blockCIDs, ["root-a", "root-b", "root-c"])
     }
 
+    func testValidatedTierMarkerSurvivesRecovery() async throws {
+        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let store = try makeStore(path: path)
+        try await store.stage(
+            blockBatch(postStateCID: "root-state", blockHash: "root"),
+            volumeRoots: []
+        )
+        try await store.stage(
+            blockBatch(
+                postStateCID: "child-state",
+                blockHash: "child",
+                parentBlockHash: "root",
+                blockHeight: 1
+            ),
+            volumeRoots: [],
+            validated: false
+        )
+        let rootValidated = try await store.blockValidated("root")
+        let childValidated = try await store.blockValidated("child")
+        let unknownValidated = try await store.blockValidated("unknown")
+        XCTAssertTrue(rootValidated)
+        XCTAssertFalse(childValidated)
+        XCTAssertFalse(unknownValidated)
+
+        // A fresh store over the same durable file (crash recovery) must
+        // reconstruct the identical validated set, and the tier must not
+        // perturb the batch-derived index audit.
+        let recovered = try makeStore(path: path)
+        let recoveredRoot = try await recovered.blockValidated("root")
+        let recoveredChild = try await recovered.blockValidated("child")
+        XCTAssertTrue(recoveredRoot)
+        XCTAssertFalse(recoveredChild)
+        try await recovered.auditNormalizedIndexes()
+    }
+
     func testNormalizedIndexAuditRequiresExactBatchDerivedRows() async throws {
         let path = temporaryDirectory().appendingPathComponent("state.db")
         let store = try makeStore(path: path)
