@@ -1786,6 +1786,216 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertEqual(degradedValidatedTip, bCID)
     }
 
+    /// A walk-validated block's materialized body + post-state must survive a
+    /// restart AND the daemon's periodic unpinned-volume eviction: the restart
+    /// rebuilds batch retention from `admission_batches`, which never carried
+    /// walk-validated roots, so without a per-block owner pin the state is
+    /// evicted while `accepted_blocks.validated` still names the block — a
+    /// marker without its state that no walk pass can heal.
+    func testWalkValidatedStateSurvivesRestartAndEviction() async throws {
+        let directory = temporaryDirectory()
+        let config = try configuration(path: ["Nexus"], storage: directory)
+        let chain = try await weighedThenValidatedChain(
+            configuration: config, depth: 4
+        )
+        let tipCID = try BlockHeader(node: try XCTUnwrap(chain.last)).rawCID
+
+        // Restart once so retention is rebuilt from the durable batches, then
+        // run the daemon's eviction with no grace over the closed volumes.db.
+        var process: ChainProcess? = try await ChainProcess.open(
+            configuration: config
+        )
+        process = nil
+        let broker = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        _ = try await broker.evictUnpinned(graceSeconds: 0)
+
+        process = try await ChainProcess.open(configuration: config)
+        let validated = await process!.deepestValidatedMainChainTip()
+        XCTAssertEqual(validated?.cid, tipCID)
+        XCTAssertEqual(validated?.height, 4)
+        let tip: Block
+        do {
+            tip = try await process!.validatedTipBlock()
+        } catch {
+            return XCTFail(
+                "the walk-validated tip must resolve after restart + eviction: "
+                    + "\(error)"
+            )
+        }
+        XCTAssertEqual(try BlockHeader(node: tip).rawCID, tipCID)
+        let postState: LatticeStateHeader
+        do {
+            postState = try await tip.postState.resolve(fetcher: process!)
+        } catch {
+            return XCTFail(
+                "the walk-validated post-state must survive restart + eviction: "
+                    + "\(error)"
+            )
+        }
+        XCTAssertNotNil(postState.node)
+    }
+
+    /// A walk-validated marker whose owner pin is gone (its state is fair
+    /// game for eviction) is demoted to weighed at boot: act-on reads degrade
+    /// to the validated parent and the validate walk re-executes the block,
+    /// restoring both the marker and its pin — never a marker without state.
+    func testBootDemotesWalkValidatedMarkerWithoutItsPinAndTheWalkRepromotes()
+        async throws
+    {
+        let directory = temporaryDirectory()
+        let config = try configuration(path: ["Nexus"], storage: directory)
+        let chain = try await weighedThenValidatedChain(
+            configuration: config, depth: 4
+        )
+        let tipCID = try BlockHeader(node: try XCTUnwrap(chain.last)).rawCID
+        let parentCID = try BlockHeader(node: chain[2]).rawCID
+        let owner = [config.nexusGenesisCID, config.address.key]
+            .joined(separator: ":") + ":validated:" + tipCID
+
+        let broker = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        var owners = await broker.pinnedOwners(prefix: owner)
+        XCTAssertEqual(owners, [owner], "validation must pin under the owner")
+        try await broker.unpinAll(owner: owner)
+
+        let process = try await ChainProcess.open(configuration: config)
+        let degraded = await process.deepestValidatedMainChainTip()
+        XCTAssertEqual(degraded?.cid, parentCID)
+        XCTAssertEqual(degraded?.height, 3)
+        let canonicalHeight = await process.canonicalTipHeight()
+        XCTAssertEqual(canonicalHeight, 4, "the tip stays accepted (weighed)")
+
+        let service = ChainService(
+            process: process,
+            childCandidateProvider: { _ in [] },
+            childProofPublisher: { _ in },
+            acceptedBlockPublisher: { _ in }
+        )
+        await service.runValidateWalkPass()
+        let repromoted = await process.deepestValidatedMainChainTip()
+        XCTAssertEqual(repromoted?.cid, tipCID)
+        owners = await broker.pinnedOwners(prefix: owner)
+        XCTAssertEqual(
+            owners, [owner],
+            "re-validation must re-pin the tip's body + state under its owner"
+        )
+    }
+
+    /// An owner pin whose marker never flipped (a crash between the pin and
+    /// the marker write) is released at boot; the block stays weighed.
+    func testBootReleasesValidatedOwnerPinWithoutItsMarker() async throws {
+        let producer = try await ChainProcess.open(
+            configuration: try configuration(
+                path: ["Nexus"], storage: temporaryDirectory()
+            )
+        )
+        let block = try await mineChild(
+            of: try await producer.canonicalTipBlock(),
+            timestamp: 3_600_000,
+            nonce: 1,
+            on: producer
+        )
+        let blockCID = try BlockHeader(node: block).rawCID
+        guard case .canonicalized = try await producer.admit(
+            BlockHeader(node: block)
+        ).decision else {
+            return XCTFail("expected the producer block to canonicalize")
+        }
+
+        let directory = temporaryDirectory()
+        let config = try configuration(path: ["Nexus"], storage: directory)
+        var process: ChainProcess? = try await ChainProcess.open(
+            configuration: config
+        )
+        let weighed = try await process!.admit(
+            BlockHeader(node: block),
+            remoteSource: FetcherContentSource(producer),
+            mode: .weighed
+        )
+        XCTAssertTrue(weighed.decision.isAccepted)
+        process = nil
+
+        // The pin holds a real stored volume (the protocol-constant empty
+        // state) for a block whose row is still `validated = 0`.
+        let owner = [config.nexusGenesisCID, config.address.key]
+            .joined(separator: ":") + ":validated:" + blockCID
+        let broker = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        try await broker.pinBatch(
+            roots: [LatticeState.emptyHeader.rawCID], owner: owner
+        )
+        var owners = await broker.pinnedOwners(prefix: owner)
+        XCTAssertEqual(owners, [owner])
+
+        process = try await ChainProcess.open(configuration: config)
+        owners = await broker.pinnedOwners(prefix: owner)
+        XCTAssertTrue(owners.isEmpty, "an orphan owner pin must be released")
+        let validated = await process!.deepestValidatedMainChainTip()
+        XCTAssertEqual(validated?.height, 0, "the block stays weighed")
+    }
+
+    /// Mine `depth` reward-carrying blocks on a fresh producer (each credits a
+    /// fresh key, so every post-state is a NEW volume that only execution
+    /// materializes — an empty block's post-state is genesis state, which the
+    /// eager genesis batch already retains), weighed-admit them all into a
+    /// consumer at `configuration`, then validate each (the walk's promotion).
+    /// Returns the chain in ascending-height order; the consumer is closed.
+    private func weighedThenValidatedChain(
+        configuration config: NodeConfiguration,
+        depth: Int
+    ) async throws -> [Block] {
+        let producer = try await ChainProcess.open(
+            configuration: try configuration(
+                path: ["Nexus"], storage: temporaryDirectory()
+            )
+        )
+        let producerService = ChainService(
+            process: producer,
+            childCandidateProvider: { _ in [] },
+            childProofPublisher: { _ in },
+            acceptedBlockPublisher: { _ in }
+        )
+        var chain: [Block] = []
+        for _ in 0..<depth {
+            let template = try await producerService.miningTemplate(
+                MiningTemplateRequest(rewards: [MiningReward(
+                    chainPath: ["Nexus"],
+                    transaction: try signedRewardTransaction()
+                )])
+            )
+            let outcome = try await producer.admit(
+                BlockHeader(node: template.block)
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+            chain.append(template.block)
+        }
+
+        let consumer = try await ChainProcess.open(configuration: config)
+        for block in chain {
+            let weighed = try await consumer.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producer),
+                mode: .weighed
+            )
+            XCTAssertTrue(weighed.decision.isAccepted)
+        }
+        for block in chain {
+            let validated = try await consumer.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producer),
+                mode: .validate
+            )
+            XCTAssertTrue(validated.decision.isAccepted)
+        }
+        let validatedTip = await consumer.deepestValidatedMainChainTip()
+        XCTAssertEqual(validatedTip?.height, UInt64(depth))
+        return chain
+    }
+
     private func mineChild(
         of previous: Block,
         timestamp: Int64,
@@ -1922,6 +2132,35 @@ final class ChainProcessTests: XCTestCase {
         try await header.storeBlock(fetcher: fetcher, storer: collector)
         return await collector.allEntries()
     }
+}
+
+/// A mining reward crediting a fresh key by 1 on Nexus.
+private func signedRewardTransaction() throws -> Transaction {
+    let key = CryptoUtils.generateKeyPair()
+    let body = TransactionBody(
+        accountActions: [AccountAction(
+            owner: CryptoUtils.createAddress(from: key.publicKey),
+            delta: 1
+        )],
+        actions: [],
+        depositActions: [],
+        genesisActions: [],
+        receiptActions: [],
+        withdrawalActions: [],
+        signers: [CryptoUtils.createAddress(from: key.publicKey)],
+        fee: 0,
+        nonce: 0,
+        chainPath: ["Nexus"]
+    )
+    let bodyHeader = try HeaderImpl<TransactionBody>(node: body)
+    let signature = try XCTUnwrap(TransactionSigning.sign(
+        bodyHeader: bodyHeader,
+        privateKeyHex: key.privateKey
+    ))
+    return Transaction(
+        signatures: [key.publicKey: signature],
+        body: bodyHeader
+    )
 }
 
 private func signedGenesisAnchorTransaction(

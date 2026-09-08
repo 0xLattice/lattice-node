@@ -472,20 +472,9 @@ final class NodeStoreTests: XCTestCase {
         try await recovered.auditNormalizedIndexes()
     }
 
-    func testPromoteValidatedRetainsStateAndSurvivesRecovery() async throws {
+    func testPromoteValidatedFlipsMarkerOnlyAndSurvivesRecovery() async throws {
         let path = temporaryDirectory().appendingPathComponent("state.db")
-        let broker = try DiskBroker(
-            path: path.deletingLastPathComponent()
-                .appendingPathComponent("volumes.db").path
-        )
-        let store = try makeStore(path: path, broker: broker)
-        // The materialized post-state must be a real stored volume for retention
-        // to accept its root (retention pins existing CAS content).
-        let storer = NodeAdmissionStorage(storage: broker)
-        try await LatticeState.emptyHeader.storeRecursively(
-            storer: storer as any VolumeStorer
-        )
-        let materializedRoot = LatticeState.emptyHeader.rawCID
+        let store = try makeStore(path: path)
         // A weighed child: enters the accepted index below the validated tier,
         // carrying the empty-stateDiff block fact.
         try await store.stage(
@@ -504,45 +493,44 @@ final class NodeStoreTests: XCTestCase {
         )
         let weighedChild = try await store.blockValidated("child")
         XCTAssertFalse(weighedChild)
+        var walkValidated = try await store.walkValidatedBlockCIDs()
+        XCTAssertTrue(walkValidated.isEmpty)
 
-        // Validate-on-candidacy promotes it: the materialized post-state root is
-        // retained and the durable marker flips WITHOUT rewriting admission_facts.
-        try await store.promoteValidated(
-            blockCID: "child",
-            materializedRoots: [materializedRoot]
-        )
+        // Validate-on-candidacy promotes it: the durable marker flips to the
+        // walk-validated tier WITHOUT rewriting admission_facts. Retaining the
+        // materialized state is the caller's owner pin, not this marker.
+        try await store.promoteValidated(blockCID: "child")
         let validatedChild = try await store.blockValidated("child")
         XCTAssertTrue(validatedChild)
-        let retainedAfterPromote = try await broker.retainedRoots(
-            scope: "test:blocks"
-        )
-        XCTAssertTrue(
-            retainedAfterPromote.contains(materializedRoot),
-            "the materialized post-state root must be retained"
+        walkValidated = try await store.walkValidatedBlockCIDs()
+        XCTAssertEqual(
+            walkValidated, ["child"],
+            "the eager root is validated but not walk-validated"
         )
 
         // Idempotent: a re-validation (reorg re-projection / crash retry) is a
         // no-op and never throws a fact conflict.
-        try await store.promoteValidated(
-            blockCID: "child",
-            materializedRoots: [materializedRoot]
-        )
+        try await store.promoteValidated(blockCID: "child")
         let revalidatedChild = try await store.blockValidated("child")
         XCTAssertTrue(revalidatedChild)
 
-        // Crash recovery: a fresh store over the same durable files keeps the
-        // block validated and its materialized state retained, and the tier does
-        // not perturb the batch-derived index audit.
-        let recovered = try makeStore(path: path, broker: broker)
+        // Crash recovery: a fresh store over the same durable file keeps the
+        // tier, and the tier does not perturb the batch-derived index audit.
+        let recovered = try makeStore(path: path)
         let recoveredChildValidated = try await recovered.blockValidated("child")
         XCTAssertTrue(recoveredChildValidated)
-        let retainedAfterRecovery = try await broker.retainedRoots(
-            scope: "test:blocks"
-        )
-        XCTAssertTrue(
-            retainedAfterRecovery.contains(materializedRoot)
-        )
+        walkValidated = try await recovered.walkValidatedBlockCIDs()
+        XCTAssertEqual(walkValidated, ["child"])
         try await recovered.auditNormalizedIndexes()
+
+        // Boot reconciliation returns a marker whose pin is gone to weighed.
+        try await recovered.demoteValidated(blockCID: "child")
+        let demotedChild = try await recovered.blockValidated("child")
+        XCTAssertFalse(demotedChild)
+        walkValidated = try await recovered.walkValidatedBlockCIDs()
+        XCTAssertTrue(walkValidated.isEmpty)
+        let rootStillValidated = try await recovered.blockValidated("root")
+        XCTAssertTrue(rootStillValidated)
     }
 
     func testNormalizedIndexAuditRequiresExactBatchDerivedRows() async throws {
