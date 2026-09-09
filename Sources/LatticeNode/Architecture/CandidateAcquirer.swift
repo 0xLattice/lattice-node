@@ -194,10 +194,14 @@ struct CandidateAcquirer {
             }) {
                 guard seeded < Self.retainedCapacity else { break seeding }
                 descendantCIDs.insert(descendant.blockCID)
+                // Durable network history: weighed, like the frontier below.
+                // Eager-wins is monotone, so an eager seed here would pin the
+                // block to execution for the process lifetime.
                 let key = observe(Seed(
                     blockCID: descendant.blockCID,
                     package: nil,
-                    recoveryRootCID: descendant.rootCID
+                    recoveryRootCID: descendant.rootCID,
+                    weighed: true
                 ), retainingOverflow: true).key
                 guard let key else { continue }
                 setState(.predecessor(predecessorCID), for: key)

@@ -417,12 +417,14 @@ final class NodeStoreTests: XCTestCase {
             snapshotSequence: nil,
             limit: 1
         )
-        XCTAssertEqual(first.blockCIDs, ["root-a"])
+        XCTAssertEqual(first.blockCIDs, ["root-b"], "most recent first")
 
         try await store.stage(
             blockBatch(postStateCID: "root-c-state", blockHash: "root-c"),
             volumeRoots: []
         )
+        // A cursored (legacy descent) page under the captured snapshot: CID
+        // order after the cursor, never seeing root-c.
         let continued = try await store.acceptedLeafPage(
             afterCID: "root-a",
             snapshotSequence: first.snapshotSequence,
@@ -434,7 +436,36 @@ final class NodeStoreTests: XCTestCase {
             limit: 16
         )
         XCTAssertEqual(continued.blockCIDs, ["root-b"])
-        XCTAssertEqual(refreshed.blockCIDs, ["root-a", "root-b", "root-c"])
+        XCTAssertEqual(refreshed.blockCIDs, ["root-c", "root-b", "root-a"])
+    }
+
+    /// The leaf set only grows and only recent forks can still contend, so
+    /// the bounded frontier (cursor-less) page must hold the most recently
+    /// ADMITTED leaves — never a lexicographic sample. The cursored page
+    /// keeps the legacy CID-order contract the wire's cursor rule expects.
+    func testAcceptedLeafPageIsMostRecentFirstAndCursorKeepsCIDOrder()
+        async throws
+    {
+        let store = try makeStore()
+        // Admission order deliberately disagrees with lexicographic order.
+        for name in ["root-e", "root-a", "root-d", "root-b", "root-c"] {
+            try await store.stage(
+                blockBatch(postStateCID: "\(name)-state", blockHash: name),
+                volumeRoots: []
+            )
+        }
+        let frontier = try await store.acceptedLeafPage(
+            afterCID: nil,
+            snapshotSequence: nil,
+            limit: 2
+        )
+        XCTAssertEqual(frontier.blockCIDs, ["root-c", "root-b"])
+        let cursored = try await store.acceptedLeafPage(
+            afterCID: "root-b",
+            snapshotSequence: frontier.snapshotSequence,
+            limit: 2
+        )
+        XCTAssertEqual(cursored.blockCIDs, ["root-c", "root-d"])
     }
 
     func testValidatedTierMarkerSurvivesRecovery() async throws {

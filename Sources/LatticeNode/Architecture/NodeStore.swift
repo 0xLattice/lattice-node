@@ -590,9 +590,16 @@ actor NodeStore {
         }
     }
 
-    /// Stable pagination over the accepted forest's leaves. The first call
-    /// captures the current admission sequence; later calls reuse it so newly
-    /// admitted descendants cannot reshuffle an in-progress page walk.
+    /// Pagination over the accepted forest's leaves. The cursor-less page is
+    /// the MOST RECENTLY ADMITTED leaves (newest first): the leaf set only
+    /// ever grows (accepted rows are never deleted) and only recent forks can
+    /// still contend in fork choice, so a bounded frontier page must be the
+    /// recent end, never a lexicographic sample. A cursored page keeps the
+    /// legacy contract — leaves lexicographically after `afterCID`, in CID
+    /// order — which is what the wire's cursor rule and older peers' descent
+    /// expect; the frontier pull never cursors. The first call captures the
+    /// current admission sequence; later calls reuse it so newly admitted
+    /// descendants cannot reshuffle an in-progress page walk.
     func acceptedLeafPage(
         afterCID: String?,
         snapshotSequence: Int64?,
@@ -621,7 +628,7 @@ actor NodeStore {
             )
         } else {
             rows = try database.query(
-                "SELECT block_cid FROM accepted_blocks AS block WHERE block.admission_seq <= ?1 AND NOT EXISTS (SELECT 1 FROM accepted_blocks AS child WHERE child.parent_cid = block.block_cid AND child.admission_seq <= ?1) ORDER BY block.block_cid LIMIT ?2",
+                "SELECT block_cid FROM accepted_blocks AS block WHERE block.admission_seq <= ?1 AND NOT EXISTS (SELECT 1 FROM accepted_blocks AS child WHERE child.parent_cid = block.block_cid AND child.admission_seq <= ?1) ORDER BY block.admission_seq DESC, block.block_cid DESC LIMIT ?2",
                 params: [.int(snapshot), .int(sqlLimit)]
             )
         }

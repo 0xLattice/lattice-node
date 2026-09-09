@@ -926,14 +926,16 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                             self.retentionScope, blockHeader.rawCID
                         )
                     )
-                    try await self.store.promoteValidated(
-                        blockCID: blockHeader.rawCID
-                    )
                     // The weighed tier suppressed hierarchy issuance; validation
                     // re-derives it, and Lattice hands the carrier link back in the
                     // staging context. Persist it exactly as the eager path does so
                     // a cold-synced parent can serve child-proof routes and relay
                     // securing proofs for children anchored in below-tip blocks.
+                    // Persisted BEFORE the marker flips: a crash (or a throw)
+                    // between the two leaves a weighed block the walk simply
+                    // re-validates (the artifact rows are INSERT OR IGNORE), never
+                    // a validated block whose carrier link is lost for good —
+                    // boot reconciliation checks the pin, not the link.
                     if let hierarchyArtifacts = context.issuedCarrierLink.map({
                         AdmissionHierarchyArtifacts(
                             carrierLink: $0,
@@ -951,6 +953,9 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                             pendingChildProofCapacity: Self.preparedChildProofCapacity
                         )
                     }
+                    try await self.store.promoteValidated(
+                        blockCID: blockHeader.rawCID
+                    )
                 }
                 return
             }

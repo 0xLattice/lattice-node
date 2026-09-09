@@ -77,12 +77,20 @@ part of the design regardless of everything below.
 Negotiation and the tip announcement only ever describe a peer's *main
 chain*; fork choice weighs *subtrees*, so a receiver also needs the losing
 forks. The header graph is fully determined by its **leaves plus parent
-links** (every root node carries its parent CID), so the hello reply announces
-the peer's **frontier** with a one-shot accepted-leaves pull — one page, no
-cursor, no retry state — and each unknown leaf's ordinary predecessor walk
-reassembles its short ancestry down to known history. Announced gaps beyond
+links** (every root node carries its parent CID), so a receiver pulls a peer's
+**frontier** — one accepted-leaves page (the most recently admitted leaves),
+no cursor, no retry state, correlated to the one request sent — once per
+session, at the moment it is at the live edge with respect to that peer: the
+peer's tip within two blocks of the receiver's *acquired* (weighed-inclusive)
+tip, whether at hello for a caught-up peer or when range sync toward it
+completes. Each unknown leaf's ordinary predecessor walk then reassembles its
+short ancestry down to known history — short by construction, because the
+main chain up to the edge is already held; pulled while deep, every leaf would
+descend the whole gap in competition with range sync. Announced gaps beyond
 the live edge (more than two blocks ahead) take the negotiated range sync; the
 predecessor walk serves only the true live edge and the frontier's leaves.
+Acquisition measures gaps, the paging window and the locator against the
+acquired tip; only the act-on surfaces read the validated tip.
 
 ### 2. Acquire the header graph and weigh it
 

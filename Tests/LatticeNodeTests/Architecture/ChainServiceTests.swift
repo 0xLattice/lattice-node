@@ -2129,6 +2129,44 @@ final class ChainServiceTests: XCTestCase {
         )
     }
 
+    /// A restart under deferred execution commonly leaves validated < canonical,
+    /// and the walk is otherwise armed only by a canonical commit: with no
+    /// network traffic nothing would ever run it and templates would build on
+    /// the stale validated tip. Service start (`restoreLocalTransactions`, the
+    /// daemon's pre-networking hook) must arm it itself.
+    func testServiceStartDrivesTheValidateWalkWhenValidatedLagsCanonical()
+        async throws
+    {
+        let depth = 4
+        let producer = try await nexusProcess()
+        let chain = try await mineNexusChain(on: producer, depth: depth)
+        let consumerProcess = try await nexusProcess()
+        for block in chain {
+            let outcome = try await consumerProcess.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producer),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+        let consumer = makeService(process: consumerProcess)
+        let before = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(before?.height, 0, "restart state: validated lags")
+
+        try await consumer.restoreLocalTransactions()
+
+        var validated: UInt64?
+        for _ in 0..<500 {
+            validated = await consumerProcess.deepestValidatedMainChainTip()?.height
+            if validated == UInt64(depth) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(
+            validated, UInt64(depth),
+            "service start must converge validated to canonical unprompted"
+        )
+    }
+
     /// A gap in the below-tip range parks the walk at gap-1: the node keeps
     /// acting on the last validated tip (no wedge) and resumes to the tip once
     /// the missing block becomes admissible.

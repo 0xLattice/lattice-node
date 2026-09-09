@@ -1117,11 +1117,16 @@ public actor ChainService {
         return await pool.snapshot().map(\.cid).sorted()
     }
 
-    /// Rebuilds only user-submitted durable entries before networking starts.
-    /// Peer-originated transactions intentionally remain volatile.
+    /// Service start, before networking: rebuilds only user-submitted durable
+    /// entries (peer-originated transactions intentionally remain volatile)
+    /// and arms the validate walk if the restart left the validated tier
+    /// below the canonical tip — the common state under deferred execution,
+    /// and otherwise driven only by a canonical commit, so on a quiet network
+    /// templates would build on the stale validated tip indefinitely.
     public func restoreLocalTransactions() async throws {
         await acquireOperation()
         defer { releaseOperation() }
+        await reserveValidateWalkIfBehind()
         try await restoreLocalTransactionsLocked()
     }
 
@@ -1815,6 +1820,20 @@ public actor ChainService {
         releaseOperation()
     }
 
+    /// Deferred execution: if the canonical (weighed-inclusive) tip has run
+    /// ahead of the validated tier, execute the gap forward so the node stays
+    /// operable. Reserve — never run inline: callers hold the service gate,
+    /// and the walk re-acquires the process gate per block. `nil` validated
+    /// height means nothing on the main chain is validated yet (below
+    /// genesis), so treat it as strictly behind any canonical tip.
+    private func reserveValidateWalkIfBehind() async {
+        let validatedHeight = await process.deepestValidatedMainChainTip()?.height
+        if let target = await process.canonicalTipHeight(),
+           (validatedHeight.map { Int64($0) } ?? -1) < Int64(target) {
+            reserveValidateWalkWorker()
+        }
+    }
+
     /// Coalescing reserve for the validate-on-candidacy walk. Mirrors
     /// `reserveCanonicalCommitWorker`'s single-instance-Task + dirty-bit shape: a
     /// commit that lands mid-walk sets the dirty bit (so the running worker takes
@@ -2104,20 +2123,10 @@ public actor ChainService {
         _ commit: ChainCommit
     ) async throws {
         guard commit.canonicalChanged else { return }
-        // Deferred execution: if the canonical (weighed-inclusive) tip has run
-        // ahead of the validated tier, execute the gap forward so the node stays
-        // operable. Reserve — never run inline: this method holds the service
-        // gate, and the walk re-acquires the process gate per block. `nil`
-        // validated height means nothing on the main chain is validated yet
-        // (below genesis), so treat it as strictly behind any canonical tip.
         // Reserved BEFORE the mempool bookkeeping below: operability must not
         // hinge on it, and a body-less weighed tip is exactly the case where
         // that bookkeeping has the least to work with.
-        let validatedHeight = await process.deepestValidatedMainChainTip()?.height
-        if let target = await process.canonicalTipHeight(),
-           (validatedHeight.map { Int64($0) } ?? -1) < Int64(target) {
-            reserveValidateWalkWorker()
-        }
+        await reserveValidateWalkIfBehind()
         try await prepareMempoolLocked()
 
         let addedTransactions = try await transactions(
