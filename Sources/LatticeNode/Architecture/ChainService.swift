@@ -2104,6 +2104,20 @@ public actor ChainService {
         _ commit: ChainCommit
     ) async throws {
         guard commit.canonicalChanged else { return }
+        // Deferred execution: if the canonical (weighed-inclusive) tip has run
+        // ahead of the validated tier, execute the gap forward so the node stays
+        // operable. Reserve — never run inline: this method holds the service
+        // gate, and the walk re-acquires the process gate per block. `nil`
+        // validated height means nothing on the main chain is validated yet
+        // (below genesis), so treat it as strictly behind any canonical tip.
+        // Reserved BEFORE the mempool bookkeeping below: operability must not
+        // hinge on it, and a body-less weighed tip is exactly the case where
+        // that bookkeeping has the least to work with.
+        let validatedHeight = await process.deepestValidatedMainChainTip()?.height
+        if let target = await process.canonicalTipHeight(),
+           (validatedHeight.map { Int64($0) } ?? -1) < Int64(target) {
+            reserveValidateWalkWorker()
+        }
         try await prepareMempoolLocked()
 
         let addedTransactions = try await transactions(
@@ -2153,17 +2167,6 @@ public actor ChainService {
         for cid in removedByCID.keys.sorted() where pooledRoots.contains(cid) {
             scheduleTransactionPublication(cid)
         }
-        // Deferred execution: if the canonical (weighed-inclusive) tip has run
-        // ahead of the validated tier, execute the gap forward so the node stays
-        // operable. Reserve — never run inline: this method holds the service
-        // gate, and the walk re-acquires the process gate per block. `nil`
-        // validated height means nothing on the main chain is validated yet
-        // (below genesis), so treat it as strictly behind any canonical tip.
-        let validatedHeight = await process.deepestValidatedMainChainTip()?.height
-        if let target = await process.canonicalTipHeight(),
-           (validatedHeight.map { Int64($0) } ?? -1) < Int64(target) {
-            reserveValidateWalkWorker()
-        }
     }
 
     private func scheduleTransactionPublication(_ cid: String) {
@@ -2201,6 +2204,14 @@ public actor ChainService {
         -> [Transaction] {
         var result: [Transaction] = []
         for cid in blockCIDs {
+            // An accepted-but-weighed (deferred-execution) block holds no body
+            // locally yet: there is nothing of it to reconcile until the walk
+            // validates it, and pool revalidation against the validated tip
+            // covers the rest. An unknown block still fails below.
+            if await process.hasAcceptedBlock(cid),
+               await process.blockValidated(cid) == false {
+                continue
+            }
             let header = BlockHeader(
                 rawCID: cid,
                 node: nil,

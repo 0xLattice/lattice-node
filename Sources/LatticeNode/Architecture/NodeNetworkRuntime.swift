@@ -35,8 +35,9 @@ public struct NetworkCandidateAdmission: Sendable {
     public let preparingChildDirectories: [String]
     public let contentSource: any ContentSource
     /// Admit on the weighed (deferred-execution) tier: enter fork choice on
-    /// verified work without executing. True only for below-tip range-sync
-    /// candidates; live gossip and self-admit stay eager.
+    /// verified work without executing. True for every network-sourced block
+    /// (live gossip, frontier leaves, range-sync pages, predecessor walks);
+    /// only locally produced blocks stay eager.
     public let weighed: Bool
 
     public init(
@@ -510,8 +511,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// previous sync can never alias a new sync's epoch.
     private var nextRangeSyncProgressEpoch: UInt64 = 0
     /// A gap larger than this (announced height minus ours) starts a forward-apply
-    /// range sync; shallower gaps use the direct predecessor path.
-    private static let rangeSyncDepthThreshold: UInt64 = 64
+    /// range sync (negotiated locator, pages, progress watchdog, peer rotation);
+    /// only the true live edge uses the direct predecessor path.
+    private static let rangeSyncDepthThreshold: UInt64 = 2
     private var childProofRecoveryTask: Task<Void, Never>?
     private var childProofRecoveryGeneration: UInt64?
     /// Periodically re-announces this node as a DHT provider of its chain's
@@ -2372,6 +2374,27 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard isCurrentRuntime(generation: generation, process: process) else {
                 return
             }
+            // One-shot frontier pull. The tip announcement and main-chain
+            // range sync never carry losing forks, yet fork choice weighs
+            // subtrees; a peer's accepted LEAVES plus parent links determine
+            // its whole header graph, so one page per session is the entire
+            // discovery — each leaf's predecessor walk reassembles its short
+            // ancestry down to known history. No cursor: the live frontier
+            // is small under the losing-fork budget, and any remainder
+            // re-enters through announcements.
+            if let payload = try? AcceptedLeavesRequestMessage(
+                requestID: makeRequestID(),
+                afterCID: nil
+            ).encoded() {
+                _ = await overlay.sendMessage(
+                    to: peer,
+                    topic: NodeNetworkTopic.acceptedLeavesRequest,
+                    payload: payload
+                )
+            }
+            guard isCurrentRuntime(generation: generation, process: process) else {
+                return
+            }
             scheduleChildProofRecovery(
                 generation: generation,
                 process: process
@@ -2552,20 +2575,20 @@ public actor NodeNetworkRuntime: IvyDelegate {
                           overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
                 }
             }
+            // Network-sourced: weighed. It ranks on verified work and the
+            // validate-on-candidacy walk executes it exactly when canonical.
             let candidate = CandidateSeed(
                 blockCID: announcement.blockCID,
                 package: nil,
-                provider: candidateProvider(peer)
+                provider: candidateProvider(peer),
+                weighed: true
             )
             guard enqueueCandidate(candidate) else { return }
         case NodeNetworkTopic.acceptedLeavesRequest:
-            // Legacy-served: this node no longer walks a peer's accepted
-            // forest (header-graph range sync + live announcements + the
-            // predecessor walk replaced the descent), but keeps answering so
-            // an older peer still syncs from it. The four accepted-leaves /
-            // portable-attachment-index message types, both server handlers
-            // and `acceptedLeafPage` are scheduled for deletion the release
-            // after the fleet upgrades past this one.
+            // Answers a peer's one-shot frontier pull (sent in its hello
+            // reply) with one page of accepted leaves; older peers' cursored
+            // descent still pages through the same handler. The
+            // portable-attachment-index pair stays legacy-served only.
             guard
                 let request = try? AcceptedLeavesRequestMessage.decoded(
                     message.payload
@@ -2607,6 +2630,29 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 topic: NodeNetworkTopic.acceptedLeavesResponse,
                 payload: payload
             )
+        case NodeNetworkTopic.acceptedLeavesResponse:
+            // The frontier page (see the hello reply). Every leaf we lack seeds
+            // weighed; its predecessor walk parks on missing ancestors that
+            // range sync or the walk itself fills. No cursor, no retry state:
+            // the page bound is the wire bound and every CID is verified on
+            // fetch, so an unsolicited page costs no more than announcements.
+            guard let response = try? AcceptedLeavesResponseMessage.decoded(
+                message.payload
+            ) else { return }
+            for cid in response.blockCIDs where CIDIdentity.isCanonical(cid) {
+                await overlay.rememberProvider(rootCID: cid, peer: peer.id)
+                guard isCurrentRuntime(generation: generation, process: process),
+                      overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+                if await process.hasAcceptedBlock(cid) { continue }
+                guard isCurrentRuntime(generation: generation, process: process),
+                      overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+                _ = enqueueCandidate(CandidateSeed(
+                    blockCID: cid,
+                    package: nil,
+                    provider: candidateProvider(peer),
+                    weighed: true
+                ))
+            }
         case NodeNetworkTopic.forwardRangeRequest:
             guard
                 let request = try? ForwardRangeRequestMessage.decoded(

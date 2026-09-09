@@ -74,6 +74,16 @@ never punish). An empty page is never again conflated with "caught up." This
 is the Bitcoin block-locator convention, and it is the mandatory, SOTA-shared
 part of the design regardless of everything below.
 
+Negotiation and the tip announcement only ever describe a peer's *main
+chain*; fork choice weighs *subtrees*, so a receiver also needs the losing
+forks. The header graph is fully determined by its **leaves plus parent
+links** (every root node carries its parent CID), so the hello reply announces
+the peer's **frontier** with a one-shot accepted-leaves pull — one page, no
+cursor, no retry state — and each unknown leaf's ordinary predecessor walk
+reassembles its short ancestry down to known history. Announced gaps beyond
+the live edge (more than two blocks ahead) take the negotiated range sync; the
+predecessor walk serves only the true live edge and the frontier's leaves.
+
 ### 2. Acquire the header graph and weigh it
 
 From the common ancestor, retrieve block **headers** (targeted root
@@ -82,6 +92,9 @@ enters fork choice immediately — no body, no execution. Headers may be
 acquired from many peers in parallel and out of order; a header's *place* is
 its parent CID, so assembly is trivial. Fork choice ranks whole subtrees over
 this header/weight graph exactly as it does today (it is already state-blind).
+Every network-sourced block — live gossip, frontier leaves, range-sync pages
+and the predecessor walks they seed — enters on the weighed tier; only a block
+this node produced itself is executed eagerly.
 
 For a **root** chain a header's own PoW is its work, self-contained. For a
 **child** chain a header's weight is *inherited* — it is the securing work of

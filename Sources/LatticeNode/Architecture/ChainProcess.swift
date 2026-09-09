@@ -1222,6 +1222,19 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         (try? await store.hasAcceptedBlock(cid)) ?? false
     }
 
+    /// Ungated: whether `cid` is accepted on the validated (executed) tier, as
+    /// opposed to merely weighed.
+    public func blockValidated(_ cid: String) async -> Bool {
+        (try? await store.blockValidated(cid)) ?? false
+    }
+
+    /// Fork choice's same-chain subtree weight of `cid`, or nil when the block
+    /// is unknown or the process is not active.
+    func subtreeWeight(of cid: String) async -> WorkSum? {
+        guard case .active(let level) = runtimePhase else { return nil }
+        return await level.chain.subtreeWeight(forHash: cid)
+    }
+
     /// Walks durable parent edges from `cid` toward genesis and returns the
     /// first ancestor that is NOT accepted locally — the block an
     /// accepted-but-disconnected segment is actually missing — or nil when

@@ -102,6 +102,7 @@ private actor TopicRecorder {
     private var topics: [String] = []
     func append(_ topic: String) { topics.append(topic) }
     func contains(_ topic: String) -> Bool { topics.contains(topic) }
+    func count(of topic: String) -> Int { topics.filter { $0 == topic }.count }
 }
 
 private actor AuthenticatedPeerRecorder: IvyDelegate {
@@ -5981,6 +5982,514 @@ final class NetworkTrustTests: XCTestCase {
         )
     }
 
+    // MARK: frontier hello — the header graph is its leaves plus parent links
+
+    /// The overlay hello reply carries the tip announcement AND exactly one
+    /// accepted-leaves (frontier) request: a peer's leaves plus parent links
+    /// determine its whole header graph, losing forks included, so discovery
+    /// needs the frontier once per session and no cursoring.
+    func testOverlayHelloRequestsTheFrontierExactlyOnce() async throws {
+        let fixture = try await overlayRuntime(
+            keyByte: 0xc1,
+            requestTimeout: .seconds(5)
+        )
+        let topics = TopicRecorder()
+        let client = Ivy(config: IvyConfig(
+            signingKey: signingKey(0xc2),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        let delegate = TopicRecordingPeer(recorder: topics)
+        await client.installTestDelegate(delegate)
+        let service = networkService(
+            process: fixture.process,
+            runtime: fixture.runtime
+        )
+        do {
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: transactionServiceHandlers(service)
+            )
+            try await connectAndHello(
+                client,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            try await waitForTopic(
+                NodeNetworkTopic.acceptedLeavesRequest,
+                in: topics
+            )
+            // Settle: nothing later in the hello reply may send a second one.
+            try await Task.sleep(for: .milliseconds(300))
+            let frontierRequests = await topics.count(
+                of: NodeNetworkTopic.acceptedLeavesRequest
+            )
+            let announcements = await topics.count(
+                of: NodeNetworkTopic.blockAnnouncement
+            )
+            XCTAssertEqual(frontierRequests, 1)
+            XCTAssertEqual(announcements, 1)
+        } catch {
+            await client.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await client.stop()
+        await fixture.runtime.stop()
+    }
+
+    /// A joiner discovers a producer's LOSING fork from the frontier pull alone
+    /// (range sync pages only the main chain; announcements carry only the
+    /// tip). The fresh joiner first cold-syncs the canonical chain — every
+    /// network block admitted weighed, then validated by the walk — and, after
+    /// the producer silently accepts a losing sibling, a rejoin's one-shot
+    /// frontier pull weighs that sibling into fork choice without ever
+    /// executing it, while the joiner keeps building on the canonical tip.
+    func testJoinerWeighsLosingForkFromFrontierWithoutExecutingIt() async throws {
+        let producer = try await overlayRuntime(
+            keyByte: 0xc3,
+            requestTimeout: .seconds(5)
+        )
+        let joiner = try await overlayRuntime(
+            keyByte: 0xc4,
+            requestTimeout: .seconds(5),
+            bootstrapPeers: [producer.endpoint]
+        )
+        let producerService = networkService(
+            process: producer.process,
+            runtime: producer.runtime
+        )
+        let joinerService = networkService(
+            process: joiner.process,
+            runtime: joiner.runtime
+        )
+        let joinerAdmissions = NetworkEventRecorder()
+        let joinerHandlers = transactionServiceHandlers(
+            joinerService,
+            admissions: joinerAdmissions
+        )
+
+        // Producer history: genesis-1-2-3-4-5 canonical.
+        let clock = TestBlockClock()
+        var parent = try await producer.process.canonicalTipBlock()
+        var canonical: [String] = []
+        var block2 = parent
+        for height in 1...5 {
+            parent = try await acceptNexusBlock(
+                on: parent,
+                process: producer.process,
+                timestamp: clock.next()
+            )
+            canonical.append(try BlockHeader(node: parent).rawCID)
+            if height == 2 { block2 = parent }
+        }
+        let tipCID = try XCTUnwrap(canonical.last)
+
+        do {
+            try await producer.runtime.start(
+                process: producer.process,
+                handlers: transactionServiceHandlers(producerService)
+            )
+            try await joiner.runtime.start(
+                process: joiner.process,
+                handlers: joinerHandlers
+            )
+            try await waitUntil("joiner validates the canonical tip") {
+                await joiner.process.status().tipCID == tipCID
+            }
+
+            // A losing sibling of 3 (on 2), accepted by the producer's process
+            // only: no announcement ever carries it, and it is off the main
+            // chain, so only the frontier can reveal it.
+            let losing = try await acceptNexusBlock(
+                on: block2,
+                process: producer.process,
+                timestamp: clock.next()
+            )
+            let losingCID = try BlockHeader(node: losing).rawCID
+            let producerTip = await producer.process.status().tipCID
+            XCTAssertEqual(producerTip, tipCID, "the sibling must lose")
+
+            // Rejoin: the new session's hello pulls the frontier once.
+            await joiner.runtime.stop()
+            try await joiner.runtime.start(
+                process: joiner.process,
+                handlers: joinerHandlers
+            )
+            try await waitUntil("joiner weighs the losing sibling") {
+                await joiner.process.hasAcceptedBlock(losingCID)
+            }
+
+            let losingValidated = await joiner.process.blockValidated(losingCID)
+            XCTAssertFalse(losingValidated, "a losing fork is weighed, never executed")
+            for cid in canonical {
+                let validated = await joiner.process.blockValidated(cid)
+                XCTAssertTrue(validated, "canonical block must be walk-validated")
+            }
+            let admissions = await joinerAdmissions.snapshot()
+            XCTAssertTrue(
+                admissions.contains("\(losingCID)|weighed"),
+                "admissions: \(admissions)"
+            )
+            XCTAssertTrue(
+                admissions.allSatisfy { $0.hasSuffix("|weighed") },
+                "every network-sourced block seeds weighed: \(admissions)"
+            )
+            let joinerTip = await joiner.process.status().tipCID
+            XCTAssertEqual(joinerTip, tipCID)
+            let template = try await joinerService.miningTemplate(
+                MiningTemplateRequest()
+            )
+            XCTAssertEqual(template.block.parent?.rawCID, tipCID)
+        } catch {
+            await joiner.runtime.stop()
+            await producer.runtime.stop()
+            throw error
+        }
+        await joiner.runtime.stop()
+        await producer.runtime.stop()
+    }
+
+    /// Subtree weights are complete. At the fork on 2, branch X wins only
+    /// because of a LOSING sub-subtree S under it: X = X3 + {X4a,X5a,X6a}
+    /// canonical + S {X4b,X5b} = 6, versus Y = Y3..Y7 = 5. A joiner that
+    /// learned Y's leaf but not S would reorg to Y; the frontier pull delivers
+    /// both leaves, so the joiner's fork choice matches the producer's, with S
+    /// weighed (strictly lighter than its sibling, so never canonical, never
+    /// executed).
+    func testJoinerForkChoiceMatchesProducerOnlyWithItsLosingSubtree()
+        async throws
+    {
+        let producer = try await overlayRuntime(
+            keyByte: 0xc5,
+            requestTimeout: .seconds(5)
+        )
+        let joiner = try await overlayRuntime(
+            keyByte: 0xc6,
+            requestTimeout: .seconds(5),
+            bootstrapPeers: [producer.endpoint]
+        )
+        let producerService = networkService(
+            process: producer.process,
+            runtime: producer.runtime
+        )
+        let joinerService = networkService(
+            process: joiner.process,
+            runtime: joiner.runtime
+        )
+        let joinerHandlers = transactionServiceHandlers(joinerService)
+
+        let clock = TestBlockClock()
+        func extend(
+            _ parent: Block, by count: Int
+        ) async throws -> [Block] {
+            var blocks: [Block] = []
+            var current = parent
+            for _ in 0..<count {
+                current = try await acceptNexusBlock(
+                    on: current,
+                    process: producer.process,
+                    timestamp: clock.next()
+                )
+                blocks.append(current)
+            }
+            return blocks
+        }
+        func cid(_ block: Block) throws -> String {
+            try BlockHeader(node: block).rawCID
+        }
+        let genesis = try await producer.process.canonicalTipBlock()
+        let trunk = try await extend(genesis, by: 2)
+        let block2 = try XCTUnwrap(trunk.last)
+        let x3 = try await acceptNexusBlock(
+            on: block2,
+            process: producer.process,
+            timestamp: clock.next()
+        )
+        let xCanonical = try await extend(x3, by: 3)
+        let xTipCID = try cid(try XCTUnwrap(xCanonical.last))
+
+        do {
+            try await producer.runtime.start(
+                process: producer.process,
+                handlers: transactionServiceHandlers(producerService)
+            )
+            try await joiner.runtime.start(
+                process: joiner.process,
+                handlers: joinerHandlers
+            )
+            try await waitUntil("joiner validates X's tip") {
+                await joiner.process.status().tipCID == xTipCID
+            }
+
+            // Silently (process-only) add S under X3 and the competitor Y.
+            let s = try await extend(x3, by: 2)
+            let y = try await extend(block2, by: 5)
+            let sLeafCID = try cid(try XCTUnwrap(s.last))
+            let yLeafCID = try cid(try XCTUnwrap(y.last))
+            let producerTip = await producer.process.status().tipCID
+            XCTAssertEqual(producerTip, xTipCID, "X must still win on the producer")
+
+            await joiner.runtime.stop()
+            try await joiner.runtime.start(
+                process: joiner.process,
+                handlers: joinerHandlers
+            )
+            // A leaf is accepted the moment it is fetched, while its segment
+            // is still disconnected; the header graph is complete only once
+            // the subtree weights at the fork match the producer's.
+            let x3CID = try cid(x3)
+            let y3CID = try cid(try XCTUnwrap(y.first))
+            let producerXWeight = await producer.process.subtreeWeight(of: x3CID)
+            let producerYWeight = await producer.process.subtreeWeight(of: y3CID)
+            let producerX = try XCTUnwrap(producerXWeight)
+            let producerY = try XCTUnwrap(producerYWeight)
+            XCTAssertGreaterThan(producerX, producerY, "X outweighs Y only with S")
+            try await waitUntil("joiner assembles both subtrees") {
+                let joinerX = await joiner.process.subtreeWeight(of: x3CID)
+                let joinerY = await joiner.process.subtreeWeight(of: y3CID)
+                return joinerX == producerX && joinerY == producerY
+            }
+            try await waitUntil("joiner settles on X") {
+                await joiner.process.status().tipCID == xTipCID
+            }
+            let hasS = await joiner.process.hasAcceptedBlock(sLeafCID)
+            let hasY = await joiner.process.hasAcceptedBlock(yLeafCID)
+            XCTAssertTrue(hasS && hasY)
+            for block in s {
+                let validated = await joiner.process.blockValidated(try cid(block))
+                XCTAssertFalse(validated, "S is weighed, never executed")
+            }
+            let template = try await joinerService.miningTemplate(
+                MiningTemplateRequest()
+            )
+            XCTAssertEqual(template.block.parent?.rawCID, xTipCID)
+        } catch {
+            await joiner.runtime.stop()
+            await producer.runtime.stop()
+            throw error
+        }
+        await joiner.runtime.stop()
+        await producer.runtime.stop()
+    }
+
+    /// A live-gossiped block is admitted WEIGHED (rank on verified work), then
+    /// executed by the validate-on-candidacy walk once canonical, so the
+    /// validated tip and the mining template still reflect it.
+    func testLiveAnnouncementIsWeighedThenValidatedOnCandidacy() async throws {
+        let producer = try await overlayRuntime(
+            keyByte: 0xc7,
+            requestTimeout: .seconds(5)
+        )
+        let joiner = try await overlayRuntime(
+            keyByte: 0xc8,
+            requestTimeout: .seconds(5),
+            bootstrapPeers: [producer.endpoint]
+        )
+        let producerService = networkService(
+            process: producer.process,
+            runtime: producer.runtime
+        )
+        let joinerService = networkService(
+            process: joiner.process,
+            runtime: joiner.runtime
+        )
+        let producerInventory = NetworkEventRecorder()
+        let joinerInventory = NetworkEventRecorder()
+        let joinerAdmissions = NetworkEventRecorder()
+        do {
+            try await producer.runtime.start(
+                process: producer.process,
+                handlers: transactionServiceHandlers(
+                    producerService,
+                    inventoryRequests: producerInventory
+                )
+            )
+            try await joiner.runtime.start(
+                process: joiner.process,
+                handlers: transactionServiceHandlers(
+                    joinerService,
+                    inventoryRequests: joinerInventory,
+                    admissions: joinerAdmissions
+                )
+            )
+            // Both hellos have landed once each side answered the other's
+            // inventory request; anything mined now travels as live gossip.
+            try await waitForEvent(in: producerInventory, phase: "producer hello")
+            try await waitForEvent(in: joinerInventory, phase: "joiner hello")
+
+            // A real body: the weighed admit stores only the boundary, so the
+            // walk must fetch this transaction over the network to validate.
+            _ = try await producerService.submitTransaction(
+                SubmitTransactionRequest(
+                    transaction: try signedNetworkTransaction(chainPath: ["Nexus"])
+                )
+            )
+            let template = try await producerService.miningTemplate(
+                MiningTemplateRequest()
+            )
+            let mined = try await producerService.submitWork(SubmitWorkRequest(
+                workID: template.workID,
+                nonce: 0
+            ))
+            XCTAssertTrue(mined.accepted)
+            let drained = await producerService.status().mempoolCount
+            XCTAssertEqual(drained, 0, "the block must carry the transaction")
+            let minedCID = try BlockHeader(node: template.block).rawCID
+
+            try await waitUntil("joiner validates the live block") {
+                await joiner.process.status().tipCID == minedCID
+            }
+            // The hello reply's tip announcement also admits (as a duplicate)
+            // the peer's genesis; only the live block is under test.
+            let admissions = (await joinerAdmissions.snapshot())
+                .filter { $0.hasPrefix(minedCID) }
+            XCTAssertEqual(admissions, ["\(minedCID)|weighed"])
+            let validated = await joiner.process.blockValidated(minedCID)
+            XCTAssertTrue(validated)
+            let joinerTemplate = try await joinerService.miningTemplate(
+                MiningTemplateRequest()
+            )
+            XCTAssertEqual(joinerTemplate.block.parent?.rawCID, minedCID)
+        } catch {
+            await joiner.runtime.stop()
+            await producer.runtime.stop()
+            throw error
+        }
+        await joiner.runtime.stop()
+        await producer.runtime.stop()
+    }
+
+    /// A joiner one block behind (direct predecessor path, no range sync)
+    /// weighs the announced block and must then FETCH its deferred body from
+    /// the peer to validate it: the joiner never saw the block's transaction
+    /// gossiped, so nothing but the network fetch can complete the walk.
+    func testShallowJoinerFetchesDeferredBodyOfLiveEdgeBlock() async throws {
+        let producer = try await overlayRuntime(
+            keyByte: 0xc9,
+            requestTimeout: .seconds(5)
+        )
+        let joiner = try await overlayRuntime(
+            keyByte: 0xca,
+            requestTimeout: .seconds(5),
+            bootstrapPeers: [producer.endpoint]
+        )
+        let producerService = networkService(
+            process: producer.process,
+            runtime: producer.runtime
+        )
+        let joinerService = networkService(
+            process: joiner.process,
+            runtime: joiner.runtime
+        )
+        let joinerAdmissions = NetworkEventRecorder()
+        do {
+            try await producer.runtime.start(
+                process: producer.process,
+                handlers: transactionServiceHandlers(producerService)
+            )
+            // Mined BEFORE the joiner exists: the transaction is never relayed
+            // to it, so the block's body is only available over the network.
+            _ = try await producerService.submitTransaction(
+                SubmitTransactionRequest(
+                    transaction: try signedNetworkTransaction(chainPath: ["Nexus"])
+                )
+            )
+            let template = try await producerService.miningTemplate(
+                MiningTemplateRequest()
+            )
+            let mined = try await producerService.submitWork(SubmitWorkRequest(
+                workID: template.workID,
+                nonce: 0
+            ))
+            XCTAssertTrue(mined.accepted)
+            let drained = await producerService.status().mempoolCount
+            XCTAssertEqual(drained, 0, "the block must carry the transaction")
+            let minedCID = try BlockHeader(node: template.block).rawCID
+
+            try await joiner.runtime.start(
+                process: joiner.process,
+                handlers: transactionServiceHandlers(
+                    joinerService,
+                    admissions: joinerAdmissions
+                )
+            )
+            try await waitUntil("joiner validates the announced block") {
+                await joiner.process.status().tipCID == minedCID
+            }
+            let admissions = (await joinerAdmissions.snapshot())
+                .filter { $0.hasPrefix(minedCID) }
+            XCTAssertEqual(admissions, ["\(minedCID)|weighed"])
+            let joinerTemplate = try await joinerService.miningTemplate(
+                MiningTemplateRequest()
+            )
+            XCTAssertEqual(joinerTemplate.block.parent?.rawCID, minedCID)
+        } catch {
+            await joiner.runtime.stop()
+            await producer.runtime.stop()
+            throw error
+        }
+        await joiner.runtime.stop()
+        await producer.runtime.stop()
+    }
+
+    /// Strictly increasing, slightly-past block timestamps (admission is
+    /// `timestamp <= now`).
+    private final class TestBlockClock {
+        private var current = Int64(Date().timeIntervalSince1970 * 1_000) - 5_000
+        func next() -> Int64 {
+            current += 100
+            return current
+        }
+    }
+
+    /// Build an empty block on `parent`, grind its (max-target) nonce, and
+    /// accept it eagerly on `process` — a producer's own history.
+    private func acceptNexusBlock(
+        on parent: Block,
+        process: ChainProcess,
+        timestamp: Int64
+    ) async throws -> Block {
+        var nonce: UInt64 = 0
+        var block = try await BlockBuilder.buildBlock(
+            previous: parent,
+            timestamp: timestamp,
+            nonce: nonce,
+            fetcher: process
+        )
+        while block.proofOfWorkHash() > block.target {
+            nonce += 1
+            block = try await BlockBuilder.buildBlock(
+                previous: parent,
+                timestamp: timestamp,
+                nonce: nonce,
+                fetcher: process
+            )
+        }
+        let outcome = try await process.admit(BlockHeader(node: block))
+        guard outcome.decision.isAccepted else {
+            throw NetworkTestError.failedPhase(
+                "producer block rejected: \(outcome.decision)"
+            )
+        }
+        return block
+    }
+
+    private func waitUntil(
+        _ phase: String,
+        attempts: Int = 3_000,
+        _ condition: () async throws -> Bool
+    ) async throws {
+        for _ in 0..<attempts {
+            if try await condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw NetworkTestError.failedPhase(phase)
+    }
+
     private func canonicalNetworkBlock() async throws -> Block {
         let process = try await canonicalNetworkProcess()
         return try await process.canonicalTipBlock()
@@ -6069,23 +6578,41 @@ final class NetworkTrustTests: XCTestCase {
             acceptedTransactionPublisher: { [weak runtime] rootCID in
                 guard let runtime else { throw CancellationError() }
                 try await runtime.publishTransaction(rootCID)
+            },
+            // Mirror the daemon: a weighed admit stored only the boundary, so the
+            // validate walk pulls the deferred body over the network.
+            validateBodySource: { [weak runtime] blockCID, admit in
+                guard let runtime else { throw CancellationError() }
+                return try await runtime.remoteContentSource
+                    .withRoot(blockCID) { session in
+                        try await admit(session)
+                    }
             }
         )
     }
 
+    /// Handlers that pass the runtime's admission tier through (as the daemon
+    /// does); `admissions` records each attempt as `<cid>|weighed` or
+    /// `<cid>|eager`.
     private func transactionServiceHandlers(
         _ service: ChainService,
         inventoryRequests: NetworkEventRecorder? = nil,
-        transactions: NetworkEventRecorder? = nil
+        transactions: NetworkEventRecorder? = nil,
+        admissions: NetworkEventRecorder? = nil
     ) -> NodeNetworkHandlers {
         NodeNetworkHandlers(
             admission: { [weak service] admission in
                 guard let service else { throw CancellationError() }
+                await admissions?.append(
+                    "\(admission.header.rawCID)|"
+                        + (admission.weighed ? "weighed" : "eager")
+                )
                 return try await service.admitNetworkCandidate(
                     admission.header,
                     authenticatedChildPackage: admission.authenticatedChildPackage,
                     preparingChildDirectories: admission.preparingChildDirectories,
-                    contentSource: admission.contentSource
+                    contentSource: admission.contentSource,
+                    weighed: admission.weighed
                 )
             },
             transaction: { [weak service] transaction in

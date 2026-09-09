@@ -14,14 +14,15 @@ struct CandidateProvider: Hashable, Sendable {
 struct CandidateAcquirer {
     static let readyCapacity = 1_024
     // Operator budget for parked/waiting attempts: the live-edge predecessor
-    // walk (a chain of parks from an announced tip down to the first block
-    // we hold, each block possibly holding a rootless .predecessor park AND a
-    // rooted evidence wait at once) plus durable-descendant seeding at
-    // restart. Must comfortably exceed a shallow-gap walk (rangeSyncDepthThreshold
-    // x 2 slots); deeper gaps go through range sync, which admits parent-first
-    // and retains nothing. Over budget, the oldest park is evicted, never the
-    // fresh one — an evicted obligation re-enters through a later announcement
-    // or a range-sync page.
+    // walk (a chain of parks from an announced tip or frontier leaf down to
+    // the first block we hold, each block possibly holding a rootless
+    // .predecessor park AND a rooted evidence wait at once) plus
+    // durable-descendant seeding at restart. Generous relative to the live
+    // edge: gaps beyond rangeSyncDepthThreshold go through range sync, which
+    // admits parent-first and retains nothing, so a walk only ever spans a
+    // leaf's short ancestry. Over budget, the oldest park is evicted, never
+    // the fresh one — an evicted obligation re-enters through a later
+    // announcement, frontier page or range-sync page.
     static let retainedCapacity = 512
 
     enum WaitReason: Equatable, Sendable {
@@ -50,8 +51,8 @@ struct CandidateAcquirer {
         let package: AuthenticatedChildPackage?
         let providers: [CandidateProvider]
         /// Admit this candidate on the weighed tier (deferred execution): enter
-        /// fork choice on verified work without executing it. Set only for
-        /// below-tip range-sync candidates; eager-wins (see `Seed.weighed`).
+        /// fork choice on verified work without executing it. Set for every
+        /// network-sourced candidate; eager-wins (see `Seed.weighed`).
         let weighed: Bool
     }
 
@@ -62,8 +63,9 @@ struct CandidateAcquirer {
         let provider: CandidateProvider?
         /// Request weighed (deferred-execution) admission for this candidate.
         /// Monotone eager-wins: once ANY eager seed touches a CID the block
-        /// stays eager, so a below-tip range-sync flag never downgrades a block
-        /// a live/self-admit path needs executed now.
+        /// stays eager, so a network-sourced flag never downgrades a block a
+        /// self-admit path needs executed now. A predecessor park seeds the
+        /// missing ancestor on its descendant's tier.
         let weighed: Bool
 
         init(
@@ -211,9 +213,11 @@ struct CandidateAcquirer {
         for predecessorCID in durableDescendants.keys.sorted()
             where !descendantCIDs.contains(predecessorCID) {
             guard frontierSeeded < Self.retainedCapacity else { break }
+            // Network history: weighed.
             _ = observe(Seed(
                 blockCID: predecessorCID,
-                package: nil
+                package: nil,
+                weighed: true
             ), retainingOverflow: true)
             frontierSeeded += 1
         }
@@ -503,9 +507,13 @@ struct CandidateAcquirer {
                 record.attempts[ticket.key.rootCID] = attempt
                 waitingOn[predecessorCID, default: []].insert(ticket.key)
                 records[ticket.key.blockCID] = record
+                // The missing ancestor is seeded on its descendant's tier: a
+                // weighed (network-sourced) walk stays weighed all the way
+                // down; eager-wins still applies if anyone needs it executed.
                 _ = observe(Seed(
                     blockCID: predecessorCID,
-                    package: nil
+                    package: nil,
+                    weighed: attempt.weighed
                 ), retainingOverflow: true)
                 // Carry the descendant's providers onto the predecessor seed:
                 // a provider-less candidate can only be fetched by dialing a
@@ -518,7 +526,8 @@ struct CandidateAcquirer {
                     _ = observe(Seed(
                         blockCID: predecessorCID,
                         package: nil,
-                        provider: provider
+                        provider: provider,
+                        weighed: attempt.weighed
                     ), retainingOverflow: true)
                 }
                 fillReadyCapacity()
