@@ -927,10 +927,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 * Self.maximumCandidateWaitTicks
         )
         pendingEvidenceIndexes.removeAll()
-        for pending in pendingParentChainFacts.values {
-            pending.continuation?.resume(returning: nil)
-        }
-        pendingParentChainFacts.removeAll()
+        discardPendingParentChainFacts(where: { _ in true }, requeue: false)
         for pending in pendingGenesisVerifications.values {
             pending.continuation.resume(returning: false)
         }
@@ -2308,15 +2305,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         if case .parent? = removedRole {
             pendingEvidenceIndexes.removeAll()
-            let interrupted = pendingParentChainFacts.values.filter {
-                $0.peer.key == key
-            }
-            pendingParentChainFacts = pendingParentChainFacts.filter {
-                $0.value.peer.key != key
-            }
-            for pending in interrupted {
-                retryParentFactCandidate(pending)
-            }
+            // A response can never arrive on the gone session: requeue the
+            // live candidates now, and resolve a validate walk's request nil
+            // (it is not a candidate — re-seeding an accepted main-chain block
+            // would be wrong — and an unresumed continuation would suspend
+            // the walk for the process lifetime).
+            discardPendingParentChainFacts(
+                where: { $0.peer.key == key },
+                requeue: true
+            )
         }
         cancelChildCandidateWork(for: key)
         let reservations = pendingCandidateReservations.filter {
@@ -5936,32 +5933,79 @@ public actor NodeNetworkRuntime: IvyDelegate {
         for blockCID: String,
         requirement: CrossChainEvidenceRequirement
     ) async -> AuthenticatedChildPackage? {
-        guard isRunning, let process, !configuration.address.isNexus else {
+        guard isRunning, let process, !configuration.address.isNexus,
+              let fact = parentFact(for: requirement) else {
             return nil
         }
         let generation = runtimeGeneration
-        let parentPath = Array(configuration.chainPath.dropLast())
-        let fact: ParentChainFact
-        switch requirement {
-        case .parentGenesis(
-            let requiredPath, let directory, let childGenesisCID, let parentStateCID
-        ) where requiredPath == parentPath
-                && directory == configuration.address.directory:
-            fact = .genesis(
-                childGenesisCID: childGenesisCID,
-                parentStateCID: parentStateCID
-            )
-        case .parentStateContinuity(let requiredPath, let fromStateCID, let toStateCID)
-            where requiredPath == parentPath:
-            fact = .continuity(fromStateCID: fromStateCID, toStateCID: toStateCID)
-        default:
-            return nil
-        }
         guard let package = try? await process.recoveredAuthenticatedChildPackage(
             for: blockCID
         ), isCurrentRuntime(generation: generation, process: process) else {
             return nil
         }
+        return await awaitParentFact(
+            fact,
+            for: blockCID,
+            package: package,
+            generation: generation,
+            process: process
+        )
+    }
+
+    #if DEBUG
+    /// Test seam: `resolveValidateEvidence` with the block's package supplied
+    /// instead of recovered from the store — the request, await and every
+    /// resumption path are the production ones.
+    public func resolveValidateEvidenceForTesting(
+        for blockCID: String,
+        requirement: CrossChainEvidenceRequirement,
+        package: AuthenticatedChildPackage
+    ) async -> AuthenticatedChildPackage? {
+        guard isRunning, let process, let fact = parentFact(for: requirement) else {
+            return nil
+        }
+        return await awaitParentFact(
+            fact,
+            for: blockCID,
+            package: package,
+            generation: runtimeGeneration,
+            process: process
+        )
+    }
+    #endif
+
+    private func parentFact(
+        for requirement: CrossChainEvidenceRequirement
+    ) -> ParentChainFact? {
+        let parentPath = Array(configuration.chainPath.dropLast())
+        switch requirement {
+        case .parentGenesis(
+            let requiredPath, let directory, let childGenesisCID, let parentStateCID
+        ) where requiredPath == parentPath
+                && directory == configuration.address.directory:
+            return .genesis(
+                childGenesisCID: childGenesisCID,
+                parentStateCID: parentStateCID
+            )
+        case .parentStateContinuity(let requiredPath, let fromStateCID, let toStateCID)
+            where requiredPath == parentPath:
+            return .continuity(fromStateCID: fromStateCID, toStateCID: toStateCID)
+        default:
+            return nil
+        }
+    }
+
+    /// Send the parent-fact request and await its outcome: the merged package
+    /// on a fact, nil on refusal, timeout, parent disconnect or reset. Every
+    /// removal of the pending entry resumes the continuation (see
+    /// `discardPendingParentChainFacts`), so the walk never stays suspended.
+    private func awaitParentFact(
+        _ fact: ParentChainFact,
+        for blockCID: String,
+        package: AuthenticatedChildPackage,
+        generation: UInt64,
+        process: ChainProcess
+    ) async -> AuthenticatedChildPackage? {
         SyncTrace.log(
             "validate evidence request block=\(blockCID.prefix(12)) fact=\(fact)"
         )
@@ -5979,6 +6023,26 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     process: process,
                     continuation: continuation
                 )
+            }
+        }
+    }
+
+    /// The one teardown path for pending parent-fact requests: a walk's
+    /// continuation is resumed nil, a live candidate's entry is requeued when
+    /// asked. No other site may drop an entry without going through here.
+    private func discardPendingParentChainFacts(
+        where predicate: (PendingParentChainFact) -> Bool,
+        requeue: Bool
+    ) {
+        let discarded = pendingParentChainFacts.values.filter(predicate)
+        pendingParentChainFacts = pendingParentChainFacts.filter {
+            !predicate($0.value)
+        }
+        for pending in discarded {
+            if let continuation = pending.continuation {
+                continuation.resume(returning: nil)
+            } else if requeue {
+                retryParentFactCandidate(pending)
             }
         }
     }
@@ -6019,23 +6083,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 package: package,
                 continuation: continuation
             )
-        _ = await hierarchy.sendMessage(
-            to: parent,
-            topic: NodeNetworkTopic.parentChainFactRequest,
-            payload: payload
-        )
-        guard isCurrentRuntime(
-            generation: generation,
-            process: process
-        ) else {
-            pendingParentChainFacts.removeValue(
-                forKey: request.requestID
-            )?.continuation?.resume(returning: nil)
-            return
-        }
-        // A failed enqueue is transient. Keep the request until the same
-        // timeout used for an unanswered parent response requeues the
-        // candidate; a disconnect requeues it sooner.
+        // Armed BEFORE the send suspends: the entry must always have a
+        // bounded life, whatever happens during or after the send. A failed
+        // enqueue is transient — the same timeout used for an unanswered
+        // parent response requeues the candidate (or resolves the walk's
+        // request nil); a disconnect does so sooner.
         let delay = Self.nanoseconds(
             planeConfigurations.hierarchy.requestTimeout
         )
@@ -6046,6 +6098,21 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 generation: generation
             )
         }
+        _ = await hierarchy.sendMessage(
+            to: parent,
+            topic: NodeNetworkTopic.parentChainFactRequest,
+            payload: payload
+        )
+        guard isCurrentRuntime(
+            generation: generation,
+            process: process
+        ) else {
+            discardPendingParentChainFacts(
+                where: { $0.request.requestID == request.requestID },
+                requeue: false
+            )
+            return
+        }
     }
 
     private func acceptParentChainFact(
@@ -6054,6 +6121,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         process: ChainProcess
     ) async {
         guard isCurrentRuntime(generation: generation, process: process) else {
+            pending.continuation?.resume(returning: nil)
             return
         }
         let parentPath = Array(configuration.chainPath.dropLast())

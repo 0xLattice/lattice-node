@@ -478,6 +478,39 @@ final class NodeStoreTests: XCTestCase {
         XCTAssertNotNil(store)
     }
 
+    /// The leaf flag is a derived index over the verified parent links: a
+    /// disagreeing row is REPAIRED by the boot audit from those links, never
+    /// treated as corruption that wipes the store.
+    func testBootAuditRepairsAWrongLeafFlag() async throws {
+        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let store = try makeStore(path: path)
+        try await store.stage(
+            blockBatch(postStateCID: "root-state", blockHash: "root"),
+            volumeRoots: []
+        )
+        try await store.stage(
+            blockBatch(
+                postStateCID: "child-state",
+                blockHash: "child",
+                parentBlockHash: "root",
+                blockHeight: 1
+            ),
+            volumeRoots: []
+        )
+        let database = try NodeSQLite(path: path.path)
+        // Both flags deliberately wrong.
+        _ = try database.execute(
+            "UPDATE accepted_blocks SET leaf = CASE block_cid WHEN 'root' THEN 1 ELSE 0 END"
+        )
+        try await store.auditNormalizedIndexes()
+        var leaves: [String: Int64] = [:]
+        for row in try database.query("SELECT block_cid, leaf FROM accepted_blocks") {
+            leaves[try XCTUnwrap(row["block_cid"]?.textValue)] =
+                try XCTUnwrap(row["leaf"]?.intValue)
+        }
+        XCTAssertEqual(leaves, ["root": 0, "child": 1])
+    }
+
     /// Leaf-ness is maintained on insert in either order: a parent inserted
     /// after its child (a disconnected segment arriving out of order) is not
     /// a leaf, and inserting a child retires its parent's flag.

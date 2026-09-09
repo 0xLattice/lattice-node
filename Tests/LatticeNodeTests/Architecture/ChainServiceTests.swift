@@ -2197,9 +2197,11 @@ final class ChainServiceTests: XCTestCase {
     }
 
     /// Eviction demotes OFF-main-chain validated blocks; if that fork later
-    /// wins, the main chain carries weighed holes below still-validated
-    /// blocks. The probe must equal the full downward walk after such a
-    /// reorg back — never an upward walk from a stale floor into a hole.
+    /// wins, the main chain carries weighed holes BELOW still-validated
+    /// blocks. A cached floor that sits below such a hole (parked at genesis
+    /// by an intervening third fork) must not walk up into the hole and
+    /// under-report: the probe must equal the full downward walk — the
+    /// validated block above the hole.
     func testValidatedTipMatchesTheDownwardWalkAfterReorgBackOverAHole()
         async throws
     {
@@ -2257,9 +2259,27 @@ final class ChainServiceTests: XCTestCase {
         // retention depth below the validated head — all but one demoted.
         _ = try await consumerProcess.evictUnretainedVolumes()
 
-        // Reorg back to A: extend it past B. The main chain is A with
-        // demoted holes below whatever A block survived eviction.
-        let moreA = try await mineNexusChain(on: producerA, depth: 6)
+        // A third fork C from genesis, heavier than B and weighed only: the
+        // probe falls back (B's floor left the main chain) and parks the
+        // cached floor at genesis — BELOW A's demoted holes.
+        let producerC = try await nexusProcess()
+        let forkC = try await mineNexusRewardChain(
+            on: producerC, depth: 12, miner: CryptoUtils.generateKeyPair()
+        )
+        for block in forkC {
+            let outcome = try await consumerProcess.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producerC),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+        let onC = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(onC?.height, 0, "nothing on C above genesis is validated")
+
+        // Reorg back to A: extend it past C. The main chain is A with
+        // demoted holes (A1-A3) below the A block that survived eviction.
+        let moreA = try await mineNexusChain(on: producerA, depth: 10)
         for block in moreA {
             let outcome = try await consumerProcess.admit(
                 BlockHeader(node: block),
@@ -2269,11 +2289,11 @@ final class ChainServiceTests: XCTestCase {
             XCTAssertTrue(outcome.decision.isAccepted)
         }
         let canonical = await consumerProcess.canonicalTipHeight()
-        XCTAssertEqual(canonical, 10, "A must win again")
+        XCTAssertEqual(canonical, 14, "A must win again")
         let probed = await consumerProcess.deepestValidatedMainChainTip()
         // The full downward walk from the tip, computed independently.
         var expected: (cid: String, height: UInt64)?
-        var height: UInt64 = 10
+        var height: UInt64 = 14
         while true {
             if let cid = await consumerProcess.mainChainBlockCID(atHeight: height),
                await consumerProcess.blockValidated(cid) {
@@ -2283,6 +2303,7 @@ final class ChainServiceTests: XCTestCase {
             if height == 0 { break }
             height -= 1
         }
+        XCTAssertEqual(expected?.height, 4, "A4 survived eviction above the holes")
         XCTAssertEqual(probed?.height, expected?.height)
         XCTAssertEqual(probed?.cid, expected?.cid)
         // And it keeps agreeing on a second probe (the fast path).

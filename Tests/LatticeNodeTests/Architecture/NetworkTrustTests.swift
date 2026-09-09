@@ -659,6 +659,7 @@ private actor HierarchyRetryRecorder {
     private var evidenceIndexRequests = 0
     private var helloSessions: [Data] = []
     private var indexSessions: [Data] = []
+    private var parentFactRequests = 0
 
     init(withholdFirstHello: Bool = false) {
         self.withholdFirstHello = withholdFirstHello
@@ -674,6 +675,8 @@ private actor HierarchyRetryRecorder {
         case NodeNetworkTopic.childEvidenceIndexRequest:
             evidenceIndexRequests += 1
             indexSessions.append(sessionID)
+        case NodeNetworkTopic.parentChainFactRequest:
+            parentFactRequests += 1
         default:
             break
         }
@@ -683,6 +686,8 @@ private actor HierarchyRetryRecorder {
     func sessionTrace() -> (hellos: [Data], indexes: [Data]) {
         (helloSessions, indexSessions)
     }
+
+    func parentFactRequestCount() -> Int { parentFactRequests }
 }
 
 private final class HierarchyRetryPeer: IvyDelegate, Sendable {
@@ -4955,6 +4960,80 @@ final class NetworkTrustTests: XCTestCase {
             XCTAssertNotEqual(firstHello, secondHello)
             XCTAssertFalse(trace.indexes.contains(firstHello))
             XCTAssertTrue(Set(trace.hellos.dropFirst()).contains(firstIndex))
+        } catch {
+            await fixture.parent.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await fixture.parent.stop()
+        await fixture.runtime.stop()
+    }
+
+    /// The validate walk's evidence request suspends on the parent's answer.
+    /// When the parent session drops while it is in flight, the request must
+    /// resolve nil (the walk parks and retries) — never stay suspended: an
+    /// unresumed continuation would leave the walk worker alive and every
+    /// later reserve a no-op for the process lifetime.
+    func testValidateEvidenceRequestResolvesNilWhenTheParentSessionDrops()
+        async throws
+    {
+        let fixture = try await hierarchyRetryFixture(
+            keyByte: 0x68,
+            summary: nil
+        )
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: fixture.storage)
+        }
+        let package = AuthenticatedChildPackage(
+            package: ChildValidationPackage(proof: ChildBlockProof(
+                rootCID: "proof-root",
+                directoryPath: ["Retry"],
+                entries: []
+            ))
+        )
+        do {
+            try await fixture.parent.start()
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: duplicateNetworkHandlers()
+            )
+            try await waitUntil("parent role granted") {
+                !(await fixture.recorder.sessionTrace()).hellos.isEmpty
+            }
+            // In flight: the parent never answers.
+            let resolved = Task { [runtime = fixture.runtime] in
+                await runtime.resolveValidateEvidenceForTesting(
+                    for: testCID("child-block"),
+                    requirement: .parentStateContinuity(
+                        parentPath: ["Nexus"],
+                        fromStateCID: testCID("from-state"),
+                        toStateCID: testCID("to-state")
+                    ),
+                    package: package
+                )
+            }
+            try await waitUntil("request sent to the parent") {
+                await fixture.recorder.parentFactRequestCount() >= 1
+            }
+            await fixture.parent.stop()
+
+            // Bounded: a leaked continuation never returns.
+            let outcome = await withTaskGroup(
+                of: Bool.self, returning: Bool.self
+            ) { group in
+                group.addTask { await resolved.value == nil }
+                group.addTask {
+                    try? await Task.sleep(for: .seconds(10))
+                    return false
+                }
+                let first = await group.next() ?? false
+                group.cancelAll()
+                return first
+            }
+            XCTAssertTrue(
+                outcome,
+                "an in-flight evidence request must resolve nil on parent drop"
+            )
         } catch {
             await fixture.parent.stop()
             await fixture.runtime.stop()

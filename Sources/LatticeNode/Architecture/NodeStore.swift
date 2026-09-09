@@ -705,11 +705,16 @@ actor NodeStore {
         }
 
         var actualAcceptedBlocks: [String: PersistedAcceptedBlock] = [:]
+        var leafFlags: [String: Bool] = [:]
         for row in try database.query(
-            "SELECT block_cid, parent_cid, admission_seq FROM accepted_blocks"
+            "SELECT block_cid, parent_cid, admission_seq, leaf FROM accepted_blocks"
         ) {
             let block = try persistedAcceptedBlock(from: row)
             actualAcceptedBlocks[block.blockCID] = block
+            guard let leaf = row["leaf"]?.intValue else {
+                throw NodeStoreError.corrupt("malformed accepted-block leaf flag")
+            }
+            leafFlags[block.blockCID] = leaf == 1
         }
         guard actualAcceptedBlocks == expectedAcceptedBlocks else {
             throw NodeStoreError.corrupt(
@@ -727,19 +732,16 @@ actor NodeStore {
                 childrenByParent[parentCID, default: []].append(block.blockCID)
             }
         }
-        // The maintained leaf flag must agree with the parent links.
-        for row in try database.query(
-            "SELECT block_cid, leaf FROM accepted_blocks"
-        ) {
-            guard let cid = row["block_cid"]?.textValue,
-                  let leaf = row["leaf"]?.intValue else {
-                throw NodeStoreError.corrupt("malformed accepted-block leaf flag")
-            }
-            guard (leaf == 1) == (childrenByParent[cid] == nil) else {
-                throw NodeStoreError.corrupt(
-                    "accepted-block leaf flag does not match its children"
-                )
-            }
+        // The maintained leaf flag is a derived index over the parent links
+        // verified above, so a disagreeing row is repaired from that truth,
+        // never a wipe: only the disagreeing rows are rewritten.
+        for (cid, leaf) in leafFlags.sorted(by: { $0.key < $1.key })
+        where leaf != (childrenByParent[cid] == nil) {
+            SyncTrace.log("boot audit: repairing leaf flag block=\(cid.prefix(12))")
+            try database.execute(
+                "UPDATE accepted_blocks SET leaf = ?1 WHERE block_cid = ?2",
+                params: [.int(childrenByParent[cid] == nil ? 1 : 0), .text(cid)]
+            )
         }
         var connectedQueue = Array(connectedAcceptedBlocks)
         while let parentCID = connectedQueue.popLast() {
