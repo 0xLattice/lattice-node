@@ -439,6 +439,33 @@ final class NodeStoreTests: XCTestCase {
         XCTAssertEqual(refreshed.blockCIDs, ["root-c", "root-b", "root-a"])
     }
 
+    /// The frontier page is served per authenticated peer request on the store
+    /// actor: it must read the admission index, not scan and temp-sort the
+    /// whole accepted set.
+    func testFrontierLeafPageUsesTheAdmissionIndex() async throws {
+        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let store = try makeStore(path: path)
+        try await store.stage(
+            blockBatch(postStateCID: "root-a-state", blockHash: "root-a"),
+            volumeRoots: []
+        )
+        // A second connection on the same file: plans are read-only.
+        let database = try NodeSQLite(path: path.path)
+        let plan = try database.query(
+            "EXPLAIN QUERY PLAN " + NodeStore.frontierLeafPageSQL,
+            params: [.int(1), .int(64)]
+        )
+        let details = plan.compactMap { $0["detail"]?.textValue }
+        XCTAssertTrue(
+            details.contains { $0.contains("accepted_blocks_by_admission") },
+            "plan: \(details)"
+        )
+        XCTAssertFalse(
+            details.contains { $0.contains("TEMP B-TREE FOR ORDER BY") },
+            "plan: \(details)"
+        )
+    }
+
     /// The leaf set only grows and only recent forks can still contend, so
     /// the bounded frontier (cursor-less) page must hold the most recently
     /// ADMITTED leaves — never a lexicographic sample. The cursored page

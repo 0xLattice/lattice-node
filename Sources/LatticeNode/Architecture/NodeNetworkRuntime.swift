@@ -2377,11 +2377,16 @@ public actor NodeNetworkRuntime: IvyDelegate {
             overlayHelloDeadlines.removeValue(forKey: peer.key)?.task.cancel()
             overlaySessions.removeValue(forKey: peer.key)
             overlayPeers[peer.key] = peer
-            let helloStatus = await process.status()
-            if let tip = helloStatus.tipCID,
+            // Advertise the ACQUIRED (canonical, weighed-inclusive) tip: every
+            // receiver measures its gap, its range-sync target and its edge
+            // against acquired heights, so advertising the validated tip would
+            // strand a joiner at our validated height on a quiet network and
+            // make it pull our frontier while genuinely deep.
+            let helloTip = await process.canonicalTip()
+            if let helloTip,
                 let payload = try? BlockAnnouncementMessage(
-                    blockCID: tip,
-                    height: helloStatus.height
+                    blockCID: helloTip.cid,
+                    height: helloTip.height
                 ).encoded()
             {
                 guard isCurrentRuntime(generation: generation, process: process) else {
@@ -2394,8 +2399,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 )
                 SyncTrace.log(
                     "hello reply peer=\(peer.key.hex.prefix(8)) "
-                        + "tip=\(helloStatus.height.map(String.init) ?? "nil") "
-                        + "sent=\(sent)"
+                        + "tip=\(helloTip.height) sent=\(sent)"
                 )
             }
             guard isCurrentRuntime(generation: generation, process: process) else {
@@ -5106,8 +5110,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard isCurrentRuntime(generation: generation, process: process),
               rangeSync == nil,
               overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
-        let status = await process.status()
-        let acquired = await acquiredHeight(process)
+        let acquired = await process.canonicalTip()
         guard isCurrentRuntime(generation: generation, process: process),
               rangeSync == nil,
               overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
@@ -5115,18 +5118,20 @@ public actor NodeNetworkRuntime: IvyDelegate {
             "range-sync start target=\(targetHeight) "
                 + "peer=\(peer.key.hex.prefix(8))"
         )
-        // `requestedAfterCID` is a placeholder until the common-ancestor
-        // negotiation below replaces it; the heights are the acquired tip.
+        // The anchor is the ACQUIRED tip — one (cid, height) pair describing
+        // the same block — until the common-ancestor negotiation below
+        // replaces it; a validated-tip CID under an acquired height would
+        // re-page every held block above it.
         rangeSync = RangeSyncState(
             peer: peer,
             requestID: 0,
             awaiting: false,
             hasMore: true,
-            requestedAfterCID: status.tipCID ?? configuration.nexusGenesisCID,
-            requestedHeight: acquired,
+            requestedAfterCID: acquired?.cid ?? configuration.nexusGenesisCID,
+            requestedHeight: acquired?.height ?? 0,
             targetHeight: targetHeight,
             progressEpoch: 0,
-            progressBaselineHeight: acquired,
+            progressBaselineHeight: acquired?.height ?? 0,
             redriveAttempts: 0,
             negotiated: false,
             responseTimeout: nil,
@@ -5138,19 +5143,24 @@ public actor NodeNetworkRuntime: IvyDelegate {
         await sendAncestorRangeRequest(generation: generation, process: process)
     }
 
-    /// Request the next forward page if one is due: not already awaiting a
-    /// response, the peer has more, and we are within the outstanding-window
-    /// bound (requested minus applied).
+    /// Request the next forward page if one is due: the common ancestor is
+    /// negotiated, not already awaiting a response, the peer has more, and we
+    /// are within the outstanding-window bound (requested minus applied). The
+    /// `negotiated` guard matters: an admission drain can pump during the
+    /// locator build inside `sendAncestorRangeRequest` (awaiting is still
+    /// false there), and a forward page from the un-negotiated anchor would
+    /// re-page held history and bump the requestID the negotiation reply
+    /// must match.
     private func pumpRangeSync(
         generation: UInt64,
         process: ChainProcess
     ) async {
-        guard let sync = rangeSync, !sync.awaiting, sync.hasMore,
+        guard let sync = rangeSync, sync.negotiated, !sync.awaiting, sync.hasMore,
               isCurrentRuntime(generation: generation, process: process),
               overlayPeers[sync.peer.key]?.sessionID == sync.peer.sessionID else { return }
         let applied = await acquiredHeight(process)
         guard var current = rangeSync, current.requestID == sync.requestID,
-              !current.awaiting, current.hasMore,
+              current.negotiated, !current.awaiting, current.hasMore,
               isCurrentRuntime(generation: generation, process: process) else { return }
         let window = Self.rangeSyncMaxPagesAhead
             * UInt64(ForwardRangeResponseMessage.maximumBlocks)
@@ -5399,8 +5409,28 @@ public actor NodeNetworkRuntime: IvyDelegate {
             enqueued += 1
         }
         guard enqueued > 0, let lastCID else {
-            // Caught up to this peer from a real common ancestor.
+            // Caught up to this peer from a real common ancestor — or a peer
+            // whose claim was a lie (a tall height, then nothing to page).
+            // Demote its recorded claim exactly like the empty forward page:
+            // left in place, `candidates.max(by: height)` would re-pick it
+            // at every re-entry probe and it would own the single sync slot
+            // forever. A fresh announcement re-records it. Caught up to an
+            // honest claim, this is the edge moment for its frontier pull.
+            var claimed: UInt64?
+            if let claim = announcedTips[peer.key],
+               claim.peer.sessionID == peer.sessionID {
+                announcedTips.removeValue(forKey: peer.key)
+                claimed = claim.height
+            }
             clearRangeSync()
+            if let claimed {
+                await pullFrontierIfAtEdge(
+                    from: peer,
+                    peerHeight: claimed,
+                    generation: generation,
+                    process: process
+                )
+            }
             return
         }
         // Anchor the request-height window at the ANCESTOR's height, not our own
@@ -5462,8 +5492,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ) async {
         guard let sync = rangeSync, sync.progressEpoch == epoch,
               isCurrentGeneration(generation) else { return }
-        let status = await process.status()
-        let applied = await acquiredHeight(process)
+        let acquired = await process.canonicalTip()
+        let applied = acquired?.height ?? 0
         guard var current = rangeSync, current.progressEpoch == epoch,
               isCurrentGeneration(generation) else { return }
         if applied >= current.targetHeight {
@@ -5509,7 +5539,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // forward again — re-delivering the wedged block re-attaches its
         // provider (bumping providerRevision re-readies the waiting candidate),
         // and rotates onto whatever the peer still serves.
-        current.requestedAfterCID = status.tipCID ?? configuration.nexusGenesisCID
+        current.requestedAfterCID = acquired?.cid ?? configuration.nexusGenesisCID
         current.requestedHeight = applied
         current.progressBaselineHeight = applied
         current.hasMore = true
@@ -5643,10 +5673,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
         generation: UInt64,
         process: ChainProcess
     ) async {
-        guard overlayPeers[peer.key]?.sessionID == peer.sessionID,
+        // An in-flight range sync is by definition not the edge, whatever any
+        // peer attests about its own height.
+        guard rangeSync == nil,
+              overlayPeers[peer.key]?.sessionID == peer.sessionID,
               frontierPulls[peer.key]?.sessionID != peer.sessionID else { return }
         let ourHeight = await acquiredHeight(process)
         guard isCurrentRuntime(generation: generation, process: process),
+              rangeSync == nil,
               overlayPeers[peer.key]?.sessionID == peer.sessionID,
               frontierPulls[peer.key]?.sessionID != peer.sessionID,
               peerHeight <= ourHeight + Self.rangeSyncDepthThreshold else { return }
@@ -5669,6 +5703,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
             payload: payload
         )
     }
+
+    #if DEBUG
+    /// Test seam: the range sync's current request anchor (the block the next
+    /// page is requested after, and its height).
+    func rangeSyncAnchorForTesting() -> (afterCID: String, requestedHeight: UInt64)? {
+        rangeSync.map { ($0.requestedAfterCID, $0.requestedHeight) }
+    }
+    #endif
 
     private func discardServingSessions(for peerKey: PeerKey) {
         var sessionIDs = Set<Data>()

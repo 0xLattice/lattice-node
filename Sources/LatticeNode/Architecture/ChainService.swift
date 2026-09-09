@@ -1857,14 +1857,14 @@ public actor ChainService {
     }
 
     /// Arm one delayed re-drive of the validate walk after it parks on a network
-    /// availability gap. A withheld body has no arrival signal and — once weighed
-    /// sync has completed — may leave no canonical commit to re-arm the walk, so a
-    /// single coalesced timer polls until the body is servable. Only meaningful
-    /// when a body source is wired; a broker-only walk never parks on a fetch.
+    /// availability gap or a store error. A withheld body has no arrival signal
+    /// and — once weighed sync has completed — may leave no canonical commit to
+    /// re-arm the walk, so a single coalesced timer polls until the body is
+    /// servable. A broker-only walk never parks on a fetch, but a store error
+    /// can park it in any configuration, so the timer is not gated on a body
+    /// source.
     private func scheduleValidateWalkRetry() {
-        guard validateBodySource != nil, validateWalkRetryTask == nil else {
-            return
-        }
+        guard validateWalkRetryTask == nil else { return }
         validateWalkRetryTask = Task { [weak self, validateWalkRetryInterval] in
             try? await Task.sleep(for: validateWalkRetryInterval)
             guard !Task.isCancelled else { return }
@@ -1944,7 +1944,18 @@ public actor ChainService {
                 }
             } catch {
                 // A store/durability error is not a verdict: keep acting on the
-                // last validated tip. A later commit re-arms the walk.
+                // last validated tip. With the hierarchy artifacts persisted
+                // BEFORE the marker flips, a deterministic store conflict
+                // (conflicting issued parent fact / child proof, genesis
+                // authority without a connected parent) throws here every
+                // time and no commit would re-arm the walk on a quiet
+                // network — a silent permanent stall at this height. Log it
+                // and re-attempt on the availability-park timer so it stays
+                // observable and never wedges silently.
+                SyncTrace.log(
+                    "validate walk h=\(nextHeight) store error: \(error)"
+                )
+                scheduleValidateWalkRetry()
                 return
             }
             switch outcome.decision {

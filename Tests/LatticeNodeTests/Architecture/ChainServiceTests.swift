@@ -2129,6 +2129,89 @@ final class ChainServiceTests: XCTestCase {
         )
     }
 
+    /// `deepestValidatedMainChainTip` is read on every walk iteration and every
+    /// gated `status()`. Validated main-chain blocks form a prefix, so each
+    /// read after the first must cost O(delta) store reads (the blocks
+    /// validated since), never O(gap) — draining a backlog was O(gap²).
+    func testValidatedTipProbeReadsScaleWithTheDeltaNotTheGap() async throws {
+        let depth = 12
+        let producer = try await nexusProcess()
+        let chain = try await mineNexusChain(on: producer, depth: depth)
+        let consumerProcess = try await nexusProcess()
+        for block in chain {
+            let outcome = try await consumerProcess.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producer),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+        // Prime once (the full downward walk), then count only the reads the
+        // per-block probes make while the tier advances one block at a time.
+        _ = await consumerProcess.deepestValidatedMainChainTip()
+        await consumerProcess.resetValidatedTipStoreReadsForTesting()
+        for (index, block) in chain.enumerated() {
+            let outcome = try await consumerProcess.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producer),
+                mode: .validate
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+            let validated = await consumerProcess.deepestValidatedMainChainTip()
+            XCTAssertEqual(validated?.height, UInt64(index + 1))
+        }
+        let reads = await consumerProcess.validatedTipStoreReadsForTesting()
+        XCTAssertLessThanOrEqual(
+            reads, 4 * depth,
+            "\(reads) store reads for \(depth) probes: O(gap) per probe"
+        )
+    }
+
+    /// The probe's cached floor is only a floor while that block is still the
+    /// main-chain block at its height: a heavier fork below it must fall back
+    /// to the full walk and report the validated prefix of the NEW main chain.
+    func testValidatedTipFallsBackBelowAReorgedCachePoint() async throws {
+        let producer = try await nexusProcess()
+        let chain = try await mineNexusChain(on: producer, depth: 4)
+        let consumerProcess = try await nexusProcess()
+        let genesisCID = try BlockHeader(
+            node: await consumerProcess.canonicalTipBlock()
+        ).rawCID
+        for mode in [AdmissionMode.weighed, .validate] {
+            for block in chain {
+                let outcome = try await consumerProcess.admit(
+                    BlockHeader(node: block),
+                    remoteSource: FetcherContentSource(producer),
+                    mode: mode
+                )
+                XCTAssertTrue(outcome.decision.isAccepted)
+            }
+        }
+        let cached = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(cached?.height, 4)
+
+        // A heavier competing fork from genesis (reward blocks, so its CIDs
+        // differ), weighed only: the main chain moves and nothing on it above
+        // genesis is validated.
+        let rival = try await nexusProcess()
+        let fork = try await mineNexusRewardChain(
+            on: rival, depth: 6, miner: CryptoUtils.generateKeyPair()
+        )
+        for block in fork {
+            let outcome = try await consumerProcess.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(rival),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+        let canonical = await consumerProcess.canonicalTipHeight()
+        XCTAssertEqual(canonical, 6, "the fork must win")
+        let reorged = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(reorged?.height, 0)
+        XCTAssertEqual(reorged?.cid, genesisCID)
+    }
+
     /// A restart under deferred execution commonly leaves validated < canonical,
     /// and the walk is otherwise armed only by a canonical commit: with no
     /// network traffic nothing would ever run it and templates would build on

@@ -590,6 +590,11 @@ actor NodeStore {
         }
     }
 
+    /// The cursor-less (frontier) leaf page: ?1 = snapshot admission sequence,
+    /// ?2 = limit. Served by `accepted_blocks_by_admission`.
+    static let frontierLeafPageSQL =
+        "SELECT block_cid FROM accepted_blocks AS block WHERE block.admission_seq <= ?1 AND NOT EXISTS (SELECT 1 FROM accepted_blocks AS child WHERE child.parent_cid = block.block_cid AND child.admission_seq <= ?1) ORDER BY block.admission_seq DESC, block.block_cid DESC LIMIT ?2"
+
     /// Pagination over the accepted forest's leaves. The cursor-less page is
     /// the MOST RECENTLY ADMITTED leaves (newest first): the leaf set only
     /// ever grows (accepted rows are never deleted) and only recent forks can
@@ -628,7 +633,7 @@ actor NodeStore {
             )
         } else {
             rows = try database.query(
-                "SELECT block_cid FROM accepted_blocks AS block WHERE block.admission_seq <= ?1 AND NOT EXISTS (SELECT 1 FROM accepted_blocks AS child WHERE child.parent_cid = block.block_cid AND child.admission_seq <= ?1) ORDER BY block.admission_seq DESC, block.block_cid DESC LIMIT ?2",
+                Self.frontierLeafPageSQL,
                 params: [.int(snapshot), .int(sqlLimit)]
             )
         }
@@ -3641,6 +3646,12 @@ actor NodeStore {
             """)
         try database.execute(
             "CREATE INDEX IF NOT EXISTS accepted_blocks_by_parent ON accepted_blocks (parent_cid, admission_seq, block_cid)"
+        )
+        // The frontier (cursor-less) leaf page reads the accepted set newest
+        // first; without this the page is a full scan plus a temp sort on the
+        // store actor per authenticated peer request.
+        try database.execute(
+            "CREATE INDEX IF NOT EXISTS accepted_blocks_by_admission ON accepted_blocks (admission_seq DESC, block_cid DESC)"
         )
         try database.execute("""
             CREATE TABLE IF NOT EXISTS issued_parent_fact_sources (

@@ -389,6 +389,101 @@ private actor FrontierRequestCapturingPeer: IvyDelegate {
     func frontierRequestIDs() -> [UInt64] { requestIDs }
 }
 
+/// A lying peer: claims a tall tip once per session, then answers every
+/// locator negotiation with a valid common ancestor and an EMPTY page.
+private actor EmptyAncestorPeer: IvyDelegate {
+    private let claimedHeight: UInt64
+    private var authorizedSessions: [Data] = []
+    private var ancestorRequests = 0
+
+    init(claimedHeight: UInt64) {
+        self.claimedHeight = claimedHeight
+    }
+
+    func ivy(
+        _ ivy: Ivy,
+        didReceiveMessage message: PeerMessage,
+        from peer: AuthenticatedPeer
+    ) async {
+        switch message.topic {
+        case NodeNetworkTopic.blockAnnouncement:
+            guard !authorizedSessions.contains(peer.sessionID) else { return }
+            authorizedSessions.append(peer.sessionID)
+            guard let payload = try? BlockAnnouncementMessage(
+                blockCID: testCID("liar-tip"),
+                height: claimedHeight
+            ).encoded() else { return }
+            _ = await ivy.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.blockAnnouncement,
+                payload: payload
+            )
+        case NodeNetworkTopic.ancestorRangeRequest:
+            ancestorRequests += 1
+            guard let request = try? AncestorRangeRequestMessage.decoded(
+                message.payload
+            ), let payload = try? AncestorRangeResponseMessage(
+                requestID: request.requestID,
+                commonAncestor: request.locator.last,
+                blockCIDs: [],
+                hasMore: false
+            ).encoded() else { return }
+            _ = await ivy.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.ancestorRangeResponse,
+                payload: payload
+            )
+        case NodeNetworkTopic.transactionInventoryRequest:
+            await answerInventoryEmpty(ivy, message: message, peer: peer)
+        default:
+            break
+        }
+    }
+
+    func ancestorRequestCount() -> Int { ancestorRequests }
+}
+
+/// A peer that claims a tall tip once per session and then never answers
+/// the negotiation, so the receiver's range sync stays in flight.
+private actor SilentDeepPeer: IvyDelegate {
+    private let claimedHeight: UInt64
+    private var authorizedSessions: [Data] = []
+    private var ancestorRequests = 0
+
+    init(claimedHeight: UInt64) {
+        self.claimedHeight = claimedHeight
+    }
+
+    func ivy(
+        _ ivy: Ivy,
+        didReceiveMessage message: PeerMessage,
+        from peer: AuthenticatedPeer
+    ) async {
+        switch message.topic {
+        case NodeNetworkTopic.blockAnnouncement:
+            guard !authorizedSessions.contains(peer.sessionID) else { return }
+            authorizedSessions.append(peer.sessionID)
+            guard let payload = try? BlockAnnouncementMessage(
+                blockCID: testCID("deep-tip"),
+                height: claimedHeight
+            ).encoded() else { return }
+            _ = await ivy.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.blockAnnouncement,
+                payload: payload
+            )
+        case NodeNetworkTopic.ancestorRangeRequest:
+            ancestorRequests += 1
+        case NodeNetworkTopic.transactionInventoryRequest:
+            await answerInventoryEmpty(ivy, message: message, peer: peer)
+        default:
+            break
+        }
+    }
+
+    func ancestorRequestCount() -> Int { ancestorRequests }
+}
+
 /// Answer a runtime's hello-reply inventory request with an empty page so the
 /// scripted session survives past the request timeout.
 private func answerInventoryEmpty(
@@ -6964,6 +7059,304 @@ final class NetworkTrustTests: XCTestCase {
         }
         await joiner.runtime.stop()
         await producer.runtime.stop()
+    }
+
+    /// The hello reply advertises the ACQUIRED tip: every receiver measures
+    /// its gap, range-sync target and edge against acquired heights, so a node
+    /// whose validated tip lags (deferred execution) must not advertise the
+    /// validated one — a joiner would range-sync to the validated height,
+    /// clear as "caught up", and never re-enter on a quiet network.
+    func testHelloReplyAdvertisesTheAcquiredTip() async throws {
+        let fixture = try await overlayRuntime(
+            keyByte: 0xc3,
+            requestTimeout: .seconds(5)
+        )
+        let depth = 5
+        let blocks = try await weighedChain(on: fixture.process, depth: depth)
+        let tipCID = try BlockHeader(node: try XCTUnwrap(blocks.last)).rawCID
+        let validatedHeight = await fixture.process.status().height
+        XCTAssertEqual(validatedHeight, 0, "validated tip lags the acquired tip")
+        let payloads = PayloadRecorder()
+        let client = Ivy(config: IvyConfig(
+            signingKey: signingKey(0x79),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        // Ivy holds its delegate weakly: keep it alive for the test.
+        let delegate = PayloadRecordingPeer(recorder: payloads)
+        await client.installTestDelegate(delegate)
+        do {
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: inertNetworkHandlers()
+            )
+            try await connectAndHello(
+                client,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            try await waitUntil("hello reply announcement") {
+                !(await payloads.payloads(
+                    topic: NodeNetworkTopic.blockAnnouncement
+                )).isEmpty
+            }
+            let announced = try (await payloads.payloads(
+                topic: NodeNetworkTopic.blockAnnouncement
+            )).map { try BlockAnnouncementMessage.decoded($0) }
+            let hello = try XCTUnwrap(announced.first)
+            XCTAssertEqual(hello.blockCID, tipCID)
+            XCTAssertEqual(hello.height, UInt64(depth))
+        } catch {
+            await client.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await client.stop()
+        await fixture.runtime.stop()
+    }
+
+    /// A peer whose claim negotiates to a valid common ancestor and then an
+    /// EMPTY page loses its recorded claim exactly like an empty forward page:
+    /// otherwise the re-entry probe re-picks the tallest claim forever and a
+    /// liar owns the single sync slot. The honest peer syncs us afterwards.
+    func testEmptyAncestorPageDemotesThePeersClaim() async throws {
+        let fixture = try await overlayRuntime(
+            keyByte: 0xc5,
+            requestTimeout: .milliseconds(300)
+        )
+        let liar = EmptyAncestorPeer(claimedHeight: 1 << 62)
+        let liarClient = Ivy(config: IvyConfig(
+            signingKey: signingKey(0x7a),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        await liarClient.installTestDelegate(liar)
+        let depth = 5
+        let producer = try await canonicalNetworkProcess()
+        let clock = TestBlockClock()
+        var parent = try await producer.canonicalTipBlock()
+        let genesisCID = try BlockHeader(node: parent).rawCID
+        var chain: [String] = []
+        var volumes: [SerializedVolume] = []
+        for _ in 0..<depth {
+            parent = try await acceptNexusBlock(
+                on: parent, process: producer, timestamp: clock.next()
+            )
+            let cid = try BlockHeader(node: parent).rawCID
+            chain.append(cid)
+            let volume = await producer.volume(cid)
+            volumes.append(try XCTUnwrap(volume))
+        }
+        let honest = RangeServingPeer(
+            genesisCID: genesisCID,
+            chain: chain,
+            receiver: fixture.process
+        )
+        let honestClient = Ivy(config: IvyConfig(
+            signingKey: signingKey(0x7c),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        await honestClient.installTestDelegate(honest)
+        await honestClient.setContentSource(
+            RecordingNetworkTestVolumesSource(volumes)
+        )
+        let service = networkService(
+            process: fixture.process,
+            runtime: fixture.runtime
+        )
+        do {
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: transactionServiceHandlers(service)
+            )
+            try await connectAndHello(
+                liarClient,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            try await waitUntil("liar negotiated once") {
+                await liar.ancestorRequestCount() >= 1
+            }
+            // Four re-entry windows: a retained claim would be re-picked.
+            try await Task.sleep(for: .milliseconds(1_200))
+            let negotiations = await liar.ancestorRequestCount()
+            XCTAssertEqual(
+                negotiations, 1,
+                "an empty-page claim must be demoted, not re-picked"
+            )
+
+            try await connectAndHello(
+                honestClient,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            try await waitUntil("honest peer syncs the chain") {
+                await fixture.process.canonicalTipHeight() == UInt64(depth)
+            }
+            let afterwards = await liar.ancestorRequestCount()
+            XCTAssertEqual(afterwards, 1)
+        } catch {
+            await liarClient.stop()
+            await honestClient.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await liarClient.stop()
+        await honestClient.stop()
+        await fixture.runtime.stop()
+    }
+
+    /// The range-sync anchor is one (cid, height) pair describing the SAME
+    /// block — the acquired tip — never the validated tip's CID under the
+    /// acquired height (which would re-page every held block above it).
+    func testRangeSyncAnchorsAtTheAcquiredTip() async throws {
+        let fixture = try await overlayRuntime(
+            keyByte: 0xc7,
+            requestTimeout: .seconds(5)
+        )
+        let depth = 5
+        let blocks = try await weighedChain(on: fixture.process, depth: depth)
+        let tipCID = try BlockHeader(node: try XCTUnwrap(blocks.last)).rawCID
+        let topics = TopicRecorder()
+        let client = Ivy(config: IvyConfig(
+            signingKey: signingKey(0x7d),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        // Ivy holds its delegate weakly: keep it alive for the test.
+        let delegate = TopicRecordingPeer(recorder: topics)
+        await client.installTestDelegate(delegate)
+        do {
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: inertNetworkHandlers()
+            )
+            try await connectAndHello(
+                client,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            try await waitForTopic(NodeNetworkTopic.blockAnnouncement, in: topics)
+            guard case .enqueued = await client.sendMessage(
+                to: fixture.peerID,
+                topic: NodeNetworkTopic.blockAnnouncement,
+                payload: try BlockAnnouncementMessage(
+                    blockCID: testCID("deep-tip"),
+                    height: 100
+                ).encoded()
+            ) else {
+                throw NetworkTestError.failedSend
+            }
+            try await waitForTopic(
+                NodeNetworkTopic.ancestorRangeRequest,
+                in: topics
+            )
+            let anchorValue = await fixture.runtime.rangeSyncAnchorForTesting()
+            let anchor = try XCTUnwrap(anchorValue)
+            XCTAssertEqual(anchor.requestedHeight, UInt64(depth))
+            XCTAssertEqual(anchor.afterCID, tipCID, "anchor CID is the acquired tip")
+        } catch {
+            await client.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await client.stop()
+        await fixture.runtime.stop()
+    }
+
+    /// While a range sync is in flight we are by definition not at the edge:
+    /// another peer attesting height 1 must not trigger a frontier pull until
+    /// the sync clears.
+    func testNoFrontierPullWhileARangeSyncIsInFlight() async throws {
+        let fixture = try await overlayRuntime(
+            keyByte: 0xc9,
+            requestTimeout: .milliseconds(300)
+        )
+        let deep = SilentDeepPeer(claimedHeight: 100)
+        let deepClient = Ivy(config: IvyConfig(
+            signingKey: signingKey(0x71),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        await deepClient.installTestDelegate(deep)
+        let shallow = FrontierRequestCapturingPeer()
+        let shallowClient = Ivy(config: IvyConfig(
+            signingKey: signingKey(0x73),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        await shallowClient.installTestDelegate(shallow)
+        do {
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: inertNetworkHandlers()
+            )
+            try await connectAndHello(
+                deepClient,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            try await waitUntil("deep sync in flight") {
+                await deep.ancestorRequestCount() >= 1
+            }
+            try await connectAndHello(
+                shallowClient,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            try await waitUntil("shallow hello landed") {
+                await shallow.count(of: NodeNetworkTopic.blockAnnouncement) >= 1
+            }
+            guard case .enqueued = await shallowClient.sendMessage(
+                to: fixture.peerID,
+                topic: NodeNetworkTopic.blockAnnouncement,
+                payload: try BlockAnnouncementMessage(
+                    blockCID: testCID("shallow-tip"),
+                    height: 1
+                ).encoded()
+            ) else {
+                throw NetworkTestError.failedSend
+            }
+            try await Task.sleep(for: .milliseconds(400))
+            let duringSync = await shallow.count(
+                of: NodeNetworkTopic.acceptedLeavesRequest
+            )
+            XCTAssertEqual(duringSync, 0, "no pull while a range sync is in flight")
+
+            // The deep peer leaves: the sync clears, and the re-entry probe
+            // finds the shallow peer at the edge.
+            await deepClient.stop()
+            try await waitUntil("pull after the sync clears") {
+                await shallow.count(of: NodeNetworkTopic.acceptedLeavesRequest) == 1
+            }
+        } catch {
+            await deepClient.stop()
+            await shallowClient.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await deepClient.stop()
+        await shallowClient.stop()
+        await fixture.runtime.stop()
     }
 
     /// Mine `depth` empty blocks on a fresh producer and weighed-admit them on

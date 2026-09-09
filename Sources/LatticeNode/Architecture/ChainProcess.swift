@@ -1172,9 +1172,22 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// the canonical tier. Re-read every walk iteration so a mid-walk reorg or
     /// exclusion re-projection re-targets rather than chasing a stale frontier.
     func canonicalTipHeight() async -> UInt64? {
+        await canonicalTip()?.height
+    }
+
+    /// The CURRENT canonical (weighed-inclusive) main-chain tip as one
+    /// (cid, height) pair, or nil when not active. The height is that CID's
+    /// own — immutable — so the pair is consistent even if a reorg lands
+    /// between the two consensus reads; a `canonicalTipHeight()` paired with
+    /// a separate by-height CID lookup is not. Acquisition (the hello-reply
+    /// advertisement, range-sync anchors) uses this; act-on reads use
+    /// `status()` / the validated tip.
+    func canonicalTip() async -> (cid: String, height: UInt64)? {
         guard case .active(let level) = runtimePhase else { return nil }
         let tip = await level.chain.getMainChainTip()
-        return await level.chain.getConsensusBlock(hash: tip)?.blockHeight
+        guard let height = await level.chain.getConsensusBlock(hash: tip)?
+            .blockHeight else { return nil }
+        return (tip, height)
     }
 
     /// Anchored `directory -> genesisCID` map from the committed `genesisState`
@@ -1525,19 +1538,66 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         return await deepestValidatedMainChainTip(level: level)
     }
 
+    /// The last answer of `deepestValidatedMainChainTip`. Validated main-chain
+    /// blocks form a PREFIX (the walk validates forward from validated+1,
+    /// self-mined blocks attach on the validated tip, a reorg leaves a
+    /// validated prefix below the fork point), so the last answer is a floor:
+    /// while that block is still the main-chain block at its height, only the
+    /// delta above it needs reading — O(delta) per call instead of O(gap),
+    /// which made draining a backlog O(gap²) and every gated `status()`
+    /// O(gap). Any demotion on a live process (eviction) clears it — boot
+    /// reconciliation demotes inside `open`, before this instance exists, so
+    /// the cache starts empty — and a cached block that left the main chain
+    /// falls back to the full walk.
+    private var validatedTipCache: (cid: String, height: UInt64)?
+    #if DEBUG
+    // Test seam: store reads made by the validated-tip probe.
+    private var validatedTipStoreReads = 0
+    func validatedTipStoreReadsForTesting() -> Int { validatedTipStoreReads }
+    func resetValidatedTipStoreReadsForTesting() { validatedTipStoreReads = 0 }
+    #endif
+
+    private func storeBlockValidated(_ cid: String) async -> Bool {
+        #if DEBUG
+        validatedTipStoreReads += 1
+        #endif
+        return (try? await store.blockValidated(cid)) == true
+    }
+
     private func deepestValidatedMainChainTip(
         level: ChainLevel
     ) async -> (cid: String, height: UInt64)? {
         let tip = await level.chain.getMainChainTip()
-        guard var height = await level.chain
+        guard let tipHeight = await level.chain
             .getConsensusBlock(hash: tip)?.blockHeight
         else { return nil }
+        if let cached = validatedTipCache, cached.height <= tipHeight,
+           await level.chain.getMainChainBlockHash(atIndex: cached.height)
+            == cached.cid {
+            // Walk UP from the cached floor while the next main-chain block
+            // is validated.
+            var best = cached
+            while best.height < tipHeight {
+                let next = best.height + 1
+                guard let cid = await level.chain.getMainChainBlockHash(
+                    atIndex: next
+                ), await storeBlockValidated(cid) else { break }
+                best = (cid, next)
+            }
+            validatedTipCache = best
+            return best
+        }
+        var height = tipHeight
         while true {
             if let cid = await level.chain.getMainChainBlockHash(atIndex: height),
-               (try? await store.blockValidated(cid)) == true {
+               await storeBlockValidated(cid) {
+                validatedTipCache = (cid, height)
                 return (cid, height)
             }
-            if height == 0 { return nil }
+            if height == 0 {
+                validatedTipCache = nil
+                return nil
+            }
             height -= 1
         }
     }
@@ -2064,6 +2124,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             policy.maximumRetainedOffChainValidatedBlocks
         ) {
             try await store.demoteValidated(blockCID: candidate.cid)
+            validatedTipCache = nil
             try await broker.unpinAll(
                 owner: Self.validatedOwner(retentionScope, candidate.cid)
             )
