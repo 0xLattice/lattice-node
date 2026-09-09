@@ -2311,6 +2311,218 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertEqual(again?.height, expected?.height)
     }
 
+    /// Two forks demote at different heights (A5-A8 evicted first, D9-D10
+    /// later), and a third fork parks the cached floor on the shared prefix
+    /// BETWEEN them (T6). When D returns as the main chain — T1-T8 validated,
+    /// D9-D10 holes, D11-D14 validated — a floor at or above the LOWEST
+    /// demotion would walk up from T6 and stop at D9, reporting T8 while the
+    /// downward walk reports D14. The gate must be the HIGHEST demotion.
+    func testValidatedTipDoesNotWalkUpBetweenHolesOfDifferentForks()
+        async throws
+    {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lattice-chain-service-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let policy = NodeResourcePolicy(
+            maximumRetainedOffChainValidatedBlocks: 0,
+            offChainValidatedRetentionDepth: 1
+        )
+        let consumerProcess = try await ChainProcess.open(
+            configuration: NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: directory,
+                privateKeyHex: String(repeating: "01", count: 32),
+                resourcePolicy: policy
+            )
+        )
+        func admitAll(
+            _ blocks: [Block], from source: ChainProcess, mode: AdmissionMode
+        ) async throws {
+            for block in blocks {
+                let outcome = try await consumerProcess.admit(
+                    BlockHeader(node: block),
+                    remoteSource: FetcherContentSource(source),
+                    mode: mode
+                )
+                XCTAssertTrue(outcome.decision.isAccepted, "\(mode) admit")
+            }
+        }
+        /// A producer that holds `prefix` (eager) so it can fork from its tip.
+        func producer(holding prefix: [Block], from source: ChainProcess)
+            async throws -> ChainProcess
+        {
+            let process = try await nexusProcess()
+            for block in prefix {
+                let outcome = try await process.admit(
+                    BlockHeader(node: block),
+                    remoteSource: FetcherContentSource(source)
+                )
+                XCTAssertTrue(outcome.decision.isAccepted)
+            }
+            return process
+        }
+        func downwardWalk(from height: UInt64) async -> (cid: String, height: UInt64)? {
+            var height = height
+            while true {
+                if let cid = await consumerProcess.mainChainBlockCID(atHeight: height),
+                   await consumerProcess.blockValidated(cid) {
+                    return (cid, height)
+                }
+                if height == 0 { return nil }
+                height -= 1
+            }
+        }
+
+        // Trunk T1-T4, validated.
+        let producerT = try await nexusProcess()
+        let trunk = try await mineNexusChain(on: producerT, depth: 4)
+        try await admitAll(trunk, from: producerT, mode: .weighed)
+        try await admitAll(trunk, from: producerT, mode: .validate)
+        // Fork A from T4 (A5-A8), validated while main.
+        let producerA = try await producer(holding: trunk, from: producerT)
+        let forkA = try await mineNexusRewardChain(
+            on: producerA, depth: 4, miner: CryptoUtils.generateKeyPair()
+        )
+        try await admitAll(forkA, from: producerA, mode: .weighed)
+        try await admitAll(forkA, from: producerA, mode: .validate)
+        // Trunk continues T5-T12 (heavier): A is off-chain.
+        let trunkMore = try await mineNexusChain(on: producerT, depth: 8)
+        try await admitAll(trunkMore, from: producerT, mode: .weighed)
+        // Fork D from T8 (D9-D14) will need bodies from producerD on the walk.
+        let producerD = try await producer(
+            holding: trunk + Array(trunkMore.prefix(4)), from: producerT
+        )
+        let consumer = makeService(
+            process: consumerProcess,
+            validateBodySource: { _, admit in
+                try await admit(FetcherContentSource(producerD))
+            }
+        )
+        await consumer.runValidateWalkPass()
+        let onTrunk = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(onTrunk?.height, 12)
+        // Eviction 1: A5-A8 demoted (holes 5-8 on fork A).
+        _ = try await consumerProcess.evictUnretainedVolumes()
+
+        let forkD = try await mineNexusRewardChain(
+            on: producerD, depth: 6, miner: CryptoUtils.generateKeyPair()
+        )
+        try await admitAll(forkD, from: producerD, mode: .weighed)
+        await consumer.runValidateWalkPass()
+        let onD = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(onD?.height, 14, "D9-D14 validated while main")
+        // Trunk T13-T16: D is off-chain; eviction 2 demotes D9-D10 (below
+        // the retention ceiling 12 - 1), leaving D11-D14 validated ABOVE.
+        let trunkEven = try await mineNexusChain(on: producerT, depth: 4)
+        try await admitAll(trunkEven, from: producerT, mode: .weighed)
+        let backOnTrunk = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(backOnTrunk?.height, 12)
+        _ = try await consumerProcess.evictUnretainedVolumes()
+        let d9 = try BlockHeader(node: forkD[0]).rawCID
+        let d11 = try BlockHeader(node: forkD[2]).rawCID
+        let d9Validated = await consumerProcess.blockValidated(d9)
+        let d11Validated = await consumerProcess.blockValidated(d11)
+        XCTAssertFalse(d9Validated, "D9 demoted")
+        XCTAssertTrue(d11Validated, "D11 retained above the hole")
+
+        // Fork E from T6 (weighed only) parks the floor on the shared prefix
+        // at T6 — above A's holes, below D's. Fork choice weighs SUBTREES at
+        // the fork point: the trunk side of T6 is T7-T16 plus D9-D14 (16), so
+        // E needs more than that to win here and still lose to D's return.
+        let producerE = try await producer(
+            holding: trunk + Array(trunkMore.prefix(2)), from: producerT
+        )
+        let forkE = try await mineNexusChain(on: producerE, depth: 18)
+        try await admitAll(forkE, from: producerE, mode: .weighed)
+        let onE = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(onE?.height, 6, "floor parked at T6")
+
+        // D returns, heavier than E: T1-T8 validated, D9-D10 holes, D11-D14
+        // validated, D15-D22 weighed.
+        let forkDMore = try await mineNexusRewardChain(
+            on: producerD, depth: 8, miner: CryptoUtils.generateKeyPair()
+        )
+        try await admitAll(forkDMore, from: producerD, mode: .weighed)
+        let canonical = await consumerProcess.canonicalTipHeight()
+        XCTAssertEqual(canonical, 22)
+        let probed = await consumerProcess.deepestValidatedMainChainTip()
+        let expected = await downwardWalk(from: 22)
+        XCTAssertEqual(expected?.height, 14, "D14 is the true validated top")
+        XCTAssertEqual(probed?.height, expected?.height)
+        XCTAssertEqual(probed?.cid, expected?.cid)
+    }
+
+    /// Boot reconciliation demotes a walk-validated block whose owner pin is
+    /// gone. That block can later sit on the main chain beneath validated
+    /// blocks, so the reopened process must seed its hole ceiling from the
+    /// boot demotions: a floor parked below the hole by an intervening fork
+    /// must take the downward walk, not walk up into the hole.
+    func testBootDemotedHoleIsRespectedAfterReorgBack() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lattice-chain-service-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: directory,
+            privateKeyHex: String(repeating: "01", count: 32)
+        )
+        var consumerProcess: ChainProcess? = try await ChainProcess.open(
+            configuration: configuration
+        )
+        let producerA = try await nexusProcess()
+        let forkA = try await mineNexusChain(on: producerA, depth: 6)
+        for mode in [AdmissionMode.weighed, .validate] {
+            for block in forkA {
+                let outcome = try await consumerProcess!.admit(
+                    BlockHeader(node: block),
+                    remoteSource: FetcherContentSource(producerA),
+                    mode: mode
+                )
+                XCTAssertTrue(outcome.decision.isAccepted)
+            }
+        }
+        // A2 loses its owner pin; the next open demotes it.
+        let a2 = try BlockHeader(node: forkA[1]).rawCID
+        try await consumerProcess!.unpinValidatedOwnerForTesting(a2)
+        consumerProcess = nil
+        consumerProcess = try await ChainProcess.open(configuration: configuration)
+        let a2Validated = await consumerProcess!.blockValidated(a2)
+        XCTAssertFalse(a2Validated, "boot reconciliation demoted A2")
+
+        // A heavier fork F from genesis parks the floor at genesis.
+        let producerF = try await nexusProcess()
+        let forkF = try await mineNexusRewardChain(
+            on: producerF, depth: 8, miner: CryptoUtils.generateKeyPair()
+        )
+        for block in forkF {
+            let outcome = try await consumerProcess!.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producerF),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+        let onF = await consumerProcess!.deepestValidatedMainChainTip()
+        XCTAssertEqual(onF?.height, 0)
+
+        // A returns: A1 validated, A2 a hole, A3-A6 validated above it.
+        let forkAMore = try await mineNexusChain(on: producerA, depth: 4)
+        for block in forkAMore {
+            let outcome = try await consumerProcess!.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producerA),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+        let canonical = await consumerProcess!.canonicalTipHeight()
+        XCTAssertEqual(canonical, 10, "A must win again")
+        let probed = await consumerProcess!.deepestValidatedMainChainTip()
+        XCTAssertEqual(probed?.height, 6, "the downward walk's A6, not A1")
+        let a6 = try BlockHeader(node: forkA[5]).rawCID
+        XCTAssertEqual(probed?.cid, a6)
+    }
+
     /// The probe's cached floor is only a floor while that block is still the
     /// main-chain block at its height: a heavier fork below it must fall back
     /// to the full walk and report the validated prefix of the NEW main chain.
