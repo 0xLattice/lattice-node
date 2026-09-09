@@ -271,13 +271,22 @@ private actor RangeServingPeer: IvyDelegate {
     /// Ascending, genesis excluded.
     private let chain: [String]
     private let receiver: ChainProcess
+    /// The height announced once per session (defaults to the chain's).
+    private let claimedHeight: UInt64
     private var authorizedSessions: [Data] = []
     private var frontierRequestHeights: [UInt64] = []
+    private var forwardAfterCIDs: [String] = []
 
-    init(genesisCID: String, chain: [String], receiver: ChainProcess) {
+    init(
+        genesisCID: String,
+        chain: [String],
+        receiver: ChainProcess,
+        claimedHeight: UInt64? = nil
+    ) {
         self.genesisCID = genesisCID
         self.chain = chain
         self.receiver = receiver
+        self.claimedHeight = claimedHeight ?? UInt64(chain.count)
     }
 
     func ivy(
@@ -292,7 +301,7 @@ private actor RangeServingPeer: IvyDelegate {
             authorizedSessions.append(peer.sessionID)
             guard let payload = try? BlockAnnouncementMessage(
                 blockCID: tip,
-                height: UInt64(chain.count)
+                height: claimedHeight
             ).encoded() else { return }
             _ = await ivy.sendMessage(
                 to: peer,
@@ -324,6 +333,7 @@ private actor RangeServingPeer: IvyDelegate {
             guard let request = try? ForwardRangeRequestMessage.decoded(
                 message.payload
             ) else { return }
+            forwardAfterCIDs.append(request.afterCID)
             let page = pageAfter(request.afterCID)
             guard let payload = try? ForwardRangeResponseMessage(
                 requestID: request.requestID,
@@ -360,6 +370,7 @@ private actor RangeServingPeer: IvyDelegate {
     }
 
     func frontierRequests() -> [UInt64] { frontierRequestHeights }
+    func forwardRequests() -> [String] { forwardAfterCIDs }
 }
 
 /// Records every topic it receives and the requestID of each frontier
@@ -387,6 +398,89 @@ private actor FrontierRequestCapturingPeer: IvyDelegate {
 
     func count(of topic: String) -> Int { topics.filter { $0 == topic }.count }
     func frontierRequestIDs() -> [UInt64] { requestIDs }
+}
+
+/// A peer that announces a tip the receiver lacks, negotiates GENESIS as the
+/// common ancestor, and serves one full first page (with more claimed
+/// beyond it); forward requests are recorded and answered empty.
+private actor FullPagePeer: IvyDelegate {
+    private let genesisCID: String
+    private let page: [String]
+    private let claimedHeight: UInt64
+    private var authorizedSessions: [Data] = []
+    private var forwardAfterCIDs: [String] = []
+
+    private let hasMore: Bool
+
+    init(
+        genesisCID: String,
+        page: [String],
+        claimedHeight: UInt64,
+        hasMore: Bool
+    ) {
+        self.genesisCID = genesisCID
+        self.page = page
+        self.claimedHeight = claimedHeight
+        self.hasMore = hasMore
+    }
+
+    func ivy(
+        _ ivy: Ivy,
+        didReceiveMessage message: PeerMessage,
+        from peer: AuthenticatedPeer
+    ) async {
+        switch message.topic {
+        case NodeNetworkTopic.blockAnnouncement:
+            guard !authorizedSessions.contains(peer.sessionID) else { return }
+            authorizedSessions.append(peer.sessionID)
+            guard let payload = try? BlockAnnouncementMessage(
+                blockCID: testCID("full-page-tip"),
+                height: claimedHeight
+            ).encoded() else { return }
+            _ = await ivy.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.blockAnnouncement,
+                payload: payload
+            )
+        case NodeNetworkTopic.ancestorRangeRequest:
+            guard let request = try? AncestorRangeRequestMessage.decoded(
+                message.payload
+            ), request.locator.contains(genesisCID),
+            let payload = try? AncestorRangeResponseMessage(
+                requestID: request.requestID,
+                commonAncestor: genesisCID,
+                blockCIDs: page,
+                hasMore: hasMore
+            ).encoded() else { return }
+            _ = await ivy.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.ancestorRangeResponse,
+                payload: payload
+            )
+        case NodeNetworkTopic.forwardRangeRequest:
+            guard let request = try? ForwardRangeRequestMessage.decoded(
+                message.payload
+            ) else { return }
+            forwardAfterCIDs.append(request.afterCID)
+            guard let payload = try? ForwardRangeResponseMessage(
+                requestID: request.requestID,
+                afterCID: request.afterCID,
+                blockCIDs: [],
+                hasMore: false
+            ).encoded() else { return }
+            _ = await ivy.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.forwardRangeResponse,
+                payload: payload
+            )
+        case NodeNetworkTopic.transactionInventoryRequest:
+            await answerInventoryEmpty(ivy, message: message, peer: peer)
+        default:
+            break
+        }
+    }
+
+    func forwardRequests() -> [String] { forwardAfterCIDs }
 }
 
 /// A lying peer: claims a tall tip once per session, then answers every
@@ -7359,6 +7453,77 @@ final class NetworkTrustTests: XCTestCase {
         await fixture.runtime.stop()
     }
 
+    /// The negotiated anchor survives the ancestor page's enqueue loop: the
+    /// loop suspends per CID while the worker it starts drains into the pump,
+    /// and a pump that fired there would page forward from the PRE-negotiation
+    /// anchor (our own tip) and bump the requestID so the negotiated anchor is
+    /// discarded. Every CID of the page is held, so each candidate completes
+    /// (and drains) immediately; the anchor must still be the page's last CID.
+    func testNegotiatedAnchorSurvivesDrainsDuringTheAncestorPage() async throws {
+        let fixture = try await overlayRuntime(
+            keyByte: 0xcb,
+            requestTimeout: .seconds(5)
+        )
+        // Kept small: the fixture weighed-admits every block and the page's
+        // candidates all complete locally; sixteen drains is plenty.
+        let pageSize = 16
+        let held = try await weighedChain(on: fixture.process, depth: pageSize + 1)
+        let chain = try held.map { try BlockHeader(node: $0).rawCID }
+        let genesisCID = try BlockHeader(
+            node: await fixture.process.canonicalTipBlock()
+        ).rawCID
+        let ourTipCID = try XCTUnwrap(chain.last)
+        let pageLastCID = chain[pageSize - 1]
+        // The peer announces a tip we lack (so a range sync opens), negotiates
+        // genesis as the common ancestor, and serves one page of blocks we
+        // already hold — every candidate completes at once and drains into
+        // the pump while the page loop is still running.
+        let scripted = FullPagePeer(
+            genesisCID: genesisCID,
+            page: Array(chain.prefix(pageSize)),
+            claimedHeight: UInt64(pageSize) * 16,
+            hasMore: false
+        )
+        let client = Ivy(config: IvyConfig(
+            signingKey: signingKey(0xcc),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        await client.installTestDelegate(scripted)
+        do {
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: inertNetworkHandlers()
+            )
+            try await connectAndHello(
+                client,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            // The committed anchor is the negotiated page's end. (A wrong-anchor
+            // pump would instead have paged forward from our tip, bumped the
+            // requestID, and left the negotiated anchor discarded.)
+            try await waitUntil("negotiated anchor committed") {
+                (await fixture.runtime.rangeSyncAnchorForTesting())?.afterCID
+                    == pageLastCID
+            }
+            let forward = await scripted.forwardRequests()
+            XCTAssertFalse(
+                forward.contains(ourTipCID),
+                "no forward page anchored at our pre-negotiation tip: \(forward)"
+            )
+        } catch {
+            await client.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await client.stop()
+        await fixture.runtime.stop()
+    }
+
     /// Mine `depth` empty blocks on a fresh producer and weighed-admit them on
     /// `process` straight at the process (no commit publisher, so no walk
     /// fires): `process` then HOLDS the chain to `depth` while its validated
@@ -7543,6 +7708,12 @@ final class NetworkTrustTests: XCTestCase {
                     .withRoot(blockCID) { session in
                         try await admit(session)
                     }
+            },
+            validateEvidenceSource: { [weak runtime] blockCID, requirement in
+                await runtime?.resolveValidateEvidence(
+                    for: blockCID,
+                    requirement: requirement
+                )
             }
         )
     }

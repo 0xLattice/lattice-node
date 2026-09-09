@@ -334,6 +334,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let request: ParentChainFactMessage
         let blockCID: String
         let package: AuthenticatedChildPackage
+        /// Set by the validate walk's evidence request: the fact's arrival (or
+        /// its timeout) is handed back as the merged package (or nil) instead
+        /// of re-seeding a live candidate.
+        var continuation: CheckedContinuation<AuthenticatedChildPackage?, Never>? = nil
     }
 
     private struct PendingGenesisVerification: Sendable {
@@ -923,6 +927,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 * Self.maximumCandidateWaitTicks
         )
         pendingEvidenceIndexes.removeAll()
+        for pending in pendingParentChainFacts.values {
+            pending.continuation?.resume(returning: nil)
+        }
         pendingParentChainFacts.removeAll()
         for pending in pendingGenesisVerifications.values {
             pending.continuation.resume(returning: false)
@@ -2389,7 +2396,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     height: helloTip.height
                 ).encoded()
             {
-                guard isCurrentRuntime(generation: generation, process: process) else {
+                guard isCurrentRuntime(generation: generation, process: process),
+                      overlayPeers[peer.key]?.sessionID == peer.sessionID else {
                     return
                 }
                 let sent = await overlay.sendMessage(
@@ -5362,12 +5370,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
               response.requestID == sync.requestID else {
             return
         }
-        guard var current = rangeSync, current.requestID == sync.requestID else { return }
-        current.responseTimeout?.cancel()
-        current.awaiting = false
-        current.responseTimeout = nil
-        current.negotiated = true
-        rangeSync = current
+        // Like the forward page: stay `awaiting` (timeout armed) through the
+        // enqueue loop below. The loop suspends per CID and the worker it
+        // starts drains into `pumpRangeSync`; flipping `awaiting`/`negotiated`
+        // here would let that pump page forward from the PRE-negotiation
+        // anchor (our own tip) and bump the requestID, so the negotiated
+        // anchor committed after the loop would be discarded. The flags flip
+        // only in the committed block.
         // Outcome (c): no locator entry on the peer's main chain — disjoint
         // retention. End this peer's stream and drop its recorded claim so the
         // re-entry probe tries the next-tallest peer instead of re-picking it.
@@ -5440,6 +5449,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // the sibling. Fall back to the frontier height if the lookup fails.
         let anchorHeight = await process.acceptedBlockHeight(ancestor)
         guard var committed = rangeSync, committed.requestID == sync.requestID else { return }
+        committed.responseTimeout?.cancel()
+        committed.responseTimeout = nil
+        committed.awaiting = false
+        committed.negotiated = true
         let base = anchorHeight ?? committed.requestedHeight
         committed.requestedAfterCID = lastCID
         committed.requestedHeight = base + enqueued
@@ -5909,12 +5922,74 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
     }
 
+    /// Validate-tier evidence (deferred execution): a weighed CHILD block's
+    /// `.validate` admission recovers its own proof package from the store but
+    /// still needs the cross-chain fact the live path obtains from the
+    /// configured parent — the parent-state continuity (or genesis) link. The
+    /// walk hands the requirement here; this is the SAME request the live
+    /// candidate path sends (`requestParentChainFact`), awaited, and the merged
+    /// package is returned for the `.validate` re-admit. Nil when the fact is
+    /// not obtainable now (no parent session, request budget, timeout); the
+    /// walk then parks and retries. Without this, every weighed child block
+    /// parks the walk on `.unavailable(.parentStateContinuity)` forever.
+    public func resolveValidateEvidence(
+        for blockCID: String,
+        requirement: CrossChainEvidenceRequirement
+    ) async -> AuthenticatedChildPackage? {
+        guard isRunning, let process, !configuration.address.isNexus else {
+            return nil
+        }
+        let generation = runtimeGeneration
+        let parentPath = Array(configuration.chainPath.dropLast())
+        let fact: ParentChainFact
+        switch requirement {
+        case .parentGenesis(
+            let requiredPath, let directory, let childGenesisCID, let parentStateCID
+        ) where requiredPath == parentPath
+                && directory == configuration.address.directory:
+            fact = .genesis(
+                childGenesisCID: childGenesisCID,
+                parentStateCID: parentStateCID
+            )
+        case .parentStateContinuity(let requiredPath, let fromStateCID, let toStateCID)
+            where requiredPath == parentPath:
+            fact = .continuity(fromStateCID: fromStateCID, toStateCID: toStateCID)
+        default:
+            return nil
+        }
+        guard let package = try? await process.recoveredAuthenticatedChildPackage(
+            for: blockCID
+        ), isCurrentRuntime(generation: generation, process: process) else {
+            return nil
+        }
+        SyncTrace.log(
+            "validate evidence request block=\(blockCID.prefix(12)) fact=\(fact)"
+        )
+        return await withCheckedContinuation { continuation in
+            Task { [weak self] in
+                guard let self else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                await self.requestParentChainFact(
+                    fact,
+                    for: blockCID,
+                    package: package,
+                    generation: generation,
+                    process: process,
+                    continuation: continuation
+                )
+            }
+        }
+    }
+
     private func requestParentChainFact(
         _ fact: ParentChainFact,
         for blockCID: String,
         package: AuthenticatedChildPackage,
         generation: UInt64,
-        process: ChainProcess
+        process: ChainProcess,
+        continuation: CheckedContinuation<AuthenticatedChildPackage?, Never>? = nil
     ) async {
         guard !configuration.address.isNexus,
               isCurrentRuntime(generation: generation, process: process),
@@ -5925,19 +6000,24 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     && $0.request.fact == fact
               }),
               let parent = configuredParentPeer() else {
+            continuation?.resume(returning: nil)
             return
         }
         let request = ParentChainFactMessage(
             requestID: makeRequestID(),
             fact: fact
         )
-        guard let payload = try? request.encoded() else { return }
+        guard let payload = try? request.encoded() else {
+            continuation?.resume(returning: nil)
+            return
+        }
         pendingParentChainFacts[request.requestID] =
             PendingParentChainFact(
                 peer: parent,
                 request: request,
                 blockCID: blockCID,
-                package: package
+                package: package,
+                continuation: continuation
             )
         _ = await hierarchy.sendMessage(
             to: parent,
@@ -5950,7 +6030,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         ) else {
             pendingParentChainFacts.removeValue(
                 forKey: request.requestID
-            )
+            )?.continuation?.resume(returning: nil)
             return
         }
         // A failed enqueue is transient. Keep the request until the same
@@ -6002,7 +6082,16 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard let merged = CandidateAcquirer.mergePackages(
             pending.package,
             localFact
-        ) else { return }
+        ) else {
+            pending.continuation?.resume(returning: nil)
+            return
+        }
+        // The validate walk asked for this fact: hand the merged package back
+        // to its `.validate` re-admit; there is no live candidate to re-ready.
+        if let continuation = pending.continuation {
+            continuation.resume(returning: merged)
+            return
+        }
         // A parent fact that arrives SUCCESSFULLY must re-ready the candidate that
         // was blocked waiting for it. observe()/enqueueCandidate only flips a
         // `.waiting(.evidence)` attempt back to `.ready`, never a `.waiting(.later)`
@@ -6028,6 +6117,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
               let pending = pendingParentChainFacts.removeValue(
                 forKey: requestID
               ) else { return }
+        if let continuation = pending.continuation {
+            continuation.resume(returning: nil)
+            return
+        }
         retryParentFactCandidate(pending)
     }
 

@@ -2167,6 +2167,129 @@ final class ChainServiceTests: XCTestCase {
         )
     }
 
+    /// The fast path re-reads the cached block's marker: an ungated probe can
+    /// race an eviction that demoted the cached block and cleared the cache
+    /// under the gate, then write the stale floor back. A demoted floor must
+    /// fall back to the full walk, never be resurrected as validated.
+    func testValidatedTipProbeDoesNotResurrectADemotedFloor() async throws {
+        let depth = 4
+        let producer = try await nexusProcess()
+        let chain = try await mineNexusChain(on: producer, depth: depth)
+        let consumerProcess = try await nexusProcess()
+        for mode in [AdmissionMode.weighed, .validate] {
+            for block in chain {
+                let outcome = try await consumerProcess.admit(
+                    BlockHeader(node: block),
+                    remoteSource: FetcherContentSource(producer),
+                    mode: mode
+                )
+                XCTAssertTrue(outcome.decision.isAccepted)
+            }
+        }
+        let cached = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(cached?.height, UInt64(depth))
+        // Demote the cached tip behind the probe's back (the race).
+        let tipCID = try BlockHeader(node: try XCTUnwrap(chain.last)).rawCID
+        try await consumerProcess.demoteValidatedForTesting(tipCID)
+        let probed = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(probed?.height, UInt64(depth - 1))
+        XCTAssertNotEqual(probed?.cid, tipCID, "a demoted floor is never validated")
+    }
+
+    /// Eviction demotes OFF-main-chain validated blocks; if that fork later
+    /// wins, the main chain carries weighed holes below still-validated
+    /// blocks. The probe must equal the full downward walk after such a
+    /// reorg back — never an upward walk from a stale floor into a hole.
+    func testValidatedTipMatchesTheDownwardWalkAfterReorgBackOverAHole()
+        async throws
+    {
+        // Fork A: validated to 4. Fork B: heavier, validated to 8, and A's
+        // blocks are then off-chain deep enough to be demoted.
+        let producerA = try await nexusProcess()
+        let forkA = try await mineNexusChain(on: producerA, depth: 4)
+        let producerB = try await nexusProcess()
+        let forkB = try await mineNexusRewardChain(
+            on: producerB, depth: 8, miner: CryptoUtils.generateKeyPair()
+        )
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lattice-chain-service-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let policy = NodeResourcePolicy(
+            maximumRetainedOffChainValidatedBlocks: 1,
+            offChainValidatedRetentionDepth: 1
+        )
+        let consumerProcess = try await ChainProcess.open(
+            configuration: NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: directory,
+                privateKeyHex: String(repeating: "01", count: 32),
+                resourcePolicy: policy
+            )
+        )
+        for mode in [AdmissionMode.weighed, .validate] {
+            for block in forkA {
+                let outcome = try await consumerProcess.admit(
+                    BlockHeader(node: block),
+                    remoteSource: FetcherContentSource(producerA),
+                    mode: mode
+                )
+                XCTAssertTrue(outcome.decision.isAccepted)
+            }
+        }
+        for block in forkB {
+            let outcome = try await consumerProcess.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producerB),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+        let consumer = makeService(
+            process: consumerProcess,
+            validateBodySource: { cid, admit in
+                try await admit(FetcherContentSource(producerB))
+            }
+        )
+        await consumer.runValidateWalkPass()
+        let onB = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(onB?.height, 8, "B validated to its tip")
+        // Eviction: A's validated blocks are off-chain and deeper than the
+        // retention depth below the validated head — all but one demoted.
+        _ = try await consumerProcess.evictUnretainedVolumes()
+
+        // Reorg back to A: extend it past B. The main chain is A with
+        // demoted holes below whatever A block survived eviction.
+        let moreA = try await mineNexusChain(on: producerA, depth: 6)
+        for block in moreA {
+            let outcome = try await consumerProcess.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producerA),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+        let canonical = await consumerProcess.canonicalTipHeight()
+        XCTAssertEqual(canonical, 10, "A must win again")
+        let probed = await consumerProcess.deepestValidatedMainChainTip()
+        // The full downward walk from the tip, computed independently.
+        var expected: (cid: String, height: UInt64)?
+        var height: UInt64 = 10
+        while true {
+            if let cid = await consumerProcess.mainChainBlockCID(atHeight: height),
+               await consumerProcess.blockValidated(cid) {
+                expected = (cid, height)
+                break
+            }
+            if height == 0 { break }
+            height -= 1
+        }
+        XCTAssertEqual(probed?.height, expected?.height)
+        XCTAssertEqual(probed?.cid, expected?.cid)
+        // And it keeps agreeing on a second probe (the fast path).
+        let again = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(again?.height, expected?.height)
+    }
+
     /// The probe's cached floor is only a floor while that block is still the
     /// main-chain block at its height: a heavier fork below it must fall back
     /// to the full walk and report the validated prefix of the NEW main chain.

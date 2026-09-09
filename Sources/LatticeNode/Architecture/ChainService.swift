@@ -514,6 +514,12 @@ public actor ChainService {
     // sync completes the acquirer may hold no timed wait to re-drive it, so the
     // walk owns its own liveness retry rather than borrowing the acquirer's.
     private let validateBodySource: ValidateBodyAdmission?
+    // Cross-chain evidence acquisition for the validate walk: a weighed CHILD
+    // block's `.validate` needs the parent fact (state continuity / genesis
+    // link) the live path obtains from the configured parent. The walk hands
+    // the requirement to this source and re-admits with the package it
+    // returns; nil parks the walk on the retry timer as an availability gap.
+    private let validateEvidenceSource: ValidateEvidenceSource?
     private let validateWalkRetryInterval: Duration
     private var validateWalkRetryTask: Task<Void, Never>?
     #if DEBUG
@@ -540,6 +546,7 @@ public actor ChainService {
         acceptedBlockPublisher: @escaping AcceptedBlockPublisher,
         acceptedTransactionPublisher: @escaping AcceptedTransactionPublisher = { _ in },
         validateBodySource: ValidateBodyAdmission? = nil,
+        validateEvidenceSource: ValidateEvidenceSource? = nil,
         validateWalkRetryInterval: Duration = .seconds(4),
         mempoolMaxCount: Int = 10_000,
         mempoolMaxNonReadyPerSigner: Int = 64,
@@ -550,6 +557,7 @@ public actor ChainService {
                 && maximumChildCandidates > 0
         )
         self.validateBodySource = validateBodySource
+        self.validateEvidenceSource = validateEvidenceSource
         self.validateWalkRetryInterval = validateWalkRetryInterval
         self.process = process
         self.childCandidateProvider = childCandidateProvider
@@ -1834,6 +1842,12 @@ public actor ChainService {
         }
     }
 
+    /// See `validateEvidenceSource`.
+    public typealias ValidateEvidenceSource = @Sendable (
+        _ blockCID: String,
+        _ requirement: CrossChainEvidenceRequirement
+    ) async -> AuthenticatedChildPackage?
+
     /// Coalescing reserve for the validate-on-candidacy walk. Mirrors
     /// `reserveCanonicalCommitWorker`'s single-instance-Task + dirty-bit shape: a
     /// commit that lands mid-walk sets the dirty bit (so the running worker takes
@@ -1916,10 +1930,11 @@ public actor ChainService {
             #endif
             let header = BlockHeader(rawCID: next, node: nil, encryptionInfo: nil)
             let admitValidate: @Sendable (
-                any ContentSource
-            ) async throws -> NodeAdmissionOutcome = { [self] remoteSource in
+                (any ContentSource)?, AuthenticatedChildPackage?
+            ) async throws -> NodeAdmissionOutcome = { [self] remoteSource, package in
                 try await process.admit(
                     header,
+                    authenticatedChildPackage: package,
                     remoteSource: remoteSource,
                     mode: .validate,
                     canonicalCommitPublisher: { [self] commit in
@@ -1927,20 +1942,28 @@ public actor ChainService {
                     }
                 )
             }
-            let outcome: NodeAdmissionOutcome
-            do {
+            let attempt: @Sendable (
+                AuthenticatedChildPackage?
+            ) async throws -> NodeAdmissionOutcome = { [validateBodySource] package in
                 if let validateBodySource {
-                    outcome = try await validateBodySource(next) { remoteSource in
-                        try await admitValidate(remoteSource)
+                    return try await validateBodySource(next) { remoteSource in
+                        try await admitValidate(remoteSource, package)
                     }
-                } else {
-                    outcome = try await process.admit(
-                        header,
-                        mode: .validate,
-                        canonicalCommitPublisher: { [self] commit in
-                            await enqueueCanonicalCommit(commit)
-                        }
-                    )
+                }
+                return try await admitValidate(nil, package)
+            }
+            var outcome: NodeAdmissionOutcome
+            do {
+                outcome = try await attempt(nil)
+                // A CHILD block on the validate tier recovers its own proof but
+                // may still need a cross-chain fact from the parent. Obtain it
+                // exactly as the live path does and re-admit with the merged
+                // package; if it cannot be obtained now, fall through to the
+                // availability park below.
+                if case .unavailable(let requirement?) = outcome.decision,
+                   let validateEvidenceSource,
+                   let package = await validateEvidenceSource(next, requirement) {
+                    outcome = try await attempt(package)
                 }
             } catch {
                 // A store/durability error is not a verdict: keep acting on the
@@ -1958,6 +1981,9 @@ public actor ChainService {
                 scheduleValidateWalkRetry()
                 return
             }
+            SyncTrace.log(
+                "validate walk h=\(nextHeight) decision=\(outcome.decision)"
+            )
             switch outcome.decision {
             case .canonicalized, .acceptedSide, .duplicate:
                 // SUCCESS promoted weighed->validated (validated height advances),
