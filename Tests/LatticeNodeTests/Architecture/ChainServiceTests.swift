@@ -2129,6 +2129,271 @@ final class ChainServiceTests: XCTestCase {
         )
     }
 
+    /// `deepestValidatedMainChainTip` is read on every walk iteration and every
+    /// gated `status()`. Validated main-chain blocks form a prefix, so each
+    /// read after the first must cost O(delta) store reads (the blocks
+    /// validated since), never O(gap) — draining a backlog was O(gap²).
+    func testValidatedTipProbeReadsScaleWithTheDeltaNotTheGap() async throws {
+        let depth = 12
+        let producer = try await nexusProcess()
+        let chain = try await mineNexusChain(on: producer, depth: depth)
+        let consumerProcess = try await nexusProcess()
+        for block in chain {
+            let outcome = try await consumerProcess.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producer),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+        // Prime once (the full downward walk), then count only the reads the
+        // per-block probes make while the tier advances one block at a time.
+        _ = await consumerProcess.deepestValidatedMainChainTip()
+        await consumerProcess.resetValidatedTipStoreReadsForTesting()
+        for (index, block) in chain.enumerated() {
+            let outcome = try await consumerProcess.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producer),
+                mode: .validate
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+            let validated = await consumerProcess.deepestValidatedMainChainTip()
+            XCTAssertEqual(validated?.height, UInt64(index + 1))
+        }
+        let reads = await consumerProcess.validatedTipStoreReadsForTesting()
+        XCTAssertLessThanOrEqual(
+            reads, 4 * depth,
+            "\(reads) store reads for \(depth) probes: O(gap) per probe"
+        )
+    }
+
+    /// The fast path re-reads the cached block's marker: an ungated probe can
+    /// race an eviction that demoted the cached block and cleared the cache
+    /// under the gate, then write the stale floor back. A demoted floor must
+    /// fall back to the full walk, never be resurrected as validated.
+    func testValidatedTipProbeDoesNotResurrectADemotedFloor() async throws {
+        let depth = 4
+        let producer = try await nexusProcess()
+        let chain = try await mineNexusChain(on: producer, depth: depth)
+        let consumerProcess = try await nexusProcess()
+        for mode in [AdmissionMode.weighed, .validate] {
+            for block in chain {
+                let outcome = try await consumerProcess.admit(
+                    BlockHeader(node: block),
+                    remoteSource: FetcherContentSource(producer),
+                    mode: mode
+                )
+                XCTAssertTrue(outcome.decision.isAccepted)
+            }
+        }
+        let cached = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(cached?.height, UInt64(depth))
+        // Demote the cached tip behind the probe's back (the race).
+        let tipCID = try BlockHeader(node: try XCTUnwrap(chain.last)).rawCID
+        try await consumerProcess.demoteValidatedForTesting(tipCID)
+        let probed = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(probed?.height, UInt64(depth - 1))
+        XCTAssertNotEqual(probed?.cid, tipCID, "a demoted floor is never validated")
+    }
+
+    /// Eviction demotes OFF-main-chain validated blocks; if that fork later
+    /// wins, the main chain carries weighed holes BELOW still-validated
+    /// blocks. A cached floor that sits below such a hole (parked at genesis
+    /// by an intervening third fork) must not walk up into the hole and
+    /// under-report: the probe must equal the full downward walk — the
+    /// validated block above the hole.
+    func testValidatedTipMatchesTheDownwardWalkAfterReorgBackOverAHole()
+        async throws
+    {
+        // Fork A: validated to 4. Fork B: heavier, validated to 8, and A's
+        // blocks are then off-chain deep enough to be demoted.
+        let producerA = try await nexusProcess()
+        let forkA = try await mineNexusChain(on: producerA, depth: 4)
+        let producerB = try await nexusProcess()
+        let forkB = try await mineNexusRewardChain(
+            on: producerB, depth: 8, miner: CryptoUtils.generateKeyPair()
+        )
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lattice-chain-service-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let policy = NodeResourcePolicy(
+            maximumRetainedOffChainValidatedBlocks: 1,
+            offChainValidatedRetentionDepth: 1
+        )
+        let consumerProcess = try await ChainProcess.open(
+            configuration: NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: directory,
+                privateKeyHex: String(repeating: "01", count: 32),
+                resourcePolicy: policy
+            )
+        )
+        for mode in [AdmissionMode.weighed, .validate] {
+            for block in forkA {
+                let outcome = try await consumerProcess.admit(
+                    BlockHeader(node: block),
+                    remoteSource: FetcherContentSource(producerA),
+                    mode: mode
+                )
+                XCTAssertTrue(outcome.decision.isAccepted)
+            }
+        }
+        for block in forkB {
+            let outcome = try await consumerProcess.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producerB),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+        let consumer = makeService(
+            process: consumerProcess,
+            validateBodySource: { cid, admit in
+                try await admit(FetcherContentSource(producerB))
+            }
+        )
+        await consumer.runValidateWalkPass()
+        let onB = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(onB?.height, 8, "B validated to its tip")
+        // Eviction: A's validated blocks are off-chain and deeper than the
+        // retention depth below the validated head — all but one demoted.
+        _ = try await consumerProcess.evictUnretainedVolumes()
+
+        // A third fork C from genesis, heavier than B and weighed only: the
+        // probe falls back (B's floor left the main chain) and parks the
+        // cached floor at genesis — BELOW A's demoted holes.
+        let producerC = try await nexusProcess()
+        let forkC = try await mineNexusRewardChain(
+            on: producerC, depth: 12, miner: CryptoUtils.generateKeyPair()
+        )
+        for block in forkC {
+            let outcome = try await consumerProcess.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producerC),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+        let onC = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(onC?.height, 0, "nothing on C above genesis is validated")
+
+        // Reorg back to A: extend it past C. The main chain is A with
+        // demoted holes (A1-A3) below the A block that survived eviction.
+        let moreA = try await mineNexusChain(on: producerA, depth: 10)
+        for block in moreA {
+            let outcome = try await consumerProcess.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producerA),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+        let canonical = await consumerProcess.canonicalTipHeight()
+        XCTAssertEqual(canonical, 14, "A must win again")
+        let probed = await consumerProcess.deepestValidatedMainChainTip()
+        // The full downward walk from the tip, computed independently.
+        var expected: (cid: String, height: UInt64)?
+        var height: UInt64 = 14
+        while true {
+            if let cid = await consumerProcess.mainChainBlockCID(atHeight: height),
+               await consumerProcess.blockValidated(cid) {
+                expected = (cid, height)
+                break
+            }
+            if height == 0 { break }
+            height -= 1
+        }
+        XCTAssertEqual(expected?.height, 4, "A4 survived eviction above the holes")
+        XCTAssertEqual(probed?.height, expected?.height)
+        XCTAssertEqual(probed?.cid, expected?.cid)
+        // And it keeps agreeing on a second probe (the fast path).
+        let again = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(again?.height, expected?.height)
+    }
+
+    /// The probe's cached floor is only a floor while that block is still the
+    /// main-chain block at its height: a heavier fork below it must fall back
+    /// to the full walk and report the validated prefix of the NEW main chain.
+    func testValidatedTipFallsBackBelowAReorgedCachePoint() async throws {
+        let producer = try await nexusProcess()
+        let chain = try await mineNexusChain(on: producer, depth: 4)
+        let consumerProcess = try await nexusProcess()
+        let genesisCID = try BlockHeader(
+            node: await consumerProcess.canonicalTipBlock()
+        ).rawCID
+        for mode in [AdmissionMode.weighed, .validate] {
+            for block in chain {
+                let outcome = try await consumerProcess.admit(
+                    BlockHeader(node: block),
+                    remoteSource: FetcherContentSource(producer),
+                    mode: mode
+                )
+                XCTAssertTrue(outcome.decision.isAccepted)
+            }
+        }
+        let cached = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(cached?.height, 4)
+
+        // A heavier competing fork from genesis (reward blocks, so its CIDs
+        // differ), weighed only: the main chain moves and nothing on it above
+        // genesis is validated.
+        let rival = try await nexusProcess()
+        let fork = try await mineNexusRewardChain(
+            on: rival, depth: 6, miner: CryptoUtils.generateKeyPair()
+        )
+        for block in fork {
+            let outcome = try await consumerProcess.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(rival),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+        let canonical = await consumerProcess.canonicalTipHeight()
+        XCTAssertEqual(canonical, 6, "the fork must win")
+        let reorged = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(reorged?.height, 0)
+        XCTAssertEqual(reorged?.cid, genesisCID)
+    }
+
+    /// A restart under deferred execution commonly leaves validated < canonical,
+    /// and the walk is otherwise armed only by a canonical commit: with no
+    /// network traffic nothing would ever run it and templates would build on
+    /// the stale validated tip. Service start (`restoreLocalTransactions`, the
+    /// daemon's pre-networking hook) must arm it itself.
+    func testServiceStartDrivesTheValidateWalkWhenValidatedLagsCanonical()
+        async throws
+    {
+        let depth = 4
+        let producer = try await nexusProcess()
+        let chain = try await mineNexusChain(on: producer, depth: depth)
+        let consumerProcess = try await nexusProcess()
+        for block in chain {
+            let outcome = try await consumerProcess.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(producer),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+        let consumer = makeService(process: consumerProcess)
+        let before = await consumerProcess.deepestValidatedMainChainTip()
+        XCTAssertEqual(before?.height, 0, "restart state: validated lags")
+
+        try await consumer.restoreLocalTransactions()
+
+        var validated: UInt64?
+        for _ in 0..<500 {
+            validated = await consumerProcess.deepestValidatedMainChainTip()?.height
+            if validated == UInt64(depth) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(
+            validated, UInt64(depth),
+            "service start must converge validated to canonical unprompted"
+        )
+    }
+
     /// A gap in the below-tip range parks the walk at gap-1: the node keeps
     /// acting on the last validated tip (no wedge) and resumes to the tip once
     /// the missing block becomes admissible.

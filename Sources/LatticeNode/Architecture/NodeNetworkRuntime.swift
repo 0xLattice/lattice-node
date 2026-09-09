@@ -35,8 +35,9 @@ public struct NetworkCandidateAdmission: Sendable {
     public let preparingChildDirectories: [String]
     public let contentSource: any ContentSource
     /// Admit on the weighed (deferred-execution) tier: enter fork choice on
-    /// verified work without executing. True only for below-tip range-sync
-    /// candidates; live gossip and self-admit stay eager.
+    /// verified work without executing. True for every network-sourced block
+    /// (live gossip, frontier leaves, range-sync pages, predecessor walks);
+    /// only locally produced blocks stay eager.
     public let weighed: Bool
 
     public init(
@@ -333,6 +334,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let request: ParentChainFactMessage
         let blockCID: String
         let package: AuthenticatedChildPackage
+        /// Set by the validate walk's evidence request: the fact's arrival (or
+        /// its timeout) is handed back as the merged package (or nil) instead
+        /// of re-seeding a live candidate.
+        var continuation: CheckedContinuation<AuthenticatedChildPackage?, Never>? = nil
     }
 
     private struct PendingGenesisVerification: Sendable {
@@ -495,6 +500,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
         [UInt64: PendingTransactionInventory] = [:]
     private var activeTransactionVolumes = Set<TransactionVolumeLease>()
     private var servingAcceptedLeaves: Set<Data> = []
+    /// The one frontier (accepted-leaves) pull per overlay session: sent once
+    /// we are at the live edge with respect to the peer, answered by exactly
+    /// the page whose requestID matches (`requestID` is cleared on receipt).
+    /// The session ID rejects a stale entry after a reconnect.
+    private struct FrontierPull {
+        let sessionID: Data
+        var requestID: UInt64?
+    }
+    private var frontierPulls: [PeerKey: FrontierPull] = [:]
     private var servingAncestorRange: Set<Data> = []
     private var servingReadEndpoints: Set<Data> = []
     /// Public read URLs declared by wired children in their hierarchy hellos,
@@ -510,8 +524,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// previous sync can never alias a new sync's epoch.
     private var nextRangeSyncProgressEpoch: UInt64 = 0
     /// A gap larger than this (announced height minus ours) starts a forward-apply
-    /// range sync; shallower gaps use the direct predecessor path.
-    private static let rangeSyncDepthThreshold: UInt64 = 64
+    /// range sync (negotiated locator, pages, progress watchdog, peer rotation);
+    /// only the true live edge uses the direct predecessor path.
+    private static let rangeSyncDepthThreshold: UInt64 = 2
     private var childProofRecoveryTask: Task<Void, Never>?
     private var childProofRecoveryGeneration: UInt64?
     /// Periodically re-announces this node as a DHT provider of its chain's
@@ -901,6 +916,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         childProofRecoveryGeneration = nil
         childProofRecoveryNeedsRefresh = false
         servingAcceptedLeaves.removeAll()
+        frontierPulls.removeAll()
         servingAncestorRange.removeAll()
         clearRangeSync()
         candidateWorker?.cancel()
@@ -911,7 +927,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 * Self.maximumCandidateWaitTicks
         )
         pendingEvidenceIndexes.removeAll()
-        pendingParentChainFacts.removeAll()
+        discardPendingParentChainFacts(where: { _ in true }, requeue: false)
         for pending in pendingGenesisVerifications.values {
             pending.continuation.resume(returning: false)
         }
@@ -972,7 +988,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard isCurrentRuntime(generation: generation, process: process) else {
             throw NodeNetworkRuntimeError.notRunning
         }
-        let height = await process.status().height
+        // The announced block's OWN height, not the validated tip's: every
+        // accepted block is announced (weighed pages and frontier leaves
+        // included), and a receiver's gap test reads the pair as one claim. A
+        // catching-up node announcing (block@1000, height 100) would hide the
+        // gap and record a stale tip at every receiver.
+        let height = await process.acceptedBlockHeight(blockCID)
         guard isCurrentRuntime(generation: generation, process: process) else {
             throw NodeNetworkRuntimeError.notRunning
         }
@@ -2161,8 +2182,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             }
             overlayPeers.removeValue(forKey: peer.key)
             discardServingSessions(for: peer.key)
+            frontierPulls.removeValue(forKey: peer.key)
             overlaySessions[peer.key] = peer
             scheduleOverlayHelloDeadline(for: peer, generation: generation)
+            SyncTrace.log("overlay connect peer=\(peer.key.hex.prefix(8))")
             topic = NodeNetworkTopic.overlayHello
         } else if ivy === hierarchy {
             guard peer.route == .direct else {
@@ -2214,6 +2237,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 candidateAcquirer.disconnect(candidateProvider(disconnected))
             }
             discardServingSessions(for: key)
+            frontierPulls.removeValue(forKey: key)
             if rangeSync?.peer.key == key {
                 clearRangeSync()
             }
@@ -2281,15 +2305,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         if case .parent? = removedRole {
             pendingEvidenceIndexes.removeAll()
-            let interrupted = pendingParentChainFacts.values.filter {
-                $0.peer.key == key
-            }
-            pendingParentChainFacts = pendingParentChainFacts.filter {
-                $0.value.peer.key != key
-            }
-            for pending in interrupted {
-                retryParentFactCandidate(pending)
-            }
+            // A response can never arrive on the gone session: requeue the
+            // live candidates now, and resolve a validate walk's request nil
+            // (it is not a candidate — re-seeding an accepted main-chain block
+            // would be wrong — and an unresumed continuation would suspend
+            // the walk for the process lifetime).
+            discardPendingParentChainFacts(
+                where: { $0.peer.key == key },
+                requeue: true
+            )
         }
         cancelChildCandidateWork(for: key)
         let reservations = pendingCandidateReservations.filter {
@@ -2338,6 +2362,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         process: ChainProcess
     ) async {
         if message.topic == NodeNetworkTopic.overlayHello {
+            SyncTrace.log(
+                "overlay hello peer=\(peer.key.hex.prefix(8)) "
+                    + "expected=\(expectsOverlayHello(from: peer))"
+            )
             guard expectsOverlayHello(from: peer) else { return }
             guard let remote = try? ChainHello.decode(message.payload),
                   (try? remote.validateCompatibility(
@@ -2353,25 +2381,38 @@ public actor NodeNetworkRuntime: IvyDelegate {
             overlayHelloDeadlines.removeValue(forKey: peer.key)?.task.cancel()
             overlaySessions.removeValue(forKey: peer.key)
             overlayPeers[peer.key] = peer
-            let helloStatus = await process.status()
-            if let tip = helloStatus.tipCID,
+            // Advertise the ACQUIRED (canonical, weighed-inclusive) tip: every
+            // receiver measures its gap, its range-sync target and its edge
+            // against acquired heights, so advertising the validated tip would
+            // strand a joiner at our validated height on a quiet network and
+            // make it pull our frontier while genuinely deep.
+            let helloTip = await process.canonicalTip()
+            if let helloTip,
                 let payload = try? BlockAnnouncementMessage(
-                    blockCID: tip,
-                    height: helloStatus.height
+                    blockCID: helloTip.cid,
+                    height: helloTip.height
                 ).encoded()
             {
-                guard isCurrentRuntime(generation: generation, process: process) else {
+                guard isCurrentRuntime(generation: generation, process: process),
+                      overlayPeers[peer.key]?.sessionID == peer.sessionID else {
                     return
                 }
-                _ = await overlay.sendMessage(
+                let sent = await overlay.sendMessage(
                     to: peer,
                     topic: NodeNetworkTopic.blockAnnouncement,
                     payload: payload
+                )
+                SyncTrace.log(
+                    "hello reply peer=\(peer.key.hex.prefix(8)) "
+                        + "tip=\(helloTip.height) sent=\(sent)"
                 )
             }
             guard isCurrentRuntime(generation: generation, process: process) else {
                 return
             }
+            // The peer's frontier is pulled by `pullFrontierIfAtEdge` once its
+            // tip is known (its own hello-reply announcement) and we are at
+            // the live edge with respect to it — never blindly here.
             scheduleChildProofRecovery(
                 generation: generation,
                 process: process
@@ -2526,7 +2567,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             if await process.hasAcceptedBlock(announcement.blockCID) == false {
                 guard isCurrentRuntime(generation: generation, process: process),
                       overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
-                let ourHeight = await process.status().height ?? 0
+                let ourHeight = await acquiredHeight(process)
                 guard isCurrentRuntime(generation: generation, process: process),
                       overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
                 if let announced = announcement.height {
@@ -2552,20 +2593,39 @@ public actor NodeNetworkRuntime: IvyDelegate {
                           overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
                 }
             }
+            // At-edge evaluation happens whether or not we hold the block:
+            // holding the peer's tip IS being at its edge. The peer's height
+            // is its best claim this session (this announcement or a taller
+            // recorded one), so a losing-sibling announcement below its tip
+            // cannot read as "at edge" while we are still deep.
+            if let announced = announcement.height {
+                let recorded = announcedTips[peer.key]
+                let peerHeight = recorded?.peer.sessionID == peer.sessionID
+                    ? max(announced, recorded?.height ?? 0)
+                    : announced
+                await pullFrontierIfAtEdge(
+                    from: peer,
+                    peerHeight: peerHeight,
+                    generation: generation,
+                    process: process
+                )
+                guard isCurrentRuntime(generation: generation, process: process),
+                      overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+            }
+            // Network-sourced: weighed. It ranks on verified work and the
+            // validate-on-candidacy walk executes it exactly when canonical.
             let candidate = CandidateSeed(
                 blockCID: announcement.blockCID,
                 package: nil,
-                provider: candidateProvider(peer)
+                provider: candidateProvider(peer),
+                weighed: true
             )
             guard enqueueCandidate(candidate) else { return }
         case NodeNetworkTopic.acceptedLeavesRequest:
-            // Legacy-served: this node no longer walks a peer's accepted
-            // forest (header-graph range sync + live announcements + the
-            // predecessor walk replaced the descent), but keeps answering so
-            // an older peer still syncs from it. The four accepted-leaves /
-            // portable-attachment-index message types, both server handlers
-            // and `acceptedLeafPage` are scheduled for deletion the release
-            // after the fleet upgrades past this one.
+            // Answers a peer's one-shot frontier pull (see
+            // `pullFrontierIfAtEdge`) with one page of accepted leaves; older
+            // peers' cursored descent still pages through the same handler.
+            // The portable-attachment-index pair stays legacy-served only.
             guard
                 let request = try? AcceptedLeavesRequestMessage.decoded(
                     message.payload
@@ -2590,8 +2650,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
             else {
                 return
             }
+            // The cursor-less page is the most recently admitted leaves (the
+            // frontier pull); the wire carries a page CID-sorted, and the
+            // receiver never depends on order. A cursored (legacy descent)
+            // page is already in CID order.
             let page = Array(
                 leaves.blockCIDs.prefix(AcceptedLeavesResponseMessage.maximumLeaves)
+            ).sorted()
+            SyncTrace.log(
+                "frontier serve peer=\(peer.key.hex.prefix(8)) leaves=\(page.count)"
             )
             guard
                 let payload = try? AcceptedLeavesResponseMessage(
@@ -2607,6 +2674,46 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 topic: NodeNetworkTopic.acceptedLeavesResponse,
                 payload: payload
             )
+        case NodeNetworkTopic.acceptedLeavesResponse:
+            // The frontier page (see `pullFrontierIfAtEdge`): accepted only as
+            // the one answer to the one request we sent this session —
+            // correlated by requestID like every other response, then the
+            // request is consumed, so an unsolicited, mismatched or repeated
+            // page seeds nothing. Every leaf we lack seeds weighed; its
+            // predecessor walk parks on missing ancestors that range sync or
+            // the walk itself fills. No cursor, no retry state.
+            guard let response = try? AcceptedLeavesResponseMessage.decoded(
+                message.payload
+            ) else { return }
+            guard var pull = frontierPulls[peer.key],
+                  pull.sessionID == peer.sessionID,
+                  pull.requestID == response.requestID else {
+                SyncTrace.log(
+                    "frontier page rejected peer=\(peer.key.hex.prefix(8)) "
+                        + "leaves=\(response.blockCIDs.count)"
+                )
+                return
+            }
+            pull.requestID = nil
+            frontierPulls[peer.key] = pull
+            SyncTrace.log(
+                "frontier page peer=\(peer.key.hex.prefix(8)) "
+                    + "leaves=\(response.blockCIDs.count)"
+            )
+            for cid in response.blockCIDs where CIDIdentity.isCanonical(cid) {
+                await overlay.rememberProvider(rootCID: cid, peer: peer.id)
+                guard isCurrentRuntime(generation: generation, process: process),
+                      overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+                if await process.hasAcceptedBlock(cid) { continue }
+                guard isCurrentRuntime(generation: generation, process: process),
+                      overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+                _ = enqueueCandidate(CandidateSeed(
+                    blockCID: cid,
+                    package: nil,
+                    provider: candidateProvider(peer),
+                    weighed: true
+                ))
+            }
         case NodeNetworkTopic.forwardRangeRequest:
             guard
                 let request = try? ForwardRangeRequestMessage.decoded(
@@ -5008,7 +5115,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard isCurrentRuntime(generation: generation, process: process),
               rangeSync == nil,
               overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
-        let status = await process.status()
+        let acquired = await process.canonicalTip()
         guard isCurrentRuntime(generation: generation, process: process),
               rangeSync == nil,
               overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
@@ -5016,16 +5123,20 @@ public actor NodeNetworkRuntime: IvyDelegate {
             "range-sync start target=\(targetHeight) "
                 + "peer=\(peer.key.hex.prefix(8))"
         )
+        // The anchor is the ACQUIRED tip — one (cid, height) pair describing
+        // the same block — until the common-ancestor negotiation below
+        // replaces it; a validated-tip CID under an acquired height would
+        // re-page every held block above it.
         rangeSync = RangeSyncState(
             peer: peer,
             requestID: 0,
             awaiting: false,
             hasMore: true,
-            requestedAfterCID: status.tipCID ?? configuration.nexusGenesisCID,
-            requestedHeight: status.height ?? 0,
+            requestedAfterCID: acquired?.cid ?? configuration.nexusGenesisCID,
+            requestedHeight: acquired?.height ?? 0,
             targetHeight: targetHeight,
             progressEpoch: 0,
-            progressBaselineHeight: status.height ?? 0,
+            progressBaselineHeight: acquired?.height ?? 0,
             redriveAttempts: 0,
             negotiated: false,
             responseTimeout: nil,
@@ -5037,21 +5148,25 @@ public actor NodeNetworkRuntime: IvyDelegate {
         await sendAncestorRangeRequest(generation: generation, process: process)
     }
 
-    /// Request the next forward page if one is due: not already awaiting a
-    /// response, the peer has more, and we are within the outstanding-window
-    /// bound (requested minus applied).
+    /// Request the next forward page if one is due: the common ancestor is
+    /// negotiated, not already awaiting a response, the peer has more, and we
+    /// are within the outstanding-window bound (requested minus applied). The
+    /// `negotiated` guard matters: an admission drain can pump during the
+    /// locator build inside `sendAncestorRangeRequest` (awaiting is still
+    /// false there), and a forward page from the un-negotiated anchor would
+    /// re-page held history and bump the requestID the negotiation reply
+    /// must match.
     private func pumpRangeSync(
         generation: UInt64,
         process: ChainProcess
     ) async {
-        guard let sync = rangeSync, !sync.awaiting, sync.hasMore,
+        guard let sync = rangeSync, sync.negotiated, !sync.awaiting, sync.hasMore,
               isCurrentRuntime(generation: generation, process: process),
               overlayPeers[sync.peer.key]?.sessionID == sync.peer.sessionID else { return }
-        let status = await process.status()
+        let applied = await acquiredHeight(process)
         guard var current = rangeSync, current.requestID == sync.requestID,
-              !current.awaiting, current.hasMore,
+              current.negotiated, !current.awaiting, current.hasMore,
               isCurrentRuntime(generation: generation, process: process) else { return }
-        let applied = status.height ?? 0
         let window = Self.rangeSyncMaxPagesAhead
             * UInt64(ForwardRangeResponseMessage.maximumBlocks)
         guard current.requestedHeight < applied + window else { return }
@@ -5136,10 +5251,25 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // every backoff forever (a fresh announcement re-records it — a liar
         // must keep actively re-announcing to re-capture the slot).
         guard enqueued > 0, let lastCID else {
-            if announcedTips[peer.key]?.peer.sessionID == peer.sessionID {
+            var claimed: UInt64?
+            if let claim = announcedTips[peer.key],
+               claim.peer.sessionID == peer.sessionID {
                 announcedTips.removeValue(forKey: peer.key)
+                claimed = claim.height
             }
             clearRangeSync()
+            // Demoted, so the re-entry probe will not evaluate this peer: if
+            // the empty page means we caught up to its claim, this is the
+            // edge moment for its one frontier pull (a liar's claim fails
+            // the edge test and pulls nothing).
+            if let claimed {
+                await pullFrontierIfAtEdge(
+                    from: peer,
+                    peerHeight: claimed,
+                    generation: generation,
+                    process: process
+                )
+            }
             return
         }
         current.requestedAfterCID = lastCID
@@ -5160,8 +5290,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// entries. Every entry is a block THIS node accepted, so the ancestor the
     /// responder picks can never rewind us past our own verified history.
     private func buildBlockLocator(process: ChainProcess) async -> [String] {
-        let status = await process.status()
-        guard let tip = status.height else {
+        // Anchored at the ACQUIRED tip: the locator negotiates what we hold,
+        // and a validated-tip base would re-page the weighed history above it.
+        guard let tip = await process.canonicalTipHeight() else {
             return [configuration.nexusGenesisCID]
         }
         var heights: [UInt64] = []
@@ -5236,12 +5367,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
               response.requestID == sync.requestID else {
             return
         }
-        guard var current = rangeSync, current.requestID == sync.requestID else { return }
-        current.responseTimeout?.cancel()
-        current.awaiting = false
-        current.responseTimeout = nil
-        current.negotiated = true
-        rangeSync = current
+        // Like the forward page: stay `awaiting` (timeout armed) through the
+        // enqueue loop below. The loop suspends per CID and the worker it
+        // starts drains into `pumpRangeSync`; flipping `awaiting`/`negotiated`
+        // here would let that pump page forward from the PRE-negotiation
+        // anchor (our own tip) and bump the requestID, so the negotiated
+        // anchor committed after the loop would be discarded. The flags flip
+        // only in the committed block.
         // Outcome (c): no locator entry on the peer's main chain — disjoint
         // retention. End this peer's stream and drop its recorded claim so the
         // re-entry probe tries the next-tallest peer instead of re-picking it.
@@ -5283,8 +5415,28 @@ public actor NodeNetworkRuntime: IvyDelegate {
             enqueued += 1
         }
         guard enqueued > 0, let lastCID else {
-            // Caught up to this peer from a real common ancestor.
+            // Caught up to this peer from a real common ancestor — or a peer
+            // whose claim was a lie (a tall height, then nothing to page).
+            // Demote its recorded claim exactly like the empty forward page:
+            // left in place, `candidates.max(by: height)` would re-pick it
+            // at every re-entry probe and it would own the single sync slot
+            // forever. A fresh announcement re-records it. Caught up to an
+            // honest claim, this is the edge moment for its frontier pull.
+            var claimed: UInt64?
+            if let claim = announcedTips[peer.key],
+               claim.peer.sessionID == peer.sessionID {
+                announcedTips.removeValue(forKey: peer.key)
+                claimed = claim.height
+            }
             clearRangeSync()
+            if let claimed {
+                await pullFrontierIfAtEdge(
+                    from: peer,
+                    peerHeight: claimed,
+                    generation: generation,
+                    process: process
+                )
+            }
             return
         }
         // Anchor the request-height window at the ANCESTOR's height, not our own
@@ -5294,6 +5446,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // the sibling. Fall back to the frontier height if the lookup fails.
         let anchorHeight = await process.acceptedBlockHeight(ancestor)
         guard var committed = rangeSync, committed.requestID == sync.requestID else { return }
+        committed.responseTimeout?.cancel()
+        committed.responseTimeout = nil
+        committed.awaiting = false
+        committed.negotiated = true
         let base = anchorHeight ?? committed.requestedHeight
         committed.requestedAfterCID = lastCID
         committed.requestedHeight = base + enqueued
@@ -5346,10 +5502,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ) async {
         guard let sync = rangeSync, sync.progressEpoch == epoch,
               isCurrentGeneration(generation) else { return }
-        let status = await process.status()
+        let acquired = await process.canonicalTip()
+        let applied = acquired?.height ?? 0
         guard var current = rangeSync, current.progressEpoch == epoch,
               isCurrentGeneration(generation) else { return }
-        let applied = status.height ?? 0
         if applied >= current.targetHeight {
             // Caught up to the peer's advertised tip: release the slot so the
             // next deep peer can drive, and let direct propagation carry any
@@ -5393,7 +5549,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // forward again — re-delivering the wedged block re-attaches its
         // provider (bumping providerRevision re-readies the waiting candidate),
         // and rotates onto whatever the peer still serves.
-        current.requestedAfterCID = status.tipCID ?? configuration.nexusGenesisCID
+        current.requestedAfterCID = acquired?.cid ?? configuration.nexusGenesisCID
         current.requestedHeight = applied
         current.progressBaselineHeight = applied
         current.hasMore = true
@@ -5436,8 +5592,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
     }
 
-    private func clearRangeSync() {
-        SyncTrace.log("range-sync clear")
+    private func clearRangeSync(from caller: String = #function) {
+        SyncTrace.log("range-sync clear (\(caller))")
         rangeSync?.responseTimeout?.cancel()
         rangeSync?.progressTimeout?.cancel()
         rangeSync = nil
@@ -5464,9 +5620,23 @@ public actor NodeNetworkRuntime: IvyDelegate {
         rangeSyncReentryTask = nil
         guard isCurrentGeneration(generation), isRunning,
               rangeSync == nil, let process else { return }
-        let ourHeight = await process.status().height ?? 0
+        let ourHeight = await acquiredHeight(process)
         guard isCurrentRuntime(generation: generation, process: process),
               rangeSync == nil else { return }
+        // Every recorded peer we are now at the edge with (the sync that just
+        // cleared brought us there, or nothing beyond the edge remains) gets
+        // its one frontier pull; the helper re-checks the edge per peer.
+        for (key, claim) in announcedTips.sorted(by: { $0.key.hex < $1.key.hex })
+            where overlayPeers[key]?.sessionID == claim.peer.sessionID {
+            await pullFrontierIfAtEdge(
+                from: claim.peer,
+                peerHeight: claim.height,
+                generation: generation,
+                process: process
+            )
+            guard isCurrentRuntime(generation: generation, process: process),
+                  rangeSync == nil else { return }
+        }
         let candidates = announcedTips.filter { key, value in
             overlayPeers[key]?.sessionID == value.peer.sessionID
                 && value.height > ourHeight + Self.rangeSyncDepthThreshold
@@ -5482,6 +5652,75 @@ public actor NodeNetworkRuntime: IvyDelegate {
         )
         // The peer may refuse or stall again; the next clear re-probes.
     }
+
+    /// The height acquisition compares against: the canonical (weighed-
+    /// inclusive) tip — what we HOLD. `status().height` is the validated tip,
+    /// the act-on gate (templates, reads, hello tip); under deferred execution
+    /// weighed admissions never advance it, so gap tests, the paging window
+    /// and the locator measured against it would pace range sync on the
+    /// validate walk and re-page history already held.
+    private func acquiredHeight(_ process: ChainProcess) async -> UInt64 {
+        await process.canonicalTipHeight() ?? 0
+    }
+
+    /// One-shot frontier pull, once per session, at the live edge. The tip
+    /// announcement and main-chain range sync never carry losing forks, yet
+    /// fork choice weighs subtrees; a peer's accepted LEAVES plus parent links
+    /// determine its whole header graph, so one page per session is the
+    /// entire discovery — each unknown leaf's predecessor walk reassembles
+    /// its ancestry down to known history. That walk is short only when we
+    /// already hold the peer's main chain up to the live edge: pulled while
+    /// deep, every leaf would descend the whole gap top-down in competition
+    /// with range sync (and the parks would evict the leaves themselves). So
+    /// the pull waits for the moment `peerHeight` is within
+    /// `rangeSyncDepthThreshold` of our acquired tip — evaluated wherever
+    /// that is decided: on the peer's announcements and when a range sync
+    /// clears. No cursor: the live frontier is small under the losing-fork
+    /// budget, and any remainder re-enters through announcements.
+    private func pullFrontierIfAtEdge(
+        from peer: AuthenticatedPeer,
+        peerHeight: UInt64,
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        // An in-flight range sync is by definition not the edge, whatever any
+        // peer attests about its own height.
+        guard rangeSync == nil,
+              overlayPeers[peer.key]?.sessionID == peer.sessionID,
+              frontierPulls[peer.key]?.sessionID != peer.sessionID else { return }
+        let ourHeight = await acquiredHeight(process)
+        guard isCurrentRuntime(generation: generation, process: process),
+              rangeSync == nil,
+              overlayPeers[peer.key]?.sessionID == peer.sessionID,
+              frontierPulls[peer.key]?.sessionID != peer.sessionID,
+              peerHeight <= ourHeight + Self.rangeSyncDepthThreshold else { return }
+        let requestID = makeRequestID()
+        guard let payload = try? AcceptedLeavesRequestMessage(
+            requestID: requestID,
+            afterCID: nil
+        ).encoded() else { return }
+        frontierPulls[peer.key] = FrontierPull(
+            sessionID: peer.sessionID,
+            requestID: requestID
+        )
+        SyncTrace.log(
+            "frontier pull peer=\(peer.key.hex.prefix(8)) "
+                + "peerHeight=\(peerHeight) ours=\(ourHeight)"
+        )
+        _ = await overlay.sendMessage(
+            to: peer,
+            topic: NodeNetworkTopic.acceptedLeavesRequest,
+            payload: payload
+        )
+    }
+
+    #if DEBUG
+    /// Test seam: the range sync's current request anchor (the block the next
+    /// page is requested after, and its height).
+    func rangeSyncAnchorForTesting() -> (afterCID: String, requestedHeight: UInt64)? {
+        rangeSync.map { ($0.requestedAfterCID, $0.requestedHeight) }
+    }
+    #endif
 
     private func discardServingSessions(for peerKey: PeerKey) {
         var sessionIDs = Set<Data>()
@@ -5680,12 +5919,141 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
     }
 
-    private func requestParentChainFact(
+    /// Validate-tier evidence (deferred execution): a weighed CHILD block's
+    /// `.validate` admission recovers its own proof package from the store but
+    /// still needs the cross-chain fact the live path obtains from the
+    /// configured parent — the parent-state continuity (or genesis) link. The
+    /// walk hands the requirement here; this is the SAME request the live
+    /// candidate path sends (`requestParentChainFact`), awaited, and the merged
+    /// package is returned for the `.validate` re-admit. Nil when the fact is
+    /// not obtainable now (no parent session, request budget, timeout); the
+    /// walk then parks and retries. Without this, every weighed child block
+    /// parks the walk on `.unavailable(.parentStateContinuity)` forever.
+    public func resolveValidateEvidence(
+        for blockCID: String,
+        requirement: CrossChainEvidenceRequirement
+    ) async -> AuthenticatedChildPackage? {
+        guard isRunning, let process, !configuration.address.isNexus,
+              let fact = parentFact(for: requirement) else {
+            return nil
+        }
+        let generation = runtimeGeneration
+        guard let package = try? await process.recoveredAuthenticatedChildPackage(
+            for: blockCID
+        ), isCurrentRuntime(generation: generation, process: process) else {
+            return nil
+        }
+        return await awaitParentFact(
+            fact,
+            for: blockCID,
+            package: package,
+            generation: generation,
+            process: process
+        )
+    }
+
+    #if DEBUG
+    /// Test seam: `resolveValidateEvidence` with the block's package supplied
+    /// instead of recovered from the store — the request, await and every
+    /// resumption path are the production ones.
+    public func resolveValidateEvidenceForTesting(
+        for blockCID: String,
+        requirement: CrossChainEvidenceRequirement,
+        package: AuthenticatedChildPackage
+    ) async -> AuthenticatedChildPackage? {
+        guard isRunning, let process, let fact = parentFact(for: requirement) else {
+            return nil
+        }
+        return await awaitParentFact(
+            fact,
+            for: blockCID,
+            package: package,
+            generation: runtimeGeneration,
+            process: process
+        )
+    }
+    #endif
+
+    private func parentFact(
+        for requirement: CrossChainEvidenceRequirement
+    ) -> ParentChainFact? {
+        let parentPath = Array(configuration.chainPath.dropLast())
+        switch requirement {
+        case .parentGenesis(
+            let requiredPath, let directory, let childGenesisCID, let parentStateCID
+        ) where requiredPath == parentPath
+                && directory == configuration.address.directory:
+            return .genesis(
+                childGenesisCID: childGenesisCID,
+                parentStateCID: parentStateCID
+            )
+        case .parentStateContinuity(let requiredPath, let fromStateCID, let toStateCID)
+            where requiredPath == parentPath:
+            return .continuity(fromStateCID: fromStateCID, toStateCID: toStateCID)
+        default:
+            return nil
+        }
+    }
+
+    /// Send the parent-fact request and await its outcome: the merged package
+    /// on a fact, nil on refusal, timeout, parent disconnect or reset. Every
+    /// removal of the pending entry resumes the continuation (see
+    /// `discardPendingParentChainFacts`), so the walk never stays suspended.
+    private func awaitParentFact(
         _ fact: ParentChainFact,
         for blockCID: String,
         package: AuthenticatedChildPackage,
         generation: UInt64,
         process: ChainProcess
+    ) async -> AuthenticatedChildPackage? {
+        SyncTrace.log(
+            "validate evidence request block=\(blockCID.prefix(12)) fact=\(fact)"
+        )
+        return await withCheckedContinuation { continuation in
+            Task { [weak self] in
+                guard let self else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                await self.requestParentChainFact(
+                    fact,
+                    for: blockCID,
+                    package: package,
+                    generation: generation,
+                    process: process,
+                    continuation: continuation
+                )
+            }
+        }
+    }
+
+    /// The one teardown path for pending parent-fact requests: a walk's
+    /// continuation is resumed nil, a live candidate's entry is requeued when
+    /// asked. No other site may drop an entry without going through here.
+    private func discardPendingParentChainFacts(
+        where predicate: (PendingParentChainFact) -> Bool,
+        requeue: Bool
+    ) {
+        let discarded = pendingParentChainFacts.values.filter(predicate)
+        pendingParentChainFacts = pendingParentChainFacts.filter {
+            !predicate($0.value)
+        }
+        for pending in discarded {
+            if let continuation = pending.continuation {
+                continuation.resume(returning: nil)
+            } else if requeue {
+                retryParentFactCandidate(pending)
+            }
+        }
+    }
+
+    private func requestParentChainFact(
+        _ fact: ParentChainFact,
+        for blockCID: String,
+        package: AuthenticatedChildPackage,
+        generation: UInt64,
+        process: ChainProcess,
+        continuation: CheckedContinuation<AuthenticatedChildPackage?, Never>? = nil
     ) async {
         guard !configuration.address.isNexus,
               isCurrentRuntime(generation: generation, process: process),
@@ -5696,37 +6064,30 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     && $0.request.fact == fact
               }),
               let parent = configuredParentPeer() else {
+            continuation?.resume(returning: nil)
             return
         }
         let request = ParentChainFactMessage(
             requestID: makeRequestID(),
             fact: fact
         )
-        guard let payload = try? request.encoded() else { return }
+        guard let payload = try? request.encoded() else {
+            continuation?.resume(returning: nil)
+            return
+        }
         pendingParentChainFacts[request.requestID] =
             PendingParentChainFact(
                 peer: parent,
                 request: request,
                 blockCID: blockCID,
-                package: package
+                package: package,
+                continuation: continuation
             )
-        _ = await hierarchy.sendMessage(
-            to: parent,
-            topic: NodeNetworkTopic.parentChainFactRequest,
-            payload: payload
-        )
-        guard isCurrentRuntime(
-            generation: generation,
-            process: process
-        ) else {
-            pendingParentChainFacts.removeValue(
-                forKey: request.requestID
-            )
-            return
-        }
-        // A failed enqueue is transient. Keep the request until the same
-        // timeout used for an unanswered parent response requeues the
-        // candidate; a disconnect requeues it sooner.
+        // Armed BEFORE the send suspends: the entry must always have a
+        // bounded life, whatever happens during or after the send. A failed
+        // enqueue is transient — the same timeout used for an unanswered
+        // parent response requeues the candidate (or resolves the walk's
+        // request nil); a disconnect does so sooner.
         let delay = Self.nanoseconds(
             planeConfigurations.hierarchy.requestTimeout
         )
@@ -5737,6 +6098,21 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 generation: generation
             )
         }
+        _ = await hierarchy.sendMessage(
+            to: parent,
+            topic: NodeNetworkTopic.parentChainFactRequest,
+            payload: payload
+        )
+        guard isCurrentRuntime(
+            generation: generation,
+            process: process
+        ) else {
+            discardPendingParentChainFacts(
+                where: { $0.request.requestID == request.requestID },
+                requeue: false
+            )
+            return
+        }
     }
 
     private func acceptParentChainFact(
@@ -5745,6 +6121,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         process: ChainProcess
     ) async {
         guard isCurrentRuntime(generation: generation, process: process) else {
+            pending.continuation?.resume(returning: nil)
             return
         }
         let parentPath = Array(configuration.chainPath.dropLast())
@@ -5773,7 +6150,16 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard let merged = CandidateAcquirer.mergePackages(
             pending.package,
             localFact
-        ) else { return }
+        ) else {
+            pending.continuation?.resume(returning: nil)
+            return
+        }
+        // The validate walk asked for this fact: hand the merged package back
+        // to its `.validate` re-admit; there is no live candidate to re-ready.
+        if let continuation = pending.continuation {
+            continuation.resume(returning: merged)
+            return
+        }
         // A parent fact that arrives SUCCESSFULLY must re-ready the candidate that
         // was blocked waiting for it. observe()/enqueueCandidate only flips a
         // `.waiting(.evidence)` attempt back to `.ready`, never a `.waiting(.later)`
@@ -5799,6 +6185,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
               let pending = pendingParentChainFacts.removeValue(
                 forKey: requestID
               ) else { return }
+        if let continuation = pending.continuation {
+            continuation.resume(returning: nil)
+            return
+        }
         retryParentFactCandidate(pending)
     }
 

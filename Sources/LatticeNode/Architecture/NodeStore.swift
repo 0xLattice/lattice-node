@@ -209,9 +209,11 @@ actor NodeStore {
     /// exclusive and gives each handoff an age for budgeted eviction.
     /// Epoch 39 records the deferred-execution tier (weighed vs validated) on
     /// each accepted block so recovery reconstructs the validated set.
+    /// Epoch 40 records leaf-ness on each accepted block so the frontier page
+    /// is an index read, not a per-row scan of the accepted history.
     /// Older stores must be
     /// wiped; Nexus deterministically recreates the configured exact genesis.
-    static let currentSchemaEpoch: Int64 = 39
+    static let currentSchemaEpoch: Int64 = 40
 
     private static func parentGenesisFactKey(
         _ link: ParentGenesisLink
@@ -302,6 +304,9 @@ actor NodeStore {
                 throw NodeStoreError.wipeRequired("schema tables are missing or unexpected")
             }
         }
+        // Indexes are ensured on BOTH branches: an existing store runs no
+        // other DDL, so an index added after its creation would never exist.
+        try Self.ensureIndexes(in: database)
         try database.configureDurability()
 
         self.database = database
@@ -590,9 +595,24 @@ actor NodeStore {
         }
     }
 
-    /// Stable pagination over the accepted forest's leaves. The first call
-    /// captures the current admission sequence; later calls reuse it so newly
-    /// admitted descendants cannot reshuffle an in-progress page walk.
+    /// The cursor-less (frontier) leaf page: ?1 = snapshot admission sequence,
+    /// ?2 = limit. Served by the partial index `accepted_blocks_frontier`.
+    /// Leaf-ness is the maintained `leaf` flag; under a snapshot a block whose
+    /// only children were admitted after the snapshot reads as a non-leaf,
+    /// which only ever hides a leaf from an older page walk.
+    static let frontierLeafPageSQL =
+        "SELECT block_cid FROM accepted_blocks AS block WHERE block.leaf = 1 AND block.admission_seq <= ?1 ORDER BY block.admission_seq DESC, block.block_cid DESC LIMIT ?2"
+
+    /// Pagination over the accepted forest's leaves. The cursor-less page is
+    /// the MOST RECENTLY ADMITTED leaves (newest first): the leaf set only
+    /// ever grows (accepted rows are never deleted) and only recent forks can
+    /// still contend in fork choice, so a bounded frontier page must be the
+    /// recent end, never a lexicographic sample. A cursored page keeps the
+    /// legacy contract — leaves lexicographically after `afterCID`, in CID
+    /// order — which is what the wire's cursor rule and older peers' descent
+    /// expect; the frontier pull never cursors. The first call captures the
+    /// current admission sequence; later calls reuse it so newly admitted
+    /// descendants cannot reshuffle an in-progress page walk.
     func acceptedLeafPage(
         afterCID: String?,
         snapshotSequence: Int64?,
@@ -615,13 +635,15 @@ actor NodeStore {
 
         let rows: [[String: NodeSQLiteValue]]
         if let afterCID {
+            // Legacy cursored descent (older peers only; dead after the
+            // flag-day roll — delete with the cursored request handling).
             rows = try database.query(
                 "SELECT block_cid FROM accepted_blocks AS block WHERE block.admission_seq <= ?1 AND block.block_cid > ?2 AND NOT EXISTS (SELECT 1 FROM accepted_blocks AS child WHERE child.parent_cid = block.block_cid AND child.admission_seq <= ?1) ORDER BY block.block_cid LIMIT ?3",
                 params: [.int(snapshot), .text(afterCID), .int(sqlLimit)]
             )
         } else {
             rows = try database.query(
-                "SELECT block_cid FROM accepted_blocks AS block WHERE block.admission_seq <= ?1 AND NOT EXISTS (SELECT 1 FROM accepted_blocks AS child WHERE child.parent_cid = block.block_cid AND child.admission_seq <= ?1) ORDER BY block.block_cid LIMIT ?2",
+                Self.frontierLeafPageSQL,
                 params: [.int(snapshot), .int(sqlLimit)]
             )
         }
@@ -683,11 +705,16 @@ actor NodeStore {
         }
 
         var actualAcceptedBlocks: [String: PersistedAcceptedBlock] = [:]
+        var leafFlags: [String: Bool] = [:]
         for row in try database.query(
-            "SELECT block_cid, parent_cid, admission_seq FROM accepted_blocks"
+            "SELECT block_cid, parent_cid, admission_seq, leaf FROM accepted_blocks"
         ) {
             let block = try persistedAcceptedBlock(from: row)
             actualAcceptedBlocks[block.blockCID] = block
+            guard let leaf = row["leaf"]?.intValue else {
+                throw NodeStoreError.corrupt("malformed accepted-block leaf flag")
+            }
+            leafFlags[block.blockCID] = leaf == 1
         }
         guard actualAcceptedBlocks == expectedAcceptedBlocks else {
             throw NodeStoreError.corrupt(
@@ -704,6 +731,17 @@ actor NodeStore {
             if let parentCID = block.parentCID {
                 childrenByParent[parentCID, default: []].append(block.blockCID)
             }
+        }
+        // The maintained leaf flag is a derived index over the parent links
+        // verified above, so a disagreeing row is repaired from that truth,
+        // never a wipe: only the disagreeing rows are rewritten.
+        for (cid, leaf) in leafFlags.sorted(by: { $0.key < $1.key })
+        where leaf != (childrenByParent[cid] == nil) {
+            SyncTrace.log("boot audit: repairing leaf flag block=\(cid.prefix(12))")
+            try database.execute(
+                "UPDATE accepted_blocks SET leaf = ?1 WHERE block_cid = ?2",
+                params: [.int(childrenByParent[cid] == nil ? 1 : 0), .text(cid)]
+            )
         }
         var connectedQueue = Array(connectedAcceptedBlocks)
         while let parentCID = connectedQueue.popLast() {
@@ -1154,8 +1192,12 @@ actor NodeStore {
                 }
                 continue
             }
+            // Leaf-ness is incremental: a new row is a leaf unless a child
+            // row already exists (accepted rows arrive out of order for
+            // disconnected segments), and inserting a child retires its
+            // parent's leaf flag.
             try database.execute(
-                "INSERT INTO accepted_blocks (block_cid, parent_cid, admission_seq, validated) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO accepted_blocks (block_cid, parent_cid, admission_seq, validated, leaf) VALUES (?1, ?2, ?3, ?4, CASE WHEN EXISTS (SELECT 1 FROM accepted_blocks WHERE parent_cid = ?1) THEN 0 ELSE 1 END)",
                 params: [
                     .text(block.blockCID),
                     block.parentCID.map(NodeSQLiteValue.text) ?? .null,
@@ -1163,6 +1205,12 @@ actor NodeStore {
                     .int(validated ? 1 : 0),
                 ]
             )
+            if let parentCID = block.parentCID {
+                try database.execute(
+                    "UPDATE accepted_blocks SET leaf = 0 WHERE block_cid = ?1 AND leaf = 1",
+                    params: [.text(parentCID)]
+                )
+            }
         }
     }
 
@@ -3601,6 +3649,20 @@ actor NodeStore {
         }
     }
 
+    /// Every index, `IF NOT EXISTS`, run at every open (new and existing
+    /// stores alike) so an index introduced later still materializes.
+    private static func ensureIndexes(in database: NodeSQLite) throws {
+        try database.execute(
+            "CREATE INDEX IF NOT EXISTS accepted_blocks_by_parent ON accepted_blocks (parent_cid, admission_seq, block_cid)"
+        )
+        // The frontier (cursor-less) page: the leaves, newest first. Partial
+        // on `leaf = 1` so on a fork-free chain the page is one index entry,
+        // never a scan of the accepted history filtered per row.
+        try database.execute(
+            "CREATE INDEX IF NOT EXISTS accepted_blocks_frontier ON accepted_blocks (admission_seq DESC, block_cid DESC) WHERE leaf = 1"
+        )
+    }
+
     private static func createDataTables(in database: NodeSQLite) throws {
         try database.execute("""
             CREATE TABLE IF NOT EXISTS consensus_revision (
@@ -3629,12 +3691,10 @@ actor NodeStore {
                 block_cid TEXT PRIMARY KEY,
                 parent_cid TEXT,
                 admission_seq INTEGER NOT NULL,
-                validated INTEGER NOT NULL DEFAULT 1
+                validated INTEGER NOT NULL DEFAULT 1,
+                leaf INTEGER NOT NULL DEFAULT 1
             ) WITHOUT ROWID
             """)
-        try database.execute(
-            "CREATE INDEX IF NOT EXISTS accepted_blocks_by_parent ON accepted_blocks (parent_cid, admission_seq, block_cid)"
-        )
         try database.execute("""
             CREATE TABLE IF NOT EXISTS issued_parent_fact_sources (
                 payload BLOB PRIMARY KEY

@@ -514,6 +514,12 @@ public actor ChainService {
     // sync completes the acquirer may hold no timed wait to re-drive it, so the
     // walk owns its own liveness retry rather than borrowing the acquirer's.
     private let validateBodySource: ValidateBodyAdmission?
+    // Cross-chain evidence acquisition for the validate walk: a weighed CHILD
+    // block's `.validate` needs the parent fact (state continuity / genesis
+    // link) the live path obtains from the configured parent. The walk hands
+    // the requirement to this source and re-admits with the package it
+    // returns; nil parks the walk on the retry timer as an availability gap.
+    private let validateEvidenceSource: ValidateEvidenceSource?
     private let validateWalkRetryInterval: Duration
     private var validateWalkRetryTask: Task<Void, Never>?
     #if DEBUG
@@ -540,6 +546,7 @@ public actor ChainService {
         acceptedBlockPublisher: @escaping AcceptedBlockPublisher,
         acceptedTransactionPublisher: @escaping AcceptedTransactionPublisher = { _ in },
         validateBodySource: ValidateBodyAdmission? = nil,
+        validateEvidenceSource: ValidateEvidenceSource? = nil,
         validateWalkRetryInterval: Duration = .seconds(4),
         mempoolMaxCount: Int = 10_000,
         mempoolMaxNonReadyPerSigner: Int = 64,
@@ -550,6 +557,7 @@ public actor ChainService {
                 && maximumChildCandidates > 0
         )
         self.validateBodySource = validateBodySource
+        self.validateEvidenceSource = validateEvidenceSource
         self.validateWalkRetryInterval = validateWalkRetryInterval
         self.process = process
         self.childCandidateProvider = childCandidateProvider
@@ -1117,11 +1125,16 @@ public actor ChainService {
         return await pool.snapshot().map(\.cid).sorted()
     }
 
-    /// Rebuilds only user-submitted durable entries before networking starts.
-    /// Peer-originated transactions intentionally remain volatile.
+    /// Service start, before networking: rebuilds only user-submitted durable
+    /// entries (peer-originated transactions intentionally remain volatile)
+    /// and arms the validate walk if the restart left the validated tier
+    /// below the canonical tip — the common state under deferred execution,
+    /// and otherwise driven only by a canonical commit, so on a quiet network
+    /// templates would build on the stale validated tip indefinitely.
     public func restoreLocalTransactions() async throws {
         await acquireOperation()
         defer { releaseOperation() }
+        await reserveValidateWalkIfBehind()
         try await restoreLocalTransactionsLocked()
     }
 
@@ -1815,6 +1828,26 @@ public actor ChainService {
         releaseOperation()
     }
 
+    /// Deferred execution: if the canonical (weighed-inclusive) tip has run
+    /// ahead of the validated tier, execute the gap forward so the node stays
+    /// operable. Reserve — never run inline: callers hold the service gate,
+    /// and the walk re-acquires the process gate per block. `nil` validated
+    /// height means nothing on the main chain is validated yet (below
+    /// genesis), so treat it as strictly behind any canonical tip.
+    private func reserveValidateWalkIfBehind() async {
+        let validatedHeight = await process.deepestValidatedMainChainTip()?.height
+        if let target = await process.canonicalTipHeight(),
+           (validatedHeight.map { Int64($0) } ?? -1) < Int64(target) {
+            reserveValidateWalkWorker()
+        }
+    }
+
+    /// See `validateEvidenceSource`.
+    public typealias ValidateEvidenceSource = @Sendable (
+        _ blockCID: String,
+        _ requirement: CrossChainEvidenceRequirement
+    ) async -> AuthenticatedChildPackage?
+
     /// Coalescing reserve for the validate-on-candidacy walk. Mirrors
     /// `reserveCanonicalCommitWorker`'s single-instance-Task + dirty-bit shape: a
     /// commit that lands mid-walk sets the dirty bit (so the running worker takes
@@ -1838,14 +1871,14 @@ public actor ChainService {
     }
 
     /// Arm one delayed re-drive of the validate walk after it parks on a network
-    /// availability gap. A withheld body has no arrival signal and — once weighed
-    /// sync has completed — may leave no canonical commit to re-arm the walk, so a
-    /// single coalesced timer polls until the body is servable. Only meaningful
-    /// when a body source is wired; a broker-only walk never parks on a fetch.
+    /// availability gap or a store error. A withheld body has no arrival signal
+    /// and — once weighed sync has completed — may leave no canonical commit to
+    /// re-arm the walk, so a single coalesced timer polls until the body is
+    /// servable. A broker-only walk never parks on a fetch, but a store error
+    /// can park it in any configuration, so the timer is not gated on a body
+    /// source.
     private func scheduleValidateWalkRetry() {
-        guard validateBodySource != nil, validateWalkRetryTask == nil else {
-            return
-        }
+        guard validateWalkRetryTask == nil else { return }
         validateWalkRetryTask = Task { [weak self, validateWalkRetryInterval] in
             try? await Task.sleep(for: validateWalkRetryInterval)
             guard !Task.isCancelled else { return }
@@ -1897,10 +1930,11 @@ public actor ChainService {
             #endif
             let header = BlockHeader(rawCID: next, node: nil, encryptionInfo: nil)
             let admitValidate: @Sendable (
-                any ContentSource
-            ) async throws -> NodeAdmissionOutcome = { [self] remoteSource in
+                (any ContentSource)?, AuthenticatedChildPackage?
+            ) async throws -> NodeAdmissionOutcome = { [self] remoteSource, package in
                 try await process.admit(
                     header,
+                    authenticatedChildPackage: package,
                     remoteSource: remoteSource,
                     mode: .validate,
                     canonicalCommitPublisher: { [self] commit in
@@ -1908,26 +1942,48 @@ public actor ChainService {
                     }
                 )
             }
-            let outcome: NodeAdmissionOutcome
-            do {
+            let attempt: @Sendable (
+                AuthenticatedChildPackage?
+            ) async throws -> NodeAdmissionOutcome = { [validateBodySource] package in
                 if let validateBodySource {
-                    outcome = try await validateBodySource(next) { remoteSource in
-                        try await admitValidate(remoteSource)
+                    return try await validateBodySource(next) { remoteSource in
+                        try await admitValidate(remoteSource, package)
                     }
-                } else {
-                    outcome = try await process.admit(
-                        header,
-                        mode: .validate,
-                        canonicalCommitPublisher: { [self] commit in
-                            await enqueueCanonicalCommit(commit)
-                        }
-                    )
+                }
+                return try await admitValidate(nil, package)
+            }
+            var outcome: NodeAdmissionOutcome
+            do {
+                outcome = try await attempt(nil)
+                // A CHILD block on the validate tier recovers its own proof but
+                // may still need a cross-chain fact from the parent. Obtain it
+                // exactly as the live path does and re-admit with the merged
+                // package; if it cannot be obtained now, fall through to the
+                // availability park below.
+                if case .unavailable(let requirement?) = outcome.decision,
+                   let validateEvidenceSource,
+                   let package = await validateEvidenceSource(next, requirement) {
+                    outcome = try await attempt(package)
                 }
             } catch {
                 // A store/durability error is not a verdict: keep acting on the
-                // last validated tip. A later commit re-arms the walk.
+                // last validated tip. With the hierarchy artifacts persisted
+                // BEFORE the marker flips, a deterministic store conflict
+                // (conflicting issued parent fact / child proof, genesis
+                // authority without a connected parent) throws here every
+                // time and no commit would re-arm the walk on a quiet
+                // network — a silent permanent stall at this height. Log it
+                // and re-attempt on the availability-park timer so it stays
+                // observable and never wedges silently.
+                SyncTrace.log(
+                    "validate walk h=\(nextHeight) store error: \(error)"
+                )
+                scheduleValidateWalkRetry()
                 return
             }
+            SyncTrace.log(
+                "validate walk h=\(nextHeight) decision=\(outcome.decision)"
+            )
             switch outcome.decision {
             case .canonicalized, .acceptedSide, .duplicate:
                 // SUCCESS promoted weighed->validated (validated height advances),
@@ -2104,6 +2160,10 @@ public actor ChainService {
         _ commit: ChainCommit
     ) async throws {
         guard commit.canonicalChanged else { return }
+        // Reserved BEFORE the mempool bookkeeping below: operability must not
+        // hinge on it, and a body-less weighed tip is exactly the case where
+        // that bookkeeping has the least to work with.
+        await reserveValidateWalkIfBehind()
         try await prepareMempoolLocked()
 
         let addedTransactions = try await transactions(
@@ -2153,17 +2213,6 @@ public actor ChainService {
         for cid in removedByCID.keys.sorted() where pooledRoots.contains(cid) {
             scheduleTransactionPublication(cid)
         }
-        // Deferred execution: if the canonical (weighed-inclusive) tip has run
-        // ahead of the validated tier, execute the gap forward so the node stays
-        // operable. Reserve — never run inline: this method holds the service
-        // gate, and the walk re-acquires the process gate per block. `nil`
-        // validated height means nothing on the main chain is validated yet
-        // (below genesis), so treat it as strictly behind any canonical tip.
-        let validatedHeight = await process.deepestValidatedMainChainTip()?.height
-        if let target = await process.canonicalTipHeight(),
-           (validatedHeight.map { Int64($0) } ?? -1) < Int64(target) {
-            reserveValidateWalkWorker()
-        }
     }
 
     private func scheduleTransactionPublication(_ cid: String) {
@@ -2201,6 +2250,14 @@ public actor ChainService {
         -> [Transaction] {
         var result: [Transaction] = []
         for cid in blockCIDs {
+            // An accepted-but-weighed (deferred-execution) block holds no body
+            // locally yet: there is nothing of it to reconcile until the walk
+            // validates it, and pool revalidation against the validated tip
+            // covers the rest. An unknown block still fails below.
+            if await process.hasAcceptedBlock(cid),
+               await process.blockValidated(cid) == false {
+                continue
+            }
             let header = BlockHeader(
                 rawCID: cid,
                 node: nil,

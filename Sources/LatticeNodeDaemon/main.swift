@@ -161,6 +161,15 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                     .withRoot(blockCID) { session in
                         try await admit(session)
                     }
+            },
+            validateEvidenceSource: { [weak network] blockCID, requirement in
+                // A weighed child block's validate tier needs the parent fact
+                // (state continuity / genesis link) the live path requests from
+                // the configured parent; the same request, awaited.
+                await network?.resolveValidateEvidence(
+                    for: blockCID,
+                    requirement: requirement
+                )
             }
         )
         try await service.restoreLocalTransactions()

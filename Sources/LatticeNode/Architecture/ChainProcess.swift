@@ -926,14 +926,16 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                             self.retentionScope, blockHeader.rawCID
                         )
                     )
-                    try await self.store.promoteValidated(
-                        blockCID: blockHeader.rawCID
-                    )
                     // The weighed tier suppressed hierarchy issuance; validation
                     // re-derives it, and Lattice hands the carrier link back in the
                     // staging context. Persist it exactly as the eager path does so
                     // a cold-synced parent can serve child-proof routes and relay
                     // securing proofs for children anchored in below-tip blocks.
+                    // Persisted BEFORE the marker flips: a crash (or a throw)
+                    // between the two leaves a weighed block the walk simply
+                    // re-validates (the artifact rows are INSERT OR IGNORE), never
+                    // a validated block whose carrier link is lost for good —
+                    // boot reconciliation checks the pin, not the link.
                     if let hierarchyArtifacts = context.issuedCarrierLink.map({
                         AdmissionHierarchyArtifacts(
                             carrierLink: $0,
@@ -951,6 +953,9 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                             pendingChildProofCapacity: Self.preparedChildProofCapacity
                         )
                     }
+                    try await self.store.promoteValidated(
+                        blockCID: blockHeader.rawCID
+                    )
                 }
                 return
             }
@@ -1167,9 +1172,22 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// the canonical tier. Re-read every walk iteration so a mid-walk reorg or
     /// exclusion re-projection re-targets rather than chasing a stale frontier.
     func canonicalTipHeight() async -> UInt64? {
+        await canonicalTip()?.height
+    }
+
+    /// The CURRENT canonical (weighed-inclusive) main-chain tip as one
+    /// (cid, height) pair, or nil when not active. The height is that CID's
+    /// own — immutable — so the pair is consistent even if a reorg lands
+    /// between the two consensus reads; a `canonicalTipHeight()` paired with
+    /// a separate by-height CID lookup is not. Acquisition (the hello-reply
+    /// advertisement, range-sync anchors) uses this; act-on reads use
+    /// `status()` / the validated tip.
+    func canonicalTip() async -> (cid: String, height: UInt64)? {
         guard case .active(let level) = runtimePhase else { return nil }
         let tip = await level.chain.getMainChainTip()
-        return await level.chain.getConsensusBlock(hash: tip)?.blockHeight
+        guard let height = await level.chain.getConsensusBlock(hash: tip)?
+            .blockHeight else { return nil }
+        return (tip, height)
     }
 
     /// Anchored `directory -> genesisCID` map from the committed `genesisState`
@@ -1220,6 +1238,19 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// this as the canonical-data gate before serving decoded block content.
     public func hasAcceptedBlock(_ cid: String) async -> Bool {
         (try? await store.hasAcceptedBlock(cid)) ?? false
+    }
+
+    /// Ungated: whether `cid` is accepted on the validated (executed) tier, as
+    /// opposed to merely weighed.
+    public func blockValidated(_ cid: String) async -> Bool {
+        (try? await store.blockValidated(cid)) ?? false
+    }
+
+    /// Fork choice's same-chain subtree weight of `cid`, or nil when the block
+    /// is unknown or the process is not active.
+    func subtreeWeight(of cid: String) async -> WorkSum? {
+        guard case .active(let level) = runtimePhase else { return nil }
+        return await level.chain.subtreeWeight(forHash: cid)
     }
 
     /// Walks durable parent edges from `cid` toward genesis and returns the
@@ -1507,19 +1538,87 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         return await deepestValidatedMainChainTip(level: level)
     }
 
+    /// The last answer of `deepestValidatedMainChainTip`. Validated main-chain
+    /// blocks form a PREFIX (the walk validates forward from validated+1,
+    /// self-mined blocks attach on the validated tip, a reorg leaves a
+    /// validated prefix below the fork point), so the last answer is a floor:
+    /// while that block is still the main-chain block at its height, only the
+    /// delta above it needs reading — O(delta) per call instead of O(gap),
+    /// which made draining a backlog O(gap²) and every gated `status()`
+    /// O(gap). Any demotion on a live process (eviction) clears it, and a
+    /// cached block that left the main chain, or whose marker is no longer
+    /// validated when re-read, falls back to the full walk.
+    private var validatedTipCache: (cid: String, height: UInt64)?
+    /// The prefix assumption has one hole: eviction demotes OFF-main-chain
+    /// blocks, and if that fork later wins the main chain carries weighed
+    /// holes BELOW still-validated blocks. This is the lowest height ever
+    /// demoted on this process (eviction; boot reconciliation runs before any
+    /// probe, so it needs no seed). The fast path is taken only while the
+    /// cached floor sits at or above it — an up-walk from a floor below a
+    /// hole would stop at the hole and under-report the true top — and the
+    /// mark is never cleared: the walk re-validates the hole from below and
+    /// the floor climbs past it, after which O(delta) resumes.
+    private var demotedHoleFloor: UInt64?
+    #if DEBUG
+    // Test seam: store reads made by the validated-tip probe.
+    private var validatedTipStoreReads = 0
+    func validatedTipStoreReadsForTesting() -> Int { validatedTipStoreReads }
+    func resetValidatedTipStoreReadsForTesting() { validatedTipStoreReads = 0 }
+    /// Test seam: demote a block's marker WITHOUT touching the probe's cache,
+    /// the stale-floor race an ungated probe could otherwise resurrect.
+    func demoteValidatedForTesting(_ cid: String) async throws {
+        try await store.demoteValidated(blockCID: cid)
+    }
+    #endif
+
+    private func storeBlockValidated(_ cid: String) async -> Bool {
+        #if DEBUG
+        validatedTipStoreReads += 1
+        #endif
+        return (try? await store.blockValidated(cid)) == true
+    }
+
     private func deepestValidatedMainChainTip(
         level: ChainLevel
     ) async -> (cid: String, height: UInt64)? {
         let tip = await level.chain.getMainChainTip()
-        guard var height = await level.chain
+        guard let tipHeight = await level.chain
             .getConsensusBlock(hash: tip)?.blockHeight
         else { return nil }
+        // Fast path: the floor is at or above every demotion hole, still the
+        // main-chain block at its height, and — re-read, since an ungated
+        // probe may race an eviction that cleared the cache under the gate —
+        // still validated.
+        if let cached = validatedTipCache, cached.height <= tipHeight,
+           demotedHoleFloor.map({ cached.height >= $0 }) ?? true,
+           await level.chain.getMainChainBlockHash(atIndex: cached.height)
+            == cached.cid,
+           await storeBlockValidated(cached.cid) {
+            // Walk UP from the cached floor while the next main-chain block
+            // is validated.
+            var best = cached
+            while best.height < tipHeight {
+                let next = best.height + 1
+                guard let cid = await level.chain.getMainChainBlockHash(
+                    atIndex: next
+                ), await storeBlockValidated(cid) else { break }
+                best = (cid, next)
+            }
+            validatedTipCache = best
+            return best
+        }
+        // Full downward walk: the first validated block from the top.
+        var height = tipHeight
         while true {
             if let cid = await level.chain.getMainChainBlockHash(atIndex: height),
-               (try? await store.blockValidated(cid)) == true {
+               await storeBlockValidated(cid) {
+                validatedTipCache = (cid, height)
                 return (cid, height)
             }
-            if height == 0 { return nil }
+            if height == 0 {
+                validatedTipCache = nil
+                return nil
+            }
             height -= 1
         }
     }
@@ -2046,6 +2145,10 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             policy.maximumRetainedOffChainValidatedBlocks
         ) {
             try await store.demoteValidated(blockCID: candidate.cid)
+            validatedTipCache = nil
+            demotedHoleFloor = min(
+                demotedHoleFloor ?? candidate.height, candidate.height
+            )
             try await broker.unpinAll(
                 owner: Self.validatedOwner(retentionScope, candidate.cid)
             )

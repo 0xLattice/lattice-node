@@ -417,12 +417,14 @@ final class NodeStoreTests: XCTestCase {
             snapshotSequence: nil,
             limit: 1
         )
-        XCTAssertEqual(first.blockCIDs, ["root-a"])
+        XCTAssertEqual(first.blockCIDs, ["root-b"], "most recent first")
 
         try await store.stage(
             blockBatch(postStateCID: "root-c-state", blockHash: "root-c"),
             volumeRoots: []
         )
+        // A cursored (legacy descent) page under the captured snapshot: CID
+        // order after the cursor, never seeing root-c.
         let continued = try await store.acceptedLeafPage(
             afterCID: "root-a",
             snapshotSequence: first.snapshotSequence,
@@ -434,7 +436,198 @@ final class NodeStoreTests: XCTestCase {
             limit: 16
         )
         XCTAssertEqual(continued.blockCIDs, ["root-b"])
-        XCTAssertEqual(refreshed.blockCIDs, ["root-a", "root-b", "root-c"])
+        XCTAssertEqual(refreshed.blockCIDs, ["root-c", "root-b", "root-a"])
+    }
+
+    /// The frontier page is served per authenticated peer request on the store
+    /// actor: it must read the partial frontier index — on a PRE-EXISTING
+    /// store too, whose open path runs no other DDL — never scan and
+    /// temp-sort the accepted set.
+    func testFrontierLeafPageUsesTheFrontierIndexOnAnExistingStore() async throws {
+        let path = temporaryDirectory().appendingPathComponent("state.db")
+        var store: NodeStore? = try makeStore(path: path)
+        try await store!.stage(
+            blockBatch(postStateCID: "root-a-state", blockHash: "root-a"),
+            volumeRoots: []
+        )
+        store = nil
+        // A store file created without the index (an older layout).
+        do {
+            let older = try NodeSQLite(path: path.path)
+            _ = try older.execute("DROP INDEX IF EXISTS accepted_blocks_frontier")
+        }
+        store = try makeStore(path: path)
+        // A fresh connection sees the reopened store's schema.
+        let database = try NodeSQLite(path: path.path)
+        let indexes = try database.query(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'accepted_blocks'"
+        ).compactMap { $0["name"]?.textValue }
+        let plan = try database.query(
+            "EXPLAIN QUERY PLAN " + NodeStore.frontierLeafPageSQL,
+            params: [.int(1), .int(64)]
+        )
+        let details = plan.compactMap { $0["detail"]?.textValue }
+        XCTAssertTrue(
+            details.contains { $0.contains("accepted_blocks_frontier") },
+            "plan: \(details) indexes: \(indexes)"
+        )
+        XCTAssertFalse(
+            details.contains { $0.contains("TEMP B-TREE") },
+            "plan: \(details)"
+        )
+        XCTAssertNotNil(store)
+    }
+
+    /// The leaf flag is a derived index over the verified parent links: a
+    /// disagreeing row is REPAIRED by the boot audit from those links, never
+    /// treated as corruption that wipes the store.
+    func testBootAuditRepairsAWrongLeafFlag() async throws {
+        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let store = try makeStore(path: path)
+        try await store.stage(
+            blockBatch(postStateCID: "root-state", blockHash: "root"),
+            volumeRoots: []
+        )
+        try await store.stage(
+            blockBatch(
+                postStateCID: "child-state",
+                blockHash: "child",
+                parentBlockHash: "root",
+                blockHeight: 1
+            ),
+            volumeRoots: []
+        )
+        let database = try NodeSQLite(path: path.path)
+        // Both flags deliberately wrong.
+        _ = try database.execute(
+            "UPDATE accepted_blocks SET leaf = CASE block_cid WHEN 'root' THEN 1 ELSE 0 END"
+        )
+        try await store.auditNormalizedIndexes()
+        var leaves: [String: Int64] = [:]
+        for row in try database.query("SELECT block_cid, leaf FROM accepted_blocks") {
+            leaves[try XCTUnwrap(row["block_cid"]?.textValue)] =
+                try XCTUnwrap(row["leaf"]?.intValue)
+        }
+        XCTAssertEqual(leaves, ["root": 0, "child": 1])
+    }
+
+    /// Leaf-ness is maintained on insert in either order: a parent inserted
+    /// after its child (a disconnected segment arriving out of order) is not
+    /// a leaf, and inserting a child retires its parent's flag.
+    func testAcceptedBlockLeafFlagsTrackChildrenInEitherInsertionOrder()
+        async throws
+    {
+        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let store = try makeStore(path: path)
+        // In order: root, then child.
+        try await store.stage(
+            blockBatch(postStateCID: "root-state", blockHash: "root"),
+            volumeRoots: []
+        )
+        try await store.stage(
+            blockBatch(
+                postStateCID: "child-state",
+                blockHash: "child",
+                parentBlockHash: "root",
+                blockHeight: 1
+            ),
+            volumeRoots: []
+        )
+        // Out of order: grandchild before its parent.
+        try await store.stage(
+            blockBatch(
+                postStateCID: "gc-state",
+                blockHash: "grandchild",
+                parentBlockHash: "middle",
+                blockHeight: 3
+            ),
+            volumeRoots: []
+        )
+        try await store.stage(
+            blockBatch(
+                postStateCID: "middle-state",
+                blockHash: "middle",
+                parentBlockHash: "child",
+                blockHeight: 2
+            ),
+            volumeRoots: []
+        )
+        let database = try NodeSQLite(path: path.path)
+        var leaves: [String: Int64] = [:]
+        for row in try database.query("SELECT block_cid, leaf FROM accepted_blocks") {
+            leaves[try XCTUnwrap(row["block_cid"]?.textValue)] =
+                try XCTUnwrap(row["leaf"]?.intValue)
+        }
+        XCTAssertEqual(
+            leaves,
+            ["root": 0, "child": 0, "middle": 0, "grandchild": 1]
+        )
+        try await store.auditNormalizedIndexes()
+    }
+
+    /// The maintained-flag frontier page is the same set the correlated
+    /// NOT EXISTS leaf filter produces on a forked fixture.
+    func testFrontierPageMatchesTheLeafFilterOnAForkedFixture() async throws {
+        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let store = try makeStore(path: path)
+        try await store.stage(
+            blockBatch(postStateCID: "r-state", blockHash: "r"),
+            volumeRoots: []
+        )
+        for (cid, parent, height) in [
+            ("a", "r", UInt64(1)), ("b", "r", 1), ("aa", "a", 2), ("ab", "a", 2),
+            ("aaa", "aa", 3),
+        ] {
+            try await store.stage(
+                blockBatch(
+                    postStateCID: "\(cid)-state",
+                    blockHash: cid,
+                    parentBlockHash: parent,
+                    blockHeight: height
+                ),
+                volumeRoots: []
+            )
+        }
+        let page = try await store.acceptedLeafPage(
+            afterCID: nil,
+            snapshotSequence: nil,
+            limit: 64
+        )
+        let database = try NodeSQLite(path: path.path)
+        let filtered = try database.query(
+            "SELECT block_cid FROM accepted_blocks AS block WHERE NOT EXISTS (SELECT 1 FROM accepted_blocks AS child WHERE child.parent_cid = block.block_cid) ORDER BY block.admission_seq DESC, block.block_cid DESC"
+        ).compactMap { $0["block_cid"]?.textValue }
+        XCTAssertEqual(page.blockCIDs, filtered)
+        XCTAssertEqual(Set(page.blockCIDs), ["aaa", "ab", "b"])
+    }
+
+    /// The leaf set only grows and only recent forks can still contend, so
+    /// the bounded frontier (cursor-less) page must hold the most recently
+    /// ADMITTED leaves — never a lexicographic sample. The cursored page
+    /// keeps the legacy CID-order contract the wire's cursor rule expects.
+    func testAcceptedLeafPageIsMostRecentFirstAndCursorKeepsCIDOrder()
+        async throws
+    {
+        let store = try makeStore()
+        // Admission order deliberately disagrees with lexicographic order.
+        for name in ["root-e", "root-a", "root-d", "root-b", "root-c"] {
+            try await store.stage(
+                blockBatch(postStateCID: "\(name)-state", blockHash: name),
+                volumeRoots: []
+            )
+        }
+        let frontier = try await store.acceptedLeafPage(
+            afterCID: nil,
+            snapshotSequence: nil,
+            limit: 2
+        )
+        XCTAssertEqual(frontier.blockCIDs, ["root-c", "root-b"])
+        let cursored = try await store.acceptedLeafPage(
+            afterCID: "root-b",
+            snapshotSequence: frontier.snapshotSequence,
+            limit: 2
+        )
+        XCTAssertEqual(cursored.blockCIDs, ["root-c", "root-d"])
     }
 
     func testValidatedTierMarkerSurvivesRecovery() async throws {

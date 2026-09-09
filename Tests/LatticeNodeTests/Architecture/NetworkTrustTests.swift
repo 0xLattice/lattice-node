@@ -102,6 +102,7 @@ private actor TopicRecorder {
     private var topics: [String] = []
     func append(_ topic: String) { topics.append(topic) }
     func contains(_ topic: String) -> Bool { topics.contains(topic) }
+    func count(of topic: String) -> Int { topics.filter { $0 == topic }.count }
 }
 
 private actor AuthenticatedPeerRecorder: IvyDelegate {
@@ -260,6 +261,345 @@ private actor OverlayAnnouncingPeer: IvyDelegate {
     func authorizedSessionCount() -> Int { authorizedSessions.count }
 }
 
+/// A scripted overlay peer holding a main chain: announces its tip once per
+/// session (on the runtime's hello-reply announcement), answers the
+/// common-ancestor negotiation and forward pages from that chain, and records
+/// the receiver's ACQUIRED height at the moment each frontier (accepted-
+/// leaves) request arrives.
+private actor RangeServingPeer: IvyDelegate {
+    private let genesisCID: String
+    /// Ascending, genesis excluded.
+    private let chain: [String]
+    private let receiver: ChainProcess
+    /// The height announced once per session (defaults to the chain's).
+    private let claimedHeight: UInt64
+    private var authorizedSessions: [Data] = []
+    private var frontierRequestHeights: [UInt64] = []
+    private var forwardAfterCIDs: [String] = []
+
+    init(
+        genesisCID: String,
+        chain: [String],
+        receiver: ChainProcess,
+        claimedHeight: UInt64? = nil
+    ) {
+        self.genesisCID = genesisCID
+        self.chain = chain
+        self.receiver = receiver
+        self.claimedHeight = claimedHeight ?? UInt64(chain.count)
+    }
+
+    func ivy(
+        _ ivy: Ivy,
+        didReceiveMessage message: PeerMessage,
+        from peer: AuthenticatedPeer
+    ) async {
+        switch message.topic {
+        case NodeNetworkTopic.blockAnnouncement:
+            guard !authorizedSessions.contains(peer.sessionID),
+                  let tip = chain.last else { return }
+            authorizedSessions.append(peer.sessionID)
+            guard let payload = try? BlockAnnouncementMessage(
+                blockCID: tip,
+                height: claimedHeight
+            ).encoded() else { return }
+            _ = await ivy.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.blockAnnouncement,
+                payload: payload
+            )
+        case NodeNetworkTopic.ancestorRangeRequest:
+            guard let request = try? AncestorRangeRequestMessage.decoded(
+                message.payload
+            ) else { return }
+            // Locator is newest-first: the first hit is the highest shared.
+            let ancestor = request.locator.first {
+                $0 == genesisCID || chain.contains($0)
+            }
+            let page = ancestor.map { pageAfter($0) }
+                ?? (blockCIDs: [], hasMore: false)
+            guard let payload = try? AncestorRangeResponseMessage(
+                requestID: request.requestID,
+                commonAncestor: ancestor,
+                blockCIDs: page.blockCIDs,
+                hasMore: page.hasMore
+            ).encoded() else { return }
+            _ = await ivy.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.ancestorRangeResponse,
+                payload: payload
+            )
+        case NodeNetworkTopic.forwardRangeRequest:
+            guard let request = try? ForwardRangeRequestMessage.decoded(
+                message.payload
+            ) else { return }
+            forwardAfterCIDs.append(request.afterCID)
+            let page = pageAfter(request.afterCID)
+            guard let payload = try? ForwardRangeResponseMessage(
+                requestID: request.requestID,
+                afterCID: request.afterCID,
+                blockCIDs: page.blockCIDs,
+                hasMore: page.hasMore
+            ).encoded() else { return }
+            _ = await ivy.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.forwardRangeResponse,
+                payload: payload
+            )
+        case NodeNetworkTopic.acceptedLeavesRequest:
+            frontierRequestHeights.append(
+                await receiver.canonicalTipHeight() ?? 0
+            )
+        case NodeNetworkTopic.transactionInventoryRequest:
+            // An unanswered inventory request recycles the session at the
+            // request timeout, which would erase the runtime's recorded tip.
+            await answerInventoryEmpty(ivy, message: message, peer: peer)
+        default:
+            break
+        }
+    }
+
+    private func pageAfter(_ cid: String) -> (blockCIDs: [String], hasMore: Bool) {
+        let start = cid == genesisCID
+            ? 0
+            : (chain.firstIndex(of: cid).map { $0 + 1 } ?? chain.count)
+        let page = Array(
+            chain[start...].prefix(ForwardRangeResponseMessage.maximumBlocks)
+        )
+        return (page, start + page.count < chain.count)
+    }
+
+    func frontierRequests() -> [UInt64] { frontierRequestHeights }
+    func forwardRequests() -> [String] { forwardAfterCIDs }
+}
+
+/// Records every topic it receives and the requestID of each frontier
+/// (accepted-leaves) request, so a test can answer — or fail to answer — it.
+private actor FrontierRequestCapturingPeer: IvyDelegate {
+    private var topics: [String] = []
+    private var requestIDs: [UInt64] = []
+
+    func ivy(
+        _ ivy: Ivy,
+        didReceiveMessage message: PeerMessage,
+        from peer: AuthenticatedPeer
+    ) async {
+        topics.append(message.topic)
+        if message.topic == NodeNetworkTopic.acceptedLeavesRequest,
+           let request = try? AcceptedLeavesRequestMessage.decoded(
+            message.payload
+           ) {
+            requestIDs.append(request.requestID)
+        }
+        if message.topic == NodeNetworkTopic.transactionInventoryRequest {
+            await answerInventoryEmpty(ivy, message: message, peer: peer)
+        }
+    }
+
+    func count(of topic: String) -> Int { topics.filter { $0 == topic }.count }
+    func frontierRequestIDs() -> [UInt64] { requestIDs }
+}
+
+/// A peer that announces a tip the receiver lacks, negotiates GENESIS as the
+/// common ancestor, and serves one full first page (with more claimed
+/// beyond it); forward requests are recorded and answered empty.
+private actor FullPagePeer: IvyDelegate {
+    private let genesisCID: String
+    private let page: [String]
+    private let claimedHeight: UInt64
+    private var authorizedSessions: [Data] = []
+    private var forwardAfterCIDs: [String] = []
+
+    private let hasMore: Bool
+
+    init(
+        genesisCID: String,
+        page: [String],
+        claimedHeight: UInt64,
+        hasMore: Bool
+    ) {
+        self.genesisCID = genesisCID
+        self.page = page
+        self.claimedHeight = claimedHeight
+        self.hasMore = hasMore
+    }
+
+    func ivy(
+        _ ivy: Ivy,
+        didReceiveMessage message: PeerMessage,
+        from peer: AuthenticatedPeer
+    ) async {
+        switch message.topic {
+        case NodeNetworkTopic.blockAnnouncement:
+            guard !authorizedSessions.contains(peer.sessionID) else { return }
+            authorizedSessions.append(peer.sessionID)
+            guard let payload = try? BlockAnnouncementMessage(
+                blockCID: testCID("full-page-tip"),
+                height: claimedHeight
+            ).encoded() else { return }
+            _ = await ivy.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.blockAnnouncement,
+                payload: payload
+            )
+        case NodeNetworkTopic.ancestorRangeRequest:
+            guard let request = try? AncestorRangeRequestMessage.decoded(
+                message.payload
+            ), request.locator.contains(genesisCID),
+            let payload = try? AncestorRangeResponseMessage(
+                requestID: request.requestID,
+                commonAncestor: genesisCID,
+                blockCIDs: page,
+                hasMore: hasMore
+            ).encoded() else { return }
+            _ = await ivy.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.ancestorRangeResponse,
+                payload: payload
+            )
+        case NodeNetworkTopic.forwardRangeRequest:
+            guard let request = try? ForwardRangeRequestMessage.decoded(
+                message.payload
+            ) else { return }
+            forwardAfterCIDs.append(request.afterCID)
+            guard let payload = try? ForwardRangeResponseMessage(
+                requestID: request.requestID,
+                afterCID: request.afterCID,
+                blockCIDs: [],
+                hasMore: false
+            ).encoded() else { return }
+            _ = await ivy.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.forwardRangeResponse,
+                payload: payload
+            )
+        case NodeNetworkTopic.transactionInventoryRequest:
+            await answerInventoryEmpty(ivy, message: message, peer: peer)
+        default:
+            break
+        }
+    }
+
+    func forwardRequests() -> [String] { forwardAfterCIDs }
+}
+
+/// A lying peer: claims a tall tip once per session, then answers every
+/// locator negotiation with a valid common ancestor and an EMPTY page.
+private actor EmptyAncestorPeer: IvyDelegate {
+    private let claimedHeight: UInt64
+    private var authorizedSessions: [Data] = []
+    private var ancestorRequests = 0
+
+    init(claimedHeight: UInt64) {
+        self.claimedHeight = claimedHeight
+    }
+
+    func ivy(
+        _ ivy: Ivy,
+        didReceiveMessage message: PeerMessage,
+        from peer: AuthenticatedPeer
+    ) async {
+        switch message.topic {
+        case NodeNetworkTopic.blockAnnouncement:
+            guard !authorizedSessions.contains(peer.sessionID) else { return }
+            authorizedSessions.append(peer.sessionID)
+            guard let payload = try? BlockAnnouncementMessage(
+                blockCID: testCID("liar-tip"),
+                height: claimedHeight
+            ).encoded() else { return }
+            _ = await ivy.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.blockAnnouncement,
+                payload: payload
+            )
+        case NodeNetworkTopic.ancestorRangeRequest:
+            ancestorRequests += 1
+            guard let request = try? AncestorRangeRequestMessage.decoded(
+                message.payload
+            ), let payload = try? AncestorRangeResponseMessage(
+                requestID: request.requestID,
+                commonAncestor: request.locator.last,
+                blockCIDs: [],
+                hasMore: false
+            ).encoded() else { return }
+            _ = await ivy.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.ancestorRangeResponse,
+                payload: payload
+            )
+        case NodeNetworkTopic.transactionInventoryRequest:
+            await answerInventoryEmpty(ivy, message: message, peer: peer)
+        default:
+            break
+        }
+    }
+
+    func ancestorRequestCount() -> Int { ancestorRequests }
+}
+
+/// A peer that claims a tall tip once per session and then never answers
+/// the negotiation, so the receiver's range sync stays in flight.
+private actor SilentDeepPeer: IvyDelegate {
+    private let claimedHeight: UInt64
+    private var authorizedSessions: [Data] = []
+    private var ancestorRequests = 0
+
+    init(claimedHeight: UInt64) {
+        self.claimedHeight = claimedHeight
+    }
+
+    func ivy(
+        _ ivy: Ivy,
+        didReceiveMessage message: PeerMessage,
+        from peer: AuthenticatedPeer
+    ) async {
+        switch message.topic {
+        case NodeNetworkTopic.blockAnnouncement:
+            guard !authorizedSessions.contains(peer.sessionID) else { return }
+            authorizedSessions.append(peer.sessionID)
+            guard let payload = try? BlockAnnouncementMessage(
+                blockCID: testCID("deep-tip"),
+                height: claimedHeight
+            ).encoded() else { return }
+            _ = await ivy.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.blockAnnouncement,
+                payload: payload
+            )
+        case NodeNetworkTopic.ancestorRangeRequest:
+            ancestorRequests += 1
+        case NodeNetworkTopic.transactionInventoryRequest:
+            await answerInventoryEmpty(ivy, message: message, peer: peer)
+        default:
+            break
+        }
+    }
+
+    func ancestorRequestCount() -> Int { ancestorRequests }
+}
+
+/// Answer a runtime's hello-reply inventory request with an empty page so the
+/// scripted session survives past the request timeout.
+private func answerInventoryEmpty(
+    _ ivy: Ivy,
+    message: PeerMessage,
+    peer: AuthenticatedPeer
+) async {
+    guard let request = try? TransactionInventoryRequestMessage.decoded(
+        message.payload
+    ), let response = try? TransactionInventoryResponseMessage(
+        requestID: request.requestID,
+        afterRootCID: request.afterRootCID,
+        volumeRootCIDs: [],
+        hasMore: false
+    ).encoded() else { return }
+    _ = await ivy.sendMessage(
+        to: peer,
+        topic: NodeNetworkTopic.transactionInventoryResponse,
+        payload: response
+    )
+}
+
 private struct PortableAttachmentTestPayload: Sendable {
     let summary: PortableAttachmentSummary
     let content: [String: Data]
@@ -319,6 +659,7 @@ private actor HierarchyRetryRecorder {
     private var evidenceIndexRequests = 0
     private var helloSessions: [Data] = []
     private var indexSessions: [Data] = []
+    private var parentFactRequests = 0
 
     init(withholdFirstHello: Bool = false) {
         self.withholdFirstHello = withholdFirstHello
@@ -334,6 +675,8 @@ private actor HierarchyRetryRecorder {
         case NodeNetworkTopic.childEvidenceIndexRequest:
             evidenceIndexRequests += 1
             indexSessions.append(sessionID)
+        case NodeNetworkTopic.parentChainFactRequest:
+            parentFactRequests += 1
         default:
             break
         }
@@ -343,6 +686,8 @@ private actor HierarchyRetryRecorder {
     func sessionTrace() -> (hellos: [Data], indexes: [Data]) {
         (helloSessions, indexSessions)
     }
+
+    func parentFactRequestCount() -> Int { parentFactRequests }
 }
 
 private final class HierarchyRetryPeer: IvyDelegate, Sendable {
@@ -4624,6 +4969,80 @@ final class NetworkTrustTests: XCTestCase {
         await fixture.runtime.stop()
     }
 
+    /// The validate walk's evidence request suspends on the parent's answer.
+    /// When the parent session drops while it is in flight, the request must
+    /// resolve nil (the walk parks and retries) — never stay suspended: an
+    /// unresumed continuation would leave the walk worker alive and every
+    /// later reserve a no-op for the process lifetime.
+    func testValidateEvidenceRequestResolvesNilWhenTheParentSessionDrops()
+        async throws
+    {
+        let fixture = try await hierarchyRetryFixture(
+            keyByte: 0x68,
+            summary: nil
+        )
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: fixture.storage)
+        }
+        let package = AuthenticatedChildPackage(
+            package: ChildValidationPackage(proof: ChildBlockProof(
+                rootCID: "proof-root",
+                directoryPath: ["Retry"],
+                entries: []
+            ))
+        )
+        do {
+            try await fixture.parent.start()
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: duplicateNetworkHandlers()
+            )
+            try await waitUntil("parent role granted") {
+                !(await fixture.recorder.sessionTrace()).hellos.isEmpty
+            }
+            // In flight: the parent never answers.
+            let resolved = Task { [runtime = fixture.runtime] in
+                await runtime.resolveValidateEvidenceForTesting(
+                    for: testCID("child-block"),
+                    requirement: .parentStateContinuity(
+                        parentPath: ["Nexus"],
+                        fromStateCID: testCID("from-state"),
+                        toStateCID: testCID("to-state")
+                    ),
+                    package: package
+                )
+            }
+            try await waitUntil("request sent to the parent") {
+                await fixture.recorder.parentFactRequestCount() >= 1
+            }
+            await fixture.parent.stop()
+
+            // Bounded: a leaked continuation never returns.
+            let outcome = await withTaskGroup(
+                of: Bool.self, returning: Bool.self
+            ) { group in
+                group.addTask { await resolved.value == nil }
+                group.addTask {
+                    try? await Task.sleep(for: .seconds(10))
+                    return false
+                }
+                let first = await group.next() ?? false
+                group.cancelAll()
+                return first
+            }
+            XCTAssertTrue(
+                outcome,
+                "an in-flight evidence request must resolve nil on parent drop"
+            )
+        } catch {
+            await fixture.parent.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await fixture.parent.stop()
+        await fixture.runtime.stop()
+    }
+
     func testRecoveredNoncanonicalCarrierAnnouncesEvidenceAfterEmptyIndex()
         async throws {
         let fixture = try await pendingSideCarrierFixture(
@@ -5981,6 +6400,1296 @@ final class NetworkTrustTests: XCTestCase {
         )
     }
 
+    // MARK: frontier pull — the header graph is its leaves plus parent links
+
+    /// The frontier (accepted-leaves) request is sent once per session, at
+    /// the live edge: triggered by the peer's tip announcement — never by the
+    /// hello alone, which carries no peer height — and evaluated even when we
+    /// already HOLD the announced block (holding the peer's tip is being at
+    /// its edge). A later at-edge announcement in the same session pulls
+    /// nothing more.
+    func testFrontierIsPulledOnceAtTheEdgeEvenForAHeldTip() async throws {
+        let fixture = try await overlayRuntime(
+            keyByte: 0xc1,
+            requestTimeout: .seconds(5)
+        )
+        let topics = TopicRecorder()
+        let client = Ivy(config: IvyConfig(
+            signingKey: signingKey(0xc2),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        let delegate = TopicRecordingPeer(recorder: topics)
+        await client.installTestDelegate(delegate)
+        let service = networkService(
+            process: fixture.process,
+            runtime: fixture.runtime
+        )
+        let genesisCID = try BlockHeader(
+            node: await fixture.process.canonicalTipBlock()
+        ).rawCID
+        do {
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: transactionServiceHandlers(service)
+            )
+            try await connectAndHello(
+                client,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            try await waitForTopic(NodeNetworkTopic.blockAnnouncement, in: topics)
+            // Settle: the hello reply alone knows no peer height.
+            try await Task.sleep(for: .milliseconds(300))
+            let atHello = await topics.count(
+                of: NodeNetworkTopic.acceptedLeavesRequest
+            )
+            XCTAssertEqual(atHello, 0, "hello must not pull the frontier blindly")
+
+            // The peer's tip is our own genesis: held, and at the edge.
+            guard case .enqueued = await client.sendMessage(
+                to: fixture.peerID,
+                topic: NodeNetworkTopic.blockAnnouncement,
+                payload: try BlockAnnouncementMessage(
+                    blockCID: genesisCID,
+                    height: 0
+                ).encoded()
+            ) else {
+                throw NetworkTestError.failedSend
+            }
+            try await waitForTopic(
+                NodeNetworkTopic.acceptedLeavesRequest,
+                in: topics
+            )
+            // Still at the edge, same session: no second pull.
+            guard case .enqueued = await client.sendMessage(
+                to: fixture.peerID,
+                topic: NodeNetworkTopic.blockAnnouncement,
+                payload: try BlockAnnouncementMessage(
+                    blockCID: testCID("next"),
+                    height: 1
+                ).encoded()
+            ) else {
+                throw NetworkTestError.failedSend
+            }
+            try await Task.sleep(for: .milliseconds(300))
+            let frontierRequests = await topics.count(
+                of: NodeNetworkTopic.acceptedLeavesRequest
+            )
+            let announcements = await topics.count(
+                of: NodeNetworkTopic.blockAnnouncement
+            )
+            XCTAssertEqual(frontierRequests, 1)
+            XCTAssertEqual(announcements, 1)
+        } catch {
+            await client.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await client.stop()
+        await fixture.runtime.stop()
+    }
+
+    /// A joiner far below a peer's tip must NOT pull the frontier at hello:
+    /// every leaf would be far above its edge and each leaf's predecessor walk
+    /// would descend the whole main chain in competition with range sync. The
+    /// gap takes range sync first; the one pull lands once the ACQUIRED tip is
+    /// at the edge, and only once.
+    func testDeepJoinerPullsTheFrontierOnlyAfterRangeSyncReachesTheEdge()
+        async throws
+    {
+        let fixture = try await overlayRuntime(
+            keyByte: 0xcb,
+            requestTimeout: .milliseconds(300)
+        )
+        let depth = 8
+        let producer = try await canonicalNetworkProcess()
+        let clock = TestBlockClock()
+        var parent = try await producer.canonicalTipBlock()
+        let genesisCID = try BlockHeader(node: parent).rawCID
+        var chain: [String] = []
+        var volumes: [SerializedVolume] = []
+        for _ in 0..<depth {
+            parent = try await acceptNexusBlock(
+                on: parent,
+                process: producer,
+                timestamp: clock.next()
+            )
+            let cid = try BlockHeader(node: parent).rawCID
+            chain.append(cid)
+            let volume = await producer.volume(cid)
+            volumes.append(try XCTUnwrap(volume))
+        }
+        let scripted = RangeServingPeer(
+            genesisCID: genesisCID,
+            chain: chain,
+            receiver: fixture.process
+        )
+        let client = Ivy(config: IvyConfig(
+            signingKey: signingKey(0xcc),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        await client.installTestDelegate(scripted)
+        await client.setContentSource(RecordingNetworkTestVolumesSource(volumes))
+        let service = networkService(
+            process: fixture.process,
+            runtime: fixture.runtime
+        )
+        do {
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: transactionServiceHandlers(service)
+            )
+            try await connectAndHello(
+                client,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            try await waitUntil("joiner acquires the peer's chain") {
+                await fixture.process.canonicalTipHeight() == UInt64(depth)
+            }
+            try await waitUntil("frontier pulled at the edge", attempts: 1_000) {
+                !(await scripted.frontierRequests()).isEmpty
+            }
+            // Settle: nothing after the edge pulls again.
+            try await Task.sleep(for: .milliseconds(300))
+            let pulls = await scripted.frontierRequests()
+            XCTAssertEqual(pulls.count, 1, "one pull per session: \(pulls)")
+            XCTAssertEqual(
+                pulls.first, UInt64(depth),
+                "the frontier is pulled at the edge, never at hello while deep"
+            )
+        } catch {
+            await client.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await client.stop()
+        await fixture.runtime.stop()
+    }
+
+    /// A frontier page seeds candidates only as the one answer to the one
+    /// request we sent: an unsolicited or mismatched-requestID page seeds
+    /// nothing, the matching page seeds, and a second matching page seeds
+    /// nothing (the request is consumed).
+    func testFrontierPageSeedsOnlyTheOneCorrelatedResponse() async throws {
+        let fixture = try await overlayRuntime(
+            keyByte: 0xcd,
+            requestTimeout: .seconds(5)
+        )
+        let producer = try await canonicalNetworkProcess()
+        let clock = TestBlockClock()
+        let genesis = try await producer.canonicalTipBlock()
+        let genesisCID = try BlockHeader(node: genesis).rawCID
+        let block1 = try await acceptNexusBlock(
+            on: genesis, process: producer, timestamp: clock.next()
+        )
+        let block2 = try await acceptNexusBlock(
+            on: block1, process: producer, timestamp: clock.next()
+        )
+        let sibling = try await acceptNexusBlock(
+            on: genesis, process: producer, timestamp: clock.next()
+        )
+        let block2CID = try BlockHeader(node: block2).rawCID
+        let siblingCID = try BlockHeader(node: sibling).rawCID
+        var volumes: [SerializedVolume] = []
+        for block in [block1, block2, sibling] {
+            let cid = try BlockHeader(node: block).rawCID
+            let volume = await producer.volume(cid)
+            volumes.append(try XCTUnwrap(volume))
+        }
+        let scripted = FrontierRequestCapturingPeer()
+        let client = Ivy(config: IvyConfig(
+            signingKey: signingKey(0xce),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        await client.installTestDelegate(scripted)
+        await client.setContentSource(RecordingNetworkTestVolumesSource(volumes))
+        let service = networkService(
+            process: fixture.process,
+            runtime: fixture.runtime
+        )
+        func sendPage(requestID: UInt64, leaves: [String]) async throws {
+            guard case .enqueued = await client.sendMessage(
+                to: fixture.peerID,
+                topic: NodeNetworkTopic.acceptedLeavesResponse,
+                payload: try AcceptedLeavesResponseMessage(
+                    requestID: requestID,
+                    afterCID: nil,
+                    snapshotSequence: 1,
+                    blockCIDs: leaves,
+                    hasMore: false
+                ).encoded()
+            ) else {
+                throw NetworkTestError.failedSend
+            }
+        }
+        do {
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: transactionServiceHandlers(service)
+            )
+            try await connectAndHello(
+                client,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            // At-edge announcement of a held block triggers the one pull.
+            guard case .enqueued = await client.sendMessage(
+                to: fixture.peerID,
+                topic: NodeNetworkTopic.blockAnnouncement,
+                payload: try BlockAnnouncementMessage(
+                    blockCID: genesisCID,
+                    height: 0
+                ).encoded()
+            ) else {
+                throw NetworkTestError.failedSend
+            }
+            try await waitUntil("frontier request") {
+                !(await scripted.frontierRequestIDs()).isEmpty
+            }
+            let captured = await scripted.frontierRequestIDs()
+            let requestID = try XCTUnwrap(captured.first)
+
+            // Mismatched requestID: seeds nothing.
+            try await sendPage(requestID: requestID &+ 1, leaves: [siblingCID])
+            try await Task.sleep(for: .milliseconds(300))
+            let unsolicited = await fixture.process.hasAcceptedBlock(siblingCID)
+            XCTAssertFalse(unsolicited, "an uncorrelated page must seed nothing")
+
+            // The one matching page seeds (leaf 2 walks down to leaf 1).
+            try await sendPage(requestID: requestID, leaves: [block2CID])
+            try await waitUntil("matching page seeds the leaf") {
+                await fixture.process.hasAcceptedBlock(block2CID)
+            }
+
+            // A second matching page: the request is consumed.
+            try await sendPage(requestID: requestID, leaves: [siblingCID])
+            try await Task.sleep(for: .milliseconds(300))
+            let repeated = await fixture.process.hasAcceptedBlock(siblingCID)
+            XCTAssertFalse(repeated, "a repeated page must seed nothing")
+        } catch {
+            await client.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await client.stop()
+        await fixture.runtime.stop()
+    }
+
+    /// An announcement carries the announced block's OWN height, not the
+    /// validated tip's: every accepted block is announced, and a receiver
+    /// reads (blockCID, height) as one claim for its gap test.
+    func testAnnouncementCarriesTheAnnouncedBlocksOwnHeight() async throws {
+        let fixture = try await overlayRuntime(
+            keyByte: 0xcf,
+            requestTimeout: .seconds(5)
+        )
+        let depth = 5
+        let payloads = PayloadRecorder()
+        let client = Ivy(config: IvyConfig(
+            signingKey: signingKey(0xd0),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        // Ivy holds its delegate weakly: keep it alive for the test.
+        let delegate = PayloadRecordingPeer(recorder: payloads)
+        await client.installTestDelegate(delegate)
+        do {
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: inertNetworkHandlers()
+            )
+            try await connectAndHello(
+                client,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            try await waitUntil("hello reply announcement") {
+                !(await payloads.payloads(
+                    topic: NodeNetworkTopic.blockAnnouncement
+                )).isEmpty
+            }
+            // Acquire weighed history AFTER the session is up (see
+            // weighedChain): the node now holds the chain to `depth` while
+            // its validated tip is still genesis.
+            let blocks = try await weighedChain(on: fixture.process, depth: depth)
+            let tipCID = try BlockHeader(node: try XCTUnwrap(blocks.last)).rawCID
+            let validatedHeight = await fixture.process.status().height
+            XCTAssertEqual(validatedHeight, 0, "validated tip lags the acquired tip")
+            try await fixture.runtime.announceBlock(tipCID)
+            try await waitUntil("tip announcement") {
+                (await payloads.payloads(
+                    topic: NodeNetworkTopic.blockAnnouncement
+                )).count >= 2
+            }
+            let announced = try (await payloads.payloads(
+                topic: NodeNetworkTopic.blockAnnouncement
+            )).map { try BlockAnnouncementMessage.decoded($0) }
+            let tip = try XCTUnwrap(announced.first { $0.blockCID == tipCID })
+            XCTAssertEqual(tip.height, UInt64(depth))
+        } catch {
+            await client.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await client.stop()
+        await fixture.runtime.stop()
+    }
+
+    /// The range-sync gap test measures against the ACQUIRED (weighed-
+    /// inclusive) tip — what we hold — not the validated tip: a node holding
+    /// weighed blocks to H treats H+1 as the live edge (direct predecessor
+    /// path) and H+3 as a gap (range sync).
+    func testRangeSyncGapIsMeasuredAgainstTheAcquiredTip() async throws {
+        let fixture = try await overlayRuntime(
+            keyByte: 0xc1,
+            requestTimeout: .seconds(5)
+        )
+        let depth = 5
+        let topics = TopicRecorder()
+        let client = Ivy(config: IvyConfig(
+            signingKey: signingKey(0xc2),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        // Ivy holds its delegate weakly: keep it alive for the test.
+        let delegate = TopicRecordingPeer(recorder: topics)
+        await client.installTestDelegate(delegate)
+        do {
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: inertNetworkHandlers()
+            )
+            try await connectAndHello(
+                client,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            try await waitForTopic(NodeNetworkTopic.blockAnnouncement, in: topics)
+            // Acquire weighed history AFTER the session is up (see
+            // weighedChain): held to `depth`, validated tip still genesis.
+            _ = try await weighedChain(on: fixture.process, depth: depth)
+            guard case .enqueued = await client.sendMessage(
+                to: fixture.peerID,
+                topic: NodeNetworkTopic.blockAnnouncement,
+                payload: try BlockAnnouncementMessage(
+                    blockCID: testCID("edge"),
+                    height: UInt64(depth + 1)
+                ).encoded()
+            ) else {
+                throw NetworkTestError.failedSend
+            }
+            try await Task.sleep(for: .milliseconds(300))
+            let atEdge = await topics.count(
+                of: NodeNetworkTopic.ancestorRangeRequest
+            )
+            XCTAssertEqual(
+                atEdge, 0,
+                "one past the acquired tip is the live edge, not a gap"
+            )
+            guard case .enqueued = await client.sendMessage(
+                to: fixture.peerID,
+                topic: NodeNetworkTopic.blockAnnouncement,
+                payload: try BlockAnnouncementMessage(
+                    blockCID: testCID("deep"),
+                    height: UInt64(depth + 3)
+                ).encoded()
+            ) else {
+                throw NetworkTestError.failedSend
+            }
+            try await waitForTopic(
+                NodeNetworkTopic.ancestorRangeRequest,
+                in: topics
+            )
+        } catch {
+            await client.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await client.stop()
+        await fixture.runtime.stop()
+    }
+
+    /// A joiner discovers a producer's LOSING fork from the frontier pull alone
+    /// (range sync pages only the main chain; announcements carry only the
+    /// tip). The fresh joiner first cold-syncs the canonical chain — every
+    /// network block admitted weighed, then validated by the walk — and, after
+    /// the producer silently accepts a losing sibling, a rejoin's one-shot
+    /// frontier pull weighs that sibling into fork choice without ever
+    /// executing it, while the joiner keeps building on the canonical tip.
+    func testJoinerWeighsLosingForkFromFrontierWithoutExecutingIt() async throws {
+        let producer = try await overlayRuntime(
+            keyByte: 0xc3,
+            requestTimeout: .seconds(5)
+        )
+        let joiner = try await overlayRuntime(
+            keyByte: 0xc4,
+            requestTimeout: .seconds(5),
+            bootstrapPeers: [producer.endpoint]
+        )
+        let producerService = networkService(
+            process: producer.process,
+            runtime: producer.runtime
+        )
+        let joinerService = networkService(
+            process: joiner.process,
+            runtime: joiner.runtime
+        )
+        let joinerAdmissions = NetworkEventRecorder()
+        let joinerHandlers = transactionServiceHandlers(
+            joinerService,
+            admissions: joinerAdmissions
+        )
+
+        // Producer history: genesis-1-2-3-4-5 canonical.
+        let clock = TestBlockClock()
+        var parent = try await producer.process.canonicalTipBlock()
+        var canonical: [String] = []
+        var block2 = parent
+        for height in 1...5 {
+            parent = try await acceptNexusBlock(
+                on: parent,
+                process: producer.process,
+                timestamp: clock.next()
+            )
+            canonical.append(try BlockHeader(node: parent).rawCID)
+            if height == 2 { block2 = parent }
+        }
+        let tipCID = try XCTUnwrap(canonical.last)
+
+        do {
+            try await producer.runtime.start(
+                process: producer.process,
+                handlers: transactionServiceHandlers(producerService)
+            )
+            try await joiner.runtime.start(
+                process: joiner.process,
+                handlers: joinerHandlers
+            )
+            try await waitUntil("joiner validates the canonical tip") {
+                await joiner.process.status().tipCID == tipCID
+            }
+
+            // A losing sibling of 3 (on 2), accepted by the producer's process
+            // only: no announcement ever carries it, and it is off the main
+            // chain, so only the frontier can reveal it.
+            let losing = try await acceptNexusBlock(
+                on: block2,
+                process: producer.process,
+                timestamp: clock.next()
+            )
+            let losingCID = try BlockHeader(node: losing).rawCID
+            let producerTip = await producer.process.status().tipCID
+            XCTAssertEqual(producerTip, tipCID, "the sibling must lose")
+
+            // Rejoin: the new session's hello pulls the frontier once.
+            await joiner.runtime.stop()
+            try await joiner.runtime.start(
+                process: joiner.process,
+                handlers: joinerHandlers
+            )
+            try await waitUntil("joiner weighs the losing sibling") {
+                await joiner.process.hasAcceptedBlock(losingCID)
+            }
+
+            let losingValidated = await joiner.process.blockValidated(losingCID)
+            XCTAssertFalse(losingValidated, "a losing fork is weighed, never executed")
+            for cid in canonical {
+                let validated = await joiner.process.blockValidated(cid)
+                XCTAssertTrue(validated, "canonical block must be walk-validated")
+            }
+            let admissions = await joinerAdmissions.snapshot()
+            XCTAssertTrue(
+                admissions.contains("\(losingCID)|weighed"),
+                "admissions: \(admissions)"
+            )
+            XCTAssertTrue(
+                admissions.allSatisfy { $0.hasSuffix("|weighed") },
+                "every network-sourced block seeds weighed: \(admissions)"
+            )
+            let joinerTip = await joiner.process.status().tipCID
+            XCTAssertEqual(joinerTip, tipCID)
+            let template = try await joinerService.miningTemplate(
+                MiningTemplateRequest()
+            )
+            XCTAssertEqual(template.block.parent?.rawCID, tipCID)
+        } catch {
+            await joiner.runtime.stop()
+            await producer.runtime.stop()
+            throw error
+        }
+        await joiner.runtime.stop()
+        await producer.runtime.stop()
+    }
+
+    /// Subtree weights are complete. At the fork on 2, branch X wins only
+    /// because of a LOSING sub-subtree S under it: X = X3 + {X4a,X5a,X6a}
+    /// canonical + S {X4b,X5b} = 6, versus Y = Y3..Y7 = 5. A joiner that
+    /// learned Y's leaf but not S would reorg to Y; the frontier pull delivers
+    /// both leaves, so the joiner's fork choice matches the producer's, with S
+    /// weighed (strictly lighter than its sibling, so never canonical, never
+    /// executed).
+    func testJoinerForkChoiceMatchesProducerOnlyWithItsLosingSubtree()
+        async throws
+    {
+        let producer = try await overlayRuntime(
+            keyByte: 0xc5,
+            requestTimeout: .seconds(5)
+        )
+        let joiner = try await overlayRuntime(
+            keyByte: 0xc6,
+            requestTimeout: .seconds(5),
+            bootstrapPeers: [producer.endpoint]
+        )
+        let producerService = networkService(
+            process: producer.process,
+            runtime: producer.runtime
+        )
+        let joinerService = networkService(
+            process: joiner.process,
+            runtime: joiner.runtime
+        )
+        let joinerHandlers = transactionServiceHandlers(joinerService)
+
+        let clock = TestBlockClock()
+        func extend(
+            _ parent: Block, by count: Int
+        ) async throws -> [Block] {
+            var blocks: [Block] = []
+            var current = parent
+            for _ in 0..<count {
+                current = try await acceptNexusBlock(
+                    on: current,
+                    process: producer.process,
+                    timestamp: clock.next()
+                )
+                blocks.append(current)
+            }
+            return blocks
+        }
+        func cid(_ block: Block) throws -> String {
+            try BlockHeader(node: block).rawCID
+        }
+        let genesis = try await producer.process.canonicalTipBlock()
+        let trunk = try await extend(genesis, by: 2)
+        let block2 = try XCTUnwrap(trunk.last)
+        let x3 = try await acceptNexusBlock(
+            on: block2,
+            process: producer.process,
+            timestamp: clock.next()
+        )
+        let xCanonical = try await extend(x3, by: 3)
+        let xTipCID = try cid(try XCTUnwrap(xCanonical.last))
+
+        do {
+            try await producer.runtime.start(
+                process: producer.process,
+                handlers: transactionServiceHandlers(producerService)
+            )
+            try await joiner.runtime.start(
+                process: joiner.process,
+                handlers: joinerHandlers
+            )
+            try await waitUntil("joiner validates X's tip") {
+                await joiner.process.status().tipCID == xTipCID
+            }
+
+            // Silently (process-only) add S under X3 and the competitor Y.
+            let s = try await extend(x3, by: 2)
+            let y = try await extend(block2, by: 5)
+            let sLeafCID = try cid(try XCTUnwrap(s.last))
+            let yLeafCID = try cid(try XCTUnwrap(y.last))
+            let producerTip = await producer.process.status().tipCID
+            XCTAssertEqual(producerTip, xTipCID, "X must still win on the producer")
+            // The producer's frontier page carries both new leaves (most
+            // recently admitted first), which is all the joiner needs.
+            let producerFrontier = try await producer.process.acceptedLeafPage(
+                afterCID: nil,
+                snapshotSequence: nil,
+                limit: AcceptedLeavesResponseMessage.maximumLeaves
+            ).blockCIDs
+            XCTAssertEqual(
+                Array(producerFrontier.prefix(2)), [yLeafCID, sLeafCID],
+                "frontier: \(producerFrontier)"
+            )
+
+            await joiner.runtime.stop()
+            try await joiner.runtime.start(
+                process: joiner.process,
+                handlers: joinerHandlers
+            )
+            // A leaf is accepted the moment it is fetched, while its segment
+            // is still disconnected; the header graph is complete only once
+            // the subtree weights at the fork match the producer's.
+            let x3CID = try cid(x3)
+            let y3CID = try cid(try XCTUnwrap(y.first))
+            let producerXWeight = await producer.process.subtreeWeight(of: x3CID)
+            let producerYWeight = await producer.process.subtreeWeight(of: y3CID)
+            let producerX = try XCTUnwrap(producerXWeight)
+            let producerY = try XCTUnwrap(producerYWeight)
+            XCTAssertGreaterThan(producerX, producerY, "X outweighs Y only with S")
+            try await waitUntil("joiner assembles both subtrees") {
+                let joinerX = await joiner.process.subtreeWeight(of: x3CID)
+                let joinerY = await joiner.process.subtreeWeight(of: y3CID)
+                return joinerX == producerX && joinerY == producerY
+            }
+            try await waitUntil("joiner settles on X") {
+                await joiner.process.status().tipCID == xTipCID
+            }
+            let hasS = await joiner.process.hasAcceptedBlock(sLeafCID)
+            let hasY = await joiner.process.hasAcceptedBlock(yLeafCID)
+            XCTAssertTrue(hasS && hasY)
+            for block in s {
+                let validated = await joiner.process.blockValidated(try cid(block))
+                XCTAssertFalse(validated, "S is weighed, never executed")
+            }
+            let template = try await joinerService.miningTemplate(
+                MiningTemplateRequest()
+            )
+            XCTAssertEqual(template.block.parent?.rawCID, xTipCID)
+        } catch {
+            await joiner.runtime.stop()
+            await producer.runtime.stop()
+            throw error
+        }
+        await joiner.runtime.stop()
+        await producer.runtime.stop()
+    }
+
+    /// A live-gossiped block is admitted WEIGHED (rank on verified work), then
+    /// executed by the validate-on-candidacy walk once canonical, so the
+    /// validated tip and the mining template still reflect it.
+    func testLiveAnnouncementIsWeighedThenValidatedOnCandidacy() async throws {
+        let producer = try await overlayRuntime(
+            keyByte: 0xc7,
+            requestTimeout: .seconds(5)
+        )
+        let joiner = try await overlayRuntime(
+            keyByte: 0xc8,
+            requestTimeout: .seconds(5),
+            bootstrapPeers: [producer.endpoint]
+        )
+        let producerService = networkService(
+            process: producer.process,
+            runtime: producer.runtime
+        )
+        let joinerService = networkService(
+            process: joiner.process,
+            runtime: joiner.runtime
+        )
+        let producerInventory = NetworkEventRecorder()
+        let joinerInventory = NetworkEventRecorder()
+        let joinerAdmissions = NetworkEventRecorder()
+        do {
+            try await producer.runtime.start(
+                process: producer.process,
+                handlers: transactionServiceHandlers(
+                    producerService,
+                    inventoryRequests: producerInventory
+                )
+            )
+            try await joiner.runtime.start(
+                process: joiner.process,
+                handlers: transactionServiceHandlers(
+                    joinerService,
+                    inventoryRequests: joinerInventory,
+                    admissions: joinerAdmissions
+                )
+            )
+            // Both hellos have landed once each side answered the other's
+            // inventory request; anything mined now travels as live gossip.
+            try await waitForEvent(in: producerInventory, phase: "producer hello")
+            try await waitForEvent(in: joinerInventory, phase: "joiner hello")
+
+            // A real body: the weighed admit stores only the boundary, so the
+            // walk must fetch this transaction over the network to validate.
+            _ = try await producerService.submitTransaction(
+                SubmitTransactionRequest(
+                    transaction: try signedNetworkTransaction(chainPath: ["Nexus"])
+                )
+            )
+            let template = try await producerService.miningTemplate(
+                MiningTemplateRequest()
+            )
+            let mined = try await producerService.submitWork(SubmitWorkRequest(
+                workID: template.workID,
+                nonce: 0
+            ))
+            XCTAssertTrue(mined.accepted)
+            let drained = await producerService.status().mempoolCount
+            XCTAssertEqual(drained, 0, "the block must carry the transaction")
+            let minedCID = try BlockHeader(node: template.block).rawCID
+
+            try await waitUntil("joiner validates the live block") {
+                await joiner.process.status().tipCID == minedCID
+            }
+            // The hello reply's tip announcement also admits (as a duplicate)
+            // the peer's genesis; only the live block is under test.
+            let admissions = (await joinerAdmissions.snapshot())
+                .filter { $0.hasPrefix(minedCID) }
+            XCTAssertEqual(admissions, ["\(minedCID)|weighed"])
+            let validated = await joiner.process.blockValidated(minedCID)
+            XCTAssertTrue(validated)
+            let joinerTemplate = try await joinerService.miningTemplate(
+                MiningTemplateRequest()
+            )
+            XCTAssertEqual(joinerTemplate.block.parent?.rawCID, minedCID)
+        } catch {
+            await joiner.runtime.stop()
+            await producer.runtime.stop()
+            throw error
+        }
+        await joiner.runtime.stop()
+        await producer.runtime.stop()
+    }
+
+    /// A joiner one block behind (direct predecessor path, no range sync)
+    /// weighs the announced block and must then FETCH its deferred body from
+    /// the peer to validate it: the joiner never saw the block's transaction
+    /// gossiped, so nothing but the network fetch can complete the walk.
+    func testShallowJoinerFetchesDeferredBodyOfLiveEdgeBlock() async throws {
+        let producer = try await overlayRuntime(
+            keyByte: 0xc9,
+            requestTimeout: .seconds(5)
+        )
+        let joiner = try await overlayRuntime(
+            keyByte: 0xca,
+            requestTimeout: .seconds(5),
+            bootstrapPeers: [producer.endpoint]
+        )
+        let producerService = networkService(
+            process: producer.process,
+            runtime: producer.runtime
+        )
+        let joinerService = networkService(
+            process: joiner.process,
+            runtime: joiner.runtime
+        )
+        let joinerAdmissions = NetworkEventRecorder()
+        do {
+            try await producer.runtime.start(
+                process: producer.process,
+                handlers: transactionServiceHandlers(producerService)
+            )
+            // Mined BEFORE the joiner exists: the transaction is never relayed
+            // to it, so the block's body is only available over the network.
+            _ = try await producerService.submitTransaction(
+                SubmitTransactionRequest(
+                    transaction: try signedNetworkTransaction(chainPath: ["Nexus"])
+                )
+            )
+            let template = try await producerService.miningTemplate(
+                MiningTemplateRequest()
+            )
+            let mined = try await producerService.submitWork(SubmitWorkRequest(
+                workID: template.workID,
+                nonce: 0
+            ))
+            XCTAssertTrue(mined.accepted)
+            let drained = await producerService.status().mempoolCount
+            XCTAssertEqual(drained, 0, "the block must carry the transaction")
+            let minedCID = try BlockHeader(node: template.block).rawCID
+
+            try await joiner.runtime.start(
+                process: joiner.process,
+                handlers: transactionServiceHandlers(
+                    joinerService,
+                    admissions: joinerAdmissions
+                )
+            )
+            try await waitUntil("joiner validates the announced block") {
+                await joiner.process.status().tipCID == minedCID
+            }
+            let admissions = (await joinerAdmissions.snapshot())
+                .filter { $0.hasPrefix(minedCID) }
+            XCTAssertEqual(admissions, ["\(minedCID)|weighed"])
+            let joinerTemplate = try await joinerService.miningTemplate(
+                MiningTemplateRequest()
+            )
+            XCTAssertEqual(joinerTemplate.block.parent?.rawCID, minedCID)
+        } catch {
+            await joiner.runtime.stop()
+            await producer.runtime.stop()
+            throw error
+        }
+        await joiner.runtime.stop()
+        await producer.runtime.stop()
+    }
+
+    /// The hello reply advertises the ACQUIRED tip: every receiver measures
+    /// its gap, range-sync target and edge against acquired heights, so a node
+    /// whose validated tip lags (deferred execution) must not advertise the
+    /// validated one — a joiner would range-sync to the validated height,
+    /// clear as "caught up", and never re-enter on a quiet network.
+    func testHelloReplyAdvertisesTheAcquiredTip() async throws {
+        let fixture = try await overlayRuntime(
+            keyByte: 0xc3,
+            requestTimeout: .seconds(5)
+        )
+        let depth = 5
+        let blocks = try await weighedChain(on: fixture.process, depth: depth)
+        let tipCID = try BlockHeader(node: try XCTUnwrap(blocks.last)).rawCID
+        let validatedHeight = await fixture.process.status().height
+        XCTAssertEqual(validatedHeight, 0, "validated tip lags the acquired tip")
+        let payloads = PayloadRecorder()
+        let client = Ivy(config: IvyConfig(
+            signingKey: signingKey(0x79),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        // Ivy holds its delegate weakly: keep it alive for the test.
+        let delegate = PayloadRecordingPeer(recorder: payloads)
+        await client.installTestDelegate(delegate)
+        do {
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: inertNetworkHandlers()
+            )
+            try await connectAndHello(
+                client,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            try await waitUntil("hello reply announcement") {
+                !(await payloads.payloads(
+                    topic: NodeNetworkTopic.blockAnnouncement
+                )).isEmpty
+            }
+            let announced = try (await payloads.payloads(
+                topic: NodeNetworkTopic.blockAnnouncement
+            )).map { try BlockAnnouncementMessage.decoded($0) }
+            let hello = try XCTUnwrap(announced.first)
+            XCTAssertEqual(hello.blockCID, tipCID)
+            XCTAssertEqual(hello.height, UInt64(depth))
+        } catch {
+            await client.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await client.stop()
+        await fixture.runtime.stop()
+    }
+
+    /// A peer whose claim negotiates to a valid common ancestor and then an
+    /// EMPTY page loses its recorded claim exactly like an empty forward page:
+    /// otherwise the re-entry probe re-picks the tallest claim forever and a
+    /// liar owns the single sync slot. The honest peer syncs us afterwards.
+    func testEmptyAncestorPageDemotesThePeersClaim() async throws {
+        let fixture = try await overlayRuntime(
+            keyByte: 0xc5,
+            requestTimeout: .milliseconds(300)
+        )
+        let liar = EmptyAncestorPeer(claimedHeight: 1 << 62)
+        let liarClient = Ivy(config: IvyConfig(
+            signingKey: signingKey(0x7a),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        await liarClient.installTestDelegate(liar)
+        let depth = 5
+        let producer = try await canonicalNetworkProcess()
+        let clock = TestBlockClock()
+        var parent = try await producer.canonicalTipBlock()
+        let genesisCID = try BlockHeader(node: parent).rawCID
+        var chain: [String] = []
+        var volumes: [SerializedVolume] = []
+        for _ in 0..<depth {
+            parent = try await acceptNexusBlock(
+                on: parent, process: producer, timestamp: clock.next()
+            )
+            let cid = try BlockHeader(node: parent).rawCID
+            chain.append(cid)
+            let volume = await producer.volume(cid)
+            volumes.append(try XCTUnwrap(volume))
+        }
+        let honest = RangeServingPeer(
+            genesisCID: genesisCID,
+            chain: chain,
+            receiver: fixture.process
+        )
+        let honestClient = Ivy(config: IvyConfig(
+            signingKey: signingKey(0x7c),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        await honestClient.installTestDelegate(honest)
+        await honestClient.setContentSource(
+            RecordingNetworkTestVolumesSource(volumes)
+        )
+        let service = networkService(
+            process: fixture.process,
+            runtime: fixture.runtime
+        )
+        do {
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: transactionServiceHandlers(service)
+            )
+            try await connectAndHello(
+                liarClient,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            try await waitUntil("liar negotiated once") {
+                await liar.ancestorRequestCount() >= 1
+            }
+            // Four re-entry windows: a retained claim would be re-picked.
+            try await Task.sleep(for: .milliseconds(1_200))
+            let negotiations = await liar.ancestorRequestCount()
+            XCTAssertEqual(
+                negotiations, 1,
+                "an empty-page claim must be demoted, not re-picked"
+            )
+
+            try await connectAndHello(
+                honestClient,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            try await waitUntil("honest peer syncs the chain") {
+                await fixture.process.canonicalTipHeight() == UInt64(depth)
+            }
+            let afterwards = await liar.ancestorRequestCount()
+            XCTAssertEqual(afterwards, 1)
+        } catch {
+            await liarClient.stop()
+            await honestClient.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await liarClient.stop()
+        await honestClient.stop()
+        await fixture.runtime.stop()
+    }
+
+    /// The range-sync anchor is one (cid, height) pair describing the SAME
+    /// block — the acquired tip — never the validated tip's CID under the
+    /// acquired height (which would re-page every held block above it).
+    func testRangeSyncAnchorsAtTheAcquiredTip() async throws {
+        let fixture = try await overlayRuntime(
+            keyByte: 0xc7,
+            requestTimeout: .seconds(5)
+        )
+        let depth = 5
+        let blocks = try await weighedChain(on: fixture.process, depth: depth)
+        let tipCID = try BlockHeader(node: try XCTUnwrap(blocks.last)).rawCID
+        let topics = TopicRecorder()
+        let client = Ivy(config: IvyConfig(
+            signingKey: signingKey(0x7d),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        // Ivy holds its delegate weakly: keep it alive for the test.
+        let delegate = TopicRecordingPeer(recorder: topics)
+        await client.installTestDelegate(delegate)
+        do {
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: inertNetworkHandlers()
+            )
+            try await connectAndHello(
+                client,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            try await waitForTopic(NodeNetworkTopic.blockAnnouncement, in: topics)
+            guard case .enqueued = await client.sendMessage(
+                to: fixture.peerID,
+                topic: NodeNetworkTopic.blockAnnouncement,
+                payload: try BlockAnnouncementMessage(
+                    blockCID: testCID("deep-tip"),
+                    height: 100
+                ).encoded()
+            ) else {
+                throw NetworkTestError.failedSend
+            }
+            try await waitForTopic(
+                NodeNetworkTopic.ancestorRangeRequest,
+                in: topics
+            )
+            let anchorValue = await fixture.runtime.rangeSyncAnchorForTesting()
+            let anchor = try XCTUnwrap(anchorValue)
+            XCTAssertEqual(anchor.requestedHeight, UInt64(depth))
+            XCTAssertEqual(anchor.afterCID, tipCID, "anchor CID is the acquired tip")
+        } catch {
+            await client.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await client.stop()
+        await fixture.runtime.stop()
+    }
+
+    /// While a range sync is in flight we are by definition not at the edge:
+    /// another peer attesting height 1 must not trigger a frontier pull until
+    /// the sync clears.
+    func testNoFrontierPullWhileARangeSyncIsInFlight() async throws {
+        let fixture = try await overlayRuntime(
+            keyByte: 0xc9,
+            requestTimeout: .milliseconds(300)
+        )
+        let deep = SilentDeepPeer(claimedHeight: 100)
+        let deepClient = Ivy(config: IvyConfig(
+            signingKey: signingKey(0x71),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        await deepClient.installTestDelegate(deep)
+        let shallow = FrontierRequestCapturingPeer()
+        let shallowClient = Ivy(config: IvyConfig(
+            signingKey: signingKey(0x73),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        await shallowClient.installTestDelegate(shallow)
+        do {
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: inertNetworkHandlers()
+            )
+            try await connectAndHello(
+                deepClient,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            try await waitUntil("deep sync in flight") {
+                await deep.ancestorRequestCount() >= 1
+            }
+            try await connectAndHello(
+                shallowClient,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            try await waitUntil("shallow hello landed") {
+                await shallow.count(of: NodeNetworkTopic.blockAnnouncement) >= 1
+            }
+            guard case .enqueued = await shallowClient.sendMessage(
+                to: fixture.peerID,
+                topic: NodeNetworkTopic.blockAnnouncement,
+                payload: try BlockAnnouncementMessage(
+                    blockCID: testCID("shallow-tip"),
+                    height: 1
+                ).encoded()
+            ) else {
+                throw NetworkTestError.failedSend
+            }
+            try await Task.sleep(for: .milliseconds(400))
+            let duringSync = await shallow.count(
+                of: NodeNetworkTopic.acceptedLeavesRequest
+            )
+            XCTAssertEqual(duringSync, 0, "no pull while a range sync is in flight")
+
+            // The deep peer leaves: the sync clears, and the re-entry probe
+            // finds the shallow peer at the edge.
+            await deepClient.stop()
+            try await waitUntil("pull after the sync clears") {
+                await shallow.count(of: NodeNetworkTopic.acceptedLeavesRequest) == 1
+            }
+        } catch {
+            await deepClient.stop()
+            await shallowClient.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await deepClient.stop()
+        await shallowClient.stop()
+        await fixture.runtime.stop()
+    }
+
+    /// The negotiated anchor survives the ancestor page's enqueue loop: the
+    /// loop suspends per CID while the worker it starts drains into the pump,
+    /// and a pump that fired there would page forward from the PRE-negotiation
+    /// anchor (our own tip) and bump the requestID so the negotiated anchor is
+    /// discarded. Every CID of the page is held, so each candidate completes
+    /// (and drains) immediately; the anchor must still be the page's last CID.
+    func testNegotiatedAnchorSurvivesDrainsDuringTheAncestorPage() async throws {
+        let fixture = try await overlayRuntime(
+            keyByte: 0xcb,
+            requestTimeout: .seconds(5)
+        )
+        // Kept small: the fixture weighed-admits every block and the page's
+        // candidates all complete locally; sixteen drains is plenty.
+        let pageSize = 16
+        let held = try await weighedChain(on: fixture.process, depth: pageSize + 1)
+        let chain = try held.map { try BlockHeader(node: $0).rawCID }
+        let genesisCID = try BlockHeader(
+            node: await fixture.process.canonicalTipBlock()
+        ).rawCID
+        let ourTipCID = try XCTUnwrap(chain.last)
+        let pageLastCID = chain[pageSize - 1]
+        // The peer announces a tip we lack (so a range sync opens), negotiates
+        // genesis as the common ancestor, and serves one page of blocks we
+        // already hold — every candidate completes at once and drains into
+        // the pump while the page loop is still running.
+        let scripted = FullPagePeer(
+            genesisCID: genesisCID,
+            page: Array(chain.prefix(pageSize)),
+            claimedHeight: UInt64(pageSize) * 16,
+            hasMore: false
+        )
+        let client = Ivy(config: IvyConfig(
+            signingKey: signingKey(0xcc),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        await client.installTestDelegate(scripted)
+        do {
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: inertNetworkHandlers()
+            )
+            try await connectAndHello(
+                client,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            // The committed anchor is the negotiated page's end. (A wrong-anchor
+            // pump would instead have paged forward from our tip, bumped the
+            // requestID, and left the negotiated anchor discarded.)
+            try await waitUntil("negotiated anchor committed") {
+                (await fixture.runtime.rangeSyncAnchorForTesting())?.afterCID
+                    == pageLastCID
+            }
+            let forward = await scripted.forwardRequests()
+            XCTAssertFalse(
+                forward.contains(ourTipCID),
+                "no forward page anchored at our pre-negotiation tip: \(forward)"
+            )
+        } catch {
+            await client.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await client.stop()
+        await fixture.runtime.stop()
+    }
+
+    /// Mine `depth` empty blocks on a fresh producer and weighed-admit them on
+    /// `process` straight at the process (no commit publisher, so no walk
+    /// fires): `process` then HOLDS the chain to `depth` while its validated
+    /// tip stays at genesis — the deferred-execution catch-up state.
+    private func weighedChain(
+        on process: ChainProcess,
+        depth: Int
+    ) async throws -> [Block] {
+        let producer = try await canonicalNetworkProcess()
+        let clock = TestBlockClock()
+        var parent = try await producer.canonicalTipBlock()
+        var blocks: [Block] = []
+        for _ in 0..<depth {
+            parent = try await acceptNexusBlock(
+                on: parent,
+                process: producer,
+                timestamp: clock.next()
+            )
+            blocks.append(parent)
+            let outcome = try await process.admit(
+                BlockHeader(node: parent),
+                remoteSource: FetcherContentSource(producer),
+                mode: .weighed
+            )
+            guard outcome.decision.isAccepted else {
+                throw NetworkTestError.failedPhase(
+                    "weighed admit rejected: \(outcome.decision)"
+                )
+            }
+        }
+        return blocks
+    }
+
+    /// Strictly increasing, slightly-past block timestamps (admission is
+    /// `timestamp <= now`).
+    private final class TestBlockClock {
+        private var current = Int64(Date().timeIntervalSince1970 * 1_000) - 5_000
+        func next() -> Int64 {
+            current += 100
+            return current
+        }
+    }
+
+    /// Build an empty block on `parent`, grind its (max-target) nonce, and
+    /// accept it eagerly on `process` — a producer's own history.
+    private func acceptNexusBlock(
+        on parent: Block,
+        process: ChainProcess,
+        timestamp: Int64
+    ) async throws -> Block {
+        var nonce: UInt64 = 0
+        var block = try await BlockBuilder.buildBlock(
+            previous: parent,
+            timestamp: timestamp,
+            nonce: nonce,
+            fetcher: process
+        )
+        while block.proofOfWorkHash() > block.target {
+            nonce += 1
+            block = try await BlockBuilder.buildBlock(
+                previous: parent,
+                timestamp: timestamp,
+                nonce: nonce,
+                fetcher: process
+            )
+        }
+        let outcome = try await process.admit(BlockHeader(node: block))
+        guard outcome.decision.isAccepted else {
+            throw NetworkTestError.failedPhase(
+                "producer block rejected: \(outcome.decision)"
+            )
+        }
+        return block
+    }
+
+    private func waitUntil(
+        _ phase: String,
+        attempts: Int = 3_000,
+        _ condition: () async throws -> Bool
+    ) async throws {
+        for _ in 0..<attempts {
+            if try await condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw NetworkTestError.failedPhase(phase)
+    }
+
     private func canonicalNetworkBlock() async throws -> Block {
         let process = try await canonicalNetworkProcess()
         return try await process.canonicalTipBlock()
@@ -6069,23 +7778,47 @@ final class NetworkTrustTests: XCTestCase {
             acceptedTransactionPublisher: { [weak runtime] rootCID in
                 guard let runtime else { throw CancellationError() }
                 try await runtime.publishTransaction(rootCID)
+            },
+            // Mirror the daemon: a weighed admit stored only the boundary, so the
+            // validate walk pulls the deferred body over the network.
+            validateBodySource: { [weak runtime] blockCID, admit in
+                guard let runtime else { throw CancellationError() }
+                return try await runtime.remoteContentSource
+                    .withRoot(blockCID) { session in
+                        try await admit(session)
+                    }
+            },
+            validateEvidenceSource: { [weak runtime] blockCID, requirement in
+                await runtime?.resolveValidateEvidence(
+                    for: blockCID,
+                    requirement: requirement
+                )
             }
         )
     }
 
+    /// Handlers that pass the runtime's admission tier through (as the daemon
+    /// does); `admissions` records each attempt as `<cid>|weighed` or
+    /// `<cid>|eager`.
     private func transactionServiceHandlers(
         _ service: ChainService,
         inventoryRequests: NetworkEventRecorder? = nil,
-        transactions: NetworkEventRecorder? = nil
+        transactions: NetworkEventRecorder? = nil,
+        admissions: NetworkEventRecorder? = nil
     ) -> NodeNetworkHandlers {
         NodeNetworkHandlers(
             admission: { [weak service] admission in
                 guard let service else { throw CancellationError() }
+                await admissions?.append(
+                    "\(admission.header.rawCID)|"
+                        + (admission.weighed ? "weighed" : "eager")
+                )
                 return try await service.admitNetworkCandidate(
                     admission.header,
                     authenticatedChildPackage: admission.authenticatedChildPackage,
                     preparingChildDirectories: admission.preparingChildDirectories,
-                    contentSource: admission.contentSource
+                    contentSource: admission.contentSource,
+                    weighed: admission.weighed
                 )
             },
             transaction: { [weak service] transaction in

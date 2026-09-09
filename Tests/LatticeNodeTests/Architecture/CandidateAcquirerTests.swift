@@ -426,6 +426,28 @@ final class CandidateAcquirerTests: XCTestCase {
         XCTAssertNil(acquirer.next())
     }
 
+    /// Restart seeding is network history on both sides of the missing
+    /// predecessor: the frontier AND the durable descendants waiting on it
+    /// are weighed. Eager-wins is monotone, so an eager boot seed would pin a
+    /// losing-fork descendant to execution for the process lifetime.
+    func testResetSeedsDurableDescendantsWeighed() throws {
+        var acquirer = CandidateAcquirer()
+        acquirer.reset(
+            retryWindow: .seconds(1),
+            durableDescendants: ["P": [.init(blockCID: "O", rootCID: nil)]]
+        )
+        let predecessor = try XCTUnwrap(acquirer.next())
+        XCTAssertEqual(predecessor.blockCID, "P")
+        XCTAssertTrue(predecessor.weighed, "restart frontier is weighed")
+        XCTAssertTrue(acquirer.complete(
+            predecessor.ticket,
+            resolution: .connected
+        ))
+        let descendant = try XCTUnwrap(acquirer.next())
+        XCTAssertEqual(descendant.blockCID, "O")
+        XCTAssertTrue(descendant.weighed, "durable descendant is weighed")
+    }
+
     func testDurableOrphansStartAtTheMissingFrontier() throws {
         var acquirer = CandidateAcquirer()
         acquirer.reset(
