@@ -12,7 +12,7 @@ nginx -c /etc/nginx/nginx.conf
 
 exec /usr/local/bin/lattice-node \
     --chain-path Nexus \
-    --data-directory /data/chains/Nexus-v2 \
+    --data-directory /data/chains/Nexus-v3 \
     --identity-key /data/identity/nexus.key \
     --listen-port 4001 \
     --fact-listen-port 4002 \
