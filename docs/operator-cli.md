@@ -70,6 +70,7 @@ lattice mine status  # cursor position and batch runway
 | `mine start/stop/status` | Supervised rewarded mining (below). `stop` is graceful: the in-flight batch finishes and the cursor is persisted. |
 | `child deploy` | Create a new child of a running local parent (below). |
 | `child adopt <path>` | Join an *existing* child: adds it to the tree and starts it; genesis is re-derived through the authenticated parent link, never copied from a node. |
+| `tx send/deposit/receipt/withdraw` | Sign a transaction with a key file and submit it to one chain in the tree (below). |
 | `wipe <chain>` | Remove one stopped chain's state (`state.db` + `volumes.db` as a unit). Identity is never touched — a wiped Nexus recreates the pinned genesis; a wiped child returns to `awaitingGenesis`. |
 | `emit-systemd` | Print units that run `up --foreground` and `mine run` under systemd. |
 
@@ -117,14 +118,43 @@ Notes:
   the parent mempool holds only the anchor.
 - A child with no funded account cannot transact — use `--premine-to`.
 
+## Transactions
+
+`tx` signs with a `lattice-rewards` key file (the key stays on this host) and
+submits to the named chain's loopback RPC, which validates against current
+state before pooling. `--nonce` defaults to the chain's next expected nonce
+for the key; pass it explicitly to queue several transactions before the
+first is mined. `--fee` adds an explicit signer debit.
+
+```bash
+# plain transfer
+lattice tx send --chain Nexus/Market --key alice.json --to <address> --amount 40
+
+# parent/child value exchange, in protocol order; the three legs share one
+# identity: demander / demand / swap-nonce
+lattice tx deposit  --chain Nexus/Market --key seller.json \
+  --swap-nonce 7 --demand 60 --lock 100            # seller locks 100 on the child
+lattice tx receipt  --chain Nexus        --key buyer.json \
+  --swap-nonce 7 --demand 60 --demander <seller> --directory Market
+                                                   # buyer pays 60 on the parent
+lattice tx withdraw --chain Nexus/Market --key buyer.json \
+  --swap-nonce 7 --demand 60 --demander <seller> --amount 100
+                                                   # buyer claims the locked 100
+```
+
+A withdrawal is accepted only once the child's parent-state view contains the
+receipt, which lags the receipt's mining on the parent until a later carrier
+links it; the node fail-closes with `400` until then, so retry.
+
 ## Runbook proof
 
 The E2E suite drives exactly these flows against real processes: a second
 host `init --peer`s the first, syncs Nexus, `child adopt`s its child chain
-and syncs that too; and full token swaps — deposit locked on a child (and on
-a grandchild under a nested parent), receipt paid one level up, withdrawal
-claimed against the parent's receipt state, and dependent spends proving the
-credited balances (`Tests/LatticeNodeE2ETests/LatticeCtlE2ETests.swift`).
+and syncs that too; and full token swaps through `tx` — deposit locked on a
+child (and on a grandchild under a nested parent), receipt paid one level up,
+withdrawal claimed against the parent's receipt state, and dependent spends
+proving the credited balances
+(`Tests/LatticeNodeE2ETests/LatticeCtlE2ETests.swift`).
 
 ## Troubleshooting
 

@@ -352,7 +352,8 @@ func post<Body: Encodable, Response: Decodable>(
     guard let http = response as? HTTPURLResponse,
           (200..<300).contains(http.statusCode) else {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        throw CtlError("\(path) failed: HTTP \(status)")
+        let detail = String(decoding: data.prefix(512), as: UTF8.self)
+        throw CtlError("\(path) failed: HTTP \(status) \(detail)")
     }
     return try JSONDecoder().decode(Response.self, from: data)
 }
