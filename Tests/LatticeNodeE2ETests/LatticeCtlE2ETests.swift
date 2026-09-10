@@ -2,11 +2,7 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
-import Lattice
-import LatticeNode
-import UInt256
 import XCTest
-import cashew
 
 /// Black-box E2Es for the `lattice` operator CLI: real shipped binaries,
 /// public HTTP, nothing in-process. Proves the CLI can bring up multichain
@@ -163,75 +159,67 @@ final class LatticeCtlE2ETests: XCTestCase {
         throw CtlE2EError("timed out waiting for \(label)")
     }
 
-    private struct KeyFile: Decodable {
+    /// A `lattice-rewards` key file: the CLI signs with the file, the test
+    /// only ever needs the address.
+    private struct TestKey {
         let address: String
-        let privateKey: String
-        let publicKey: String
+        let file: URL
     }
 
-    private func makeKey(_ directory: URL, _ name: String) async throws -> KeyFile {
+    private func makeKey(_ directory: URL, _ name: String) async throws -> TestKey {
         let path = directory.appendingPathComponent("\(name).json")
         _ = try await runRewards(["generate-key", "--out", path.path])
-        return try JSONDecoder().decode(
+        struct KeyFile: Decodable { let address: String }
+        let decoded = try JSONDecoder().decode(
             KeyFile.self, from: Data(contentsOf: path)
         )
+        return TestKey(address: decoded.address, file: path)
     }
 
-    private func signedTransaction(
-        key: KeyFile,
-        chainPath: [String],
-        accountActions: [AccountAction] = [],
-        depositActions: [DepositAction] = [],
-        receiptActions: [ReceiptAction] = [],
-        withdrawalActions: [WithdrawalAction] = [],
-        fee: UInt64 = 0,
-        nonce: UInt64
-    ) throws -> Transaction {
-        let body = TransactionBody(
-            accountActions: accountActions,
-            actions: [],
-            depositActions: depositActions,
-            genesisActions: [],
-            receiptActions: receiptActions,
-            withdrawalActions: withdrawalActions,
-            signers: [key.address],
-            fee: fee,
-            nonce: nonce,
-            chainPath: chainPath
-        )
-        let header = try HeaderImpl(node: body)
-        guard let signature = TransactionSigning.sign(
-            bodyHeader: header, privateKeyHex: key.privateKey
-        ) else { throw CtlE2EError("signing failed") }
-        return Transaction(
-            signatures: [key.publicKey: signature], body: header
-        )
+    /// `lattice tx …` against the host; false when the node refused the
+    /// transaction — a stale nonce, an unfunded credit, or the tip moving
+    /// under the preflight. Swap legs retry on that.
+    ///
+    /// The reason is kept, because every other failure looks identical here:
+    /// a wrong key path or a chain missing from the topology would otherwise
+    /// surface only as a timeout four minutes later, with nothing saying why.
+    private func tx(_ host: CtlHost, _ arguments: [String]) async -> Bool {
+        do {
+            _ = try await runCtl(["tx"] + arguments, root: host.root)
+            return true
+        } catch {
+            lastTxFailure = "\(arguments.first ?? "tx"): \(error)"
+            return false
+        }
     }
 
-    private func submit(
-        _ transaction: Transaction, rpc: UInt16, label: String = ""
+    /// Why the most recent `tx` invocation was refused, for timeout messages.
+    private var lastTxFailure: String?
+
+    /// Retry a `tx` submit until the node accepts it, reporting the last
+    /// refusal if it never does.
+    private func submitUntilAccepted(
+        _ label: String,
+        _ host: CtlHost,
+        _ arguments: [String],
+        seconds: Int = 240
     ) async throws {
-        guard let url = URL(
-            string: "http://127.0.0.1:\(rpc)/v1/transactions"
-        ) else { throw CtlE2EError("bad url") }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(
-            SubmitTransactionRequest(transaction: transaction)
-        )
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse,
-              http.statusCode == 200 else {
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            throw CtlE2EError("submit \(label) failed: HTTP \(status) \(String(decoding: data, as: UTF8.self))")
+        lastTxFailure = nil
+        do {
+            try await waitFor(label, seconds: seconds) {
+                await self.tx(host, arguments)
+            }
+        } catch {
+            throw CtlE2EError(
+                "\(label); last refusal: \(lastTxFailure ?? "none recorded")"
+            )
         }
     }
 
     /// Brings up one CLI-managed host mining Nexus with rewards to `miner`,
     /// then deploys a premined child.
     private func bringUpMiningHost(
-        miner: KeyFile
+        miner: TestKey
     ) async throws -> CtlHost {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-node-e2e-ctl-\(UUID().uuidString)")
@@ -239,7 +227,7 @@ final class LatticeCtlE2ETests: XCTestCase {
             at: root, withIntermediateDirectories: true
         )
         _ = try await runCtl(["init"], root: root)
-        try writeMinerKey(miner, into: root, name: "miner")
+        try copyKey(miner, into: root, name: "miner")
         _ = try await runRewards([
             "emit-batch", "--key",
             root.appendingPathComponent("miner.json").path,
@@ -274,15 +262,12 @@ final class LatticeCtlE2ETests: XCTestCase {
         return host
     }
 
-    private func writeMinerKey(
-        _ key: KeyFile, into root: URL, name: String
+    private func copyKey(
+        _ key: TestKey, into root: URL, name: String
     ) throws {
-        let encoder = JSONEncoder()
-        try encoder.encode([
-            "address": key.address,
-            "privateKey": key.privateKey,
-            "publicKey": key.publicKey,
-        ]).write(to: root.appendingPathComponent("\(name).json"))
+        try FileManager.default.copyItem(
+            at: key.file, to: root.appendingPathComponent("\(name).json")
+        )
     }
 
     /// Deploys a child of `parent` through the CLI, premining it to
@@ -294,7 +279,7 @@ final class LatticeCtlE2ETests: XCTestCase {
         directory: String,
         parent: String = "Nexus",
         premineTo: String,
-        fund: KeyFile
+        fund: TestKey
     ) async throws -> UInt16 {
         let spec: [String: Any] = [
             "maxNumberOfTransactionsPerBlock": 100,
@@ -308,7 +293,7 @@ final class LatticeCtlE2ETests: XCTestCase {
         ]
         let specURL = host.root.appendingPathComponent("spec-\(directory).json")
         try JSONSerialization.data(withJSONObject: spec).write(to: specURL)
-        try writeMinerKey(fund, into: host.root, name: "fund-\(directory)")
+        try copyKey(fund, into: host.root, name: "fund-\(directory)")
         _ = try await runCtl([
             "child", "deploy", directory,
             "--parent", parent,
@@ -454,13 +439,6 @@ final class LatticeCtlE2ETests: XCTestCase {
             return consumed >= 3
         }
         _ = try await runCtl(["mine", "stop"], root: host.root)
-        let status = try await runCtl(["mine", "status"], root: host.root)
-        guard let rewardsLine = status.split(separator: "\n").first(
-            where: { $0.hasPrefix("rewards:") }
-        ), let buyerNonce = rewardsLine.split(separator: " ")
-            .dropFirst().first.flatMap({ UInt64($0) }) else {
-            throw CtlE2EError("could not read reward cursor")
-        }
         let topologyURL = host.root.appendingPathComponent("lattice.json")
         var topology = try JSONSerialization.jsonObject(
             with: Data(contentsOf: topologyURL)
@@ -481,94 +459,62 @@ final class LatticeCtlE2ETests: XCTestCase {
         }
 
         // 1. Seller locks 100 on the child, demanding 60 on the parent.
-        let deposit = try signedTransaction(
-            key: seller,
-            chainPath: ["Nexus", "Market"],
-            accountActions: [AccountAction(owner: seller.address, delta: -100)],
-            depositActions: [DepositAction(
-                nonce: 7, demander: seller.address,
-                amountDemanded: 60, amountDeposited: 100
-            )],
-            nonce: 0
-        )
         let heightBeforeDeposit = await childHeight()
-        try await submit(deposit, rpc: childRPC, label: "deposit")
+        try await runCtl([
+            "tx", "deposit", "--chain", "Nexus/Market",
+            "--key", seller.file.path,
+            "--swap-nonce", "7", "--demand", "60", "--lock", "100",
+        ], root: host.root)
         try await waitFor("deposit mined on the child", seconds: 180) {
             let height = await childHeight()
             let drained = await mempoolDrained(childRPC)
             return height > heightBeforeDeposit && drained
         }
 
-        // 2. Buyer pays the demanded 60 on the parent with a receipt.
-        let receipt = try signedTransaction(
-            key: buyer,
-            chainPath: ["Nexus"],
-            receiptActions: [ReceiptAction(
-                withdrawer: buyer.address, nonce: 7,
-                demander: seller.address, amountDemanded: 60,
-                directory: "Market"
-            )],
-            nonce: buyerNonce
-        )
-        try await submit(receipt, rpc: host.nexusRPC, label: "receipt")
+        // 2. Buyer pays the demanded 60 on the parent with a receipt. The
+        // buyer's nonce follows its mined rewards; `tx` reads it from state.
+        try await runCtl([
+            "tx", "receipt", "--chain", "Nexus", "--key", buyer.file.path,
+            "--swap-nonce", "7", "--demand", "60",
+            "--demander", seller.address, "--directory", "Market",
+        ], root: host.root)
         try await waitFor("receipt mined on the parent", seconds: 180) {
             await mempoolDrained(host.nexusRPC)
         }
 
         // 3. Buyer withdraws the locked 100 on the child.
-        let withdrawal = try signedTransaction(
-            key: buyer,
-            chainPath: ["Nexus", "Market"],
-            accountActions: [AccountAction(owner: buyer.address, delta: 100)],
-            withdrawalActions: [WithdrawalAction(
-                withdrawer: buyer.address, nonce: 7,
-                demander: seller.address, amountDemanded: 60,
-                amountWithdrawn: 100
-            )],
-            nonce: 0
-        )
+        let withdrawal = [
+            "withdraw", "--chain", "Nexus/Market", "--key", buyer.file.path,
+            "--swap-nonce", "7", "--demand", "60",
+            "--demander", seller.address, "--amount", "100",
+        ]
         // The child validates the withdrawal against its parent-receipt state,
         // which lags the receipt's mining on the parent until a carrier links
-        // it — the node correctly fail-closed 400s a withdrawal it cannot yet
-        // prove. Retry the submit until the child's parent view includes the
-        // receipt (the recurring carrier-link race).
-        try await waitFor("child accepts the withdrawal", seconds: 240) {
-            do {
-                try await self.submit(withdrawal, rpc: childRPC, label: "withdrawal")
-                return true
-            } catch {
-                return false
-            }
-        }
+        // it. Submitting early is NOT refused: submission preflights with no
+        // parent state to check against, so the pool holds the withdrawal as
+        // temporarily unavailable and the template decides later. This retries
+        // to stay robust against the submits that ARE refused — a stale nonce,
+        // or the tip moving under the preflight.
+        try await submitUntilAccepted(
+            "child accepts the withdrawal", host, withdrawal
+        )
         try await waitFor("withdrawal mined on the child", seconds: 240) {
             await mempoolDrained(childRPC)
         }
 
         // 4. The withdrawn funds are real: spend them.
         let sink = try await makeKey(scratch, "sink")
-        let spend = try signedTransaction(
-            key: buyer,
-            chainPath: ["Nexus", "Market"],
-            accountActions: [
-                AccountAction(owner: buyer.address, delta: -40),
-                AccountAction(owner: sink.address, delta: 40),
-            ],
-            nonce: 1
-        )
+        let spend = [
+            "send", "--chain", "Nexus/Market", "--key", buyer.file.path,
+            "--to", sink.address, "--amount", "40",
+        ]
         let heightBeforeSpend = await childHeight()
         // Each dependent submit validates against the PRIOR tx's applied,
         // queryable state; mempool-drained only proves the prior tx left the
         // mempool, not that its credit is visible, so a submit can fail-closed
         // 400 until the credit lands. Retry until accepted (same race as the
         // withdrawal submit).
-        try await waitFor("child accepts the spend", seconds: 240) {
-            do {
-                try await self.submit(spend, rpc: childRPC, label: "spend")
-                return true
-            } catch {
-                return false
-            }
-        }
+        try await submitUntilAccepted("child accepts the spend", host, spend)
         try await waitFor("dependent spend mined", seconds: 240) {
             let height = await childHeight()
             let drained = await mempoolDrained(childRPC)
@@ -578,29 +524,60 @@ final class LatticeCtlE2ETests: XCTestCase {
         // 5. The credit is real, not merely drained-from-the-mempool: the
         // sink can only spend if step 4 actually credited it. A spend chain
         // is the strongest state proof available over public RPC.
-        let sinkSpend = try signedTransaction(
-            key: sink,
-            chainPath: ["Nexus", "Market"],
-            accountActions: [
-                AccountAction(owner: sink.address, delta: -35),
-                AccountAction(owner: seller.address, delta: 35),
-            ],
-            nonce: 0
-        )
+        let sinkSpend = [
+            "send", "--chain", "Nexus/Market", "--key", sink.file.path,
+            "--to", seller.address, "--amount", "35",
+        ]
         let heightBeforeSinkSpend = await childHeight()
-        try await waitFor("child accepts the sink spend", seconds: 240) {
-            do {
-                try await self.submit(sinkSpend, rpc: childRPC, label: "sink-spend")
-                return true
-            } catch {
-                return false
-            }
-        }
+        try await submitUntilAccepted(
+            "child accepts the sink spend", host, sinkSpend
+        )
         try await waitFor("sink spend proves the credited state", seconds: 240) {
             let height = await childHeight()
             let drained = await mempoolDrained(childRPC)
             return height > heightBeforeSinkSpend && drained
         }
+
+        // 6. Two transfers submitted back to back, before either is mined,
+        // must both happen. The signer's next nonce is read from committed
+        // state, so without also accounting for what that signer already has
+        // pooled, both would be signed at the same nonce — and the pool keeps
+        // whichever bids the higher real fee, dropping the other while both
+        // commands print `submitted` and exit 0. Paying nobody must never look
+        // like success, so assert on the recipient's balance, not on exit
+        // codes: only two surviving transfers reach 300.
+        let queueTarget = try await makeKey(scratch, "queued")
+        let before = await balance(childRPC, queueTarget.address)
+        XCTAssertEqual(before, 0, "a fresh key starts unfunded")
+        try await submitUntilAccepted("first queued transfer", host, [
+            "send", "--chain", "Nexus/Market", "--key", seller.file.path,
+            "--to", queueTarget.address, "--amount", "100", "--fee", "1",
+        ])
+        // Deliberately a HIGHER fee: this is the transaction that would win
+        // the replace-by-fee race and silently erase the one above.
+        try await submitUntilAccepted("second queued transfer", host, [
+            "send", "--chain", "Nexus/Market", "--key", seller.file.path,
+            "--to", queueTarget.address, "--amount", "200", "--fee", "9",
+        ])
+        try await waitFor("both queued transfers mined", seconds: 120) {
+            await self.balance(childRPC, queueTarget.address) == 300
+        }
+    }
+
+    /// One account's balance as the chain currently sees it; 0 when the
+    /// account has never been credited.
+    private func balance(_ rpc: UInt16, _ address: String) async -> UInt64 {
+        guard let url = URL(
+            string: "http://127.0.0.1:\(rpc)/api/state/account/\(address)"
+        ) else { return 0 }
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        guard let (data, response) = try? await URLSession.shared.data(
+            for: request
+        ), (response as? HTTPURLResponse)?.statusCode == 200,
+           let object = try? JSONSerialization.jsonObject(with: data)
+               as? [String: Any] else { return 0 }
+        return (object["balance"] as? NSNumber)?.uint64Value ?? 0
     }
 
     /// A swap one level deeper: the seller lives on a GRANDCHILD, the buyer
@@ -643,18 +620,12 @@ final class LatticeCtlE2ETests: XCTestCase {
         }
 
         // 1. Seller locks 100 on the grandchild, demanding 60 on Market.
-        let deposit = try signedTransaction(
-            key: seller,
-            chainPath: ["Nexus", "Market", "Stalls"],
-            accountActions: [AccountAction(owner: seller.address, delta: -100)],
-            depositActions: [DepositAction(
-                nonce: 9, demander: seller.address,
-                amountDemanded: 60, amountDeposited: 100
-            )],
-            nonce: 0
-        )
         let beforeDeposit = await height(stallsRPC)
-        try await submit(deposit, rpc: stallsRPC, label: "grandchild-deposit")
+        try await runCtl([
+            "tx", "deposit", "--chain", "Nexus/Market/Stalls",
+            "--key", seller.file.path,
+            "--swap-nonce", "9", "--demand", "60", "--lock", "100",
+        ], root: host.root)
         try await waitFor("deposit mined on the grandchild", seconds: 240) {
             let now = await height(stallsRPC)
             let empty = await drained(stallsRPC)
@@ -662,78 +633,46 @@ final class LatticeCtlE2ETests: XCTestCase {
         }
 
         // 2. Buyer pays the demanded 60 on the middle chain.
-        let receipt = try signedTransaction(
-            key: buyer,
-            chainPath: ["Nexus", "Market"],
-            receiptActions: [ReceiptAction(
-                withdrawer: buyer.address, nonce: 9,
-                demander: seller.address, amountDemanded: 60,
-                directory: "Stalls"
-            )],
-            nonce: 0
+        let receipt = [
+            "receipt", "--chain", "Nexus/Market", "--key", buyer.file.path,
+            "--swap-nonce", "9", "--demand", "60",
+            "--demander", seller.address, "--directory", "Stalls",
+        ]
+        // The receipt is an ordinary parent-chain payment, so it is refused
+        // outright until the buyer's premined balance is queryable on the
+        // middle chain — retry until it funds.
+        try await submitUntilAccepted(
+            "middle chain accepts the receipt", host, receipt
         )
-        // Same fail-closed race as the withdrawal below: the middle chain
-        // validates the receipt against its recorded grandchild state, which
-        // lags the deposit's mining until a carrier links it — retry until
-        // the middle chain's child view includes the deposit.
-        try await waitFor("middle chain accepts the receipt", seconds: 240) {
-            do {
-                try await self.submit(
-                    receipt, rpc: marketRPC, label: "child-receipt"
-                )
-                return true
-            } catch {
-                return false
-            }
-        }
         try await waitFor("receipt mined on the middle chain", seconds: 240) {
             await drained(marketRPC)
         }
 
         // 3. Buyer withdraws the locked 100 on the grandchild.
-        let withdrawal = try signedTransaction(
-            key: buyer,
-            chainPath: ["Nexus", "Market", "Stalls"],
-            accountActions: [AccountAction(owner: buyer.address, delta: 100)],
-            withdrawalActions: [WithdrawalAction(
-                withdrawer: buyer.address, nonce: 9,
-                demander: seller.address, amountDemanded: 60,
-                amountWithdrawn: 100
-            )],
-            nonce: 0
-        )
+        let withdrawal = [
+            "withdraw", "--chain", "Nexus/Market/Stalls",
+            "--key", buyer.file.path,
+            "--swap-nonce", "9", "--demand", "60",
+            "--demander", seller.address, "--amount", "100",
+        ]
         // The grandchild validates the withdrawal against its PARENT-chain
         // receipt state, which lags the receipt's mining on the middle chain
-        // until a subsequent carrier links it — the node correctly fail-closed
-        // 400s a withdrawal it cannot yet prove. Retry the submit until the
-        // grandchild's parent view includes the receipt (the recurring
-        // 2-core-runner flake was this race).
-        try await waitFor("grandchild accepts the withdrawal", seconds: 240) {
-            do {
-                try await self.submit(
-                    withdrawal, rpc: stallsRPC, label: "grandchild-withdrawal"
-                )
-                return true
-            } catch {
-                return false
-            }
-        }
+        // until a subsequent carrier links it. As on the child above, an early
+        // submit is held rather than refused; this retries for the submits
+        // that ARE refused.
+        try await submitUntilAccepted(
+            "grandchild accepts the withdrawal", host, withdrawal
+        )
         try await waitFor("withdrawal mined on the grandchild", seconds: 300) {
             await drained(stallsRPC)
         }
 
         // 4. The credit is real: the buyer spends it onward to the sink.
-        let spend = try signedTransaction(
-            key: buyer,
-            chainPath: ["Nexus", "Market", "Stalls"],
-            accountActions: [
-                AccountAction(owner: buyer.address, delta: -40),
-                AccountAction(owner: sink.address, delta: 40),
-            ],
-            nonce: 1
-        )
         let beforeSpend = await height(stallsRPC)
-        try await submit(spend, rpc: stallsRPC, label: "grandchild-spend")
+        try await runCtl([
+            "tx", "send", "--chain", "Nexus/Market/Stalls",
+            "--key", buyer.file.path, "--to", sink.address, "--amount", "40",
+        ], root: host.root)
         try await waitFor("dependent spend mined on the grandchild", seconds: 240) {
             let now = await height(stallsRPC)
             let empty = await drained(stallsRPC)

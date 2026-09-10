@@ -378,6 +378,51 @@ final class DaemonHTTPTests: XCTestCase {
                 XCTAssertEqual(response.status, .ok)
             }
 
+            // A refusal names itself. The operator surface is loopback-only and
+            // the caller holds the signing key, so an unexplained 400 only
+            // hides which rule it broke: a second transaction at the same
+            // (signer, nonce) bidding no more of a real fee is replace-by-fee
+            // refusing, and must say so.
+            let rival = TransactionBody(
+                accountActions: [],
+                actions: [],
+                depositActions: [],
+                genesisActions: [],
+                receiptActions: [],
+                withdrawalActions: [],
+                signers: [CryptoUtils.createAddress(from: key.publicKey)],
+                fee: 1,
+                nonce: 0,
+                chainPath: ["Nexus"]
+            )
+            let rivalHeader = try HeaderImpl(node: rival)
+            let rivalTransaction = Transaction(
+                signatures: [key.publicKey: try XCTUnwrap(
+                    TransactionSigning.sign(
+                        bodyHeader: rivalHeader,
+                        privateKeyHex: key.privateKey
+                    )
+                )],
+                body: rivalHeader
+            )
+            XCTAssertNotEqual(rivalHeader.rawCID, bodyHeader.rawCID)
+            try await client.execute(
+                uri: "/v1/transactions",
+                method: .post,
+                headers: [.contentType: "application/json"],
+                body: ByteBuffer(bytes: try JSONEncoder().encode(
+                    SubmitTransactionRequest(transaction: rivalTransaction)
+                ))
+            ) { response in
+                XCTAssertEqual(response.status, .badRequest)
+                XCTAssertTrue(
+                    String(
+                        decoding: response.body.readableBytesView, as: UTF8.self
+                    ).contains("feeTooLow"),
+                    "the refusal must name itself, got: \(String(decoding: response.body.readableBytesView, as: UTF8.self))"
+                )
+            }
+
             try await client.execute(
                 uri: "/v1/transactions/\(transactionCID)",
                 method: .get

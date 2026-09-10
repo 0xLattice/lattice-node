@@ -871,23 +871,32 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
             context: context
         )
     } catch ChainServiceError.childIntentLimitReached {
-        throw HTTPError(.tooManyRequests)
+        throw HTTPError(.tooManyRequests, message: "childIntentLimitReached")
     } catch ChainServiceError.noDeploymentAvailable {
-        throw HTTPError(.conflict)
-    } catch ChainServiceError.mempoolUnavailable,
-            ChainServiceError.parentUnavailable {
-        throw HTTPError(.serviceUnavailable)
-    } catch is ChainServiceError {
-        throw HTTPError(.badRequest)
+        throw HTTPError(.conflict, message: "noDeploymentAvailable")
+    } catch let error as ChainServiceError
+    where error == .mempoolUnavailable || error == .parentUnavailable {
+        throw HTTPError(.serviceUnavailable, message: reason(error))
+    } catch let error as ChainServiceError {
+        throw HTTPError(.badRequest, message: reason(error))
     } catch TransactionPoolError.full {
-        throw HTTPError(.tooManyRequests)
-    } catch is TransactionPoolError {
-        throw HTTPError(.badRequest)
-    } catch is MiningTemplateError {
-        throw HTTPError(.badRequest)
+        throw HTTPError(.tooManyRequests, message: "full")
+    } catch let error as TransactionPoolError {
+        throw HTTPError(.badRequest, message: reason(error))
+    } catch let error as MiningTemplateError {
+        throw HTTPError(.badRequest, message: reason(error))
     } catch ChainProcessError.chainNotBootstrapped {
-        throw HTTPError(.conflict)
+        throw HTTPError(.conflict, message: "chainNotBootstrapped")
     }
+}
+
+/// The refusal's own case name. These routes are the loopback-only operator
+/// surface, and an unexplained `400` makes every refusal — an unfunded
+/// credit, a stale nonce, an unproven withdrawal — look alike to the operator
+/// holding the key. The case name is the node's existing vocabulary; it adds
+/// no state the caller could not already read back over the same loopback.
+private func reason(_ error: some Error) -> String {
+    String(describing: error)
 }
 
 private func json<Value: Encodable, Context: RequestContext>(
