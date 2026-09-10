@@ -187,8 +187,16 @@ struct TxOptions: ParsableArguments {
             let privateKey: String
             let publicKey: String
         }
+        let url = URL(fileURLWithPath: key)
+        // This key spends money. The tree already refuses to load a
+        // group/other-readable node identity, which controls far less.
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        if let permissions = attributes[.posixPermissions] as? NSNumber,
+           permissions.intValue & 0o077 != 0 {
+            throw CtlError("key file \(url.path) is group/other-readable; chmod 600 it")
+        }
         let file = try JSONDecoder().decode(
-            KeyFile.self, from: Data(contentsOf: URL(fileURLWithPath: key))
+            KeyFile.self, from: Data(contentsOf: url)
         )
         return Signer(
             address: CryptoUtils.createAddress(from: file.publicKey),
@@ -213,7 +221,7 @@ struct TxOptions: ParsableArguments {
         if let nonce {
             signerNonce = nonce
         } else {
-            signerNonce = try await nextExpectedNonce(
+            signerNonce = try await nextNonce(
                 rpc: target.rpc, address: signer.address
             )
         }
@@ -251,23 +259,126 @@ struct TxOptions: ParsableArguments {
     }
 }
 
-/// The chain's own view of the key's next nonce, as of its tip. A key that
-/// never transacted is absent from state and starts at 0.
-func nextExpectedNonce(rpc: UInt16, address: String) async throws -> UInt64 {
+/// The nonce to sign with when the operator did not name one: the chain's
+/// next expected nonce for the key, advanced past anything that key already
+/// has waiting in the pool.
+///
+/// The committed tip alone is not enough. Two invocations before a block is
+/// mined would both read the same next nonce, and the pool replaces one
+/// `(signer, nonce)` with whichever bids the higher real fee — so the earlier
+/// transfer would be dropped while both commands printed `submitted` and
+/// exited 0. Paying nobody must not look like success.
+func nextNonce(rpc: UInt16, address: String) async throws -> UInt64 {
+    let committed = try await committedNextNonce(rpc: rpc, address: address)
+    guard let pending = try await highestPendingNonce(
+        rpc: rpc, signer: address
+    ) else { return committed }
+    return max(committed, pending &+ 1)
+}
+
+/// The chain's own view of the key's next nonce, as of its tip.
+func committedNextNonce(rpc: UInt16, address: String) async throws -> UInt64 {
     guard let url = URL(
         string: "http://127.0.0.1:\(rpc)/api/state/account/\(address)"
     ) else { throw CtlError("bad RPC URL") }
     var request = URLRequest(url: url)
     request.timeoutInterval = 10
+    // These reads decide which nonce to sign. The node marks them
+    // `max-age=3`, and URLSession.shared keeps a shared on-disk cache, so two
+    // commands run back to back would otherwise both read the same seconds-old
+    // pool and account — the exact window in which the second must see the
+    // first.
+    request.cachePolicy = .reloadIgnoringLocalCacheData
     let (data, response) = try await URLSession.shared.data(for: request)
     guard let http = response as? HTTPURLResponse else {
         throw CtlError("account lookup failed")
     }
-    if http.statusCode == 404 { return 0 }
+    if http.statusCode == 404 {
+        // 404 is both "this key has never transacted" and "the tip is not
+        // readable yet". Signing at 0 on the second reading would burn the
+        // nonce sequence of a key that is 500 transactions in, so only the
+        // first reading is allowed to answer 0.
+        guard try await chainHasTip(rpc: rpc) else {
+            throw CtlError("\(address): the chain has no readable tip yet; retry once it is active")
+        }
+        return 0
+    }
     guard http.statusCode == 200 else {
         throw CtlError("account lookup failed: HTTP \(http.statusCode)")
     }
     return try JSONDecoder().decode(ExplorerAccount.self, from: data).nonce
+}
+
+func chainHasTip(rpc: UInt16) async throws -> Bool {
+    guard let url = URL(string: "http://127.0.0.1:\(rpc)/health") else {
+        throw CtlError("bad RPC URL")
+    }
+    var request = URLRequest(url: url)
+    request.timeoutInterval = 10
+    // These reads decide which nonce to sign. The node marks them
+    // `max-age=3`, and URLSession.shared keeps a shared on-disk cache, so two
+    // commands run back to back would otherwise both read the same seconds-old
+    // pool and account — the exact window in which the second must see the
+    // first.
+    request.cachePolicy = .reloadIgnoringLocalCacheData
+    let (data, response) = try await URLSession.shared.data(for: request)
+    guard (response as? HTTPURLResponse)?.statusCode == 200,
+          let status = try JSONSerialization.jsonObject(with: data)
+              as? [String: Any] else {
+        throw CtlError("status lookup failed")
+    }
+    return status["tipCID"] as? String != nil
+}
+
+/// The highest nonce this signer already has pending, or nil for none. The
+/// pool listing is capped by the node, so this can only ever miss entries
+/// beyond that cap — in which case the submit is refused rather than
+/// silently replacing, which is the safe direction.
+func highestPendingNonce(rpc: UInt16, signer: String) async throws -> UInt64? {
+    guard let url = URL(string: "http://127.0.0.1:\(rpc)/api/mempool") else {
+        throw CtlError("bad RPC URL")
+    }
+    var request = URLRequest(url: url)
+    request.timeoutInterval = 10
+    // These reads decide which nonce to sign. The node marks them
+    // `max-age=3`, and URLSession.shared keeps a shared on-disk cache, so two
+    // commands run back to back would otherwise both read the same seconds-old
+    // pool and account — the exact window in which the second must see the
+    // first.
+    request.cachePolicy = .reloadIgnoringLocalCacheData
+    let (data, response) = try await URLSession.shared.data(for: request)
+    guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+        throw CtlError("mempool lookup failed")
+    }
+    let pool = try JSONDecoder().decode(ExplorerMempool.self, from: data)
+    var highest: UInt64?
+    for cid in pool.transactions {
+        guard let entry = try await pooledTransaction(rpc: rpc, cid: cid),
+              entry.signers.contains(signer) else { continue }
+        highest = max(highest ?? entry.nonce, entry.nonce)
+    }
+    return highest
+}
+
+/// One pooled transaction, or nil when it left the pool between the listing
+/// and this read — a race that is ordinary, not an error.
+func pooledTransaction(
+    rpc: UInt16, cid: String
+) async throws -> ExplorerTransaction? {
+    guard let url = URL(
+        string: "http://127.0.0.1:\(rpc)/api/transaction/\(cid)"
+    ) else { throw CtlError("bad RPC URL") }
+    var request = URLRequest(url: url)
+    request.timeoutInterval = 10
+    // These reads decide which nonce to sign. The node marks them
+    // `max-age=3`, and URLSession.shared keeps a shared on-disk cache, so two
+    // commands run back to back would otherwise both read the same seconds-old
+    // pool and account — the exact window in which the second must see the
+    // first.
+    request.cachePolicy = .reloadIgnoringLocalCacheData
+    let (data, response) = try await URLSession.shared.data(for: request)
+    guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+    return try? JSONDecoder().decode(ExplorerTransaction.self, from: data)
 }
 
 func requireAddress(_ address: String, _ flag: String) throws {

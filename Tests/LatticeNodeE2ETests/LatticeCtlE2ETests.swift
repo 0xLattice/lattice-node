@@ -179,8 +179,41 @@ final class LatticeCtlE2ETests: XCTestCase {
     /// `lattice tx …` against the host; false when the node refused the
     /// transaction — a stale nonce, an unfunded credit, or the tip moving
     /// under the preflight. Swap legs retry on that.
+    ///
+    /// The reason is kept, because every other failure looks identical here:
+    /// a wrong key path or a chain missing from the topology would otherwise
+    /// surface only as a timeout four minutes later, with nothing saying why.
     private func tx(_ host: CtlHost, _ arguments: [String]) async -> Bool {
-        (try? await runCtl(["tx"] + arguments, root: host.root)) != nil
+        do {
+            _ = try await runCtl(["tx"] + arguments, root: host.root)
+            return true
+        } catch {
+            lastTxFailure = "\(arguments.first ?? "tx"): \(error)"
+            return false
+        }
+    }
+
+    /// Why the most recent `tx` invocation was refused, for timeout messages.
+    private var lastTxFailure: String?
+
+    /// Retry a `tx` submit until the node accepts it, reporting the last
+    /// refusal if it never does.
+    private func submitUntilAccepted(
+        _ label: String,
+        _ host: CtlHost,
+        _ arguments: [String],
+        seconds: Int = 240
+    ) async throws {
+        lastTxFailure = nil
+        do {
+            try await waitFor(label, seconds: seconds) {
+                await self.tx(host, arguments)
+            }
+        } catch {
+            throw CtlE2EError(
+                "\(label); last refusal: \(lastTxFailure ?? "none recorded")"
+            )
+        }
     }
 
     /// Brings up one CLI-managed host mining Nexus with rewards to `miner`,
@@ -462,9 +495,9 @@ final class LatticeCtlE2ETests: XCTestCase {
         // temporarily unavailable and the template decides later. This retries
         // to stay robust against the submits that ARE refused — a stale nonce,
         // or the tip moving under the preflight.
-        try await waitFor("child accepts the withdrawal", seconds: 240) {
-            await self.tx(host, withdrawal)
-        }
+        try await submitUntilAccepted(
+            "child accepts the withdrawal", host, withdrawal
+        )
         try await waitFor("withdrawal mined on the child", seconds: 240) {
             await mempoolDrained(childRPC)
         }
@@ -481,9 +514,7 @@ final class LatticeCtlE2ETests: XCTestCase {
         // mempool, not that its credit is visible, so a submit can fail-closed
         // 400 until the credit lands. Retry until accepted (same race as the
         // withdrawal submit).
-        try await waitFor("child accepts the spend", seconds: 240) {
-            await self.tx(host, spend)
-        }
+        try await submitUntilAccepted("child accepts the spend", host, spend)
         try await waitFor("dependent spend mined", seconds: 240) {
             let height = await childHeight()
             let drained = await mempoolDrained(childRPC)
@@ -498,14 +529,55 @@ final class LatticeCtlE2ETests: XCTestCase {
             "--to", seller.address, "--amount", "35",
         ]
         let heightBeforeSinkSpend = await childHeight()
-        try await waitFor("child accepts the sink spend", seconds: 240) {
-            await self.tx(host, sinkSpend)
-        }
+        try await submitUntilAccepted(
+            "child accepts the sink spend", host, sinkSpend
+        )
         try await waitFor("sink spend proves the credited state", seconds: 240) {
             let height = await childHeight()
             let drained = await mempoolDrained(childRPC)
             return height > heightBeforeSinkSpend && drained
         }
+
+        // 6. Two transfers submitted back to back, before either is mined,
+        // must both happen. The signer's next nonce is read from committed
+        // state, so without also accounting for what that signer already has
+        // pooled, both would be signed at the same nonce — and the pool keeps
+        // whichever bids the higher real fee, dropping the other while both
+        // commands print `submitted` and exit 0. Paying nobody must never look
+        // like success, so assert on the recipient's balance, not on exit
+        // codes: only two surviving transfers reach 300.
+        let queueTarget = try await makeKey(scratch, "queued")
+        let before = await balance(childRPC, queueTarget.address)
+        XCTAssertEqual(before, 0, "a fresh key starts unfunded")
+        try await submitUntilAccepted("first queued transfer", host, [
+            "send", "--chain", "Nexus/Market", "--key", seller.file.path,
+            "--to", queueTarget.address, "--amount", "100", "--fee", "1",
+        ])
+        // Deliberately a HIGHER fee: this is the transaction that would win
+        // the replace-by-fee race and silently erase the one above.
+        try await submitUntilAccepted("second queued transfer", host, [
+            "send", "--chain", "Nexus/Market", "--key", seller.file.path,
+            "--to", queueTarget.address, "--amount", "200", "--fee", "9",
+        ])
+        try await waitFor("both queued transfers mined", seconds: 120) {
+            await self.balance(childRPC, queueTarget.address) == 300
+        }
+    }
+
+    /// One account's balance as the chain currently sees it; 0 when the
+    /// account has never been credited.
+    private func balance(_ rpc: UInt16, _ address: String) async -> UInt64 {
+        guard let url = URL(
+            string: "http://127.0.0.1:\(rpc)/api/state/account/\(address)"
+        ) else { return 0 }
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        guard let (data, response) = try? await URLSession.shared.data(
+            for: request
+        ), (response as? HTTPURLResponse)?.statusCode == 200,
+           let object = try? JSONSerialization.jsonObject(with: data)
+               as? [String: Any] else { return 0 }
+        return (object["balance"] as? NSNumber)?.uint64Value ?? 0
     }
 
     /// A swap one level deeper: the seller lives on a GRANDCHILD, the buyer
@@ -569,9 +641,9 @@ final class LatticeCtlE2ETests: XCTestCase {
         // The receipt is an ordinary parent-chain payment, so it is refused
         // outright until the buyer's premined balance is queryable on the
         // middle chain — retry until it funds.
-        try await waitFor("middle chain accepts the receipt", seconds: 240) {
-            await self.tx(host, receipt)
-        }
+        try await submitUntilAccepted(
+            "middle chain accepts the receipt", host, receipt
+        )
         try await waitFor("receipt mined on the middle chain", seconds: 240) {
             await drained(marketRPC)
         }
@@ -588,9 +660,9 @@ final class LatticeCtlE2ETests: XCTestCase {
         // until a subsequent carrier links it. As on the child above, an early
         // submit is held rather than refused; this retries for the submits
         // that ARE refused.
-        try await waitFor("grandchild accepts the withdrawal", seconds: 240) {
-            await self.tx(host, withdrawal)
-        }
+        try await submitUntilAccepted(
+            "grandchild accepts the withdrawal", host, withdrawal
+        )
         try await waitFor("withdrawal mined on the grandchild", seconds: 300) {
             await drained(stallsRPC)
         }
