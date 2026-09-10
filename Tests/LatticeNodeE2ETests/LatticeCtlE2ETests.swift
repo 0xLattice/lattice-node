@@ -177,8 +177,8 @@ final class LatticeCtlE2ETests: XCTestCase {
     }
 
     /// `lattice tx …` against the host; false when the node refused the
-    /// transaction (the fail-closed 400s that swap legs retry until a
-    /// carrier links the cross-chain state).
+    /// transaction — a stale nonce, an unfunded credit, or the tip moving
+    /// under the preflight. Swap legs retry on that.
     private func tx(_ host: CtlHost, _ arguments: [String]) async -> Bool {
         (try? await runCtl(["tx"] + arguments, root: host.root)) != nil
     }
@@ -457,9 +457,11 @@ final class LatticeCtlE2ETests: XCTestCase {
         ]
         // The child validates the withdrawal against its parent-receipt state,
         // which lags the receipt's mining on the parent until a carrier links
-        // it — the node correctly fail-closed 400s a withdrawal it cannot yet
-        // prove. Retry the submit until the child's parent view includes the
-        // receipt (the recurring carrier-link race).
+        // it. Submitting early is NOT refused: submission preflights with no
+        // parent state to check against, so the pool holds the withdrawal as
+        // temporarily unavailable and the template decides later. This retries
+        // to stay robust against the submits that ARE refused — a stale nonce,
+        // or the tip moving under the preflight.
         try await waitFor("child accepts the withdrawal", seconds: 240) {
             await self.tx(host, withdrawal)
         }
@@ -564,10 +566,9 @@ final class LatticeCtlE2ETests: XCTestCase {
             "--swap-nonce", "9", "--demand", "60",
             "--demander", seller.address, "--directory", "Stalls",
         ]
-        // Same fail-closed race as the withdrawal below: the middle chain
-        // validates the receipt against its recorded grandchild state, which
-        // lags the deposit's mining until a carrier links it — retry until
-        // the middle chain's child view includes the deposit.
+        // The receipt is an ordinary parent-chain payment, so it is refused
+        // outright until the buyer's premined balance is queryable on the
+        // middle chain — retry until it funds.
         try await waitFor("middle chain accepts the receipt", seconds: 240) {
             await self.tx(host, receipt)
         }
@@ -584,10 +585,9 @@ final class LatticeCtlE2ETests: XCTestCase {
         ]
         // The grandchild validates the withdrawal against its PARENT-chain
         // receipt state, which lags the receipt's mining on the middle chain
-        // until a subsequent carrier links it — the node correctly fail-closed
-        // 400s a withdrawal it cannot yet prove. Retry the submit until the
-        // grandchild's parent view includes the receipt (the recurring
-        // 2-core-runner flake was this race).
+        // until a subsequent carrier links it. As on the child above, an early
+        // submit is held rather than refused; this retries for the submits
+        // that ARE refused.
         try await waitFor("grandchild accepts the withdrawal", seconds: 240) {
             await self.tx(host, withdrawal)
         }

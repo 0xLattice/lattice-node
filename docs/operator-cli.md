@@ -142,9 +142,11 @@ lattice tx withdraw --chain Nexus/Market --key buyer.json \
                                                    # buyer claims the locked 100
 ```
 
-A withdrawal is accepted only once the child's parent-state view contains the
-receipt, which lags the receipt's mining on the parent until a later carrier
-links it; the node fail-closes with `400` until then, so retry.
+Submitting a withdrawal before the child's parent-state view carries the
+receipt is not an error: the pool holds it as temporarily unavailable, and it
+becomes eligible for a block once a carrier links that state. A transaction
+that spends a balance it does not yet have is different — that one is refused
+outright, so a dependent spend has to wait for the credit it depends on.
 
 ## Runbook proof
 
