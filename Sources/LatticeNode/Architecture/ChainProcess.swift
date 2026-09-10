@@ -165,7 +165,8 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         liveMempoolOwner: String,
         childIntentRetentionScope: String,
         directoryLock: StorageDirectoryLock,
-        runtimePhase: RuntimePhase
+        runtimePhase: RuntimePhase,
+        bootHoleCeiling: UInt64?
     ) {
         self.configuration = configuration
         self.store = store
@@ -177,6 +178,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         self.childIntentRetentionScope = childIntentRetentionScope
         self.directoryLock = directoryLock
         self.runtimePhase = runtimePhase
+        self.demotedHoleCeiling = bootHoleCeiling
     }
 
     /// Completes store validation, retained-root reconciliation, and recovery
@@ -296,11 +298,13 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         let pinnedOwners = Set(
             await broker.pinnedOwners(prefix: validatedOwnerPrefix)
         )
+        var bootDemoted: [String] = []
         for blockCID in walkValidated.sorted()
         where !pinnedOwners.contains(
             Self.validatedOwner(retentionScope, blockCID)
         ) {
             try await store.demoteValidated(blockCID: blockCID)
+            bootDemoted.append(blockCID)
         }
         for owner in pinnedOwners.sorted()
         where !walkValidated.contains(
@@ -404,6 +408,18 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             configuration: configuration
         )
 
+        // A block boot reconciliation demoted can later reorg onto the main
+        // chain beneath still-validated blocks: seed the probe's hole
+        // ceiling with the highest such height (see `demotedHoleCeiling`).
+        var bootHoleCeiling: UInt64?
+        if case .active(let level) = runtimePhase {
+            for blockCID in bootDemoted {
+                guard let height = await level.chain
+                    .getConsensusBlock(hash: blockCID)?.blockHeight
+                else { continue }
+                bootHoleCeiling = max(bootHoleCeiling ?? height, height)
+            }
+        }
         return ChainProcess(
             configuration: configuration,
             store: store,
@@ -414,7 +430,8 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             liveMempoolOwner: liveMempoolOwner,
             childIntentRetentionScope: childIntentRetentionScope,
             directoryLock: directoryLock,
-            runtimePhase: runtimePhase
+            runtimePhase: runtimePhase,
+            bootHoleCeiling: bootHoleCeiling
         )
     }
 
@@ -1549,16 +1566,21 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// cached block that left the main chain, or whose marker is no longer
     /// validated when re-read, falls back to the full walk.
     private var validatedTipCache: (cid: String, height: UInt64)?
-    /// The prefix assumption has one hole: eviction demotes OFF-main-chain
-    /// blocks, and if that fork later wins the main chain carries weighed
-    /// holes BELOW still-validated blocks. This is the lowest height ever
-    /// demoted on this process (eviction; boot reconciliation runs before any
-    /// probe, so it needs no seed). The fast path is taken only while the
-    /// cached floor sits at or above it — an up-walk from a floor below a
-    /// hole would stop at the hole and under-report the true top — and the
-    /// mark is never cleared: the walk re-validates the hole from below and
-    /// the floor climbs past it, after which O(delta) resumes.
-    private var demotedHoleFloor: UInt64?
+    /// The prefix assumption has one hole: a demoted block (eviction of an
+    /// off-main-chain block; boot reconciliation of a marker whose owner pin
+    /// is gone) can sit on the main chain BENEATH still-validated blocks —
+    /// eviction keeps the retained blocks nearest the head, above the ones it
+    /// demotes, and two forks demote at different heights. This is the
+    /// HIGHEST height ever demoted on this process (eviction here; `open`
+    /// seeds it from boot reconciliation). The fast path is taken only while
+    /// the cached floor sits at or above it: with no demotion above the
+    /// floor, validated-on-main is contiguous above it and the up-walk is
+    /// exact; a floor below any hole takes the full downward walk instead
+    /// (an up-walk would stop at the hole and under-report the true top).
+    /// The mark is never cleared; the ceiling tracks the head, where
+    /// eviction happens, so the floor is normally above it and O(delta)
+    /// holds.
+    private var demotedHoleCeiling: UInt64?
     #if DEBUG
     // Test seam: store reads made by the validated-tip probe.
     private var validatedTipStoreReads = 0
@@ -1568,6 +1590,11 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// the stale-floor race an ungated probe could otherwise resurrect.
     func demoteValidatedForTesting(_ cid: String) async throws {
         try await store.demoteValidated(blockCID: cid)
+    }
+    /// Test seam: drop a walk-validated block's owner pin, the state boot
+    /// reconciliation demotes at the next open.
+    func unpinValidatedOwnerForTesting(_ cid: String) async throws {
+        try await broker.unpinAll(owner: Self.validatedOwner(retentionScope, cid))
     }
     #endif
 
@@ -1590,7 +1617,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         // probe may race an eviction that cleared the cache under the gate —
         // still validated.
         if let cached = validatedTipCache, cached.height <= tipHeight,
-           demotedHoleFloor.map({ cached.height >= $0 }) ?? true,
+           demotedHoleCeiling.map({ cached.height >= $0 }) ?? true,
            await level.chain.getMainChainBlockHash(atIndex: cached.height)
             == cached.cid,
            await storeBlockValidated(cached.cid) {
@@ -2146,8 +2173,8 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         ) {
             try await store.demoteValidated(blockCID: candidate.cid)
             validatedTipCache = nil
-            demotedHoleFloor = min(
-                demotedHoleFloor ?? candidate.height, candidate.height
+            demotedHoleCeiling = max(
+                demotedHoleCeiling ?? candidate.height, candidate.height
             )
             try await broker.unpinAll(
                 owner: Self.validatedOwner(retentionScope, candidate.cid)
