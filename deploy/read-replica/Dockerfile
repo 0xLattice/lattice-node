@@ -1,6 +1,6 @@
 # Read-only public replica: the Lattice node image + an nginx allowlist proxy.
 # Pin the node image by immutable sha tag (bump on each read-RPC release).
-FROM ghcr.io/adalinxx/lattice-node:sha-fee0e1d
+FROM ghcr.io/adalinxx/lattice-node:sha-e2d20e2
 
 USER root
 RUN apt-get update \
