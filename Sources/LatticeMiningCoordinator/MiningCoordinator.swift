@@ -207,6 +207,7 @@ public actor MiningCoordinator {
     private let workers: [MiningCoordinatorWorker]
     private let totalBatchSize: UInt64
     private let staleProbeEnabled: Bool
+    private let staleProbeIntervalNanoseconds: UInt64
     private let retryBackoffNanoseconds: UInt64
     private let maxSubmitRetries: Int
     private var nextNonceOffset: UInt64
@@ -220,6 +221,7 @@ public actor MiningCoordinator {
         totalBatchSize: UInt64,
         nonceOffset: UInt64 = 0,
         staleProbeEnabled: Bool = true,
+        staleProbeInterval: Duration = .seconds(2),
         retryBackoffDelay: Duration = .milliseconds(250),
         maxSubmitRetries: Int = 3
     ) {
@@ -228,6 +230,8 @@ public actor MiningCoordinator {
         self.totalBatchSize = max(totalBatchSize, 1)
         self.nextNonceOffset = nonceOffset
         self.staleProbeEnabled = staleProbeEnabled
+        // A zero interval would hammer the node's status route.
+        self.staleProbeIntervalNanoseconds = max(Self.nanoseconds(staleProbeInterval), 1_000_000)
         self.retryBackoffNanoseconds = Self.nanoseconds(retryBackoffDelay)
         self.maxSubmitRetries = max(maxSubmitRetries, 0)
     }
@@ -307,6 +311,8 @@ public actor MiningCoordinator {
         enum Event: Sendable {
             case fresh
             case stale
+            /// A background task ended with the batch; nothing to act on.
+            case ended
             case expired
             case searched
             case workerFailed(workerId: String, error: String)
@@ -352,6 +358,22 @@ public actor MiningCoordinator {
                     guard let latest else { return .fresh }
                     return latest == work.staleToken ? .fresh : .stale
                 }
+                group.addTask { [nodeClient, staleProbeIntervalNanoseconds] in
+                    // The tip can move at any point in a round, and against a
+                    // hard target no submission comes along to notice it, so
+                    // the probe repeats until the batch ends.
+                    while true {
+                        do {
+                            try await Task.sleep(nanoseconds: staleProbeIntervalNanoseconds)
+                        } catch {
+                            return .ended
+                        }
+                        if let latest = try? await nodeClient.fetchStaleToken(),
+                           latest != work.staleToken {
+                            return .stale
+                        }
+                    }
+                }
             }
 
             if let lifetime = work.expiresInMilliseconds {
@@ -373,6 +395,8 @@ public actor MiningCoordinator {
                 switch event {
                 case .fresh:
                     probing = false
+                case .ended:
+                    break
                 case .searched:
                     searching -= 1
                 case .stale:
@@ -657,7 +681,23 @@ public final class HTTPMiningCoordinatorNodeClient: MiningCoordinatorNodeClient 
             let disposition: String
             let tipCID: String?
         }
+        struct Refusal: Decodable {
+            struct Reason: Decodable {
+                let message: String
+            }
+            let error: Reason
+        }
         guard let response = try? JSONDecoder().decode(Response.self, from: data) else {
+            // A 4xx refusal (unknown or expired work, a missed target) is the
+            // node's final answer: retrying it cannot land the block. The
+            // daemon names the refusal in the body.
+            if http.statusCode >= 400,
+               let refusal = try? JSONDecoder().decode(Refusal.self, from: data) {
+                return MiningSolutionSubmission(
+                    accepted: false,
+                    disposition: refusal.error.message
+                )
+            }
             throw MiningCoordinatorNodeClientError.invalidSubmissionResponse(statusCode: http.statusCode)
         }
         return MiningSolutionSubmission(

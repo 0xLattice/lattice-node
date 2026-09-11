@@ -206,6 +206,57 @@ private actor MergedMiningNode: MiningCoordinatorNodeClient {
     }
 }
 
+/// Serves fixed work whose tip moves to a new block after `movesAfter`.
+private actor MovingTipNode: MiningCoordinatorNodeClient {
+    private let work: MiningCoordinatorWork
+    private let movesAt: ContinuousClock.Instant
+    private(set) var probes = 0
+
+    init(work: MiningCoordinatorWork, movesAfter: Duration) {
+        self.work = work
+        movesAt = ContinuousClock.now + movesAfter
+    }
+
+    func fetchWork() async throws -> MiningCoordinatorWork? {
+        work
+    }
+
+    func fetchStaleToken() async throws -> String? {
+        probes += 1
+        return ContinuousClock.now < movesAt ? work.staleToken : "moved-tip"
+    }
+
+    func submit(workId: String, nonce: UInt64) async throws -> MiningSolutionSubmission {
+        MiningSolutionSubmission(accepted: true, disposition: "canonicalized")
+    }
+}
+
+/// Submits through the real HTTP client against a stubbed daemon, and counts
+/// every POST the coordinator makes.
+private actor HTTPSubmittingNode: MiningCoordinatorNodeClient {
+    private let work: MiningCoordinatorWork
+    private let client: HTTPMiningCoordinatorNodeClient
+    private(set) var submitAttempts = 0
+
+    init(work: MiningCoordinatorWork, client: HTTPMiningCoordinatorNodeClient) {
+        self.work = work
+        self.client = client
+    }
+
+    func fetchWork() async throws -> MiningCoordinatorWork? {
+        work
+    }
+
+    func fetchStaleToken() async throws -> String? {
+        work.staleToken
+    }
+
+    func submit(workId: String, nonce: UInt64) async throws -> MiningSolutionSubmission {
+        submitAttempts += 1
+        return try await client.submit(workId: workId, nonce: nonce)
+    }
+}
+
 private actor CancellationFlag {
     private(set) var cancelled = false
 
@@ -691,6 +742,64 @@ final class MiningCoordinatorTests: XCTestCase {
                 .invalidSubmissionResponse(statusCode: 502)
             )
         }
+    }
+
+    /// The daemon refuses a submission with a 4xx whose body names the
+    /// refusal (`{"error":{"message":"unknownWork"}}`). That is the node's final
+    /// answer, not a transport failure to retry.
+    func testHTTPSubmitTreatsDaemonRefusalAsFinalAnswer() throws {
+        let response = try XCTUnwrap(HTTPURLResponse(
+            url: URL(string: "http://127.0.0.1/v1/mining/work")!,
+            statusCode: 400,
+            httpVersion: nil,
+            headerFields: nil
+        ))
+
+        let submission = try HTTPMiningCoordinatorNodeClient.decodeSubmission(
+            data: Data(#"{"error":{"message":"unknownWork"}}"#.utf8),
+            response: response
+        )
+
+        XCTAssertFalse(submission.accepted)
+        XCTAssertEqual(submission.disposition, "unknownWork")
+    }
+
+    /// A refused parent hit (e.g. its template was evicted from the node's
+    /// book) is submitted once and reported with the node's reason.
+    func testRefusedSubmissionIsNotRetried() async throws {
+        StubTemplateURLProtocol.responder = { _ in
+            (400, Data(#"{"error":{"message":"unknownWork"}}"#.utf8))
+        }
+        defer { StubTemplateURLProtocol.responder = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [StubTemplateURLProtocol.self]
+        let node = HTTPSubmittingNode(
+            work: work,
+            client: HTTPMiningCoordinatorNodeClient(
+                apiBaseURL: URL(string: "http://127.0.0.1:1/api")!,
+                session: URLSession(configuration: config)
+            )
+        )
+        let worker = MiningCoordinatorWorker(id: "solver") { work, _ in
+            MiningWorkerResult(workerId: "solver", workId: work.workId, nonce: 9)
+        }
+        let coordinator = MiningCoordinator(
+            nodeClient: node,
+            workers: [worker],
+            totalBatchSize: 1,
+            staleProbeEnabled: false,
+            retryBackoffDelay: .milliseconds(1)
+        )
+
+        let result = await coordinator.runBatch()
+
+        XCTAssertEqual(result, .submitted(
+            workId: "work-1",
+            nonce: 9,
+            submission: MiningSolutionSubmission(accepted: false, disposition: "unknownWork")
+        ))
+        let attempts = await node.submitAttempts
+        XCTAssertEqual(attempts, 1)
     }
 
     func testHTTPSubmitTreatsJSONServerFailureAsRetryableTransportFailure() throws {
@@ -1216,6 +1325,41 @@ final class MiningCoordinatorTests: XCTestCase {
 
     /// The node refuses nonces for expired work, so the batch stops searching
     /// once the template's lifetime has passed.
+    /// The tip can move long after the batch's first freshness probe. The
+    /// round must notice and stop, not grind dead work until the template
+    /// expires or a hard-target hit finally reaches the node.
+    func testTipChangeMidRoundAbandonsTheBatch() async {
+        let work = MiningCoordinatorWork(
+            workId: "work-1",
+            blockHex: "00",
+            targetHex: "ff",
+            staleToken: "tip"
+        )
+        let node = MovingTipNode(work: work, movesAfter: .milliseconds(300))
+        let flag = CancellationFlag()
+        let worker = MiningCoordinatorWorker(id: "grinder") { _, _ in
+            try? await Task.sleep(for: .seconds(5))
+            await flag.record(Task.isCancelled)
+            return nil
+        }
+        let coordinator = MiningCoordinator(
+            nodeClient: node,
+            workers: [worker],
+            totalBatchSize: 1,
+            staleProbeInterval: .milliseconds(50)
+        )
+
+        let started = ContinuousClock.now
+        let result = await coordinator.runBatch()
+
+        XCTAssertEqual(result, .stale(workId: "work-1"))
+        XCTAssertLessThan(ContinuousClock.now - started, .seconds(3))
+        let cancelled = await flag.cancelled
+        XCTAssertTrue(cancelled)
+        let probes = await node.probes
+        XCTAssertGreaterThan(probes, 1)
+    }
+
     func testSearchStopsWhenTemplateExpires() async {
         let work = MiningCoordinatorWork(
             workId: "work-1",
