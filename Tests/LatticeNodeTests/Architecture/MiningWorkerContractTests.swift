@@ -87,6 +87,7 @@ final class MiningWorkerContractTests: XCTestCase {
         let expected = ProofOfWork.proofOfWorkHashPrefixBytes(genesis.block)
             .map { String(format: "%02x", $0) }.joined()
         XCTAssertEqual(decoded.prefixHex, expected)
+        XCTAssertEqual(decoded.targets, response.targets.map { $0.toHexString() })
         XCTAssertEqual(
             TemplateResponse.derivePrefixHex(blockHex: decoded.blockHex),
             expected
