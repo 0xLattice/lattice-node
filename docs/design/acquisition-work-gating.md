@@ -148,10 +148,11 @@ kind of local preference: a node "may apply its own root-work floor before
 spending resources on acquisition, but that is a non-punitive local preference
 and never changes validity" (Lattice spec §5.4). A gate may control what a node
 spends resources on. It may never decide whether a block is valid or how much
-it weighs. It can affect which head a node selects only by forgetting, under an
-operator budget, verified work it never counted. That is a bounded deviation,
-set out under [The deviation](#the-deviation), and this document does not claim
-the rules quoted here already allow it.
+it weighs. It can affect which head a node selects only by releasing, under an
+operator budget, verified work it never counted, and then being unable to
+obtain that work again. That is a bounded deviation, set out under
+[The deviation](#the-deviation), and this document does not claim the rules
+quoted here already allow it.
 
 **Operator choice, not protocol constants.** "Storage, transport,
 bootstrap-spec, and parent-witness ceilings are node-local acquisition policy,
@@ -356,26 +357,40 @@ they cannot remove.
   another keep. A record counts as stalled only when no known provider can serve
   its frontier. One provider timing out proves nothing, because under partial
   synchrony a slow honest peer and a staller look the same.
-- **P2: Released work stays counted as a number.** A released tally's work is
-  added to a durable total of forgotten work for each comparison it would enter,
-  and evicting the record never subtracts from that total. There is at most one
-  total per comparison in the kept graph, so the totals are no larger than the
-  kept graph they annotate, and they survive a restart. Totals carry no block
-  identities, so they may over-count overlapping releases. That is why they are
-  used for exactly two things: blocking further release, and triggering the
-  resumption in P3. They are never used for keeping or for fork choice.
+- **P2: Released work stays counted by identity, never as a bare number.** A
+  release leaves an entry naming the frontier it stopped at and the work proven
+  behind that frontier. Entries are grouped by the comparison the work would
+  enter. A released tally that has not attached enters no comparison yet, so its
+  entry stands on its own frontier until it attaches. Re-releasing a frontier
+  that is already recorded replaces its entry rather than adding to it, so
+  replaying the same offer can never add its work twice. An entry is removed
+  when its work is kept or tallied again, so the accounting falls as well as
+  rises. Entries are bounded per comparison and in total; when the bound is
+  reached the entries farthest from mattering are dropped (P6), and dropped work
+  falls under [The deviation](#the-deviation). Nothing is ever collapsed into a
+  number that can only grow. Entry work can still over-count overlaps between
+  distinct frontiers, so entries are used for exactly two things: blocking
+  further release, and triggering the resumption in P3. They are never used for
+  keeping and never for fork choice.
 - **P3: Reaching a margin obliges resumption.** When known unkept work plus
-  forgotten work entering a comparison reaches its margin, the node must resume
-  that comparison's released tallies and re-solicit that comparison's branches
-  from its peers. This is an obligation, not an option. It draws budget from
-  tallies far from any margin, and peer pausing never blocks it. Re-solicitation
-  is rate-bounded per comparison, so an over-counted total costs at most a
-  bounded stream of requests. What gets kept is still decided only by work that
-  has been tallied again. No existing overlay request can ask for this: the
-  frontier pull returns a peer's newest leaves, the legacy leaf descent walks
-  every leaf in CID order, and range sync pages only a peer's main chain. A
-  request for the branches of a peer's accepted graph that descend from a named
-  block is therefore a requirement of this design.
+  recorded released work entering a comparison reaches its margin, the node must
+  resume that comparison's released tallies and re-solicit that comparison's
+  branches from its peers. This is an obligation, not an option. It draws budget
+  from tallies far from any margin, and peer pausing never blocks it.
+  Re-solicitation is bounded per comparison and bounded in total across
+  comparisons, and that global budget is spent in order of the real unkept work
+  at each comparison, so comparisons an attacker has inflated cannot crowd out
+  an honest one. What gets kept is still decided only by work that has been
+  tallied again. No existing overlay request can ask for this: the frontier pull
+  returns a peer's newest leaves, the legacy leaf descent walks every leaf in
+  CID order, and range sync pages only a peer's main chain. A request for the
+  branches of a peer's accepted graph that descend from a named block is
+  therefore a requirement of this design. It must be bounded the way the
+  existing leaf page is, with a page limit, a cursor and a fixed admission
+  snapshot so a changing forest cannot move a branch behind the cursor, and it
+  answers only what that peer retains. It is also a new wire topic: peers that
+  predate it cannot answer, so until the fleet has upgraded, re-solicitation
+  reaches only upgraded peers and the deviation lasts longer.
 - **P4: Pressure falls on peers, never the node.** When the budget is full, the
   node may stop starting tallies for its lowest-ranked peers and may release
   their existing tallies, each release meeting P1 and P2. It never stops
@@ -393,27 +408,35 @@ they cannot remove.
   the node observed, never on addresses peers advertise. Where observed
   diversity collapses, as behind a proxy, the reservation reduces to the peers
   the node dialed.
-- **P6: The adversary does not set the horizon.** Records are evicted in order
-  of distance from any margin, farthest first, with distance including the
-  forgotten totals. A flood of cheap releases therefore pushes out the
-  attacker's own far-from-margin records before an honest record near a margin.
+- **P6: The adversary does not set the horizon.** Entries and records are
+  dropped in order of distance from mattering, farthest first. For attached
+  work, that distance is the gap between a comparison's known plus recorded work
+  and its margin. Unattached work enters no comparison, so its distance is the
+  work it proves: an unattached record holding more work is dropped later,
+  because that is what could matter once it attaches. A flood of cheap releases
+  therefore pushes out the attacker's own far-from-margin entries before an
+  honest entry near a margin.
 
 When every release that would relieve the budget is blocked by P2, the node
 keeps the blocked offers. It does not halt and it does not forget. At that
-comparison the gate falls back to today's behaviour.
+comparison the gate falls back to today's behaviour. **That fallback is decided
+by real unkept work alone.** Recorded released work may block a release, but it
+can never be the thing that makes the node keep an offer, so replaying releases
+cannot buy an attacker permanent storage at a comparison of its choosing.
 
 **What the requirements give.** Three guarantees follow:
 
-- **Work with a record.** For every offer the node is tallying or still holds a
-  record for, the node computes the head it would compute if it had kept that
-  offer. It differs only while that work is being fetched. This follows from the
-  pivotality rule, from P1, and from P3's obligation to resume.
-- **Evicted work.** Work whose record was evicted still counts in the totals. As
-  soon as it could be pivotal, P3 re-solicits it, and if any provider serves it
-  the ordinary keep rule applies.
+- **Work the node can still obtain.** For every offer the node is tallying, or
+  holds a record for and can still fetch, the node computes the head it would
+  compute if it had kept that offer. It differs only while that work is being
+  fetched. This follows from the pivotality rule, from P1, and from P3's
+  obligation to resume.
+- **Work the node cannot obtain.** Released work that no peer will serve again
+  falls under [the deviation](#the-deviation), whether or not its record
+  survives.
 - **No attacker control.** An attacker cannot halt tallying (P4, P5), cannot
-  choose what is evicted (P6), and cannot get junk kept by replaying releases
-  (P2).
+  choose what is dropped (P6), and cannot get junk kept by replaying releases
+  (P2 and the fallback rule above).
 
 ### The deviation
 
@@ -423,50 +446,67 @@ counterexample:
 
 1. A gating node and a node that keeps everything both verify branch B. B
    attaches at fork F, far below F's margin.
-2. Under budget pressure the gating node releases B. Later B's record is
-   evicted, leaving only B's work in F's forgotten total.
+2. Under budget pressure the gating node releases B, keeping an entry for it.
 3. B's only provider then goes offline for good.
 4. An exclusion removes validated incumbent weight at F, and F's comparison
    narrows. Known work on B's side still falls short of the margin, but known
    work plus B reaches it.
-5. The node that kept everything switches head. The gating node's total reaches
-   the margin and it re-solicits, but nobody serves B, so it does not switch.
+5. The node that kept everything switches head. The gating node's accounting
+   reaches the margin and it re-solicits, but nobody serves B, so it does not
+   switch.
 
-The two heads now differ only because one node released work it had verified.
+Losing the entry is not required: a node that still holds B's record but can
+find no provider is in the same position. Nor is exclusion the only way a
+margin narrows; new grind locations narrow margins too (§9.4). What the
+deviation needs is only that verified work was released and cannot be fetched
+again.
+
 This is not an availability gap under the project's rules, because the
 comparison those rules use is a node that retained B:
 
 - operator-finality requires that "A node's fork choice must be identical to
   that of a node which retained everything it has ever verified". It warns that
   otherwise nodes "could compute different heaviest branches purely as a
-  function of their retention policy".
+  function of their retention policy". That comparison node keeps the *weight
+  facts*, not the bytes, and it "may select a head it has not yet re-acquired",
+  so the loss of a provider does not excuse the gating node.
 - modular-admission-pipeline rules out work floors because "two nodes with
   different floors could select different tips". Two nodes with different tally
   budgets could too.
 - protocol.md treats any filter on work that can reach fork choice as
   consensus-relevant.
-- weight-first-acquisition says a missing input is "retried indefinitely". Here,
-  after eviction, the work is retried only when it becomes pivotal, and only by
-  re-solicitation, which cannot name what was lost.
+- weight-first-acquisition says a missing input is "retried indefinitely". Here
+  the work is retried only when it becomes pivotal, and only by re-solicitation,
+  which after a drop cannot even name what was lost.
+
+The per-comparison accounting cannot be promoted into fork choice to close this.
+It has no grind identity, so real arrivals would double-count against it (§9.1);
+it is reachable by replay, so it would hand an attacker a way to move a head;
+and making it exact against dropped work needs exactly the identities that are
+gone, which is the durable-skeleton option below.
 
 The deviation is bounded in five ways:
 
-- **Scope.** It concerns only verified work that the node released and never
-  counted. That includes unattached work whose missing ancestor arrives later by
-  another route.
-- **Trigger.** It changes a head only when forgotten work is pivotal: known work
-  entering a comparison falls short of the margin, and known plus forgotten work
+- **Scope.** It concerns only verified work the node released and never counted,
+  attached or not, whether or not its record survives, and only while no peer
+  will serve that work again.
+- **Trigger.** It changes a head only when released work is pivotal: known work
+  entering a comparison falls short of the margin, and known plus released work
   reaches it.
-- **Duration.** It lasts only while no provider serves the forgotten work when
-  it is re-solicited. Any provider ends it.
-- **Zero cases.** It is zero on a node that never releases a tally, or that
-  keeps every record durably, and for every offer the node never released.
-- **Restart.** A restart does not create a new kind of deviation. Records do not
-  survive a restart but the totals do, so a restart turns records into totals.
-  After a restart the frontier pull re-offers only each peer's newest leaves,
-  and only once the node is at the live edge with that peer. A node still
-  catching up gets no frontier pages until then, and re-solicitation covers
-  what the frontier pull does not.
+- **Duration.** It lasts only while no provider serves the work when it is
+  re-solicited. Any provider ends it. Until peers support the fork-point-scoped
+  request above, re-solicitation reaches fewer of them, which lengthens it.
+- **Zero cases.** It is zero for a node that never releases a verified tally,
+  and for every offer the node never released. Keeping every record durably is
+  not sufficient: a record whose work nobody will serve cannot be re-fetched.
+  Zero requires that released work is either never released or counted, as in
+  the alternatives below.
+- **Restart.** A restart does not create a new kind of deviation. The tally
+  record does not survive a restart but the released-work entries do, so a
+  restart turns records into entries. After a restart the frontier pull re-offers
+  only each peer's newest leaves, and only once the node is at the live edge
+  with that peer. A node still catching up gets no frontier pages until then,
+  and re-solicitation covers what the frontier pull does not.
 
 **Building releases as specified requires first rewording** operator-finality's
 weight-preservation rule, protocol.md's work-floor sentence and
@@ -475,17 +515,22 @@ deviation for verified work that was never counted. That is a decision for the
 maintainer. There are two alternatives with no deviation at all:
 
 - **Durable skeleton records.** A release keeps each released block's identity,
-  parent link and verified work durably, without its bytes, and counts that work
-  once it becomes pivotal, as operator-finality already counts evicted weight.
-  Fork choice is then identical. The cost is durable per-block metadata for
-  every released block, which is most of the permanent per-block cost the gate
-  exists to avoid. It also needs a specification change to count work that was
-  verified from bytes the node held but never staged.
+  parent link and verified work durably, without its bytes, and **counts** that
+  work once it becomes pivotal, as operator-finality already counts evicted
+  weight. Counting it, not merely recording it, is what removes the deviation.
+  The cost is that the entry count cannot be bounded: an attacker can mint cheap
+  blocks at an eased schedule, have them tallied and released, and each one
+  leaves a permanent entry. Capping the record would bring the deviation back in
+  a worse form, over work the node had already counted. So this option means
+  permanent per-block metadata for every block ever offered, which is most of
+  the permanent per-block cost the gate exists to avoid. It also needs a
+  specification change to count work that was verified from bytes the node held
+  but never staged.
 - **Never release verified work.** Budget pressure only pauses new tallies, and
   an existing tally that cannot fit is kept. Fork choice is then identical. The
   cost is that an attacker who fills the tally budget forces keeping at whatever
-  rate it can fill it, so while the budget stays full the gate falls back to
-  today's cost.
+  rate it can fill it, and what is kept is kept permanently, so the storage cost
+  is permanent rather than lasting only while the budget is full.
 
 ## Stranding
 
@@ -524,9 +569,10 @@ These are the ways that can happen, and how the concept handles each:
 - **Cascading releases.** After a partition heals, an honest wide branch could
   be released piece by piece, each piece far from the margin on its own, so its
   work never adds up. That case is exactly what GHOST exists for, so it is not
-  rare. Under P2, released work stays counted per comparison against every
-  further release, even after its record is evicted. Under P3, the node must
-  resume and re-solicit once the total reaches a margin. What remains is
+  rare. Under P2 each released piece stays counted by its own frontier identity,
+  against every further release, and an unattached piece is counted on its
+  frontier until it attaches. Under P3 the node must resume and re-solicit once
+  the accounting reaches a margin. What remains is
   [the deviation](#the-deviation).
 - **A tallying halt.** If budget pressure could stop all tallying, an attacker
   could fill the budget with tallies that never attach. Under P4, pressure
@@ -534,7 +580,7 @@ These are the ways that can happen, and how the concept handles each:
   that is still progressing, and never stops the node. A stall is defined by
   provider availability rather than by one timeout (P1). P5 keeps the reserved
   share with peers the node chose. A release that P2 blocks falls back to
-  keeping.
+  keeping, decided by real unkept work.
 - **Catch-up and fresh nodes.** The bar is measured over validated weight, and
   during catch-up validated weight lags the weighed tip. So the bar stays near
   zero for the whole catch-up, not only at genesis. The same holds at a fork
@@ -597,9 +643,9 @@ They interact in four ways:
   invalid. Once kept, it is admitted exactly as today. Head outcomes can differ
   only as set out under [The deviation](#the-deviation).
 - **Same head, except the stated deviation.** A gating node computes the head it
-  would compute if it had kept every offer it is tallying or still holds a
-  record for, apart from the time taken to fetch that work. Beyond that, heads
-  can differ only as set out under [The deviation](#the-deviation).
+  would compute if it had kept every offer it is tallying, or holds a record for
+  and can still obtain, apart from the time taken to fetch that work. Beyond
+  that, heads can differ only as set out under [The deviation](#the-deviation).
 - **Weight preservation is unchanged for counted work.** Eviction never drops
   counted work ([operator-finality](operator-finality.md)), and the gate never
   counts work it has not kept. The deviation relaxes operator-finality's rule
@@ -611,8 +657,8 @@ They interact in four ways:
 - **Operator settings.** The margin, the tally and record budgets, any reserved
   share, and any minimum required before keeping are node configuration with
   sensible defaults. The default never tallies an honest live-edge block.
-  "Keep everything" is a conforming setting, and a node that never releases, or
-  keeps every record durably, has no deviation.
+  "Keep everything" is a conforming setting, and a node that never releases a
+  verified tally has no deviation.
 - **The node's own blocks and parent facts are not gated.** A block this node
   produced is kept as today. Genesis and continuity facts issued by the parent
   carry no work, and the [process trust model](process-trust-model.md) governs
@@ -631,7 +677,7 @@ They interact in four ways:
   branch that has been completely tallied is not walked again when re-announced,
   but a stream of fresh cheap CIDs still costs one probe each. That cost scales
   with the attacker's bandwidth, not with any work, and it too belongs to peer
-  accountability. Cheap releases can also inflate a comparison's forgotten
-  total. That blocks release at that comparison and triggers rate-bounded
-  re-solicitation, so the cost is a fall back to keeping there, plus a bounded
-  stream of requests.
+  accountability. Releases of distinct cheap frontiers can also raise a
+  comparison's recorded released work. That blocks release at that comparison
+  and triggers rate-bounded re-solicitation, so the cost is a fall back to
+  keeping there, decided by real unkept work, plus a bounded stream of requests.
