@@ -389,8 +389,8 @@ because boundary-focused testing needed the same things:
   task-local budgets read the system clock directly.
 - **Durable storage faults.** Nothing can fail, delay or lose a `NodeStore` write
   or a `DiskBroker` store on demand, or crash a process between two of them.
-  Crash tests today reopen a store after a clean close, or send a real `SIGKILL`
-  at an uncontrolled moment.
+  Crash tests today open a fresh store over the same durable file at a point the
+  test chose, or kill a real process at a moment the test does not control.
 - **Randomness** in Ivy's jitter and secrets, the runtime's peer shuffle and
   identifier generation.
 - **Dependencies.** Ivy, Tally, VolumeBroker and cashew are separate repositories
@@ -403,4 +403,52 @@ differently turns the simulation into a test of itself.
 
 ## Relation to the existing tiers
 
+Simulation is a new tier, not a replacement for the stack. Each existing tier
+answers a question simulation cannot, and simulation answers one they cannot.
+
+| Tier | Keeps owning | Relation to simulation |
+|---|---|---|
+| Reducer and unit tests (`CandidateAcquirerTests`, `AdmissionDecisionTests`) | Exact contracts of small state machines | Unchanged. The reducers run inside simulated nodes as they are. |
+| Component tests with latches and blocking sources (`ChainProcessTests`, `ChainServiceTests`, `NodeStoreTests`) | One named interleaving, pinned forever | Complemented. Simulation searches for interleavings; a failing seed, once understood, can become a pinned component test. Purpose-built DEBUG ordering hooks become less necessary for discovery. |
+| Real-network integration (`NetworkTrustTests`) | Ivy sessions, framing, authentication and delegate delivery over real sockets | Complemented. Simulation replaces the transport, so it cannot vouch for it. |
+| Black-box E2E with real binaries (`LatticeNodeE2ETests`, `LatticeCtlE2ETests`, release smoke) | The shipped artifact: daemon startup, configuration, HTTP, real disk, real processes | Complemented. These stay the gate for the thing users run. Their role as the main place ordering bugs surface, and the need to absorb those bugs with scaled deadlines, retries and opt-in gates, moves to simulation. |
+| Sanitizers and strict concurrency | Memory safety and true data races | Complemented. Simulation serializes execution, so it cannot see this class, and these tools cannot see logical interleavings. |
+| Wire and read-router fuzzing | Hostile single inputs at the unauthenticated surfaces | Complemented. Fuzzing varies one message; simulation varies sequences, timing and faults. Both keep the same seed-and-replay discipline. |
+| Lattice's `LatticeSim` and determinism goldens | Consensus rules and host-independent results | Complemented. The reference model for invariant 1 has the same shape as the frozen model the north star requires, and it may be shared rather than duplicated. |
+| Reproducible builds | The binary is what the source says | Supports simulation. A seed replays only on the same build, and reproducible builds make "the same build" checkable. |
+| Testnet and fleet operation | Real hardware, real latency, real operators | Complemented. Simulation reaches their failure modes before the fleet does, and cannot replace the fleet as the final judge. |
+
+What simulation replaces is narrow and specific: **timing as the discovery
+mechanism for ordering, crash, partition, skew and peer-misbehaviour bugs.** A
+nondeterministic failure becomes a seed to replay instead of a quarantine to
+maintain, and a convergence scenario becomes a fault schedule that runs in
+simulated time instead of a CPU-bound wait that has to be scaled for CI.
+
 ## Boundaries
+
+- **Consensus is untouched.** Simulation checks the node against Lattice's rules;
+  it adds no rule, constant or threshold. Simulation parameters such as fault
+  rates, partition lengths and convergence bounds are test choices, never
+  protocol values.
+- **Simulated nodes run production logic.** Everything above the seams is the
+  code that ships. A simulation that reimplements node behaviour tests its own
+  reimplementation.
+- **Seams are consequence-free in production.** The production binding of every
+  seam is the real clock, socket, disk and generator. No seam may give test
+  code a decision that production makes differently, and no DEBUG-only path may
+  be required to reach a state the simulation checks.
+- **Adversaries act only through the environment.** Lying peers, lost writes and
+  skewed clocks are applied to what a node receives or reads. Nothing edits a
+  node's stores or in-memory state, the same rule the E2E tier already follows.
+- **Proof of work stays real.** A simulated block is admitted because its hash
+  beats its target, not because the simulation says so. Targets can be cheap,
+  but they must not be the maximum target: the exclusion test (2f51a5f4) notes
+  that its forgery passes only because the harness mines at the maximum target,
+  and a maximum target can mask work-accounting defects. Nonce search order
+  comes from the seed.
+- **A passing seed is evidence, not proof.** Coverage is bounded by the fault
+  model, the workload and the invariants. A property that is not written down is
+  not checked, however many seeds pass.
+- **Replay is the property that cannot be traded.** A source of nondeterminism
+  left in the simulated world costs more than the coverage it seems to add,
+  because it turns every failure back into a log to read.
