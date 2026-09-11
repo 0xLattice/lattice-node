@@ -5,14 +5,21 @@ primary_region = "iad"
   dockerfile = "Dockerfile"
 
 [env]
-  CHILD_PATH = "Nexus/testnet"
+  # The descending path this host follows, outermost first. Ports are
+  # assigned by position, and the [[services]] blocks below hardcode the
+  # result, so APPEND ONLY: inserting or reordering a path silently re-points
+  # 443 at a different chain.
+  CHILD_PATHS = "Nexus/testnet Nexus/testnet/swap"
   # The P2P self-description must be an IP literal (Ivy netgroup hardening
   # rejects hostnames): the app's dedicated IPv4 (`fly ips list`).
   EXTERNAL_HOST = "169.155.61.57"
   # The browsable self-description is the TLS-fronted hostname (fly terminates
   # TLS by SNI; the bare IP has no cert). Advertised through the parent
   # rendezvous so the explorer can reach the child chain.
-  PUBLIC_READ_URL = "https://lattice-mainnet-testnet.fly.dev"
+  # One browsable URL per path, in the same order. fly terminates TLS by SNI
+  # on any port, so a deeper chain gets its own port on the same hostname;
+  # the bare IP has no cert and is not usable here.
+  PUBLIC_READ_URLS = "https://lattice-mainnet-testnet.fly.dev https://lattice-mainnet-testnet.fly.dev:8443"
   # Field diagnosis for the catch-up stall: `lattice up` discards child
   # stderr, so trace to a file on the volume. Remove when the stall class
   # is closed.
@@ -37,6 +44,13 @@ primary_region = "iad"
   [[services.ports]]
     port = 4101
 
+# Grandchild overlay: same story one level down.
+[[services]]
+  protocol = "tcp"
+  internal_port = 4201
+  [[services.ports]]
+    port = 4201
+
 # Public read surface for the child chain: 443/80 -> --public-read-port.
 [[services]]
   protocol = "tcp"
@@ -53,6 +67,24 @@ primary_region = "iad"
     grace_period = "60s"
     path = "/health"
 
+# Public read surface for the grandchild: 8443 -> its --public-read-port.
+[[services]]
+  protocol = "tcp"
+  internal_port = 8082
+  [[services.ports]]
+    port = 8443
+    handlers = ["tls", "http"]
+  [[services.http_checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "60s"
+    path = "/health"
+
+# Each chain in CHILD_PATHS is a full process (two SQLite stores, an Ivy
+# overlay, two HTTP listeners). Fly OOM-kills the MACHINE rather than the
+# process that overran, so a third chain peaking during a cold sync would
+# take the Nexus and child followers down with it — and the explorer reads
+# from those. Headroom is cheaper than that outage.
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "1gb"
+  memory = "2gb"
