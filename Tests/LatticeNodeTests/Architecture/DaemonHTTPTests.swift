@@ -676,6 +676,157 @@ final class DaemonHTTPTests: XCTestCase {
         }
     }
 
+    /// The public read router is the other surface an unauthenticated caller
+    /// controls outright: every path segment and query value is theirs. Swift
+    /// answers a bad number with a TRAP, which takes the whole node down rather
+    /// than refusing one request, and this router has already shipped one — an
+    /// `offset` near `Int.max` overflowed an addition. That fix had no test.
+    ///
+    /// So: every parametered read route, against values chosen for the ways
+    /// Swift actually fails — integer edges and one past them, sign flips,
+    /// scientific and hex spellings, oversize digit runs, non-CID garbage,
+    /// encoded path traversal, and a real CID for contrast — on a chain that
+    /// holds real blocks, so handlers get past the cheap 404s and reach the
+    /// arithmetic. Surviving is the first assertion; the second is that no
+    /// route answers a caller's input with a 5xx, which would be an unhandled
+    /// path even where it is not yet a crash.
+    func testPublicReadRoutesSurviveHostileParameters() async throws {
+        let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-http-hostile-params-\(UUID().uuidString)"
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storage) }
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: storage,
+            privateKeyHex: String(repeating: "01", count: 32)
+        )
+        let process = try await ChainProcess.open(configuration: configuration)
+        let service = ChainService(
+            process: process,
+            childCandidateProvider: { _ in [] },
+            childProofPublisher: { _ in },
+            acceptedBlockPublisher: { _ in },
+        )
+        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
+        // Genesis carries the premine transaction, so a transactions page on
+        // it has a non-zero total and really reaches the offset arithmetic.
+        let genesis = configuration.nexusGenesisCID
+
+        let integerEdges = [
+            "0", "-1", "1", "-0",
+            "\(Int.max)", "9223372036854775808",
+            "\(Int.min)", "-9223372036854775809",
+            "\(UInt64.max)", "18446744073709551616",
+            String(repeating: "9", count: 400),
+            "1e9", "0x10", "+5", " 5", "5 ", "abc", "",
+        ]
+        let ids = integerEdges + [
+            "not-a-cid",
+            "bafy" + String(repeating: "z", count: 60),
+            String(repeating: "a", count: 1_500),
+            "\u{0}", "\u{202E}", "\u{1F4A5}", "a b",
+            genesis,
+        ]
+
+        // Path parameters are NOT percent-decoded by the router — verified: a
+        // real CID with its first byte written as %62 answers 400, not 200. So
+        // a segment reaches the handler exactly as sent. Encode only what can
+        // never legally appear in a path, so `-1`, `+5`, `1e9` and `0x10`
+        // arrive raw; a NUL, a space or an emoji still has to be escaped,
+        // because no real client can put one in a path any other way.
+        var pathSegmentAllowed = CharacterSet.urlPathAllowed
+        pathSegmentAllowed.remove(charactersIn: "/")
+        func pathSegment(_ raw: String) -> String {
+            raw.addingPercentEncoding(withAllowedCharacters: pathSegmentAllowed) ?? ""
+        }
+        // Query values ARE decoded, so escaping everything is what delivers
+        // the intended value to the handler there.
+        func queryValue(_ raw: String) -> String {
+            raw.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+        }
+        // The whole point of `pathSegment`: these must reach the handler raw.
+        // If they came back escaped the path cases would silently test `%2D1`.
+        for raw in ["-1", "+5", "1e9", "0x10", "\(Int.min)", "\(UInt64.max)"] {
+            XCTAssertEqual(pathSegment(raw), raw, "\(raw) must be sent unescaped")
+        }
+        // Already-escaped as an attacker sends them. Re-encoding would turn
+        // `%2F` into `%252F` and test a string nobody sends.
+        let wireLiteralSegments = [
+            "..%2F..%2Fetc%2Fpasswd", "%2e%2e%2f", "%00", "%FF%FE", "..",
+        ]
+
+        var uris: [String] = []
+        for segment in ids.map(pathSegment) + wireLiteralSegments {
+            // An empty segment would route to a different handler entirely,
+            // which tests the router, not the parameter.
+            guard !segment.isEmpty else { continue }
+            uris += [
+                "/api/block/\(segment)",
+                "/api/block/\(segment)/transactions",
+                "/api/block/\(segment)/children",
+                "/api/transaction/\(segment)",
+                "/api/state/account/\(segment)",
+                "/v1/blocks/\(segment)",
+                "/v1/transactions/\(segment)",
+                "/v1/accounts/\(segment)?block=\(genesis)",
+            ]
+        }
+        for value in integerEdges {
+            let query = queryValue(value)
+            uris += [
+                "/api/block/\(genesis)/transactions?offset=\(query)",
+                "/api/block/\(genesis)/transactions?limit=\(query)",
+                "/api/block/\(genesis)/transactions?offset=\(query)&limit=\(query)",
+                "/v1/blocks?limit=\(query)",
+                "/v1/blocks?before=\(query)",
+                "/v1/accounts/\(genesis)?block=\(query)",
+                "/api/chain/children?limit=\(query)",
+                "/api/block/latest?chainPath=\(query)",
+            ]
+        }
+
+        let matrix = uris
+        try await app.test(.router) { client in
+            _ = try await mineOneBlock(client: client)
+            _ = try await mineOneBlock(client: client)
+
+            // The one this router already shipped: offset near Int.max on a
+            // page with real transactions. Named so a regression says so.
+            try await client.execute(
+                uri: "/api/block/\(genesis)/transactions?offset=\(Int.max)&limit=\(Int.max)",
+                method: .get
+            ) { response in
+                XCTAssertLessThan(
+                    response.status.code, 500,
+                    "offset=Int.max must be refused or answered empty, never overflow"
+                )
+            }
+
+            var statuses = Set<Int>()
+            for uri in matrix {
+                try await client.execute(uri: uri, method: .get) { response in
+                    statuses.insert(response.status.code)
+                    XCTAssertLessThan(
+                        response.status.code, 500,
+                        "\(uri) answered \(response.status): a caller's input reached an unhandled path"
+                    )
+                }
+            }
+            // Reaching here means no request trapped. That alone would still
+            // pass if a routing change sent the whole matrix to 404, so require
+            // evidence that it hit real handlers: one that SERVED (the genesis
+            // CID is in the matrix) and one that PARSED and REJECTED input.
+            XCTAssertTrue(
+                statuses.contains(200),
+                "nothing was served: the matrix never reached a working handler \(statuses)"
+            )
+            XCTAssertTrue(
+                statuses.contains(400),
+                "nothing was rejected as bad input: handlers never parsed the matrix \(statuses)"
+            )
+        }
+    }
+
     func testReadSnapshotMatchesStatusAndNeverBlocksBehindTheOperationGate() async throws {
         let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-http-readsnapshot-test-\(UUID().uuidString)"

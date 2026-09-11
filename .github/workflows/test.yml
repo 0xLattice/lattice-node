@@ -264,6 +264,29 @@ jobs:
       - name: Run Clang analyzer seed/smoke
         run: scripts/run-clang-analyzer.sh
 
+  # A soak far longer than the in-suite default. The wire is the only surface
+  # an unauthenticated peer controls outright, and Swift answers malformed
+  # input with a trap rather than an error, so the node dies instead of
+  # dropping the message. Deterministic seeds mean a hit here replays exactly.
+  wire-fuzz:
+    runs-on: ubuntu-latest
+    container: swift:6.1-jammy
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies for Linux
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev
+
+      - name: Build test targets
+        run: swift build --build-tests
+
+      - name: Fuzz the wire decoders
+        env:
+          LATTICE_FUZZ_ITERATIONS: "2000000"
+        run: swift test --skip-build --filter WireProtocolFuzzTests
+
   read-replica-allowlist:
     runs-on: ubuntu-latest
     steps:
