@@ -159,15 +159,17 @@ records its CID. The deployer constructs and signs an ordinary parent
 transaction containing `GenesisAction(directory, blockCID)` and submits it
 through `POST /v1/transactions`. Mining templates select it like any other
 transaction; the accepted parent block records `directory -> genesisCID` in the
-parent's committed genesis state, which the parent's `GET /api/chain/children`
-lists.
+parent's committed genesis state. The parent's `GET /api/chain/children`
+returns at most 100 of those entries with no offset, so on a parent with more
+children a recorded child can be absent from it.
 
 A child process launched with `--chain-path Nexus/Payments` and `--parent
 <parent-key>@<host>:<fact-port>` stays `awaitingGenesis` until it can admit
-that genesis. If its data directory contains the seed as `child-genesis.json`,
-it rebuilds the genesis from the seed. Otherwise it asks its parent for the CID
-recorded under its directory and fetches the genesis block by that CID from
-child-overlay peers. Either way it admits the genesis only after its
+that genesis, which it pursues by two concurrent paths. If its data directory
+contains the seed as `child-genesis.json` at startup (the file is read only
+then), it rebuilds the genesis from the seed. Independently, it asks its parent
+for the CID recorded under its directory and fetches the genesis block by that
+CID from child-overlay peers. Either way it admits the genesis only after its
 authenticated immediate parent confirms that it recorded exactly that CID.
 `lattice child deploy` performs these steps; see [Operator CLI](operator-cli.md).
 
@@ -181,4 +183,6 @@ authenticated immediate parent confirms that it recorded exactly that CID.
 - A full transaction pool returns `429 Too Many Requests`.
 - A temporarily unavailable transaction policy returns `503 Service
   Unavailable`.
-- JSON requests are bounded to 1 MiB.
+- Request bodies are bounded to 2 MiB, Hummingbird's default upload limit.
+  Within that, a transaction submission and a template request's rewards are
+  each bounded to 1 MiB once re-encoded.

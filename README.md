@@ -63,12 +63,13 @@ The child starts in `awaitingGenesis`. A child genesis is self-contained: it is
 built offline and deterministically from a seed (the child `ChainSpec`, an
 optional premine recipient, and a timestamp), and the parent only records its
 CID. Submit a separately signed parent transaction carrying the matching
-`GenesisAction`; ordinary mining includes it like any other transaction. A
-child whose data directory holds the seed as `child-genesis.json` rebuilds the
-genesis from it; a child without the seed asks its parent for the recorded CID
-and fetches the content-addressed genesis block from child-overlay peers.
-Either way, it becomes active only after its authenticated immediate parent
-confirms that it recorded exactly that CID. There is no opaque serialized
+`GenesisAction`; ordinary mining includes it like any other transaction. The
+child pursues the genesis by two concurrent paths. It rebuilds it from a seed
+found as `child-genesis.json` in its data directory at startup (the file is read
+only then). It also asks its parent for the recorded CID and fetches the
+content-addressed genesis block from child-overlay peers, which a brand-new
+chain does not yet have. Either way, it becomes active only after its
+authenticated immediate parent confirms that it recorded exactly that CID. There is no opaque serialized
 bootstrap channel. `lattice child deploy` runs the whole flow; see the
 [operator CLI](docs/operator-cli.md).
 

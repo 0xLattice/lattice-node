@@ -93,23 +93,27 @@ swift run lattice-node \
   --rpc-port 8180
 ```
 
-It initially reports `awaitingGenesis`. To give it a genesis:
+It initially reports `awaitingGenesis`. To give a new chain its genesis:
 
 1. Build the self-contained child genesis offline from a seed: the child spec,
    an optional premine recipient, and a timestamp. The same seed always yields
    the same genesis CID.
-2. Construct and sign a parent transaction carrying that CID in a
+2. Write that seed as `child-genesis.json` into the child's data directory
+   before starting the child. The node reads the file only at startup, so a
+   child that was already running must be restarted after the file is written.
+3. Construct and sign a parent transaction carrying the genesis CID in a
    `GenesisAction` for directory `Payments`.
-3. `POST /v1/transactions` on the parent with that transaction.
-4. Mine the parent with `lattice-mining-coordinator` as usual; the transaction
+4. `POST /v1/transactions` on the parent with that transaction.
+5. Mine the parent with `lattice-mining-coordinator` as usual; the transaction
    is selected like any other.
 
-The child then needs the genesis itself: either the seed in its data directory
-as `child-genesis.json`, or a child-overlay peer serving the genesis block for
-the CID its parent recorded. It admits the genesis only after its authenticated
-parent confirms that exact record. The child does not accept opaque genesis
-bytes on its command line. `lattice child deploy` performs all of these steps
-for a local tree.
+A child started with the seed retries until the parent's record lands. A child
+also tries to fetch the recorded genesis block by CID from child-overlay peers,
+but a brand-new chain has no peer serving it, so the first node of a new chain
+needs the seed. Either way, the child admits the genesis only after its
+authenticated parent confirms that exact record. The child does not accept
+opaque genesis bytes on its command line. `lattice child deploy` performs all
+of these steps for a local tree.
 
 ## Testing an application
 

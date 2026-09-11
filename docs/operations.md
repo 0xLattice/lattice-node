@@ -117,9 +117,13 @@ nonce.
 
 ## Child chains
 
-Start a child process before or after its parent records the child genesis. It
-can safely remain in `awaitingGenesis` until the parent block carrying the
-`GenesisAction` is accepted.
+A child process may start before or after its parent records the child genesis
+and can safely remain in `awaitingGenesis` until the parent block carrying the
+`GenesisAction` is accepted. The node reads a `child-genesis.json` seed from its
+data directory only at startup: place the seed before starting the first node
+of a new chain, or restart the child after writing it. Without a seed read at
+startup, the child can activate only by fetching the recorded genesis from a
+child-overlay peer, and a brand-new chain has none.
 
 ```bash
 lattice-node \
@@ -205,12 +209,18 @@ matched backup pair or wipe the entire process directory and resync.
 - Verify its `--chain-path` is absolute and exactly matches the intended child.
 - Verify `--parent` names the immediate parent's process key and fact port.
 - Confirm a separately signed parent transaction carrying the matching
-  `GenesisAction` was mined: the parent's `GET /api/chain/children` must list
-  the child with the expected genesis CID.
-- If the child's data directory holds `child-genesis.json`, confirm it is the
-  exact seed that genesis CID was built from; any other seed yields a different
-  CID, which the parent will not confirm.
-- Without a seed, confirm a child-overlay peer can serve the genesis block.
+  `GenesisAction` was mined. The parent's `GET /api/chain/children` listing
+  helps, but it returns at most 100 children with no offset, so absence from it
+  is not proof on a parent with more children.
+- The child pursues two genesis paths concurrently: a `child-genesis.json` seed
+  read from its data directory at startup, and a fetch of the recorded genesis
+  block by CID from child-overlay peers.
+- If the seed was written after the child started, restart the child; the seed
+  is read only at startup.
+- If the seed is not the exact one the recorded CID was built from, it yields a
+  different CID that the parent will not confirm. The child can then activate
+  only through the fetch path, so confirm a child-overlay peer serves the
+  genesis block (a brand-new chain has none), or replace the seed and restart.
 - Check hierarchy-plane connectivity; an overlay peer cannot substitute for the
   configured parent fact link.
 

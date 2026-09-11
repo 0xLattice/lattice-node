@@ -160,12 +160,14 @@ request is CID-stable and refreshes one offer instead of consuming another.
 3. External mining includes that transaction in a parent block like any other.
    The accepted block records `directory -> genesisCID` in the parent's
    committed genesis state.
-4. The child process, started at any point with its absolute path and parent
-   fact endpoint, opens its durable store in `awaitingGenesis`. If its data
-   directory holds the seed as `child-genesis.json`, it rebuilds the genesis
-   locally. Otherwise it asks the parent for the CID recorded under its
-   directory and fetches the genesis block by that CID from child-overlay
-   peers, requiring the content to hash back to it.
+4. The child process, started with its absolute path and parent fact endpoint,
+   opens its durable store in `awaitingGenesis` and runs two genesis paths
+   concurrently. If its data directory holds the seed as `child-genesis.json`
+   at startup (the file is read only then), it rebuilds the genesis locally.
+   Independently, it asks the parent for the CID recorded under its directory
+   and fetches the genesis block by that CID from child-overlay peers,
+   requiring the content to hash back to it. A brand-new chain has no such
+   peer, so its first node needs the seed in place before it starts.
 5. The child asks its authenticated immediate parent to acknowledge the exact
    `(directory, genesisCID, empty parent state)` fact. Only a positive answer
    lets it bootstrap the genesis and become `active`; otherwise it stays
