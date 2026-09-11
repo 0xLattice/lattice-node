@@ -117,39 +117,48 @@ struct Child: AsyncParsableCommand {
             )
             let genesisCID = try BlockHeader(node: genesis).rawCID
 
+            struct KeyFile: Decodable {
+                let privateKey: String
+                let publicKey: String
+            }
+            let key = try JSONDecoder().decode(
+                KeyFile.self,
+                from: Data(contentsOf: URL(fileURLWithPath: fund))
+            )
+            let address = CryptoUtils.createAddress(from: key.publicKey)
+            let body = TransactionBody(
+                accountActions: fee == 0 ? [] : [AccountAction(
+                    owner: address, delta: -Int64(fee)
+                )],
+                actions: [],
+                depositActions: [],
+                genesisActions: [GenesisAction(
+                    directory: directory, blockCID: genesisCID
+                )],
+                receiptActions: [],
+                withdrawalActions: [],
+                signers: [address],
+                fee: fee,
+                nonce: nonce,
+                chainPath: [parent].flatMap {
+                    $0 == "Nexus" ? ["Nexus"]
+                        : $0.components(separatedBy: "/")
+                }
+            )
+            let header = try HeaderImpl(node: body)
+
+            // While --fund, --nonce and --fee still describe the pending
+            // anchor it is resubmitted verbatim: a re-signed copy is a rival
+            // at the same nonce that the pool refuses. Changed ones re-sign it
+            // for the SAME genesis — the only way out of a nonce the key never
+            // reaches (pooled as future) or a fee too low to mine. Whichever
+            // anchor for this genesis lands, the seed kept here activates it.
             let pending: PendingChildDeploy
-            if let resumable {
+            var created: Data?
+            if let resumable,
+               resumable.anchor.transaction.body.rawCID == header.rawCID {
                 pending = resumable
             } else {
-                struct KeyFile: Decodable {
-                    let privateKey: String
-                    let publicKey: String
-                }
-                let key = try JSONDecoder().decode(
-                    KeyFile.self,
-                    from: Data(contentsOf: URL(fileURLWithPath: fund))
-                )
-                let address = CryptoUtils.createAddress(from: key.publicKey)
-                let body = TransactionBody(
-                    accountActions: fee == 0 ? [] : [AccountAction(
-                        owner: address, delta: -Int64(fee)
-                    )],
-                    actions: [],
-                    depositActions: [],
-                    genesisActions: [GenesisAction(
-                        directory: directory, blockCID: genesisCID
-                    )],
-                    receiptActions: [],
-                    withdrawalActions: [],
-                    signers: [address],
-                    fee: fee,
-                    nonce: nonce,
-                    chainPath: [parent].flatMap {
-                        $0 == "Nexus" ? ["Nexus"]
-                            : $0.components(separatedBy: "/")
-                    }
-                )
-                let header = try HeaderImpl(node: body)
                 guard let signature = TransactionSigning.sign(
                     bodyHeader: header, privateKeyHex: key.privateKey
                 ) else {
@@ -161,9 +170,18 @@ struct Child: AsyncParsableCommand {
                         signatures: [key.publicKey: signature], body: header
                     ))
                 )
-                try writeDurably(
-                    JSONEncoder().encode(pending), to: pendingURL
-                )
+                let encoded = try JSONEncoder().encode(pending)
+                if resumed {
+                    try writeDurably(encoded, to: pendingURL)
+                    print("re-signed the pending anchor for the changed --fund, --nonce or --fee")
+                } else {
+                    // Exclusive: a concurrent deploy of this child may have
+                    // written its own seed since the check above.
+                    guard try createDurably(encoded, at: pendingURL) else {
+                        throw CtlError("another deploy of \(childPath) started at the same time and holds \(pendingURL.path); this run submitted nothing, so re-run to resume that deploy")
+                    }
+                    created = encoded
+                }
             }
             print("genesis \(genesisCID)")
             print("seed \(String(decoding: try JSONEncoder().encode(seed), as: UTF8.self))")
@@ -195,8 +213,9 @@ struct Child: AsyncParsableCommand {
                     // left this process, so nothing can ever record it. A
                     // resumed one may have been refused only because it just
                     // landed; otherwise it stays pending for the operator.
-                    if !resumed {
-                        try? FileManager.default.removeItem(at: pendingURL)
+                    if let created {
+                        // Only if the file is still this run's own seed.
+                        removeIfUnchanged(pendingURL, expected: created)
                         throw CtlError("the parent refused the genesis anchor; nothing was recorded: \(refusal)")
                     }
                     guard await parentRecordedGenesis(
@@ -204,7 +223,7 @@ struct Child: AsyncParsableCommand {
                         directory: directory,
                         genesisCID: genesisCID
                     ) else {
-                        throw CtlError("the parent refused the pending genesis anchor (\(refusal)); it stays pending at \(pendingURL.path). Delete that file only if this anchor can never be recorded, e.g. another transaction spent its nonce")
+                        throw CtlError("the parent refused the pending genesis anchor (\(refusal)); it stays pending at \(pendingURL.path). Re-run with a corrected --nonce, a higher --fee or another --fund to re-sign it for the same genesis")
                     }
                     recorded = true
                 } catch {
@@ -281,7 +300,7 @@ struct Child: AsyncParsableCommand {
                 }
             }
             guard recorded else {
-                throw CtlError("the genesis anchor was not recorded yet; the child was NOT added. It stays pending at \(pendingURL.path): re-run the same command to keep waiting for it, after checking the parent's mining and the funding key nonce")
+                throw CtlError("the genesis anchor was not recorded yet; the child was NOT added. It stays pending at \(pendingURL.path): re-run the same command to keep waiting, or re-run with a corrected --nonce or a higher --fee to re-sign the anchor for the same genesis")
             }
             // Seed the child's data directory with the genesis inputs so its node
             // rebuilds the identical self-contained genesis and self-admits it on
@@ -343,26 +362,6 @@ struct Child: AsyncParsableCommand {
 struct PendingChildDeploy: Codable {
     let seed: ChildGenesisSeed
     let anchor: SubmitTransactionRequest
-}
-
-/// Replaces `url` atomically and syncs the file and its directory to stable
-/// storage before returning.
-func writeDurably(_ data: Data, to url: URL) throws {
-    let directory = url.deletingLastPathComponent()
-    try FileManager.default.createDirectory(
-        at: directory, withIntermediateDirectories: true
-    )
-    try data.write(to: url, options: .atomic)
-    for path in [url.path, directory.path] {
-        let descriptor = open(path, O_RDONLY)
-        guard descriptor >= 0 else {
-            throw CtlError("cannot open \(path) to sync it (errno \(errno))")
-        }
-        defer { close(descriptor) }
-        guard fsync(descriptor) == 0 else {
-            throw CtlError("cannot sync \(path) to disk (errno \(errno))")
-        }
-    }
 }
 
 /// Free means free on this HOST, not merely absent from the file: another

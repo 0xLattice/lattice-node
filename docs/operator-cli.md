@@ -123,15 +123,21 @@ pending) and it resumes that pending deploy instead of building a new genesis:
 
 - anchor already recorded: submission is skipped; the child is added and started.
 - anchor still pooled, or never accepted: the identical signed transaction is
-  resubmitted (`--fund`, `--nonce` and `--fee` are not re-read), then the
-  command waits for it as before.
-- the parent refuses it: the deploy stays pending and the refusal is printed.
-  Delete the pending file only if that anchor can never be recorded (another
-  transaction spent its nonce). A parent refusing a *fresh* anchor removes its
+  resubmitted, then the command waits for it as before.
+- `--nonce`, `--fee` or `--fund` changed: the anchor is re-signed for the same
+  genesis and submitted. This is how to fix a nonce the key has not reached
+  (pooled as future, never mined) or a fee too low to mine; a replacement at
+  the same nonce must pay a strictly higher fee.
+- the parent refuses it: the deploy stays pending and the refusal is printed;
+  re-run with corrected values. A parent refusing a *fresh* anchor removes its
   pending file, since that transaction never reached the network.
 
 The pending file is removed once the child is in `lattice.json` with its seed
 in `chains/<path>/child-genesis.json`. `wipe` never touches `pending-deploy/`.
+Deleting it by hand abandons that genesis even though an earlier anchor for it
+(one with a future nonce included) can still be recorded later. If two deploys
+of the same child start together, only one claims the pending file; the other
+stops without submitting.
 The `genesis` and `seed` lines are flushed before submission.
 
 Notes:

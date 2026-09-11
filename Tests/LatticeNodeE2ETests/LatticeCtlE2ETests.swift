@@ -807,6 +807,66 @@ final class LatticeCtlE2ETests: XCTestCase {
         )
     }
 
+    /// A pending deploy must stay correctable. An anchor signed with a nonce
+    /// the key has not reached is admitted as `future` and never mined; the
+    /// re-run with the right `--nonce` has to re-sign the anchor for the SAME
+    /// genesis, not resubmit the stuck transaction forever.
+    func testPendingDeployReSignsForACorrectedNonce() async throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lattice-node-e2e-ctlkeys-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: scratch, withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let miner = try await makeKey(scratch, "minerNonce")
+        let seller = try await makeKey(scratch, "sellerNonce")
+        let fund = try await makeKey(scratch, "fundNonce")
+        let host = try await bringUpMiningHost(miner: miner)
+        // External miners are running throughout, so an anchor that never
+        // lands is unmineable rather than merely unmined.
+        _ = try await runCtl(["mine", "start"], root: host.root)
+        let deploy = try deployArguments(
+            host, directory: "Market",
+            premineTo: seller.address, fund: fund
+        )
+
+        // 1. A fresh key expects nonce 0; nonce 5 is pooled as future.
+        let stuck = try await runCtl(
+            deploy + ["--nonce", "5", "--external-mining-wait-seconds", "1"],
+            root: host.root, expectFailure: true
+        )
+        guard let genesis = line("genesis", in: stuck),
+              line("anchor", in: stuck) != nil else {
+            throw CtlE2EError("the future-nonce anchor is submitted and pooled: \(stuck)")
+        }
+        try check(
+            await recordedGenesis(host.nexusRPC, "Market") == nil,
+            "a future-nonce anchor cannot be recorded: \(stuck)"
+        )
+
+        // 2. The corrected re-run brings up the child on that same genesis.
+        let corrected = try await runCtl(
+            deploy + ["--nonce", "0", "--external-mining-wait-seconds", "120"],
+            root: host.root
+        )
+        try check(
+            line("genesis", in: corrected) == genesis,
+            "the corrected run resumes genesis \(genesis): \(corrected)"
+        )
+        let childRPC = try childRPC(host, "Nexus/Market")
+        try await waitFor("the corrected child is active") {
+            await self.health(childRPC)?["phase"] as? String == "active"
+        }
+        try await waitFor("the child genesis carries the seeded premine") {
+            await self.balance(childRPC, seller.address) == 50_000
+        }
+        let recorded = await recordedGenesis(host.nexusRPC, "Market")
+        try check(
+            recorded == genesis,
+            "the parent records \(genesis), not \(recorded ?? "nothing")"
+        )
+    }
+
     /// Throws rather than recording an XCTAssert failure: on macOS, assertion
     /// failures recorded after a spawned process exits intermittently vanish
     /// from the run's failure count, which would make these checks vacuous.
