@@ -105,17 +105,28 @@ lattice child deploy Market \
 # nested children: --parent Nexus/Market
 ```
 
-The full arc runs in one command: deployment intent on the local parent →
-`GenesisAction` anchor signed by `--fund` (the key stays on this machine) →
-deployment-mode mining rounds driven from the tree root → the child appears in
-`lattice.json` with auto-allocated ports and comes up `active` on the intent's
-genesis CID. If the anchor is not mined, **nothing is recorded or spawned**.
+The full arc runs in one command: the self-contained child genesis is built
+locally from a seed (spec, `--premine-to`, timestamp) → a `GenesisAction`
+anchor signed by `--fund` (the key stays on this machine) is submitted to the
+parent → ordinary one-round coordinator runs are driven from the tree root
+until the parent lists the recorded CID → the child appears in `lattice.json`
+with auto-allocated ports, its data directory is seeded with
+`child-genesis.json`, and it comes up `active` on that genesis CID. If the
+parent does not record the anchor, **nothing is added to the tree or spawned**.
 
 Notes:
 - `--fund` must be a funded key on the parent chain; `--nonce` defaults to 0
   and must be the key's next expected nonce (a reused key needs the real one).
-- Deploy before `mine start`, or pause mining: the anchor-mined gate assumes
-  the parent mempool holds only the anchor.
+- The gate is the parent's committed record of the genesis CID, read through
+  its `/api/chain/children` listing, not mempool drain. That listing returns at
+  most 100 children, so on a parent with more children the gate can miss a
+  recorded child and report that the anchor was not recorded.
+- On a network whose target is too hard for ad-hoc CPU rounds, pass
+  `--external-mining-wait-seconds <n>` to wait for already-running miners to
+  record the anchor instead of driving local rounds.
+- The command prints the `genesis` CID and `seed` JSON before submitting the
+  anchor, so a recorded CID can still be activated by hand if the command dies
+  before seeding the child.
 - A child with no funded account cannot transact — use `--premine-to`.
 
 ## Transactions
