@@ -366,8 +366,9 @@ they cannot remove.
   entry stands on its own frontier until it attaches. Re-releasing a frontier
   that is already recorded replaces its entry rather than adding to it, so
   replaying the same offer can never add its work twice. An entry is removed
-  when its work is kept or tallied again, so the accounting falls as well as
-  rises. Entries are bounded per comparison and in total; when the bound is
+  when its frontier becomes held or tallied by any route, as in P1, so a branch
+  re-acquired under a leaf that subsumes it clears the entry too, and the
+  accounting falls as well as rises. Entries are bounded per comparison and in total; when the bound is
   reached the entries farthest from mattering are dropped (P6), and dropped work
   falls under [The deviation](#the-deviation). Nothing is ever collapsed into a
   number that can only grow. Entry work can still over-count overlaps between
@@ -420,11 +421,14 @@ they cannot remove.
   honest entry near a margin.
 
 When every release that would relieve the budget is blocked by P2, the node
-keeps the blocked offers. It does not halt and it does not forget. At that
-comparison the gate falls back to today's behaviour. **That fallback is decided
-by real unkept work alone.** Recorded released work may block a release, but it
-can never be the thing that makes the node keep an offer, so replaying releases
-cannot buy an attacker permanent storage at a comparison of its choosing.
+neither halts nor forgets, and **what it does next is decided by real unkept
+work alone**. Where that work has reached the comparison's margin, keeping is
+justified: the node keeps the blocked offers, and at that comparison the gate
+falls back to today's behaviour. Where it has not, the node keeps nothing on the
+strength of recorded released work; it pauses peers under P4 until budget frees.
+Recorded released work may block a release, but it can never be the thing that
+makes the node keep an offer, so replaying releases cannot buy an attacker
+permanent storage at a comparison of its choosing.
 
 **What the requirements give.** Three guarantees follow:
 
@@ -482,8 +486,9 @@ comparison those rules use is a node that retained B:
   which after a drop cannot even name what was lost.
 
 The per-comparison accounting cannot be promoted into fork choice to close this.
-It has no grind identity, so real arrivals would double-count against it (§9.1);
-it is reachable by replay, so it would hand an attacker a way to move a head;
+Its entries name frontiers, not per-block grind identities, so real arrivals
+would double-count against it (§9.1); it is reachable by replay, so it would
+hand an attacker a way to move a head;
 and making it exact against dropped work needs exactly the identities that are
 gone, which is the durable-skeleton option below.
 
@@ -537,8 +542,9 @@ accepts in exchange for how much storage:
 
 Between those ends the operator trades storage against how much verified work
 the node may forget. No protocol constant sits anywhere on the dial: like every
-other limit here, it is a node-local decision with a sane default, and a node at
-any setting is a fully conforming peer.
+other limit here, it is a node-local decision with a sane default. A node at any
+setting is fully conforming in consensus terms, and fully conforming under the
+three documents named below once they are reworded.
 
 **Rewording three documents is a prerequisite to building this.**
 operator-finality's weight-preservation rule, protocol.md's work-floor sentence
