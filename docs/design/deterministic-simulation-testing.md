@@ -375,20 +375,25 @@ node's observable behaviour against it; it does not restate it.
     whatever the arrival order and whether or not they restarted. Sources: north
     star gate items 7–8.
 16. **Every advertised candidate reaches an outcome.** Once faults stop, every
-    candidate still advertised by a reachable honest peer is eventually either
-    admitted (and possibly later excluded by a completed check) or rejected at
-    admission. Re-acquiring a candidate without end is neither outcome, and it
-    fails this property.
+    candidate still advertised by a reachable honest peer eventually ends in one
+    of three outcomes:
+    - admitted, and possibly later excluded by a completed check;
+    - returned as a carrier by a target miss;
+    - rejected at admission.
+
+    Re-acquiring a candidate without end is none of these, and it fails this
+    property.
     - A runtime reset (candidate acquisition invariant 9) or a bounded retry
       budget may drop an in-flight attempt only if a later advertisement
       re-creates the obligation. That re-acquisition must itself end in one of
       those outcomes.
-    - Known divergence: the retry-budget reclaim added in 1a18bb44 removes an
-      attempt without scheduling replacement work, which candidate acquisition
-      invariant 8 does not allow as written.
+    - This is a weaker liveness form than candidate acquisition invariant 8,
+      and it is the form the simulation checks. Invariant 8 as written remains a
+      separate, open discrepancy: the retry-budget reclaim added in 1a18bb44
+      removes an attempt without scheduling replacement work.
 
     Sources: invariants 8–9 and the acceptance criteria in candidate acquisition;
-    spec §9.9 for exclusion.
+    spec §9.3 and §5.4 for the carrier result; spec §9.9 for exclusion.
 
 The north star lists these adversarial scenarios:
 
@@ -611,10 +616,13 @@ mechanism for ordering, crash, partition, skew and peer-misbehaviour bugs.**
   follows.
 - **Proof of work stays real.** A simulated block is admitted because its hash
   beats its target, not because the simulation says so.
-  - Targets can be cheap, but they must be mixed and not at the maximum.
+  - Targets can be cheap, but they must be mixed and must not all sit at the
+    maximum. Genesis commits the maximum target by convention, and block 1's
+    schedule is the maximum (spec §5.1 and §5.5). Later blocks reach harder,
+    differing targets by mining harder than scheduled and by retargeting.
   - Spec §9.1 credits `floor(2^256 / (target + 1))`, which is 1 at the maximum
-    target. Every block would then weigh the same, and weight comparisons would
-    collapse to block counts.
+    target. If every block sat there, every block would weigh the same, and
+    weight comparisons would collapse to block counts.
   - At the maximum target every hash is also a hit, so the target-miss path in
     spec §9.3 is never exercised.
   - The exclusion test (2f51a5f4) states that its forgery passes only because the
