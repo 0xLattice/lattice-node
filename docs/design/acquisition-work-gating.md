@@ -150,9 +150,11 @@ and never changes validity" (Lattice spec §5.4). A gate may control what a node
 spends resources on. It may never decide whether a block is valid or how much
 it weighs. It can affect which head a node selects only by releasing, under an
 operator budget, verified work it never counted, and then being unable to
-obtain that work again. That is a bounded deviation, set out under
-[The deviation](#the-deviation), and this document does not claim the rules
-quoted here already allow it.
+obtain that work again. That is a bounded deviation, and it is the operator's
+to accept or refuse: it is set by how much release accounting the operator pays
+to keep, as set out under [The deviation](#the-deviation). This document does
+not claim the rules quoted here already allow it. They state an unconditional
+rule today, and accepting this makes that rule operator-selected.
 
 **Operator choice, not protocol constants.** "Storage, transport,
 bootstrap-spec, and parent-witness ceilings are node-local acquisition policy,
@@ -499,8 +501,8 @@ The deviation is bounded in five ways:
 - **Zero cases.** It is zero for a node that never releases a verified tally,
   and for every offer the node never released. Keeping every record durably is
   not sufficient: a record whose work nobody will serve cannot be re-fetched.
-  Zero requires that released work is either never released or counted, as in
-  the alternatives below.
+  Zero requires that released work is either never released, or kept durably
+  *and counted*, which is the far end of the operator's dial below.
 - **Restart.** A restart does not create a new kind of deviation. The tally
   record does not survive a restart but the released-work entries do, so a
   restart turns records into entries. After a restart the frontier pull re-offers
@@ -508,29 +510,42 @@ The deviation is bounded in five ways:
   with that peer. A node still catching up gets no frontier pages until then,
   and re-solicitation covers what the frontier pull does not.
 
-**Building releases as specified requires first rewording** operator-finality's
-weight-preservation rule, protocol.md's work-floor sentence and
-modular-admission-pipeline's floor sentence, so that they admit this bounded
-deviation for verified work that was never counted. That is a decision for the
-maintainer. There are two alternatives with no deviation at all:
+### The deviation is an operator choice
 
-- **Durable skeleton records.** A release keeps each released block's identity,
-  parent link and verified work durably, without its bytes, and **counts** that
-  work once it becomes pivotal, as operator-finality already counts evicted
-  weight. Counting it, not merely recording it, is what removes the deviation.
-  The cost is that the entry count cannot be bounded: an attacker can mint cheap
-  blocks at an eased schedule, have them tallied and released, and each one
-  leaves a permanent entry. Capping the record would bring the deviation back in
-  a worse form, over work the node had already counted. So this option means
-  permanent per-block metadata for every block ever offered, which is most of
-  the permanent per-block cost the gate exists to avoid. It also needs a
-  specification change to count work that was verified from bytes the node held
-  but never staged.
-- **Never release verified work.** Budget pressure only pauses new tallies, and
-  an existing tally that cannot fit is kept. Fork choice is then identical. The
-  cost is that an attacker who fills the tally budget forces keeping at whatever
-  rate it can fill it, and what is kept is kept permanently, so the storage cost
-  is permanent rather than lasting only while the budget is full.
+This is one dial, not a menu of designs. The operator sets how much release
+accounting the node keeps, and that setting decides how much deviation the node
+accepts in exchange for how much storage:
+
+- **A finite record budget** is the ordinary setting. The node releases under
+  pressure, drops the entries farthest from mattering when the budget is full,
+  and accepts the bounded deviation above. Storage stays inside the bound the
+  operator chose.
+- **A budget large enough to keep every released block's identity, parent link
+  and verified work durably, and to count that work once it becomes pivotal**,
+  has no deviation at all. Counting the work, as operator-finality already
+  counts evicted weight, is what removes it; merely recording it does not. The
+  cost is that this count cannot be bounded. An attacker can mint cheap blocks
+  at an eased schedule, have them tallied and released, and each one leaves a
+  permanent entry. So this setting means permanent per-block metadata for every
+  block ever offered, which is most of the permanent per-block cost the gate
+  exists to avoid. It also needs a specification change to count work that was
+  verified from bytes the node held but never staged.
+- **Never releasing** is the same choice made at the other end. Pressure only
+  pauses new tallies, and a tally that cannot fit is kept. There is no
+  deviation, but an attacker who fills the tally budget forces keeping at
+  whatever rate it can fill it, and what is kept is kept permanently.
+
+Between those ends the operator trades storage against how much verified work
+the node may forget. No protocol constant sits anywhere on the dial: like every
+other limit here, it is a node-local decision with a sane default, and a node at
+any setting is a fully conforming peer.
+
+**Rewording three documents is a prerequisite to building this.**
+operator-finality's weight-preservation rule, protocol.md's work-floor sentence
+and modular-admission-pipeline's floor sentence each state an unconditional rule
+today. Accepting a bounded deviation as an operator setting makes that rule
+operator-selected, and those documents have to say so before this is built. This
+document does not reword them.
 
 ## Stranding
 
@@ -657,8 +672,10 @@ They interact in four ways:
 - **Operator settings.** The margin, the tally and record budgets, any reserved
   share, and any minimum required before keeping are node configuration with
   sensible defaults. The default never tallies an honest live-edge block.
-  "Keep everything" is a conforming setting, and a node that never releases a
-  verified tally has no deviation.
+  "Keep everything" is a conforming setting. The record budget is the dial
+  described under [The deviation](#the-deviation): finite accepts a bounded
+  deviation for bounded storage, while a budget that keeps and counts every
+  released block has none.
 - **The node's own blocks and parent facts are not gated.** A block this node
   produced is kept as today. Genesis and continuity facts issued by the parent
   carry no work, and the [process trust model](process-trust-model.md) governs
