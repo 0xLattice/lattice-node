@@ -1031,10 +1031,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
         return ExplorerPeersResponse(count: peers.count, peers: Array(summaries))
     }
 
-    /// Discover nodes serving the chain whose genesis is `genesisCID` via the
-    /// DHT (Ivy caches, else walks), and map each to a public read URL under
-    /// convention A: the child node serves its read API over HTTPS on the same
-    /// host it announced as the genesis provider. Deduped by host, bounded.
+    /// The public read URLs declared for the chain whose genesis is
+    /// `genesisCID`: this node's own declaration plus those of the providers
+    /// it discovers via the DHT. Only declared URLs; bounded, cached briefly.
     public func discoverProviderReadURLs(genesisCID: String) async -> [String] {
         guard CIDIdentity.isCanonical(genesisCID) else { return [] }
         if let cached = readURLDiscoveries[genesisCID],
@@ -1062,50 +1061,55 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
 
     /// Resolve the browsable read URLs for the chain whose genesis is
-    /// `genesisCID`: DHT-discover the provider nodes (Ivy caches, else walks),
-    /// then ask each provider we hold an overlay session with for its
-    /// self-DECLARED public read URL — the P2P plane traffics in IP literals a
-    /// browser cannot dial, so browsability is its own declaration, carried
-    /// from a child's hierarchy hello to its parent and served here. Providers
-    /// that declare nothing (or predate the topic and stay silent until the
-    /// ask times out) fall back to convention A: read API over HTTPS on the
-    /// announced provider host. Declared URLs order first; all self-declared
-    /// and unverified — the consumer verifies the served genesis against the
+    /// `genesisCID`. A read URL is only ever a self-DECLARATION — the P2P
+    /// plane traffics in IP literals a browser cannot dial, so browsability is
+    /// its own declaration, carried from a child's hierarchy hello to its
+    /// parent and served here; no URL is ever derived from a provider's
+    /// announced host. This node's own declaration leads, read directly: it
+    /// must not hinge on Ivy holding a provider record under our own key,
+    /// which exists only once this node advertises a P2P address and an
+    /// announce has landed. Then DHT-discover the other provider nodes (Ivy
+    /// caches, else walks) and ask each one we hold an overlay session with.
+    /// Providers that declare nothing, stay silent until the ask times out,
+    /// or hold no session contribute nothing. All self-declared and
+    /// unverified — the consumer verifies the served genesis against the
     /// parent's on-chain anchor. Deduped, bounded, briefly cached.
     private func performReadURLDiscovery(genesisCID: String) async -> [String] {
         let generation = runtimeGeneration
+        var own: [String] = []
+        // Same cheap precheck as serving an ask: the state walk runs only
+        // when this node has anything to declare.
+        if let process,
+           configuration.publicReadURL != nil || !childDeclaredReadURLs.isEmpty {
+            own = await declaredReadURLs(
+                genesisCID: genesisCID,
+                process: process
+            )
+        }
         let endpoints = await overlay.discoverProviders(rootCID: genesisCID)
-        var seenHosts: Set<String> = []
-        var candidates: [PeerEndpoint] = []
+        // One candidate per provider identity, not per host: the ask goes to
+        // the identity's session, so several providers behind one IP are
+        // each asked, and one identity's several routes take one ask slot.
+        var seenKeys: Set<PeerKey> = []
+        var candidates: [PeerKey] = []
         for endpoint in endpoints {
-            guard !endpoint.host.isEmpty,
-                  seenHosts.insert(endpoint.host).inserted else { continue }
-            candidates.append(endpoint)
+            guard let key = try? PeerKey(endpoint.publicKey),
+                  key.hex != configuration.processPublicKey,
+                  seenKeys.insert(key).inserted else { continue }
+            candidates.append(key)
             if candidates.count >= 32 { break }
         }
         var urlsByCandidate = [[String]](
             repeating: [],
             count: candidates.count
         )
-        for (index, endpoint) in candidates.enumerated()
-        where endpoint.publicKey == configuration.processPublicKey {
-            // Our own provider record: answer from our own knowledge.
-            if let process {
-                urlsByCandidate[index] = await declaredReadURLs(
-                    genesisCID: genesisCID,
-                    process: process
-                )
-            }
-        }
         // Asks run concurrently: a legacy peer never answers (it drops the
         // unknown topic), so a sequential walk would stall the explorer route
         // for asks-times-deadline against an unupgraded fleet.
         await withTaskGroup(of: (Int, [String]).self) { group in
             var asked = 0
-            for (index, endpoint) in candidates.enumerated() {
-                guard endpoint.publicKey != configuration.processPublicKey,
-                      asked < Self.maximumReadEndpointAsks,
-                      let key = try? PeerKey(endpoint.publicKey),
+            for (index, key) in candidates.enumerated() {
+                guard asked < Self.maximumReadEndpointAsks,
                       let peer = overlayPeers[key] else { continue }
                 asked += 1
                 group.addTask { [weak self] in
@@ -1121,37 +1125,17 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 urlsByCandidate[index] = urls
             }
         }
+        var seenURLs: Set<String> = []
         var declared: [String] = []
-        var fallback: [String] = []
-        for (index, endpoint) in candidates.enumerated() {
+        for urls in [own] + urlsByCandidate {
             // Per-responder cap: a declaration is self-described hint data,
             // so one responder must not be able to flood the merged answer.
-            let urls = urlsByCandidate[index]
-                .prefix(Self.maximumDeclaredURLsPerResponder)
-            if urls.isEmpty {
-                // Bracket IPv6 literals so the authority parses (host:port
-                // ambiguity).
-                let host = endpoint.host
-                let authority = host.contains(":") ? "[\(host)]" : host
-                fallback.append("https://\(authority)")
-            } else {
-                declared.append(contentsOf: urls)
+            for url in urls.prefix(Self.maximumDeclaredURLsPerResponder)
+            where seenURLs.insert(url).inserted {
+                declared.append(url)
             }
         }
-        // Declared URLs order first, but fallbacks keep reserved slots: sybil
-        // declarations must never evict the conventional URL derived from an
-        // honest provider's announced host. Only KEPT declared entries enter
-        // the seen-set — a declared URL cut by the cap must not poison the
-        // fallback dedup and vanish a fallback it never displaced.
-        var seenURLs: Set<String> = []
-        var declaredUnique: [String] = []
-        for url in declared where declaredUnique.count < 16 {
-            if seenURLs.insert(url).inserted {
-                declaredUnique.append(url)
-            }
-        }
-        let fallbackUnique = fallback.filter { seenURLs.insert($0).inserted }
-        let bounded = Array((declaredUnique + fallbackUnique).prefix(32))
+        let bounded = Array(declared.prefix(16))
         guard isCurrentGeneration(generation) else { return bounded }
         let now = Date()
         readURLDiscoveries = readURLDiscoveries.filter { $0.value.expires > now }

@@ -784,8 +784,9 @@ private func addPublicReadRoutes(
     }
     // Permissionless child discovery: `?chainPath=<parent>/<dir>` names a DIRECT
     // child of this node's chain. We resolve that child's anchored genesisCID
-    // from our own genesisState, then DHT-discover nodes providing that CID and
-    // return them as read URLs (convention A). No registry: a child node becomes
+    // from our own genesisState, then return the read URLs declared for it: our
+    // own (a wired child's hello declaration) and those of the nodes DHT
+    // discovery finds providing that CID. No registry: a child node becomes
     // discoverable purely by announcing itself as a provider of its genesis.
     router.get("api/chain/endpoints") { request, context in
         guard let requested = request.uri.queryParameters["chainPath"]
