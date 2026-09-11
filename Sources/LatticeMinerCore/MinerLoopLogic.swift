@@ -13,6 +13,9 @@ public struct TemplateResponse: Decodable, Sendable, Equatable {
     /// whose blockHex is not a decodable Block.
     public let prefixHex: String
     public let searchTarget: String
+    /// Every target this work can clear, easiest first (`searchTarget`
+    /// leads). Just `searchTarget` when a node predates the field.
+    public let targets: [String]
     public let chainPath: [String]
     public let expiresInMilliseconds: UInt64
     public let staleToken: String
@@ -21,6 +24,7 @@ public struct TemplateResponse: Decodable, Sendable, Equatable {
         workID: String,
         blockHex: String,
         searchTarget: String,
+        targets: [String]? = nil,
         chainPath: [String] = ["Nexus"],
         expiresInMilliseconds: UInt64 = 30_000,
         staleToken: String? = nil
@@ -29,6 +33,7 @@ public struct TemplateResponse: Decodable, Sendable, Equatable {
         self.blockHex = blockHex
         self.prefixHex = Self.derivePrefixHex(blockHex: blockHex)
         self.searchTarget = searchTarget
+        self.targets = targets ?? [searchTarget]
         self.chainPath = chainPath
         self.expiresInMilliseconds = expiresInMilliseconds
         self.staleToken = staleToken ?? workID
@@ -46,6 +51,7 @@ public struct TemplateResponse: Decodable, Sendable, Equatable {
         case workID
         case block
         case searchTarget
+        case targets
         case chainPath
         case expiresInMilliseconds
     }
@@ -68,6 +74,10 @@ public struct TemplateResponse: Decodable, Sendable, Equatable {
             UInt256.self,
             forKey: .searchTarget
         ).toHexString()
+        targets = try container.decodeIfPresent(
+            [UInt256].self,
+            forKey: .targets
+        )?.map { $0.toHexString() } ?? [searchTarget]
         chainPath = try container.decode([String].self, forKey: .chainPath)
         expiresInMilliseconds = try container.decode(
             UInt64.self,
