@@ -55,9 +55,9 @@ and the batch is retried.
 
 ## Merged work
 
-One template can clear several chains' targets: the Nexus root, its direct
-children, and a descendant a child schedules through. The coordinator first
-searches the easiest. A hit that clears only some of them is a `carrier`: the
+One template can clear several chains' targets: the Nexus root and its direct
+children. When the node can list all of them (no direct child carries children
+of its own), the coordinator first searches the easiest. A hit that clears only some of them is a `carrier`: the
 coordinator submits it, the node keeps the work open, and the coordinator
 invokes the worker again over the rest of its range (`--start-nonce` just past
 the hit) with `--target` set to the easiest target still uncleared. That repeats

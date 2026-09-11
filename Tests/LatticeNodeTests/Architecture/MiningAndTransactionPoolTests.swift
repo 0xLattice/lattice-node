@@ -126,12 +126,11 @@ final class MiningTemplateBookTests: XCTestCase {
     }
 
     /// After a hit clears the easiest target the miner keeps searching toward
-    /// the next one, so the template must name every target it knows: the root,
-    /// each direct child, and the descendant a child schedules through.
-    func testTemplateAdvertisesEveryNestedTargetEasiestFirst() async throws {
+    /// the next one and skips hits in between, so the template may only list
+    /// targets when the list is complete: every direct child is a leaf.
+    func testTemplateAdvertisesTargetsOnlyWhenEveryChildIsALeaf() async throws {
         let hard = try await chainFixture(target: UInt256(4))
         let middleTarget = UInt256.max >> 8
-        let leafTarget = UInt256.max >> 4
         func childBlock(
             parentState: LatticeStateHeader,
             target: UInt256
@@ -150,55 +149,63 @@ final class MiningTemplateBookTests: XCTestCase {
             )
             return (genesis, block)
         }
-        let middleGenesis = try await childBlock(
+        let middle = try await childBlock(
             parentState: hard.genesis.postState,
             target: middleTarget
-        ).genesis
-        let leaf = try await childBlock(
-            parentState: middleGenesis.postState,
-            target: leafTarget
-        ).block
+        )
         let sibling = try await childBlock(
             parentState: hard.genesis.postState,
             target: .max
         ).block
-        let middle = try await MiningTemplateBook(
+        func rootTemplate(
+            _ children: [DirectChildCandidate]
+        ) async throws -> MiningTemplate {
+            try await MiningTemplateBook(chainPath: ["Nexus"]).build(
+                previous: hard.genesis,
+                transactions: [],
+                children: children,
+                timestamp: 2,
+                fetcher: hard.store
+            )
+        }
+
+        let flat = try await rootTemplate([
+            DirectChildCandidate(directory: "Middle", block: middle.block),
+            DirectChildCandidate(directory: "Sibling", block: sibling),
+        ])
+        XCTAssertEqual(flat.searchTarget, UInt256.max)
+        XCTAssertEqual(flat.targets, [UInt256.max, middleTarget, UInt256(4)])
+        let response = MiningTemplateResponse(
+            template: flat,
+            maximumLifetimeMilliseconds: 30_000
+        )
+        XCTAssertEqual(response.targets, flat.targets)
+
+        // Middle now carries a leaf of its own. A grandchild target is invisible
+        // here, so skipping hits between the known targets could starve it.
+        let leaf = try await childBlock(
+            parentState: middle.genesis.postState,
+            target: UInt256.max >> 4
+        ).block
+        let nestedMiddle = try await MiningTemplateBook(
             chainPath: ["Nexus", "Middle"]
         ).build(
-            previous: middleGenesis,
+            previous: middle.genesis,
             transactions: [],
             children: [DirectChildCandidate(directory: "Leaf", block: leaf)],
             timestamp: 2,
             fetcher: hard.store
         )
-        XCTAssertEqual(middle.block.target, middleTarget)
-        XCTAssertEqual(middle.searchTarget, leafTarget)
-
-        let root = try await MiningTemplateBook(chainPath: ["Nexus"]).build(
-            previous: hard.genesis,
-            transactions: [],
-            children: [
-                DirectChildCandidate(
-                    directory: "Middle",
-                    block: middle.block,
-                    searchWitness: middle.searchWitness
-                ),
-                DirectChildCandidate(directory: "Sibling", block: sibling),
-            ],
-            timestamp: 2,
-            fetcher: hard.store
-        )
-
-        XCTAssertEqual(root.searchTarget, UInt256.max)
-        XCTAssertEqual(
-            root.targets,
-            [UInt256.max, leafTarget, middleTarget, UInt256(4)]
-        )
-        let response = MiningTemplateResponse(
-            template: root,
-            maximumLifetimeMilliseconds: 30_000
-        )
-        XCTAssertEqual(response.targets, root.targets)
+        let nested = try await rootTemplate([
+            DirectChildCandidate(
+                directory: "Middle",
+                block: nestedMiddle.block,
+                searchWitness: nestedMiddle.searchWitness
+            ),
+            DirectChildCandidate(directory: "Sibling", block: sibling),
+        ])
+        XCTAssertEqual(nested.searchTarget, UInt256.max)
+        XCTAssertEqual(nested.targets, [UInt256.max])
     }
 
     func testStateInvalidTransactionDoesNotSuppressWork() async throws {

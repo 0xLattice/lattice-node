@@ -136,9 +136,10 @@ Response fields:
 - `searchTarget`: the effective threshold the miner must hit. It is bounded by
   the configured minimum Nexus-root work and, for deployment work, by the
   hardest pending deployment target in the selected recursive subtree.
-- `targets`: every target a nonce for this work can clear that the node
-  schedules — the Nexus root, each direct child, and the descendant a child
-  schedules through — easiest first, so it begins with `searchTarget`.
+- `targets`: every target a nonce for this work can clear — the Nexus root and
+  each direct child — easiest first, so it begins with `searchTarget`. The list
+  is complete only when no direct child carries children of its own; otherwise
+  it is `searchTarget` alone.
 - `chainPath`: always `["Nexus"]` on this route.
 - `expiresInMilliseconds`: template lifetime.
 
@@ -157,7 +158,8 @@ Possible dispositions are `canonicalized`, `acceptedSide`, `carrier`,
 and `storageFailed`.
 A `carrier` cleared only child targets and leaves the work open until it
 expires: a later nonce for the same `workID` that clears a harder target is
-still submittable. Every other disposition consumes the work.
+still submittable. Any other disposition consumes the work; a refused
+submission leaves it unchanged.
 
 ## Child deployment
 

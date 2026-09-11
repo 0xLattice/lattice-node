@@ -1178,6 +1178,42 @@ final class MiningCoordinatorTests: XCTestCase {
         XCTAssertLessThanOrEqual(merged.hash(resumedAfter), merged.childTarget)
     }
 
+    /// A reported nonce that clears no target at all is a worker fault: it is
+    /// submitted so the node's refusal surfaces, never silently re-searched.
+    func testHitThatClearsNothingIsSubmittedNotResearched() async {
+        let merged = MergedWork()
+        let bogus = (0..<MergedWork.span).first { merged.hash($0) > merged.childTarget }!
+        let calls = SearchLedger()
+        let worker = MiningCoordinatorWorker(id: "faulty") { assignment, range in
+            await calls.record(SearchLedger.Search(
+                target: MinerLoopLogic.parseTarget(assignment.targetHex)!,
+                startNonce: range.startNonce,
+                hashed: 0,
+                cancelled: false
+            ))
+            return MiningWorkerResult(workerId: "faulty", workId: assignment.workId, nonce: bogus)
+        }
+        let node = MergedMiningNode(merged)
+        let coordinator = MiningCoordinator(
+            nodeClient: node,
+            workers: [worker],
+            totalBatchSize: MergedWork.span,
+            staleProbeEnabled: false
+        )
+
+        let result = await coordinator.runBatch()
+
+        let submissions = await node.submissions
+        XCTAssertEqual(submissions, [bogus])
+        XCTAssertEqual(result, .submitted(
+            workId: "merged",
+            nonce: bogus,
+            submission: MiningSolutionSubmission(accepted: false, disposition: "invalid")
+        ))
+        let searches = await calls.searches
+        XCTAssertEqual(searches.count, 1)
+    }
+
     /// The node refuses nonces for expired work, so the batch stops searching
     /// once the template's lifetime has passed.
     func testSearchStopsWhenTemplateExpires() async {

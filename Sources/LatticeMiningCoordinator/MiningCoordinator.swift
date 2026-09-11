@@ -391,13 +391,15 @@ public actor MiningCoordinator {
                 case .solution(let result, let index, let range):
                     searching -= 1
                     let hash = midstate.map { ProofOfWork.hash(midstate: $0, nonce: result.nonce) }
-                    var clearsOpenTarget = true
-                    if let hash, let openTarget {
-                        clearsOpenTarget = hash <= openTarget
+                    // A hit that clears only targets an earlier hit already
+                    // cleared is not worth a submission; its worker just keeps
+                    // searching. Anything else goes to the node, including a
+                    // hit that clears nothing, which the node refuses.
+                    var alreadyCleared = false
+                    if let hash, let openTarget, let searchTarget = work.targets.first {
+                        alreadyCleared = hash > openTarget && hash <= searchTarget
                     }
-                    // A hit whose targets an earlier hit already cleared is
-                    // not worth a submission; its worker just keeps searching.
-                    if clearsOpenTarget {
+                    if !alreadyCleared {
                         if staleProbeEnabled, await isStale(work) {
                             group.cancelAll()
                             metricsState.staleAbortCount += 1
