@@ -60,8 +60,8 @@ cross-component invariants:
 - a hierarchy connection cannot read CAS content before its own compatible
   hello, and a provisional carrier can be served only as its leased request
   root and is never persisted;
-- a durable canonical commit reserves reconciliation before a later template,
-  transaction, or child intent can observe the new chain state;
+- a durable canonical commit reserves reconciliation before a later template
+  or transaction can observe the new chain state;
 - optional child-proof materialization never suppresses canonical publication;
 - one physical grind contributes at most its strongest target-derived quantity
   to one chain-local location; distinct grinds sum, and replay cannot multiply

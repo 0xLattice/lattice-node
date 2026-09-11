@@ -105,15 +105,17 @@ lattice child deploy Market \
 # nested children: --parent Nexus/Market
 ```
 
-The full arc runs in one command: the child genesis is built offline from a
-seed (spec, premine, timestamp) → a `GenesisAction` anchor recording its CID is
-signed by `--fund` (the key stays on this machine) → the seed and the signed
-anchor are written durably under the root (`pending-deploy/Nexus-Market.json`
-for `Nexus/Market`) → the anchor is submitted to the local parent → mining rounds driven from
+The full arc runs in one command: the self-contained child genesis is built
+locally from a seed (spec, `--premine-to`, timestamp) → a `GenesisAction`
+anchor for its CID is signed by `--fund` (the key stays on this machine) → the
+seed and the signed anchor are written durably under the root
+(`pending-deploy/Nexus-Market.json` for `Nexus/Market`) → the anchor is
+submitted to the parent → ordinary one-round coordinator runs are driven from
 the tree root (or `--external-mining-wait-seconds` of polling) until the parent
-records it → the child appears in `lattice.json` with auto-allocated ports and
-comes up `active` on that genesis CID. Until the anchor is recorded, **nothing
-is added to `lattice.json` or spawned**.
+lists the recorded CID → the child's data directory is seeded with
+`child-genesis.json`, the child appears in `lattice.json` with auto-allocated
+ports, and it comes up `active` on that genesis CID. If the parent does not
+record the anchor, **nothing is added to the tree or spawned**.
 
 An interrupted or timed-out deploy is resumable, never lost: once submitted,
 the anchor can still land after the command dies, and the pending file is the
@@ -138,13 +140,20 @@ Deleting it by hand abandons that genesis even though an earlier anchor for it
 (one with a future nonce included) can still be recorded later. If two deploys
 of the same child start together, only one claims the pending file; the other
 stops without submitting.
-The `genesis` and `seed` lines are flushed before submission.
 
 Notes:
 - `--fund` must be a funded key on the parent chain; `--nonce` defaults to 0
   and must be the key's next expected nonce (a reused key needs the real one).
-- Deploy before `mine start`, or pause mining: the anchor-mined gate assumes
-  the parent mempool holds only the anchor.
+- The gate is the parent's committed record of the genesis CID, read through
+  its `/api/chain/children` listing, not mempool drain. That listing returns at
+  most 100 children, so on a parent with more children the gate can miss a
+  recorded child and report that the anchor was not recorded.
+- On a network whose target is too hard for ad-hoc CPU rounds, pass
+  `--external-mining-wait-seconds <n>` to wait for already-running miners to
+  record the anchor instead of driving local rounds.
+- The command prints the `genesis` CID and `seed` JSON, flushed, before
+  submitting the anchor. The copy a re-run resumes from is the pending file
+  above, which is already on disk by then.
 - A child with no funded account cannot transact — use `--premine-to`.
 
 ## Transactions
