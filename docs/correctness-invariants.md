@@ -56,12 +56,6 @@ exact snapshot or startup rebuild reconciles ownership before garbage
 collection. Canonicity never changes retention or validity; accepted, shared,
 and independently retained roots remain owned.
 
-The bounded in-memory child-intent set has its own exact VolumeBroker scope.
-An intent becomes visible only after its complete content-bound closure is
-stored and retained; replacement, anchoring, and staleness release roots only
-after the remaining exact set is installed. Restart clears this scope because
-child intents are not consensus recovery facts.
-
 ## NODE-MEMPOOL-001 — the mempool is tip-relative, not consensus
 
 The mempool may retain, order, relay, replace, or retry transactions, but only
