@@ -619,6 +619,13 @@ public actor ChainService {
         )
     }
 
+    /// Ungated height of the canonical (weighed-inclusive) main-chain tip, or
+    /// nil while awaiting genesis. Observability only: act-on reads use the
+    /// validated tip in `status()` / `readSnapshot()`.
+    public func canonicalTipHeight() async -> UInt64? {
+        await process.canonicalTipHeight()
+    }
+
     /// Bounded public read: a decoded, content-verified block, gated to only
     /// what this node has durably accepted. Never takes the operation gate —
     /// reads only ChainProcess's ungated CAS path.
