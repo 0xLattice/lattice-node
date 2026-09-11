@@ -186,10 +186,7 @@ The root-independent direct edge is derived from an ordinary child-evidence
 Volume. Its canonical one-entry manifest commits only the child CID and proof
 envelope; no duplicate direct-edge Volume exists.
 Child-chain validation Volumes are acquired from the child chain's exact
-same-chain advertisers. For a parent-created genesis, the exact configured
-parent is the preferred source because it created and retains the complete
-Volume roots; any exact same-chain advertiser may supply the same CID-verified
-Volumes as an availability fallback. A parent
+same-chain advertisers. A parent
 persists the edge when it issues the child commitment; a child persists the
 incoming edge when it validates that commitment. Children never return edge
 inventories or topology to parents.
@@ -224,8 +221,9 @@ inbox root. Multiple roots for one child are separate summaries. No proof-root
 pagination or evidence request/response layer exists beneath this inventory.
 
 For child genesis, the configured immediate parent positively acknowledges only
-an exact `(directory, child CID, deployment prevState)` tuple derived from an
-accepted parent block. For a non-genesis candidate, equal parent-state
+an exact `(directory, child CID, empty parent state)` tuple recorded by a
+`GenesisAction` in an accepted parent block; a self-contained child genesis
+commits to the empty parent state. For a non-genesis candidate, equal parent-state
 references need no request; otherwise the parent positively acknowledges only
 an exact transitive reachability pair from its recovered validated graph.
 Responses are unsigned, bound to the current authenticated session and pending
@@ -284,11 +282,10 @@ Template requests may contain externally signed reward transactions keyed by
 absolute chain path. The node partitions those rewards through the hierarchy
 request and issues only the final parent template.
 
-The request mode defaults to `normal`, which excludes every transaction that
-contains a `GenesisAction`. `deployment` selects one fully backed local or
-descendant deployment subtree per round and propagates its hardest target to
-Nexus. This separation prevents unavailable child content from poisoning
-ordinary mining.
+There is no template mode. A transaction carrying a `GenesisAction` is selected
+like any other pooled transaction. A child genesis is self-contained, so a
+template never carries one; merged-mining templates attach only ongoing
+direct-child candidates supplied by their processes.
 
 ## HTTP surface
 
@@ -300,7 +297,6 @@ GET  /v1/status
 POST /v1/transactions
 POST /v1/mining/templates
 POST /v1/mining/work
-POST /v1/children/intents
 ```
 
 See [RPC API](rpc-api.md) for DTOs and [Architecture](architecture.md) for
