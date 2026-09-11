@@ -113,8 +113,8 @@ header path, or verdict. Nexus terminates the induction.
 
 Child genesis uses the same narrow boundary. The parent answers only when an
 accepted parent block contains the exact `GenesisAction(directory, childCID)`.
-The fact also binds `deploymentBlock.prevState`, and the child requires
-`childGenesis.parentState` to equal it. A structural carrier that was not
+A child genesis is self-contained and commits to the empty parent state, so
+the fact binds that empty state. A structural carrier that was not
 accepted on the parent chain can prove work but cannot authorize deployment.
 
 Arbitrary peers may supply any required content-addressed Volume. They never

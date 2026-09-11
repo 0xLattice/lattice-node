@@ -50,13 +50,13 @@ Both routes return the same chain-process status:
   "height": 42,
   "revision": 57,
   "mempoolCount": 3,
-  "mempoolBytes": 2048,
-  "pendingChildIntents": 0
+  "mempoolBytes": 2048
 }
 ```
 
-A child reports `phase: "awaitingGenesis"`, with null tip and height, until it
-receives its authenticated genesis link from its immediate parent.
+A child reports `phase: "awaitingGenesis"`, with null tip and height, until its
+authenticated immediate parent confirms the recorded genesis CID and the child
+admits that genesis.
 After bootstrap, it reports `phase: "active"` from its durable accepted graph;
 parent connectivity does not change the meaning of proof-derived work.
 
@@ -105,7 +105,6 @@ assembled.
 
 ```json
 {
-  "mode": "normal",
   "rewards": [
     {
       "chainPath": ["Nexus"],
@@ -118,24 +117,21 @@ assembled.
 }
 ```
 
-`mode` is optional and defaults to `normal`. Normal work excludes all
-`GenesisAction` transactions. `deployment` selects one pending deployment whose
-complete anchor set has matching child intent content, rotating across eligible
-work. Child intents bind one parent state: siblings intended for the same carrier
-belong in one transaction containing all of their `GenesisAction`s. `rewards`
-may be empty. Each reward is an externally signed transaction
-for one absolute chain path; process identity is never converted into wallet
-identity. The coordinator exposes the same choice as `--deployment`.
-When no complete deployment subtree is currently available, the endpoint
-returns `409` so the coordinator backs off instead of mining ordinary work.
+`rewards` is the only request field and may be empty; other fields are
+ignored. Each reward is an externally signed transaction for one absolute chain
+path; process identity is never converted into wallet identity. There is no
+template mode: transactions carrying a `GenesisAction` are selected from the
+pool like any other transaction.
 
 Response fields:
 
 - `workID`: CID of the nonce-zero candidate.
 - `block`: the complete candidate block.
-- `searchTarget`: the effective threshold the miner must hit. It is bounded by
-  the configured minimum Nexus-root work and, for deployment work, by the
-  hardest pending deployment target in the selected recursive subtree.
+- `searchTarget`: the threshold the miner must hit. It is the easiest
+  (numerically largest) of the Nexus candidate's own target and the search
+  targets of the attached child candidates, each of which already accounts for
+  its own descendants. A nonce that meets `searchTarget` but not the Nexus
+  target can still advance a descendant chain.
 - `chainPath`: always `["Nexus"]` on this route.
 - `expiresInMilliseconds`: template lifetime.
 
@@ -153,49 +149,27 @@ Possible dispositions are `canonicalized`, `acceptedSide`, `carrier`,
 `duplicate`, `unavailable`, `temporarilyInvalid`, `invalid`, `localFailure`,
 and `storageFailed`.
 
-## Child deployment
+## Child genesis
 
-### `POST /v1/children/intents`
+No RPC route builds or carries a child genesis. A child genesis is
+self-contained: it commits to the empty parent state and uses the maximum
+target, so it is built offline and deterministically from a seed (the child
+`ChainSpec`, an optional premine recipient, and a timestamp). The parent only
+records its CID. The deployer constructs and signs an ordinary parent
+transaction containing `GenesisAction(directory, blockCID)` and submits it
+through `POST /v1/transactions`. Mining templates select it like any other
+transaction; the accepted parent block records `directory -> genesisCID` in the
+parent's committed genesis state, which the parent's `GET /api/chain/children`
+lists.
 
-Build an ordinary direct-child genesis against the current parent state.
-
-Request fields:
-
-- `directory`: one 1–64 byte visible-ASCII direct-child edge label; it cannot
-  contain `/`.
-- `spec`: the child's `ChainSpec`.
-- `genesisTransactions`: content-bound transactions for the absolute child
-  path.
-- `policyModules`: the exact complete module Volumes named by `spec.wasmPolicies`,
-  encoded as `{rootCID, bytes}`. The field is empty when the spec has no policy.
-- `target`: child genesis target.
-- `timestamp`: child genesis timestamp in milliseconds.
-
-Response:
-
-```json
-{
-  "directory": "Payments",
-  "chainPath": ["Nexus", "Payments"],
-  "genesisCID": "<cid>",
-  "genesisBlock": {"...": "Block fields"},
-  "parentStateCID": "<cid>"
-}
-```
-
-The response is the content-addressed block itself, not an opaque serialized
-bootstrap field.
-The request is validated through an in-memory content overlay, so a novel
-module need not already exist in the node's broker. Only a valid intent is
-published to VolumeBroker. Its complete genesis, transaction, spec, state-witness,
-and module Volumes remain exactly retained through template creation, and are
-released when the intent is replaced, anchored, or made stale by parent state.
-Creating the intent does not mutate the parent chain. The caller separately
-constructs and signs the parent transaction containing the matching
-`GenesisAction`, submits it through `/v1/transactions`, and mines it. A child
-process launched with `--chain-path Nexus/Payments` and `--parent
-<parent-key>@<host>:<fact-port>` activates only after the hierarchy plane
-delivers the authenticated genesis link.
+A child process launched with `--chain-path Nexus/Payments` and `--parent
+<parent-key>@<host>:<fact-port>` stays `awaitingGenesis` until it can admit
+that genesis. If its data directory contains the seed as `child-genesis.json`,
+it rebuilds the genesis from the seed. Otherwise it asks its parent for the CID
+recorded under its directory and fetches the genesis block by that CID from
+child-overlay peers. Either way it admits the genesis only after its
+authenticated immediate parent confirms that it recorded exactly that CID.
+`lattice child deploy` performs these steps; see [Operator CLI](operator-cli.md).
 
 ## Errors and limits
 
@@ -204,11 +178,7 @@ delivers the authenticated genesis link.
 - Consensus-producing requests return `503 Service Unavailable` only when the
   process is not active or the requested local resource is temporarily
   unavailable.
-- A full transaction pool or child-intent capacity returns `429 Too Many
-  Requests`.
+- A full transaction pool returns `429 Too Many Requests`.
 - A temporarily unavailable transaction policy returns `503 Service
   Unavailable`.
-- Ordinary JSON requests are bounded to 1 MiB. Child-intent bodies use a
-  node-local byte ceiling before decoding because they may carry a genesis
-  Volume plus content-bound policy modules; exceeding it is local capacity, not
-  chain invalidity.
+- JSON requests are bounded to 1 MiB.

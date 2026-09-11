@@ -59,13 +59,18 @@ swift run lattice-node \
   --rpc-port 8180
 ```
 
-The child starts in `awaitingGenesis`. Create a child intent on the parent,
-submit the separately signed parent `GenesisAction` transaction, and mine the
-parent block that commits it. The authenticated hierarchy plane then delivers
-the genesis proof and signed authorization. The child derives work from that
-proof and becomes active once the genesis is durably admitted. Genesis is
-returned as a normal content-addressed block; there is no opaque serialized
-bootstrap channel.
+The child starts in `awaitingGenesis`. A child genesis is self-contained: it is
+built offline and deterministically from a seed (the child `ChainSpec`, an
+optional premine recipient, and a timestamp), and the parent only records its
+CID. Submit a separately signed parent transaction carrying the matching
+`GenesisAction`; ordinary mining includes it like any other transaction. A
+child whose data directory holds the seed as `child-genesis.json` rebuilds the
+genesis from it; a child without the seed asks its parent for the recorded CID
+and fetches the content-addressed genesis block from child-overlay peers.
+Either way, it becomes active only after its authenticated immediate parent
+confirms that it recorded exactly that CID. There is no opaque serialized
+bootstrap channel. `lattice child deploy` runs the whole flow; see the
+[operator CLI](docs/operator-cli.md).
 
 ## Mining
 
@@ -83,9 +88,8 @@ swift run lattice-mining-coordinator \
 block/range assignment, searches nonces, and reports the result. It never owns
 chain state, wallet keys, child topology, proofs, or publication.
 
-Normal templates exclude every transaction containing a `GenesisAction`.
-Run the coordinator with `--deployment` to mine one fully backed pending child
-deployment subtree; repeated deployment rounds rotate across eligible work.
+Templates have no deployment mode: a parent transaction carrying a
+`GenesisAction` is selected from the pool like any other transaction.
 
 ## HTTP API
 
@@ -99,7 +103,6 @@ cannot select a second chain at runtime.
 | `/v1/transactions` | POST | Submit a content-bound signed transaction |
 | `/v1/mining/templates` | POST | Create Nexus work and gather direct-child candidates |
 | `/v1/mining/work` | POST | Submit a nonce for issued work |
-| `/v1/children/intents` | POST | Build a direct-child genesis intent |
 
 See [docs/rpc-api.md](docs/rpc-api.md) for request and response shapes.
 

@@ -50,8 +50,7 @@ Important fields:
   `bafyreiayw4z5qz4lt2sljf2enzn7uol3qa6bebadav7qwnqz7agxkiuwhq`.
 - `tipCID` and `height`: null only while a child awaits genesis.
 - `revision`: the local consensus mutation watermark.
-- `mempoolCount`, `mempoolBytes`, and `pendingChildIntents`: bounded service
-  pressure indicators.
+- `mempoolCount` and `mempoolBytes`: bounded service pressure indicators.
 
 ## External mining services
 
@@ -118,8 +117,9 @@ nonce.
 
 ## Child chains
 
-Start a child process before or after preparing its parent intent. It can safely
-remain in `awaitingGenesis` until the parent carrier is accepted.
+Start a child process before or after its parent records the child genesis. It
+can safely remain in `awaitingGenesis` until the parent block carrying the
+`GenesisAction` is accepted.
 
 ```bash
 lattice-node \
@@ -181,8 +181,8 @@ systemctl start lattice-node lattice-miner
 ```
 
 An empty Nexus directory recreates the exact pinned genesis automatically. An
-empty child directory returns to `awaitingGenesis` and must reacquire its
-authenticated genesis link from its configured parent.
+empty child directory returns to `awaitingGenesis` and must admit its genesis
+again, which requires its configured parent to confirm the recorded CID.
 
 Before running a recursive removal, resolve and verify the explicit path. Never
 target a home directory, workspace root, or an unresolved environment variable.
@@ -204,11 +204,13 @@ matched backup pair or wipe the entire process directory and resync.
 
 - Verify its `--chain-path` is absolute and exactly matches the intended child.
 - Verify `--parent` names the immediate parent's process key and fact port.
-- Confirm the parent intent was followed by a separately signed parent
-  `GenesisAction` transaction.
-- Confirm the coordinator was run with `--deployment`; normal templates never
-  include genesis actions.
-- Confirm a parent carrier containing the matching child genesis was accepted.
+- Confirm a separately signed parent transaction carrying the matching
+  `GenesisAction` was mined: the parent's `GET /api/chain/children` must list
+  the child with the expected genesis CID.
+- If the child's data directory holds `child-genesis.json`, confirm it is the
+  exact seed that genesis CID was built from; any other seed yields a different
+  CID, which the parent will not confirm.
+- Without a seed, confirm a child-overlay peer can serve the genesis block.
 - Check hierarchy-plane connectivity; an overlay peer cannot substitute for the
   configured parent fact link.
 

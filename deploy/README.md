@@ -110,9 +110,11 @@ lattice-node \
   --rpc-port 8180
 ```
 
-The child waits for the content-addressed genesis proof created by a parent
-intent plus a separately signed parent `GenesisAction` transaction. It never
-boots from an opaque serialized genesis field.
+The child waits until a separately signed parent `GenesisAction` transaction
+has recorded its self-contained genesis CID, then admits that genesis (rebuilt
+from a `child-genesis.json` seed in its data directory, or fetched by CID from
+child-overlay peers) once its parent confirms the record. It never boots from
+an opaque serialized genesis field.
 
 ## Destructive migration
 

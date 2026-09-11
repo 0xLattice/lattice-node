@@ -47,7 +47,7 @@ authenticated immediate parent's fact-plane public key and endpoint.
 LatticeNodeDaemon
   ├─ NodeConfiguration     immutable path, keys, ports
   ├─ ChainProcess          consensus admission and durable recovery
-  ├─ ChainService          transactions, intents, templates, work results
+  ├─ ChainService          transactions, templates, work results
   ├─ NodeStore             state.db: semantic facts, indexes, root references
   ├─ DiskBroker            volumes.db: materialized CAS volumes
   ├─ Ivy overlay           same-chain peers and content
@@ -71,7 +71,7 @@ Ivy acquisition and root attribution
 The runtime never mutates consensus state directly. Network preflight remains
 outside the service operation gate, while a commit reserves the service's small
 reconciliation fence before process mutation order is released. That prevents a
-new template, mempool operation, or child intent from observing a canonical
+new template or mempool operation from observing a canonical
 commit before its service projection catches up, without allowing a slow peer
 to stall mining or RPC. Miner/RPC/reconciliation reads are local-only; remote
 content acquisition is explicit and root-scoped to network admission or a
@@ -150,25 +150,32 @@ request is CID-stable and refreshes one offer instead of consuming another.
 
 ## Child genesis flow
 
-1. Start the child process with its absolute path and parent fact endpoint. It
-   opens its durable store in `awaitingGenesis`.
-2. Call the parent's `POST /v1/children/intents`. The parent builds and stores a
-   child genesis bound to its current state and returns the block and CID.
-3. Construct and sign an ordinary parent transaction containing the matching
-   `GenesisAction`, then submit it to `POST /v1/transactions`.
-4. External mining commits that transaction and child block in a parent
-   carrier.
-5. The parent durably prepares and publishes the direct-child proof. It also
-   acknowledges the exact deployment fact from its accepted graph. The child
-   verifies the proof, requires its `parentState` to equal the deployment
-   block's entering state, and becomes `active`.
+1. Build the self-contained child genesis offline from a seed: the child
+   `ChainSpec`, an optional premine recipient, and a timestamp. The genesis
+   commits to the empty parent state and uses the maximum target, so the same
+   seed always yields the same CID.
+2. Construct and sign an ordinary parent transaction containing
+   `GenesisAction(directory, genesisCID)`, then submit it to
+   `POST /v1/transactions`.
+3. External mining includes that transaction in a parent block like any other.
+   The accepted block records `directory -> genesisCID` in the parent's
+   committed genesis state.
+4. The child process, started at any point with its absolute path and parent
+   fact endpoint, opens its durable store in `awaitingGenesis`. If its data
+   directory holds the seed as `child-genesis.json`, it rebuilds the genesis
+   locally. Otherwise it asks the parent for the CID recorded under its
+   directory and fetches the genesis block by that CID from child-overlay
+   peers, requiring the content to hash back to it.
+5. The child asks its authenticated immediate parent to acknowledge the exact
+   `(directory, genesisCID, empty parent state)` fact. Only a positive answer
+   lets it bootstrap the genesis and become `active`; otherwise it stays
+   `awaitingGenesis` and retries.
 
-There is no opaque genesis byte channel. The parent retains the complete Cashew
-Volumes it created for genesis, while any exact same-chain advertiser may
-supply the same CID-verified Volumes. The authenticated immediate-parent process
-alone acknowledges the exact accepted deployment tuple and later forward
-parent-state movements from its recovered validated graph. These positive
-acknowledgements are unsigned, session-bound, and non-portable.
+There is no opaque genesis byte channel, and no parent block carries a child
+genesis. The authenticated immediate-parent process alone acknowledges the
+recorded genesis and later forward parent-state movements from its recovered
+validated graph. These positive acknowledgements are unsigned, session-bound,
+and non-portable.
 
 The process that directly parents an edge retains only its sparse commitment
 proof. Ordinary child validation Volumes remain child-chain data. Admission stages a
@@ -187,9 +194,7 @@ The child never returns topology or derived work to its parent. Work is derived
 from the child proof and remains entirely inside the child process.
 
 An evidence Volume is one complete, one-entry Volume whose canonical manifest
-contains the child CID and proof envelope. Parent-created genesis retention
-stores complete Volume root IDs in NodeStore as local metadata; those IDs do
-not affect evidence identity or wire size. Its Ivy request carries a local
+contains the child CID and proof envelope. Its Ivy request carries a local
 singleton/archive allocation bound even though those limits are not added to
 the wire protocol.
 
@@ -242,20 +247,12 @@ The node owns chain truth and template validity. The coordinator owns work
 lifecycle and range allocation. Workers own only proof-of-work search over an
 immutable assignment.
 
-Normal work never includes a `GenesisAction`. Deployment work explicitly
-selects one transaction whose complete anchor set has matching locally retained
-child intents, or one deployment subtree supplied by a direct child. Its
-effective search target preserves the hardest deployment barrier recursively.
-Because every intent binds the carrier's entering parent state, sibling chains
-that must launch together are anchored atomically by one transaction.
-
-A child intent carries the exact complete WASM module Volumes named by its
-spec. Validation composes those request-owned bytes over local VolumeBroker
-content; there is no ambient module-upload CAS. After validation, one exact
-`child-intents` retention scope covers every Volume in each live intent closure.
-Replacement, anchoring, and parent-state staleness update that set atomically
-with respect to process eviction, while restart clears it because intents are
-operational state rather than recovery authority.
+Templates have no deployment mode. A transaction carrying a `GenesisAction` is
+selected like any other pooled transaction. Child geneses are self-contained,
+so a template never carries one; merged-mining templates attach only ongoing
+direct-child candidates supplied by their processes. The effective search
+target is the easiest target among the Nexus candidate and those child
+candidates.
 
 ## Durability and recovery
 
