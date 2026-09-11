@@ -26,11 +26,11 @@ offer to how much work stands behind it.
 
 - **A probe.** A node cannot see an offer's work until it holds the offer's
   root node, so it must fetch content before it knows anything.
-- **Structural verification.** The node checks proof of work, then header
-  linkage. It resolves the parent and spec, and checks the version, that the
-  spec matches the parent's, that the block's `prevState` equals the parent's
-  `postState`, the height, the timestamp, and the target schedule across the
-  retarget window.
+- **Structural verification.** The node checks proof of work (for a child
+  block, its securing-work proof), then header linkage. It resolves the parent
+  and spec, and checks the version, that the spec matches the parent's, that
+  the block's `prevState` equals the parent's `postState`, the height, the
+  timestamp, and the target schedule across the retarget window.
 - **Permanent storage.** A weighed block's block boundary and consensus facts
   are staged durably. Lattice "never prunes accepted graph or verified
   local-work facts" (spec §12.5, invariant 9; §9.7), and recovery replays those
@@ -50,13 +50,20 @@ A block's target is bound to the schedule of its own ancestry
 the cost of extending it. By convention Nexus genesis commits the maximum
 target (§5.5; `NexusGenesis`), which every hash satisfies. A branch attached at
 or near genesis, or after any stretch where the schedule relaxed, can be
-extended for a fraction of the cost of the chain it claims to rival. Timestamps
-must strictly increase and may not run ahead of real time, which limits how
-*deep* such a branch can grow while staying cheap. They do not limit how *wide*
-it can grow. And with no clamp committed, a single late timestamp on an
-abandoned tip can ease its schedule back to the maximum target in one step. The
-honest chain's difficulty protects the honest chain's tip. It does nothing to
-make a deep side branch expensive.
+extended for a fraction of the cost of the chain it claims to rival.
+
+Timestamps must strictly increase and may not run ahead of real time. That
+limits how *deep* a branch can grow while staying cheap, but not how *wide*.
+Nor does it stop an abandoned tip from easing. With no clamp committed, the
+newest interval carries the most weight in the retarget window. So one block
+with a late timestamp eases the next target roughly in proportion to the gap,
+about 145-fold for a year-old Nexus tip. The late block itself must still meet
+the old schedule. But the gap stays in the window, and the few blocks that
+follow keep easing, so the schedule can be driven to the maximum target for
+roughly one block's work at the old difficulty.
+
+The honest chain's difficulty protects the honest chain's tip. It does nothing
+to make a deep side branch expensive.
 
 A second kind of offer carries work without being a new block. One block may be
 secured by many distinct grinds (§9.1), and a carrier need not be valid on its
@@ -182,22 +189,23 @@ enters the same comparisons.
 
 Acquisition spends in three steps, and only the last is permanent:
 
-- **Probe.** The node obtains an offered root and verifies its proof of work.
-  This step cannot be avoided, because no gate can act on work it has not seen.
-  The probe is the price of learning an offer's work at all. Fabricated or
-  mismatched bytes can still be attributed to their sender, as today.
+- **Probe.** The node obtains an offered root and verifies its proof of work
+  (for a child block, its securing-work proof). This step cannot be avoided,
+  because no gate can act on work it has not seen. The probe is the price of
+  learning an offer's work at all. Fabricated or mismatched bytes can still be
+  attributed to their sender, as today.
 - **Tally.** While an offer has not yet been shown to matter, the node applies
-  every check weighed admission applies: proof of work, version, parent link,
-  matching spec, `prevState` against the parent's `postState`, height,
-  timestamp, and target schedule. It records the resulting proven work. Nothing
-  is staged, stored durably, entered into the consensus graph or relayed. A
-  block's work is credited only once all of its checks have completed. A
-  top-down walk meets a block's descendants before its ancestors, so the
-  schedule checks for the top of the walk complete only as the walk descends
-  far enough to cover their retarget window. Until then that work stays
-  uncredited and the pending blocks occupy the budget. The window is committed
-  by the chain, and §3.5 already lets a node decline to operate a chain whose
-  committed parameters exceed its resources.
+  every check weighed admission applies: proof of work (for a child block, the
+  securing-work proof), version, parent link, matching spec, `prevState`
+  against the parent's `postState`, height, timestamp, and target schedule. It
+  records the resulting proven work. Nothing is staged, stored durably, entered
+  into the consensus graph or relayed. A block's work is credited only once all
+  of its checks have completed. A top-down walk meets a block's descendants
+  before its ancestors, so the schedule checks for the top of the walk complete
+  only as the walk descends far enough to cover their retarget window. Until
+  then that work stays uncredited and the pending blocks occupy the budget. The
+  window is committed by the chain, and §3.5 already lets a node decline to
+  operate a chain whose committed parameters exceed its resources.
 - **Keep.** Once the work that would enter a comparison reaches the bar, the
   offers behind it go through ordinary acquisition unchanged: weighed when
   possessed, stored durably, counted, and executed if they become load-bearing.
@@ -279,7 +287,7 @@ branch into small offers: overlapping work counts once, so what gets kept still
 carries at least the bar in proven work. An exact tie can change a comparison,
 so it is never "strictly less" and is always kept.
 
-**The bar prices work, not bytes or blocks.** Once a comparison comes near its
+**The bar prices work, not bytes or blocks.** Once a comparison reaches its
 margin, every block riding that comparison is keepable, however many there are
 and however cheap each one is. The gate guarantees that what the node keeps
 carries real work in proportion to what it could change. It leaves block count
@@ -316,41 +324,6 @@ An offer below the bar is not refused. It is not recorded as rejected, not
 marked invalid, and not held against the peer that offered it. It can still be
 offered and acquired again by CID.
 
-Tallying has its own operator budget. Under pressure the node releases tallies
-by **progress**, not by how far they are from mattering:
-
-- **A tally stalled on availability may be released.** If its missing ancestor
-  or its next page cannot be obtained, it is not advancing. A miss is not a
-  verdict, and unattached work never reaches fork choice, so releasing it
-  decides nothing. It comes back when the missing content is offered or served.
-- **An attached tally may be released only when it is far from every margin.**
-  Distance is judged on unkept work *plus work already released* against the
-  same comparison. That stops an honest wide branch from being released one
-  piece at a time, with each piece looking far from the margin on its own.
-- **Released work stays counted.** A release frees the tally's blocks but leaves
-  behind how much work was released against each comparison and the leaf CIDs
-  that carry it. When unkept plus released work approaches a margin, the node
-  fetches the released leaves again by CID from any provider. It does not wait
-  for a re-offer.
-
-The effect of a release is therefore an ordinary availability gap. The node
-knows the work exists and which CIDs carry it, and getting them back is
-fetching content-addressed bytes, which protocol.md already treats as
-availability, never as a verdict.
-
-When the budget is still full, the gate never pauses the node as a whole. That
-would be an eclipse chosen by the attacker: it could fill the budget with
-branches whose bottom parent nobody serves, and so stop the node from tallying
-anything, including the heavier branch it needs. Instead the node pauses the
-**peer** holding the most tally budget per unit of proven work. Part of the
-budget is reserved for outbound and netgroup-diverse peers, so inbound
-connections alone cannot use all of it.
-
-Side branches cannot be approached forward, because range sync pages only a
-peer's main chain. Losing leaves arrive through the frontier pull, once per
-session. That is why released side work must be fetched again by CID rather
-than waiting to be offered.
-
 Where an offer attaches determines when the bar is known. Forward acquisition
 from a negotiated common ancestor ([bulk-sync-stream](bulk-sync-stream.md))
 knows the attachment point before the first page, so the bar is known from the
@@ -366,6 +339,96 @@ that declines work cheaply. No advertisement can prove an offer irrelevant.
 Declining only lowers an offer's priority and is never final. An honest heavy
 offer that under-claims is still tallied on its proven work. Hints are
 advisory.
+
+### Budget pressure
+
+Tallying has an operator budget, and something must give when it is full. This
+document does not choose that mechanism. It states the properties any
+budget-pressure policy must have. The guarantees below follow from those
+properties, whatever mechanism provides them.
+
+- **P1: A release never silently forgets proven work.** Every release, whether
+  of an attached or an unattached tally, leaves a resumable record: the CIDs of
+  the frontier where the tally stopped, the proven lower bound behind them, and
+  the providers known for them. The record is identified by CID and combines
+  work by grind identity, so replaying the same offer cannot add its work twice.
+  A later tally that reaches a recorded CID replaces the record's entry for it.
+- **P2: Released work may block release, never cause keeping.** Released work
+  counts toward how close a comparison is to its margin when deciding whether
+  another tally may be released, so the gate fails open. Released work may also
+  cause released tallies to resume from their recorded frontiers. But it never,
+  by itself, causes anything to be kept. Keeping requires work that has been
+  tallied again, checked and tied to its bytes. Released totals therefore
+  cannot get junk kept, however they are replayed.
+- **P3: Pressure pauses peers, never the node.** When the budget is full, the
+  node stops starting tallies for particular peers, never all tallying.
+  Otherwise an attacker could fill the budget with branches whose bottom parent
+  nobody serves and cut the node off from the heavier branch. Peers are ranked
+  by work whose proof has already been verified, meaning a root hash or
+  securing proof that beats its claimed target. That is real work even before
+  the schedule checks complete, so an honest top-down walk is not ranked as if
+  it had proven nothing while its top retarget window waits on ancestors.
+  Fully-checked credit remains the only thing that crosses a bar.
+- **P4: Reserved budget follows the node's own choices and observations.** Any
+  share of the budget reserved against inbound pressure goes to peers the node
+  chose to dial, operator-configured peers before referred ones. It is spread
+  across netgroups taken from observed socket addresses, never self-advertised
+  ones. Outbound candidates can come from peer referrals, and behind a proxy
+  every inbound peer shares one observed address. So observed diversity can be
+  empty, and the reservation then reduces to the peers the node dialed.
+- **P5: Stalled means no known provider can serve.** A tally counts as stalled
+  on availability only when none of the providers known for its frontier can
+  serve it, not when one provider is slow or times out. Under partial synchrony
+  a slow honest peer and a staller look the same, so one timeout proves nothing.
+  An attacker who registers as a provider for honest CIDs cannot make those CIDs
+  stalled while an honest provider is known.
+
+**What the properties give.** For every offer the node is tallying, the
+pivotality rule means the node computes the head it would compute if it had
+kept that offer. P1 and P2 extend this to released offers. Released work is
+still known as a lower bound attached to CIDs. It counts against every further
+release, so an honest wide branch cannot be released away one piece at a time.
+And it can be resumed by CID from any known provider. So for any offer the node
+still holds a tally or release record for, the head differs from the
+kept-everything head only while that work is being fetched. That is an
+availability gap. P3 and P5 keep an attacker from halting tallying or forcing
+the release of an honest tally while an honest provider is known.
+
+**What remains.** The resumable record is itself bounded by the operator's
+budget, and it does not survive a restart:
+
+- **Eviction.** Evicting a record is node-local cache eviction, the same kind of
+  operator-budget reclamation this project already uses for losing-fork state.
+  After eviction the node no longer knows that work exists.
+- **Restart.** After a restart, work known only through records comes back only
+  if it is offered again. Live announcements re-offer peers' tips. Each new
+  session's frontier pull re-offers that peer's most recently admitted leaves,
+  one page, newest first. A released side branch that is neither a tip nor among
+  some peer's newest leaves is not re-offered until something descending from it
+  is announced. Whether any provider still keeps it at all is availability:
+  under [operator-finality](operator-finality.md), a fork survives only while
+  someone keeps it.
+- **The head effect.** While such work is unknown, the node's head can differ
+  from that of a node that holds it. It differs only in a comparison that the
+  forgotten work would itself have decided. That is the same standing as a
+  branch the node never received.
+
+In plain terms, against the two rules this has to live with:
+
+- **Protocol.md** forbids a filter on work that can reach fork choice: a rule
+  that makes nodes judge the same known work differently. The gate applies no
+  such rule. Every piece of work it still has a record of is inside the
+  pivotality accounting above. What it can do is forget, under a storage
+  budget, work it held only as a record and never counted. That is a retention
+  decision with the effect of not having received the work, not a filter on
+  work the node knows.
+- **Weight-first-acquisition** says a missing input is "retried indefinitely".
+  Eviction and restart are where "indefinitely" ends for released work. A node
+  retries what it still remembers. Beyond its budget, or after a restart, it
+  relies on the network offering the work again, as every node already does for
+  branches it never heard of. This is a real weakening for released work, and
+  the operator chooses how much of it to accept: a node that keeps every record
+  gives up nothing.
 
 ## Stranding
 
@@ -397,19 +460,21 @@ These are the ways that can happen, and how the concept handles each:
   tall cheap branch over a shorter, heavier one. Claims only order tallies and
   never decide what is kept, so a truthful heavier offer is kept on its proof,
   whatever anyone announced.
-- **A poisoned lower bound.** Letting an attacker's stalled partial tally
-  of an honest leaf stand in for the whole branch would pin that branch below
-  the bar. Partial tallies stay open and are extended by later offers, so the
-  honest peers' offers complete it.
-- **Cascading releases.** After a partition heals, an honest wide branch can be
-  released piece by piece, each piece far from the margin alone, so its work
-  never adds up. That case is exactly what GHOST exists for, so it is not rare.
-  Counting released work in the distance test, and fetching released leaves
-  again by CID when the total nears a margin, keeps the pieces adding up.
-- **A tallying halt.** If the gate paused all tallying when its budget filled, an
-  attacker could fill it with tallies that never attach and cut the node off
-  from the heavier branch. Stalled tallies are releasable, and a full budget
-  pauses a peer, not the node.
+- **A poisoned lower bound.** An attacker could announce an honest leaf, stall
+  its ancestry, and try to have that partial tally stand in for the whole
+  branch. Partial tallies stay open and are extended by later offers. If budget
+  pressure releases one, P1 keeps its frontier, so the honest offers still
+  resume it.
+- **Cascading releases.** After a partition heals, an honest wide branch could
+  be released piece by piece, each piece far from the margin on its own, so its
+  work never adds up. That case is exactly what GHOST exists for, so it is not
+  rare. Under P2, released work counts against every further release, and
+  under P1 it combines by grind identity and resumes by CID.
+- **A tallying halt.** If budget pressure could stop all tallying, an attacker
+  could fill the budget with tallies that never attach. P3 pauses peers, not the
+  node, and ranks them by work whose proof is already verified. P5 defines a
+  stall by provider availability rather than by one timeout. P4 keeps the
+  reserved share with peers the node chose.
 - **Catch-up and fresh nodes.** The bar is measured over validated weight, and
   during catch-up validated weight lags the weighed tip. So the bar stays near
   zero for the whole catch-up, not only at genesis. The same holds at a fork
@@ -470,11 +535,11 @@ They interact in four ways:
 - **Consensus is untouched.** No validity rule, work measure, comparison,
   exclusion or tier changes. An offer below the bar is neither valid nor
   invalid. Once kept, it is admitted exactly as today.
-- **Same head, up to availability.** A gating node computes the same head it
-  would compute if it had kept every offer it is tallying or has released. That
-  is the pivotality rule above, applied to unkept and released work combined by
-  grind identity. The only divergence is an availability gap: the time taken to
-  fetch, by CID, work that is being kept or that was released.
+- **Same head over what the node remembers.** A gating node computes the head it
+  would compute if it had kept every offer it still holds a tally or release
+  record for. The only difference is the time taken to fetch that work by CID.
+  Work whose record was evicted, or lost at a restart, has the standing of work
+  never received, as set out under Budget pressure.
 - **Weight preservation is unchanged.** Eviction never drops counted work
   ([operator-finality](operator-finality.md)), and the gate never counts work it
   has not kept. The two fit together: eviction decides what a node stops
@@ -484,10 +549,10 @@ They interact in four ways:
   peer's tallies under budget pressure is resource budgeting, not reputation,
   and ends when budget frees. Bytes that do not match what was advertised can
   still be attributed to their sender, as today.
-- **Operator settings.** The margin, the tally budgets, the reserved share for
-  outbound and diverse peers, and any minimum required before keeping are node
-  configuration with sensible defaults. The default never tallies an honest
-  live-edge block, and "keep everything" is a conforming setting.
+- **Operator settings.** The margin, the tally and record budgets, any reserved
+  share, and any minimum required before keeping are node configuration with
+  sensible defaults. The default never tallies an honest live-edge block, and
+  "keep everything" is a conforming setting.
 - **The node's own blocks and parent facts are not gated.** A block this node
   produced is kept as today. Genesis and continuity facts issued by the parent
   carry no work, and the [process trust model](process-trust-model.md) governs
