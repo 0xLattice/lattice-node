@@ -8,6 +8,7 @@ import Glibc
 import XCTest
 @testable import LatticeMiningCoordinator
 import LatticeMinerCore
+import UInt256
 
 private actor StubNodeClient: MiningCoordinatorNodeClient {
     private var workResponses: [MiningCoordinatorWork?]
@@ -88,6 +89,128 @@ private actor RetryingSubmitStub: MiningCoordinatorNodeClient {
 
     func recordedSubmissions() -> [(workId: String, nonce: UInt64)] {
         submissions
+    }
+}
+
+/// Merged work over a fixed preimage prefix: an easy child target that about
+/// half of all hashes clear, and a HARD parent target that exactly one nonce in
+/// the span clears. A maximum parent target would let the first hit clear the
+/// parent too, which is exactly the case that cannot show the parent starving.
+private struct MergedWork: Sendable {
+    static let span: UInt64 = 1 << 14
+
+    let prefix: ContiguousArray<UInt8>
+    let childTarget: UInt256
+    let parentTarget: UInt256
+    let parentNonce: UInt64
+    let work: MiningCoordinatorWork
+
+    init() {
+        prefix = ContiguousArray("merged-mining-duty-cycle".utf8)
+        let midstate = ProofOfWork.midstate(prefixBytes: prefix)
+        var parentNonce: UInt64 = 0
+        var parentTarget = UInt256.max
+        for nonce in 0..<Self.span {
+            let hash = ProofOfWork.hash(midstate: midstate, nonce: nonce)
+            if hash < parentTarget {
+                parentTarget = hash
+                parentNonce = nonce
+            }
+        }
+        childTarget = UInt256.max >> 1
+        self.parentTarget = parentTarget
+        self.parentNonce = parentNonce
+        work = MiningCoordinatorWork(
+            workId: "merged",
+            blockHex: "00",
+            prefixHex: prefix.map { String(format: "%02x", $0) }.joined(),
+            targetHex: childTarget.toHexString(),
+            targets: [childTarget, parentTarget],
+            expiresInMilliseconds: nil,
+            staleToken: "tip"
+        )
+    }
+
+    func hash(_ nonce: UInt64) -> UInt256 {
+        ProofOfWork.hash(midstate: ProofOfWork.midstate(prefixBytes: prefix), nonce: nonce)
+    }
+
+    var firstChildNonce: UInt64 {
+        (0..<Self.span).first { hash($0) <= childTarget }!
+    }
+
+    /// A real CPU search of the assigned prefix, target, and range that records
+    /// the effort it actually spent.
+    func worker(id: String, ledger: SearchLedger) -> MiningCoordinatorWorker {
+        MiningCoordinatorWorker(id: id) { assignment, range in
+            let target = MinerLoopLogic.parseTarget(assignment.targetHex)!
+            let nonce = ProofOfWork.searchBatch(
+                midstate: ProofOfWork.midstate(prefixBytes: prefix),
+                target: target,
+                startNonce: range.startNonce,
+                count: range.count
+            )
+            await ledger.record(SearchLedger.Search(
+                target: target,
+                startNonce: range.startNonce,
+                hashed: nonce.map { $0 - range.startNonce + 1 } ?? range.count,
+                cancelled: Task.isCancelled
+            ))
+            return nonce.map {
+                MiningWorkerResult(workerId: id, workId: assignment.workId, nonce: $0)
+            }
+        }
+    }
+}
+
+private actor SearchLedger {
+    struct Search: Equatable {
+        let target: UInt256
+        let startNonce: UInt64
+        let hashed: UInt64
+        let cancelled: Bool
+    }
+
+    private(set) var searches: [Search] = []
+
+    func record(_ search: Search) {
+        searches.append(search)
+    }
+}
+
+/// Decides each submission the way the node does: by hashing it. A hash that
+/// clears the parent target produces the parent block; one that clears only the
+/// child target is a carrier, which leaves the work open.
+private actor MergedMiningNode: MiningCoordinatorNodeClient {
+    private let merged: MergedWork
+    private(set) var submissions: [UInt64] = []
+
+    init(_ merged: MergedWork) {
+        self.merged = merged
+    }
+
+    func fetchWork() async throws -> MiningCoordinatorWork? {
+        merged.work
+    }
+
+    func submit(workId: String, nonce: UInt64) async throws -> MiningSolutionSubmission {
+        submissions.append(nonce)
+        let hash = merged.hash(nonce)
+        if hash <= merged.parentTarget {
+            return MiningSolutionSubmission(accepted: true, disposition: "canonicalized", tipCID: "parent")
+        }
+        if hash <= merged.childTarget {
+            return MiningSolutionSubmission(accepted: false, disposition: "carrier")
+        }
+        return MiningSolutionSubmission(accepted: false, disposition: "invalid")
+    }
+}
+
+private actor CancellationFlag {
+    private(set) var cancelled = false
+
+    func record(_ cancelled: Bool) {
+        self.cancelled = cancelled
     }
 }
 
@@ -264,6 +387,33 @@ final class MiningCoordinatorTests: XCTestCase {
         ))
         XCTAssertEqual(withToken?.workId, "candidate-cid")
         XCTAssertEqual(withToken?.staleToken, "tip-hash")
+    }
+
+    func testWorkAdoptsTemplateTargetsEasiestFirst() {
+        func hex(_ value: UInt64) -> String { UInt256(value).toHexString() }
+        let merged = MiningCoordinatorWork(template: TemplateResponse(
+            workID: "candidate-cid",
+            blockHex: "00",
+            searchTarget: hex(1_000),
+            targets: [hex(10), hex(4_000), hex(1_000), hex(10)]
+        ))
+        // Nothing easier than the search target is submittable.
+        XCTAssertEqual(merged?.targets, [UInt256(1_000), UInt256(10)])
+        XCTAssertEqual(merged?.targetHex, hex(1_000))
+
+        let legacy = MiningCoordinatorWork(template: TemplateResponse(
+            workID: "candidate-cid",
+            blockHex: "00",
+            searchTarget: hex(1_000)
+        ))
+        XCTAssertEqual(legacy?.targets, [UInt256(1_000)])
+
+        XCTAssertNil(MiningCoordinatorWork(template: TemplateResponse(
+            workID: "candidate-cid",
+            blockHex: "00",
+            searchTarget: hex(1_000),
+            targets: ["not-hex"]
+        )))
     }
 
     func testStableStaleTokenSubmitsDespiteWorkIdChurn() async {
@@ -939,6 +1089,130 @@ final class MiningCoordinatorTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? MiningCoordinatorNodeClientError, .unauthorized(statusCode: 401))
         }
+    }
+
+    /// Issue #63: a hit that clears only the easy child target is submitted,
+    /// and the same range keeps being searched toward the hard parent target
+    /// until the parent block is found.
+    func testChildTargetHitKeepsSearchingTowardHardParentTarget() async {
+        let merged = MergedWork()
+        let childNonce = merged.firstChildNonce
+        XCTAssertLessThan(merged.parentTarget, UInt256.max >> 10, "the parent target must be hard")
+        XCTAssertGreaterThan(merged.hash(childNonce), merged.parentTarget)
+        XCTAssertGreaterThan(merged.parentNonce, childNonce)
+        let ledger = SearchLedger()
+        let node = MergedMiningNode(merged)
+        let coordinator = MiningCoordinator(
+            nodeClient: node,
+            workers: [merged.worker(id: "w0", ledger: ledger)],
+            totalBatchSize: MergedWork.span,
+            staleProbeEnabled: false
+        )
+
+        let result = await coordinator.runBatch()
+
+        let submissions = await node.submissions
+        XCTAssertEqual(submissions, [childNonce, merged.parentNonce])
+        XCTAssertEqual(result, .submitted(
+            workId: "merged",
+            nonce: merged.parentNonce,
+            submission: MiningSolutionSubmission(
+                accepted: true,
+                disposition: "canonicalized",
+                tipCID: "parent"
+            )
+        ))
+        // The effort actually spent: up to the child hit against the child
+        // target, then every following nonce against the parent target.
+        let searches = await ledger.searches
+        XCTAssertEqual(searches, [
+            SearchLedger.Search(
+                target: merged.childTarget,
+                startNonce: 0,
+                hashed: childNonce + 1,
+                cancelled: false
+            ),
+            SearchLedger.Search(
+                target: merged.parentTarget,
+                startNonce: childNonce + 1,
+                hashed: merged.parentNonce - childNonce,
+                cancelled: false
+            ),
+        ])
+    }
+
+    /// With several workers, one child hit is submitted; the other workers'
+    /// hits on the already-cleared child target are not, and every worker moves
+    /// on to the parent target until one of them finds it.
+    func testChildHitIsSubmittedOnceAcrossWorkersAndParentIsStillFound() async throws {
+        let merged = MergedWork()
+        let ledger = SearchLedger()
+        let node = MergedMiningNode(merged)
+        let coordinator = MiningCoordinator(
+            nodeClient: node,
+            workers: (0..<4).map { merged.worker(id: "w\($0)", ledger: ledger) },
+            totalBatchSize: MergedWork.span,
+            staleProbeEnabled: false
+        )
+
+        let result = await coordinator.runBatch()
+
+        let submissions = await node.submissions
+        XCTAssertEqual(submissions.count, 2, "submissions: \(submissions)")
+        XCTAssertLessThanOrEqual(merged.hash(submissions[0]), merged.childTarget)
+        XCTAssertGreaterThan(merged.hash(submissions[0]), merged.parentTarget)
+        XCTAssertEqual(submissions.last, merged.parentNonce)
+        guard case .submitted(_, merged.parentNonce, let submission) = result else {
+            return XCTFail("expected the parent block, got \(result)")
+        }
+        XCTAssertTrue(submission.accepted)
+        // The parent block came from a search against the parent target that
+        // resumed right after a child hit in its own worker's range.
+        let searches = await ledger.searches
+        let parentSearch = searches.first {
+            $0.target == merged.parentTarget
+                && !$0.cancelled
+                && $0.startNonce + $0.hashed - 1 == merged.parentNonce
+        }
+        let resumedAfter = try XCTUnwrap(parentSearch).startNonce - 1
+        XCTAssertLessThanOrEqual(merged.hash(resumedAfter), merged.childTarget)
+    }
+
+    /// The node refuses nonces for expired work, so the batch stops searching
+    /// once the template's lifetime has passed.
+    func testSearchStopsWhenTemplateExpires() async {
+        let work = MiningCoordinatorWork(
+            workId: "work-1",
+            blockHex: "00",
+            prefixHex: "",
+            targetHex: "ff",
+            targets: [UInt256(255)],
+            expiresInMilliseconds: 50,
+            staleToken: nil
+        )
+        let flag = CancellationFlag()
+        let worker = MiningCoordinatorWorker(id: "slow") { _, _ in
+            try? await Task.sleep(for: .seconds(10))
+            await flag.record(Task.isCancelled)
+            return nil
+        }
+        let node = StubNodeClient(workResponses: [work])
+        let coordinator = MiningCoordinator(
+            nodeClient: node,
+            workers: [worker],
+            totalBatchSize: 1,
+            staleProbeEnabled: false
+        )
+
+        let started = ContinuousClock.now
+        let result = await coordinator.runBatch()
+
+        XCTAssertEqual(result, .stale(workId: "work-1"))
+        XCTAssertLessThan(ContinuousClock.now - started, .seconds(5))
+        let cancelled = await flag.cancelled
+        XCTAssertTrue(cancelled)
+        let submissionCount = await node.submissionCount()
+        XCTAssertEqual(submissionCount, 0)
     }
 
     func testHTTPFetchStaleTokenUsesChainInfoTipWithoutTemplateFetch() async throws {

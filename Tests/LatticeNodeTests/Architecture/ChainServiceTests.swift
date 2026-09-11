@@ -2,6 +2,7 @@ import Crypto
 import Foundation
 import Ivy
 import Lattice
+import LatticeMinerCore
 import UInt256
 import VolumeBroker
 import XCTest
@@ -1237,6 +1238,97 @@ final class ChainServiceTests: XCTestCase {
         )
         XCTAssertEqual(admissionsAfter, admissionsBefore)
         XCTAssertEqual(leavesAfter, leavesBefore)
+    }
+
+    /// A nonce that clears only the child's easier target must not close the
+    /// work: the miner keeps searching the same assignment toward the parent's
+    /// harder target, and a later parent-clearing nonce for the same workID
+    /// has to produce the parent block. Consuming the template on the carrier
+    /// throws that nonce away as `unknownWork`.
+    func testCarrierSubmissionKeepsWorkOpenForTheParentTarget() async throws {
+        let process = try await nexusProcess()
+        let genesis = try await process.canonicalTipBlock()
+        let activeChild = try await anchoredChildGenesis(
+            parent: process,
+            parentGenesis: genesis,
+            childTimestamp: 1,
+            carrierNonce: 0
+        )
+        let publishedBlocks = PublishedBlocks()
+        let service = makeService(
+            process: process,
+            childCandidateProvider: { context in
+                let child = try await BlockBuilder.buildBlock(
+                    previous: activeChild.block,
+                    transactions: [],
+                    parentChainBlock: context.parentCarrier,
+                    timestamp: context.parentCarrier.timestamp,
+                    fetcher: process
+                )
+                return [DirectChildCandidate(
+                    directory: "Payments",
+                    block: child
+                )]
+            },
+            acceptedBlockPublisher: { blockCID in
+                await publishedBlocks.record(blockCID)
+            }
+        )
+        let template = try await service.miningTemplate(MiningTemplateRequest())
+        XCTAssertLessThan(
+            template.block.target,
+            template.searchTarget,
+            "the parent target must be harder than the scheduled child target"
+        )
+        XCTAssertEqual(template.targets, [template.searchTarget, template.block.target])
+
+        // The parent target is hard: scan with a midstate, then let the node's
+        // own hash decide every submission below.
+        let carrierNonce = firstNonce(of: template.block, from: 0) {
+            $0 > template.block.target
+        }
+        XCTAssertGreaterThan(
+            template.block.replacingNonce(carrierNonce).proofOfWorkHash(),
+            template.block.target
+        )
+        let carried = try await service.submitWork(SubmitWorkRequest(
+            workID: template.workID,
+            nonce: carrierNonce
+        ))
+        XCTAssertEqual(carried.disposition, .carrier)
+        XCTAssertFalse(carried.accepted)
+        let tipAfterCarrier = await process.status().tipCID
+        XCTAssertEqual(tipAfterCarrier, template.block.parent?.rawCID)
+
+        let parentNonce = firstNonce(of: template.block, from: carrierNonce + 1) {
+            $0 <= template.block.target
+        }
+        XCTAssertLessThanOrEqual(
+            template.block.replacingNonce(parentNonce).proofOfWorkHash(),
+            template.block.target
+        )
+        let parent = try await service.submitWork(SubmitWorkRequest(
+            workID: template.workID,
+            nonce: parentNonce
+        ))
+        XCTAssertTrue(parent.accepted)
+        XCTAssertEqual(parent.disposition, .canonicalized)
+        let minedCID = try BlockHeader(
+            node: template.block.replacingNonce(parentNonce)
+        ).rawCID
+        XCTAssertEqual(parent.tipCID, minedCID)
+        let published = await publishedBlocks.all()
+        XCTAssertEqual(published, [minedCID])
+
+        // The parent block consumes the work.
+        await XCTAssertThrowsErrorAsync(
+            try await service.submitWork(SubmitWorkRequest(
+                workID: template.workID,
+                nonce: parentNonce
+            ))
+        ) { error in
+            XCTAssertEqual(error as? MiningTemplateError, .unknownWork)
+        }
     }
 
     func testAuthenticatedProviderSuppliesOrdinaryChildCandidate() async throws {
@@ -3562,6 +3654,20 @@ private func XCTAssertThrowsErrorAsync<T>(
     } catch {
         handler(error)
     }
+}
+
+/// Nonce scan over the consensus PoW preimage midstate.
+private func firstNonce(
+    of block: Block,
+    from start: UInt64,
+    where accepts: (UInt256) -> Bool
+) -> UInt64 {
+    let midstate = ProofOfWork.midstate(for: block)
+    var nonce = start
+    while !accepts(ProofOfWork.hash(midstate: midstate, nonce: nonce)) {
+        nonce += 1
+    }
+    return nonce
 }
 
 private extension Block {

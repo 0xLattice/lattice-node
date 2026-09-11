@@ -70,6 +70,21 @@ public struct MiningTemplate: Sendable {
     let childCandidates: [DirectChildCandidate]
     let searchWitness: ChildSchedulingWitness?
 
+    /// Every distinct target a nonce for this work can clear that scheduling
+    /// knows of: the root, each direct child, and each child's scheduled
+    /// descendant. Easiest first, so the first is `searchTarget`. A carrier
+    /// leaves the work open, so the miner keeps searching toward the rest.
+    var targets: [UInt256] {
+        var targets: Set<UInt256> = [searchTarget, block.target]
+        for child in childCandidates {
+            targets.insert(child.block.target)
+            if let terminal = child.searchWitness?.terminal {
+                targets.insert(terminal.target)
+            }
+        }
+        return targets.filter { $0 <= searchTarget }.sorted(by: >)
+    }
+
     var remainingLifetimeMilliseconds: UInt64 {
         let components = ContinuousClock.now.duration(to: expiresAt).components
         guard components.seconds >= 0, components.attoseconds >= 0 else {
