@@ -22,6 +22,14 @@ private enum NetworkTestError: Error {
     case failedPhase(String)
 }
 
+private actor MinimumWorkRecorder {
+    private var values: [[MiningMinimumWork]] = []
+
+    func record(_ value: [MiningMinimumWork]) { values.append(value) }
+
+    func last() -> [MiningMinimumWork]? { values.last }
+}
+
 private func inertNetworkHandlers() -> NodeNetworkHandlers {
     NodeNetworkHandlers(admission: { _ in throw CancellationError() })
 }
@@ -2787,6 +2795,70 @@ final class NetworkTrustTests: XCTestCase {
         ).encoded()) { error in
             XCTAssertEqual(error as? NodeNetworkWireError, .malformed)
         }
+    }
+
+    /// A miner's minimum work rides the candidate request only when it has
+    /// entries, so a request without one keeps the exact bytes it always had.
+    func testCandidateRequestCarriesMinimumWorkOnlyWhenPresent() async throws {
+        let parent = try await canonicalNetworkBlock()
+        let parentCID = try BlockHeader(node: parent).rawCID
+        let parentData = try XCTUnwrap(parent.toData())
+        func request(
+            _ minimumWork: [MiningMinimumWork]
+        ) -> ChildCandidateRequestMessage {
+            ChildCandidateRequestMessage(
+                requestID: 21,
+                budgetMilliseconds: 750,
+                childPath: ["Nexus", "Payments"],
+                parentCID: parentCID,
+                parentData: parentData,
+                rewards: [],
+                minimumWork: minimumWork
+            )
+        }
+
+        let legacy = try request([]).encoded()
+        XCTAssertEqual(legacy.suffix(parentData.count), parentData)
+        XCTAssertTrue(
+            try ChildCandidateRequestMessage.decoded(legacy).minimumWork.isEmpty
+        )
+
+        let entries = [
+            MiningMinimumWork(
+                chainPath: ["Nexus", "Payments"],
+                work: UInt256(1) << 32
+            ),
+            MiningMinimumWork(
+                chainPath: ["Nexus", "Payments", "Receipts"],
+                work: UInt256(9)
+            ),
+        ]
+        let encoded = try request(entries).encoded()
+        XCTAssertGreaterThan(encoded.count, legacy.count)
+        XCTAssertEqual(
+            try ChildCandidateRequestMessage.decoded(encoded).minimumWork,
+            entries
+        )
+
+        // Another subtree, zero work, a truncated trailer, and an empty one
+        // (which a present-only-when-used field can never encode) are refused.
+        XCTAssertThrowsError(try request([MiningMinimumWork(
+            chainPath: ["Nexus", "Other"],
+            work: UInt256(1)
+        )]).encoded())
+        XCTAssertThrowsError(try request([MiningMinimumWork(
+            chainPath: ["Nexus", "Payments"],
+            work: .zero
+        )]).encoded())
+        XCTAssertThrowsError(
+            try ChildCandidateRequestMessage.decoded(encoded + Data([0]))
+        )
+        var emptyTrailer = legacy
+        emptyTrailer.append(contentsOf: [2, 0, 0, 0])
+        emptyTrailer.append(Data("[]".utf8))
+        XCTAssertThrowsError(
+            try ChildCandidateRequestMessage.decoded(emptyTrailer)
+        )
     }
 
     func testCandidateRequestEnforcesHierarchyRewardAndFrameBounds() async throws {
@@ -5782,6 +5854,61 @@ final class NetworkTrustTests: XCTestCase {
             throw error
         }
         await reservationGate.release()
+        await fixture.childRuntime.stop()
+        await fixture.parentRuntime.stop()
+    }
+
+    /// The parent forwards a miner's minimum work to the child that builds
+    /// the block, and only the entries at or below that child.
+    func testChildCandidateRequestCarriesDescendantMinimumWork() async throws {
+        let fixture = try await provisionalRootFixture(keyByte: 0x96)
+        let received = MinimumWorkRecorder()
+        let childHandlers = NodeNetworkHandlers(
+            childCandidateBuilder: { context, _ in
+                await received.record(context.minimumWork)
+                return fixture.candidate
+            },
+            candidateReservations: { _ in true },
+            admission: { _ in throw CancellationError() }
+        )
+        do {
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess,
+                handlers: inertNetworkHandlers()
+            )
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess,
+                handlers: childHandlers
+            )
+            try await waitForChildCandidate(fixture)
+
+            let childEntry = MiningMinimumWork(
+                chainPath: ["Nexus", "Payments"],
+                work: UInt256(1) << 8
+            )
+            let candidates = await fixture.parentRuntime.directChildCandidates(
+                ChildCandidateRequestContext(
+                    parentCarrier: fixture.context.parentCarrier,
+                    rewards: [],
+                    minimumWork: [
+                        MiningMinimumWork(
+                            chainPath: ["Nexus"],
+                            work: UInt256(1) << 20
+                        ),
+                        childEntry,
+                    ]
+                )
+            )
+            XCTAssertEqual(candidates.count, 1)
+            // The parent's own minimum is the parent's business, not the
+            // child's: only the child's entry crosses.
+            let forwarded = await received.last()
+            XCTAssertEqual(forwarded, [childEntry])
+        } catch {
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+            throw error
+        }
         await fixture.childRuntime.stop()
         await fixture.parentRuntime.stop()
     }

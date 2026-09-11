@@ -74,17 +74,34 @@ public struct MiningReward: Codable, Sendable {
     }
 }
 
+/// A miner's minimum work per block for one absolute chain path. It is a
+/// template choice, never a validity rule: the node builds that chain's block
+/// at `min(scheduled target, minimumWorkTarget(work))`.
+public struct MiningMinimumWork: Codable, Sendable, Equatable {
+    public let chainPath: [String]
+    public let work: UInt256
+
+    public init(chainPath: [String], work: UInt256) {
+        self.chainPath = chainPath
+        self.work = work
+    }
+}
+
 public struct MiningTemplateRequest: Codable, Sendable {
     public let rewards: [MiningReward]
+    public let minimumWork: [MiningMinimumWork]
 
     public init(
-        rewards: [MiningReward] = []
+        rewards: [MiningReward] = [],
+        minimumWork: [MiningMinimumWork] = []
     ) {
         self.rewards = rewards
+        self.minimumWork = minimumWork
     }
 
     private enum CodingKeys: String, CodingKey {
         case rewards
+        case minimumWork
     }
 
     public init(from decoder: any Decoder) throws {
@@ -93,6 +110,18 @@ public struct MiningTemplateRequest: Codable, Sendable {
             [MiningReward].self,
             forKey: .rewards
         ) ?? []
+        minimumWork = try container.decodeIfPresent(
+            [MiningMinimumWork].self,
+            forKey: .minimumWork
+        ) ?? []
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(rewards, forKey: .rewards)
+        if !minimumWork.isEmpty {
+            try container.encode(minimumWork, forKey: .minimumWork)
+        }
     }
 }
 
@@ -177,15 +206,19 @@ public struct DirectChildProofPublication: Sendable {
 public struct ChildCandidateRequestContext: Sendable {
     public let parentCarrier: Block
     public let rewards: [MiningReward]
+    /// The requesting miner's minimum work for descendant chains.
+    public let minimumWork: [MiningMinimumWork]
     public let excludedDirectories: Set<String>
 
     public init(
         parentCarrier: Block,
         rewards: [MiningReward],
+        minimumWork: [MiningMinimumWork] = [],
         excludedDirectories: Set<String> = []
     ) {
         self.parentCarrier = parentCarrier
         self.rewards = rewards
+        self.minimumWork = minimumWork
         self.excludedDirectories = excludedDirectories
     }
 }
@@ -420,6 +453,7 @@ public enum ChainServiceError: Error, Equatable, Sendable {
     case unresolvedChainSpec
     case invalidRewardTransaction
     case invalidRewardPlan
+    case invalidMinimumWork
     case rewardPlanTooLarge
     case requestTooLarge
     case invalidChildDirectory
@@ -1339,6 +1373,7 @@ public actor ChainService {
             do {
                 assembled = try await buildMiningTemplate(
                     rewards: request.rewards,
+                    minimumWork: request.minimumWork,
                     parentCarrier: nil
                 )
             } catch {
@@ -1443,7 +1478,8 @@ public actor ChainService {
     public func miningCandidate(
         parentCarrier: Block,
         parentContentSource: any ContentSource,
-        rewards: [MiningReward] = []
+        rewards: [MiningReward] = [],
+        minimumWork: [MiningMinimumWork] = []
     ) async throws -> DirectChildCandidate {
         await acquireOperation()
         defer { releaseOperation() }
@@ -1458,6 +1494,7 @@ public actor ChainService {
         ]))
         let template = try await buildMiningTemplate(
             rewards: rewards,
+            minimumWork: minimumWork,
             parentCarrier: parentCarrier,
             fetcher: fetcher
         )
@@ -1490,6 +1527,7 @@ public actor ChainService {
 
     private func buildMiningTemplate(
         rewards: [MiningReward],
+        minimumWork: [MiningMinimumWork],
         parentCarrier: Block?,
         fetcher: (any Fetcher)? = nil
     ) async throws -> MiningTemplate {
@@ -1497,6 +1535,7 @@ public actor ChainService {
         let previous = try await process.validatedTipBlock()
         let spec = try await chainSpec(for: previous)
         let rewardPlan = try await validatedRewardPlan(rewards)
+        let minimumWorkPlan = try validatedMinimumWorkPlan(minimumWork)
         let reward = try await validatedRewardTransaction(
             rewardPlan.current,
             previous: previous,
@@ -1542,6 +1581,7 @@ public actor ChainService {
                 parentCarrier: parentCarrier,
                 timestamp: timestamp,
                 transactionLimit: poolLimit + (reward == nil ? 0 : 1),
+                minimumWork: minimumWorkPlan.current,
                 fetcher: fetcher
             )
             try requireReward(rewardPlan.current, in: provisional.block)
@@ -1572,7 +1612,8 @@ public actor ChainService {
             let provided = try await validatedProvidedChildren(
                 context: ChildCandidateRequestContext(
                     parentCarrier: provisional.block,
-                    rewards: rewardPlan.descendants
+                    rewards: rewardPlan.descendants,
+                    minimumWork: minimumWorkPlan.descendants
                 )
             )
             var optionalChildren = provided
@@ -1592,6 +1633,7 @@ public actor ChainService {
                     .sorted { $0.directory < $1.directory },
                 parentCarrier: parentCarrier,
                 timestamp: timestamp,
+                minimumWork: minimumWorkPlan.current,
                 fetcher: fetcher
             )
             try requireReward(rewardPlan.current, in: template.block)
@@ -1612,6 +1654,7 @@ public actor ChainService {
                         .sorted { $0.directory < $1.directory },
                     parentCarrier: parentCarrier,
                     timestamp: timestamp,
+                    minimumWork: minimumWorkPlan.current,
                     fetcher: fetcher
                 )
                 if try await blockFits(
@@ -1632,6 +1675,7 @@ public actor ChainService {
                                 .sorted { $0.directory < $1.directory },
                             parentCarrier: parentCarrier,
                             timestamp: timestamp,
+                            minimumWork: minimumWorkPlan.current,
                             fetcher: fetcher
                         )
                         if try await blockFits(
@@ -2400,6 +2444,38 @@ public actor ChainService {
         return ValidatedRewardPlan(
             current: current,
             descendants: descendants.sorted {
+                $0.chainPath.lexicographicallyPrecedes($1.chainPath)
+            }
+        )
+    }
+
+    /// Splits a miner's minimum-work entries into this chain's own and those
+    /// for its descendants, which travel with the child candidate requests.
+    private func validatedMinimumWorkPlan(
+        _ entries: [MiningMinimumWork]
+    ) throws -> (current: UInt256?, descendants: [MiningMinimumWork]) {
+        let currentPath = process.configuration.chainPath
+        var seen: Set<String> = []
+        var current: UInt256?
+        var descendants: [MiningMinimumWork] = []
+        for entry in entries {
+            guard let address = ChainAddress(entry.chainPath),
+                  address.components.count >= currentPath.count,
+                  Array(address.components.prefix(currentPath.count))
+                    == currentPath,
+                  seen.insert(address.key).inserted,
+                  entry.work > .zero else {
+                throw ChainServiceError.invalidMinimumWork
+            }
+            if address.components == currentPath {
+                current = entry.work
+            } else {
+                descendants.append(entry)
+            }
+        }
+        return (
+            current,
+            descendants.sorted {
                 $0.chainPath.lexicographicallyPrecedes($1.chainPath)
             }
         )

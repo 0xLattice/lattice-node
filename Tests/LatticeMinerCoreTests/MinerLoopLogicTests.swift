@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 import Lattice
 import UInt256
@@ -49,6 +50,51 @@ final class MinerLoopLogicTests: XCTestCase {
         XCTAssertEqual(decoded.expiresInMilliseconds, 30_000)
         XCTAssertEqual(decoded.staleToken, "candidate")
         XCTAssertEqual(Data(hex: decoded.blockHex), block.toData())
+    }
+
+    func testParseMinimumWorkAcceptsPowersOfTwoAndDecimals() {
+        XCTAssertEqual(MinerLoopLogic.parseMinimumWork("2^32"), UInt256(1) << 32)
+        XCTAssertEqual(MinerLoopLogic.parseMinimumWork("2^0"), UInt256(1))
+        XCTAssertEqual(
+            MinerLoopLogic.parseMinimumWork("4294967296"), UInt256(1) << 32
+        )
+        XCTAssertNil(MinerLoopLogic.parseMinimumWork("0"))
+        XCTAssertNil(MinerLoopLogic.parseMinimumWork("2^256"))
+        XCTAssertNil(MinerLoopLogic.parseMinimumWork("2^"))
+        XCTAssertNil(MinerLoopLogic.parseMinimumWork("-1"))
+        XCTAssertNil(MinerLoopLogic.parseMinimumWork("0x20"))
+        XCTAssertNil(MinerLoopLogic.parseMinimumWork(""))
+    }
+
+    func testMinimumWorkFieldMirrorsTheTemplateRequestShape() throws {
+        let field = try XCTUnwrap(MinerLoopLogic.minimumWorkField([
+            "Nexus=2^32",
+            "Nexus/testnet/swap=17",
+        ]))
+        let encoded = try JSONSerialization.data(withJSONObject: field)
+        let decoded = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [[String: Any]]
+        )
+        XCTAssertEqual(decoded.count, 2)
+        XCTAssertEqual(decoded[0]["chainPath"] as? [String], ["Nexus"])
+        XCTAssertEqual(
+            decoded[0]["work"] as? String,
+            (UInt256(1) << 32).toPrefixedHexString()
+        )
+        XCTAssertEqual(
+            decoded[1]["chainPath"] as? [String],
+            ["Nexus", "testnet", "swap"]
+        )
+        XCTAssertEqual(
+            decoded[1]["work"] as? String,
+            UInt256(17).toPrefixedHexString()
+        )
+
+        XCTAssertNil(MinerLoopLogic.minimumWorkField(["Nexus=2^32", "Nexus=2^8"]))
+        XCTAssertNil(MinerLoopLogic.minimumWorkField(["Payments=2^32"]))
+        XCTAssertNil(MinerLoopLogic.minimumWorkField(["Nexus"]))
+        XCTAssertNil(MinerLoopLogic.minimumWorkField(["Nexus/=2^32"]))
+        XCTAssertNil(MinerLoopLogic.minimumWorkField(["Nexus=0"]))
     }
 
     func testParseTargetRoundTrips() {

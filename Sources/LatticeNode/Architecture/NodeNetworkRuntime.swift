@@ -1358,6 +1358,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     $0.chainPath.count >= path.count
                         && Array($0.chainPath.prefix(path.count)) == path
                 }
+                let minimumWork = context.minimumWork.filter {
+                    $0.chainPath.count >= path.count
+                        && Array($0.chainPath.prefix(path.count)) == path
+                }
                 group.addTask {
                     let candidate = await self.requestChildCandidate(
                         from: key,
@@ -1365,6 +1369,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                         parentCID: parentCID,
                         parentData: parentData,
                         rewards: rewards,
+                        minimumWork: minimumWork,
                         deadline: deadline,
                         generation: generation,
                         process: process
@@ -6299,6 +6304,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         parentCID: String,
         parentData: Data,
         rewards: [MiningReward],
+        minimumWork: [MiningMinimumWork],
         deadline: ContinuousClock.Instant,
         generation: UInt64,
         process: ChainProcess
@@ -6336,7 +6342,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
             childPath: childPath,
             parentCID: parentCID,
             parentData: parentData,
-            rewards: rewards
+            rewards: rewards,
+            minimumWork: minimumWork
         )
         guard let payload = try? request.encoded() else { return nil }
         return await withCheckedContinuation { continuation in
@@ -6770,7 +6777,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     try await builder(
                         ChildCandidateRequestContext(
                             parentCarrier: parent,
-                            rewards: request.rewards
+                            rewards: request.rewards,
+                            minimumWork: request.minimumWork
                         ),
                         session
                     )

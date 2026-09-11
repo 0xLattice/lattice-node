@@ -68,6 +68,38 @@ lattice-mining-coordinator \
 Custom workers (GPU or remote hardware) implement the contract in
 [mining-workers.md](mining-workers.md) and slot in via `--worker-executable`.
 
+### Minimum work per block
+
+A chain whose genesis sits at the maximum target hands out near-free blocks
+until the retarget catches up: a fresh chain can mine a burst of them in
+seconds, and the correction that follows overshoots by as much as it was
+behind. A miner can decline to take those blocks. `--min-work <chain
+path>=<work>` asks the node to build that chain's block at the harder of the
+requested target and the scheduled one; `nextTarget` is recomputed from the
+target actually used, so the retarget sees real difficulty from block 1 and no
+burst happens.
+
+```bash
+lattice-mining-coordinator \
+  --node http://127.0.0.1:8080 \
+  --worker-executable /usr/local/bin/lattice-miner \
+  --min-work Nexus=2^32 \
+  --min-work Nexus/testnet/swap=2^20
+```
+
+- It is an operator choice, never consensus. Validity requires only that a
+  block be as hard as its parent scheduled (`target <= parent.nextTarget`), so
+  mining harder is always permitted and nodes keep accepting other miners'
+  blocks at the scheduled target. Fork choice is untouched. Unset — the
+  default — templates and blocks are exactly as before.
+- Choose the value as work per block: roughly `expected hashrate ×
+  targetBlockTime`. At 1 GH/s against a one-hour target block time that is
+  3.6e12, so `2^42`. Both `2^N` and plain decimal integers are accepted.
+- Set it per chain, and set it before launching a fresh chain: every chain
+  that starts at the maximum target bursts on its own, Nexus and each child
+  alike. One coordinator covers the chain it mines and every chain merged-mined
+  under it, one `--min-work` each.
+
 If block production stalls:
 
 1. Confirm the Nexus node is `active`.

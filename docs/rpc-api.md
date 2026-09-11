@@ -113,15 +113,29 @@ assembled.
         "body": {"chainPath": ["Nexus"], "...": "other TransactionBody fields"}
       }
     }
-  ]
+  ],
+  "minimumWork": [{"chainPath": ["Nexus"], "work": "0x100000000"}]
 }
 ```
 
-`rewards` is the only request field and may be empty; other fields are
-ignored. Each reward is an externally signed transaction for one absolute chain
-path; process identity is never converted into wallet identity. There is no
-template mode: transactions carrying a `GenesisAction` are selected from the
-pool like any other transaction.
+`rewards` and `minimumWork` are the only request fields and may be empty or
+absent; other fields are ignored. Each reward is an externally signed
+transaction for one absolute chain path; process identity is never converted
+into wallet identity. There is no template mode: transactions carrying a
+`GenesisAction` are selected from the pool like any other transaction.
+
+`minimumWork` is the requesting miner's own minimum work per block, for this
+chain and for chains merged-mined under it (`work` is a hex `UInt256`; each
+`chainPath` is absolute and must name this chain or a descendant, at most
+once). The named chain's candidate is built at `min(scheduled target,
+floor(2^256 / work) - 1)` — harder than the schedule, never easier — and each
+descendant entry travels with the child candidate request down the hierarchy
+plane, so a child's block carries its own minimum. It is a template choice of
+the miner that asked, not consensus: admission, validation, and fork choice are
+untouched, and a block from any other miner at the scheduled target is still
+accepted. Absent, templates are exactly as they were. An entry naming an
+unknown or duplicate path, or zero work, is refused with `400`
+`invalidMinimumWork`.
 
 Response fields:
 

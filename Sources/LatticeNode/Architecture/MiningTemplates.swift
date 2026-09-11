@@ -61,6 +61,18 @@ func schedulingTargets(
     return candidate.block.target
 }
 
+/// The easiest target whose work (`workForTarget`, spec §9.1:
+/// `floor(2^256 / (target + 1))`) is at least `work`, i.e.
+/// `floor(2^256 / work) - 1`, floored at 1 like the retarget.
+public func minimumWorkTarget(_ work: UInt256) -> UInt256 {
+    precondition(work > .zero)
+    let quotient = UInt256.max / work
+    // floor(2^256 / work) exceeds floor((2^256 - 1) / work) by one exactly
+    // when work divides 2^256.
+    let exact = UInt256.max % work == work - UInt256(1)
+    return exact ? quotient : max(UInt256(1), quotient - UInt256(1))
+}
+
 public struct MiningTemplate: Sendable {
     public let workID: String
     public let block: Block
@@ -145,6 +157,7 @@ public actor MiningTemplateBook {
         parentCarrier: Block? = nil,
         timestamp: Int64,
         transactionLimit: Int = .max,
+        minimumWork: UInt256? = nil,
         fetcher: any Fetcher
     ) async throws -> MiningTemplate {
         let template = try await assemble(
@@ -154,6 +167,7 @@ public actor MiningTemplateBook {
             parentCarrier: parentCarrier,
             timestamp: timestamp,
             transactionLimit: transactionLimit,
+            minimumWork: minimumWork,
             fetcher: fetcher
         )
         return issue(template)
@@ -212,6 +226,7 @@ public actor MiningTemplateBook {
         parentCarrier: Block? = nil,
         timestamp: Int64,
         transactionLimit: Int = .max,
+        minimumWork: UInt256? = nil,
         fetcher: any Fetcher
     ) async throws -> MiningTemplate {
         try await assemble(
@@ -221,6 +236,7 @@ public actor MiningTemplateBook {
             parentCarrier: parentCarrier,
             timestamp: timestamp,
             transactionLimit: transactionLimit,
+            minimumWork: minimumWork,
             fetcher: fetcher
         )
     }
@@ -232,9 +248,17 @@ public actor MiningTemplateBook {
         parentCarrier: Block?,
         timestamp: Int64,
         transactionLimit: Int,
+        minimumWork: UInt256?,
         fetcher: any Fetcher
     ) async throws -> MiningTemplate {
         precondition(transactionLimit >= 0)
+        // A miner's minimum work only ever makes this block harder than the
+        // schedule, which validity permits (`target <= parent.nextTarget`);
+        // Lattice derives `nextTarget` from the target actually used. Without
+        // one the builder takes the schedule exactly as before.
+        let target = minimumWork.map {
+            min(previous.nextTarget, minimumWorkTarget($0))
+        }
         var childBlocks: [String: Block] = [:]
         var childTargets: [String: UInt256] = [:]
         for child in children {
@@ -260,6 +284,7 @@ public actor MiningTemplateBook {
             children: childBlocks,
             parentCarrier: parentCarrier,
             timestamp: timestamp,
+            target: target,
             chainPath: chainPath,
             fetcher: fetcher
         )
@@ -279,6 +304,7 @@ public actor MiningTemplateBook {
                     children: childBlocks,
                     parentCarrier: parentCarrier,
                     timestamp: timestamp,
+                    target: target,
                     chainPath: chainPath,
                     fetcher: fetcher
                 )
@@ -361,6 +387,7 @@ public actor MiningTemplateBook {
         children: [String: Block],
         parentCarrier: Block?,
         timestamp: Int64,
+        target: UInt256?,
         chainPath: [String],
         fetcher: any Fetcher
     ) async throws -> Block {
@@ -370,6 +397,7 @@ public actor MiningTemplateBook {
             children: children,
             parentChainBlock: parentCarrier,
             timestamp: timestamp,
+            target: target,
             nonce: 0,
             fetcher: fetcher
         )

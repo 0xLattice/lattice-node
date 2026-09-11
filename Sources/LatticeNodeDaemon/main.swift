@@ -179,7 +179,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                 return try await service.miningCandidate(
                     parentCarrier: context.parentCarrier,
                     parentContentSource: parentContentSource,
-                    rewards: context.rewards
+                    rewards: context.rewards,
+                    minimumWork: context.minimumWork
                 )
             },
             candidateReservations: { [weak service] update in

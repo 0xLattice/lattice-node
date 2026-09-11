@@ -107,6 +107,7 @@ let package = Package(
         .executableTarget(
             name: "LatticeMiningCoordinatorTool",
             dependencies: [
+                "LatticeMinerCore",
                 "LatticeMiningCoordinator",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]),
@@ -121,6 +122,7 @@ let package = Package(
             dependencies: [
                 "LatticeNode",
                 "LatticeCtlCore",
+                "LatticeMinerCore",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy"),
                 .product(name: "VolumeBroker", package: "VolumeBroker"),
