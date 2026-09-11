@@ -1727,6 +1727,169 @@ final class NetworkTrustTests: XCTestCase {
         }
     }
 
+    func testReadURLDiscoveryListsOwnDeclarationWithoutOwnProviderRecord()
+        async throws {
+        // The node declares a read URL for its own genesis but advertises no
+        // P2P address (no external address, no STUN), so Ivy never stores a
+        // provider record under its own key. Its own declaration must still
+        // lead the answer: the node best placed to answer must not omit the
+        // one endpoint it knows first-hand, leaving only other providers.
+        let target = try await overlayRuntime(
+            keyByte: 0xc3,
+            requestTimeout: .seconds(2),
+            publicReadURL: "https://nexus.example"
+        )
+        let maybeOwnGenesis = await target.process.mainChainBlockCID(
+            atHeight: 0
+        )
+        let ownGenesis = try XCTUnwrap(maybeOwnGenesis)
+        let service = networkService(
+            process: target.process,
+            runtime: target.runtime
+        )
+        try await target.runtime.start(
+            process: target.process,
+            handlers: transactionServiceHandlers(service)
+        )
+        let discovery = try await discoverReadURLsWithOneProvider(
+            target: target.runtime,
+            peerID: target.peerID,
+            endpoint: target.endpoint,
+            hello: target.hello,
+            genesisCID: ownGenesis,
+            providerKeyByte: 0xc4,
+            providerAnswer: ["https://remote.example"]
+        )
+        // The remote provider was discovered and asked, and its declaration
+        // flows through; the node's own declaration comes first.
+        XCTAssertTrue(discovery.providerAsked)
+        XCTAssertEqual(
+            discovery.urls,
+            ["https://nexus.example", "https://remote.example"]
+        )
+    }
+
+    func testReadURLDiscoveryInventsNoURLForUndeclaredProvider() async throws {
+        // A provider that answers the ask declaring no read surface has no
+        // browsable endpoint; its P2P host is an IP literal, not a read URL.
+        // Neither it nor this undeclared node may appear as https://<host>.
+        let target = try await overlayRuntime(
+            keyByte: 0xc5,
+            requestTimeout: .seconds(2)
+        )
+        let service = networkService(
+            process: target.process,
+            runtime: target.runtime
+        )
+        try await target.runtime.start(
+            process: target.process,
+            handlers: transactionServiceHandlers(service)
+        )
+        let discovery = try await discoverReadURLsWithOneProvider(
+            target: target.runtime,
+            peerID: target.peerID,
+            endpoint: target.endpoint,
+            hello: target.hello,
+            genesisCID: testCID("undeclared-child"),
+            providerKeyByte: 0xc6,
+            providerAnswer: []
+        )
+        // Not vacuous: the provider was found and asked, and still no URL.
+        XCTAssertTrue(discovery.providerAsked)
+        XCTAssertEqual(discovery.urls, [])
+    }
+
+    /// Runs the started `target`'s read-URL discovery for `genesisCID` while
+    /// one overlay peer, reachable at its advertised loopback listen address,
+    /// announces itself as a provider of that genesis and answers the
+    /// declared-URL ask with `providerAnswer`. Reports whether the ask reached
+    /// the provider, so an empty result can never pass for a missed discovery.
+    /// Stops `target` before returning.
+    private func discoverReadURLsWithOneProvider(
+        target: NodeNetworkRuntime,
+        peerID: PeerID,
+        endpoint: PeerEndpoint,
+        hello: Data,
+        genesisCID: String,
+        providerKeyByte: UInt8,
+        providerAnswer: [String]
+    ) async throws -> (urls: [String], providerAsked: Bool) {
+        let recorder = PayloadRecorder()
+        let provider = Ivy(config: IvyConfig(
+            signingKey: signingKey(providerKeyByte),
+            listenPort: NetworkTransportTestPorts.allocate(),
+            stunServers: [],
+            mode: .overlay
+        ))
+        let providerDelegate = PayloadRecordingPeer(recorder: recorder)
+        await provider.installTestDelegate(providerDelegate)
+        do {
+            try await connectAndHello(
+                provider,
+                peerID: peerID,
+                endpoint: endpoint,
+                hello: hello
+            )
+            for _ in 0..<200 {
+                if await !recorder.payloads(
+                    topic: NodeNetworkTopic.blockAnnouncement
+                ).isEmpty { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            await provider.announceProvider(
+                rootCID: genesisCID,
+                expiresAt: UInt64(Date().timeIntervalSince1970) + 600
+            )
+            // Frames on one session are handled in order, so an answered
+            // probe sent after the announce proves the record was stored.
+            let probe = try ReadEndpointRequestMessage(
+                requestID: 1,
+                genesisCID: testCID("probe")
+            ).encoded()
+            _ = await provider.sendMessage(
+                to: peerID,
+                topic: NodeNetworkTopic.readEndpointRequest,
+                payload: probe
+            )
+            _ = try await waitForReadEndpointResponse(
+                requestID: 1,
+                in: recorder
+            )
+
+            let discovery = Task {
+                await target.discoverProviderReadURLs(genesisCID: genesisCID)
+            }
+            var ask: ReadEndpointRequestMessage?
+            for _ in 0..<150 where ask == nil {
+                ask = await recorder.payloads(
+                    topic: NodeNetworkTopic.readEndpointRequest
+                ).lazy.compactMap {
+                    try? ReadEndpointRequestMessage.decoded($0)
+                }.first { $0.genesisCID == genesisCID }
+                if ask == nil { try await Task.sleep(for: .milliseconds(10)) }
+            }
+            if let ask {
+                _ = await provider.sendMessage(
+                    to: peerID,
+                    topic: NodeNetworkTopic.readEndpointResponse,
+                    payload: try ReadEndpointResponseMessage(
+                        requestID: ask.requestID,
+                        genesisCID: genesisCID,
+                        readURLs: providerAnswer
+                    ).encoded()
+                )
+            }
+            let urls = await discovery.value
+            await provider.stop()
+            await target.stop()
+            return (urls, ask != nil)
+        } catch {
+            await provider.stop()
+            await target.stop()
+            throw error
+        }
+    }
+
     private func waitForReadEndpointResponse(
         requestID: UInt64,
         in recorder: PayloadRecorder
