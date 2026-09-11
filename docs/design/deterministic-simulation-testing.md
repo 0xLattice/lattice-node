@@ -282,6 +282,125 @@ separate tests.
 
 ## Determinism in Swift
 
+Deterministic simulation is easiest in a system designed for it from the first
+line. `lattice-node` was not, and Swift makes several of the missing properties
+hard to recover. This section states what is achievable and what is not.
+
+### Why Swift resists it
+
+- **The global executor is nondeterministic.** Unstructured tasks, task-group
+  children and nonisolated async functions run on a shared thread pool whose
+  job order user code does not choose. Two runs of the same test on the same
+  machine can interleave differently, and a loaded runner interleaves
+  differently again.
+- **Actors are reentrant.** Every `await` inside an actor is a point at which
+  another message may run and change the state the suspended code will resume
+  with. The node knows this and defends against it by hand: `ChainProcess`
+  queues admission and eviction because "actors are reentrant", and
+  `ChainService` keeps "one externally observable order" because it "calls other
+  actors and is therefore reentrant". The review-found bugs above are this
+  hazard at places the defence did not cover. Strict concurrency rules out data
+  races; it does not rule out an unlucky order of legal steps.
+- **Time comes from the system.** The network runtime, template book and
+  runtime caches read `ContinuousClock.now` or `Date()` directly, and the
+  runtime waits with `Task.sleep` in roughly two dozen places. Tally's
+  admission bookkeeping and VolumeBroker's `MemoryBroker` also read the clock
+  directly. Even the test helper `TestBlockClock` in `NetworkTrustTests` is
+  anchored to real wall time, because admission compares block timestamps with
+  the real clock.
+- **The network is real sockets.** Ivy builds SwiftNIO client, server and
+  datagram bootstraps over the operating system's sockets. SwiftNIO event loops
+  run on their own threads, outside Swift Concurrency's executor entirely.
+- **Disk is real SQLite and a real broker.** `NodeStore` opens its database
+  directly and `ChainProcess` holds a concrete `DiskBroker`. Durability timing
+  and crash behaviour belong to the operating system.
+- **Randomness is ambient.** Ivy draws reconnect jitter and session secrets from
+  the system generator, the runtime shuffles hierarchy peers, and the stores
+  mint `UUID`s.
+
+### What is and is not achievable
+
+Full determinism of the unmodified production binary is not achievable. The
+achievable target is narrower and still valuable: **every piece of node logic
+above a small set of seams runs deterministically, and everything below those
+seams is simulated rather than real.**
+
+Scheduling determinism means that all work belonging to the simulated nodes
+runs on a single controlled executor, so only one job runs at a time and the
+seed chooses the order. Swift provides legitimate tools for moving actor and
+task work onto a chosen executor, and every task that escapes them reintroduces
+the global pool. Serializing alone is not enough, because a serial executor with
+a fixed order explores only one interleaving. The seed has to choose among the
+runnable jobs.
+
+Two consequences follow and should be accepted openly:
+
+- **Simulation does not find true parallel data races.** A run that executes one
+  job at a time cannot corrupt memory through simultaneous access. The
+  task-allocator crash investigated in the earlier lineage would not reproduce.
+  ThreadSanitizer, ASan and strict concurrency remain the tools for that class,
+  and simulation is the tool for the class they cannot see.
+- **Simulation does not test what it replaces.** Ivy's socket handling, SwiftNIO,
+  SQLite's durability, the operating system's scheduler, and compiler or
+  runtime defects stay outside the simulated world. The real-network and
+  multi-process tiers keep owning them.
+
+### Seams that already exist
+
+The codebase already has boundaries a simulated environment could attach to,
+because boundary-focused testing needed the same things:
+
+- **Content.** Admission takes a cashew `ContentSource` (`InMemoryContentSource`,
+  `FetcherContentSource`, `OverlayContentSource`), and component tests already
+  substitute blocking, counting and recording sources. Ivy's content exchange
+  is served through the `IvyContentSource` protocol, with test sources in
+  `NetworkTrustTests`.
+- **Service ports.** `ChainService` receives its network effects as injected
+  closures: `validateBodySource`, `validateEvidenceSource`, the child-candidate
+  provider and reconciler, and the block, transaction and proof publishers. Its
+  validate-walk retry interval is a parameter. `NodeNetworkHandlers` is the
+  same kind of boundary between the runtime and the service.
+- **Pure reducers.** `CandidateAcquirer`, `ParentEvidenceFlow` and
+  `ChildCandidateOwnership` are synchronous state machines that perform neither
+  Ivy I/O nor consensus ([composable node architecture](modular-admission-pipeline.md)).
+  `CandidateAcquirer` already takes time as an explicit `now:` argument, and its
+  tests advance time by hand. These are already deterministic.
+- **Validation time.** Lattice's admission accepts an explicit
+  `ValidationContext` carrying the clock reading for one attempt, as spec §9.3
+  requires. The node does not pass one today and so takes the wall-clock
+  default. The seam exists and stops at the node boundary.
+- **Peer delivery.** The node receives transport events through the
+  `IvyDelegate` protocol, and tests already install recording delegates. Ivy's
+  `PeerHealthMonitor` accepts injected `now` and nonce functions.
+- **Storage.** The retained-root path is written against VolumeBroker's broker
+  protocols, which lets `NodeStoreTests` interpose a `BlockingVolumeBroker`.
+- **Precedent for seeded runs.** Lattice's `LatticeSim` drives the real
+  `ChainState` fork choice from a seed and requires "the same trace
+  byte-for-byte" ([consensus simulator](https://github.com/adalinxx/Lattice/blob/30.4.0/docs/consensus-simulator.md)).
+  The wire fuzzers use a portable seeded generator rather than the system one.
+
+### Where no seam exists
+
+- **Scheduling.** Nothing today runs node work on an executor a test controls.
+- **Outbound transport.** The runtime constructs its two Ivy instances itself,
+  and Ivy's sockets have no in-memory substitute. Receiving is a seam; sending,
+  connecting and disconnecting are not.
+- **Runtime and mining time.** Deadlines, retry sleeps, template lifetimes and
+  task-local budgets read the system clock directly.
+- **Durable storage faults.** Nothing can fail, delay or lose a `NodeStore` write
+  or a `DiskBroker` store on demand, or crash a process between two of them.
+  Crash tests today reopen a store after a clean close, or send a real `SIGKILL`
+  at an uncontrolled moment.
+- **Randomness** in Ivy's jitter and secrets, the runtime's peer shuffle and
+  identifier generation.
+- **Dependencies.** Ivy, Tally, VolumeBroker and cashew are separate repositories
+  pinned by release. Any seam inside them is a change in that repository first.
+
+A seam is acceptable only when production behaviour through it is unchanged:
+the production binding reads the real clock, opens the real socket and writes
+the real disk. A seam that lets test code decide something production decides
+differently turns the simulation into a test of itself.
+
 ## Relation to the existing tiers
 
 ## Boundaries
