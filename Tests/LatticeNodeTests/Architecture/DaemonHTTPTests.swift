@@ -724,18 +724,39 @@ final class DaemonHTTPTests: XCTestCase {
             "not-a-cid",
             "bafy" + String(repeating: "z", count: 60),
             String(repeating: "a", count: 1_500),
-            "..%2F..%2Fetc%2Fpasswd",
-            "%00", "\u{0}", "\u{202E}", "\u{1F4A5}",
+            "\u{0}", "\u{202E}", "\u{1F4A5}", "a b",
             genesis,
         ]
 
-        func pathSafe(_ raw: String) -> String {
+        // Path parameters are NOT percent-decoded by the router — verified: a
+        // real CID with its first byte written as %62 answers 400, not 200. So
+        // a segment reaches the handler exactly as sent. Encode only what can
+        // never legally appear in a path, so `-1`, `+5`, `1e9` and `0x10`
+        // arrive raw; a NUL, a space or an emoji still has to be escaped,
+        // because no real client can put one in a path any other way.
+        var pathSegmentAllowed = CharacterSet.urlPathAllowed
+        pathSegmentAllowed.remove(charactersIn: "/")
+        func pathSegment(_ raw: String) -> String {
+            raw.addingPercentEncoding(withAllowedCharacters: pathSegmentAllowed) ?? ""
+        }
+        // Query values ARE decoded, so escaping everything is what delivers
+        // the intended value to the handler there.
+        func queryValue(_ raw: String) -> String {
             raw.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
         }
+        // The whole point of `pathSegment`: these must reach the handler raw.
+        // If they came back escaped the path cases would silently test `%2D1`.
+        for raw in ["-1", "+5", "1e9", "0x10", "\(Int.min)", "\(UInt64.max)"] {
+            XCTAssertEqual(pathSegment(raw), raw, "\(raw) must be sent unescaped")
+        }
+        // Already-escaped as an attacker sends them. Re-encoding would turn
+        // `%2F` into `%252F` and test a string nobody sends.
+        let wireLiteralSegments = [
+            "..%2F..%2Fetc%2Fpasswd", "%2e%2e%2f", "%00", "%FF%FE", "..",
+        ]
 
         var uris: [String] = []
-        for id in ids {
-            let segment = pathSafe(id)
+        for segment in ids.map(pathSegment) + wireLiteralSegments {
             // An empty segment would route to a different handler entirely,
             // which tests the router, not the parameter.
             guard !segment.isEmpty else { continue }
@@ -751,7 +772,7 @@ final class DaemonHTTPTests: XCTestCase {
             ]
         }
         for value in integerEdges {
-            let query = pathSafe(value)
+            let query = queryValue(value)
             uris += [
                 "/api/block/\(genesis)/transactions?offset=\(query)",
                 "/api/block/\(genesis)/transactions?limit=\(query)",
@@ -781,19 +802,28 @@ final class DaemonHTTPTests: XCTestCase {
                 )
             }
 
-            var answered = 0
+            var statuses = Set<Int>()
             for uri in matrix {
                 try await client.execute(uri: uri, method: .get) { response in
+                    statuses.insert(response.status.code)
                     XCTAssertLessThan(
                         response.status.code, 500,
                         "\(uri) answered \(response.status): a caller's input reached an unhandled path"
                     )
                 }
-                answered += 1
             }
-            // Reaching here at all means no request trapped. Count them too, so
-            // a routing change that silently skips the matrix cannot pass.
-            XCTAssertEqual(answered, matrix.count)
+            // Reaching here means no request trapped. That alone would still
+            // pass if a routing change sent the whole matrix to 404, so require
+            // evidence that it hit real handlers: one that SERVED (the genesis
+            // CID is in the matrix) and one that PARSED and REJECTED input.
+            XCTAssertTrue(
+                statuses.contains(200),
+                "nothing was served: the matrix never reached a working handler \(statuses)"
+            )
+            XCTAssertTrue(
+                statuses.contains(400),
+                "nothing was rejected as bad input: handlers never parsed the matrix \(statuses)"
+            )
         }
     }
 
