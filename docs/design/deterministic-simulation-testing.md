@@ -18,7 +18,8 @@ The node is tested well at every boundary it owns:
 CI adds:
 
 - strict concurrency checking;
-- ThreadSanitizer, plus ASan and UBSan over the hierarchy regressions;
+- ThreadSanitizer, ASan and UBSan, each run over the hierarchy regressions
+  (`NetworkTrustTests`);
 - reproducible release builds;
 - seeded fuzzing of the wire decoders (`WireProtocolFuzzTests`);
 - an edge-case matrix over every parametered public read route
@@ -73,7 +74,7 @@ This repository's history records that class repeatedly.
   handed to a concurrent outbound connection as its source port, killing the
   daemon with `EADDRINUSE` (`E2EPorts`).
 - A coordinator test documents the "did not finish within 20 seconds" flake,
-  which only appeared under sustained instant-block mining on Linux
+  which was hit under sustained instant-block mining on Linux
   (`MiningCoordinatorTests`).
 - A convergence assertion compares both nodes live rather than against a
   snapshot. The reason given is that "an equal-work same-height sibling
@@ -94,15 +95,16 @@ had exercised until review named them:
 - a stale discovery creator evicting a fresh in-flight discovery after a
   stop/start cycle (e0bf5cc8).
 
-Reaching such an ordering in a test takes a purpose-built hook:
+Reaching such an ordering in a test takes purpose-built hooks and latches:
 
-- 43431f87 added a DEBUG `resolveValidateEvidenceForTesting` seam so its
-  evidence-wait paths could be driven.
+- 43431f87 added a DEBUG `resolveValidateEvidenceForTesting` seam, which
+  supplies the evidence package so the evidence-wait paths can be driven. The
+  ordering itself comes from the test's own latch.
 - A related race is exercised by a DEBUG `demoteValidatedForTesting` call placed
   "behind the probe's back" (`ChainServiceTests`). In that race, a validated-tip
   probe could write back a floor that a concurrent eviction had demoted.
 
-Each hook pins one ordering that someone already suspected.
+Each hook or latch pins one ordering that someone already suspected.
 
 ### The retired smoke harness
 
@@ -320,7 +322,7 @@ node's observable behaviour against it; it does not restate it.
    excluded across restart. Later work beneath it never resurrects it, and it
    remains held and served. Sources: spec §9.9; "Exclusion is chain-local and
    never touches exported work" in deferred execution.
-9. **Restart changes nothing without new facts.**
+9. **Recovery selects exactly what the durable facts determine.**
    - After recovery, a node's head is the head fork choice selects over its
      durable facts.
    - A crash between durable staging and in-memory application may leave the
@@ -349,13 +351,19 @@ node's observable behaviour against it; it does not restate it.
     The simulation can run both side by side as a differential oracle. Source:
     "Acted-on decisions are uniform over obtained bytes" in deferred execution.
 13. **Authority stays where it belongs.**
-    - Continuity and genesis authority originates only in the authenticated
-      immediate parent's validated graph.
-    - The immutable fact may reach a node over any route, but no peer can
-      originate one.
+    - Spec §9.5 allows a continuity fact to be relayed independently of its
+      original transport. This node does not take that allowance.
+    - A continuity or genesis acknowledgement is accepted only as the answer to
+      the node's own request, on its authenticated session with the configured
+      immediate parent. The same fact from any other peer or session is refused.
+    - Evidence received from peers carries only a proof, so no received genesis
+      or continuity claim reaches validation.
     - No content reaches state before its CID and evidence verify.
 
-    Sources: the [process trust model](process-trust-model.md); spec §9.5.
+    Sources: the [process trust model](process-trust-model.md) (session-bound,
+    non-portable acknowledgements; a hierarchy plane that disables relay); the
+    proof-only child evidence envelope; spec §9.5 for the relay allowance the
+    node declines.
 14. **State stays bounded.** Every retained collection respects its bound at
     every step, under any fault schedule. Source: invariant 10 in
     [candidate acquisition](candidate-acquisition.md).
@@ -366,15 +374,21 @@ node's observable behaviour against it; it does not restate it.
     quiet, honest nodes holding the same facts select the same tip. This holds
     whatever the arrival order and whether or not they restarted. Sources: north
     star gate items 7–8.
-16. **No candidate is lost through ordering or backpressure.** Once faults stop,
-    every candidate still advertised by a reachable honest peer is eventually
-    admitted, rejected by a completed check, or acquired again. The property is
-    re-acquisition, not retention of every attempt:
-    - a runtime reset makes an in-flight completion stale (candidate acquisition
-      invariant 9);
-    - a bounded retry budget may reclaim an unresolvable park (1a18bb44).
+16. **Every advertised candidate reaches an outcome.** Once faults stop, every
+    candidate still advertised by a reachable honest peer is eventually either
+    admitted (and possibly later excluded by a completed check) or rejected at
+    admission. Re-acquiring a candidate without end is neither outcome, and it
+    fails this property.
+    - A runtime reset (candidate acquisition invariant 9) or a bounded retry
+      budget may drop an in-flight attempt only if a later advertisement
+      re-creates the obligation. That re-acquisition must itself end in one of
+      those outcomes.
+    - Known divergence: the retry-budget reclaim added in 1a18bb44 removes an
+      attempt without scheduling replacement work, which candidate acquisition
+      invariant 8 does not allow as written.
 
-    Sources: invariants 8–9 and the acceptance criteria in candidate acquisition.
+    Sources: invariants 8–9 and the acceptance criteria in candidate acquisition;
+    spec §9.9 for exclusion.
 
 The north star lists these adversarial scenarios:
 
@@ -597,9 +611,12 @@ mechanism for ordering, crash, partition, skew and peer-misbehaviour bugs.**
   follows.
 - **Proof of work stays real.** A simulated block is admitted because its hash
   beats its target, not because the simulation says so.
-  - Targets can be cheap, but they must not all be the maximum target. At the
-    maximum target every hash is a hit, so the target-miss path in spec §9.3 is
-    never exercised.
+  - Targets can be cheap, but they must be mixed and not at the maximum.
+  - Spec §9.1 credits `floor(2^256 / (target + 1))`, which is 1 at the maximum
+    target. Every block would then weigh the same, and weight comparisons would
+    collapse to block counts.
+  - At the maximum target every hash is also a hit, so the target-miss path in
+    spec §9.3 is never exercised.
   - The exclusion test (2f51a5f4) states that its forgery passes only because the
     harness mines at the maximum target. It asserts that precondition rather than
     assuming it.
