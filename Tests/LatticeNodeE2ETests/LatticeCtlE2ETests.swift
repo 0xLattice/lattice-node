@@ -828,7 +828,7 @@ final class LatticeCtlE2ETests: XCTestCase {
         _ arguments: [String], root: URL, log name: String
     ) throws -> RunningCtl {
         let log = root.appendingPathComponent("\(name).log")
-        FileManager.default.createFile(atPath: log.path, contents: nil)
+        _ = FileManager.default.createFile(atPath: log.path, contents: nil)
         let handle = try FileHandle(forWritingTo: log)
         let process = Process()
         process.executableURL = try binary("E2E_CTL_BIN", "lattice")
