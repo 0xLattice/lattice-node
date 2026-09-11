@@ -1087,13 +1087,16 @@ public actor NodeNetworkRuntime: IvyDelegate {
             )
         }
         let endpoints = await overlay.discoverProviders(rootCID: genesisCID)
-        var seenHosts: Set<String> = []
-        var candidates: [PeerEndpoint] = []
+        // One candidate per provider identity, not per host: the ask goes to
+        // the identity's session, so several providers behind one IP are
+        // each asked, and one identity's several routes take one ask slot.
+        var seenKeys: Set<PeerKey> = []
+        var candidates: [PeerKey] = []
         for endpoint in endpoints {
-            guard endpoint.publicKey != configuration.processPublicKey,
-                  !endpoint.host.isEmpty,
-                  seenHosts.insert(endpoint.host).inserted else { continue }
-            candidates.append(endpoint)
+            guard let key = try? PeerKey(endpoint.publicKey),
+                  key.hex != configuration.processPublicKey,
+                  seenKeys.insert(key).inserted else { continue }
+            candidates.append(key)
             if candidates.count >= 32 { break }
         }
         var urlsByCandidate = [[String]](
@@ -1105,9 +1108,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // for asks-times-deadline against an unupgraded fleet.
         await withTaskGroup(of: (Int, [String]).self) { group in
             var asked = 0
-            for (index, endpoint) in candidates.enumerated() {
+            for (index, key) in candidates.enumerated() {
                 guard asked < Self.maximumReadEndpointAsks,
-                      let key = try? PeerKey(endpoint.publicKey),
                       let peer = overlayPeers[key] else { continue }
                 asked += 1
                 group.addTask { [weak self] in
