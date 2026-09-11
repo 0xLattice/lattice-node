@@ -1207,14 +1207,16 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         return (tip, height)
     }
 
-    /// Anchored `directory -> genesisCID` map from the committed `genesisState`
-    /// subtrie of the tip's post-state (one bounded, ungated resolve). Lets the
-    /// runtime announce every wired+anchored child's genesis on this (parent)
-    /// overlay for the permissionless child-bootstrap rendezvous in a single
-    /// pass — no per-child re-resolve, and unanchored fake `.child` peers just
-    /// miss the map.
-    func anchoredChildGenesisCIDs(limit: Int) async -> [String: String] {
-        guard case .active(let level) = runtimePhase, limit > 0,
+    /// Anchored `directory -> genesisCID` for exactly `directories`, read from
+    /// the committed `genesisState` subtrie of the tip's post-state by one
+    /// targeted, ungated resolve of just those keys. Cost follows the
+    /// directories asked, not the number of anchored children, so a child is
+    /// found wherever its directory sorts. Unanchored directories (fake
+    /// `.child` peers) just miss the map.
+    func anchoredChildGenesisCIDs(
+        directories: Set<String>
+    ) async -> [String: String] {
+        guard case .active(let level) = runtimePhase, !directories.isEmpty,
               let tip = await deepestValidatedMainChainTip(level: level)?.cid
         else { return [:] }
         let header = BlockHeader(rawCID: tip, node: nil, encryptionInfo: nil)
@@ -1223,15 +1225,20 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                   fetcher: localFetcher
               ).node,
               let genesis = (try? await state.genesisState.resolve(
+                  paths: Dictionary(uniqueKeysWithValues: directories.map {
+                      ([$0], ResolutionStrategy.targeted)
+                  }),
                   fetcher: localFetcher
-              ))?.node,
-              let entries = try? await genesis.boundedKeysAndValues(
-                  limit: limit,
-                  fetcher: localFetcher
-              ) else {
+              ))?.node else {
             return [:]
         }
-        return Dictionary(entries.map { ($0.key, $0.value) }) { first, _ in first }
+        var anchored: [String: String] = [:]
+        for directory in directories {
+            if let genesisCID = (try? genesis.get(key: directory)) ?? nil {
+                anchored[directory] = genesisCID
+            }
+        }
+        return anchored
     }
 
     func portableEvidenceVolumeCID(

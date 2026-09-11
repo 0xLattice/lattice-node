@@ -1167,7 +1167,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
            await process.mainChainBlockCID(atHeight: 0) == genesisCID {
             urls.append(own)
         }
-        let anchored = await process.anchoredChildGenesisCIDs(limit: 200)
+        let anchored = await process.anchoredChildGenesisCIDs(
+            directories: wiredChildDirectories()
+        )
         let directories = Set(
             anchored.filter { $0.value == genesisCID }.map(\.key)
         )
@@ -3774,7 +3776,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // an adopting child that raced ahead of the parent's anchor just
             // retries once the record lands.
             guard let genesisCID = await process
-                    .anchoredChildGenesisCIDs(limit: 200)[directory],
+                    .anchoredChildGenesisCIDs(directories: [directory])[directory],
                   let payload = try? ChildGenesisAnchorResponseMessage(
                       requestID: request.requestID,
                       genesisCID: genesisCID
@@ -4169,35 +4171,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // newly-wired child within a minute (records are small).
         let interval = max(UInt64(30), min(ttl / 2, UInt64(60)))
         while isRunning, runtimeGeneration == generation {
-            let expiresAt = UInt64(Date().timeIntervalSince1970) + ttl
-            // (1) This node's own chain genesis, on its own overlay — peers of
-            // this chain can find providers of it.
-            if let ownGenesis = await process.mainChainBlockCID(atHeight: 0) {
-                await overlay.announceProvider(
-                    rootCID: ownGenesis,
-                    expiresAt: expiresAt
-                )
-            }
-            // (2) Parent rendezvous: for every child ALREADY WIRED to this node
-            // (a child that co-runs alongside its parent connects here), announce
-            // that child's genesis on THIS parent overlay. Any node on the parent
-            // chain can then discoverProviders(childGenesis) and reach a node
-            // serving the child — permissionless, no registry, and discovery is
-            // the global overlay DHT (not this node's connected-peer list).
-            let anchored = await process.anchoredChildGenesisCIDs(limit: 200)
-            var announcedChildren: Set<String> = []
-            for role in hierarchyPeers.values {
-                guard case .child(let path) = role,
-                      let directory = path.last,
-                      let childGenesis = anchored[directory],
-                      announcedChildren.insert(childGenesis).inserted else {
-                    continue
-                }
-                await overlay.announceProvider(
-                    rootCID: childGenesis,
-                    expiresAt: expiresAt
-                )
-            }
+            await announceGenesisProviders(
+                expiresAt: UInt64(Date().timeIntervalSince1970) + ttl,
+                process: process
+            )
             do {
                 try await Task.sleep(nanoseconds: interval &* 1_000_000_000)
             } catch {
@@ -4205,6 +4182,61 @@ public actor NodeNetworkRuntime: IvyDelegate {
             }
         }
     }
+
+    private func announceGenesisProviders(
+        expiresAt: UInt64,
+        process: ChainProcess
+    ) async {
+        // (1) This node's own chain genesis, on its own overlay — peers of
+        // this chain can find providers of it.
+        if let ownGenesis = await process.mainChainBlockCID(atHeight: 0) {
+            await overlay.announceProvider(
+                rootCID: ownGenesis,
+                expiresAt: expiresAt
+            )
+        }
+        // (2) Parent rendezvous: for every child ALREADY WIRED to this node
+        // (a child that co-runs alongside its parent connects here), announce
+        // that child's genesis on THIS parent overlay. Any node on the parent
+        // chain can then discoverProviders(childGenesis) and reach a node
+        // serving the child — permissionless, no registry, and discovery is
+        // the global overlay DHT (not this node's connected-peer list).
+        let anchored = await process.anchoredChildGenesisCIDs(
+            directories: wiredChildDirectories()
+        )
+        var announcedChildren: Set<String> = []
+        for role in hierarchyPeers.values {
+            guard case .child(let path) = role,
+                  let directory = path.last,
+                  let childGenesis = anchored[directory],
+                  announcedChildren.insert(childGenesis).inserted else {
+                continue
+            }
+            await overlay.announceProvider(
+                rootCID: childGenesis,
+                expiresAt: expiresAt
+            )
+        }
+    }
+
+    /// Directories of the immediate children currently wired to this node.
+    private func wiredChildDirectories() -> Set<String> {
+        Set(hierarchyPeers.values.compactMap { role -> String? in
+            guard case .child(let path) = role else { return nil }
+            return path.last
+        })
+    }
+
+    #if DEBUG
+    /// Test seam: one pass of the genesis-provider announce loop, which
+    /// otherwise repeats only once a minute.
+    func announceGenesisProvidersForTesting(process: ChainProcess) async {
+        await announceGenesisProviders(
+            expiresAt: UInt64(Date().timeIntervalSince1970) + 600,
+            process: process
+        )
+    }
+    #endif
 
     private func recoverChildProofs(
         generation: UInt64,
