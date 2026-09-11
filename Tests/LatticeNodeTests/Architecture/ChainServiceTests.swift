@@ -2049,6 +2049,232 @@ final class ChainServiceTests: XCTestCase {
         return blocks
     }
 
+    /// Acceptance: the deferred-execution linchpin end to end. Weighed
+    /// admission ranks a block on verified work alone, so an attacker can put
+    /// a block that will NEVER execute at the head of fork choice for free —
+    /// the work is real, only the declared post-state is a lie. The chain must
+    /// then do four things, and the fourth is what makes the other three safe:
+    ///
+    ///  1. rank it: an unexecuted block really does take the tip;
+    ///  2. only convict on a COMPLETED check: while the body is out of reach
+    ///     the block keeps its weight, because a node that excluded on a
+    ///     missing body would let anyone delete a competitor's branch by
+    ///     withholding bytes;
+    ///  3. reproject: its weight leaves, and the tip falls back to the
+    ///     heaviest block that actually validates;
+    ///  4. keep serving it: exclusion is a chain-local weighting decision, not
+    ///     pruning, so the bytes stay available to peers — a node must never
+    ///     conclude that other nodes are wrong to hold it;
+    ///
+    /// NOT covered here: that recovery replays the exclusion and reprojects
+    /// identically. The spec requires it, and an exclusion the recovery path
+    /// forgets would re-admit the invalid tip on every reboot, so it is worth
+    /// a test — but a live `ChainService` keeps the process and its storage
+    /// lock alive, so this harness cannot reopen the same directory. Closing
+    /// that needs a way to shut a service down, which does not exist yet.
+    ///
+    /// This is the only test in this repo covering exclusion at all.
+    func testInvalidWeighedTipIsExcludedReprojectedAndStillServed() async throws {
+        // The honest branch, and a heavier one whose TIP is a lie. Tampering
+        // the tip is the only shape an attacker can actually get admitted: a
+        // lie deeper in the branch breaks `prevState == parent.postState` for
+        // its own successor, so weighed admission rejects the rest.
+        let honestProducer = try await nexusProcess()
+        let honest = try await mineNexusRewardChain(
+            on: honestProducer, depth: 4, miner: CryptoUtils.generateKeyPair()
+        )
+        let attackProducer = try await nexusProcess()
+        let attack = try await mineNexusRewardChain(
+            on: attackProducer, depth: 6, miner: CryptoUtils.generateKeyPair()
+        )
+        let honestTip = try BlockHeader(node: honest[3]).rawCID
+        let lastValid = attack[4]
+        let lastValidCID = try BlockHeader(node: lastValid).rawCID
+
+        // The lie: this block pays a reward, so its post-state cannot equal
+        // its pre-state. Every header-linkage field stays honest, which is
+        // precisely why weighed admission has no grounds to refuse it.
+        let truth = attack[5]
+        let forged = Block(
+            version: truth.version,
+            parent: truth.parent,
+            transactions: truth.transactions,
+            target: truth.target,
+            nextTarget: truth.nextTarget,
+            spec: truth.spec,
+            parentState: truth.parentState,
+            prevState: truth.prevState,
+            postState: truth.prevState,
+            children: truth.children,
+            height: truth.height,
+            timestamp: truth.timestamp,
+            nonce: truth.nonce
+        )
+        let forgedCID = try BlockHeader(node: forged).rawCID
+        // The forgery keeps the honest block's nonce, so its proof of work is
+        // never re-solved — it passes only because this harness mines at the
+        // maximum target, where every hash qualifies. Assert that precondition
+        // rather than lean on it: if the harness ever mines against a real
+        // target, this fires and says to re-solve the nonce, instead of the
+        // forgery being refused for want of work and the whole exclusion path
+        // silently going uncovered. (This repo has already been bitten by a
+        // max-target genesis masking a securing-work bug.)
+        XCTAssertEqual(
+            forged.target, UInt256.max,
+            "trivial-work harness: re-solve the forged nonce before tightening targets"
+        )
+        XCTAssertEqual(
+            forged.target, truth.target,
+            "the forgery claims exactly the work bound the honest block did"
+        )
+        XCTAssertNotEqual(
+            forgedCID, try BlockHeader(node: truth).rawCID,
+            "the forgery must be its own block, not the honest one"
+        )
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lattice-chain-service-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        func openNode() async throws -> ChainProcess {
+            try await ChainProcess.open(
+                configuration: NodeConfiguration(
+                    chainPath: ["Nexus"],
+                    storagePath: directory,
+                    privateKeyHex: String(repeating: "01", count: 32)
+                )
+            )
+        }
+        var node: ChainProcess? = try await openNode()
+        defer { node = nil }
+
+        for block in honest {
+            let outcome = try await node!.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(honestProducer),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+        for block in attack.prefix(5) {
+            let outcome = try await node!.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(attackProducer),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+        let forgedOutcome = try await node!.admit(
+            BlockHeader(node: forged),
+            remoteSource: FetcherContentSource(attackProducer),
+            mode: .weighed
+        )
+
+        // 1. Ranked. Work is a physical fact and the header links up, so the
+        // forgery is accepted and takes the tip on weight alone.
+        XCTAssertTrue(
+            forgedOutcome.decision.isAccepted,
+            "weighed admission judges work, not execution: it cannot refuse this"
+        )
+        let weighedTip = try BlockHeader(
+            node: await node!.canonicalTipBlock()
+        ).rawCID
+        XCTAssertEqual(
+            weighedTip, forgedCID,
+            "an unexecuted block must be able to reach the tip, or there is nothing to defend against"
+        )
+
+        // 2a. Availability is never invalidity. Run the walk first with the
+        // body out of reach: it cannot complete the check, so it must not
+        // convict. A node that excluded here would let anyone delete a
+        // competitor's branch by withholding bytes.
+        // Withhold ONLY the forgery's body, so the walk provably runs the
+        // whole branch and stalls on exactly that block — starving everything
+        // would stop it at the first block and prove nothing about this one.
+        struct BodyUnavailable: Error {}
+        var starved: ChainService? = makeService(
+            process: node!,
+            validateBodySource: { cid, admit in
+                guard cid != forgedCID else { throw BodyUnavailable() }
+                return try await admit(FetcherContentSource(attackProducer))
+            }
+        )
+        await starved!.runValidateWalkPass()
+        starved = nil
+        let starvedValidated = await node!.deepestValidatedMainChainTip()
+        XCTAssertEqual(
+            starvedValidated?.cid, lastValidCID,
+            "the walk really did execute the branch and stop at the withheld block"
+        )
+        let starvedTip = try BlockHeader(
+            node: await node!.canonicalTipBlock()
+        ).rawCID
+        XCTAssertEqual(
+            starvedTip, forgedCID,
+            "an unreachable body is a gap to retry, not a verdict: the block keeps its weight"
+        )
+        let heldWhileStarved = await node!.hasAcceptedBlock(forgedCID)
+        XCTAssertTrue(heldWhileStarved, "and is certainly not dropped")
+
+        // 2b and 3. Now the body is reachable. The walk executes forward,
+        // completes the deterministic check, and fork choice reprojects.
+        var service: ChainService? = makeService(
+            process: node!,
+            validateBodySource: { _, admit in
+                try await admit(FetcherContentSource(attackProducer))
+            }
+        )
+        await service!.runValidateWalkPass()
+
+        let afterTip = try BlockHeader(
+            node: await node!.canonicalTipBlock()
+        ).rawCID
+        XCTAssertNotEqual(
+            afterTip, forgedCID, "the invalid block must lose its weight"
+        )
+        XCTAssertEqual(
+            afterTip, lastValidCID,
+            "the tip falls back to the heaviest block that actually validates"
+        )
+        // Only the forgery is excluded. The competing honest branch is still
+        // held and servable: a reprojection that quietly dropped it would
+        // satisfy every tip assertion above.
+        let honestSurvives = await node!.hasAcceptedBlock(honestTip)
+        XCTAssertTrue(
+            honestSurvives, "the honest branch must survive the exclusion"
+        )
+        let honestServed = await node!.content([honestTip])
+        XCTAssertNotNil(
+            honestServed[honestTip], "and still be servable"
+        )
+        let validated = await node!.deepestValidatedMainChainTip()
+        XCTAssertEqual(validated?.cid, lastValidCID)
+        XCTAssertEqual(validated?.height, lastValid.height)
+
+        // 4. Excluded, not pruned. The block and its bytes stay available:
+        // this node stopped counting it, and says nothing about anyone else.
+        // Control: the honest twin of the forgery was never admitted here, so
+        // this predicate discriminates rather than answering true for anything.
+        let neverAdmitted = await node!.hasAcceptedBlock(
+            try BlockHeader(node: truth).rawCID
+        )
+        XCTAssertFalse(
+            neverAdmitted, "a block this node never admitted is not accepted"
+        )
+        let stillAccepted = await node!.hasAcceptedBlock(forgedCID)
+        XCTAssertTrue(
+            stillAccepted,
+            "exclusion is a weighting decision, not a deletion"
+        )
+        let served = await node!.content([forgedCID])
+        XCTAssertNotNil(
+            served[forgedCID],
+            "an excluded block must still be servable to peers that ask for it"
+        )
+
+        service = nil
+        node = nil
+    }
+
     /// Deferred execution turning ON: a node that weighed-syncs a chain below its
     /// tip is NON-operable (weighed tip, validated tier at genesis) until the
     /// validate-on-candidacy walk executes the branch FORWARD and makes it
