@@ -3,29 +3,13 @@ import Foundation
 /// Prometheus text exposition format 0.0.4.
 public let nodeMetricsContentType = "text/plain; version=0.0.4"
 
-extension ChainService {
-    /// The operator `/metrics` exposition. Reads the same ungated snapshot as
-    /// `/health` plus the O(1) canonical tip: no operation gate, no history walk.
-    public func metricsExposition(peers: Int, processStartTime: Date) async -> String {
-        let snapshot = await readSnapshot()
-        return renderNodeMetrics(NodeMetricsSample(
-            chainPath: snapshot.chainPath,
-            validatedTipHeight: snapshot.height,
-            weighedTipHeight: await canonicalTipHeight(),
-            peers: peers,
-            mempoolTransactions: snapshot.mempoolCount,
-            processStartTime: processStartTime
-        ))
-    }
-}
-
-struct NodeMetricsSample: Sendable, Equatable {
+struct NodeMetricsSample: Sendable {
     let chainPath: [String]
     /// Deepest validated main-chain tip; nil while awaiting genesis.
     let validatedTipHeight: UInt64?
     /// Canonical (weighed-inclusive) main-chain tip; nil while awaiting genesis.
     let weighedTipHeight: UInt64?
-    let peers: Int
+    let overlayPeers: Int
     let mempoolTransactions: Int
     let processStartTime: Date
 }
@@ -48,9 +32,9 @@ func renderNodeMetrics(_ sample: NodeMetricsSample) -> String {
             }
     )
     family(
-        "lattice_peers",
-        "Authenticated same-chain overlay peers.",
-        [(chain, String(sample.peers))]
+        "lattice_overlay_peers",
+        "Authenticated same-chain overlay peers; the parent/child fact-plane link is not counted.",
+        [(chain, String(sample.overlayPeers))]
     )
     family(
         "lattice_mempool_transactions",

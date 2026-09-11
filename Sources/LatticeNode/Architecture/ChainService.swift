@@ -619,11 +619,18 @@ public actor ChainService {
         )
     }
 
-    /// Ungated height of the canonical (weighed-inclusive) main-chain tip, or
-    /// nil while awaiting genesis. Observability only: act-on reads use the
-    /// validated tip in `status()` / `readSnapshot()`.
-    public func canonicalTipHeight() async -> UInt64? {
-        await process.canonicalTipHeight()
+    /// The operator `/metrics` exposition: an ungated read costing what
+    /// `/health` does (one validated-tip walk plus the live pool count).
+    public func metricsExposition(peers: Int, processStartTime: Date) async -> String {
+        let tips = await process.metricsTipHeights()
+        return renderNodeMetrics(NodeMetricsSample(
+            chainPath: process.configuration.chainPath,
+            validatedTipHeight: tips.validated,
+            weighedTipHeight: tips.weighed,
+            overlayPeers: peers,
+            mempoolTransactions: await pool.count,
+            processStartTime: processStartTime
+        ))
     }
 
     /// Bounded public read: a decoded, content-verified block, gated to only

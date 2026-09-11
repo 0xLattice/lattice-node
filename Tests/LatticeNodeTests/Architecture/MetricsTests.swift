@@ -26,7 +26,7 @@ final class MetricsTests: XCTestCase {
             )
             XCTAssertEqual(samples[#"lattice_chain_tip_height{chain="Nexus",tier="validated"}"#], "0")
             XCTAssertEqual(samples[#"lattice_chain_tip_height{chain="Nexus",tier="weighed"}"#], "0")
-            XCTAssertEqual(samples[#"lattice_peers{chain="Nexus"}"#], "3")
+            XCTAssertEqual(samples[#"lattice_overlay_peers{chain="Nexus"}"#], "3")
             XCTAssertEqual(samples[#"lattice_mempool_transactions{chain="Nexus"}"#], "0")
             XCTAssertEqual(samples[#"process_start_time_seconds{chain="Nexus"}"#], "1700000000.5")
         }
@@ -114,12 +114,16 @@ final class MetricsTests: XCTestCase {
             chainPath: ["Nexus", "a\"b\\c\nd\r\ne"],
             validatedTipHeight: 7,
             weighedTipHeight: 8,
-            peers: 0,
+            overlayPeers: 0,
             mempoolTransactions: 0,
             processStartTime: Date(timeIntervalSince1970: 0)
         ))
         let samples = try parseExposition(rendered)
-        XCTAssertEqual(samples[#"lattice_peers{chain="Nexus/a\"b\\c\nd"# + "\r" + #"\ne"}"#], "0")
+        let chain = #"chain="Nexus/a\"b\\c\nd"# + "\r" + #"\ne""#
+        XCTAssertEqual(samples["lattice_overlay_peers{\(chain)}"], "0")
+        // The tiers are distinct series: validated 7, weighed 8.
+        XCTAssertEqual(samples["lattice_chain_tip_height{\(chain),tier=\"validated\"}"], "7")
+        XCTAssertEqual(samples["lattice_chain_tip_height{\(chain),tier=\"weighed\"}"], "8")
 
         // Daemon: `"` and `\` are valid chain directory atoms, so a configured
         // chain path reaches the label as-is (newline is not a valid atom).
@@ -127,10 +131,35 @@ final class MetricsTests: XCTestCase {
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         try await app.test(.router) { client in
             let samples = try await scrape(client)
-            XCTAssertEqual(samples[#"lattice_peers{chain="Nexus/q\"b\\s"}"#], "0")
+            XCTAssertEqual(samples[#"lattice_overlay_peers{chain="Nexus/q\"b\\s"}"#], "0")
             // An unbootstrapped child has no tip: the height samples are absent.
             XCTAssertFalse(samples.keys.contains { $0.hasPrefix("lattice_chain_tip_height") })
         }
+    }
+
+    func testMetricsSeparateWeighedTierFromValidated() async throws {
+        // A block admitted on the weighed tier leads fork choice before it
+        // executes: the weighed tier reads 1 while the validated tier stays at
+        // genesis, so each tier is wired to its own read.
+        let producer = try await openProcess(chainPath: ["Nexus"])
+        let template = try await service(for: producer)
+            .miningTemplate(MiningTemplateRequest())
+        let produced = try await producer.admit(BlockHeader(node: template.block))
+        XCTAssertTrue(produced.decision.isAccepted)
+
+        let consumer = try await openProcess(chainPath: ["Nexus"])
+        let weighed = try await consumer.admit(
+            BlockHeader(node: template.block),
+            remoteSource: FetcherContentSource(producer),
+            mode: .weighed
+        )
+        XCTAssertTrue(weighed.decision.isAccepted)
+
+        let samples = try parseExposition(
+            await service(for: consumer).metricsExposition(peers: 0, processStartTime: Date())
+        )
+        XCTAssertEqual(samples[#"lattice_chain_tip_height{chain="Nexus",tier="validated"}"#], "0")
+        XCTAssertEqual(samples[#"lattice_chain_tip_height{chain="Nexus",tier="weighed"}"#], "1")
     }
 
     func testMetricsAbsentOnPublicReadApplication() async throws {
@@ -147,7 +176,7 @@ final class MetricsTests: XCTestCase {
         }
     }
 
-    private func openService(chainPath: [String]) async throws -> ChainService {
+    private func openProcess(chainPath: [String]) async throws -> ChainProcess {
         let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-metrics-test-\(UUID().uuidString)"
         )
@@ -161,13 +190,20 @@ final class MetricsTests: XCTestCase {
             host: "127.0.0.1",
             port: 4002
         )
-        let process = try await ChainProcess.open(configuration: NodeConfiguration(
+        return try await ChainProcess.open(configuration: NodeConfiguration(
             chainPath: chainPath,
             storagePath: storage,
             privateKeyHex: String(repeating: "01", count: 32),
             parentEndpoint: parentEndpoint
         ))
-        return ChainService(
+    }
+
+    private func openService(chainPath: [String]) async throws -> ChainService {
+        service(for: try await openProcess(chainPath: chainPath))
+    }
+
+    private func service(for process: ChainProcess) -> ChainService {
+        ChainService(
             process: process,
             childCandidateProvider: { _ in [] },
             childProofPublisher: { _ in },
@@ -187,8 +223,9 @@ private struct ExpositionError: Error, CustomStringConvertible {
 }
 
 /// Parses text exposition format 0.0.4 strictly: every line is a HELP, TYPE or
-/// sample line, and every sample's family has HELP and TYPE declared before
-/// it. Returns `series -> value`, the series spelled exactly as exposed.
+/// sample line, every sample's family has HELP and TYPE declared before it,
+/// and no HELP, TYPE or series repeats. Returns `series -> value`, the series
+/// spelled exactly as exposed.
 private func parseExposition(_ text: String) throws -> [String: String] {
     let name = "[a-zA-Z_:][a-zA-Z0-9_:]*"
     let label = #"[a-zA-Z_][a-zA-Z0-9_]*="(?:[^"\\\n]|\\[\\"n])*""#
@@ -213,20 +250,26 @@ private func parseExposition(_ text: String) throws -> [String: String] {
         }
         if let match = comment.firstMatch(in: line, range: range), match.range == range {
             if group(match, 1) == "HELP" {
-                helped.insert(group(match, 2))
+                guard helped.insert(group(match, 2)).inserted else {
+                    throw ExpositionError(description: "duplicate HELP: \(line)")
+                }
             } else {
                 guard ["counter", "gauge", "histogram", "summary", "untyped"]
                     .contains(group(match, 3)) else {
                     throw ExpositionError(description: "bad TYPE line: \(line)")
                 }
-                typed.insert(group(match, 2))
+                guard typed.insert(group(match, 2)).inserted else {
+                    throw ExpositionError(description: "duplicate TYPE: \(line)")
+                }
             }
         } else if let match = sample.firstMatch(in: line, range: range), match.range == range {
             let family = group(match, 1)
             guard helped.contains(family), typed.contains(family) else {
                 throw ExpositionError(description: "sample before HELP/TYPE: \(line)")
             }
-            samples[family + group(match, 2)] = group(match, 3)
+            guard samples.updateValue(group(match, 3), forKey: family + group(match, 2)) == nil else {
+                throw ExpositionError(description: "duplicate series: \(line)")
+            }
         } else {
             throw ExpositionError(description: "line violates the exposition grammar: \(line)")
         }
