@@ -4,7 +4,9 @@
 // self-contained child genesis OFFLINE (empty parentState) → submit ONE signed
 // GenesisAction anchor recording its CID in the parent's genesisState → wait for
 // the parent to record it → child process active — then records the child in the
-// topology. `adopt` joins an EXISTING child permissionlessly: the child process
+// topology. The seed and signed anchor are durable before submission, so an
+// interrupted deploy resumes on re-run instead of orphaning a recorded CID.
+// `adopt` joins an EXISTING child permissionlessly: the child process
 // re-derives its genesis through the authenticated parent link, never from "a
 // node that tracks it".
 
@@ -78,7 +80,29 @@ struct Child: AsyncParsableCommand {
             // (spec + premine + timestamp + max target); the child node rebuilds
             // the identical genesis from the same seed and self-admits it.
             let childComponents = parent.components(separatedBy: "/") + [directory]
-            let seed = ChildGenesisSeed(
+            // Once the anchor is submitted the parent may record its CID for
+            // good, whether or not this process survives — and the seed (its
+            // millisecond timestamp above all) is the only way back to the
+            // genesis bytes. So the seed and the exact signed anchor are made
+            // durable BEFORE submission, and a re-run for the same child
+            // resumes them instead of minting a new genesis.
+            let pendingURL = layout.pendingDeploy(for: childPath)
+            var resumable: PendingChildDeploy?
+            if FileManager.default.fileExists(atPath: pendingURL.path) {
+                let loaded = try JSONDecoder().decode(
+                    PendingChildDeploy.self,
+                    from: Data(contentsOf: pendingURL)
+                )
+                guard try HeaderImpl(node: loaded.seed.spec).rawCID
+                        == HeaderImpl(node: chainSpec).rawCID,
+                      loaded.seed.premineTo == premineTo else {
+                    throw CtlError("\(childPath) has a pending deploy with a different --spec or --premine-to (\(pendingURL.path)); its anchor may already be on the parent, so re-run with the original arguments to resume it")
+                }
+                print("resuming pending deploy \(pendingURL.path)")
+                resumable = loaded
+            }
+            let resumed = resumable != nil
+            let seed = resumable?.seed ?? ChildGenesisSeed(
                 spec: chainSpec,
                 premineTo: premineTo,
                 timestamp: Int64(Date().timeIntervalSince1970 * 1000)
@@ -92,54 +116,101 @@ struct Child: AsyncParsableCommand {
                 fetcher: genesisFetcher
             )
             let genesisCID = try BlockHeader(node: genesis).rawCID
-            print("genesis \(genesisCID)")
-            // Print the exact seed up front: the genesis CID is deterministic
-            // in it, so if this process dies between anchor submission and the
-            // seed write below, the recorded CID stays activatable by hand.
-            print("seed \(String(decoding: try JSONEncoder().encode(seed), as: UTF8.self))")
 
-            struct KeyFile: Decodable {
-                let privateKey: String
-                let publicKey: String
-            }
-            let key = try JSONDecoder().decode(
-                KeyFile.self,
-                from: Data(contentsOf: URL(fileURLWithPath: fund))
-            )
-            let address = CryptoUtils.createAddress(from: key.publicKey)
-            let body = TransactionBody(
-                accountActions: fee == 0 ? [] : [AccountAction(
-                    owner: address, delta: -Int64(fee)
-                )],
-                actions: [],
-                depositActions: [],
-                genesisActions: [GenesisAction(
-                    directory: directory, blockCID: genesisCID
-                )],
-                receiptActions: [],
-                withdrawalActions: [],
-                signers: [address],
-                fee: fee,
-                nonce: nonce,
-                chainPath: [parent].flatMap {
-                    $0 == "Nexus" ? ["Nexus"]
-                        : $0.components(separatedBy: "/")
+            let pending: PendingChildDeploy
+            if let resumable {
+                pending = resumable
+            } else {
+                struct KeyFile: Decodable {
+                    let privateKey: String
+                    let publicKey: String
                 }
-            )
-            let header = try HeaderImpl(node: body)
-            guard let signature = TransactionSigning.sign(
-                bodyHeader: header, privateKeyHex: key.privateKey
-            ) else {
-                throw CtlError("anchor signing failed; check the fund key")
+                let key = try JSONDecoder().decode(
+                    KeyFile.self,
+                    from: Data(contentsOf: URL(fileURLWithPath: fund))
+                )
+                let address = CryptoUtils.createAddress(from: key.publicKey)
+                let body = TransactionBody(
+                    accountActions: fee == 0 ? [] : [AccountAction(
+                        owner: address, delta: -Int64(fee)
+                    )],
+                    actions: [],
+                    depositActions: [],
+                    genesisActions: [GenesisAction(
+                        directory: directory, blockCID: genesisCID
+                    )],
+                    receiptActions: [],
+                    withdrawalActions: [],
+                    signers: [address],
+                    fee: fee,
+                    nonce: nonce,
+                    chainPath: [parent].flatMap {
+                        $0 == "Nexus" ? ["Nexus"]
+                            : $0.components(separatedBy: "/")
+                    }
+                )
+                let header = try HeaderImpl(node: body)
+                guard let signature = TransactionSigning.sign(
+                    bodyHeader: header, privateKeyHex: key.privateKey
+                ) else {
+                    throw CtlError("anchor signing failed; check the fund key")
+                }
+                pending = PendingChildDeploy(
+                    seed: seed,
+                    anchor: SubmitTransactionRequest(transaction: Transaction(
+                        signatures: [key.publicKey: signature], body: header
+                    ))
+                )
+                try writeDurably(
+                    JSONEncoder().encode(pending), to: pendingURL
+                )
             }
-            struct SubmitResponse: Decodable { let transactionCID: String }
-            let submitted: SubmitResponse = try await post(
-                rpc: parentChain.rpc, path: "v1/transactions",
-                body: SubmitTransactionRequest(transaction: Transaction(
-                    signatures: [key.publicKey: signature], body: header
-                ))
-            )
-            print("anchor \(submitted.transactionCID)")
+            print("genesis \(genesisCID)")
+            print("seed \(String(decoding: try JSONEncoder().encode(seed), as: UTF8.self))")
+            // Flushed: a killed process never flushes buffered stdout.
+            fflush(nil)
+
+            // A resumed anchor may already be recorded (skip submission), or
+            // still pooled, or never accepted: resubmitting the identical
+            // transaction covers both — the pool already holds it, or takes it.
+            var recorded = false
+            if resumed {
+                recorded = await parentRecordedGenesis(
+                    rpc: parentChain.rpc,
+                    directory: directory,
+                    genesisCID: genesisCID
+                )
+            }
+            if !recorded {
+                struct SubmitResponse: Decodable { let transactionCID: String }
+                do {
+                    let submitted: SubmitResponse = try await post(
+                        rpc: parentChain.rpc, path: "v1/transactions",
+                        body: pending.anchor
+                    )
+                    print("anchor \(submitted.transactionCID)")
+                    fflush(nil)
+                } catch let refusal as CtlError {
+                    // The parent answered and refused. A fresh anchor never
+                    // left this process, so nothing can ever record it. A
+                    // resumed one may have been refused only because it just
+                    // landed; otherwise it stays pending for the operator.
+                    if !resumed {
+                        try? FileManager.default.removeItem(at: pendingURL)
+                        throw CtlError("the parent refused the genesis anchor; nothing was recorded: \(refusal)")
+                    }
+                    guard await parentRecordedGenesis(
+                        rpc: parentChain.rpc,
+                        directory: directory,
+                        genesisCID: genesisCID
+                    ) else {
+                        throw CtlError("the parent refused the pending genesis anchor (\(refusal)); it stays pending at \(pendingURL.path). Delete that file only if this anchor can never be recorded, e.g. another transaction spent its nonce")
+                    }
+                    recorded = true
+                } catch {
+                    throw CtlError("submitting the genesis anchor failed (\(error.localizedDescription)) and it may still have reached the parent; it stays pending at \(pendingURL.path), so re-run the same command to resume it")
+                }
+            }
 
             // The anchor is now an ordinary mempool transaction: a NORMAL
             // parent block writes `directory -> genesisCID` into the parent's
@@ -161,8 +232,7 @@ struct Child: AsyncParsableCommand {
             }
             let worker = try nodeBinary().deletingLastPathComponent()
                 .appendingPathComponent("lattice-miner")
-            var recorded = false
-            if externalMiningWaitSeconds > 0 {
+            if !recorded, externalMiningWaitSeconds > 0 {
                 // The anchor is an ordinary mempool transaction; on a network
                 // with real miners the next parent block records it. Poll only.
                 let deadline = Date().addingTimeInterval(
@@ -179,7 +249,7 @@ struct Child: AsyncParsableCommand {
                     }
                     try await Task.sleep(for: .seconds(10))
                 }
-            } else {
+            } else if !recorded {
                 for _ in 0..<20 {
                     let coordinator = Process()
                     coordinator.executableURL = try nodeBinary()
@@ -211,23 +281,25 @@ struct Child: AsyncParsableCommand {
                 }
             }
             guard recorded else {
-                throw CtlError("the genesis anchor was not recorded; the child was NOT added — check the parent's mining and the funding key nonce, then retry")
+                throw CtlError("the genesis anchor was not recorded yet; the child was NOT added. It stays pending at \(pendingURL.path): re-run the same command to keep waiting for it, after checking the parent's mining and the funding key nonce")
             }
+            // Seed the child's data directory with the genesis inputs so its node
+            // rebuilds the identical self-contained genesis and self-admits it on
+            // startup (the parent has already recorded the CID above). This
+            // precedes the topology entry: a re-run refuses a child already in
+            // the tree, so the tree must never list a child without its seed.
+            let childData = layout.chainDirectory(for: childPath)
+            try writeDurably(
+                JSONEncoder().encode(seed),
+                to: childData.appendingPathComponent("child-genesis.json")
+            )
             let ports = nextFreePorts(topology)
             topology.chains[childPath] = TopologyChain(
                 listen: ports.0, fact: ports.1, rpc: ports.2, peers: nil
             )
             try topology.validated().save(root: layout.root)
-            // Seed the child's data directory with the genesis inputs so its node
-            // rebuilds the identical self-contained genesis and self-admits it on
-            // startup (the parent has already recorded the CID above).
-            let childData = layout.chainDirectory(for: childPath)
-            try FileManager.default.createDirectory(
-                at: childData, withIntermediateDirectories: true
-            )
-            try JSONEncoder().encode(seed).write(
-                to: childData.appendingPathComponent("child-genesis.json")
-            )
+            // The child's own directory now carries the seed.
+            try? FileManager.default.removeItem(at: pendingURL)
             try spawnChain(childPath, topology: topology, layout: layout)
             try await waitActive(
                 childPath, rpc: ports.2, expectedTip: genesisCID
@@ -260,6 +332,35 @@ struct Child: AsyncParsableCommand {
             try topology.save(root: layout.root)
             try spawnChain(path, topology: topology, layout: layout)
             print("\(path): started; awaiting authenticated genesis from the parent")
+        }
+    }
+}
+
+/// What a deploy cannot re-derive once its anchor may be on the parent: the
+/// genesis seed, and the exact signed anchor — resubmitted verbatim, so a
+/// resumed deploy is the same transaction rather than a same-nonce rival the
+/// pool refuses.
+struct PendingChildDeploy: Codable {
+    let seed: ChildGenesisSeed
+    let anchor: SubmitTransactionRequest
+}
+
+/// Replaces `url` atomically and syncs the file and its directory to stable
+/// storage before returning.
+func writeDurably(_ data: Data, to url: URL) throws {
+    let directory = url.deletingLastPathComponent()
+    try FileManager.default.createDirectory(
+        at: directory, withIntermediateDirectories: true
+    )
+    try data.write(to: url, options: .atomic)
+    for path in [url.path, directory.path] {
+        let descriptor = open(path, O_RDONLY)
+        guard descriptor >= 0 else {
+            throw CtlError("cannot open \(path) to sync it (errno \(errno))")
+        }
+        defer { close(descriptor) }
+        guard fsync(descriptor) == 0 else {
+            throw CtlError("cannot sync \(path) to disk (errno \(errno))")
         }
     }
 }
@@ -311,6 +412,9 @@ func parentRecordedGenesis(
     ) else { return false }
     var request = URLRequest(url: url)
     request.timeoutInterval = 5
+    // The listing is `max-age=3`: a cached "not yet" must not answer the
+    // re-check right after a refused resubmission.
+    request.cachePolicy = .reloadIgnoringLocalCacheData
     guard let (data, response) = try? await URLSession.shared.data(for: request),
           let http = response as? HTTPURLResponse,
           (200..<300).contains(http.statusCode),

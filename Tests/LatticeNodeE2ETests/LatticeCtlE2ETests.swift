@@ -137,11 +137,17 @@ final class LatticeCtlE2ETests: XCTestCase {
         return Array(chosen)
     }
 
+    /// Never from the URL cache: `/health` is `max-age=3`, so a cached answer
+    /// can report a stopped-and-restarting node as active before it listens.
     private func health(_ rpc: UInt16) async -> [String: Any]? {
-        guard let url = URL(string: "http://127.0.0.1:\(rpc)/health"),
-              let (data, _) = try? await URLSession.shared.data(
-                from: url
-              ) else { return nil }
+        guard let url = URL(string: "http://127.0.0.1:\(rpc)/health") else {
+            return nil
+        }
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        guard let (data, _) = try? await URLSession.shared.data(
+            for: request
+        ) else { return nil }
         return (try? JSONSerialization.jsonObject(with: data))
             as? [String: Any]
     }
@@ -281,6 +287,22 @@ final class LatticeCtlE2ETests: XCTestCase {
         premineTo: String,
         fund: TestKey
     ) async throws -> UInt16 {
+        _ = try await runCtl(try deployArguments(
+            host, directory: directory, parent: parent,
+            premineTo: premineTo, fund: fund
+        ), root: host.root)
+        return try childRPC(host, "\(parent)/\(directory)")
+    }
+
+    /// `child deploy` arguments for a premined child: writes its spec and
+    /// copies the funding key into the host root.
+    private func deployArguments(
+        _ host: CtlHost,
+        directory: String,
+        parent: String = "Nexus",
+        premineTo: String,
+        fund: TestKey
+    ) throws -> [String] {
         let spec: [String: Any] = [
             "maxNumberOfTransactionsPerBlock": 100,
             "maxStateGrowth": 100_000,
@@ -294,19 +316,25 @@ final class LatticeCtlE2ETests: XCTestCase {
         let specURL = host.root.appendingPathComponent("spec-\(directory).json")
         try JSONSerialization.data(withJSONObject: spec).write(to: specURL)
         try copyKey(fund, into: host.root, name: "fund-\(directory)")
-        _ = try await runCtl([
+        return [
             "child", "deploy", directory,
             "--parent", parent,
             "--spec", specURL.path,
             "--fund", host.root
                 .appendingPathComponent("fund-\(directory).json").path,
             "--premine-to", premineTo,
-        ], root: host.root)
+        ]
+    }
+
+    /// The RPC port the topology allocated to a deployed chain.
+    private func childRPC(_ host: CtlHost, _ path: String) throws -> UInt16 {
         let topology = try JSONSerialization.jsonObject(with: Data(
             contentsOf: host.root.appendingPathComponent("lattice.json")
         )) as! [String: Any]
         let chains = topology["chains"] as! [String: Any]
-        let deployed = chains["\(parent)/\(directory)"] as! [String: Any]
+        let deployed = try XCTUnwrap(
+            chains[path] as? [String: Any], "\(path) is not in the tree"
+        )
         return UInt16(deployed["rpc"] as! Int)
     }
 
@@ -678,6 +706,179 @@ final class LatticeCtlE2ETests: XCTestCase {
             let empty = await drained(stallsRPC)
             return now > beforeSpend && empty
         }
+    }
+
+    /// The deploy that lost a testnet child: its anchor reached the parent,
+    /// the process died before the parent recorded it, and the anchor landed
+    /// anyway — recording a genesis CID whose bytes had existed only in the
+    /// dead process. Every interruption here must leave that genesis
+    /// activatable: a re-run resumes the SAME genesis and the SAME signed
+    /// anchor, and the child it finally brings up is the one the parent
+    /// recorded. The `genesis` line must also survive the kill, since a
+    /// killed process never flushes buffered output.
+    func testInterruptedChildDeployResumesTheSameGenesis() async throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lattice-node-e2e-ctlkeys-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: scratch, withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let miner = try await makeKey(scratch, "minerResume")
+        let seller = try await makeKey(scratch, "sellerResume")
+        let fund = try await makeKey(scratch, "fundResume")
+        let host = try await bringUpMiningHost(miner: miner)
+        // Nothing mines until step 4: each attempt parks in the poll-only
+        // wait, exactly like a deploy against a network of external miners.
+        let deploy = try deployArguments(
+            host, directory: "Market",
+            premineTo: seller.address, fund: fund
+        ) + ["--external-mining-wait-seconds", "600"]
+
+        // 1. The parent is unreachable, so submission fails outright. The
+        // seed must already be durable: the next attempt is this genesis.
+        _ = try await runCtl(["down"], root: host.root)
+        let unreachable = try await runCtl(
+            deploy, root: host.root, expectFailure: true
+        )
+        guard let genesis = line("genesis", in: unreachable) else {
+            throw CtlE2EError("a deploy names its genesis before submitting: \(unreachable)")
+        }
+        _ = try await runCtl(["up"], root: host.root)
+        try await waitFor("Nexus active again") {
+            await self.health(host.nexusRPC)?["phase"] as? String == "active"
+        }
+
+        // 2. Killed once the anchor is in the parent's mempool: submitted,
+        // not recorded.
+        let first = try startCtl(deploy, root: host.root, log: "deploy-1")
+        try await waitFor("anchor pooled on the parent") {
+            (await self.health(host.nexusRPC)?["mempoolCount"] as? Int ?? 0) >= 1
+        }
+        let firstOutput = try sigkill(first)
+        try check(
+            line("genesis", in: firstOutput) == genesis,
+            "the resumed deploy is genesis \(genesis), flushed before the kill: \(firstOutput)"
+        )
+
+        // 3. Resumed while that anchor is still pooled: it must resubmit the
+        // identical transaction (which the pool already holds), not a fresh
+        // signature at the same nonce that the pool refuses as a replacement.
+        let second = try startCtl(deploy, root: host.root, log: "deploy-2")
+        try await waitFor("resumed deploy resubmits its anchor") {
+            (try? self.output(of: second)).flatMap {
+                self.line("anchor", in: $0)
+            } != nil || !second.process.isRunning
+        }
+        try check(
+            second.process.isRunning,
+            "resubmitting a still-pooled anchor is not a refusal: \((try? output(of: second)) ?? "")"
+        )
+        let secondOutput = try sigkill(second)
+        try check(
+            line("genesis", in: secondOutput) == genesis,
+            "the second resume is genesis \(genesis) too: \(secondOutput)"
+        )
+
+        // 4. The anchor lands while no deploy is running.
+        try await runCtl(["mine", "start"], root: host.root)
+        try await waitFor("parent records the anchored genesis", seconds: 120) {
+            await self.recordedGenesis(host.nexusRPC, "Market") == genesis
+        }
+
+        // 5. A re-run finds its genesis already recorded and brings the child
+        // up on it. The consequence, not the exit code: an active child whose
+        // state carries the seeded premine, on the genesis the parent holds.
+        let finished = try await runCtl(deploy, root: host.root)
+        try check(
+            line("genesis", in: finished) == genesis,
+            "the finishing run is genesis \(genesis): \(finished)"
+        )
+        let childRPC = try childRPC(host, "Nexus/Market")
+        try await waitFor("the recorded child is active") {
+            await self.health(childRPC)?["phase"] as? String == "active"
+        }
+        try await waitFor("the child genesis carries the seeded premine") {
+            await self.balance(childRPC, seller.address) == 50_000
+        }
+        let recorded = await recordedGenesis(host.nexusRPC, "Market")
+        try check(
+            recorded == genesis,
+            "the parent still records \(genesis), not \(recorded ?? "nothing")"
+        )
+    }
+
+    /// Throws rather than recording an XCTAssert failure: on macOS, assertion
+    /// failures recorded after a spawned process exits intermittently vanish
+    /// from the run's failure count, which would make these checks vacuous.
+    private func check(
+        _ condition: Bool, _ message: @autoclosure () -> String
+    ) throws {
+        guard condition else { throw CtlE2EError(message()) }
+    }
+
+    /// A `lattice` invocation left running, its combined output going to a
+    /// FILE so exactly what it flushed survives a SIGKILL.
+    private struct RunningCtl {
+        let process: Process
+        let log: URL
+        let handle: FileHandle
+    }
+
+    private func startCtl(
+        _ arguments: [String], root: URL, log name: String
+    ) throws -> RunningCtl {
+        let log = root.appendingPathComponent("\(name).log")
+        FileManager.default.createFile(atPath: log.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: log)
+        let process = Process()
+        process.executableURL = try binary("E2E_CTL_BIN", "lattice")
+        process.arguments = arguments + ["--root", root.path]
+        process.standardOutput = handle
+        process.standardError = handle
+        try process.run()
+        return RunningCtl(process: process, log: log, handle: handle)
+    }
+
+    private func output(of running: RunningCtl) throws -> String {
+        String(decoding: try Data(contentsOf: running.log), as: UTF8.self)
+    }
+
+    /// SIGKILL: no exit handlers and no stdio flush, only what already
+    /// reached the file.
+    private func sigkill(_ running: RunningCtl) throws -> String {
+        if running.process.isRunning {
+            _ = kill(running.process.processIdentifier, SIGKILL)
+        }
+        running.process.waitUntilExit()
+        try? running.handle.close()
+        return try output(of: running)
+    }
+
+    /// The value of the first `<key> <value>` line in CLI output.
+    private func line(_ key: String, in output: String) -> String? {
+        output.split(separator: "\n")
+            .first { $0.hasPrefix("\(key) ") }
+            .map { String($0.dropFirst(key.count + 1)) }
+    }
+
+    /// The genesis CID the parent has committed for `directory`, if any.
+    private func recordedGenesis(
+        _ rpc: UInt16, _ directory: String
+    ) async -> String? {
+        guard let url = URL(
+            string: "http://127.0.0.1:\(rpc)/api/chain/children?limit=100"
+        ) else { return nil }
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        guard let (data, _) = try? await URLSession.shared.data(for: request),
+           let object = try? JSONSerialization.jsonObject(with: data)
+               as? [String: Any],
+           let children = object["children"] as? [[String: Any]] else {
+            return nil
+        }
+        return children.first {
+            ($0["chainPath"] as? [String])?.last == directory
+        }?["genesisHash"] as? String
     }
 }
 

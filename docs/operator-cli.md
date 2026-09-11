@@ -105,11 +105,34 @@ lattice child deploy Market \
 # nested children: --parent Nexus/Market
 ```
 
-The full arc runs in one command: deployment intent on the local parent →
-`GenesisAction` anchor signed by `--fund` (the key stays on this machine) →
-deployment-mode mining rounds driven from the tree root → the child appears in
-`lattice.json` with auto-allocated ports and comes up `active` on the intent's
-genesis CID. If the anchor is not mined, **nothing is recorded or spawned**.
+The full arc runs in one command: the child genesis is built offline from a
+seed (spec, premine, timestamp) → a `GenesisAction` anchor recording its CID is
+signed by `--fund` (the key stays on this machine) → the seed and the signed
+anchor are written durably under the root (`pending-deploy/Nexus-Market.json`
+for `Nexus/Market`) → the anchor is submitted to the local parent → mining rounds driven from
+the tree root (or `--external-mining-wait-seconds` of polling) until the parent
+records it → the child appears in `lattice.json` with auto-allocated ports and
+comes up `active` on that genesis CID. Until the anchor is recorded, **nothing
+is added to `lattice.json` or spawned**.
+
+An interrupted or timed-out deploy is resumable, never lost: once submitted,
+the anchor can still land after the command dies, and the pending file is the
+only copy of the seed its CID depends on. Re-run the same command (same
+`--spec` and `--premine-to`; different ones are refused while a deploy is
+pending) and it resumes that pending deploy instead of building a new genesis:
+
+- anchor already recorded: submission is skipped; the child is added and started.
+- anchor still pooled, or never accepted: the identical signed transaction is
+  resubmitted (`--fund`, `--nonce` and `--fee` are not re-read), then the
+  command waits for it as before.
+- the parent refuses it: the deploy stays pending and the refusal is printed.
+  Delete the pending file only if that anchor can never be recorded (another
+  transaction spent its nonce). A parent refusing a *fresh* anchor removes its
+  pending file, since that transaction never reached the network.
+
+The pending file is removed once the child is in `lattice.json` with its seed
+in `chains/<path>/child-genesis.json`. `wipe` never touches `pending-deploy/`.
+The `genesis` and `seed` lines are flushed before submission.
 
 Notes:
 - `--fund` must be a funded key on the parent chain; `--nonce` defaults to 0

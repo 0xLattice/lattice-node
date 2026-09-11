@@ -161,6 +161,15 @@ public struct HostLayout: Sendable {
         root.appendingPathComponent("chains").appendingPathComponent(path)
     }
 
+    /// An in-flight `child deploy` (genesis seed + signed anchor). Outside the
+    /// wipeable chain directories: the anchor may land on the parent at any
+    /// time, and without this file its genesis could never be rebuilt.
+    public func pendingDeploy(for path: String) -> URL {
+        root.appendingPathComponent("pending-deploy").appendingPathComponent(
+            path.replacingOccurrences(of: "/", with: "-") + ".json"
+        )
+    }
+
     public func pidFile(for path: String) -> URL {
         root.appendingPathComponent("run").appendingPathComponent(
             path.replacingOccurrences(of: "/", with: "-") + ".pid"
