@@ -70,6 +70,31 @@ public struct MiningTemplate: Sendable {
     let childCandidates: [DirectChildCandidate]
     let searchWitness: ChildSchedulingWitness?
 
+    /// Every distinct target a nonce for this work can clear, easiest first,
+    /// so the first is `searchTarget`. A carrier leaves the work open and the
+    /// miner keeps searching toward the rest, skipping hits between them, so
+    /// the list must be complete. It is only when every direct child is a
+    /// leaf: a child carrying children of its own can clear descendant targets
+    /// this node never sees, so such work advertises `searchTarget` alone and
+    /// the miner stops at its first hit.
+    var targets: [UInt256] {
+        guard let emptyChildren = Self.emptyChildrenCID,
+              childCandidates.allSatisfy({
+                  $0.block.children.rawCID == emptyChildren
+              }) else {
+            return [searchTarget]
+        }
+        var targets: Set<UInt256> = [searchTarget, block.target]
+        for child in childCandidates {
+            targets.insert(child.block.target)
+        }
+        return targets.filter { $0 <= searchTarget }.sorted(by: >)
+    }
+
+    private static let emptyChildrenCID = try? HeaderImpl<
+        MerkleDictionaryImpl<VolumeImpl<Block>>
+    >(node: MerkleDictionaryImpl<VolumeImpl<Block>>()).rawCID
+
     var remainingLifetimeMilliseconds: UInt64 {
         let components = ContinuousClock.now.duration(to: expiresAt).components
         guard components.seconds >= 0, components.attoseconds >= 0 else {

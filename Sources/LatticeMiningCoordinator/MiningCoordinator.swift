@@ -13,28 +13,78 @@ public struct MiningCoordinatorWork: Sendable, Equatable {
     /// block bytes so non-Swift workers never re-derive the preimage layout.
     /// Empty only for hand-built work whose blockHex is not a decodable Block.
     public let prefixHex: String
+    /// The target this assignment searches.
     public let targetHex: String
+    /// Every target this work can clear, easiest first. A hit that clears
+    /// only some of them is submitted and the search continues toward the
+    /// rest over the same nonce range; one entry means the first hit ends it.
+    public let targets: [UInt256]
+    /// Template lifetime left when the work was fetched; nil never expires.
+    public let expiresInMilliseconds: UInt64?
     public let staleToken: String
 
     public init(workId: String, blockHex: String, targetHex: String, staleToken: String? = nil) {
+        self.init(
+            workId: workId,
+            blockHex: blockHex,
+            prefixHex: TemplateResponse.derivePrefixHex(blockHex: blockHex),
+            targetHex: targetHex,
+            targets: MinerLoopLogic.parseTarget(targetHex).map { [$0] } ?? [],
+            expiresInMilliseconds: nil,
+            staleToken: staleToken
+        )
+    }
+
+    init(
+        workId: String,
+        blockHex: String,
+        prefixHex: String,
+        targetHex: String,
+        targets: [UInt256],
+        expiresInMilliseconds: UInt64?,
+        staleToken: String?
+    ) {
         self.workId = workId
         self.blockHex = blockHex
-        self.prefixHex = TemplateResponse.derivePrefixHex(blockHex: blockHex)
+        self.prefixHex = prefixHex
         self.targetHex = targetHex
+        self.targets = targets
+        self.expiresInMilliseconds = expiresInMilliseconds
         self.staleToken = staleToken ?? workId
     }
 
     public init?(template: TemplateResponse) {
+        let targets = template.targets.compactMap(MinerLoopLogic.parseTarget)
         guard !template.workID.isEmpty,
               Data(hex: template.blockHex) != nil,
-              MinerLoopLogic.parseTarget(template.searchTarget) != nil else {
+              let searchTarget = MinerLoopLogic.parseTarget(template.searchTarget),
+              targets.count == template.targets.count else {
             return nil
         }
         self.init(
             workId: template.workID,
             blockHex: template.blockHex,
+            prefixHex: template.prefixHex,
             targetHex: template.searchTarget,
+            // The node refuses any hash that misses the search target.
+            targets: Set(targets + [searchTarget])
+                .filter { $0 <= searchTarget }
+                .sorted(by: >),
+            expiresInMilliseconds: template.expiresInMilliseconds,
             staleToken: template.staleToken
+        )
+    }
+
+    /// The same work, searched against `target`.
+    func searching(_ target: UInt256) -> MiningCoordinatorWork {
+        MiningCoordinatorWork(
+            workId: workId,
+            blockHex: blockHex,
+            prefixHex: prefixHex,
+            targetHex: target.toHexString(),
+            targets: targets,
+            expiresInMilliseconds: expiresInMilliseconds,
+            staleToken: staleToken
         )
     }
 }
@@ -157,6 +207,7 @@ public actor MiningCoordinator {
     private let workers: [MiningCoordinatorWorker]
     private let totalBatchSize: UInt64
     private let staleProbeEnabled: Bool
+    private let staleProbeIntervalNanoseconds: UInt64
     private let retryBackoffNanoseconds: UInt64
     private let maxSubmitRetries: Int
     private var nextNonceOffset: UInt64
@@ -170,6 +221,7 @@ public actor MiningCoordinator {
         totalBatchSize: UInt64,
         nonceOffset: UInt64 = 0,
         staleProbeEnabled: Bool = true,
+        staleProbeInterval: Duration = .seconds(2),
         retryBackoffDelay: Duration = .milliseconds(250),
         maxSubmitRetries: Int = 3
     ) {
@@ -178,6 +230,8 @@ public actor MiningCoordinator {
         self.totalBatchSize = max(totalBatchSize, 1)
         self.nextNonceOffset = nonceOffset
         self.staleProbeEnabled = staleProbeEnabled
+        // A zero interval would hammer the node's status route.
+        self.staleProbeIntervalNanoseconds = max(Self.nanoseconds(staleProbeInterval), 1_000_000)
         self.retryBackoffNanoseconds = Self.nanoseconds(retryBackoffDelay)
         self.maxSubmitRetries = max(maxSubmitRetries, 0)
     }
@@ -248,30 +302,52 @@ public actor MiningCoordinator {
         metricsState.activeWorkerCount = workers.count
         let ranges = assignRanges(workerCount: workers.count)
         metricsState.assignedRangeCount = UInt64(ranges.count)
+        // Hashing a reported nonce locally, never trusting a worker's hash,
+        // tells which of the work's targets the nonce cleared.
+        let midstate = Data(hex: work.prefixHex).flatMap {
+            $0.isEmpty ? nil : ProofOfWork.midstate(prefixBytes: ContiguousArray($0))
+        }
 
         enum Event: Sendable {
-            case unchanged
+            case fresh
             case stale
+            /// A background task ended with the batch; nothing to act on.
+            case ended
+            case expired
+            case searched
             case workerFailed(workerId: String, error: String)
-            case solution(MiningWorkerResult)
+            case solution(MiningWorkerResult, worker: Int, range: NonceSearchRange)
         }
 
         return await withTaskGroup(of: Event.self) { group in
-            for (worker, range) in zip(workers, ranges) {
+            var searching = 0
+            var probing = false
+            func search(
+                _ index: Int,
+                _ assignment: MiningCoordinatorWork,
+                _ range: NonceSearchRange
+            ) {
+                let worker = workers[index]
+                searching += 1
                 group.addTask {
                     do {
-                        guard let result = try await worker.search(work: work, range: range),
-                              result.workId == work.workId else {
-                            return .unchanged
+                        guard let result = try await worker.search(work: assignment, range: range),
+                              result.workId == assignment.workId else {
+                            return .searched
                         }
-                        return .solution(result)
+                        return .solution(result, worker: index, range: range)
                     } catch {
                         return .workerFailed(workerId: worker.id, error: String(describing: error))
                     }
                 }
             }
 
+            for (index, range) in ranges.enumerated() {
+                search(index, work, range)
+            }
+
             if staleProbeEnabled {
+                probing = true
                 group.addTask { [nodeClient] in
                     // Best-effort freshness probe only; work submission remains the
                     // authoritative stale/tip check. This must stay cheap:
@@ -279,34 +355,112 @@ public actor MiningCoordinator {
                     // candidates, so probing by fetchWork() doubles the hottest
                     // path and can starve easy-target smoke/dev mining.
                     let latest = try? await nodeClient.fetchStaleToken()
-                    guard let latest else { return .unchanged }
-                    return latest == work.staleToken ? .unchanged : .stale
+                    guard let latest else { return .fresh }
+                    return latest == work.staleToken ? .fresh : .stale
+                }
+                group.addTask { [nodeClient, staleProbeIntervalNanoseconds] in
+                    // The tip can move at any point in a round, and against a
+                    // hard target no submission comes along to notice it, so
+                    // the probe repeats until the batch ends.
+                    while true {
+                        do {
+                            try await Task.sleep(nanoseconds: staleProbeIntervalNanoseconds)
+                        } catch {
+                            return .ended
+                        }
+                        if let latest = try? await nodeClient.fetchStaleToken(),
+                           latest != work.staleToken {
+                            return .stale
+                        }
+                    }
                 }
             }
 
-            for await event in group {
+            if let lifetime = work.expiresInMilliseconds {
+                // The node refuses nonces for expired work: searching past the
+                // lifetime spends effort no submission can use.
+                let (nanoseconds, overflow) = lifetime.multipliedReportingOverflow(by: 1_000_000)
+                group.addTask {
+                    // Cancelled only once the batch is over, when no one reads it.
+                    try? await Task.sleep(nanoseconds: overflow ? .max : nanoseconds)
+                    return .expired
+                }
+            }
+
+            // The easiest target no submitted hit has cleared yet.
+            var openTarget = work.targets.first
+            var lastCarrier: MiningCoordinatorCycleResult?
+
+            while searching > 0 || probing, let event = await group.next() {
                 switch event {
-                case .unchanged:
-                    continue
+                case .fresh:
+                    probing = false
+                case .ended:
+                    break
+                case .searched:
+                    searching -= 1
                 case .stale:
                     group.cancelAll()
+                    metricsState.staleAbortCount += 1
+                    return .stale(workId: work.workId)
+                case .expired:
+                    group.cancelAll()
+                    if let lastCarrier { return lastCarrier }
                     metricsState.staleAbortCount += 1
                     return .stale(workId: work.workId)
                 case .workerFailed(let workerId, let error):
                     group.cancelAll()
                     metricsState.workerFailureCount += 1
                     return .workerFailed(workId: work.workId, workerId: workerId, error: error)
-                case .solution(let result):
-                    group.cancelAll()
-                    if staleProbeEnabled, await isStale(work) {
-                        metricsState.staleAbortCount += 1
-                        return .stale(workId: work.workId)
+                case .solution(let result, let index, let range):
+                    searching -= 1
+                    let hash = midstate.map { ProofOfWork.hash(midstate: $0, nonce: result.nonce) }
+                    // A hit that clears only targets an earlier hit already
+                    // cleared is not worth a submission; its worker just keeps
+                    // searching. Anything else goes to the node, including a
+                    // hit that clears nothing, which the node refuses.
+                    var alreadyCleared = false
+                    if let hash, let openTarget, let searchTarget = work.targets.first {
+                        alreadyCleared = hash > openTarget && hash <= searchTarget
                     }
-                    return await submitWithRetry(work: work, result: result)
+                    if !alreadyCleared {
+                        if staleProbeEnabled, await isStale(work) {
+                            group.cancelAll()
+                            metricsState.staleAbortCount += 1
+                            return .stale(workId: work.workId)
+                        }
+                        let outcome = await submitWithRetry(work: work, result: result)
+                        // Only a carrier leaves the work open, and only a known
+                        // hash names the targets it left uncleared.
+                        guard case .submitted(_, _, let submission) = outcome,
+                              !submission.accepted,
+                              submission.disposition == "carrier",
+                              let hash,
+                              let next = work.targets.first(where: { $0 < hash }) else {
+                            group.cancelAll()
+                            return outcome
+                        }
+                        openTarget = next
+                        lastCarrier = outcome
+                    }
+                    // Resume this worker's range after the hit, searching
+                    // toward the easiest target still open.
+                    let searched = result.nonce &- range.startNonce
+                    if let openTarget, searched < range.count, range.count - searched > 1 {
+                        search(
+                            index,
+                            work.searching(openTarget),
+                            NonceSearchRange(
+                                startNonce: result.nonce &+ 1,
+                                count: range.count - searched - 1
+                            )
+                        )
+                    }
                 }
             }
 
-            return .noSolution(workId: work.workId)
+            group.cancelAll()
+            return lastCarrier ?? .noSolution(workId: work.workId)
         }
     }
 
@@ -527,7 +681,23 @@ public final class HTTPMiningCoordinatorNodeClient: MiningCoordinatorNodeClient 
             let disposition: String
             let tipCID: String?
         }
+        struct Refusal: Decodable {
+            struct Reason: Decodable {
+                let message: String
+            }
+            let error: Reason
+        }
         guard let response = try? JSONDecoder().decode(Response.self, from: data) else {
+            // A 4xx refusal (unknown or expired work, a missed target) is the
+            // node's final answer: retrying it cannot land the block. The
+            // daemon names the refusal in the body.
+            if http.statusCode >= 400,
+               let refusal = try? JSONDecoder().decode(Refusal.self, from: data) {
+                return MiningSolutionSubmission(
+                    accepted: false,
+                    disposition: refusal.error.message
+                )
+            }
             throw MiningCoordinatorNodeClientError.invalidSubmissionResponse(statusCode: http.statusCode)
         }
         return MiningSolutionSubmission(
