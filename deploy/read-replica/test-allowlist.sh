@@ -4,10 +4,12 @@
 # paths get 403. This is the auditor-required public/internal boundary — a
 # TESTED part of the config, not prose.
 #
-# Also asserts the per-client limits: bursts and excess in-flight requests get
-# 429, the expensive routes trip before the general budget, one client's burst
-# does not throttle another, and a Fly-Client-IP header from a source that is
-# not fly-proxy cannot split one client into many.
+# Also asserts the limits: bursts and excess in-flight requests get 429, the
+# expensive routes trip before the general budget while block detail stays on
+# it, one client's burst does not throttle another, a Fly-Client-IP header from
+# a source that is not fly-proxy cannot split one client into many, enough
+# distinct clients still hit the server-wide ceiling, and fly's health check is
+# never throttled.
 #
 # Runs the ACTUAL nginx.conf against a stub upstream that stands in for the node
 # (returns 200 to any request). nginx and the stub share one network namespace
@@ -80,6 +82,8 @@ check GET  "/v1/accounts/$CID"     200 "account"
 check GET  /api/chain/children     200 "explorer api"
 check GET  /api/block/latest       200 "explorer api"
 check GET  "/api/chain/endpoints?chainPath=Nexus/Child" 200 "endpoint discovery"
+check GET  /api/block/1/transactions 200 "block transactions"
+check GET  /api/block/1/children   200 "block children"
 
 echo "== denied: gated/mutating + writes + unknown get 403 =="
 check GET  /v1/status              403 "gated status off the public surface"
@@ -89,6 +93,7 @@ check POST /v1/transactions        403 "write POST"
 check POST /v1/blocks              403 "POST to an allowlisted read route"
 check POST /api/block/latest       403 "POST to /api"
 check POST /api/chain/endpoints    403 "POST to endpoint discovery"
+check POST /api/block/1/transactions 403 "POST to block transactions"
 
 ok()  { echo "  ok   $1"; }
 bad() { echo "  FAIL $1"; fail=1; }
@@ -96,6 +101,9 @@ bad() { echo "  FAIL $1"; fail=1; }
 lines() { printf '%s\n' "$1" | sed -n "$2p"; }
 # count <text> <code>: how many status lines equal <code>.
 count() { printf '%s\n' "$1" | grep -c "^$2\$" || true; }
+# The server-wide ceiling is ONE bucket for every request, so a heavy block
+# leaves it nearly full. Let it drain before a block that asserts no 429.
+drain() { sleep 2; }
 
 # fire <inside|outside> <client-ip> <path> <count> [<client-ip> <path> <count>]...
 # Sends every request in ONE curl run, so a burst lands well inside a rate
@@ -138,19 +146,26 @@ if [ "$(lines "$got" 1)" = 200 ] && [ "$n" -gt 0 ]; then
 else
   bad "a 200-request burst on a general route should get 429, got $n"
 fi
+drain
 
 got=$(fire inside \
   198.51.100.3 /v1/blocks 30 \
   198.51.100.4 "/api/chain/endpoints?chainPath=Nexus/Child" 30 \
+  198.51.100.10 "/api/block/1/transactions?limit=100" 30 \
+  198.51.100.11 "/v1/blocks/$CID" 30 \
   198.51.100.5 /api/block/latest 30)
 list=$(count "$(lines "$got" 1,30)" 429)
 endpoints=$(count "$(lines "$got" 31,60)" 429)
-general=$(count "$(lines "$got" 61,90)" 429)
-if [ "$list" -gt 0 ] && [ "$endpoints" -gt 0 ] && [ "$general" -eq 0 ]; then
-  ok "30 requests trip the expensive routes (429s: list $list, endpoints $endpoints) but not a general route"
+blocktxs=$(count "$(lines "$got" 61,90)" 429)
+detail=$(count "$(lines "$got" 91,120)" 429)
+general=$(count "$(lines "$got" 121,150)" 429)
+if [ "$list" -gt 0 ] && [ "$endpoints" -gt 0 ] && [ "$blocktxs" -gt 0 ] \
+   && [ "$detail" -eq 0 ] && [ "$general" -eq 0 ]; then
+  ok "30 requests trip the expensive routes (429s: list $list, endpoints $endpoints, block txs $blocktxs) but not block detail or a general route"
 else
-  bad "30 requests should trip /v1/blocks and /api/chain/endpoints but not a general route (429s: list $list, endpoints $endpoints, general $general)"
+  bad "30 requests should trip only the expensive routes (429s: list $list, endpoints $endpoints, block txs $blocktxs, detail $detail, general $general)"
 fi
+drain
 
 # A bursts, B sends one, A sends two more: B must pass while A is still limited
 # (two, because at most one of A's can land on a refill).
@@ -176,7 +191,23 @@ else
   bad "40 concurrent slow requests from one client should get some 429 (got $n)"
 fi
 
-# Last: this spends the budget of the host's own address.
+echo "== server-wide ceiling: bounds total upstream load, not just one client =="
+# 500 clients, one request each: every per-client budget is untouched, so a 429
+# here can only come from the server-wide bucket.
+many=()
+for i in $(seq 1 500); do
+  many+=("198.18.$((i / 256)).$((i % 256))" /api/block/latest 1)
+done
+got=$(fire inside "${many[@]}")
+n=$(count "$got" 429)
+if [ "$n" -gt 0 ] && [ "$(count "$got" 200)" -gt 0 ]; then
+  ok "500 clients with one request each: $n get 429 from the server-wide ceiling"
+else
+  bad "500 single-request clients should hit the server-wide ceiling (429s: $n)"
+fi
+drain
+
+# Last two blocks: these spend the budget of the host's own address.
 echo "== untrusted source: a client-sent Fly-Client-IP does not split the budget =="
 spoofed=()
 for i in $(seq 1 200); do spoofed+=("203.0.113.$i" /api/block/latest 1); done
@@ -186,6 +217,23 @@ if [ "$n" -gt 0 ]; then
   ok "200 requests claiming 200 different Fly-Client-IPs still share one budget ($n got 429)"
 else
   bad "200 requests claiming different Fly-Client-IPs from an untrusted source should get 429 (got $n)"
+fi
+
+echo "== fly's health check is never throttled =="
+# The block above just spent the budget for the host's own address — which is
+# where a header-less request falls back, and where every client would land if
+# the trusted range were ever wrong. /health must answer anyway, or fly would
+# depool the machine under public load.
+health_bad=0
+for _ in $(seq 1 5); do
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+    "http://127.0.0.1:$PROXY_PORT/health")
+  [ "$code" = 200 ] || health_bad=1
+done
+if [ "$health_bad" -eq 0 ]; then
+  ok "/health still answers 200 with the fallback budget spent"
+else
+  bad "/health must not be rate limited: it 429'd with the fallback budget spent"
 fi
 
 if [ "$fail" -ne 0 ]; then
