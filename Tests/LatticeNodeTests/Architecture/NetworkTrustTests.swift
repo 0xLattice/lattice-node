@@ -8779,7 +8779,11 @@ final class NetworkTrustTests: XCTestCase {
             in recorder: PayloadRecorder,
             accept: (Data) -> Value?
         ) async throws -> Value? {
-            for _ in 0..<200 {
+            // Generous: this file also runs under ASan + UBSan, where the
+            // handshake and its hello follow-up are far slower. A lapse here
+            // would read as an unresolved anchor — the very failure under
+            // test — so it must only ever mean "never arrived".
+            for _ in 0..<3_000 {
                 for payload in await recorder.payloads(topic: topic) {
                     if let value = accept(payload) { return value }
                 }
@@ -8914,7 +8918,7 @@ final class NetworkTrustTests: XCTestCase {
             )
             for directory in children {
                 let genesisCID = try XCTUnwrap(genesisCIDs[directory])
-                let deadline = ContinuousClock.now + .seconds(5)
+                let deadline = ContinuousClock.now + .seconds(15)
                 var found = false
                 while !found, ContinuousClock.now < deadline {
                     found = await observer.discoverProviders(

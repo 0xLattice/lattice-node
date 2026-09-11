@@ -1167,8 +1167,20 @@ public actor NodeNetworkRuntime: IvyDelegate {
            await process.mainChainBlockCID(atHeight: 0) == genesisCID {
             urls.append(own)
         }
+        // One sample of the wired children, taken before the resolve suspends
+        // and iterated below: the answer then describes a single consistent
+        // moment. Reading live `hierarchyPeers` after the suspension instead
+        // would mix a child admitted mid-resolve into a lookup that never
+        // asked for its directory, and drop it anyway. It is served from the
+        // next ask on.
+        let wiredChildren = hierarchyPeers.compactMap { key, role -> (PeerKey, String)? in
+            guard case .child(let path) = role, let directory = path.last else {
+                return nil
+            }
+            return (key, directory)
+        }
         let anchored = await process.anchoredChildGenesisCIDs(
-            directories: wiredChildDirectories()
+            directories: Set(wiredChildren.map(\.1))
         )
         let directories = Set(
             anchored.filter { $0.value == genesisCID }.map(\.key)
@@ -1179,10 +1191,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // of sybil declarants shadow the honest child's URL from every
             // answer for the process lifetime. Random selection keeps every
             // declarant reachable across repeated asks.
-            for (key, role) in hierarchyPeers.shuffled() {
-                guard case .child(let path) = role,
-                      let directory = path.last,
-                      directories.contains(directory),
+            for (key, directory) in wiredChildren.shuffled() {
+                guard directories.contains(directory),
                       let url = childDeclaredReadURLs[key],
                       !urls.contains(url) else { continue }
                 urls.append(url)
@@ -4201,14 +4211,16 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // chain can then discoverProviders(childGenesis) and reach a node
         // serving the child — permissionless, no registry, and discovery is
         // the global overlay DHT (not this node's connected-peer list).
+        // The same sample drives the lookup and the announcements, so this
+        // pass describes one consistent moment; a child wired mid-resolve is
+        // announced by the next pass.
+        let directories = wiredChildDirectories()
         let anchored = await process.anchoredChildGenesisCIDs(
-            directories: wiredChildDirectories()
+            directories: directories
         )
         var announcedChildren: Set<String> = []
-        for role in hierarchyPeers.values {
-            guard case .child(let path) = role,
-                  let directory = path.last,
-                  let childGenesis = anchored[directory],
+        for directory in directories {
+            guard let childGenesis = anchored[directory],
                   announcedChildren.insert(childGenesis).inserted else {
                 continue
             }

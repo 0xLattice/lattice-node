@@ -1234,8 +1234,19 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         }
         var anchored: [String: String] = [:]
         for directory in directories {
-            if let genesisCID = (try? genesis.get(key: directory)) ?? nil {
-                anchored[directory] = genesisCID
+            do {
+                if let genesisCID = try genesis.get(key: directory) {
+                    anchored[directory] = genesisCID
+                }
+            } catch {
+                // A throw here is unloaded content, NOT "no such child". Both
+                // answer the caller with silence, so trace the difference:
+                // an unreadable anchor is exactly the miss this lookup exists
+                // to rule out.
+                SyncTrace.log(
+                    "anchored-child genesis unreadable"
+                        + " directory=\(directory) error=\(error)"
+                )
             }
         }
         return anchored
