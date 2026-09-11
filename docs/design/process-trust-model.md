@@ -103,13 +103,12 @@ Nexus has no parent, so its genesis is constructed locally and pinned by CID:
 `bafyreiayw4z5qz4lt2sljf2enzn7uol3qa6bebadav7qwnqz7agxkiuwhq`
 
 The CID is checked before configured root bootstrap, never used as a
-peer-admission signature permit. Every child genesis is ordinary content bound
-to a parent state. A prepared child intent becomes authoritative only after an
+peer-admission signature permit. Every child genesis is self-contained content
+that commits to the empty parent state. It becomes authoritative only after an
 accepted parent block stores the exact `GenesisAction(directory, childCID)`.
 The authenticated immediate-parent process acknowledges the exact tuple
-`(directory, childCID, deploymentBlock.prevState)` from its durable accepted
-facts, and the child requires its genesis `parentState` to equal that entering
-state. The acknowledgement is unsigned, non-portable, and never persisted by
+`(directory, childCID, empty parent state)` from its durable accepted facts
+before the child admits that genesis. The acknowledgement is unsigned, non-portable, and never persisted by
 the child as peer authority.
 
 Signature and signer fields inside a genesis block carry no authority and need

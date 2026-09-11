@@ -93,17 +93,27 @@ swift run lattice-node \
   --rpc-port 8180
 ```
 
-It initially reports `awaitingGenesis`. On the parent:
+It initially reports `awaitingGenesis`. To give a new chain its genesis:
 
-1. `POST /v1/children/intents` with directory `Payments`, the child spec,
-   child-genesis transactions, target, and timestamp.
-2. Construct and sign a parent transaction with the returned genesis CID in a
-   matching `GenesisAction`.
-3. `POST /v1/transactions` with that parent transaction.
-4. Mine the parent carrier with `lattice-mining-coordinator --deployment`.
+1. Build the self-contained child genesis offline from a seed: the child spec,
+   an optional premine recipient, and a timestamp. The same seed always yields
+   the same genesis CID.
+2. Write that seed as `child-genesis.json` into the child's data directory
+   before starting the child. The node reads the file only at startup, so a
+   child that was already running must be restarted after the file is written.
+3. Construct and sign a parent transaction carrying the genesis CID in a
+   `GenesisAction` for directory `Payments`.
+4. `POST /v1/transactions` on the parent with that transaction.
+5. Mine the parent with `lattice-mining-coordinator` as usual; the transaction
+   is selected like any other.
 
-The hierarchy plane delivers the resulting authenticated genesis link to the
-child. The child does not accept opaque genesis bytes on its command line.
+A child started with the seed retries until the parent's record lands. A child
+also tries to fetch the recorded genesis block by CID from child-overlay peers,
+but a brand-new chain has no peer serving it, so the first node of a new chain
+needs the seed. Either way, the child admits the genesis only after its
+authenticated parent confirms that exact record. The child does not accept
+opaque genesis bytes on its command line. `lattice child deploy` performs all
+of these steps for a local tree.
 
 ## Testing an application
 

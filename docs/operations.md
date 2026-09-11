@@ -50,8 +50,7 @@ Important fields:
   `bafyreiayw4z5qz4lt2sljf2enzn7uol3qa6bebadav7qwnqz7agxkiuwhq`.
 - `tipCID` and `height`: null only while a child awaits genesis.
 - `revision`: the local consensus mutation watermark.
-- `mempoolCount`, `mempoolBytes`, and `pendingChildIntents`: bounded service
-  pressure indicators.
+- `mempoolCount` and `mempoolBytes`: bounded service pressure indicators.
 
 ## External mining services
 
@@ -118,8 +117,13 @@ nonce.
 
 ## Child chains
 
-Start a child process before or after preparing its parent intent. It can safely
-remain in `awaitingGenesis` until the parent carrier is accepted.
+A child process may start before or after its parent records the child genesis
+and can safely remain in `awaitingGenesis` until the parent block carrying the
+`GenesisAction` is accepted. The node reads a `child-genesis.json` seed from its
+data directory only at startup: place the seed before starting the first node
+of a new chain, or restart the child after writing it. Without a seed read at
+startup, the child can activate only by fetching the recorded genesis from a
+child-overlay peer, and a brand-new chain has none.
 
 ```bash
 lattice-node \
@@ -181,8 +185,8 @@ systemctl start lattice-node lattice-miner
 ```
 
 An empty Nexus directory recreates the exact pinned genesis automatically. An
-empty child directory returns to `awaitingGenesis` and must reacquire its
-authenticated genesis link from its configured parent.
+empty child directory returns to `awaitingGenesis` and must admit its genesis
+again, which requires its configured parent to confirm the recorded CID.
 
 Before running a recursive removal, resolve and verify the explicit path. Never
 target a home directory, workspace root, or an unresolved environment variable.
@@ -204,11 +208,19 @@ matched backup pair or wipe the entire process directory and resync.
 
 - Verify its `--chain-path` is absolute and exactly matches the intended child.
 - Verify `--parent` names the immediate parent's process key and fact port.
-- Confirm the parent intent was followed by a separately signed parent
-  `GenesisAction` transaction.
-- Confirm the coordinator was run with `--deployment`; normal templates never
-  include genesis actions.
-- Confirm a parent carrier containing the matching child genesis was accepted.
+- Confirm a separately signed parent transaction carrying the matching
+  `GenesisAction` was mined. The parent's `GET /api/chain/children` listing
+  helps, but it returns at most 100 children with no offset, so absence from it
+  is not proof on a parent with more children.
+- The child pursues two genesis paths concurrently: a `child-genesis.json` seed
+  read from its data directory at startup, and a fetch of the recorded genesis
+  block by CID from child-overlay peers.
+- If the seed was written after the child started, restart the child; the seed
+  is read only at startup.
+- If the seed is not the exact one the recorded CID was built from, it yields a
+  different CID that the parent will not confirm. The child can then activate
+  only through the fetch path, so confirm a child-overlay peer serves the
+  genesis block (a brand-new chain has none), or replace the seed and restart.
 - Check hierarchy-plane connectivity; an overlay peer cannot substitute for the
   configured parent fact link.
 
