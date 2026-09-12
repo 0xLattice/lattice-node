@@ -582,6 +582,25 @@ public actor ChainService {
         self.maximumChildCandidates = maximumChildCandidates
     }
 
+    /// Join this service's own background workers, so that dropping it really
+    /// does release everything it holds. The commit, walk, and publication
+    /// workers each capture this actor for as long as they run, and through it
+    /// the `ChainProcess` and the exclusive storage-directory lock the process
+    /// holds — so a caller that wants to REOPEN the same storage directory
+    /// (a restart) must wait for them, not merely drop its reference. Each
+    /// worker clears its own handle when it finishes, so this returns once
+    /// none is left. Cancels only the walk's delayed retry timer, which exists
+    /// solely to re-drive the walk later; the workers themselves are awaited
+    /// rather than cancelled, so nothing in flight is abandoned mid-write.
+    public func shutdown() async {
+        validateWalkRetryTask?.cancel()
+        validateWalkRetryTask = nil
+        while let worker = canonicalCommitWorker ?? validateWalkWorker
+            ?? transactionPublicationWorker {
+            await worker.value
+        }
+    }
+
     public func status() async -> ChainServiceStatusResponse {
         await acquireOperation()
         defer { releaseOperation() }
