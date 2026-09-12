@@ -112,6 +112,15 @@ public struct NodeConfiguration: Sendable {
     /// parent's on-chain anchor before trusting it. Optional: nodes without a
     /// public TLS surface declare nothing and stay non-browsable.
     public let publicReadURL: String?
+    /// Seconds with no newly accepted block after which this node widens its
+    /// peer search: re-dial the configured peers it holds no session with, and
+    /// dial a few endpoints from one provider lookup. An eclipse only works
+    /// while the victim keeps asking the same peers, and the node that has
+    /// stopped making progress is the one that most needs others. Staleness is
+    /// measured from this node's own verified tip, never from a peer's claimed
+    /// height. Discovery only: nothing here disconnects, scores or prefers a
+    /// peer, and it has no bearing on validation or fork choice. `0` disables.
+    public let peerSearchInterval: TimeInterval
     public let resourcePolicy: NodeResourcePolicy
 
     /// Overlay slots kept in reserve for outbound dials so a burst of inbound
@@ -133,6 +142,7 @@ public struct NodeConfiguration: Sendable {
         overlayMaxConnectionsPerNetgroup: Int = IvyConfig.defaultMaxConnections,
         externalAddress: String? = nil,
         publicReadURL: String? = nil,
+        peerSearchInterval: TimeInterval = 600,
         resourcePolicy: NodeResourcePolicy = .default
     ) throws {
         guard let address = ChainAddress(chainPath) else {
@@ -203,6 +213,7 @@ public struct NodeConfiguration: Sendable {
         self.overlayMaxConnectionsPerNetgroup = max(1, overlayMaxConnectionsPerNetgroup)
         self.externalAddress = externalAddress
         self.publicReadURL = declaredReadURL
+        self.peerSearchInterval = max(0, peerSearchInterval)
         self.resourcePolicy = resourcePolicy
     }
 

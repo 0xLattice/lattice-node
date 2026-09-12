@@ -243,6 +243,59 @@ parent's unsigned session-bound answer.
 For application testing, deploy a normal child with test-oriented parameters.
 Nexus retains its one pinned genesis.
 
+## Peer search
+
+A node that has stopped making progress goes looking for more peers rather
+than waiting on the ones it already holds. An eclipse only works for as long
+as its victim keeps asking the same peers, and running a node is cheap, so
+searching is the defence.
+
+- **Trigger.** No new high-water accepted height for `--peer-search-interval`
+  seconds. Staleness is measured from this node's own acquired tip, which
+  advances only on proof of work it verified itself; no peer's announced or
+  claimed height is consulted. A tip that moves *backwards* (a reorg, an
+  exclusion re-projection) is not progress and does not reset the timer.
+- **Response.** Re-dial every configured `--peer` this node holds no session
+  with (which also clears the overlay's reconnect suppression, the one state in
+  which it has permanently given up on a configured peer), then run one
+  provider lookup for this chain's genesis and dial up to four endpoints it is
+  not already connected to. Discovery answers pointing at unspecified,
+  loopback, link-local, multicast or broadcast hosts are dropped unread.
+- **Default.** `600` (ten minutes), enabled. Same cadence for the first search
+  and every repeat while the tip is still idle, so a long stall cannot
+  accumulate dials.
+- **Tuning.** `--peer-search-interval <seconds>`. `0` disables it entirely, as
+  does any negative value.
+- **Timing precision.** The staleness threshold is the interval exactly as
+  configured, but the node samples its own tip on a cadence bounded to
+  1s–24h. A search therefore fires up to one sampling period *after* the
+  threshold is crossed: with the default, expect a widening between ten and
+  twenty minutes after the last accepted block. An interval above 24h still
+  measures staleness at its full configured value; only the sampling cadence is
+  bounded.
+
+**What this buys, unconditionally:** recovery from benign stalls — peers that
+have gone silent, and the reconnect-suppression state in which the overlay has
+stopped retrying a configured peer for good. Re-dialling a configured peer
+clears that suppression, so "loss is temporary" under **Bootstrap peers** holds
+even for a peer the overlay has given up on entirely, not only for one it is
+still backing off from.
+
+**Against a deliberate eclipse, the escape comes from the seed set, not from
+discovery.** Provider lookups resolve through the hint cache and the routing
+table, both populated exclusively through current sessions, so a fully eclipsed
+node is asking its attacker where to find peers; the discovery limb is
+therefore best-effort. The seeds are the part an attacker cannot choose, and a
+Nexus process carries them by default, so a stalled root node re-dials a source
+its attacker never selected without any operator action. A **child** chain
+receives no defaults, so a child's escape is exactly the `--peer` set its
+operator gave it — another reason to give a child real peers of its own.
+
+This is **discovery only**. It never disconnects, scores, punishes or prefers a
+peer — a slow peer and a withholding peer are indistinguishable, so an idle tip
+is never evidence against anyone — and it has no bearing on validation, fork
+choice, or which peer serves a sync.
+
 ## Storage and backups
 
 One process directory contains both halves of durable state:
