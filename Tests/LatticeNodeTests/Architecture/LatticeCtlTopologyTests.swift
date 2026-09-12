@@ -8,6 +8,22 @@ final class LatticeCtlTopologyTests: XCTestCase {
         TopologyChain(listen: base, fact: base + 1, rpc: base + 2)
     }
 
+    /// A pending deploy is keyed by chain path, and `-` is a legal directory
+    /// atom: flattening `/` to `-` would let `Nexus/A/B` and `Nexus/A-B` share
+    /// one file, so one deploy's genesis seed could overwrite the other's.
+    func testPendingDeployPathsDoNotCollide() {
+        let layout = HostLayout(root: "/tmp/lattice-collision")
+        XCTAssertNotEqual(
+            layout.pendingDeploy(for: "Nexus/A/B"),
+            layout.pendingDeploy(for: "Nexus/A-B")
+        )
+        // The name operators are told to look for in docs/operator-cli.md.
+        XCTAssertEqual(
+            layout.pendingDeploy(for: "Nexus/Market").lastPathComponent,
+            "Nexus%2FMarket.json"
+        )
+    }
+
     func testValidationRequiresNexusRootedAbsolutePaths() {
         XCTAssertThrowsError(try Topology(
             chains: ["Payments": chain(4001)]

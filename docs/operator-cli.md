@@ -121,12 +121,45 @@ lattice child deploy Market \
 
 The full arc runs in one command: the self-contained child genesis is built
 locally from a seed (spec, `--premine-to`, timestamp) → a `GenesisAction`
-anchor signed by `--fund` (the key stays on this machine) is submitted to the
-parent → ordinary one-round coordinator runs are driven from the tree root
-until the parent lists the recorded CID → the child appears in `lattice.json`
-with auto-allocated ports, its data directory is seeded with
-`child-genesis.json`, and it comes up `active` on that genesis CID. If the
-parent does not record the anchor, **nothing is added to the tree or spawned**.
+anchor for its CID is signed by `--fund` (the key stays on this machine) → the
+seed and the signed anchor are written durably under the root
+(`pending-deploy/Nexus%2FMarket.json` for `Nexus/Market`) → the anchor is
+submitted to the parent → ordinary one-round coordinator runs are driven from
+the tree root (or `--external-mining-wait-seconds` of polling) until the parent
+lists the recorded CID → the child's data directory is seeded with
+`child-genesis.json`, the child appears in `lattice.json` with auto-allocated
+ports, and it comes up `active` on that genesis CID. If the parent does not
+record the anchor, **nothing is added to the tree or spawned**.
+
+An interrupted or timed-out deploy is resumable, never lost: once submitted,
+the anchor can still land after the command dies, and the pending file is the
+only copy of the seed its CID depends on. Re-run the same command (same
+`--spec` and `--premine-to`; different ones are refused while a deploy is
+pending) and it resumes that pending deploy instead of building a new genesis:
+
+- anchor already recorded: submission is skipped; the child is added and started.
+- anchor still pooled, or never accepted: the identical signed transaction is
+  resubmitted, then the command waits for it as before.
+- `--nonce`, `--fee` or `--fund` changed: another anchor is signed for the same
+  genesis, appended to the pending file, and submitted. This is how to fix a
+  nonce the key has not reached (pooled as future, never mined) or a fee too
+  low to mine. A new nonce, or a different `--fund`, is admitted alongside the
+  earlier anchor rather than replacing it; only a same-nonce, same-signer
+  anchor is a replacement, and that one must pay a strictly higher fee.
+  Re-running with the values an earlier run used resubmits that earlier
+  anchor instead of signing again, so a correction never strands it. At most
+  one anchor per directory can ever be recorded, so the extra ones are inert.
+- the parent refuses it: the deploy stays pending and the refusal is printed;
+  re-run with corrected values. A parent refusing a *fresh* anchor removes its
+  pending file, since that transaction never reached the network.
+
+The pending file is removed once the child is in `lattice.json` with its seed
+in `chains/<path>/child-genesis.json`. `wipe` never touches `pending-deploy/`.
+Deleting it by hand abandons that genesis even though an earlier anchor for it
+(one with a future nonce included) can still be recorded later. If two *fresh*
+deploys of the same child start together, only one claims the pending file and
+the other stops without submitting; a resumed run writes to the file it just
+read, so it does not contend for the claim.
 
 Notes:
 - `--fund` must be a funded key on the parent chain; `--nonce` defaults to 0
@@ -138,9 +171,9 @@ Notes:
 - On a network whose target is too hard for ad-hoc CPU rounds, pass
   `--external-mining-wait-seconds <n>` to wait for already-running miners to
   record the anchor instead of driving local rounds.
-- The command prints the `genesis` CID and `seed` JSON before submitting the
-  anchor, so a recorded CID can still be activated by hand if the command dies
-  before seeding the child.
+- The command prints the `genesis` CID and `seed` JSON, flushed, before
+  submitting the anchor. The copy a re-run resumes from is the pending file
+  above, which is already on disk by then.
 - A child with no funded account cannot transact — use `--premine-to`.
 
 ## Transactions
