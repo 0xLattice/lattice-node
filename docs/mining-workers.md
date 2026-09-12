@@ -53,6 +53,27 @@ One JSON object on stdout:
 Exit 0 in both cases; any other exit or malformed stdout is a worker failure
 and the batch is retried.
 
+## Merged work
+
+One template can clear several chains' targets: the Nexus root and its direct
+children. When the node can list all of them (no direct child carries children
+of its own), the coordinator first searches the easiest. A hit that clears only
+some of them is a `carrier`: the coordinator submits it, the node keeps the
+work open, and the coordinator invokes the worker again over the rest of its
+range (`--start-nonce` just past the hit) with `--target` set to the easiest
+target still uncleared. That repeats until the hardest target is hit, the range
+is exhausted, or the template expires.
+
+Each invocation is still one immutable prefix, target, and range, but merged
+work adds two requirements:
+
+- A `found` result must report the **lowest** winning nonce in the assigned
+  range. The coordinator resumes just past the reported nonce, so a worker that
+  reports a higher winner silently skips the nonces below it for the harder
+  targets.
+- A worker must not assume one invocation per assigned range, or one target per
+  `--work-id`.
+
 ## Reference vector
 
 Validate any implementation against this before mining (from

@@ -71,6 +71,7 @@ check GET  /api/block/latest       200 "explorer api"
 
 echo "== denied: gated/mutating + writes + unknown get 403 =="
 check GET  /v1/status              403 "gated status off the public surface"
+check GET  /metrics                403 "operator metrics off the public surface"
 check GET  /random                 403 "unknown path"
 check GET  /                       403 "root"
 check POST /v1/transactions        403 "write POST"
