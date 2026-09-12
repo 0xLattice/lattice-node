@@ -52,6 +52,31 @@ Important fields:
 - `revision`: the local consensus mutation watermark.
 - `mempoolCount` and `mempoolBytes`: bounded service pressure indicators.
 
+## Metrics
+
+```bash
+curl --fail http://127.0.0.1:8080/metrics
+```
+
+`GET /metrics` serves Prometheus text exposition format 0.0.4 on the loopback
+RPC port only; it is never registered on `--public-read-port`, and the
+read-replica nginx allowlist refuses it. Each chain runs as its own process, so
+each chain process is a separate scrape target on its own `--rpc-port`. Scrape
+from the same host or through an authenticated proxy. A platform-managed
+scraper such as Fly's dials the machine's address, not loopback, so it cannot
+reach this endpoint. Every sample carries `chain="<absolute chain path>"` (for
+example `Nexus` or `Nexus/testnet`); label values are escaped per the format.
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `lattice_chain_tip_height` | gauge | `chain`, `tier` | Main-chain tip height. `tier="validated"` is the deepest validated tip the node acts on; `tier="weighed"` is the canonical weighed-inclusive tip that same read started from, so validated never exceeds weighed within a scrape. Absent while a child awaits genesis. |
+| `lattice_overlay_peers` | gauge | `chain` | Authenticated same-chain overlay peers. The parent/child fact-plane link is not counted: a child whose only link is its parent reads `0`. |
+| `lattice_mempool_transactions` | gauge | `chain` | Transactions in the mempool. |
+| `process_start_time_seconds` | gauge | `chain` | Process start time, seconds since the Unix epoch. |
+
+A scrape costs the same as `/health`: the same ungated validated-tip read, with
+no operation gate.
+
 ## External mining services
 
 Run one or more coordinators against a Nexus process. Each coordinator allocates

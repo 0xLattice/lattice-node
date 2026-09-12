@@ -83,6 +83,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     var publicReadUrl: String?
 
     mutating func run() async throws {
+        let processStartTime = Date()
         guard let address = ChainAddress(string: chainPath) else {
             throw ValidationError("--chain-path must be absolute and begin with Nexus")
         }
@@ -266,7 +267,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             host: rpcBind,
             port: Int(rpcPort),
             peers: peersProvider,
-            discoverProviders: providerDiscovery
+            discoverProviders: providerDiscovery,
+            processStartTime: processStartTime
         )
         let publicReadApp = publicReadPort.map { port in
             makePublicReadApplication(
@@ -415,7 +417,8 @@ func makeApplication(
     peers: @Sendable @escaping () async -> ExplorerPeersResponse = {
         ExplorerPeersResponse(count: 0, peers: [])
     },
-    discoverProviders: @Sendable @escaping (String) async -> [String] = { _ in [] }
+    discoverProviders: @Sendable @escaping (String) async -> [String] = { _ in [] },
+    processStartTime: Date = Date()
 ) -> Application<RouterResponder<BasicRequestContext>> {
     let router = Router()
     addPublicReadRoutes(
@@ -431,6 +434,18 @@ func makeApplication(
     // endpoint; the public status surface is /health.
     router.get("v1/status") { request, context in
         try json(await service.status(), request: request, context: context)
+    }
+    // Prometheus exposition: operator surface only, never the public read app.
+    router.get("metrics") { _, _ in
+        let body = await service.metricsExposition(
+            peers: await peers().count,
+            processStartTime: processStartTime
+        )
+        return Response(
+            status: .ok,
+            headers: [.contentType: nodeMetricsContentType],
+            body: ResponseBody(byteBuffer: ByteBuffer(string: body))
+        )
     }
     addOperatorWriteRoutes(to: router, service: service)
     return Application(

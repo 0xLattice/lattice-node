@@ -145,10 +145,17 @@ everything else — crucially `/v1/status` (gated + mutating) and every write PO
   pinned sha on each read-RPC release so the allowlist matches the node's routes.
 - `nginx.conf` — the allowlist itself (the auditor-required public/internal
   boundary). Any route change must land with its allowlist change in the same diff.
+  It also holds the per-client rate and in-flight limits (429). Behind fly-proxy
+  every connection comes from the proxy, so limits key on `Fly-Client-IP`,
+  trusted only from fly-proxy's egress range; the comments there give the analysis.
 - `entrypoint.sh` — starts nginx, then the node in the foreground.
-- `fly.toml` — the fly app (`lattice-mainnet-read`); 443/80 → nginx (8081).
+- `fly.toml` — the fly app (`lattice-mainnet-read`); 443/80 → nginx (8081). Keep
+  the `http` handler on both ports: it overwrites any client-sent `Fly-Client-IP`.
 - `test-allowlist.sh` — asserts the boundary (allowed routes proxy through, denied
-  routes 403) by running the real `nginx.conf` against a stub upstream in Docker.
+  routes 403) and the limits (bursts get 429, the expensive routes trip first,
+  clients are limited independently, a spoofed header from an untrusted source
+  does not split the budget) by running the real `nginx.conf` against a stub
+  upstream in Docker.
   Runs in CI (`read-replica-allowlist` job); run locally with
   `bash deploy/read-replica/test-allowlist.sh`.
 

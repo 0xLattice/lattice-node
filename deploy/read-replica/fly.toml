@@ -16,7 +16,9 @@ primary_region = "iad"
     port = 4001
 
 # Public read surface: 443/80 -> nginx (8081), which allowlists GET reads to the
-# loopback node and denies /v1/status + writes.
+# loopback node and denies /v1/status + writes. Both ports must keep the `http`
+# handler: it overwrites any client-sent Fly-Client-IP, which nginx's per-client
+# limits key on (see nginx.conf).
 [[services]]
   protocol = "tcp"
   internal_port = 8081

@@ -657,6 +657,20 @@ public actor ChainService {
         )
     }
 
+    /// The operator `/metrics` exposition: an ungated read costing what
+    /// `/health` does (one validated-tip walk plus the live pool count).
+    public func metricsExposition(peers: Int, processStartTime: Date) async -> String {
+        let tips = await process.metricsTipHeights()
+        return renderNodeMetrics(NodeMetricsSample(
+            chainPath: process.configuration.chainPath,
+            validatedTipHeight: tips.validated,
+            weighedTipHeight: tips.weighed,
+            overlayPeers: peers,
+            mempoolTransactions: await pool.count,
+            processStartTime: processStartTime
+        ))
+    }
+
     /// Bounded public read: a decoded, content-verified block, gated to only
     /// what this node has durably accepted. Never takes the operation gate —
     /// reads only ChainProcess's ungated CAS path.
