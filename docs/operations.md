@@ -35,6 +35,29 @@ RPC must remain on loopback. The same-chain overlay port may be public. Expose
 the hierarchy fact port only where configured direct parents and children need
 it.
 
+## Bootstrap peers
+
+The binary ships default bootstrap peers for the root chain, so a Nexus process
+started with no peer source of its own still has somewhere to dial. They are a
+discovery convenience and nothing more: a default peer is verified and weighed
+exactly like any other peer, receives no trust, no validation shortcut, and no
+fork-choice influence, and is dropped like any stranger if it serves a
+different chain.
+
+- **Override.** Any `--peer` you supply REPLACES the defaults; the two are never
+  merged. In `lattice.json`, a chain's `peers` list does the same.
+- **Disable.** `--no-default-peers` starts the process with none. In
+  `lattice.json`, an explicitly empty `"peers": []` means the same thing;
+  omitting the key entirely is what asks for the defaults.
+- **Child chains** never receive the root defaults. A child's peers must serve
+  that child's chain, so give it its own `--peer` endpoints.
+- **Loss is temporary.** A configured peer that goes away — including a default
+  — is re-dialled under exponential backoff for the life of the process, so a
+  node that loses its peers keeps trying to find them.
+
+The startup banner reports which set is in play (`N default` or `N configured`
+bootstrap peer(s)).
+
 ## Health
 
 ```bash
@@ -227,6 +250,10 @@ matched backup pair or wipe the entire process directory and resync.
 ### No peers
 
 - Check each `--peer` key, host, and overlay port.
+- Confirm the intended bootstrap set is in play: the startup banner reports
+  `N default` or `N configured` bootstrap peer(s), and reports none when the
+  process was started with `--no-default-peers` (or `"peers": []`) and no
+  `--peer`.
 - If `--minimum-peer-key-bits` is nonzero, confirm every required peer identity
   deliberately satisfies it. Generated process keys are accepted by the default
   value `0`.

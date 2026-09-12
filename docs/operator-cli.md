@@ -13,6 +13,7 @@ mkdir /var/lib/lattice && cd /var/lib/lattice
 
 # Scaffold: directories, a Nexus identity (0600, outside wipeable chain
 # storage), lattice.json, and your shareable peer string.
+# --peer is optional: without it the node uses its built-in bootstrap peers.
 lattice init --peer <pubkey>@lattice-mainnet-iad.fly.dev:4001
 
 lattice up          # start the tree; children are wired automatically
@@ -52,6 +53,12 @@ lattice mine status  # cursor position and batch runway
 - Every key in `chains` is an absolute Nexus-rooted path; a child requires its
   immediate parent in the same file (the CLI derives `--parent` from the local
   parent's identity and fact port — you never wire it by hand).
+- `peers` is that chain's overlay bootstrap peers. Omit it and a Nexus process
+  uses the default bootstrap peers built into the binary; a list REPLACES them;
+  an explicitly empty `"peers": []` means no bootstrap peers at all. Child
+  chains never receive the root defaults, so a child that needs peers names its
+  own. Defaults are discovery only — no trust, no fork-choice influence — and a
+  peer that goes away is re-dialled under backoff for the life of the process.
 - Ports must be unique across the file. `.` and `..` path atoms are rejected.
 - `worker` is `"cpu"` (the bundled `lattice-miner`) or a path to any
   executable honoring the [worker contract](mining-workers.md) — a GPU worker
@@ -62,7 +69,7 @@ lattice mine status  # cursor position and batch runway
 
 | Verb | What it does |
 |---|---|
-| `init [--peer …]` | Scaffold the root, mint identities, write `lattice.json`, print peer strings. |
+| `init [--peer …]` | Scaffold the root, mint identities, write `lattice.json`, print peer strings. Without `--peer` the tree carries no `peers` key, so the node uses its built-in default bootstrap peers. |
 | `identity` | Every chain's public key and peer string (no log scraping). |
 | `up [--foreground]` | Start missing processes, parents first, under a spawn lock. `--foreground` stays as PID 1 and restarts exits (containers). |
 | `down` | Stop the tree, children first. SIGTERM, then SIGKILL after a grace. |

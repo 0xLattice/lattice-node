@@ -36,7 +36,16 @@ genesis, and verifies its CID:
 The RPC server listens on loopback. Non-loopback `--rpc-bind` values are
 rejected because the current HTTP surface is unauthenticated.
 
-Add same-chain peers explicitly:
+## Bootstrap peers
+
+A Nexus process started with no peer source of its own dials the default
+bootstrap peers built into the binary, so a fresh node joins the network with
+no flags. They are a discovery convenience only: a default peer is admitted,
+verified, and weighed exactly like any other peer, gets no validation shortcut
+and no fork-choice influence, and is dropped like any stranger if it serves a
+different chain.
+
+Any peer you supply REPLACES the built-in set — the two are never merged:
 
 ```bash
 swift run lattice-node \
@@ -44,6 +53,19 @@ swift run lattice-node \
   --peer <public-key>@192.0.2.10:4001 \
   --peer <public-key>@198.51.100.20:4001
 ```
+
+To start with no bootstrap peers at all — a private or isolated network —
+disable them explicitly:
+
+```bash
+swift run lattice-node --chain-path Nexus --no-default-peers
+```
+
+The defaults are the root chain's. A child process never receives them; give a
+child its own `--peer` endpoints, which must serve that child's chain.
+
+A bootstrap peer that goes away is re-dialled under backoff for the life of the
+process, so a node that loses its peers keeps trying to find them again.
 
 Peer identity admission uses `--minimum-peer-key-bits` (default `0`). Generated
 process identities work at that default. Set a nonzero threshold only when every
