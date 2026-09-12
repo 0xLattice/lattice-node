@@ -122,13 +122,15 @@ final class LatticeCtlTopologyTests: XCTestCase {
             chains: ["Nexus": chain(4001)],
             mine: TopologyMine(
                 chain: "Nexus", worker: "cpu", workers: 2,
-                batchSize: 1_000, rewards: "rewards.jsonl"
+                batchSize: 1_000, rewards: "rewards.jsonl",
+                minWork: ["Nexus": "2^32"]
             )
         )
         try topology.save(root: root)
         let loaded = try Topology.load(root: root).validated()
         XCTAssertEqual(loaded.chains["Nexus"]?.listen, 4001)
         XCTAssertEqual(loaded.mine?.batchSize, 1_000)
+        XCTAssertEqual(loaded.mine?.minWork, ["Nexus": "2^32"])
     }
 
     func testLayoutSeparatesIdentityFromWipeableChains() {

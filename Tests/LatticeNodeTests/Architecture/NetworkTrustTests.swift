@@ -22,6 +22,14 @@ private enum NetworkTestError: Error {
     case failedPhase(String)
 }
 
+private actor MinimumWorkRecorder {
+    private var values: [[MiningMinimumWork]] = []
+
+    func record(_ value: [MiningMinimumWork]) { values.append(value) }
+
+    func last() -> [MiningMinimumWork]? { values.last }
+}
+
 private func inertNetworkHandlers() -> NodeNetworkHandlers {
     NodeNetworkHandlers(admission: { _ in throw CancellationError() })
 }
@@ -2787,6 +2795,82 @@ final class NetworkTrustTests: XCTestCase {
         ).encoded()) { error in
             XCTAssertEqual(error as? NodeNetworkWireError, .malformed)
         }
+    }
+
+    /// A miner's minimum work rides the candidate request only when it has
+    /// entries, so a request without one keeps the exact bytes it always had.
+    func testCandidateRequestCarriesMinimumWorkOnlyWhenPresent() async throws {
+        let parent = try await canonicalNetworkBlock()
+        let parentCID = try BlockHeader(node: parent).rawCID
+        let parentData = try XCTUnwrap(parent.toData())
+        func request(
+            _ minimumWork: [MiningMinimumWork]
+        ) -> ChildCandidateRequestMessage {
+            ChildCandidateRequestMessage(
+                requestID: 21,
+                budgetMilliseconds: 750,
+                childPath: ["Nexus", "Payments"],
+                parentCID: parentCID,
+                parentData: parentData,
+                rewards: [],
+                minimumWork: minimumWork
+            )
+        }
+
+        let legacy = try request([]).encoded()
+        XCTAssertEqual(legacy.suffix(parentData.count), parentData)
+        XCTAssertTrue(
+            try ChildCandidateRequestMessage.decoded(legacy).minimumWork.isEmpty
+        )
+
+        let entries = [
+            MiningMinimumWork(
+                chainPath: ["Nexus", "Payments"],
+                work: UInt256(1) << 32
+            ),
+            MiningMinimumWork(
+                chainPath: ["Nexus", "Payments", "Receipts"],
+                work: UInt256(9)
+            ),
+        ]
+        let encoded = try request(entries).encoded()
+        XCTAssertGreaterThan(encoded.count, legacy.count)
+        XCTAssertEqual(
+            try ChildCandidateRequestMessage.decoded(encoded).minimumWork,
+            entries
+        )
+
+        // Another subtree, zero work, a truncated trailer, and an empty one
+        // (which a present-only-when-used field can never encode) are refused.
+        XCTAssertThrowsError(try request([MiningMinimumWork(
+            chainPath: ["Nexus", "Other"],
+            work: UInt256(1)
+        )]).encoded())
+        XCTAssertThrowsError(try request([MiningMinimumWork(
+            chainPath: ["Nexus", "Payments"],
+            work: .zero
+        )]).encoded())
+        // More work than the hardest valid target (1) can represent.
+        XCTAssertThrowsError(try request([MiningMinimumWork(
+            chainPath: ["Nexus", "Payments"],
+            work: workForTarget(UInt256(1)) + UInt256(1)
+        )]).encoded())
+        // Beyond the payload cap the rewards field also honours.
+        XCTAssertThrowsError(try request((0..<20_000).map {
+            MiningMinimumWork(
+                chainPath: ["Nexus", "Payments", "d\($0)"],
+                work: UInt256(1) << 16
+            )
+        }).encoded())
+        XCTAssertThrowsError(
+            try ChildCandidateRequestMessage.decoded(encoded + Data([0]))
+        )
+        var emptyTrailer = legacy
+        emptyTrailer.append(contentsOf: [2, 0, 0, 0])
+        emptyTrailer.append(Data("[]".utf8))
+        XCTAssertThrowsError(
+            try ChildCandidateRequestMessage.decoded(emptyTrailer)
+        )
     }
 
     func testCandidateRequestEnforcesHierarchyRewardAndFrameBounds() async throws {
@@ -5786,6 +5870,61 @@ final class NetworkTrustTests: XCTestCase {
         await fixture.parentRuntime.stop()
     }
 
+    /// The parent forwards a miner's minimum work to the child that builds
+    /// the block, and only the entries at or below that child.
+    func testChildCandidateRequestCarriesDescendantMinimumWork() async throws {
+        let fixture = try await provisionalRootFixture(keyByte: 0x96)
+        let received = MinimumWorkRecorder()
+        let childHandlers = NodeNetworkHandlers(
+            childCandidateBuilder: { context, _ in
+                await received.record(context.minimumWork)
+                return fixture.candidate
+            },
+            candidateReservations: { _ in true },
+            admission: { _ in throw CancellationError() }
+        )
+        do {
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess,
+                handlers: inertNetworkHandlers()
+            )
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess,
+                handlers: childHandlers
+            )
+            try await waitForChildCandidate(fixture)
+
+            let childEntry = MiningMinimumWork(
+                chainPath: ["Nexus", "Payments"],
+                work: UInt256(1) << 8
+            )
+            let candidates = await fixture.parentRuntime.directChildCandidates(
+                ChildCandidateRequestContext(
+                    parentCarrier: fixture.context.parentCarrier,
+                    rewards: [],
+                    minimumWork: [
+                        MiningMinimumWork(
+                            chainPath: ["Nexus"],
+                            work: UInt256(1) << 20
+                        ),
+                        childEntry,
+                    ]
+                )
+            )
+            XCTAssertEqual(candidates.count, 1)
+            // The parent's own minimum is the parent's business, not the
+            // child's: only the child's entry crosses.
+            let forwarded = await received.last()
+            XCTAssertEqual(forwarded, [childEntry])
+        } catch {
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+            throw error
+        }
+        await fixture.childRuntime.stop()
+        await fixture.parentRuntime.stop()
+    }
+
     func testParentTemplateWaitsForDurableChildCandidateReservationAck()
         async throws
     {
@@ -8711,6 +8850,254 @@ final class NetworkTrustTests: XCTestCase {
         XCTAssertTrue(flood.allSatisfy { all.contains($0) })
     }
 
+    /// A parent with more anchored children than one listing page. Anchors
+    /// live in the genesisState trie in key order, so `c200` sorts past the
+    /// first 200 entries while `c000` sits inside them. For both wired
+    /// children, every runtime path that resolves a child's anchor must find
+    /// it: the answer to the child's own anchor request, the read URL served
+    /// for the child's genesis, and the provider record announced for it.
+    /// Each path's observation is recorded while the network runs and asserted
+    /// only once it is torn down.
+    func testWiredChildAnchorsResolveBeyondTheFirstListingPage()
+        async throws {
+        let target = try await overlayRuntime(
+            keyByte: 0xd1,
+            requestTimeout: .seconds(2)
+        )
+        let directories = (0...200).map { String(format: "c%03d", $0) }
+        let anchors = directories.map {
+            GenesisAction(directory: $0, blockCID: testCID("anchor-\($0)"))
+        }
+        let genesisCIDs = Dictionary(
+            uniqueKeysWithValues: anchors.map { ($0.directory, $0.blockCID) }
+        )
+        let children = ["c000", "c200"]
+        XCTAssertEqual(directories.sorted().firstIndex(of: "c200"), 200)
+
+        let key = CryptoUtils.generateKeyPair()
+        let body = TransactionBody(
+            accountActions: [],
+            actions: [],
+            depositActions: [],
+            genesisActions: anchors,
+            receiptActions: [],
+            withdrawalActions: [],
+            signers: [CryptoUtils.createAddress(from: key.publicKey)],
+            fee: 0,
+            nonce: 0,
+            chainPath: ["Nexus"]
+        )
+        let bodyHeader = try HeaderImpl<TransactionBody>(node: body)
+        let signature = try XCTUnwrap(TransactionSigning.sign(
+            bodyHeader: bodyHeader,
+            privateKeyHex: key.privateKey
+        ))
+        let authorization = Transaction(
+            signatures: [key.publicKey: signature],
+            body: bodyHeader
+        )
+        try await VolumeImpl<Transaction>(node: authorization)
+            .storeRecursively(storer: target.process)
+        let genesis = try await target.process.canonicalTipBlock()
+        let carrier = try await BlockBuilder.buildBlock(
+            previous: genesis,
+            transactions: [authorization],
+            timestamp: genesis.timestamp + 3_600_000,
+            nonce: 1,
+            fetcher: target.process
+        )
+        let admission = try await target.process.admit(
+            BlockHeader(node: carrier)
+        )
+        XCTAssertTrue(admission.decision.isAccepted)
+
+        /// The first payload on `topic` matching `accept`, or nil once the
+        /// wait lapses.
+        func firstPayload<Value>(
+            _ topic: String,
+            in recorder: PayloadRecorder,
+            accept: (Data) -> Value?
+        ) async throws -> Value? {
+            // Generous: this file also runs under ASan + UBSan, where the
+            // handshake and its hello follow-up are far slower. A lapse here
+            // would read as an unresolved anchor — the very failure under
+            // test — so it must only ever mean "never arrived".
+            for _ in 0..<3_000 {
+                for payload in await recorder.payloads(topic: topic) {
+                    if let value = accept(payload) { return value }
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            return nil
+        }
+
+        let configuration = target.process.configuration
+        var instances: [Ivy] = []
+        var delegates: [any IvyDelegate] = []
+        var wired: [String: Bool] = [:]
+        var anchorAnswers: [String: String] = [:]
+        var readURLs: [String: [String]] = [:]
+        var announced: [String: Bool] = [:]
+        func stopAll() async {
+            for ivy in instances { await ivy.stop() }
+            await target.runtime.stop()
+        }
+        do {
+            try await target.runtime.start(
+                process: target.process,
+                handlers: duplicateNetworkHandlers()
+            )
+            var recorders: [String: PayloadRecorder] = [:]
+            for (index, directory) in children.enumerated() {
+                let recorder = PayloadRecorder()
+                let delegate = AnchorRequestingChildPeer(
+                    recorder: recorder,
+                    hello: try ChainHello(
+                        nexusGenesisCID: configuration.nexusGenesisCID,
+                        chainPath: ["Nexus", directory],
+                        publicReadURL: "https://\(directory).example"
+                    ).encode(),
+                    childPath: ["Nexus", directory]
+                )
+                let child = Ivy(config: IvyConfig(
+                    signingKey: signingKey(0xd2 + UInt8(index)),
+                    listenPort: 0,
+                    bootstrapPeers: [PeerEndpoint(
+                        publicKey: configuration.processPublicKey,
+                        host: "127.0.0.1",
+                        port: configuration.factListenPort
+                    )],
+                    requestTimeout: .seconds(2),
+                    stunServers: [],
+                    mode: .privateNetwork
+                ))
+                await child.installTestDelegate(delegate)
+                instances.append(child)
+                delegates.append(delegate)
+                recorders[directory] = recorder
+                try await child.start()
+            }
+
+            // (1) The child's own anchor request, answered on the hierarchy
+            // plane. The evidence-index answer (served to any wired child)
+            // proves the role was granted, so a silent anchor answer is the
+            // lookup's miss, not a missing session.
+            for directory in children {
+                let recorder = try XCTUnwrap(recorders[directory])
+                wired[directory] = try await firstPayload(
+                    NodeNetworkTopic.childEvidenceIndexResponse,
+                    in: recorder,
+                    accept: { _ in true }
+                ) ?? false
+                anchorAnswers[directory] = try await firstPayload(
+                    NodeNetworkTopic.childGenesisAnchorResponse,
+                    in: recorder,
+                    accept: {
+                        try? ChildGenesisAnchorResponseMessage.decoded($0)
+                            .genesisCID
+                    }
+                )
+            }
+
+            // (2) The read URL a wired child declared, served for its genesis.
+            let observerRecorder = PayloadRecorder()
+            let observerDelegate = PayloadRecordingPeer(
+                recorder: observerRecorder
+            )
+            // A real listen port: the parent routes (and so announces to) only
+            // peers that advertise a dialable address.
+            let observer = Ivy(config: IvyConfig(
+                signingKey: signingKey(0xd4),
+                listenPort: NetworkTransportTestPorts.allocate(),
+                stunServers: [],
+                mode: .overlay
+            ))
+            await observer.installTestDelegate(observerDelegate)
+            instances.append(observer)
+            delegates.append(observerDelegate)
+            try await connectAndHello(
+                observer,
+                peerID: target.peerID,
+                endpoint: target.endpoint,
+                hello: target.hello
+            )
+            // Overlay topics are gated on a completed hello; the tip
+            // announcement back proves it landed.
+            _ = try await firstPayload(
+                NodeNetworkTopic.blockAnnouncement,
+                in: observerRecorder,
+                accept: { $0 }
+            )
+            for (index, directory) in children.enumerated() {
+                let requestID = UInt64(10 + index)
+                _ = await observer.sendMessage(
+                    to: target.peerID,
+                    topic: NodeNetworkTopic.readEndpointRequest,
+                    payload: try ReadEndpointRequestMessage(
+                        requestID: requestID,
+                        genesisCID: try XCTUnwrap(genesisCIDs[directory])
+                    ).encoded()
+                )
+                readURLs[directory] = try await firstPayload(
+                    NodeNetworkTopic.readEndpointResponse,
+                    in: observerRecorder,
+                    accept: { payload -> [String]? in
+                        guard let response = try?
+                                ReadEndpointResponseMessage.decoded(payload),
+                              response.requestID == requestID
+                        else { return nil }
+                        return response.readURLs
+                    }
+                )
+            }
+
+            // (3) The provider record announced for each wired child genesis.
+            await target.runtime.announceGenesisProvidersForTesting(
+                process: target.process
+            )
+            for directory in children {
+                let genesisCID = try XCTUnwrap(genesisCIDs[directory])
+                let deadline = ContinuousClock.now + .seconds(15)
+                var found = false
+                while !found, ContinuousClock.now < deadline {
+                    found = await observer.discoverProviders(
+                        rootCID: genesisCID
+                    ).contains {
+                        $0.publicKey == configuration.processPublicKey
+                    }
+                    if !found {
+                        try await Task.sleep(for: .milliseconds(20))
+                    }
+                }
+                announced[directory] = found
+            }
+        } catch {
+            await stopAll()
+            throw error
+        }
+        await stopAll()
+        withExtendedLifetime(delegates) {}
+
+        for directory in children {
+            XCTAssertEqual(wired[directory], true, "\(directory) hierarchy role")
+            XCTAssertEqual(
+                anchorAnswers[directory],
+                genesisCIDs[directory],
+                "anchor request from \(directory)"
+            )
+            XCTAssertEqual(
+                readURLs[directory],
+                ["https://\(directory).example"],
+                "read URL for \(directory)"
+            )
+            XCTAssertEqual(
+                announced[directory],
+                true,
+                "provider record for \(directory)"
+            )
+        }
+    }
+
     private func signingKey(_ byte: UInt8) -> Curve25519.Signing.PrivateKey {
         try! Curve25519.Signing.PrivateKey(rawRepresentation: Data(repeating: byte, count: 32))
     }
@@ -8783,6 +9170,57 @@ final class NetworkTrustTests: XCTestCase {
             from: Data(
                 "{\"id\":\"\(id)\",\"work\":\"0x\(String(work, radix: 16))\"}".utf8
             )
+        )
+    }
+}
+
+/// A raw immediate child on its parent's hierarchy plane. It answers the
+/// parent's hello with its own, then asks for its evidence index (answered
+/// for any wired child) and for the genesis CID the parent anchored for its
+/// directory. Records every payload the parent sends.
+private final class AnchorRequestingChildPeer: IvyDelegate, Sendable {
+    private let recorder: PayloadRecorder
+    private let hello: Data
+    private let childPath: [String]
+
+    init(recorder: PayloadRecorder, hello: Data, childPath: [String]) {
+        self.recorder = recorder
+        self.hello = hello
+        self.childPath = childPath
+    }
+
+    func ivy(
+        _ ivy: Ivy,
+        didReceiveMessage message: PeerMessage,
+        from peer: AuthenticatedPeer
+    ) async {
+        await recorder.append(topic: message.topic, payload: message.payload)
+        guard message.topic == NodeNetworkTopic.hierarchyHello,
+              let index = try? ChildEvidenceIndexRequestMessage(
+                requestID: 1,
+                childPath: childPath,
+                sourceID: nil,
+                cursor: 0,
+                through: nil
+              ).encoded(),
+              let anchor = try? ChildGenesisAnchorRequestMessage(
+                requestID: 2
+              ).encoded()
+        else { return }
+        _ = await ivy.sendMessage(
+            to: peer,
+            topic: NodeNetworkTopic.hierarchyHello,
+            payload: hello
+        )
+        _ = await ivy.sendMessage(
+            to: peer,
+            topic: NodeNetworkTopic.childEvidenceIndexRequest,
+            payload: index
+        )
+        _ = await ivy.sendMessage(
+            to: peer,
+            topic: NodeNetworkTopic.childGenesisAnchorRequest,
+            payload: anchor
         )
     }
 }

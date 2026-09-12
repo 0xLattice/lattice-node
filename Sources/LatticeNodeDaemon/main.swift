@@ -61,8 +61,11 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "HTTP bind address; only loopback addresses are accepted")
     var rpcBind = "127.0.0.1"
 
-    @Option(parsing: .upToNextOption, help: "Overlay peer as public-key@host:port")
+    @Option(parsing: .upToNextOption, help: "Overlay peer as public-key@host:port. Any peer given here REPLACES the built-in default bootstrap peers; the two are never merged.")
     var peer: [String] = []
+
+    @Flag(help: "Start with no built-in default bootstrap peers. Without --peer this means no bootstrap peers at all; the node then finds peers only through discovery or inbound connections.")
+    var noDefaultPeers = false
 
     @Option(help: "Immediate parent fact endpoint as public-key@host:port")
     var parent: String?
@@ -83,6 +86,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     var publicReadUrl: String?
 
     mutating func run() async throws {
+        let processStartTime = Date()
         guard let address = ChainAddress(string: chainPath) else {
             throw ValidationError("--chain-path must be absolute and begin with Nexus")
         }
@@ -100,7 +104,14 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             ?? storage.appendingPathComponent("process.key")
         let privateKeyHex = try loadOrCreateIdentity(at: keyURL)
         let parentEndpoint = try parent.map(parseParentEndpoint)
-        let overlayPeers = try peer.map(parsePeerEndpoint)
+        let explicitPeers = try peer.map(parsePeerEndpoint)
+        // An operator peer source is authoritative: a supplied list replaces
+        // the built-in defaults, and --no-default-peers expresses the empty
+        // one. Only "nothing configured at all" falls back to the defaults.
+        let overlayPeers = DefaultBootstrapPeers.resolved(
+            chainPath: address.components,
+            configured: explicitPeers.isEmpty && !noDefaultPeers ? nil : explicitPeers
+        )
 
         let configuration = try NodeConfiguration(
             chainPath: address.components,
@@ -179,7 +190,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                 return try await service.miningCandidate(
                     parentCarrier: context.parentCarrier,
                     parentContentSource: parentContentSource,
-                    rewards: context.rewards
+                    rewards: context.rewards,
+                    minimumWork: context.minimumWork
                 )
             },
             candidateReservations: { [weak service] update in
@@ -265,7 +277,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             host: rpcBind,
             port: Int(rpcPort),
             peers: peersProvider,
-            discoverProviders: providerDiscovery
+            discoverProviders: providerDiscovery,
+            processStartTime: processStartTime
         )
         let publicReadApp = publicReadPort.map { port in
             makePublicReadApplication(
@@ -281,6 +294,13 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         print("  process: \(configuration.processPublicKey)")
         print("  nexus:   \(configuration.nexusGenesisCID)")
         print("  rpc:     http://\(rpcBind):\(rpcPort)")
+        if !overlayPeers.isEmpty {
+            print(
+                "  peers:   \(overlayPeers.count) "
+                    + (explicitPeers.isEmpty ? "default" : "configured")
+                    + " bootstrap peer(s)"
+            )
+        }
         if let publicReadPort {
             print("  public-read: http://0.0.0.0:\(publicReadPort)")
         }
@@ -414,7 +434,8 @@ func makeApplication(
     peers: @Sendable @escaping () async -> ExplorerPeersResponse = {
         ExplorerPeersResponse(count: 0, peers: [])
     },
-    discoverProviders: @Sendable @escaping (String) async -> [String] = { _ in [] }
+    discoverProviders: @Sendable @escaping (String) async -> [String] = { _ in [] },
+    processStartTime: Date = Date()
 ) -> Application<RouterResponder<BasicRequestContext>> {
     let router = Router()
     addPublicReadRoutes(
@@ -430,6 +451,18 @@ func makeApplication(
     // endpoint; the public status surface is /health.
     router.get("v1/status") { request, context in
         try json(await service.status(), request: request, context: context)
+    }
+    // Prometheus exposition: operator surface only, never the public read app.
+    router.get("metrics") { _, _ in
+        let body = await service.metricsExposition(
+            peers: await peers().count,
+            processStartTime: processStartTime
+        )
+        return Response(
+            status: .ok,
+            headers: [.contentType: nodeMetricsContentType],
+            body: ResponseBody(byteBuffer: ByteBuffer(string: body))
+        )
     }
     addOperatorWriteRoutes(to: router, service: service)
     return Application(

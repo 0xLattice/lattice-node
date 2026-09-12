@@ -13,6 +13,9 @@ public struct TemplateResponse: Decodable, Sendable, Equatable {
     /// whose blockHex is not a decodable Block.
     public let prefixHex: String
     public let searchTarget: String
+    /// Every target this work can clear, easiest first (`searchTarget`
+    /// leads). Just `searchTarget` when a node predates the field.
+    public let targets: [String]
     public let chainPath: [String]
     public let expiresInMilliseconds: UInt64
     public let staleToken: String
@@ -21,6 +24,7 @@ public struct TemplateResponse: Decodable, Sendable, Equatable {
         workID: String,
         blockHex: String,
         searchTarget: String,
+        targets: [String]? = nil,
         chainPath: [String] = ["Nexus"],
         expiresInMilliseconds: UInt64 = 30_000,
         staleToken: String? = nil
@@ -29,6 +33,7 @@ public struct TemplateResponse: Decodable, Sendable, Equatable {
         self.blockHex = blockHex
         self.prefixHex = Self.derivePrefixHex(blockHex: blockHex)
         self.searchTarget = searchTarget
+        self.targets = targets ?? [searchTarget]
         self.chainPath = chainPath
         self.expiresInMilliseconds = expiresInMilliseconds
         self.staleToken = staleToken ?? workID
@@ -46,6 +51,7 @@ public struct TemplateResponse: Decodable, Sendable, Equatable {
         case workID
         case block
         case searchTarget
+        case targets
         case chainPath
         case expiresInMilliseconds
     }
@@ -68,6 +74,10 @@ public struct TemplateResponse: Decodable, Sendable, Equatable {
             UInt256.self,
             forKey: .searchTarget
         ).toHexString()
+        targets = try container.decodeIfPresent(
+            [UInt256].self,
+            forKey: .targets
+        )?.map { $0.toHexString() } ?? [searchTarget]
         chainPath = try container.decode([String].self, forKey: .chainPath)
         expiresInMilliseconds = try container.decode(
             UInt64.self,
@@ -94,5 +104,63 @@ public enum MinerLoopLogic {
             idx = end
         }
         return UInt256(words)
+    }
+
+    /// Parse a minimum work per block: `2^N` (N < 256) or a decimal integer.
+    /// Zero, overflow, and anything else is nil.
+    public static func parseMinimumWork(_ text: String) -> UInt256? {
+        func isDigits(_ digits: Substring) -> Bool {
+            !digits.isEmpty && digits.allSatisfy { $0.isASCII && $0.isNumber }
+        }
+        let work: UInt256?
+        if text.hasPrefix("2^") {
+            let exponent = text.dropFirst(2)
+            guard isDigits(exponent), let shift = Int(exponent), shift < 256 else {
+                return nil
+            }
+            work = UInt256(1) << shift
+        } else {
+            guard isDigits(Substring(text)) else { return nil }
+            work = UInt256(text)
+        }
+        // Target 0 is met by no hash and consensus rejects it, so target 1 is
+        // the hardest and `workForTarget(1)` the most work any block can be
+        // asked for. Above it there is nothing a node could build.
+        guard let work, work > .zero, work <= workForTarget(UInt256(1)) else {
+            return nil
+        }
+        return work
+    }
+
+    /// The `minimumWork` field of `POST /v1/mining/templates` for `--min-work`
+    /// entries of the form `<chain path>=<work>` (e.g. `Nexus/Payments=2^32`).
+    /// Nil when any entry is malformed or names a chain twice.
+    public static func minimumWorkField(_ entries: [String]) -> [[String: Any]]? {
+        var seen: Set<String> = []
+        var field: [[String: Any]] = []
+        for entry in entries {
+            let parts = entry.split(
+                separator: "=",
+                maxSplits: 1,
+                omittingEmptySubsequences: false
+            )
+            guard parts.count == 2,
+                  let work = parseMinimumWork(String(parts[1])) else {
+                return nil
+            }
+            let chainPath = parts[0]
+                .split(separator: "/", omittingEmptySubsequences: false)
+                .map(String.init)
+            guard chainPath.first == "Nexus",
+                  !chainPath.contains(where: \.isEmpty),
+                  seen.insert(String(parts[0])).inserted else {
+                return nil
+            }
+            field.append([
+                "chainPath": chainPath,
+                "work": work.toPrefixedHexString(),
+            ])
+        }
+        return field
     }
 }

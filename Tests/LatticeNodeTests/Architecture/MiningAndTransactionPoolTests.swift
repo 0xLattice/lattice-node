@@ -1,5 +1,6 @@
 import Foundation
 import Lattice
+import LatticeMinerCore
 import UInt256
 import XCTest
 import cashew
@@ -123,6 +124,241 @@ final class MiningTemplateBookTests: XCTestCase {
 
         XCTAssertEqual(root.block.target, UInt256(4))
         XCTAssertEqual(root.searchTarget, UInt256.max)
+    }
+
+    /// After a hit clears the easiest target the miner keeps searching toward
+    /// the next one and skips hits in between, so the template may only list
+    /// targets when the list is complete: every direct child is a leaf.
+    func testTemplateAdvertisesTargetsOnlyWhenEveryChildIsALeaf() async throws {
+        let hard = try await chainFixture(target: UInt256(4))
+        let middleTarget = UInt256.max >> 8
+        func childBlock(
+            parentState: LatticeStateHeader,
+            target: UInt256
+        ) async throws -> (genesis: Block, block: Block) {
+            let genesis = try await BlockBuilder.buildChildGenesis(
+                spec: NexusGenesis.spec,
+                parentState: parentState,
+                timestamp: 1,
+                target: target,
+                fetcher: hard.store
+            )
+            let block = try await BlockBuilder.buildBlock(
+                previous: genesis,
+                timestamp: 2,
+                fetcher: hard.store
+            )
+            return (genesis, block)
+        }
+        let middle = try await childBlock(
+            parentState: hard.genesis.postState,
+            target: middleTarget
+        )
+        let sibling = try await childBlock(
+            parentState: hard.genesis.postState,
+            target: .max
+        ).block
+        func rootTemplate(
+            _ children: [DirectChildCandidate]
+        ) async throws -> MiningTemplate {
+            try await MiningTemplateBook(chainPath: ["Nexus"]).build(
+                previous: hard.genesis,
+                transactions: [],
+                children: children,
+                timestamp: 2,
+                fetcher: hard.store
+            )
+        }
+
+        let flat = try await rootTemplate([
+            DirectChildCandidate(directory: "Middle", block: middle.block),
+            DirectChildCandidate(directory: "Sibling", block: sibling),
+        ])
+        XCTAssertEqual(flat.searchTarget, UInt256.max)
+        XCTAssertEqual(flat.targets, [UInt256.max, middleTarget, UInt256(4)])
+        let response = MiningTemplateResponse(
+            template: flat,
+            maximumLifetimeMilliseconds: 30_000
+        )
+        XCTAssertEqual(response.targets, flat.targets)
+
+        // Middle now carries a leaf of its own. A grandchild target is invisible
+        // here, so skipping hits between the known targets could starve it.
+        let leaf = try await childBlock(
+            parentState: middle.genesis.postState,
+            target: UInt256.max >> 4
+        ).block
+        let nestedMiddle = try await MiningTemplateBook(
+            chainPath: ["Nexus", "Middle"]
+        ).build(
+            previous: middle.genesis,
+            transactions: [],
+            children: [DirectChildCandidate(directory: "Leaf", block: leaf)],
+            timestamp: 2,
+            fetcher: hard.store
+        )
+        let nested = try await rootTemplate([
+            DirectChildCandidate(
+                directory: "Middle",
+                block: nestedMiddle.block,
+                searchWitness: nestedMiddle.searchWitness
+            ),
+            DirectChildCandidate(directory: "Sibling", block: sibling),
+        ])
+        XCTAssertEqual(nested.searchTarget, UInt256.max)
+        XCTAssertEqual(nested.targets, [UInt256.max])
+    }
+
+    func testMinimumWorkTargetIsTheEasiestTargetMeetingTheWork() {
+        // Target 0 is met by no hash and Lattice rejects it, so the most work
+        // any valid target can represent is workForTarget(1) = 2^255. Every
+        // value up to that ceiling must be delivered exactly, never clamped
+        // to a target that asks for less work than requested.
+        let ceiling = workForTarget(UInt256(1))
+        XCTAssertEqual(ceiling, UInt256(1) << 255)
+        for work in [
+            UInt256(1),
+            UInt256(2),
+            UInt256(3),
+            UInt256(1) << 32,
+            (UInt256(1) << 32) + UInt256(1),
+            UInt256(1) << 128,
+            (UInt256(1) << 255) - UInt256(1),
+            ceiling,
+        ] {
+            let target = minimumWorkTarget(work)
+            XCTAssertGreaterThan(target, .zero, "work \(work)")
+            XCTAssertGreaterThanOrEqual(
+                workForTarget(target), work, "work \(work)"
+            )
+            if target < .max {
+                XCTAssertLessThan(
+                    workForTarget(target + UInt256(1)), work, "work \(work)"
+                )
+            }
+        }
+        XCTAssertEqual(minimumWorkTarget(UInt256(1)), .max)
+        XCTAssertEqual(minimumWorkTarget(ceiling), UInt256(1))
+    }
+
+    /// A chain launched at the maximum target mines a burst of near-free
+    /// blocks: every block sits at the genesis target, and the retarget —
+    /// which derives `nextTarget` from the target actually used — keeps
+    /// proposing it. A miner's minimum work hardens the blocks it asks for
+    /// from block 1, and the schedule then carries the real difficulty.
+    func testMinimumWorkHoldsAFreshMaxTargetChainAtTheFilterTarget()
+        async throws
+    {
+        let work = UInt256(1) << 12
+        let filterTarget = minimumWorkTarget(work)
+        // Blocks exactly on schedule (the fixture's targetBlockTime), so the
+        // retarget proposes the target that was actually used.
+        func mine(minimumWork: UInt256?) async throws -> [Block] {
+            let fixture = try await chainFixture()
+            let book = MiningTemplateBook(chainPath: ["Nexus"])
+            var previous = fixture.genesis
+            var mined: [Block] = []
+            for height in 1...5 {
+                let template = try await book.build(
+                    previous: previous,
+                    transactions: [],
+                    children: [],
+                    timestamp: Int64(height) * 1_000,
+                    minimumWork: minimumWork,
+                    fetcher: fixture.store
+                )
+                let midstate = ProofOfWork.midstate(for: template.block)
+                var nonce: UInt64 = 0
+                while ProofOfWork.hash(midstate: midstate, nonce: nonce)
+                    > template.block.target {
+                    nonce += 1
+                }
+                let block = ProofOfWork.withNonce(template.block, nonce: nonce)
+                try await BlockHeader(node: block).storeBlock(
+                    storer: fixture.store
+                )
+                try await block.postState.storeRecursively(
+                    storer: fixture.store
+                )
+                mined.append(block)
+                previous = block
+            }
+            return mined
+        }
+
+        let burst = try await mine(minimumWork: nil)
+        XCTAssertEqual(burst.map(\.target), Array(repeating: .max, count: 5))
+        XCTAssertEqual(
+            burst.map(\.nextTarget), Array(repeating: .max, count: 5)
+        )
+
+        let filtered = try await mine(minimumWork: work)
+        XCTAssertEqual(
+            filtered.map(\.target), Array(repeating: filterTarget, count: 5)
+        )
+        XCTAssertEqual(
+            filtered.map(\.nextTarget),
+            Array(repeating: filterTarget, count: 5),
+            "the retarget must follow the targets actually mined"
+        )
+        for block in filtered {
+            XCTAssertGreaterThanOrEqual(workForTarget(block.target), work)
+            XCTAssertLessThanOrEqual(block.proofOfWorkHash(), block.target)
+        }
+    }
+
+    /// The filter never makes a block easier than the schedule.
+    func testMinimumWorkEasierThanTheScheduleLeavesTheScheduleInForce()
+        async throws
+    {
+        let hardTarget = UInt256(1) << 200
+        let fixture = try await chainFixture(target: hardTarget)
+        let book = MiningTemplateBook(chainPath: ["Nexus"])
+        XCTAssertEqual(fixture.genesis.nextTarget, hardTarget)
+
+        let easy = UInt256(1) << 8
+        XCTAssertGreaterThan(minimumWorkTarget(easy), hardTarget)
+        let scheduled = try await book.build(
+            previous: fixture.genesis,
+            transactions: [],
+            children: [],
+            timestamp: 1_000,
+            minimumWork: easy,
+            fetcher: fixture.store
+        )
+        XCTAssertEqual(scheduled.block.target, hardTarget)
+
+        // Harder than an already hard schedule still applies.
+        let harder = UInt256(1) << 64
+        let filtered = try await book.build(
+            previous: fixture.genesis,
+            transactions: [],
+            children: [],
+            timestamp: 1_001,
+            minimumWork: harder,
+            fetcher: fixture.store
+        )
+        XCTAssertEqual(filtered.block.target, minimumWorkTarget(harder))
+        XCTAssertLessThan(filtered.block.target, hardTarget)
+    }
+
+    /// No minimum work is the schedule, exactly as before.
+    func testWithoutMinimumWorkTheTemplateIsTheScheduledBlock() async throws {
+        let fixture = try await chainFixture()
+        let template = try await MiningTemplateBook(chainPath: ["Nexus"]).build(
+            previous: fixture.genesis,
+            transactions: [],
+            children: [],
+            timestamp: 1_000,
+            fetcher: fixture.store
+        )
+        let scheduled = try await BlockBuilder.buildBlock(
+            previous: fixture.genesis,
+            timestamp: 1_000,
+            fetcher: fixture.store
+        )
+        XCTAssertEqual(template.block.target, fixture.genesis.nextTarget)
+        XCTAssertEqual(template.block.toData(), scheduled.toData())
     }
 
     func testStateInvalidTransactionDoesNotSuppressWork() async throws {

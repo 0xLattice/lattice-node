@@ -2433,6 +2433,9 @@ private final class E2ENode {
             "--listen-port", String(configuration.overlayPort),
             "--fact-listen-port", String(configuration.factPort),
             "--rpc-port", String(configuration.rpcPort),
+            // A test cluster's peers are exactly the ones it wires below; the
+            // shipped defaults would send these nodes at the public network.
+            "--no-default-peers",
         ]
         if let parent = configuration.parent {
             arguments += ["--parent", "\(parent.publicKey)@127.0.0.1:\(parent.factPort)"]

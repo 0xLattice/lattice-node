@@ -2,6 +2,7 @@ import Crypto
 import Foundation
 import Ivy
 import Lattice
+import LatticeMinerCore
 import UInt256
 import VolumeBroker
 import XCTest
@@ -1239,6 +1240,332 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertEqual(leavesAfter, leavesBefore)
     }
 
+    /// A nonce that clears only the child's easier target must not close the
+    /// work: the miner keeps searching the same assignment toward the parent's
+    /// harder target, and a later parent-clearing nonce for the same workID
+    /// has to produce the parent block. Consuming the template on the carrier
+    /// throws that nonce away as `unknownWork`.
+    func testCarrierSubmissionKeepsWorkOpenForTheParentTarget() async throws {
+        let process = try await nexusProcess()
+        let genesis = try await process.canonicalTipBlock()
+        let activeChild = try await anchoredChildGenesis(
+            parent: process,
+            parentGenesis: genesis,
+            childTimestamp: 1,
+            carrierNonce: 0
+        )
+        let publishedBlocks = PublishedBlocks()
+        let service = makeService(
+            process: process,
+            childCandidateProvider: { context in
+                let child = try await BlockBuilder.buildBlock(
+                    previous: activeChild.block,
+                    transactions: [],
+                    parentChainBlock: context.parentCarrier,
+                    timestamp: context.parentCarrier.timestamp,
+                    fetcher: process
+                )
+                return [DirectChildCandidate(
+                    directory: "Payments",
+                    block: child
+                )]
+            },
+            acceptedBlockPublisher: { blockCID in
+                await publishedBlocks.record(blockCID)
+            }
+        )
+        let template = try await service.miningTemplate(MiningTemplateRequest())
+        XCTAssertLessThan(
+            template.block.target,
+            template.searchTarget,
+            "the parent target must be harder than the scheduled child target"
+        )
+        XCTAssertEqual(template.targets, [template.searchTarget, template.block.target])
+
+        // The parent target is hard: scan with a midstate, then let the node's
+        // own hash decide every submission below.
+        let carrierNonce = firstNonce(of: template.block, from: 0) {
+            $0 > template.block.target
+        }
+        XCTAssertGreaterThan(
+            template.block.replacingNonce(carrierNonce).proofOfWorkHash(),
+            template.block.target
+        )
+        let carried = try await service.submitWork(SubmitWorkRequest(
+            workID: template.workID,
+            nonce: carrierNonce
+        ))
+        XCTAssertEqual(carried.disposition, .carrier)
+        XCTAssertFalse(carried.accepted)
+        let tipAfterCarrier = await process.status().tipCID
+        XCTAssertEqual(tipAfterCarrier, template.block.parent?.rawCID)
+
+        let parentNonce = firstNonce(of: template.block, from: carrierNonce + 1) {
+            $0 <= template.block.target
+        }
+        XCTAssertLessThanOrEqual(
+            template.block.replacingNonce(parentNonce).proofOfWorkHash(),
+            template.block.target
+        )
+        let parent = try await service.submitWork(SubmitWorkRequest(
+            workID: template.workID,
+            nonce: parentNonce
+        ))
+        XCTAssertTrue(parent.accepted)
+        XCTAssertEqual(parent.disposition, .canonicalized)
+        let minedCID = try BlockHeader(
+            node: template.block.replacingNonce(parentNonce)
+        ).rawCID
+        XCTAssertEqual(parent.tipCID, minedCID)
+        let published = await publishedBlocks.all()
+        XCTAssertEqual(published, [minedCID])
+
+        // The parent block consumes the work.
+        await XCTAssertThrowsErrorAsync(
+            try await service.submitWork(SubmitWorkRequest(
+                workID: template.workID,
+                nonce: parentNonce
+            ))
+        ) { error in
+            XCTAssertEqual(error as? MiningTemplateError, .unknownWork)
+        }
+    }
+
+    /// The full node path on a fresh Nexus whose genesis is at the maximum
+    /// target: with a minimum work the miner asked for, every block is built
+    /// at that target and Lattice accepts each one — validity recomputes
+    /// `nextTarget` from the target actually used. Without it the same chain
+    /// hands out the genesis target, block after free block.
+    func testMinimumWorkMinesEveryNexusBlockAtTheFilterTarget() async throws {
+        let work = UInt256(1) << 10
+        let filterTarget = minimumWorkTarget(work)
+        let process = try await nexusProcess()
+        let service = makeService(process: process)
+        let request = MiningTemplateRequest(minimumWork: [MiningMinimumWork(
+            chainPath: ["Nexus"],
+            work: work
+        )])
+        for _ in 0..<4 {
+            let template = try await service.miningTemplate(request)
+            XCTAssertEqual(template.block.target, filterTarget)
+            XCTAssertEqual(template.searchTarget, filterTarget)
+            XCTAssertGreaterThanOrEqual(
+                workForTarget(template.block.target), work
+            )
+            let nonce = firstNonce(of: template.block, from: 0) {
+                $0 <= template.block.target
+            }
+            let response = try await service.submitWork(SubmitWorkRequest(
+                workID: template.workID,
+                nonce: nonce
+            ))
+            XCTAssertEqual(response.disposition, .canonicalized)
+        }
+
+        let burstProcess = try await nexusProcess()
+        let burst = try await makeService(process: burstProcess)
+            .miningTemplate(MiningTemplateRequest())
+        XCTAssertEqual(burst.block.target, .max)
+        XCTAssertLessThan(filterTarget, .max)
+    }
+
+    /// The minimum work is the miner's choice, not a rule the node enforces:
+    /// after filtered blocks it still accepts another producer's block at the
+    /// scheduled (easier) target.
+    func testNodeAcceptsAnUnfilteredBlockAtTheScheduledTarget() async throws {
+        let work = UInt256(1) << 10
+        let process = try await nexusProcess()
+        let service = makeService(process: process)
+        let template = try await service.miningTemplate(MiningTemplateRequest(
+            minimumWork: [MiningMinimumWork(chainPath: ["Nexus"], work: work)]
+        ))
+        let nonce = firstNonce(of: template.block, from: 0) {
+            $0 <= template.block.target
+        }
+        let filtered = try await service.submitWork(SubmitWorkRequest(
+            workID: template.workID,
+            nonce: nonce
+        ))
+        XCTAssertEqual(filtered.disposition, .canonicalized)
+
+        let tip = try await process.canonicalTipBlock()
+        XCTAssertEqual(tip.target, minimumWorkTarget(work))
+        try await Task.sleep(for: .milliseconds(5))
+        let scheduled = try await BlockBuilder.buildBlock(
+            previous: tip,
+            timestamp: tip.timestamp + 1,
+            fetcher: process
+        )
+        XCTAssertEqual(scheduled.target, tip.nextTarget)
+        XCTAssertGreaterThan(scheduled.target, minimumWorkTarget(work))
+        let mined = scheduled.replacingNonce(
+            firstNonce(of: scheduled, from: 0) { $0 <= scheduled.target }
+        )
+        let outcome = try await process.admit(try BlockHeader(node: mined))
+        XCTAssertTrue(outcome.decision.isAccepted)
+    }
+
+    /// Merged mining: each chain's block in one template is built at its own
+    /// effective target, and the node classifies a submitted nonce against
+    /// those targets — a hash that clears a chain's scheduled target but
+    /// misses its minimum work advances nothing.
+    func testMergedTemplateAppliesEachChainsOwnMinimumWork() async throws {
+        let fixture = try await activeChildService(spec: NexusGenesis.spec)
+        // The parent already retargeted to a hard schedule; its child is a
+        // fresh chain still at the maximum genesis target.
+        let parentTip = try await fixture.parent.canonicalTipBlock()
+        let parentTarget = parentTip.nextTarget
+        XCTAssertLessThan(parentTarget, UInt256.max >> 16)
+        let childWork = UInt256(1) << 4
+        let childTarget = minimumWorkTarget(childWork)
+        // Asking for less work than the parent's own schedule changes nothing
+        // there: the filter never makes a block easier.
+        let parentWork = UInt256(1) << 8
+        XCTAssertGreaterThan(minimumWorkTarget(parentWork), parentTarget)
+        let childCandidates = MinedChildCandidates()
+        let service = makeService(
+            process: fixture.parent,
+            childCandidateProvider: { context in
+                let candidate = try await fixture.service.miningCandidate(
+                    parentCarrier: context.parentCarrier,
+                    parentContentSource: FetcherContentSource(fixture.parent),
+                    rewards: context.rewards,
+                    minimumWork: context.minimumWork
+                )
+                await childCandidates.record(candidate.block)
+                return [candidate]
+            }
+        )
+        let template = try await service.miningTemplate(MiningTemplateRequest(
+            minimumWork: [
+                MiningMinimumWork(chainPath: ["Nexus"], work: parentWork),
+                MiningMinimumWork(
+                    chainPath: ["Nexus", "Payments"],
+                    work: childWork
+                ),
+            ]
+        ))
+        let lastChildCandidate = await childCandidates.last()
+        let childBlock = try XCTUnwrap(lastChildCandidate)
+        XCTAssertEqual(template.block.target, parentTarget)
+        XCTAssertEqual(childBlock.target, childTarget)
+        XCTAssertEqual(template.searchTarget, childTarget)
+        XCTAssertEqual(template.targets, [childTarget, parentTarget])
+
+        // The child genesis is at the maximum target, so this hash clears the
+        // child's SCHEDULE and misses its minimum work: no child block.
+        let tooEasy = firstNonce(of: template.block, from: 0) {
+            $0 > childTarget
+        }
+        await XCTAssertThrowsErrorAsync(
+            try await service.submitWork(SubmitWorkRequest(
+                workID: template.workID,
+                nonce: tooEasy
+            ))
+        ) { error in
+            XCTAssertEqual(error as? MiningTemplateError, .missesSearchTarget)
+        }
+        let tipAfterRefusal = await fixture.parent.status().tipCID
+        XCTAssertEqual(tipAfterRefusal, template.block.parent?.rawCID)
+
+        // Between the two minimums: the child advances, the parent does not.
+        let carrierNonce = firstNonce(of: template.block, from: 0) {
+            $0 <= childTarget && $0 > parentTarget
+        }
+        let carried = try await service.submitWork(SubmitWorkRequest(
+            workID: template.workID,
+            nonce: carrierNonce
+        ))
+        XCTAssertEqual(carried.disposition, .carrier)
+
+        let parentNonce = firstNonce(
+            of: template.block,
+            from: carrierNonce + 1
+        ) { $0 <= parentTarget }
+        let accepted = try await service.submitWork(SubmitWorkRequest(
+            workID: template.workID,
+            nonce: parentNonce
+        ))
+        XCTAssertEqual(accepted.disposition, .canonicalized)
+        XCTAssertEqual(
+            accepted.durableChildProofs.map(\.directory),
+            ["Payments"]
+        )
+    }
+
+    /// Target 0 is met by no hash and Lattice rejects it, so no target can
+    /// represent more than `workForTarget(1)` work. Asking for more must be
+    /// refused by name, never silently delivered as target 1 — that would
+    /// freeze the chain this option exists to keep mining.
+    func testUnachievableOrOversizedMinimumWorkIsRefused() async throws {
+        let process = try await nexusProcess()
+        let service = makeService(process: process)
+        let ceiling = workForTarget(UInt256(1))
+
+        await XCTAssertThrowsErrorAsync(
+            try await service.miningTemplate(MiningTemplateRequest(
+                minimumWork: [MiningMinimumWork(
+                    chainPath: ["Nexus"],
+                    work: ceiling + UInt256(1)
+                )]
+            ))
+        ) { error in
+            XCTAssertEqual(error as? ChainServiceError, .invalidMinimumWork)
+        }
+
+        // The ceiling itself is achievable: the hardest valid target.
+        let template = try await service.miningTemplate(MiningTemplateRequest(
+            minimumWork: [MiningMinimumWork(
+                chainPath: ["Nexus"],
+                work: ceiling
+            )]
+        ))
+        XCTAssertEqual(template.block.target, UInt256(1))
+
+        // A plan past the payload cap `rewards` also honours is a named
+        // refusal here, not a child candidate that silently goes missing for
+        // a whole round when the wire frame bites instead.
+        await XCTAssertThrowsErrorAsync(
+            try await service.miningTemplate(MiningTemplateRequest(
+                minimumWork: (0..<40_000).map {
+                    MiningMinimumWork(
+                        chainPath: ["Nexus", "d\($0)"],
+                        work: UInt256(1) << 16
+                    )
+                }
+            ))
+        ) { error in
+            XCTAssertEqual(
+                error as? ChainServiceError,
+                .minimumWorkPlanTooLarge
+            )
+        }
+    }
+
+    /// A request without minimum work builds the scheduled block, unchanged.
+    func testTemplateWithoutMinimumWorkIsTheScheduledBlock() async throws {
+        let process = try await nexusProcess()
+        let service = makeService(process: process)
+        let legacy = try JSONDecoder().decode(
+            MiningTemplateRequest.self,
+            from: Data(#"{"rewards":[]}"#.utf8)
+        )
+        XCTAssertTrue(legacy.minimumWork.isEmpty)
+        let template = try await service.miningTemplate(legacy)
+        let genesis = try await process.canonicalTipBlock()
+        let scheduled = try await BlockBuilder.buildBlock(
+            previous: genesis,
+            timestamp: template.block.timestamp,
+            fetcher: process
+        )
+        XCTAssertEqual(template.block.target, genesis.nextTarget)
+        XCTAssertEqual(template.block.toData(), scheduled.toData())
+        XCTAssertEqual(
+            try JSONEncoder().encode(MiningTemplateRequest()),
+            Data(#"{"rewards":[]}"#.utf8)
+        )
+    }
+
     func testAuthenticatedProviderSuppliesOrdinaryChildCandidate() async throws {
         let process = try await nexusProcess()
         let parent = try await process.canonicalTipBlock()
@@ -2066,115 +2393,37 @@ final class ChainServiceTests: XCTestCase {
     ///     pruning, so the bytes stay available to peers — a node must never
     ///     conclude that other nodes are wrong to hold it;
     ///
-    /// NOT covered here: that recovery replays the exclusion and reprojects
-    /// identically. The spec requires it, and an exclusion the recovery path
-    /// forgets would re-admit the invalid tip on every reboot, so it is worth
-    /// a test — but a live `ChainService` keeps the process and its storage
-    /// lock alive, so this harness cannot reopen the same directory. Closing
-    /// that needs a way to shut a service down, which does not exist yet.
+    /// Its recovery half — that a restart re-derives the same exclusion from
+    /// the durable facts instead of re-admitting the forgery as the tip — is
+    /// `testExclusionIsReDerivedFromDurableFactsAcrossRestart` below.
     ///
-    /// This is the only test in this repo covering exclusion at all.
+    /// These two are the only tests in this repo covering exclusion at all.
     func testInvalidWeighedTipIsExcludedReprojectedAndStillServed() async throws {
-        // The honest branch, and a heavier one whose TIP is a lie. Tampering
-        // the tip is the only shape an attacker can actually get admitted: a
-        // lie deeper in the branch breaks `prevState == parent.postState` for
-        // its own successor, so weighed admission rejects the rest.
-        let honestProducer = try await nexusProcess()
-        let honest = try await mineNexusRewardChain(
-            on: honestProducer, depth: 4, miner: CryptoUtils.generateKeyPair()
-        )
-        let attackProducer = try await nexusProcess()
-        let attack = try await mineNexusRewardChain(
-            on: attackProducer, depth: 6, miner: CryptoUtils.generateKeyPair()
-        )
+        let fixture = try await forgedWeighedTipFixture()
+        let honest = fixture.honest
+        let attack = fixture.attack
+        let attackProducer = fixture.attackProducer
         let honestTip = try BlockHeader(node: honest[3]).rawCID
         let lastValid = attack[4]
         let lastValidCID = try BlockHeader(node: lastValid).rawCID
-
-        // The lie: this block pays a reward, so its post-state cannot equal
-        // its pre-state. Every header-linkage field stays honest, which is
-        // precisely why weighed admission has no grounds to refuse it.
         let truth = attack[5]
-        let forged = Block(
-            version: truth.version,
-            parent: truth.parent,
-            transactions: truth.transactions,
-            target: truth.target,
-            nextTarget: truth.nextTarget,
-            spec: truth.spec,
-            parentState: truth.parentState,
-            prevState: truth.prevState,
-            postState: truth.prevState,
-            children: truth.children,
-            height: truth.height,
-            timestamp: truth.timestamp,
-            nonce: truth.nonce
-        )
-        let forgedCID = try BlockHeader(node: forged).rawCID
-        // The forgery keeps the honest block's nonce, so its proof of work is
-        // never re-solved — it passes only because this harness mines at the
-        // maximum target, where every hash qualifies. Assert that precondition
-        // rather than lean on it: if the harness ever mines against a real
-        // target, this fires and says to re-solve the nonce, instead of the
-        // forgery being refused for want of work and the whole exclusion path
-        // silently going uncovered. (This repo has already been bitten by a
-        // max-target genesis masking a securing-work bug.)
-        XCTAssertEqual(
-            forged.target, UInt256.max,
-            "trivial-work harness: re-solve the forged nonce before tightening targets"
-        )
-        XCTAssertEqual(
-            forged.target, truth.target,
-            "the forgery claims exactly the work bound the honest block did"
-        )
-        XCTAssertNotEqual(
-            forgedCID, try BlockHeader(node: truth).rawCID,
-            "the forgery must be its own block, not the honest one"
-        )
+        let forgedCID = try BlockHeader(node: fixture.forged).rawCID
 
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-chain-service-\(UUID().uuidString)")
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
-        func openNode() async throws -> ChainProcess {
-            try await ChainProcess.open(
-                configuration: NodeConfiguration(
-                    chainPath: ["Nexus"],
-                    storagePath: directory,
-                    privateKeyHex: String(repeating: "01", count: 32)
-                )
+        var node: ChainProcess? = try await ChainProcess.open(
+            configuration: try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: directory,
+                privateKeyHex: String(repeating: "01", count: 32)
             )
-        }
-        var node: ChainProcess? = try await openNode()
-        defer { node = nil }
-
-        for block in honest {
-            let outcome = try await node!.admit(
-                BlockHeader(node: block),
-                remoteSource: FetcherContentSource(honestProducer),
-                mode: .weighed
-            )
-            XCTAssertTrue(outcome.decision.isAccepted)
-        }
-        for block in attack.prefix(5) {
-            let outcome = try await node!.admit(
-                BlockHeader(node: block),
-                remoteSource: FetcherContentSource(attackProducer),
-                mode: .weighed
-            )
-            XCTAssertTrue(outcome.decision.isAccepted)
-        }
-        let forgedOutcome = try await node!.admit(
-            BlockHeader(node: forged),
-            remoteSource: FetcherContentSource(attackProducer),
-            mode: .weighed
         )
+        defer { node = nil }
 
         // 1. Ranked. Work is a physical fact and the header links up, so the
         // forgery is accepted and takes the tip on weight alone.
-        XCTAssertTrue(
-            forgedOutcome.decision.isAccepted,
-            "weighed admission judges work, not execution: it cannot refuse this"
-        )
+        try await weighedAdmitForgedBranch(fixture, into: node!)
         let weighedTip = try BlockHeader(
             node: await node!.canonicalTipBlock()
         ).rawCID
@@ -2273,6 +2522,231 @@ final class ChainServiceTests: XCTestCase {
 
         service = nil
         node = nil
+    }
+
+    /// Acceptance, recovery half of §9.9: the exclusion above must be RE-DERIVED
+    /// at boot. Nothing records "this node excluded a block" as a projection —
+    /// the verdict is staged as its own durable `.exclusion` admission fact, and
+    /// boot replays every staged fact through the same reducer as live
+    /// admission, so the excluded subtree is rebuilt before the first canonical
+    /// projection. A recovery path that dropped that fact would re-admit the
+    /// heavier forged branch as the tip on every reboot — a node put back on a
+    /// branch it has already proven invalid — and the live test above would
+    /// still pass.
+    ///
+    /// Scope: this is a CLEAN restart — the service is joined and the process
+    /// released before the directory is reopened — not a crash partway through
+    /// a commit. Recovery from an interrupted write is a separate question and
+    /// is not covered here.
+    func testExclusionIsReDerivedFromDurableFactsAcrossRestart() async throws {
+        let fixture = try await forgedWeighedTipFixture()
+        let lastValid = fixture.attack[4]
+        let lastValidCID = try BlockHeader(node: lastValid).rawCID
+        let honestTip = try BlockHeader(node: fixture.honest[3]).rawCID
+        let forgedCID = try BlockHeader(node: fixture.forged).rawCID
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lattice-chain-service-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: directory,
+            privateKeyHex: String(repeating: "01", count: 32)
+        )
+        var node: ChainProcess? = try await ChainProcess.open(
+            configuration: configuration
+        )
+        try await weighedAdmitForgedBranch(fixture, into: node!)
+
+        // Convict, exactly as the live test does: the body is reachable, the
+        // walk completes the deterministic check, and fork choice reprojects.
+        var service: ChainService? = makeService(
+            process: node!,
+            validateBodySource: { [attackProducer = fixture.attackProducer] _, admit in
+                try await admit(FetcherContentSource(attackProducer))
+            }
+        )
+        // Precondition the restart assertions are VACUOUS without: the forgery
+        // must actually hold the tip. The attack branch's valid prefix alone
+        // already outweighs the honest branch, so a forgery that never
+        // canonicalized would leave the tip at `lastValidCID` with nothing
+        // excluded — and every assertion after the restart would still pass.
+        let rankedTip = try BlockHeader(
+            node: await node!.canonicalTipBlock()
+        ).rawCID
+        XCTAssertEqual(
+            rankedTip, forgedCID,
+            "precondition: the forgery must hold the tip, or there is no exclusion to re-derive"
+        )
+        await service!.runValidateWalkPass()
+        let excludedTip = try BlockHeader(
+            node: await node!.canonicalTipBlock()
+        ).rawCID
+        XCTAssertEqual(
+            excludedTip, lastValidCID,
+            "precondition: the exclusion reprojected before the restart"
+        )
+
+        // Restart. The service joins its workers so nothing is left holding the
+        // process, both references go, and the storage-directory lock is
+        // released — then the same directory is reopened from its durable facts
+        // alone, with no in-memory state carried across.
+        await service!.shutdown()
+        service = nil
+        node = nil
+        let restarted = try await ChainProcess.open(configuration: configuration)
+
+        let recoveredTip = try BlockHeader(
+            node: await restarted.canonicalTipBlock()
+        ).rawCID
+        XCTAssertNotEqual(
+            recoveredTip, forgedCID,
+            "a restart must never put the node back on a branch it proved invalid"
+        )
+        XCTAssertEqual(
+            recoveredTip, lastValidCID,
+            "recovery must re-derive the same reprojection, not a different one"
+        )
+        // The forgery's work is still durably recorded and is still the
+        // heaviest thing in the store; the height proves it is not counted.
+        let recoveredHeight = await restarted.canonicalTipHeight()
+        XCTAssertEqual(
+            recoveredHeight, lastValid.height,
+            "the excluded subtree's work must not count toward fork choice after a restart"
+        )
+        let forgedValidated = await restarted.blockValidated(forgedCID)
+        XCTAssertFalse(
+            forgedValidated,
+            "an excluded block must never recover as validated"
+        )
+        // Control, as above: the competing honest branch is untouched by the
+        // exclusion, so a recovery that simply dropped everything unexecutable
+        // would not satisfy this.
+        let honestSurvives = await restarted.hasAcceptedBlock(honestTip)
+        XCTAssertTrue(
+            honestSurvives, "the honest branch must survive the restart"
+        )
+        // Excluded, not pruned — across the restart too.
+        let stillAccepted = await restarted.hasAcceptedBlock(forgedCID)
+        XCTAssertTrue(
+            stillAccepted,
+            "exclusion is a weighting decision, not a deletion"
+        )
+        let served = await restarted.content([forgedCID])
+        XCTAssertNotNil(
+            served[forgedCID],
+            "an excluded block must still be servable after a restart"
+        )
+    }
+
+    /// The forged-weighed-tip fixture both exclusion tests run on: an honest
+    /// branch, a heavier attack branch, and a forgery of the attack TIP.
+    /// Tampering the tip is the only shape an attacker can actually get
+    /// admitted: a lie deeper in the branch breaks `prevState ==
+    /// parent.postState` for its own successor, so weighed admission rejects
+    /// the rest.
+    private struct ForgedWeighedTipFixture {
+        let honestProducer: ChainProcess
+        let honest: [Block]
+        let attackProducer: ChainProcess
+        /// Mined honestly; only `prefix(5)` is ever admitted, with `forged`
+        /// standing in for the sixth block.
+        let attack: [Block]
+        /// The lie: this block pays a reward, so its post-state cannot equal
+        /// its pre-state. Every header-linkage field stays honest, which is
+        /// precisely why weighed admission has no grounds to refuse it.
+        let forged: Block
+    }
+
+    private func forgedWeighedTipFixture() async throws
+        -> ForgedWeighedTipFixture
+    {
+        let honestProducer = try await nexusProcess()
+        let honest = try await mineNexusRewardChain(
+            on: honestProducer, depth: 4, miner: CryptoUtils.generateKeyPair()
+        )
+        let attackProducer = try await nexusProcess()
+        let attack = try await mineNexusRewardChain(
+            on: attackProducer, depth: 6, miner: CryptoUtils.generateKeyPair()
+        )
+        let truth = attack[5]
+        let forged = Block(
+            version: truth.version,
+            parent: truth.parent,
+            transactions: truth.transactions,
+            target: truth.target,
+            nextTarget: truth.nextTarget,
+            spec: truth.spec,
+            parentState: truth.parentState,
+            prevState: truth.prevState,
+            postState: truth.prevState,
+            children: truth.children,
+            height: truth.height,
+            timestamp: truth.timestamp,
+            nonce: truth.nonce
+        )
+        // The forgery keeps the honest block's nonce, so its proof of work is
+        // never re-solved — it passes only because this harness mines at the
+        // maximum target, where every hash qualifies. Assert that precondition
+        // rather than lean on it: if the harness ever mines against a real
+        // target, this fires and says to re-solve the nonce, instead of the
+        // forgery being refused for want of work and the whole exclusion path
+        // silently going uncovered. (This repo has already been bitten by a
+        // max-target genesis masking a securing-work bug.)
+        XCTAssertEqual(
+            forged.target, UInt256.max,
+            "trivial-work harness: re-solve the forged nonce before tightening targets"
+        )
+        XCTAssertEqual(
+            forged.target, truth.target,
+            "the forgery claims exactly the work bound the honest block did"
+        )
+        XCTAssertNotEqual(
+            try BlockHeader(node: forged).rawCID,
+            try BlockHeader(node: truth).rawCID,
+            "the forgery must be its own block, not the honest one"
+        )
+        return ForgedWeighedTipFixture(
+            honestProducer: honestProducer,
+            honest: honest,
+            attackProducer: attackProducer,
+            attack: attack,
+            forged: forged
+        )
+    }
+
+    /// Weighed-admit the fixture into `node`: the honest branch, the attack
+    /// branch's valid prefix, then the forgery. Weighed admission judges work,
+    /// not execution, so every one of these is accepted.
+    private func weighedAdmitForgedBranch(
+        _ fixture: ForgedWeighedTipFixture,
+        into node: ChainProcess
+    ) async throws {
+        for block in fixture.honest {
+            let outcome = try await node.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(fixture.honestProducer),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+        for block in fixture.attack.prefix(5) {
+            let outcome = try await node.admit(
+                BlockHeader(node: block),
+                remoteSource: FetcherContentSource(fixture.attackProducer),
+                mode: .weighed
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+        }
+        let forged = try await node.admit(
+            BlockHeader(node: fixture.forged),
+            remoteSource: FetcherContentSource(fixture.attackProducer),
+            mode: .weighed
+        )
+        XCTAssertTrue(
+            forged.decision.isAccepted,
+            "weighed admission judges work, not execution: it cannot refuse this"
+        )
     }
 
     /// Deferred execution turning ON: a node that weighed-syncs a chain below its
@@ -3304,6 +3778,14 @@ final class ChainServiceTests: XCTestCase {
 
 }
 
+private actor MinedChildCandidates {
+    private var blocks: [Block] = []
+
+    func record(_ block: Block) { blocks.append(block) }
+
+    func last() -> Block? { blocks.last }
+}
+
 private actor ReservationRecorder {
     private let accept: Bool
     private var values: [[ChildCandidateReservationReference]] = []
@@ -3562,6 +4044,20 @@ private func XCTAssertThrowsErrorAsync<T>(
     } catch {
         handler(error)
     }
+}
+
+/// Nonce scan over the consensus PoW preimage midstate.
+private func firstNonce(
+    of block: Block,
+    from start: UInt64,
+    where accepts: (UInt256) -> Bool
+) -> UInt64 {
+    let midstate = ProofOfWork.midstate(for: block)
+    var nonce = start
+    while !accepts(ProofOfWork.hash(midstate: midstate, nonce: nonce)) {
+        nonce += 1
+    }
+    return nonce
 }
 
 private extension Block {

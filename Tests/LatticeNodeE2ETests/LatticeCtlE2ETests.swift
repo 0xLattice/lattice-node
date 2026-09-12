@@ -250,6 +250,9 @@ final class LatticeCtlE2ETests: XCTestCase {
         nexus["listen"] = Int(ports[0])
         nexus["fact"] = Int(ports[1])
         nexus["rpc"] = Int(ports[2])
+        // Explicitly empty: this host seeds itself, so the shipped default
+        // bootstrap peers must not send it at the public network.
+        nexus["peers"] = [String]()
         chains["Nexus"] = nexus
         topology["chains"] = chains
         topology["mine"] = [
