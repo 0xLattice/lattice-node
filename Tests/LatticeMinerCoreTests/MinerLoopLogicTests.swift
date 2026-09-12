@@ -43,6 +43,8 @@ final class MinerLoopLogicTests: XCTestCase {
 
         XCTAssertEqual(decoded.workID, "candidate")
         XCTAssertEqual(decoded.searchTarget, UInt256(255).toHexString())
+        // A node that predates `targets` advertises only the search target.
+        XCTAssertEqual(decoded.targets, [UInt256(255).toHexString()])
         XCTAssertEqual(decoded.chainPath, ["Nexus"])
         XCTAssertEqual(decoded.expiresInMilliseconds, 30_000)
         XCTAssertEqual(decoded.staleToken, "candidate")

@@ -100,6 +100,8 @@ public struct MiningTemplateResponse: Codable, Sendable {
     public let workID: String
     public let block: Block
     public let searchTarget: UInt256
+    /// Every target this work can clear, easiest first (`searchTarget` leads).
+    public let targets: [UInt256]
     public let chainPath: [String]
     public let expiresInMilliseconds: UInt64
 
@@ -110,6 +112,7 @@ public struct MiningTemplateResponse: Codable, Sendable {
         workID = template.workID
         block = template.block
         searchTarget = template.searchTarget
+        targets = template.targets
         chainPath = template.chainPath
         expiresInMilliseconds = min(
             maximumLifetimeMilliseconds,
@@ -617,6 +620,20 @@ public actor ChainService {
             mempoolCount: await pool.count,
             mempoolBytes: await pool.byteCount
         )
+    }
+
+    /// The operator `/metrics` exposition: an ungated read costing what
+    /// `/health` does (one validated-tip walk plus the live pool count).
+    public func metricsExposition(peers: Int, processStartTime: Date) async -> String {
+        let tips = await process.metricsTipHeights()
+        return renderNodeMetrics(NodeMetricsSample(
+            chainPath: process.configuration.chainPath,
+            validatedTipHeight: tips.validated,
+            weighedTipHeight: tips.weighed,
+            overlayPeers: peers,
+            mempoolTransactions: await pool.count,
+            processStartTime: processStartTime
+        ))
     }
 
     /// Bounded public read: a decoded, content-verified block, gated to only
@@ -1730,7 +1747,12 @@ public actor ChainService {
             outcome: outcome,
             candidateHandoffs: candidateHandoffs
         )
-        await templates.discard(workID: request.workID)
+        // A carrier cleared only child targets: the same work stays open so the
+        // miner can keep searching it toward the harder targets it has not
+        // cleared yet, instead of abandoning the search at every child hit.
+        if outcome.decision != .carrier {
+            await templates.discard(workID: request.workID)
+        }
 
         // The process enqueued this commit while preserving its own mutation
         // order. Release our gate before waiting because reconciliation must

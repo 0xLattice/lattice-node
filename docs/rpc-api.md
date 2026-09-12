@@ -132,6 +132,10 @@ Response fields:
   targets of the attached child candidates, each of which already accounts for
   its own descendants. A nonce that meets `searchTarget` but not the Nexus
   target can still advance a descendant chain.
+- `targets`: every target a nonce for this work can clear — the Nexus root and
+  each direct child — easiest first, so it begins with `searchTarget`. The list
+  is complete only when no direct child carries children of its own; otherwise
+  it is `searchTarget` alone.
 - `chainPath`: always `["Nexus"]` on this route.
 - `expiresInMilliseconds`: template lifetime.
 
@@ -146,8 +150,15 @@ Response fields are `accepted`, `disposition`, `tipCID`,
 delivery is asynchronous; this field acknowledges local durability, not remote
 receipt.
 Possible dispositions are `canonicalized`, `acceptedSide`, `carrier`,
-`duplicate`, `unavailable`, `temporarilyInvalid`, `invalid`, `localFailure`,
-and `storageFailed`.
+`duplicate`, `unavailable`, `temporarilyInvalid`, `invalid`, and
+`localFailure`.
+A `carrier` cleared only child targets and leaves the work open until it
+expires: a later nonce for the same `workID` that clears a harder target is
+still submittable. Any other disposition consumes the work.
+A submission the node refuses before admission returns `400 Bad Request` with
+`{"error":{"message":"<case>"}}`, where `<case>` is `unknownWork`, `expired`,
+or `missesSearchTarget`. The refusal is final; the coordinator reports the case
+as the disposition instead of retrying. Only `expired` also drops the work.
 
 ## Child genesis
 
