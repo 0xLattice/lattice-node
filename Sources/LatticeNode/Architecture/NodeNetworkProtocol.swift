@@ -674,6 +674,9 @@ struct ChildCandidateRequestMessage: Sendable {
     let parentCID: String
     let parentData: Data
     let rewards: [MiningReward]
+    /// Encoded after the parent block only when non-empty, so a request
+    /// without minimum work keeps its exact prior layout.
+    let minimumWork: [MiningMinimumWork]
 
     init(
         requestID: UInt64,
@@ -681,7 +684,8 @@ struct ChildCandidateRequestMessage: Sendable {
         childPath: [String],
         parentCID: String,
         parentData: Data,
-        rewards: [MiningReward]
+        rewards: [MiningReward],
+        minimumWork: [MiningMinimumWork] = []
     ) {
         self.requestID = requestID
         self.budgetMilliseconds = budgetMilliseconds
@@ -689,6 +693,7 @@ struct ChildCandidateRequestMessage: Sendable {
         self.parentCID = parentCID
         self.parentData = parentData
         self.rewards = rewards
+        self.minimumWork = minimumWork
     }
 
     func encoded() throws -> Data {
@@ -707,13 +712,19 @@ struct ChildCandidateRequestMessage: Sendable {
             rewards,
             under: childPath
         )
+        let minimumWorkBytes = try _encodeMiningMinimumWork(
+            minimumWork,
+            under: childPath
+        )
         guard rewardBytes.count <= Self.maximumRewardBytes,
-              rewardBytes.count <= Int(UInt32.max) else {
+              rewardBytes.count <= Int(UInt32.max),
+              minimumWorkBytes.count <= Int(UInt32.max) else {
             throw NodeNetworkWireError.malformed
         }
         let size = 12 + 2 + pathBytes.reduce(0) { $0 + 2 + $1.count }
             + 2 + parentBytes.count + 4 + rewardBytes.count
             + 4 + parentData.count
+            + (minimumWorkBytes.isEmpty ? 0 : 4 + minimumWorkBytes.count)
         guard size <= Self.maximumEncodedBytes else {
             throw NodeNetworkWireError.oversized
         }
@@ -731,6 +742,10 @@ struct ChildCandidateRequestMessage: Sendable {
         data.append(rewardBytes)
         data.appendUInt32(UInt32(parentData.count))
         data.append(parentData)
+        if !minimumWorkBytes.isEmpty {
+            data.appendUInt32(UInt32(minimumWorkBytes.count))
+            data.append(minimumWorkBytes)
+        }
         return data
     }
 
@@ -788,16 +803,33 @@ struct ChildCandidateRequestMessage: Sendable {
         }
         position = rewardEnd
         guard let blockLength = data.readUInt32(at: &position), blockLength > 0,
-              data.distance(from: position, to: data.endIndex) == Int(blockLength) else {
+              data.distance(from: position, to: data.endIndex) >= Int(blockLength) else {
             throw NodeNetworkWireError.malformed
+        }
+        let blockEnd = data.index(position, offsetBy: Int(blockLength))
+        let parentData = Data(data[position..<blockEnd])
+        position = blockEnd
+        var minimumWork: [MiningMinimumWork] = []
+        if position < data.endIndex {
+            guard let length = data.readUInt32(at: &position), length > 0,
+                  data.distance(from: position, to: data.endIndex) == Int(length),
+                  let entries = try? _decodeMiningMinimumWork(
+                      Data(data[position...]),
+                      under: childPath
+                  ),
+                  !entries.isEmpty else {
+                throw NodeNetworkWireError.malformed
+            }
+            minimumWork = entries
         }
         let message = Self(
             requestID: requestID,
             budgetMilliseconds: budgetMilliseconds,
             childPath: childPath,
             parentCID: parentCID,
-            parentData: Data(data[position...]),
-            rewards: rewards
+            parentData: parentData,
+            rewards: rewards,
+            minimumWork: minimumWork
         )
         guard try message.encoded() == data else {
             throw NodeNetworkWireError.nonCanonical
@@ -1020,6 +1052,50 @@ private func _decodeMiningRewards(
         throw NodeNetworkWireError.malformed
     }
     return rewards
+}
+
+/// Empty for no entries, which the request then omits entirely.
+private func _encodeMiningMinimumWork(
+    _ entries: [MiningMinimumWork],
+    under childPath: [String]
+) throws -> Data {
+    guard !entries.isEmpty else { return Data() }
+    guard entries.count <= Int(UInt16.max) else {
+        throw NodeNetworkWireError.oversized
+    }
+    var seen: Set<String> = []
+    for entry in entries {
+        guard _isAbsoluteChainPath(entry.chainPath),
+              entry.chainPath.count >= childPath.count,
+              Array(entry.chainPath.prefix(childPath.count)) == childPath,
+              seen.insert(entry.chainPath.joined(separator: "/")).inserted,
+              entry.work > .zero,
+              entry.work <= maximumRepresentableWork else {
+            throw NodeNetworkWireError.malformed
+        }
+    }
+    let data = try _canonicalJSONEncode(entries)
+    guard data.count <= ChildCandidateRequestMessage.maximumRewardBytes else {
+        throw NodeNetworkWireError.oversized
+    }
+    return data
+}
+
+private func _decodeMiningMinimumWork(
+    _ data: Data,
+    under childPath: [String]
+) throws -> [MiningMinimumWork] {
+    guard data.count <= ChildCandidateRequestMessage.maximumRewardBytes else {
+        throw NodeNetworkWireError.oversized
+    }
+    guard let entries = try? JSONDecoder().decode(
+            [MiningMinimumWork].self,
+            from: data
+          ),
+          try _encodeMiningMinimumWork(entries, under: childPath) == data else {
+        throw NodeNetworkWireError.malformed
+    }
+    return entries
 }
 
 private extension Data {

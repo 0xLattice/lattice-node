@@ -113,15 +113,35 @@ assembled.
         "body": {"chainPath": ["Nexus"], "...": "other TransactionBody fields"}
       }
     }
-  ]
+  ],
+  "minimumWork": [{"chainPath": ["Nexus"], "work": "0x100000000"}]
 }
 ```
 
-`rewards` is the only request field and may be empty; other fields are
-ignored. Each reward is an externally signed transaction for one absolute chain
-path; process identity is never converted into wallet identity. There is no
-template mode: transactions carrying a `GenesisAction` are selected from the
-pool like any other transaction.
+`rewards` and `minimumWork` are the only request fields and may be empty or
+absent; other fields are ignored. Each reward is an externally signed
+transaction for one absolute chain path; process identity is never converted
+into wallet identity. There is no template mode: transactions carrying a
+`GenesisAction` are selected from the pool like any other transaction.
+
+`minimumWork` is the requesting miner's own minimum work per block, for this
+chain and for chains merged-mined under it (`work` is a hex `UInt256`; each
+`chainPath` is absolute and must name this chain or a descendant, at most
+once). The named chain's candidate is built at `min(scheduled target,
+floor(2^256 / work) - 1)` — harder than the schedule, never easier — and each
+descendant entry travels with the child candidate request down the hierarchy
+plane, so a child's block carries its own minimum. It is a template choice of
+the miner that asked, not consensus: admission, validation, and fork choice are
+untouched, and a block from any other miner at the scheduled target is still
+accepted. Absent, templates are exactly as they were.
+
+An entry naming an unknown or duplicate path, zero work, or more work than any
+valid target can represent is refused with `400` `invalidMinimumWork`. That
+ceiling is `workForTarget(1)` = 2^255: target 0 is met by no hash and consensus
+rejects it, so target 1 is the hardest a block can ask for, and work above it is
+refused rather than clamped to a target that would deliver less. A plan larger
+than the 1 MiB payload cap the rewards field also honours is refused with `400`
+`minimumWorkPlanTooLarge`.
 
 Response fields:
 

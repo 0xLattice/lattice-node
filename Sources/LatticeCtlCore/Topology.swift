@@ -54,16 +54,22 @@ public struct TopologyMine: Codable {
     public var batchSize: UInt64?
     /// A `lattice-rewards emit-batch` file; the cursor lives beside it.
     public var rewards: String?
+    /// Minimum work per block by chain path (e.g. `{"Nexus": "2^32"}`),
+    /// passed to the coordinator as `--min-work`. A chain left out mines at
+    /// its scheduled target.
+    public var minWork: [String: String]?
 
     public init(
         chain: String, worker: String? = nil, workers: Int? = nil,
-        batchSize: UInt64? = nil, rewards: String? = nil
+        batchSize: UInt64? = nil, rewards: String? = nil,
+        minWork: [String: String]? = nil
     ) {
         self.chain = chain
         self.worker = worker
         self.workers = workers
         self.batchSize = batchSize
         self.rewards = rewards
+        self.minWork = minWork
     }
 }
 
