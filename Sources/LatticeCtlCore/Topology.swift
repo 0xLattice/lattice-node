@@ -165,9 +165,16 @@ public struct HostLayout: Sendable {
     /// wipeable chain directories: the anchor may land on the parent at any
     /// time, and without this file its genesis could never be rebuilt.
     public func pendingDeploy(for path: String) -> URL {
-        root.appendingPathComponent("pending-deploy").appendingPathComponent(
-            path.replacingOccurrences(of: "/", with: "-") + ".json"
-        )
+        // Percent-encoded, not `/`-flattened: `-` is a legal directory atom,
+        // so flattening would give `Nexus/A/B` and `Nexus/A-B` one file, and
+        // one child's genesis seed would overwrite the other's.
+        let encoded = path.addingPercentEncoding(
+            withAllowedCharacters: CharacterSet.alphanumerics.union(
+                CharacterSet(charactersIn: "._-")
+            )
+        ) ?? path
+        return root.appendingPathComponent("pending-deploy")
+            .appendingPathComponent(encoded + ".json")
     }
 
     public func pidFile(for path: String) -> URL {

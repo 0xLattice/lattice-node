@@ -867,6 +867,100 @@ final class LatticeCtlE2ETests: XCTestCase {
         )
     }
 
+    /// Correcting a nonce must not strand the anchor it replaced. The first
+    /// anchor stays pooled, so a re-run with the ORIGINAL arguments has to
+    /// resubmit that exact transaction: a re-signed copy carries the same
+    /// (signers, nonce) at the same fee, which the pool refuses as
+    /// `feeTooLow`. Only on macOS is that visible — Linux signatures are
+    /// deterministic, so a re-signed copy is byte-identical and already known.
+    func testReRunWithOriginalArgumentsResubmitsTheEarlierAnchor() async throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lattice-node-e2e-ctlkeys-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: scratch, withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let miner = try await makeKey(scratch, "minerBack")
+        let seller = try await makeKey(scratch, "sellerBack")
+        let fund = try await makeKey(scratch, "fundBack")
+        // Nothing mines until step 4, so both anchors stay pooled.
+        let host = try await bringUpMiningHost(miner: miner)
+        let deploy = try deployArguments(
+            host, directory: "Market",
+            premineTo: seller.address, fund: fund
+        )
+
+        // 1. The original anchor, at the nonce the key actually expects.
+        let original = try await runCtl(
+            deploy + ["--nonce", "0", "--external-mining-wait-seconds", "1"],
+            root: host.root, expectFailure: true
+        )
+        guard let genesis = line("genesis", in: original),
+              let anchor = line("anchor", in: original) else {
+            throw CtlE2EError("the first deploy submits an anchor: \(original)")
+        }
+        try await waitFor("the original anchor is pooled") {
+            (await self.health(host.nexusRPC)?["mempoolCount"] as? Int ?? 0) >= 1
+        }
+
+        // 2. A correction at another nonce: a second anchor, same genesis.
+        let corrected = try await runCtl(
+            deploy + ["--nonce", "5", "--external-mining-wait-seconds", "1"],
+            root: host.root, expectFailure: true
+        )
+        try check(
+            line("genesis", in: corrected) == genesis,
+            "the correction keeps genesis \(genesis): \(corrected)"
+        )
+        try await waitFor("both anchors are pooled") {
+            (await self.health(host.nexusRPC)?["mempoolCount"] as? Int ?? 0) >= 2
+        }
+
+        // 3. Back to the original arguments while anchor 1 is still pooled.
+        let again = try startCtl(
+            deploy + ["--nonce", "0", "--external-mining-wait-seconds", "600"],
+            root: host.root, log: "deploy-again"
+        )
+        defer { _ = try? sigkill(again) }
+        try await waitFor("the re-run resubmits rather than re-signing") {
+            (try? self.output(of: again)).flatMap {
+                self.line("anchor", in: $0)
+            } != nil || !again.process.isRunning
+        }
+        let resubmitted = try output(of: again)
+        try check(
+            again.process.isRunning,
+            "resubmitting the still-pooled original anchor is not a refusal: \(resubmitted)"
+        )
+        try check(
+            line("anchor", in: resubmitted) == anchor,
+            "it resubmits the original anchor \(anchor): \(resubmitted)"
+        )
+
+        // 4. It is a real anchor: let miners record it and bring the child up.
+        _ = try await runCtl(["mine", "start"], root: host.root)
+        try await waitFor("the deploy finishes", seconds: 240) {
+            !again.process.isRunning
+        }
+        let finished = try awaitExit(again)
+        try check(
+            again.process.terminationStatus == 0,
+            "the resumed deploy completed: \(finished)"
+        )
+        let childRPC = try childRPC(host, "Nexus/Market")
+        try await waitFor("the child is active") {
+            await self.health(childRPC)?["phase"] as? String == "active"
+        }
+        try await waitFor("the child genesis carries the seeded premine") {
+            await self.balance(childRPC, seller.address) == 50_000
+        }
+        let recorded = await recordedGenesis(host.nexusRPC, "Market")
+        try check(
+            recorded == genesis,
+            "the parent records \(genesis), not \(recorded ?? "nothing")"
+        )
+    }
+
     /// Throws rather than recording an XCTAssert failure: on macOS, assertion
     /// failures recorded after a spawned process exits intermittently vanish
     /// from the run's failure count, which would make these checks vacuous.
@@ -901,6 +995,13 @@ final class LatticeCtlE2ETests: XCTestCase {
 
     private func output(of running: RunningCtl) throws -> String {
         String(decoding: try Data(contentsOf: running.log), as: UTF8.self)
+    }
+
+    /// Waits for a run that is expected to finish on its own.
+    private func awaitExit(_ running: RunningCtl) throws -> String {
+        running.process.waitUntilExit()
+        try? running.handle.close()
+        return try output(of: running)
     }
 
     /// SIGKILL: no exit handlers and no stdio flush, only what already

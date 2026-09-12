@@ -19,11 +19,26 @@ public func createDurably(_ data: Data, at url: URL) throws -> Bool {
     try FileManager.default.createDirectory(
         at: directory, withIntermediateDirectories: true
     )
+    // A kill between staging and link leaves the staged copy behind. Sweep
+    // old ones, never recent ones: a staging file seconds old may belong to
+    // a deploy that is still between its own staging and link.
+    let prefix = ".\(url.lastPathComponent)."
+    if let existing = try? FileManager.default.contentsOfDirectory(
+        at: directory, includingPropertiesForKeys: [.contentModificationDateKey]
+    ) {
+        for stale in existing
+        where stale.lastPathComponent.hasPrefix(prefix)
+            && Date().timeIntervalSince((try? stale.resourceValues(
+                forKeys: [.contentModificationDateKey]
+            ).contentModificationDate) ?? Date()) > 600 {
+            try? FileManager.default.removeItem(at: stale)
+        }
+    }
     // Stage the whole file, synced, beside the target; link(2) then claims
     // the name atomically and fails if anything already holds it, so the
     // target is never partially written and never replaced.
     let staging = directory.appendingPathComponent(
-        ".\(url.lastPathComponent).\(UUID().uuidString)"
+        "\(prefix)\(UUID().uuidString)"
     )
     try data.write(to: staging)
     defer { unlink(staging.path) }

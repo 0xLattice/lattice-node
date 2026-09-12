@@ -89,10 +89,15 @@ struct Child: AsyncParsableCommand {
             let pendingURL = layout.pendingDeploy(for: childPath)
             var resumable: PendingChildDeploy?
             if FileManager.default.fileExists(atPath: pendingURL.path) {
-                let loaded = try JSONDecoder().decode(
-                    PendingChildDeploy.self,
-                    from: Data(contentsOf: pendingURL)
-                )
+                let loaded: PendingChildDeploy
+                do {
+                    loaded = try JSONDecoder().decode(
+                        PendingChildDeploy.self,
+                        from: Data(contentsOf: pendingURL)
+                    )
+                } catch {
+                    throw CtlError("the pending deploy at \(pendingURL.path) could not be read (\(error.localizedDescription)); its genesis CID may already be anchored on the parent while this file is the only copy of the seed behind it, so restore the file rather than deleting it")
+                }
                 guard try HeaderImpl(node: loaded.seed.spec).rawCID
                         == HeaderImpl(node: chainSpec).rawCID,
                       loaded.seed.premineTo == premineTo else {
@@ -121,59 +126,78 @@ struct Child: AsyncParsableCommand {
                 let privateKey: String
                 let publicKey: String
             }
-            let key = try JSONDecoder().decode(
+            // Optional: a resume that only resubmits a stored anchor must not
+            // depend on the funding key file still being present.
+            let key = try? JSONDecoder().decode(
                 KeyFile.self,
                 from: Data(contentsOf: URL(fileURLWithPath: fund))
             )
-            let address = CryptoUtils.createAddress(from: key.publicKey)
-            let body = TransactionBody(
-                accountActions: fee == 0 ? [] : [AccountAction(
-                    owner: address, delta: -Int64(fee)
-                )],
-                actions: [],
-                depositActions: [],
-                genesisActions: [GenesisAction(
-                    directory: directory, blockCID: genesisCID
-                )],
-                receiptActions: [],
-                withdrawalActions: [],
-                signers: [address],
-                fee: fee,
-                nonce: nonce,
-                chainPath: [parent].flatMap {
-                    $0 == "Nexus" ? ["Nexus"]
-                        : $0.components(separatedBy: "/")
-                }
-            )
-            let header = try HeaderImpl(node: body)
+            var requested: HeaderImpl<TransactionBody>?
+            if let key {
+                let address = CryptoUtils.createAddress(from: key.publicKey)
+                requested = try HeaderImpl(node: TransactionBody(
+                    accountActions: fee == 0 ? [] : [AccountAction(
+                        owner: address, delta: -Int64(fee)
+                    )],
+                    actions: [],
+                    depositActions: [],
+                    genesisActions: [GenesisAction(
+                        directory: directory, blockCID: genesisCID
+                    )],
+                    receiptActions: [],
+                    withdrawalActions: [],
+                    signers: [address],
+                    fee: fee,
+                    nonce: nonce,
+                    chainPath: [parent].flatMap {
+                        $0 == "Nexus" ? ["Nexus"]
+                            : $0.components(separatedBy: "/")
+                    }
+                ))
+            }
 
-            // While --fund, --nonce and --fee still describe the pending
-            // anchor it is resubmitted verbatim: a re-signed copy is a rival
-            // at the same nonce that the pool refuses. Changed ones re-sign it
-            // for the SAME genesis — the only way out of a nonce the key never
-            // reaches (pooled as future) or a fee too low to mine. Whichever
-            // anchor for this genesis lands, the seed kept here activates it.
+            // Anchors accumulate. A run whose --fund, --nonce and --fee match
+            // one already signed resubmits that exact transaction, which the
+            // pool already knows; a re-signed copy would be a same-nonce rival
+            // it refuses. Anything else is signed and APPENDED, so correcting
+            // a nonce never strands the anchor it corrected: that one may
+            // still be pooled, and returning to the original arguments
+            // resubmits it. Only one can ever be recorded — the parent's
+            // genesis insertion proof rejects a second anchor for the
+            // directory — so the seed kept here activates whichever lands.
             let pending: PendingChildDeploy
+            let anchor: SubmitTransactionRequest
             var created: Data?
-            if let resumable,
-               resumable.anchor.transaction.body.rawCID == header.rawCID {
+            let matching = resumable?.anchors.first {
+                $0.transaction.body.rawCID == requested?.rawCID
+            }
+            if let resumable, let matching {
                 pending = resumable
+                anchor = matching
+            } else if let resumable, requested == nil,
+                      let latest = resumable.anchors.last {
+                print("could not read --fund \(fund); resubmitting the stored anchor unchanged")
+                pending = resumable
+                anchor = latest
             } else {
+                guard let key, let requested else {
+                    throw CtlError("cannot read the funding key \(fund), which signs the genesis anchor")
+                }
                 guard let signature = TransactionSigning.sign(
-                    bodyHeader: header, privateKeyHex: key.privateKey
+                    bodyHeader: requested, privateKeyHex: key.privateKey
                 ) else {
                     throw CtlError("anchor signing failed; check the fund key")
                 }
+                anchor = SubmitTransactionRequest(transaction: Transaction(
+                    signatures: [key.publicKey: signature], body: requested
+                ))
                 pending = PendingChildDeploy(
-                    seed: seed,
-                    anchor: SubmitTransactionRequest(transaction: Transaction(
-                        signatures: [key.publicKey: signature], body: header
-                    ))
+                    seed: seed, anchors: (resumable?.anchors ?? []) + [anchor]
                 )
                 let encoded = try JSONEncoder().encode(pending)
                 if resumed {
                     try writeDurably(encoded, to: pendingURL)
-                    print("re-signed the pending anchor for the changed --fund, --nonce or --fee")
+                    print("signed another anchor for this genesis: --fund, --nonce or --fee changed")
                 } else {
                     // Exclusive: a concurrent deploy of this child may have
                     // written its own seed since the check above.
@@ -204,7 +228,7 @@ struct Child: AsyncParsableCommand {
                 do {
                     let submitted: SubmitResponse = try await post(
                         rpc: parentChain.rpc, path: "v1/transactions",
-                        body: pending.anchor
+                        body: anchor
                     )
                     print("anchor \(submitted.transactionCID)")
                     fflush(nil)
@@ -223,7 +247,7 @@ struct Child: AsyncParsableCommand {
                         directory: directory,
                         genesisCID: genesisCID
                     ) else {
-                        throw CtlError("the parent refused the pending genesis anchor (\(refusal)); it stays pending at \(pendingURL.path). Re-run with a corrected --nonce, a higher --fee or another --fund to re-sign it for the same genesis")
+                        throw CtlError("the parent refused the pending genesis anchor (\(refusal)); it stays pending at \(pendingURL.path). Re-run with a corrected --nonce, a higher --fee or another --fund to sign another anchor for the same genesis, or with the values an earlier run used to resubmit that anchor")
                     }
                     recorded = true
                 } catch {
@@ -300,7 +324,7 @@ struct Child: AsyncParsableCommand {
                 }
             }
             guard recorded else {
-                throw CtlError("the genesis anchor was not recorded yet; the child was NOT added. It stays pending at \(pendingURL.path): re-run the same command to keep waiting, or re-run with a corrected --nonce or a higher --fee to re-sign the anchor for the same genesis")
+                throw CtlError("the genesis anchor was not recorded yet; the child was NOT added. It stays pending at \(pendingURL.path): re-run the same command to keep waiting, with a corrected --nonce or a higher --fee to sign another anchor for the same genesis, or with the values an earlier run used to resubmit that anchor")
             }
             // Seed the child's data directory with the genesis inputs so its node
             // rebuilds the identical self-contained genesis and self-admits it on
@@ -355,13 +379,14 @@ struct Child: AsyncParsableCommand {
     }
 }
 
-/// What a deploy cannot re-derive once its anchor may be on the parent: the
-/// genesis seed, and the exact signed anchor — resubmitted verbatim, so a
-/// resumed deploy is the same transaction rather than a same-nonce rival the
-/// pool refuses.
+/// What a deploy cannot re-derive once its anchors may be on the parent: the
+/// genesis seed, and every anchor signed for it. They accumulate rather than
+/// replace each other, so a run that matches one resubmits that exact
+/// transaction (a re-signed copy is a same-nonce rival the pool refuses),
+/// and a correction leaves the anchor it corrected reachable.
 struct PendingChildDeploy: Codable {
     let seed: ChildGenesisSeed
-    let anchor: SubmitTransactionRequest
+    let anchors: [SubmitTransactionRequest]
 }
 
 /// Free means free on this HOST, not merely absent from the file: another
