@@ -275,15 +275,21 @@ searching is the defence.
   bounded.
 
 **What this buys, unconditionally:** recovery from benign stalls — peers that
-have gone silent, and the permanent reconnect-suppression trap in which the
-overlay has stopped retrying a configured peer for good.
+have gone silent, and the reconnect-suppression state in which the overlay has
+stopped retrying a configured peer for good. Re-dialling a configured peer
+clears that suppression, so "loss is temporary" under **Bootstrap peers** holds
+even for a peer the overlay has given up on entirely, not only for one it is
+still backing off from.
 
-**Against a deliberate eclipse, the escape comes from the configured seed set,
-not from discovery.** Provider lookups resolve through the hint cache and the
-routing table, both populated exclusively through current sessions, so a fully
-eclipsed node is asking its attacker where to find peers. The discovery limb is
-best-effort; set `--peer` to seeds you trust, which is the part an attacker
-cannot supply.
+**Against a deliberate eclipse, the escape comes from the seed set, not from
+discovery.** Provider lookups resolve through the hint cache and the routing
+table, both populated exclusively through current sessions, so a fully eclipsed
+node is asking its attacker where to find peers; the discovery limb is
+therefore best-effort. The seeds are the part an attacker cannot choose, and a
+Nexus process carries them by default, so a stalled root node re-dials a source
+its attacker never selected without any operator action. A **child** chain
+receives no defaults, so a child's escape is exactly the `--peer` set its
+operator gave it — another reason to give a child real peers of its own.
 
 This is **discovery only**. It never disconnects, scores, punishes or prefers a
 peer — a slow peer and a withholding peer are indistinguishable, so an idle tip
