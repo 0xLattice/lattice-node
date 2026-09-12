@@ -454,6 +454,7 @@ public enum ChainServiceError: Error, Equatable, Sendable {
     case invalidRewardTransaction
     case invalidRewardPlan
     case invalidMinimumWork
+    case minimumWorkPlanTooLarge
     case rewardPlanTooLarge
     case requestTooLarge
     case invalidChildDirectory
@@ -2454,6 +2455,16 @@ public actor ChainService {
     private func validatedMinimumWorkPlan(
         _ entries: [MiningMinimumWork]
     ) throws -> (current: UInt256?, descendants: [MiningMinimumWork]) {
+        // The same payload cap the reward plan honours. Bounding it here means
+        // an oversized plan is a named refusal to the miner that sent it,
+        // rather than a descendant request that silently fails to encode and
+        // leaves that child with no candidate for the round.
+        guard let encoded = try? JSONEncoder().encode(
+                  MiningTemplateRequest(minimumWork: entries)
+              ),
+              encoded.count <= Self.maximumRewardPlanBytes else {
+            throw ChainServiceError.minimumWorkPlanTooLarge
+        }
         let currentPath = process.configuration.chainPath
         var seen: Set<String> = []
         var current: UInt256?
@@ -2464,7 +2475,8 @@ public actor ChainService {
                   Array(address.components.prefix(currentPath.count))
                     == currentPath,
                   seen.insert(address.key).inserted,
-                  entry.work > .zero else {
+                  entry.work > .zero,
+                  entry.work <= maximumRepresentableWork else {
                 throw ChainServiceError.invalidMinimumWork
             }
             if address.components == currentPath {

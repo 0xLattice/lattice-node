@@ -1060,23 +1060,34 @@ private func _encodeMiningMinimumWork(
     under childPath: [String]
 ) throws -> Data {
     guard !entries.isEmpty else { return Data() }
+    guard entries.count <= Int(UInt16.max) else {
+        throw NodeNetworkWireError.oversized
+    }
     var seen: Set<String> = []
     for entry in entries {
         guard _isAbsoluteChainPath(entry.chainPath),
               entry.chainPath.count >= childPath.count,
               Array(entry.chainPath.prefix(childPath.count)) == childPath,
               seen.insert(entry.chainPath.joined(separator: "/")).inserted,
-              entry.work > .zero else {
+              entry.work > .zero,
+              entry.work <= maximumRepresentableWork else {
             throw NodeNetworkWireError.malformed
         }
     }
-    return try _canonicalJSONEncode(entries)
+    let data = try _canonicalJSONEncode(entries)
+    guard data.count <= ChildCandidateRequestMessage.maximumRewardBytes else {
+        throw NodeNetworkWireError.oversized
+    }
+    return data
 }
 
 private func _decodeMiningMinimumWork(
     _ data: Data,
     under childPath: [String]
 ) throws -> [MiningMinimumWork] {
+    guard data.count <= ChildCandidateRequestMessage.maximumRewardBytes else {
+        throw NodeNetworkWireError.oversized
+    }
     guard let entries = try? JSONDecoder().decode(
             [MiningMinimumWork].self,
             from: data

@@ -123,7 +123,12 @@ public enum MinerLoopLogic {
             guard isDigits(Substring(text)) else { return nil }
             work = UInt256(text)
         }
-        guard let work, work > .zero else { return nil }
+        // Target 0 is met by no hash and consensus rejects it, so target 1 is
+        // the hardest and `workForTarget(1)` the most work any block can be
+        // asked for. Above it there is nothing a node could build.
+        guard let work, work > .zero, work <= workForTarget(UInt256(1)) else {
+            return nil
+        }
         return work
     }
 

@@ -2850,6 +2850,18 @@ final class NetworkTrustTests: XCTestCase {
             chainPath: ["Nexus", "Payments"],
             work: .zero
         )]).encoded())
+        // More work than the hardest valid target (1) can represent.
+        XCTAssertThrowsError(try request([MiningMinimumWork(
+            chainPath: ["Nexus", "Payments"],
+            work: workForTarget(UInt256(1)) + UInt256(1)
+        )]).encoded())
+        // Beyond the payload cap the rewards field also honours.
+        XCTAssertThrowsError(try request((0..<20_000).map {
+            MiningMinimumWork(
+                chainPath: ["Nexus", "Payments", "d\($0)"],
+                work: UInt256(1) << 16
+            )
+        }).encoded())
         XCTAssertThrowsError(
             try ChildCandidateRequestMessage.decoded(encoded + Data([0]))
         )

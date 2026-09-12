@@ -94,7 +94,10 @@ lattice-mining-coordinator \
   default — templates and blocks are exactly as before.
 - Choose the value as work per block: roughly `expected hashrate ×
   targetBlockTime`. At 1 GH/s against a one-hour target block time that is
-  3.6e12, so `2^42`. Both `2^N` and plain decimal integers are accepted.
+  3.6e12, so `2^42`. Both `2^N` and plain decimal integers are accepted, up to
+  2^255 — the work of target 1, the hardest any block can ask for. More than
+  that is refused outright, by the miner and by the node, rather than quietly
+  becoming a target no one can ever hit.
 - Set it per chain, and set it before launching a fresh chain: every chain
   that starts at the maximum target bursts on its own, Nexus and each child
   alike. One coordinator covers the chain it mines and every chain merged-mined

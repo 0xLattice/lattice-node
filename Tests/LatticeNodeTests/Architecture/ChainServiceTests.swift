@@ -1493,6 +1493,55 @@ final class ChainServiceTests: XCTestCase {
         )
     }
 
+    /// Target 0 is met by no hash and Lattice rejects it, so no target can
+    /// represent more than `workForTarget(1)` work. Asking for more must be
+    /// refused by name, never silently delivered as target 1 — that would
+    /// freeze the chain this option exists to keep mining.
+    func testUnachievableOrOversizedMinimumWorkIsRefused() async throws {
+        let process = try await nexusProcess()
+        let service = makeService(process: process)
+        let ceiling = workForTarget(UInt256(1))
+
+        await XCTAssertThrowsErrorAsync(
+            try await service.miningTemplate(MiningTemplateRequest(
+                minimumWork: [MiningMinimumWork(
+                    chainPath: ["Nexus"],
+                    work: ceiling + UInt256(1)
+                )]
+            ))
+        ) { error in
+            XCTAssertEqual(error as? ChainServiceError, .invalidMinimumWork)
+        }
+
+        // The ceiling itself is achievable: the hardest valid target.
+        let template = try await service.miningTemplate(MiningTemplateRequest(
+            minimumWork: [MiningMinimumWork(
+                chainPath: ["Nexus"],
+                work: ceiling
+            )]
+        ))
+        XCTAssertEqual(template.block.target, UInt256(1))
+
+        // A plan past the payload cap `rewards` also honours is a named
+        // refusal here, not a child candidate that silently goes missing for
+        // a whole round when the wire frame bites instead.
+        await XCTAssertThrowsErrorAsync(
+            try await service.miningTemplate(MiningTemplateRequest(
+                minimumWork: (0..<40_000).map {
+                    MiningMinimumWork(
+                        chainPath: ["Nexus", "d\($0)"],
+                        work: UInt256(1) << 16
+                    )
+                }
+            ))
+        ) { error in
+            XCTAssertEqual(
+                error as? ChainServiceError,
+                .minimumWorkPlanTooLarge
+            )
+        }
+    }
+
     /// A request without minimum work builds the scheduled block, unchanged.
     func testTemplateWithoutMinimumWorkIsTheScheduledBlock() async throws {
         let process = try await nexusProcess()

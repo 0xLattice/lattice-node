@@ -58,6 +58,19 @@ final class MinerLoopLogicTests: XCTestCase {
         XCTAssertEqual(
             MinerLoopLogic.parseMinimumWork("4294967296"), UInt256(1) << 32
         )
+        // The hardest valid target is 1, so no target can represent more than
+        // workForTarget(1) = 2^255 and asking for more can never be delivered.
+        XCTAssertEqual(
+            MinerLoopLogic.parseMinimumWork("2^255"), workForTarget(UInt256(1))
+        )
+        XCTAssertNil(MinerLoopLogic.parseMinimumWork("2^255+1"))
+        XCTAssertNil(MinerLoopLogic.parseMinimumWork(
+            "57896044618658097711785492504343953926634992332820282019728792003956564819969"
+        ))
+        // Decimal overflow past 2^256 - 1, the branch `2^N` does not cover.
+        XCTAssertNil(MinerLoopLogic.parseMinimumWork(
+            "115792089237316195423570985008687907853269984665640564039457584007913129639936"
+        ))
         XCTAssertNil(MinerLoopLogic.parseMinimumWork("0"))
         XCTAssertNil(MinerLoopLogic.parseMinimumWork("2^256"))
         XCTAssertNil(MinerLoopLogic.parseMinimumWork("2^"))

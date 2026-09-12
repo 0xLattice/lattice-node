@@ -210,6 +210,12 @@ final class MiningTemplateBookTests: XCTestCase {
     }
 
     func testMinimumWorkTargetIsTheEasiestTargetMeetingTheWork() {
+        // Target 0 is met by no hash and Lattice rejects it, so the most work
+        // any valid target can represent is workForTarget(1) = 2^255. Every
+        // value up to that ceiling must be delivered exactly, never clamped
+        // to a target that asks for less work than requested.
+        let ceiling = workForTarget(UInt256(1))
+        XCTAssertEqual(ceiling, UInt256(1) << 255)
         for work in [
             UInt256(1),
             UInt256(2),
@@ -217,8 +223,11 @@ final class MiningTemplateBookTests: XCTestCase {
             UInt256(1) << 32,
             (UInt256(1) << 32) + UInt256(1),
             UInt256(1) << 128,
+            (UInt256(1) << 255) - UInt256(1),
+            ceiling,
         ] {
             let target = minimumWorkTarget(work)
+            XCTAssertGreaterThan(target, .zero, "work \(work)")
             XCTAssertGreaterThanOrEqual(
                 workForTarget(target), work, "work \(work)"
             )
@@ -229,6 +238,7 @@ final class MiningTemplateBookTests: XCTestCase {
             }
         }
         XCTAssertEqual(minimumWorkTarget(UInt256(1)), .max)
+        XCTAssertEqual(minimumWorkTarget(ceiling), UInt256(1))
     }
 
     /// A chain launched at the maximum target mines a burst of near-free
