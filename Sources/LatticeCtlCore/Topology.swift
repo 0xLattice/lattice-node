@@ -167,6 +167,22 @@ public struct HostLayout: Sendable {
         root.appendingPathComponent("chains").appendingPathComponent(path)
     }
 
+    /// An in-flight `child deploy` (genesis seed + signed anchor). Outside the
+    /// wipeable chain directories: the anchor may land on the parent at any
+    /// time, and without this file its genesis could never be rebuilt.
+    public func pendingDeploy(for path: String) -> URL {
+        // Percent-encoded, not `/`-flattened: `-` is a legal directory atom,
+        // so flattening would give `Nexus/A/B` and `Nexus/A-B` one file, and
+        // one child's genesis seed would overwrite the other's.
+        let encoded = path.addingPercentEncoding(
+            withAllowedCharacters: CharacterSet.alphanumerics.union(
+                CharacterSet(charactersIn: "._-")
+            )
+        ) ?? path
+        return root.appendingPathComponent("pending-deploy")
+            .appendingPathComponent(encoded + ".json")
+    }
+
     public func pidFile(for path: String) -> URL {
         root.appendingPathComponent("run").appendingPathComponent(
             path.replacingOccurrences(of: "/", with: "-") + ".pid"

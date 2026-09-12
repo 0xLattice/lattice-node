@@ -131,8 +131,15 @@ func spawnChain(
         )
         arguments += ["--parent", "\(parentKey)@127.0.0.1:\(parent.fact)"]
     }
-    for peer in chain.peers ?? [] {
-        arguments += ["--peer", peer]
+    // Absent = no peer source configured, so the node uses its built-in
+    // defaults. A list REPLACES them, and an explicit empty list means none.
+    if let peers = chain.peers {
+        if peers.isEmpty {
+            arguments += ["--no-default-peers"]
+        }
+        for peer in peers {
+            arguments += ["--peer", peer]
+        }
     }
     if let publicRead = chain.publicRead {
         arguments += ["--public-read-port", String(publicRead)]
