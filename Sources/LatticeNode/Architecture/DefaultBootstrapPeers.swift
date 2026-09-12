@@ -15,8 +15,11 @@ import Ivy
 /// temporary rather than permanent, and defaults need no reconnect machinery
 /// of their own.
 public enum DefaultBootstrapPeers {
-    /// The public Nexus overlay, as deployed: `deploy/read-replica/entrypoint.sh`
-    /// and `deploy/testnet-follower/fly.toml` dial exactly these endpoints.
+    /// The public Nexus overlay, as deployed. `deploy/read-replica/entrypoint.sh`
+    /// carries this COMPLETE set and is the drift anchor the tests check
+    /// against; `deploy/testnet-follower/fly.toml` corroborates the three
+    /// backbones, and correctly omits the follower itself — a host must not
+    /// dial its own identity.
     ///
     /// Hostnames rather than IP literals, so a host that moves stays
     /// reachable. The first three are the mainnet backbone and today resolve

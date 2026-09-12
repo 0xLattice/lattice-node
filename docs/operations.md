@@ -61,7 +61,12 @@ different chain.
   IPv4 /16, and `2a09:8280::/32` over IPv6). Count the defaults as two
   independent sources, not four. If you need more separation than that — and a
   node whose only reachable defaults are the three backbones effectively has
-  one — supply your own `--peer` endpoints.
+  one — supply your own `--peer` endpoints. Note the netgroup is computed from
+  the address a connection is OBSERVED at, not from the configured hostname, so
+  the collapse happens only after dialing: with a low
+  `--overlay-max-connections-per-netgroup` a node admits at most that many of
+  the three backbones, discarding the surplus once it has already connected and
+  without a distinctive error.
 
 The startup banner reports which set is in play (`N default` or `N configured`
 bootstrap peer(s)).

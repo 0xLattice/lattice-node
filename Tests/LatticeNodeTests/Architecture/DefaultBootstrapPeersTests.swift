@@ -101,8 +101,10 @@ private final class DialCountingListener: Sendable {
 }
 
 final class DefaultBootstrapPeersTests: XCTestCase {
-    private func signingKey(_ byte: UInt8) -> Curve25519.Signing.PrivateKey {
-        try! Curve25519.Signing.PrivateKey(
+    private func signingKey(_ byte: UInt8) throws -> Curve25519.Signing.PrivateKey {
+        // Throwing rather than `try!`: a trap would abort the whole test
+        // binary instead of failing this one test.
+        try Curve25519.Signing.PrivateKey(
             rawRepresentation: Data(repeating: byte, count: 32)
         )
     }
@@ -146,6 +148,64 @@ final class DefaultBootstrapPeersTests: XCTestCase {
             XCTAssertFalse(endpoint.host.isEmpty)
             XCTAssertNotEqual(endpoint.port, 0)
         }
+    }
+
+    /// The shipped defaults and the deployed peer list are ONE constant living
+    /// in two places, and nothing else ties them together. Without this anchor
+    /// a rotated backbone identity leaves every other test green while every
+    /// fresh node silently loses that seed: it dials, the identity check
+    /// fails, and it backs off forever with no log saying the default is wrong.
+    ///
+    /// LIMITATION: this is a two-place check, not a live one. It proves the
+    /// binary agrees with `deploy/read-replica/entrypoint.sh` — nothing more.
+    /// If a backbone key rotates in production and that file is not updated
+    /// either, this test stays green, so it is NOT proof that the defaults are
+    /// live-correct. Establishing that would mean probing production, which
+    /// these tests deliberately do not do.
+    func testShippedDefaultsMatchTheDeployedPeerList() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // Architecture
+            .deletingLastPathComponent()  // LatticeNodeTests
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // repository root
+        // The read replica is the only deployed config carrying the COMPLETE
+        // set; the testnet follower lists the three backbones but not itself.
+        let entrypoint = repoRoot
+            .appendingPathComponent("deploy/read-replica/entrypoint.sh")
+        let script = try String(contentsOf: entrypoint, encoding: .utf8)
+
+        var deployed: Set<PeerEndpoint> = []
+        let tokens = script.split(whereSeparator: \.isWhitespace).map(String.init)
+        for (index, token) in tokens.enumerated() where token == "--peer" {
+            guard index + 1 < tokens.count else { continue }
+            let value = tokens[index + 1]
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\\\""))
+            guard let at = value.firstIndex(of: "@") else { continue }
+            let address = String(value[value.index(after: at)...])
+            guard let colon = address.lastIndex(of: ":"),
+                  let port = UInt16(address[address.index(after: colon)...])
+            else { continue }
+            deployed.insert(PeerEndpoint(
+                publicKey: String(value[..<at]),
+                host: String(address[..<colon]),
+                port: port
+            ))
+        }
+
+        XCTAssertFalse(
+            deployed.isEmpty,
+            "parsed no --peer entries from \(entrypoint.path)"
+        )
+        XCTAssertEqual(
+            deployed,
+            Set(DefaultBootstrapPeers.nexus),
+            """
+            DefaultBootstrapPeers.nexus and deploy/read-replica/entrypoint.sh \
+            have drifted. They are one constant in two places: update BOTH so \
+            they agree. If a backbone identity rotated or a peer was added or \
+            removed from the deployment, make the same change in the other file.
+            """
+        )
     }
 
     /// An operator peer source REPLACES the defaults; it never merges.
@@ -257,7 +317,7 @@ final class DefaultBootstrapPeersTests: XCTestCase {
             port: listener.port
         )
         let node = Ivy(config: IvyConfig(
-            signingKey: signingKey(0x5d),
+            signingKey: try signingKey(0x5d),
             listenPort: 0,
             bootstrapPeers: [lost],
             stunServers: [],
