@@ -55,6 +55,14 @@ different chain.
   — is re-dialled under exponential backoff for the life of the process, so a
   node that loses its peers keeps trying to find them.
 
+- **Four entries, two independent netgroups.** The shipped set does not span
+  four independent networks: the three mainnet backbones all sit in one
+  `137.66.0.0/16` netgroup, and only the public follower is outside it (its own
+  IPv4 /16, and `2a09:8280::/32` over IPv6). Count the defaults as two
+  independent sources, not four. If you need more separation than that — and a
+  node whose only reachable defaults are the three backbones effectively has
+  one — supply your own `--peer` endpoints.
+
 The startup banner reports which set is in play (`N default` or `N configured`
 bootstrap peer(s)).
 
