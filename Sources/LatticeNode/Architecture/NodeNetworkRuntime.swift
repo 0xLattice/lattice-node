@@ -1167,7 +1167,21 @@ public actor NodeNetworkRuntime: IvyDelegate {
            await process.mainChainBlockCID(atHeight: 0) == genesisCID {
             urls.append(own)
         }
-        let anchored = await process.anchoredChildGenesisCIDs(limit: 200)
+        // One sample of the wired children, taken before the resolve suspends
+        // and iterated below: the answer then describes a single consistent
+        // moment. Reading live `hierarchyPeers` after the suspension instead
+        // would mix a child admitted mid-resolve into a lookup that never
+        // asked for its directory, and drop it anyway. It is served from the
+        // next ask on.
+        let wiredChildren = hierarchyPeers.compactMap { key, role -> (PeerKey, String)? in
+            guard case .child(let path) = role, let directory = path.last else {
+                return nil
+            }
+            return (key, directory)
+        }
+        let anchored = await process.anchoredChildGenesisCIDs(
+            directories: Set(wiredChildren.map(\.1))
+        )
         let directories = Set(
             anchored.filter { $0.value == genesisCID }.map(\.key)
         )
@@ -1177,10 +1191,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // of sybil declarants shadow the honest child's URL from every
             // answer for the process lifetime. Random selection keeps every
             // declarant reachable across repeated asks.
-            for (key, role) in hierarchyPeers.shuffled() {
-                guard case .child(let path) = role,
-                      let directory = path.last,
-                      directories.contains(directory),
+            for (key, directory) in wiredChildren.shuffled() {
+                guard directories.contains(directory),
                       let url = childDeclaredReadURLs[key],
                       !urls.contains(url) else { continue }
                 urls.append(url)
@@ -1358,6 +1370,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     $0.chainPath.count >= path.count
                         && Array($0.chainPath.prefix(path.count)) == path
                 }
+                let minimumWork = context.minimumWork.filter {
+                    $0.chainPath.count >= path.count
+                        && Array($0.chainPath.prefix(path.count)) == path
+                }
                 group.addTask {
                     let candidate = await self.requestChildCandidate(
                         from: key,
@@ -1365,6 +1381,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                         parentCID: parentCID,
                         parentData: parentData,
                         rewards: rewards,
+                        minimumWork: minimumWork,
                         deadline: deadline,
                         generation: generation,
                         process: process
@@ -3774,7 +3791,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // an adopting child that raced ahead of the parent's anchor just
             // retries once the record lands.
             guard let genesisCID = await process
-                    .anchoredChildGenesisCIDs(limit: 200)[directory],
+                    .anchoredChildGenesisCIDs(directories: [directory])[directory],
                   let payload = try? ChildGenesisAnchorResponseMessage(
                       requestID: request.requestID,
                       genesisCID: genesisCID
@@ -4169,35 +4186,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // newly-wired child within a minute (records are small).
         let interval = max(UInt64(30), min(ttl / 2, UInt64(60)))
         while isRunning, runtimeGeneration == generation {
-            let expiresAt = UInt64(Date().timeIntervalSince1970) + ttl
-            // (1) This node's own chain genesis, on its own overlay — peers of
-            // this chain can find providers of it.
-            if let ownGenesis = await process.mainChainBlockCID(atHeight: 0) {
-                await overlay.announceProvider(
-                    rootCID: ownGenesis,
-                    expiresAt: expiresAt
-                )
-            }
-            // (2) Parent rendezvous: for every child ALREADY WIRED to this node
-            // (a child that co-runs alongside its parent connects here), announce
-            // that child's genesis on THIS parent overlay. Any node on the parent
-            // chain can then discoverProviders(childGenesis) and reach a node
-            // serving the child — permissionless, no registry, and discovery is
-            // the global overlay DHT (not this node's connected-peer list).
-            let anchored = await process.anchoredChildGenesisCIDs(limit: 200)
-            var announcedChildren: Set<String> = []
-            for role in hierarchyPeers.values {
-                guard case .child(let path) = role,
-                      let directory = path.last,
-                      let childGenesis = anchored[directory],
-                      announcedChildren.insert(childGenesis).inserted else {
-                    continue
-                }
-                await overlay.announceProvider(
-                    rootCID: childGenesis,
-                    expiresAt: expiresAt
-                )
-            }
+            await announceGenesisProviders(
+                expiresAt: UInt64(Date().timeIntervalSince1970) + ttl,
+                process: process
+            )
             do {
                 try await Task.sleep(nanoseconds: interval &* 1_000_000_000)
             } catch {
@@ -4205,6 +4197,63 @@ public actor NodeNetworkRuntime: IvyDelegate {
             }
         }
     }
+
+    private func announceGenesisProviders(
+        expiresAt: UInt64,
+        process: ChainProcess
+    ) async {
+        // (1) This node's own chain genesis, on its own overlay — peers of
+        // this chain can find providers of it.
+        if let ownGenesis = await process.mainChainBlockCID(atHeight: 0) {
+            await overlay.announceProvider(
+                rootCID: ownGenesis,
+                expiresAt: expiresAt
+            )
+        }
+        // (2) Parent rendezvous: for every child ALREADY WIRED to this node
+        // (a child that co-runs alongside its parent connects here), announce
+        // that child's genesis on THIS parent overlay. Any node on the parent
+        // chain can then discoverProviders(childGenesis) and reach a node
+        // serving the child — permissionless, no registry, and discovery is
+        // the global overlay DHT (not this node's connected-peer list).
+        // The same sample drives the lookup and the announcements, so this
+        // pass describes one consistent moment; a child wired mid-resolve is
+        // announced by the next pass.
+        let directories = wiredChildDirectories()
+        let anchored = await process.anchoredChildGenesisCIDs(
+            directories: directories
+        )
+        var announcedChildren: Set<String> = []
+        for directory in directories {
+            guard let childGenesis = anchored[directory],
+                  announcedChildren.insert(childGenesis).inserted else {
+                continue
+            }
+            await overlay.announceProvider(
+                rootCID: childGenesis,
+                expiresAt: expiresAt
+            )
+        }
+    }
+
+    /// Directories of the immediate children currently wired to this node.
+    private func wiredChildDirectories() -> Set<String> {
+        Set(hierarchyPeers.values.compactMap { role -> String? in
+            guard case .child(let path) = role else { return nil }
+            return path.last
+        })
+    }
+
+    #if DEBUG
+    /// Test seam: one pass of the genesis-provider announce loop, which
+    /// otherwise repeats only once a minute.
+    func announceGenesisProvidersForTesting(process: ChainProcess) async {
+        await announceGenesisProviders(
+            expiresAt: UInt64(Date().timeIntervalSince1970) + 600,
+            process: process
+        )
+    }
+    #endif
 
     private func recoverChildProofs(
         generation: UInt64,
@@ -6299,6 +6348,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         parentCID: String,
         parentData: Data,
         rewards: [MiningReward],
+        minimumWork: [MiningMinimumWork],
         deadline: ContinuousClock.Instant,
         generation: UInt64,
         process: ChainProcess
@@ -6336,7 +6386,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
             childPath: childPath,
             parentCID: parentCID,
             parentData: parentData,
-            rewards: rewards
+            rewards: rewards,
+            minimumWork: minimumWork
         )
         guard let payload = try? request.encoded() else { return nil }
         return await withCheckedContinuation { continuation in
@@ -6770,7 +6821,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     try await builder(
                         ChildCandidateRequestContext(
                             parentCarrier: parent,
-                            rewards: request.rewards
+                            rewards: request.rewards,
+                            minimumWork: request.minimumWork
                         ),
                         session
                     )

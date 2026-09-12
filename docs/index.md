@@ -58,3 +58,4 @@ Background on *why* things are shaped the way they are — design notes, not API
 - [design/mining-role-boundaries.md](design/mining-role-boundaries.md) — the E15 node/coordinator/worker mining contract.
 - [design/consensus-fork-choice.md](design/consensus-fork-choice.md) — the node's operational duties around Lattice-owned consensus.
 - [design/work-proof-collapse-north-star.md](design/work-proof-collapse-north-star.md) — the implemented proof-derived work and parent-continuity north star.
+- [design/deterministic-simulation-testing.md](design/deterministic-simulation-testing.md) — the ordering, crash, partition, skew and peer-misbehaviour failures existing tiers cannot control, and the seeded simulation concept that would.
