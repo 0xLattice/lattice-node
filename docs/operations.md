@@ -52,6 +52,31 @@ Important fields:
 - `revision`: the local consensus mutation watermark.
 - `mempoolCount` and `mempoolBytes`: bounded service pressure indicators.
 
+## Metrics
+
+```bash
+curl --fail http://127.0.0.1:8080/metrics
+```
+
+`GET /metrics` serves Prometheus text exposition format 0.0.4 on the loopback
+RPC port only; it is never registered on `--public-read-port`, and the
+read-replica nginx allowlist refuses it. Each chain runs as its own process, so
+each chain process is a separate scrape target on its own `--rpc-port`. Scrape
+from the same host or through an authenticated proxy. A platform-managed
+scraper such as Fly's dials the machine's address, not loopback, so it cannot
+reach this endpoint. Every sample carries `chain="<absolute chain path>"` (for
+example `Nexus` or `Nexus/testnet`); label values are escaped per the format.
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `lattice_chain_tip_height` | gauge | `chain`, `tier` | Main-chain tip height. `tier="validated"` is the deepest validated tip the node acts on; `tier="weighed"` is the canonical weighed-inclusive tip that same read started from, so validated never exceeds weighed within a scrape. Absent while a child awaits genesis. |
+| `lattice_overlay_peers` | gauge | `chain` | Authenticated same-chain overlay peers. The parent/child fact-plane link is not counted: a child whose only link is its parent reads `0`. |
+| `lattice_mempool_transactions` | gauge | `chain` | Transactions in the mempool. |
+| `process_start_time_seconds` | gauge | `chain` | Process start time, seconds since the Unix epoch. |
+
+A scrape costs the same as `/health`: the same ungated validated-tip read, with
+no operation gate.
+
 ## External mining services
 
 Run one or more coordinators against a Nexus process. Each coordinator allocates
@@ -67,6 +92,41 @@ lattice-mining-coordinator \
 
 Custom workers (GPU or remote hardware) implement the contract in
 [mining-workers.md](mining-workers.md) and slot in via `--worker-executable`.
+
+### Minimum work per block
+
+A chain whose genesis sits at the maximum target hands out near-free blocks
+until the retarget catches up: a fresh chain can mine a burst of them in
+seconds, and the correction that follows overshoots by as much as it was
+behind. A miner can decline to take those blocks. `--min-work <chain
+path>=<work>` asks the node to build that chain's block at the harder of the
+requested target and the scheduled one; `nextTarget` is recomputed from the
+target actually used, so the retarget sees real difficulty from block 1 and no
+burst happens.
+
+```bash
+lattice-mining-coordinator \
+  --node http://127.0.0.1:8080 \
+  --worker-executable /usr/local/bin/lattice-miner \
+  --min-work Nexus=2^32 \
+  --min-work Nexus/testnet/swap=2^20
+```
+
+- It is an operator choice, never consensus. Validity requires only that a
+  block be as hard as its parent scheduled (`target <= parent.nextTarget`), so
+  mining harder is always permitted and nodes keep accepting other miners'
+  blocks at the scheduled target. Fork choice is untouched. Unset — the
+  default — templates and blocks are exactly as before.
+- Choose the value as work per block: roughly `expected hashrate ×
+  targetBlockTime`. At 1 GH/s against a one-hour target block time that is
+  3.6e12, so `2^42`. Both `2^N` and plain decimal integers are accepted, up to
+  2^255 — the work of target 1, the hardest any block can ask for. More than
+  that is refused outright, by the miner and by the node, rather than quietly
+  becoming a target no one can ever hit.
+- Set it per chain, and set it before launching a fresh chain: every chain
+  that starts at the maximum target bursts on its own, Nexus and each child
+  alike. One coordinator covers the chain it mines and every chain merged-mined
+  under it, one `--min-work` each.
 
 If block production stalls:
 

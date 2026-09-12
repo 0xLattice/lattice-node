@@ -10,6 +10,7 @@ import Foundation
 import FoundationNetworking
 #endif
 import ArgumentParser
+import LatticeMinerCore
 import LatticeMiningCoordinator
 
 @available(macOS 15.0, *)
@@ -38,6 +39,12 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
     @Option(name: .long, help: "JSON file containing the externally signed {\"rewards\":[...]} template request.")
     var rewardsFile: String?
 
+    @Option(
+        name: .long,
+        help: "Minimum work per block for one chain: <chain path>=<work>, work as 2^N or a decimal integer (e.g. Nexus=2^32). Repeat once per chain. That chain's blocks are built at the harder of this and the scheduled target. Unset chains mine at the schedule."
+    )
+    var minWork: [String] = []
+
     @Flag(name: .long, help: "Run exactly one coordinator batch (emitting a JSON result) and exit.")
     var once = false
 
@@ -58,7 +65,8 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
             apiBaseURL: apiBaseURL,
             templateRequestBody: try Self.loadTemplateRequest(
                 path: rewardsFile,
-                deployment: deployment
+                deployment: deployment,
+                minimumWork: minWork
             )
         )
 
@@ -173,7 +181,8 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
 
     private static func loadTemplateRequest(
         path: String?,
-        deployment: Bool
+        deployment: Bool,
+        minimumWork: [String]
     ) throws -> Data {
         let data: Data
         if let path {
@@ -190,6 +199,14 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
             )
         }
         if deployment { object["mode"] = "deployment" }
+        if !minimumWork.isEmpty {
+            guard let field = MinerLoopLogic.minimumWorkField(minimumWork) else {
+                throw ValidationError(
+                    "--min-work takes <chain path>=<work>, work as 2^N or a positive decimal integer, at most once per chain"
+                )
+            }
+            object["minimumWork"] = field
+        }
         return try JSONSerialization.data(withJSONObject: object)
     }
 }

@@ -44,7 +44,8 @@ lattice mine status  # cursor position and batch runway
     "worker": "cpu",
     "workers": 4,
     "batchSize": 2000000000,
-    "rewards": "reward-batch.jsonl"
+    "rewards": "reward-batch.jsonl",
+    "minWork": {"Nexus": "2^32"}
   }
 }
 ```
@@ -57,6 +58,12 @@ lattice mine status  # cursor position and batch runway
   executable honoring the [worker contract](mining-workers.md) — a GPU worker
   slots in here.
 - `rewards` is optional; without it, mined blocks pay nobody.
+- `minWork` is optional: chain path → minimum work per block (`2^N` or a
+  decimal integer), passed to the coordinator as `--min-work`. It asks for
+  blocks harder than the schedule — the miner's choice, never a validity rule
+  — and matters most on a chain launched at the maximum target, where it is
+  what keeps a fresh chain from bursting. See
+  [operations.md](operations.md#minimum-work-per-block).
 
 ## Verbs
 

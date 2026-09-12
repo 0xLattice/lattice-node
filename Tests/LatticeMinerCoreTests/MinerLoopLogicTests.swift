@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 import Lattice
 import UInt256
@@ -49,6 +50,64 @@ final class MinerLoopLogicTests: XCTestCase {
         XCTAssertEqual(decoded.expiresInMilliseconds, 30_000)
         XCTAssertEqual(decoded.staleToken, "candidate")
         XCTAssertEqual(Data(hex: decoded.blockHex), block.toData())
+    }
+
+    func testParseMinimumWorkAcceptsPowersOfTwoAndDecimals() {
+        XCTAssertEqual(MinerLoopLogic.parseMinimumWork("2^32"), UInt256(1) << 32)
+        XCTAssertEqual(MinerLoopLogic.parseMinimumWork("2^0"), UInt256(1))
+        XCTAssertEqual(
+            MinerLoopLogic.parseMinimumWork("4294967296"), UInt256(1) << 32
+        )
+        // The hardest valid target is 1, so no target can represent more than
+        // workForTarget(1) = 2^255 and asking for more can never be delivered.
+        XCTAssertEqual(
+            MinerLoopLogic.parseMinimumWork("2^255"), workForTarget(UInt256(1))
+        )
+        XCTAssertNil(MinerLoopLogic.parseMinimumWork("2^255+1"))
+        XCTAssertNil(MinerLoopLogic.parseMinimumWork(
+            "57896044618658097711785492504343953926634992332820282019728792003956564819969"
+        ))
+        // Decimal overflow past 2^256 - 1, the branch `2^N` does not cover.
+        XCTAssertNil(MinerLoopLogic.parseMinimumWork(
+            "115792089237316195423570985008687907853269984665640564039457584007913129639936"
+        ))
+        XCTAssertNil(MinerLoopLogic.parseMinimumWork("0"))
+        XCTAssertNil(MinerLoopLogic.parseMinimumWork("2^256"))
+        XCTAssertNil(MinerLoopLogic.parseMinimumWork("2^"))
+        XCTAssertNil(MinerLoopLogic.parseMinimumWork("-1"))
+        XCTAssertNil(MinerLoopLogic.parseMinimumWork("0x20"))
+        XCTAssertNil(MinerLoopLogic.parseMinimumWork(""))
+    }
+
+    func testMinimumWorkFieldMirrorsTheTemplateRequestShape() throws {
+        let field = try XCTUnwrap(MinerLoopLogic.minimumWorkField([
+            "Nexus=2^32",
+            "Nexus/testnet/swap=17",
+        ]))
+        let encoded = try JSONSerialization.data(withJSONObject: field)
+        let decoded = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [[String: Any]]
+        )
+        XCTAssertEqual(decoded.count, 2)
+        XCTAssertEqual(decoded[0]["chainPath"] as? [String], ["Nexus"])
+        XCTAssertEqual(
+            decoded[0]["work"] as? String,
+            (UInt256(1) << 32).toPrefixedHexString()
+        )
+        XCTAssertEqual(
+            decoded[1]["chainPath"] as? [String],
+            ["Nexus", "testnet", "swap"]
+        )
+        XCTAssertEqual(
+            decoded[1]["work"] as? String,
+            UInt256(17).toPrefixedHexString()
+        )
+
+        XCTAssertNil(MinerLoopLogic.minimumWorkField(["Nexus=2^32", "Nexus=2^8"]))
+        XCTAssertNil(MinerLoopLogic.minimumWorkField(["Payments=2^32"]))
+        XCTAssertNil(MinerLoopLogic.minimumWorkField(["Nexus"]))
+        XCTAssertNil(MinerLoopLogic.minimumWorkField(["Nexus/=2^32"]))
+        XCTAssertNil(MinerLoopLogic.minimumWorkField(["Nexus=0"]))
     }
 
     func testParseTargetRoundTrips() {
