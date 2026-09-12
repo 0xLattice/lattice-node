@@ -73,6 +73,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Per-netgroup overlay connection cap (both directions). Defaults to the total connection cap (no effective throttle): a low value breaks proxy-fronted nodes where every connection shares one address, and buys little since bad data is rejected on verification and outbound sync slots are separately reserved. For a real per-source admission cost on a public direct-IP node, set --minimum-peer-key-bits (a grinding price) instead of lowering this.")
     var overlayMaxConnectionsPerNetgroup = IvyConfig.defaultMaxConnections
 
+    @Option(help: "Seconds with no newly accepted block after which the node widens its peer search: re-dial the configured peers it holds no session with, plus one provider lookup for this chain's genesis. An eclipse only works while a node keeps asking the same peers, so a node making no progress goes looking for others. Staleness is measured from this node's own verified tip, never from a peer's claimed height. Discovery only — it never disconnects, scores or prefers a peer, and has no bearing on validation or fork choice. 0 disables it.")
+    var peerSearchInterval: Double = 600
+
     @Option(help: "Public read-only HTTP port; binds all interfaces and serves ONLY the bounded GET read routes (the read-replica allowlist, enforced in code). Chain data is public; this exposes no operator or write surface.")
     var publicReadPort: UInt16?
 
@@ -115,7 +118,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             minPeerKeyBits: minimumPeerKeyBits,
             overlayMaxConnectionsPerNetgroup: overlayMaxConnectionsPerNetgroup,
             externalAddress: externalAddress,
-            publicReadURL: publicReadUrl
+            publicReadURL: publicReadUrl,
+            peerSearchInterval: peerSearchInterval
         )
 
         let network = try NodeNetworkRuntime(configuration: configuration)

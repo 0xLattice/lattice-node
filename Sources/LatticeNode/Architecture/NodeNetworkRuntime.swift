@@ -537,6 +537,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// `awaitingGenesis` by resolving its recorded genesis CID off the
     /// authenticated parent and fetching+admitting the self-contained genesis.
     private var adoptedGenesisTask: Task<Void, Never>?
+    /// Widens the peer search while this node's own acquired tip stands still,
+    /// so an eclipsed or stalled node goes looking instead of waiting on the
+    /// peers it already holds.
+    private var peerSearchTask: Task<Void, Never>?
+    /// Endpoints dialled from the one provider lookup a widening performs.
+    private static let maximumPeerSearchDials = 4
     private var childProofRecoveryNeedsRefresh = false
     private var candidateAcquirer = CandidateAcquirer()
     private var candidateWorker: Task<Void, Never>?
@@ -793,6 +799,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 generation: runtimeGeneration,
                 process: process
             )
+            schedulePeerSearch(
+                generation: runtimeGeneration,
+                process: process
+            )
         } catch {
             isRunning = false
             _ = callbackEpoch.advance()
@@ -913,6 +923,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         genesisAnnounceTask = nil
         adoptedGenesisTask?.cancel()
         adoptedGenesisTask = nil
+        peerSearchTask?.cancel()
+        peerSearchTask = nil
         childProofRecoveryGeneration = nil
         childProofRecoveryNeedsRefresh = false
         servingAcceptedLeaves.removeAll()
@@ -4154,6 +4166,95 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 generation: generation,
                 process: process
             )
+        }
+    }
+
+    private func schedulePeerSearch(
+        generation: UInt64,
+        process: ChainProcess
+    ) {
+        guard configuration.peerSearchInterval > 0,
+              peerSearchTask == nil else { return }
+        let search = makePeerSearch(process: process)
+        peerSearchTask = Task { [weak self] in
+            await self?.peerSearchLoop(search, generation: generation)
+        }
+    }
+
+    /// Observe our own tip on a fixed cadence and let the search decide. The
+    /// first observation only records where the tip stands, so a node that has
+    /// just started is never treated as idle.
+    private func peerSearchLoop(
+        _ search: StaleTipPeerSearch,
+        generation: UInt64
+    ) async {
+        // Observing more often than the configured interval is harmless — the
+        // widening decision is `tick`'s, measured against that interval — and
+        // bounding the sleep keeps it representable for any value an operator
+        // can pass, where converting the raw seconds would trap.
+        let seconds = min(max(configuration.peerSearchInterval, 1), 86_400)
+        let delay = UInt64(seconds) &* 1_000_000_000
+        while isRunning, runtimeGeneration == generation {
+            await search.tick()
+            do {
+                try await Task.sleep(nanoseconds: delay)
+            } catch {
+                return
+            }
+        }
+    }
+
+    private func makePeerSearch(process: ChainProcess) -> StaleTipPeerSearch {
+        let overlay = self.overlay
+        let configured = planeConfigurations.overlay.bootstrapPeers
+        return StaleTipPeerSearch(
+            interval: configuration.peerSearchInterval,
+            maximumDiscoveredDials: Self.maximumPeerSearchDials,
+            clock: { Date() },
+            // The acquired (weighed-inclusive) tip: it advances only on work
+            // this node verified itself. The validated tip lags behind it under
+            // deferred execution and would read as staleness that is not there.
+            acquiredHeight: { await process.canonicalTipHeight() },
+            configuredPeersWithoutSession: { [weak self] in
+                await self?.peersWithoutSession(configured) ?? []
+            },
+            discoveredPeersWithoutSession: { [weak self] in
+                await self?.discoveredPeersWithoutSession(process: process) ?? []
+            },
+            dial: { endpoint in
+                _ = try? await overlay.connect(to: endpoint)
+            }
+        )
+    }
+
+    /// The configured peers we hold no authenticated session with. Dialling one
+    /// also clears the overlay's reconnect suppression, which is the one state
+    /// in which it has permanently stopped retrying a peer the operator asked
+    /// for.
+    private func peersWithoutSession(
+        _ endpoints: [PeerEndpoint]
+    ) -> [PeerEndpoint] {
+        endpoints.filter { endpoint in
+            guard let key = try? PeerKey(endpoint.publicKey) else { return false }
+            return overlayPeers[key] == nil
+        }
+    }
+
+    /// One provider lookup for this chain's own genesis — the rendezvous every
+    /// node of the chain already announces itself into — minus ourselves and
+    /// the peers we already hold. A lying provider record costs one failed dial
+    /// and nothing else.
+    private func discoveredPeersWithoutSession(
+        process: ChainProcess
+    ) async -> [PeerEndpoint] {
+        guard let genesis = await process.mainChainBlockCID(atHeight: 0) else {
+            return []
+        }
+        let ownKey = try? PeerKey(configuration.processPublicKey)
+        let discovered = await overlay.discoverProviders(rootCID: genesis)
+        return peersWithoutSession(discovered).filter { endpoint in
+            guard let key = try? PeerKey(endpoint.publicKey) else { return false }
+            return key != ownKey
         }
     }
 

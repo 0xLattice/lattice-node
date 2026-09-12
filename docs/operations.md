@@ -207,6 +207,33 @@ parent's unsigned session-bound answer.
 For application testing, deploy a normal child with test-oriented parameters.
 Nexus retains its one pinned genesis.
 
+## Peer search
+
+A node that has stopped making progress goes looking for more peers rather
+than waiting on the ones it already holds. An eclipse only works for as long
+as its victim keeps asking the same peers, and running a node is cheap, so
+searching is the defence.
+
+- **Trigger.** No newly accepted block for `--peer-search-interval` seconds.
+  Staleness is measured from this node's own acquired tip, which advances only
+  on proof of work it verified itself; no peer's announced or claimed height is
+  consulted.
+- **Response.** Re-dial every configured `--peer` this node holds no session
+  with (which also clears the overlay's reconnect suppression, the one state in
+  which it has permanently given up on a configured peer), then run one
+  provider lookup for this chain's genesis and dial up to four endpoints it is
+  not already connected to.
+- **Default.** `600` (ten minutes), enabled. Same cadence for the first search
+  and every repeat while the tip is still idle, so a long stall cannot
+  accumulate dials.
+- **Tuning.** `--peer-search-interval <seconds>`; `0` disables it entirely.
+  Lower it on a node you expect to be targeted, raise it to dial less often.
+
+This is **discovery only**. It never disconnects, scores, punishes or prefers a
+peer — a slow peer and a withholding peer are indistinguishable, so an idle tip
+is never evidence against anyone — and it has no bearing on validation, fork
+choice, or which peer serves a sync.
+
 ## Storage and backups
 
 One process directory contains both halves of durable state:
