@@ -582,16 +582,29 @@ public actor ChainService {
         self.maximumChildCandidates = maximumChildCandidates
     }
 
-    /// Join this service's own background workers, so that dropping it really
-    /// does release everything it holds. The commit, walk, and publication
-    /// workers each capture this actor for as long as they run, and through it
-    /// the `ChainProcess` and the exclusive storage-directory lock the process
-    /// holds — so a caller that wants to REOPEN the same storage directory
-    /// (a restart) must wait for them, not merely drop its reference. Each
-    /// worker clears its own handle when it finishes, so this returns once
-    /// none is left. Cancels only the walk's delayed retry timer, which exists
-    /// solely to re-drive the walk later; the workers themselves are awaited
-    /// rather than cancelled, so nothing in flight is abandoned mid-write.
+    /// Join this service's three coalesced background workers — canonical
+    /// commit, validate walk, transaction publication. Each captures this actor
+    /// for as long as it runs, and through it the `ChainProcess` and the
+    /// exclusive storage-directory lock the process holds, so a caller that
+    /// wants to REOPEN the same storage directory (a restart) must wait for
+    /// them rather than merely drop its reference. Each worker clears its own
+    /// handle as its final act, so this returns once none is left. Only the
+    /// walk's delayed retry timer is cancelled — it exists solely to re-drive
+    /// the walk later; the workers themselves are awaited, so nothing in flight
+    /// is abandoned mid-write.
+    ///
+    /// What it does NOT cover: the untracked ad-hoc `Task { [weak self] }`
+    /// spawns for candidate-reservation reconciliation and carrier child-proof
+    /// delivery (the latter reachable from the validate walk itself). They hold
+    /// this actor only for the duration of their own call, so they cannot keep
+    /// it alive indefinitely, but they are not joined here.
+    ///
+    /// Preconditions and limits: call it after ingress has stopped. It is not
+    /// terminal — traffic arriving afterwards re-arms the workers, and the walk
+    /// re-arms its own retry timer — and it puts no bound on how long it waits
+    /// while work keeps arriving. A commit worker that is RESERVED but has not
+    /// yet started is also not visible to the join. See #135 before wiring this
+    /// into daemon shutdown.
     public func shutdown() async {
         validateWalkRetryTask?.cancel()
         validateWalkRetryTask = nil

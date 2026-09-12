@@ -2298,6 +2298,11 @@ final class ChainServiceTests: XCTestCase {
     /// heavier forged branch as the tip on every reboot — a node put back on a
     /// branch it has already proven invalid — and the live test above would
     /// still pass.
+    ///
+    /// Scope: this is a CLEAN restart — the service is joined and the process
+    /// released before the directory is reopened — not a crash partway through
+    /// a commit. Recovery from an interrupted write is a separate question and
+    /// is not covered here.
     func testExclusionIsReDerivedFromDurableFactsAcrossRestart() async throws {
         let fixture = try await forgedWeighedTipFixture()
         let lastValid = fixture.attack[4]
@@ -2325,6 +2330,18 @@ final class ChainServiceTests: XCTestCase {
             validateBodySource: { [attackProducer = fixture.attackProducer] _, admit in
                 try await admit(FetcherContentSource(attackProducer))
             }
+        )
+        // Precondition the restart assertions are VACUOUS without: the forgery
+        // must actually hold the tip. The attack branch's valid prefix alone
+        // already outweighs the honest branch, so a forgery that never
+        // canonicalized would leave the tip at `lastValidCID` with nothing
+        // excluded — and every assertion after the restart would still pass.
+        let rankedTip = try BlockHeader(
+            node: await node!.canonicalTipBlock()
+        ).rawCID
+        XCTAssertEqual(
+            rankedTip, forgedCID,
+            "precondition: the forgery must hold the tip, or there is no exclusion to re-derive"
         )
         await service!.runValidateWalkPass()
         let excludedTip = try BlockHeader(
@@ -2361,6 +2378,11 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertEqual(
             recoveredHeight, lastValid.height,
             "the excluded subtree's work must not count toward fork choice after a restart"
+        )
+        let forgedValidated = await restarted.blockValidated(forgedCID)
+        XCTAssertFalse(
+            forgedValidated,
+            "an excluded block must never recover as validated"
         )
         // Control, as above: the competing honest branch is untouched by the
         // exclusion, so a recovery that simply dropped everything unexecutable
