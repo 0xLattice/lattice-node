@@ -72,14 +72,19 @@ actor StaleTipPeerSearch {
         guard interval > 0 else { return }
         let now = await clock()
         let height = await acquiredHeight()
-        guard let progressAt = lastProgressAt, height == lastHeight else {
-            // Either the first observation or the tip advanced: the node is
-            // making progress, so there is nothing to look for. This is also
-            // what stops the search once a stalled node recovers.
+        guard let progressAt = lastProgressAt,
+              (height ?? 0) <= (lastHeight ?? 0) else {
+            // Either the first observation or the tip reached a new high: the
+            // node is making progress, so there is nothing to look for. This is
+            // also what stops the search once a stalled node recovers.
             lastHeight = height
             lastProgressAt = now
             return
         }
+        // Only a NEW HIGH counts. A tip that moves backwards — a mid-walk
+        // reorg, an exclusion re-projection — is not progress, and treating it
+        // as progress would let a tip flipping between two heights reset the
+        // timer forever, suppressing the search exactly when it is needed.
         guard now.timeIntervalSince(progressAt) >= interval else { return }
         if let lastSearchAt, now.timeIntervalSince(lastSearchAt) < interval {
             // Already widened within this interval. The bound holds however

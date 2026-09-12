@@ -32,6 +32,8 @@ private actor TipHeight {
 
     func advance() { height &+= 1 }
 
+    func set(_ value: UInt64) { height = value }
+
     func read() -> UInt64? { height }
 }
 
@@ -53,10 +55,12 @@ final class StaleTipPeerSearchTests: XCTestCase {
         clock: TestClock,
         tip: TipHeight,
         recorder: DialRecorder,
-        interval: TimeInterval = StaleTipPeerSearchTests.interval
+        interval: TimeInterval = StaleTipPeerSearchTests.interval,
+        configuredPeers: [PeerEndpoint] = [StaleTipPeerSearchTests.configuredPeer],
+        discoveredPeers: [PeerEndpoint] = StaleTipPeerSearchTests.discoveredPeers
     ) -> StaleTipPeerSearch {
-        let configured = [Self.configuredPeer]
-        let discovered = Self.discoveredPeers
+        let configured = configuredPeers
+        let discovered = discoveredPeers
         return StaleTipPeerSearch(
             interval: interval,
             maximumDiscoveredDials: Self.maximumDiscoveredDials,
@@ -184,5 +188,94 @@ final class StaleTipPeerSearchTests: XCTestCase {
 
         let count = await recorder.count()
         XCTAssertEqual(count, 0, "0 disables the search")
+    }
+
+    /// A tip that moves BACKWARDS — a mid-walk reorg, an exclusion
+    /// re-projection — is not progress. Treating any change as progress would
+    /// let a tip flipping between two heights reset the stall timer on every
+    /// observation, suppressing the search exactly when it is needed.
+    func testOscillatingTipBelowItsHighWaterMarkIsStillAStall() async {
+        let clock = TestClock(Date(timeIntervalSince1970: 0))
+        let tip = TipHeight(100)
+        let recorder = DialRecorder()
+        let search = makeSearch(clock: clock, tip: tip, recorder: recorder)
+
+        await search.tick()
+        for step in 0..<6 {
+            await tip.set(step.isMultiple(of: 2) ? 99 : 100)
+            await clock.advance(Self.interval)
+            await search.tick()
+        }
+
+        let count = await recorder.count()
+        XCTAssertGreaterThan(
+            count, 0,
+            "a tip oscillating below its high-water mark is a stall, not progress"
+        )
+    }
+
+    /// A node with no configured peers at all — the default on main today —
+    /// must still run the discovery limb rather than widening into nothing.
+    func testWideningWithNoConfiguredPeersStillRunsDiscovery() async {
+        let clock = TestClock(Date(timeIntervalSince1970: 0))
+        let tip = TipHeight(5)
+        let recorder = DialRecorder()
+        let search = makeSearch(
+            clock: clock,
+            tip: tip,
+            recorder: recorder,
+            configuredPeers: []
+        )
+
+        await search.tick()
+        await clock.advance(Self.interval)
+        await search.tick()
+
+        let dialled = await recorder.snapshot()
+        XCTAssertEqual(
+            dialled,
+            Array(Self.discoveredPeers.prefix(Self.maximumDiscoveredDials)),
+            "an empty configured set still dials the capped discovery share"
+        )
+    }
+}
+
+/// The runtime-side halves of the search that are reachable without standing a
+/// whole node up: the sleep cadence and the discovery host filter.
+final class PeerSearchRuntimePolicyTests: XCTestCase {
+    /// Converting an operator-supplied Double straight to UInt64 traps. NaN is
+    /// not clamped by min/max either — both propagate it — so a non-finite
+    /// value must be replaced outright.
+    func testPollCadenceIsRepresentableForAnyOperatorValue() {
+        XCTAssertEqual(NodeNetworkRuntime.peerSearchPollSeconds(600), 600)
+        XCTAssertEqual(NodeNetworkRuntime.peerSearchPollSeconds(0.5), 1)
+        XCTAssertEqual(NodeNetworkRuntime.peerSearchPollSeconds(-5), 1)
+        XCTAssertEqual(NodeNetworkRuntime.peerSearchPollSeconds(1e30), 86_400)
+        XCTAssertEqual(NodeNetworkRuntime.peerSearchPollSeconds(.infinity), 600)
+        XCTAssertEqual(NodeNetworkRuntime.peerSearchPollSeconds(.nan), 600)
+    }
+
+    /// Discovery answers are attacker-supplied, and this is the node's first
+    /// automatic repeating dial of them, so unroutable targets are dropped
+    /// before any connection is attempted. Private ranges stay diallable: a LAN
+    /// peer is a legitimate deployment.
+    func testDiscoveredHostFilterRejectsUnroutableTargets() {
+        for host in [
+            "127.0.0.1", "0.0.0.0", "::1", "::", "localhost", "169.254.1.2",
+            "224.0.0.1", "255.255.255.255", "fe80::1", "ff02::1", ""
+        ] {
+            XCTAssertFalse(
+                NodeNetworkRuntime.isDiallableDiscoveredHost(host),
+                "\(host) must not be dialled from a discovery answer"
+            )
+        }
+        for host in [
+            "93.184.216.34", "10.0.0.5", "2606:4700::1111", "peer.example.com"
+        ] {
+            XCTAssertTrue(
+                NodeNetworkRuntime.isDiallableDiscoveredHost(host),
+                "\(host) is a legitimate dial target"
+            )
+        }
     }
 }

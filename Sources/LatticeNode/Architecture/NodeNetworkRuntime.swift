@@ -923,8 +923,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
         genesisAnnounceTask = nil
         adoptedGenesisTask?.cancel()
         adoptedGenesisTask = nil
-        peerSearchTask?.cancel()
+        // Joined, not just cancelled: `Task.sleep` unwinds on cancellation but
+        // an in-flight dial does not, and the search holds the ChainProcess
+        // strongly, so an unjoined task can outlive stop() still holding the
+        // storage lock. Actors are reentrant, so awaiting here lets the task's
+        // own callbacks into this actor run to completion.
+        let peerSearch = peerSearchTask
         peerSearchTask = nil
+        peerSearch?.cancel()
+        await peerSearch?.value
         childProofRecoveryGeneration = nil
         childProofRecoveryNeedsRefresh = false
         servingAcceptedLeaves.removeAll()
@@ -4188,12 +4195,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
         _ search: StaleTipPeerSearch,
         generation: UInt64
     ) async {
-        // Observing more often than the configured interval is harmless — the
-        // widening decision is `tick`'s, measured against that interval — and
-        // bounding the sleep keeps it representable for any value an operator
-        // can pass, where converting the raw seconds would trap.
-        let seconds = min(max(configuration.peerSearchInterval, 1), 86_400)
-        let delay = UInt64(seconds) &* 1_000_000_000
+        let delay = Self.peerSearchPollSeconds(
+            configuration.peerSearchInterval
+        ) &* 1_000_000_000
         while isRunning, runtimeGeneration == generation {
             await search.tick()
             do {
@@ -4201,6 +4205,44 @@ public actor NodeNetworkRuntime: IvyDelegate {
             } catch {
                 return
             }
+        }
+    }
+
+    /// Seconds between two observations of our own tip. Observing more often
+    /// than the configured interval is harmless — the widening decision is
+    /// `tick`'s, measured against the configured interval itself — and bounding
+    /// the sleep keeps it representable for any value an operator can pass.
+    /// `min`/`max` propagate NaN, so a non-finite value is replaced outright
+    /// rather than clamped, which would otherwise trap on conversion.
+    static func peerSearchPollSeconds(_ interval: TimeInterval) -> UInt64 {
+        guard interval.isFinite else { return 600 }
+        return UInt64(min(max(interval, 1), 86_400))
+    }
+
+    /// Hosts this node refuses to dial from an unvetted discovery answer. An
+    /// attacker who lands provider records would otherwise steer a stalled
+    /// node's automatic dials at loopback, an unspecified address, or a
+    /// link-local or multicast target. Private ranges stay diallable: a LAN
+    /// peer is a legitimate deployment, not an attack.
+    static func isDiallableDiscoveredHost(_ host: String) -> Bool {
+        let trimmed = host.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !trimmed.isEmpty, trimmed != "localhost" else { return false }
+        if trimmed.contains(":") {
+            let address = String(trimmed.split(separator: "%").first ?? "")
+            guard !address.isEmpty, address != "::", address != "::1" else {
+                return false
+            }
+            return !address.hasPrefix("fe80") && !address.hasPrefix("ff")
+        }
+        let fields = trimmed.split(separator: ".", omittingEmptySubsequences: false)
+        let octets = fields.compactMap { UInt8($0) }
+        // Not an IPv4 literal: a hostname this node cannot classify, left alone.
+        guard fields.count == 4, octets.count == 4 else { return true }
+        switch octets[0] {
+        case 0, 127: return false
+        case 169 where octets[1] == 254: return false
+        case 224...239, 255: return false
+        default: return true
         }
     }
 
@@ -4253,8 +4295,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let ownKey = try? PeerKey(configuration.processPublicKey)
         let discovered = await overlay.discoverProviders(rootCID: genesis)
         return peersWithoutSession(discovered).filter { endpoint in
-            guard let key = try? PeerKey(endpoint.publicKey) else { return false }
-            return key != ownKey
+            guard let key = try? PeerKey(endpoint.publicKey),
+                  key != ownKey,
+                  Self.isDiallableDiscoveredHost(endpoint.host) else {
+                return false
+            }
+            return true
         }
     }
 
