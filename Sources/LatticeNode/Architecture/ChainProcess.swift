@@ -1608,6 +1608,14 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     private func deepestValidatedMainChainTip(
         level: ChainLevel
     ) async -> (cid: String, height: UInt64)? {
+        await validatedTipWalk(level: level)?.validated
+    }
+
+    /// `deepestValidatedMainChainTip` together with the canonical tip height
+    /// the walk started from, which the validated height never exceeds.
+    private func validatedTipWalk(
+        level: ChainLevel
+    ) async -> (tipHeight: UInt64, validated: (cid: String, height: UInt64)?)? {
         let tip = await level.chain.getMainChainTip()
         guard let tipHeight = await level.chain
             .getConsensusBlock(hash: tip)?.blockHeight
@@ -1632,7 +1640,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 best = (cid, next)
             }
             validatedTipCache = best
-            return best
+            return (tipHeight, best)
         }
         // Full downward walk: the first validated block from the top.
         var height = tipHeight
@@ -1640,11 +1648,11 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             if let cid = await level.chain.getMainChainBlockHash(atIndex: height),
                await storeBlockValidated(cid) {
                 validatedTipCache = (cid, height)
-                return (cid, height)
+                return (tipHeight, (cid, height))
             }
             if height == 0 {
                 validatedTipCache = nil
-                return nil
+                return (tipHeight, nil)
             }
             height -= 1
         }
@@ -2116,6 +2124,15 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             height: validated?.height,
             revision: await level.chain.currentRevision()
         )
+    }
+
+    /// Ungated tip heights for `/metrics`, from ONE validated-tip walk: the
+    /// validated height and the canonical (weighed-inclusive) tip height the
+    /// walk started from, so a scrape never shows validated above weighed.
+    func metricsTipHeights() async -> (validated: UInt64?, weighed: UInt64?) {
+        guard case .active(let level) = runtimePhase else { return (nil, nil) }
+        let walk = await validatedTipWalk(level: level)
+        return (walk?.validated?.height, walk?.tipHeight)
     }
 
     /// Recovery derives every still-unconnected same-chain edge from the
