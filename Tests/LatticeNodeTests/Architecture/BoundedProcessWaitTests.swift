@@ -9,6 +9,19 @@ import LatticeProcessWait
 /// #62: `lattice mine run` parked in a wait that could never return for 1.7
 /// days while both chains froze. These pin the mechanism, not the symptom.
 ///
+/// What each leg actually covers, because it is NOT obvious:
+///   - the DRAIN bound, through `spawnCollectingOutput`:
+///     testSpawnReturnsWhenAChildExitsButAGrandchildHoldsStdoutOpen
+///   - the EXIT-WAIT bound, driven directly:
+///     testDeadlineKillsTheWholeProcessGroup
+///   - the EXIT-WAIT bound THROUGH `spawnCollectingOutput`, the path
+///     `mine run` actually takes: testSpawnReturnsWhenTheChildNeverExits
+///   - the literal #62 condition — a child that exits WITHOUT its
+///     termination callback being delivered -- is NOT covered. The callback
+///     is corelibs' to deliver, so no stub can withhold it. That leg rests
+///     on the mechanism argument (the deadline path resumes the continuation
+///     itself rather than awaiting a callback), not on a test.
+///
 /// Each test is itself bounded by an XCTWaiter, so the UNFIXED code fails
 /// with a timeout rather than hanging the suite forever — the discipline
 /// #141 asks of the E2E suite.
@@ -20,14 +33,19 @@ final class BoundedProcessWaitTests: XCTestCase {
         _ body: @escaping @Sendable () async -> Void
     ) {
         let finished = expectation(description: label)
-        Task {
+        let work = Task {
             await body()
             finished.fulfill()
         }
         let outcome = XCTWaiter.wait(for: [finished], timeout: seconds)
+        // Reap the in-flight work when the bound fires. Leaving it running
+        // let a failing control burn ~16 minutes AFTER its 30s bound had
+        // already fired: a harness that does not reap what it started is
+        // the very thing #141 objects to.
+        work.cancel()
         XCTAssertEqual(
             outcome, .completed,
-            "\(label) did not return within \(seconds)s: the wait is unbounded"
+            "\(label) did not return within \(seconds)s: the bound under test is not holding"
         )
     }
 
@@ -43,16 +61,17 @@ final class BoundedProcessWaitTests: XCTestCase {
         return url
     }
 
-    /// THE #62 SHAPE. The child exits immediately, but a grandchild it forked
-    /// inherited the stdout pipe write-end and holds it open. The old path
-    /// waits on a `terminationHandler` and then blocks in
-    /// `readDataToEndOfFile()` for an EOF that never comes, so the loop parks
-    /// forever with the coordinator already dead. The bounded path returns.
+    /// Covers the DRAIN bound, and ONLY that. The child exits immediately, so
+    /// the exit wait returns either way; what hung was
+    /// `readDataToEndOfFile()` waiting for an EOF the forked grandchild holds
+    /// back by keeping the stdout write-end open. Established by control:
+    /// with the exit wait left unbounded and only the drain bounded, this
+    /// still passes, so it does not witness the exit-wait bound.
     func testSpawnReturnsWhenAChildExitsButAGrandchildHoldsStdoutOpen() throws {
         let stub = try script("sleep 60 &\necho ready\nexit 0")
         defer { try? FileManager.default.removeItem(at: stub) }
 
-        withinDeadline(30, "spawn with an stdout-holding grandchild") {
+        withinDeadline(30, "bounded drain with an stdout-holding grandchild") {
             let result = try? await spawnCollectingOutput(
                 executable: stub, arguments: [], deadline: .seconds(3)
             )
@@ -213,6 +232,34 @@ final class BoundedProcessWaitTests: XCTestCase {
             let second = await handle.wait()
             XCTAssertEqual(first, .exited(status: 3))
             XCTAssertEqual(second, first)
+        }
+    }
+
+    /// Covers the EXIT-WAIT bound THROUGH `spawnCollectingOutput`, which is
+    /// the path `mine run` actually takes -- it never calls `runBounded`
+    /// directly. A child that never exits makes the deadline the only escape
+    /// from the exit wait, so restoring an unbounded wait inside the spawn
+    /// helper fails here. `testDeadlineKillsTheWholeProcessGroup` cannot
+    /// catch that regression: it drives `runBounded` directly and bypasses
+    /// this path entirely.
+    func testSpawnReturnsWhenTheChildNeverExits() throws {
+        let stub = try script("sleep 60")
+        defer { try? FileManager.default.removeItem(at: stub) }
+
+        withinDeadline(30, "bounded exit wait through spawnCollectingOutput") {
+            let started = ContinuousClock.now
+            let result = try? await spawnCollectingOutput(
+                executable: stub, arguments: [], deadline: .seconds(3)
+            )
+            let elapsed = started.duration(to: ContinuousClock.now)
+            XCTAssertEqual(
+                result?.outcome, .deadlineExceeded,
+                "the deadline, not the child, must end this round"
+            )
+            XCTAssertLessThan(
+                elapsed, .seconds(20),
+                "returned only after the child died on its own"
+            )
         }
     }
 }
