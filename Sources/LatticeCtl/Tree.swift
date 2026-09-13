@@ -144,6 +144,15 @@ func spawnChain(
     if let publicRead = chain.publicRead {
         arguments += ["--public-read-port", String(publicRead)]
     }
+    if let rate = chain.publicReadRate {
+        arguments += ["--public-read-rate", String(rate)]
+    }
+    if let rate = chain.publicReadExpensiveRate {
+        arguments += ["--public-read-expensive-rate", String(rate)]
+    }
+    if let rate = chain.publicReadMaxRate {
+        arguments += ["--public-read-max-rate", String(rate)]
+    }
     if let externalAddress = chain.externalAddress {
         arguments += ["--external-address", externalAddress]
     }

@@ -61,6 +61,16 @@ lattice mine status  # cursor position and batch runway
   own. Defaults are discovery only — no trust, no fork-choice influence — and a
   peer that goes away is re-dialled under backoff for the life of the process.
 - Ports must be unique across the file. `.` and `..` path atoms are rejected.
+- `publicRead` is that chain's public read port (the node's
+  `--public-read-port`). `publicReadRate`, `publicReadExpensiveRate` and
+  `publicReadMaxRate` are its arrival-rate ceilings in requests per second
+  (defaults 25, 1, 200); omit them for the node's defaults, `0` to disable one.
+  The first two are **per client**, and the client is the peer socket address —
+  the node has no trusted header and never reads a forwarded-for one. So on a
+  host behind a proxy that presents one address for every client (fly's `http`
+  handler, for example), set both to `0` or the whole internet is throttled as
+  a single user; `publicReadMaxRate` is address-agnostic and still bounds the
+  listener. `/health` is exempt from all three.
 - `worker` is `"cpu"` (the bundled `lattice-miner`) or a path to any
   executable honoring the [worker contract](mining-workers.md) — a GPU worker
   slots in here.

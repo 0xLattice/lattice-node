@@ -82,6 +82,15 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Public read-only HTTP port; binds all interfaces and serves ONLY the bounded GET read routes (the read-replica allowlist, enforced in code). Chain data is public; this exposes no operator or write surface.")
     var publicReadPort: UInt16?
 
+    @Option(help: "Per-client arrival-rate ceiling for the general public read routes, in requests per second. The client is the PEER SOCKET ADDRESS (no forwarded-for header is trusted), so behind a proxy that presents one address for every client this throttles the whole internet as one user — set it to 0 there. 0 disables this ceiling.")
+    var publicReadRate = PublicReadRateLimits.defaultGeneralRate
+
+    @Option(help: "Per-client arrival-rate ceiling, in requests per second, for the expensive public reads: /v1/blocks (a recent-block walk), /api/chain/endpoints (a peer fan-out), and a block's /transactions or /children (hundreds of content fetches). Keyed like --public-read-rate; 0 disables it.")
+    var publicReadExpensiveRate = PublicReadRateLimits.defaultExpensiveRate
+
+    @Option(help: "Listener-wide arrival-rate ceiling for the public read port, in requests per second. Address-agnostic, so it remains correct behind a proxy that collapses every client onto one address. 0 disables it; all three rates 0 is no rate limiting at all.")
+    var publicReadMaxRate = PublicReadRateLimits.defaultListenerRate
+
     @Option(help: "Self-described publicly reachable host for overlay announcements (NAT/proxy-fronted nodes announce an unreachable observed address otherwise). Host only; the overlay listen port applies.")
     var externalAddress: String?
 
@@ -101,6 +110,11 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                 throw ValidationError("--public-read-port must differ from --rpc-port")
             }
         }
+        let publicReadLimits = try PublicReadRateLimits.validated(
+            generalRate: publicReadRate,
+            expensiveRate: publicReadExpensiveRate,
+            listenerRate: publicReadMaxRate
+        )
 
         let storage = try storageURL(for: address)
         let keyURL = identityKey.map { URL(fileURLWithPath: $0) }
@@ -290,7 +304,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                 host: "0.0.0.0",
                 port: Int(port),
                 peers: peersProvider,
-                discoverProviders: providerDiscovery
+                discoverProviders: providerDiscovery,
+                limits: publicReadLimits
             )
         }
 
@@ -307,6 +322,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         }
         if let publicReadPort {
             print("  public-read: http://0.0.0.0:\(publicReadPort)")
+            print("  public-read rate limits: \(publicReadLimits.bannerDescription)")
         }
         if let declared = configuration.publicReadURL {
             print("  public-read-url: \(declared)")
@@ -487,9 +503,21 @@ func makePublicReadApplication(
     peers: @Sendable @escaping () async -> ExplorerPeersResponse = {
         ExplorerPeersResponse(count: 0, peers: [])
     },
-    discoverProviders: @Sendable @escaping (String) async -> [String] = { _ in [] }
-) -> Application<RouterResponder<BasicRequestContext>> {
-    let router = Router()
+    discoverProviders: @Sendable @escaping (String) async -> [String] = { _ in [] },
+    limits: PublicReadRateLimits = .default
+) -> Application<RouterResponder<PublicReadRequestContext>> {
+    // This listener faces the public internet with nothing in front of it, so
+    // it carries its own arrival-rate ceilings. Its context is NOT
+    // BasicRequestContext: the peer socket address is the only client identity
+    // available here, and BasicRequestContext does not carry one.
+    let router = Router(context: PublicReadRequestContext.self)
+    // Middleware applies only to routes registered AFTER this call, so the
+    // limiter must be installed before the routes it is meant to cover.
+    if let limiter = PublicReadRateLimiter(limits: limits) {
+        router.add(middleware: PublicReadRateLimitMiddleware<PublicReadRequestContext>(
+            limiter: limiter
+        ))
+    }
     addPublicReadRoutes(
         to: router,
         service: service,
@@ -502,8 +530,11 @@ func makePublicReadApplication(
     )
 }
 
-private func addPublicReadRoutes(
-    to router: Router<BasicRequestContext>,
+/// Generic over the context so the loopback application keeps
+/// `BasicRequestContext` while the public listener carries a peer address —
+/// one registration function, so the two surfaces cannot drift apart.
+private func addPublicReadRoutes<Context: RequestContext>(
+    to router: Router<Context>,
     service: ChainService,
     peers: @Sendable @escaping () async -> ExplorerPeersResponse,
     discoverProviders: @Sendable @escaping (String) async -> [String]
