@@ -30,11 +30,25 @@ public struct TopologyChain: Codable {
     /// can dial, advertised through the parent rendezvous. Distinct from
     /// `externalAddress`, which the P2P plane constrains to IP literals.
     public var publicReadUrl: String?
+    /// Per-client arrival-rate ceilings for the public read listener (the
+    /// node's `--public-read-rate` / `--public-read-expensive-rate`), in
+    /// requests per second. The client is the peer socket address, so a host
+    /// behind a proxy that presents ONE address for every client must set
+    /// these to `0` — otherwise the whole internet is throttled as one user.
+    /// Absent = the node's defaults.
+    public var publicReadRate: Double?
+    public var publicReadExpensiveRate: Double?
+    /// Listener-wide arrival-rate ceiling (`--public-read-max-rate`), in
+    /// requests per second. Address-agnostic, so it stays correct behind such
+    /// a proxy. Absent = the node's default; `0` disables it.
+    public var publicReadMaxRate: Double?
 
     public init(
         listen: UInt16, fact: UInt16, rpc: UInt16, peers: [String]? = nil,
         publicRead: UInt16? = nil, externalAddress: String? = nil,
-        publicReadUrl: String? = nil
+        publicReadUrl: String? = nil, publicReadRate: Double? = nil,
+        publicReadExpensiveRate: Double? = nil,
+        publicReadMaxRate: Double? = nil
     ) {
         self.listen = listen
         self.fact = fact
@@ -43,6 +57,9 @@ public struct TopologyChain: Codable {
         self.publicRead = publicRead
         self.externalAddress = externalAddress
         self.publicReadUrl = publicReadUrl
+        self.publicReadRate = publicReadRate
+        self.publicReadExpensiveRate = publicReadExpensiveRate
+        self.publicReadMaxRate = publicReadMaxRate
     }
 }
 
