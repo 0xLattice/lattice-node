@@ -5863,14 +5863,18 @@ public actor NodeNetworkRuntime: IvyDelegate {
         generation: UInt64,
         process: ChainProcess
     ) async {
-        // An in-flight range sync is by definition not the edge, whatever any
-        // peer attests about its own height.
-        guard rangeSync == nil,
-              overlayPeers[peer.key]?.sessionID == peer.sessionID,
+        // The edge is measured PER PEER — our acquired tip against THIS peer's
+        // own height, the test below — so a range sync running for some other
+        // peer says nothing about whether we are at the edge with this one.
+        // While we are genuinely deep that same per-peer test suppresses the
+        // pull anyway, which is what keeps a deep joiner from descending the
+        // whole gap; keying on the single shared range-sync slot instead let
+        // one peer's unverified height claim silence every OTHER peer's
+        // frontier for as long as it held the slot.
+        guard overlayPeers[peer.key]?.sessionID == peer.sessionID,
               frontierPulls[peer.key]?.sessionID != peer.sessionID else { return }
         let ourHeight = await acquiredHeight(process)
         guard isCurrentRuntime(generation: generation, process: process),
-              rangeSync == nil,
               overlayPeers[peer.key]?.sessionID == peer.sessionID,
               frontierPulls[peer.key]?.sessionID != peer.sessionID,
               peerHeight <= ourHeight + Self.rangeSyncDepthThreshold else { return }
