@@ -82,6 +82,15 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Public read-only HTTP port; binds all interfaces and serves ONLY the bounded GET read routes (the read-replica allowlist, enforced in code). Chain data is public; this exposes no operator or write surface.")
     var publicReadPort: UInt16?
 
+    @Option(help: "Per-client arrival-rate ceiling for the general public read routes, in requests per second. The client is the PEER SOCKET ADDRESS (no forwarded-for header is trusted), so behind a proxy that presents one address for every client this throttles the whole internet as one user — set it to 0 there. 0 disables this ceiling.")
+    var publicReadRate = PublicReadRateLimits.defaultGeneralRate
+
+    @Option(help: "Per-client arrival-rate ceiling, in requests per second, for the expensive public reads: /v1/blocks (a recent-block walk), /api/chain/endpoints (a peer fan-out), and a block's /transactions or /children (hundreds of content fetches). Keyed like --public-read-rate; 0 disables it.")
+    var publicReadExpensiveRate = PublicReadRateLimits.defaultExpensiveRate
+
+    @Option(help: "Listener-wide arrival-rate ceiling for the public read port, in requests per second. Address-agnostic, so it remains correct behind a proxy that collapses every client onto one address. 0 disables it; all three rates 0 is no rate limiting at all.")
+    var publicReadMaxRate = PublicReadRateLimits.defaultListenerRate
+
     @Option(help: "Self-described publicly reachable host for overlay announcements (NAT/proxy-fronted nodes announce an unreachable observed address otherwise). Host only; the overlay listen port applies.")
     var externalAddress: String?
 
@@ -101,6 +110,11 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                 throw ValidationError("--public-read-port must differ from --rpc-port")
             }
         }
+        let publicReadLimits = try PublicReadRateLimits.validated(
+            generalRate: publicReadRate,
+            expensiveRate: publicReadExpensiveRate,
+            listenerRate: publicReadMaxRate
+        )
 
         let storage = try storageURL(for: address)
         let keyURL = identityKey.map { URL(fileURLWithPath: $0) }
@@ -290,7 +304,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                 host: "0.0.0.0",
                 port: Int(port),
                 peers: peersProvider,
-                discoverProviders: providerDiscovery
+                discoverProviders: providerDiscovery,
+                limits: publicReadLimits
             )
         }
 
@@ -307,6 +322,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         }
         if let publicReadPort {
             print("  public-read: http://0.0.0.0:\(publicReadPort)")
+            print("  public-read rate limits: \(publicReadLimits.bannerDescription)")
         }
         if let declared = configuration.publicReadURL {
             print("  public-read-url: \(declared)")
@@ -446,7 +462,12 @@ func makeApplication(
         to: router,
         service: service,
         peers: peers,
-        discoverProviders: discoverProviders
+        discoverProviders: discoverProviders,
+        // Loopback reads the live snapshot: `lattice status` and the E2E
+        // suites poll this to watch height advance, and the public listener's
+        // staleness window is a defence against public load that does not
+        // apply here.
+        healthSnapshot: { await service.readSnapshot() }
     )
     // Operator surface below: registered ONLY on this loopback application.
     // /v1/status stays on the reconciling status() (expires the mempool, prunes
@@ -487,14 +508,39 @@ func makePublicReadApplication(
     peers: @Sendable @escaping () async -> ExplorerPeersResponse = {
         ExplorerPeersResponse(count: 0, peers: [])
     },
-    discoverProviders: @Sendable @escaping (String) async -> [String] = { _ in [] }
-) -> Application<RouterResponder<BasicRequestContext>> {
-    let router = Router()
+    discoverProviders: @Sendable @escaping (String) async -> [String] = { _ in [] },
+    limits: PublicReadRateLimits = .default,
+    healthClock: @escaping @Sendable () -> Double = PublicReadRateLimiter.monotonicSeconds
+) -> Application<RouterResponder<PublicReadRequestContext>> {
+    // This listener faces the public internet with nothing in front of it, so
+    // it carries its own arrival-rate ceilings. Its context is NOT
+    // BasicRequestContext: the peer socket address is the only client identity
+    // available here, and BasicRequestContext does not carry one.
+    let router = Router(context: PublicReadRequestContext.self)
+    // Middleware applies only to routes registered AFTER this call, so the
+    // limiter must be installed before the routes it is meant to cover.
+    if let limiter = PublicReadRateLimiter(limits: limits) {
+        router.add(middleware: PublicReadRateLimitMiddleware<PublicReadRequestContext>(
+            limiter: limiter
+        ))
+    }
+    // /health is exempt from every bucket, so that a health check can never be
+    // refused by public load — a refused check depools the machine, and on the
+    // testnet follower that machine carries every chain in the path. The cost
+    // is bounded by collapsing the work instead: readSnapshot() is isolated on
+    // the same ChainProcess actor that serves sync and block admission, and
+    // this makes a flood cost one call per TTL however fast it arrives.
+    let health = ShortTTLSnapshotCache(
+        ttl: statusCacheMaxAgeSeconds, clock: healthClock
+    ) {
+        await service.readSnapshot()
+    }
     addPublicReadRoutes(
         to: router,
         service: service,
         peers: peers,
-        discoverProviders: discoverProviders
+        discoverProviders: discoverProviders,
+        healthSnapshot: { await health.value() }
     )
     return Application(
         responder: router.buildResponder(),
@@ -502,11 +548,15 @@ func makePublicReadApplication(
     )
 }
 
-private func addPublicReadRoutes(
-    to router: Router<BasicRequestContext>,
+/// Generic over the context so the loopback application keeps
+/// `BasicRequestContext` while the public listener carries a peer address —
+/// one registration function, so the two surfaces cannot drift apart.
+private func addPublicReadRoutes<Context: RequestContext>(
+    to router: Router<Context>,
     service: ChainService,
     peers: @Sendable @escaping () async -> ExplorerPeersResponse,
-    discoverProviders: @Sendable @escaping (String) async -> [String]
+    discoverProviders: @Sendable @escaping (String) async -> [String],
+    healthSnapshot: @Sendable @escaping () async -> ChainServiceStatusResponse
 ) {
     // CORS is scoped to READ methods only. The POST write routes stay off the
     // allow-list on purpose: they consume application/json, so a cross-origin
@@ -523,13 +573,26 @@ private func addPublicReadRoutes(
     // /health is the public, non-mutating status: readSnapshot() takes no
     // operation gate and reconciles nothing, so a health-check/explorer poll
     // can never head-of-line-block or mutate consensus/mempool state.
-    router.get("health") { request, context in
+    let health: @Sendable (Request, Context) async throws -> Response = {
+        request, context in
         try jsonCached(
-            await service.readSnapshot(),
+            await healthSnapshot(),
             cacheControl: statusCacheControl,
             request: request,
             context: context
         )
+    }
+    router.get("health", use: health)
+    // HEAD is registered explicitly, not via `.autoGenerateHeadEndpoints`: that
+    // option would synthesise a HEAD for EVERY GET on both applications, which
+    // is far broader than this needs. Without it `HEAD /health` falls through
+    // to the not-found responder and answers 404 — and the read-replica
+    // allowlist permits HEAD (`limit_except GET HEAD`), so an operator pointing
+    // a HEAD health check here would depool a perfectly live machine. Same
+    // response, minus the body, exactly as Hummingbird's own auto-generated
+    // HEAD endpoint does it.
+    router.head("health") { request, context in
+        try await health(request, context).createHeadResponse()
     }
     router.get("v1/blocks/:cid") { request, context in
         guard let cid = context.parameters.get("cid"), isPlausibleCID(cid) else {
@@ -973,8 +1036,18 @@ private func explorerParseOffset(_ request: Request) throws -> Int {
 
 /// A block or transaction served by CID never changes once accepted.
 let immutableCacheControl = "public, max-age=31536000, immutable"
-/// Chain status/health is a live snapshot; cache it only briefly.
-let statusCacheControl = "public, max-age=3"
+/// Chain status/health is a live snapshot; cache it only briefly. The public
+/// listener also serves /health from a server-side snapshot cache of exactly
+/// this age — /health is exempt from every rate limit, so its cost is bounded
+/// by collapsing the work rather than by refusing requests, and reusing the
+/// max-age already advertised keeps that within the contract clients are told.
+/// Declared as the integer the header carries, with the cache's TTL derived
+/// from it — never the other way round. A `Double` source truncated into
+/// `max-age` could advertise 3 while caching 3.9, i.e. serve staler than
+/// promised with nothing to show for it; deriving this direction cannot.
+let statusCacheMaxAge = 3
+let statusCacheControl = "public, max-age=\(statusCacheMaxAge)"
+let statusCacheMaxAgeSeconds = Double(statusCacheMaxAge)
 
 private func jsonCached<Value: Encodable, Context: RequestContext>(
     _ value: Value,

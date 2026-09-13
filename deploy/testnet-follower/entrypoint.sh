@@ -81,12 +81,26 @@ for child_path in $CHILD_PATHS; do
       \"publicReadUrl\": \"$read_url\""
     fi
 
+    # The per-client read rate limits are OFF here, and must stay off.
+    # fly.toml maps 443/80 to the public read port through fly's `http`
+    # handler, so every client on the internet arrives at this node from
+    # fly-proxy's address. The node has no proxy it can trust and never reads a
+    # forwarded-for header, so its only client identity is that peer socket —
+    # which behind fly-proxy identifies the PROXY. A per-client limit keyed on
+    # it would throttle the whole internet as one user, and the explorer home
+    # page alone issues ~20 parallel requests. (The same collapse is analysed
+    # in deploy/read-replica/nginx.conf, which solves it with a trusted
+    # Fly-Client-IP header; a directly exposed node has no such header.)
+    # The listener-wide ceiling (--public-read-max-rate) is address-agnostic,
+    # so it is left at the node's default and does the bounding here.
     chains_json="$chains_json,
     \"$child_path\": {
       \"listen\": $listen,
       \"fact\": $fact,
       \"rpc\": $rpc,
       \"publicRead\": $public_read,
+      \"publicReadRate\": 0,
+      \"publicReadExpensiveRate\": 0,
       \"externalAddress\": \"$EXTERNAL_HOST\"$read_url_json
     }"
 
