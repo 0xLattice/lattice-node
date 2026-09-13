@@ -58,30 +58,61 @@ public struct BoundedSpawnResult: Sendable {
 /// caller may run, which is why it is not an operator knob.
 private let terminationGrace = Duration.milliseconds(200)
 
-/// What `kill(2)` must be given to take down `pid` AND whatever it spawned.
-/// A child leading its own process group is addressed as the negative group
-/// id so orphaned grandchildren die with it; otherwise only the pid is
-/// signalled. Never returns our OWN group: signalling that kills the
-/// supervisor along with the child.
-public func processSignalTarget(pid: Int32) -> Int32 {
-    let childGroup = getpgid(pid)
-    guard childGroup > 0, childGroup == pid, childGroup != getpgid(0) else {
-        return pid
+/// The teardown target for one child, CAPTURED AT SPAWN while the child is
+/// still definitively alive.
+///
+/// Re-deriving this at kill time is what put #62 back: once the child is
+/// reaped its process group is gone, `getpgid` returns -1, and the old guard
+/// silently degraded a subtree teardown into a pid-only kill that left
+/// orphaned grandchildren running -- while still reporting success.
+public struct ProcessTeardownTarget: Sendable, Equatable {
+    public let pid: Int32
+    /// The group to signal, or nil when the child shares OUR process group,
+    /// where signalling the group would kill the supervisor too.
+    public let group: Int32?
+
+    /// Only the pid can be signalled, so descendants outlive the child.
+    /// Callers must SURFACE this: a pid-only kill that announces itself is
+    /// acceptable; one that masquerades as a teardown is what hid this bug.
+    public var isDegraded: Bool { group == nil }
+
+    public init(pid: Int32, group: Int32?) {
+        self.pid = pid
+        self.group = group
     }
-    return -childGroup
+
+    /// Captures the target immediately after `run()`.
+    ///
+    /// A child's pid can never equal our own process group id -- our group
+    /// leader predates the child -- so `-pid` can never reach the supervisor.
+    /// The one unsafe case is a child SHARING our group, which means it was
+    /// never placed in a group of its own; that is recorded as degraded
+    /// rather than signalled blindly.
+    ///
+    /// When the child is already gone and `getpgid` fails, the group is still
+    /// addressed: surviving descendants may hold it open, and an empty group
+    /// makes the signal a harmless no-op. Absence of the child is not a
+    /// teardown failure, but it is also not a reason to skip the subtree.
+    public static func capture(pid: Int32) -> ProcessTeardownTarget {
+        let childGroup = getpgid(pid)
+        if childGroup > 0, childGroup == getpgid(0) {
+            return ProcessTeardownTarget(pid: pid, group: nil)
+        }
+        return ProcessTeardownTarget(pid: pid, group: pid)
+    }
 }
 
-/// SIGTERM the child's process group, escalating to SIGKILL after the grace.
+/// SIGTERM the captured target, escalating to SIGKILL after the grace.
 /// Returns immediately; the escalation runs detached.
-public func terminateProcessGroup(pid: Int32) {
-    let target = processSignalTarget(pid: pid)
-    kill(target, SIGTERM)
+public func terminateProcessGroup(_ target: ProcessTeardownTarget) {
+    let signalled = target.group.map { -$0 } ?? target.pid
+    kill(signalled, SIGTERM)
     Task.detached {
         try? await Task.sleep(for: terminationGrace)
         // Only escalate if something is still there -- the guard the
         // superseded MiningWorkerSubprocess had, and it costs nothing.
-        guard kill(target, 0) == 0 else { return }
-        kill(target, SIGKILL)
+        guard kill(signalled, 0) == 0 else { return }
+        kill(signalled, SIGKILL)
     }
 }
 
@@ -107,18 +138,21 @@ public func runBounded(
 public final class BoundedProcessWait: @unchecked Sendable {
     private let process: Process
     private let lock = NSLock()
+    /// Captured at spawn, never re-derived. See ProcessTeardownTarget.
+    private var teardown: ProcessTeardownTarget?
     private var waiters: [CheckedContinuation<ProcessWaitOutcome, Never>] = []
     private var outcome: ProcessWaitOutcome?
     private var timer: Task<Void, Never>?
 
-    /// Whether no outcome has been recorded yet.
-    private var isPending: Bool {
+    public var processIdentifier: Int32 { process.processIdentifier }
+
+    /// True when teardown can only signal the pid, so descendants survive it.
+    /// Exposed so a caller can SAY SO rather than report a clean teardown.
+    public var isTeardownDegraded: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return outcome == nil
+        return teardown?.isDegraded ?? false
     }
-
-    public var processIdentifier: Int32 { process.processIdentifier }
 
     init(process: Process) {
         self.process = process
@@ -137,22 +171,31 @@ public final class BoundedProcessWait: @unchecked Sendable {
             process.terminationHandler = nil
             throw error
         }
-        guard let deadline else { return }
         let pid = process.processIdentifier
+        // CAPTURE HERE, not at kill time: the child is alive at this instant,
+        // so its group is knowable. After it is reaped the group is gone and
+        // any later derivation silently degrades to a pid-only kill.
+        let captured = ProcessTeardownTarget.capture(pid: pid)
+        lock.lock()
+        teardown = captured
+        lock.unlock()
+        guard let deadline else { return }
         timer = Task { [weak self] in
             do {
                 try await Task.sleep(for: deadline)
             } catch {
                 return  // cancelled: the child exited first
             }
-            // The child may have exited while this task slept. Do not
-            // signal a group that already won the race: the outcome would be
-            // right either way, but onDeadline would announce a deadline
-            // that decided nothing.
-            guard let self, self.isPending else { return }
+            // SETTLE FIRST. Signalling before settling let our own SIGTERM
+            // kill the child, whose terminationHandler then won the race and
+            // reported `.exited(status: 15)` -- a deadline that fired, killed
+            // the process, and then claimed a normal exit, which silently
+            // downgrades the operator's ROUND DEADLINE EXCEEDED signal.
+            // Settling first also means a child that exited on its own keeps
+            // its real status and is never signalled.
+            guard let self, self.settle(.deadlineExceeded) else { return }
             onDeadline?(pid)
-            terminateProcessGroup(pid: pid)
-            self.settle(.deadlineExceeded)
+            terminateProcessGroup(captured)
         }
     }
 
@@ -166,9 +209,11 @@ public final class BoundedProcessWait: @unchecked Sendable {
                 attach(cont)
             }
         } onCancel: {
-            let pid = process.processIdentifier
-            if pid > 0 {
-                terminateProcessGroup(pid: pid)
+            lock.lock()
+            let captured = teardown
+            lock.unlock()
+            if let captured {
+                terminateProcessGroup(captured)
             }
         }
         timer?.cancel()
@@ -193,11 +238,12 @@ public final class BoundedProcessWait: @unchecked Sendable {
         lock.unlock()
     }
 
-    private func settle(_ result: ProcessWaitOutcome) {
+    @discardableResult
+    private func settle(_ result: ProcessWaitOutcome) -> Bool {
         lock.lock()
         if outcome != nil {
             lock.unlock()
-            return
+            return false
         }
         outcome = result
         let pending = waiters
@@ -208,6 +254,7 @@ public final class BoundedProcessWait: @unchecked Sendable {
         for waiter in pending {
             waiter.resume(returning: result)
         }
+        return true
     }
 }
 

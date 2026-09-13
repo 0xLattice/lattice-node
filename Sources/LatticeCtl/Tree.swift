@@ -47,6 +47,11 @@ func runningPid(_ layout: HostLayout, _ path: String) -> Int32? {
         probe.standardOutput = out
         probe.standardError = FileHandle.nullDevice
         guard (try? probe.run()) != nil else { return pid }
+        // Captured while the probe is alive, for the same reason the bounded
+        // wait does it: a group derived after the child is reaped is gone.
+        let teardown = ProcessTeardownTarget.capture(
+            pid: probe.processIdentifier
+        )
         // Bounded, and never `waitUntilExit()`: a pid-name probe must not
         // outlive the question it answers (#62). This bound is a local
         // liveness allowance, not a round parameter -- `ps` has none.
@@ -55,7 +60,7 @@ func runningPid(_ layout: HostLayout, _ path: String) -> Int32? {
             deadline: ContinuousClock.now + .seconds(5)
         )
         if !read.complete {
-            terminateProcessGroup(pid: probe.processIdentifier)
+            terminateProcessGroup(teardown)
             // A probe that timed out says NOTHING about the pid, and a
             // truncated name would fail the suffix check below and report a
             // live node as stopped -- which invites a double spawn. Same

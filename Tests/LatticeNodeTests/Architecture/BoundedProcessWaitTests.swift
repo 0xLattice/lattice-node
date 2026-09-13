@@ -61,6 +61,13 @@ final class BoundedProcessWaitTests: XCTestCase {
         return url
     }
 
+    /// END-TO-END COMPANION, NOT A DISCRIMINATOR. Measured across 18 Linux
+    /// runs, the sibling teardown assertion below reported the truth only
+    /// intermittently (1 failure in 18) because it depends on losing a race.
+    /// Do NOT read its green as proof that teardown works; the deterministic
+    /// pins are testCapturedGroupSurvivesAReapedChild and
+    /// testDeadlineOutcomeSurvivesOurOwnSigterm.
+    ///
     /// Covers the DRAIN bound, and ONLY that. The child exits immediately, so
     /// the exit wait returns either way; what hung was
     /// `readDataToEndOfFile()` waiting for an EOF the forked grandchild holds
@@ -259,6 +266,78 @@ final class BoundedProcessWaitTests: XCTestCase {
             XCTAssertLessThan(
                 elapsed, .seconds(20),
                 "returned only after the child died on its own"
+            )
+        }
+    }
+
+    /// DEFECT A, pinned deterministically and with no live grandchild.
+    ///
+    /// The old code derived the signal target at KILL time. Once the child is
+    /// reaped `getpgid` returns -1, the guard fell through to a pid-only kill,
+    /// and orphaned descendants survived while the caller was told the
+    /// subtree had been torn down. Capturing at spawn removes the dependence
+    /// on the child still existing: a reaped child must still yield a group,
+    /// because its descendants may be holding that group open.
+    func testCapturedGroupSurvivesAReapedChild() throws {
+        let stub = try script("exit 0")
+        defer { try? FileManager.default.removeItem(at: stub) }
+        let process = Process()
+        process.executableURL = stub
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        let handle = try runBounded(process, deadline: .seconds(30))
+        let pid = handle.processIdentifier
+
+        withinDeadline(30, "reaped child") {
+            _ = await handle.wait()
+        }
+        // The child is now exited AND reaped, so a kill-time derivation has
+        // nothing left to read.
+        XCTAssertNotEqual(getpgid(pid), pid, "child should be gone")
+
+        let captured = ProcessTeardownTarget.capture(pid: pid)
+        XCTAssertEqual(
+            captured.group, pid,
+            "a reaped child must still address its group: descendants may hold it"
+        )
+        XCTAssertFalse(
+            captured.isDegraded,
+            "absence of the child is not a teardown failure"
+        )
+    }
+
+    /// A child sharing OUR process group is the one genuinely unsafe case --
+    /// signalling that group would kill the supervisor -- so it is recorded
+    /// as degraded rather than signalled blindly or silently downgraded.
+    func testSharingOurGroupIsReportedAsDegraded() {
+        let target = ProcessTeardownTarget.capture(pid: getpid())
+        XCTAssertTrue(
+            target.isDegraded,
+            "a process in our own group must never be signalled as a group"
+        )
+        XCTAssertNil(target.group)
+    }
+
+    /// DEFECT B. The deadline fired, killed the child with our own SIGTERM,
+    /// and then the child's terminationHandler won the settle race and
+    /// reported `.exited(status: 15)` -- a normal exit. That silently
+    /// downgrades the operator's ROUND DEADLINE EXCEEDED signal to
+    /// "no result line". Measured at 14 failures in 18 Linux runs before the
+    /// fix; settling before signalling makes it deterministic.
+    func testDeadlineOutcomeSurvivesOurOwnSigterm() throws {
+        let stub = try script("sleep 60")
+        defer { try? FileManager.default.removeItem(at: stub) }
+        let process = Process()
+        process.executableURL = stub
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        let handle = try runBounded(process, deadline: .seconds(2))
+
+        withinDeadline(30, "deadline outcome") {
+            let outcome = await handle.wait()
+            XCTAssertEqual(
+                outcome, .deadlineExceeded,
+                "our own SIGTERM must not be reported as a normal exit"
             )
         }
     }
