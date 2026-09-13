@@ -214,9 +214,9 @@ final class ParentChildE2ETests: XCTestCase {
             WorkSum(workForTarget(b1.template.block.target))
         )
 
-        // These one-block sibling CIDs are segment bases. The oracle is the
+        // These one-block siblings are equal-work rivals. The oracle is the
         // Lattice comparator itself, never textual CID ordering.
-        let winnerCID = forkChoicePrefersSegmentBase(
+        let winnerCID = forkChoicePrefersBlock(
             a1.blockCID,
             over: b1.blockCID
         ) ? a1.blockCID : b1.blockCID
