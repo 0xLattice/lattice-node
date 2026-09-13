@@ -152,6 +152,7 @@ final class BoundedProcessWaitTests: XCTestCase {
             childPgidNow=\(getpgid(childPid)) \
             ourPgid=\(getpgid(0)) \
             grandchildPgidNow=\(getpgid(grandchild))
+            SIGNALS \(handle.recordedTeardownSteps.map(\.description).joined(separator: " "))
             """
         )
     }

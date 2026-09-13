@@ -138,18 +138,91 @@ public struct ProcessTeardownTarget: Sendable, Equatable {
     }
 }
 
+/// One signal attempt made during teardown, with its raw result.
+///
+/// DIAGNOSTIC ONLY: a few integers recorded unconditionally, reported only on
+/// a caller's failure path. It exists because a teardown that signals the
+/// RIGHT group and still leaves a live member behind cannot be diagnosed from
+/// the outcome alone -- the question is what each kill(2) actually returned,
+/// and whether the detached escalation ran at all.
+public struct ProcessTeardownStep: Sendable, Equatable, CustomStringConvertible {
+    public enum Stage: String, Sendable, Equatable {
+        case sigterm
+        case escalationEntered
+        case probe
+        case sigkill
+    }
+
+    public let stage: Stage
+    public let result: Int32
+    /// errno captured immediately after the call; 0 when result == 0.
+    public let failure: Int32
+    /// Milliseconds since teardown began, so a signal delayed past the
+    /// caller's own polling window is visible rather than inferred.
+    public let millisSinceStart: Int64
+
+    public init(
+        stage: Stage, result: Int32, failure: Int32, millisSinceStart: Int64
+    ) {
+        self.stage = stage
+        self.result = result
+        self.failure = failure
+        self.millisSinceStart = millisSinceStart
+    }
+
+    public var description: String {
+        "\(stage.rawValue)(r=\(result) e=\(failure) t=\(millisSinceStart)ms)"
+    }
+}
+
 /// SIGTERM the captured target, escalating to SIGKILL after the grace.
 /// Returns immediately; the escalation runs detached.
-public func terminateProcessGroup(_ target: ProcessTeardownTarget) {
+public func terminateProcessGroup(
+    _ target: ProcessTeardownTarget,
+    report: (@Sendable (ProcessTeardownStep) -> Void)? = nil
+) {
+    let start = ContinuousClock.now
     let signalled = target.group.map { -$0 } ?? target.pid
-    kill(signalled, SIGTERM)
+
+    let term = kill(signalled, SIGTERM)
+    report?(ProcessTeardownStep(
+        stage: .sigterm,
+        result: term,
+        failure: term == 0 ? 0 : errno,
+        millisSinceStart: elapsedMilliseconds(since: start)
+    ))
+
     Task.detached {
         try? await Task.sleep(for: terminationGrace)
+        report?(ProcessTeardownStep(
+            stage: .escalationEntered,
+            result: 0,
+            failure: 0,
+            millisSinceStart: elapsedMilliseconds(since: start)
+        ))
         // Only escalate if something is still there -- the guard the
         // superseded MiningWorkerSubprocess had, and it costs nothing.
-        guard kill(signalled, 0) == 0 else { return }
-        kill(signalled, SIGKILL)
+        let probe = kill(signalled, 0)
+        report?(ProcessTeardownStep(
+            stage: .probe,
+            result: probe,
+            failure: probe == 0 ? 0 : errno,
+            millisSinceStart: elapsedMilliseconds(since: start)
+        ))
+        guard probe == 0 else { return }
+        let killed = kill(signalled, SIGKILL)
+        report?(ProcessTeardownStep(
+            stage: .sigkill,
+            result: killed,
+            failure: killed == 0 ? 0 : errno,
+            millisSinceStart: elapsedMilliseconds(since: start)
+        ))
     }
+}
+
+private func elapsedMilliseconds(since start: ContinuousClock.Instant) -> Int64 {
+    let parts = start.duration(to: ContinuousClock.now).components
+    return parts.seconds * 1_000 + parts.attoseconds / 1_000_000_000_000_000
 }
 
 /// Starts `process` under a hard deadline, returning a handle whose `wait()`
@@ -176,6 +249,8 @@ public final class BoundedProcessWait: @unchecked Sendable {
     private let lock = NSLock()
     /// Captured at spawn, never re-derived. See ProcessTeardownTarget.
     private var teardown: ProcessTeardownTarget?
+    /// Diagnostic record of what the teardown signals returned.
+    private var teardownSteps: [ProcessTeardownStep] = []
     private var waiters: [CheckedContinuation<ProcessWaitOutcome, Never>] = []
     private var outcome: ProcessWaitOutcome?
     private var timer: Task<Void, Never>?
@@ -189,6 +264,22 @@ public final class BoundedProcessWait: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return teardown
+    }
+
+    /// What each teardown signal returned, in order. Diagnostic: a caller
+    /// reports this on ITS failure path, where "the right group was signalled
+    /// and a member survived" is otherwise indistinguishable from "the signal
+    /// never went out".
+    public var recordedTeardownSteps: [ProcessTeardownStep] {
+        lock.lock()
+        defer { lock.unlock() }
+        return teardownSteps
+    }
+
+    private func recordTeardownStep(_ step: ProcessTeardownStep) {
+        lock.lock()
+        teardownSteps.append(step)
+        lock.unlock()
     }
 
     /// True when teardown can only signal the pid, so descendants survive it.
@@ -238,7 +329,9 @@ public final class BoundedProcessWait: @unchecked Sendable {
             // its real status and is never signalled.
             guard let self, self.settle(.deadlineExceeded) else { return }
             onDeadline?(pid)
-            terminateProcessGroup(captured)
+            terminateProcessGroup(captured) { [weak self] step in
+                self?.recordTeardownStep(step)
+            }
         }
     }
 
@@ -256,7 +349,9 @@ public final class BoundedProcessWait: @unchecked Sendable {
             let captured = teardown
             lock.unlock()
             if let captured {
-                terminateProcessGroup(captured)
+                terminateProcessGroup(captured) { [weak self] step in
+                    self?.recordTeardownStep(step)
+                }
             }
         }
         timer?.cancel()
