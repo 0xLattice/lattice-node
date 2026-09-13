@@ -3,6 +3,7 @@ import Foundation
 import HTTPTypes
 import Hummingbird
 import HummingbirdTesting
+import Lattice
 import NIOCore
 import XCTest
 @testable import LatticeNode
@@ -384,34 +385,197 @@ final class PublicReadRateLimitTests: XCTestCase {
 
     /// A cold cache under a simultaneous burst must not stampede the loader —
     /// otherwise the cache bounds nothing in exactly the case it exists for.
+    ///
+    /// Structural rather than probabilistic: the loader parks until EVERY
+    /// caller has registered, so no load can complete while a caller is still
+    /// outside the cache, and a warm-cache read cannot be what satisfies this.
+    /// Delete the `if let inFlight` branch and all 200 callers start their own
+    /// load, unpark together, and the count lands on 200 — a deterministic
+    /// failure, not a race the test usually wins.
     func testConcurrentBurstOnAColdCacheIsCoalescedIntoOneLoad() async throws {
         let clock = TestClock()
         let counter = LoadCounter()
+        let callers = 200
+        let gate = CallerGate(expected: callers)
         let cache = ShortTTLSnapshotCache<Int>(
             ttl: statusCacheMaxAgeSeconds, clock: { clock.now }
         ) {
-            await counter.record()
+            await gate.waitForAll()
+            return await counter.record()
         }
 
-        await withTaskGroup(of: Void.self) { group in
-            for _ in 0..<200 {
-                group.addTask { _ = await cache.value() }
+        var observed: Set<Int> = []
+        await withTaskGroup(of: Int.self) { group in
+            for _ in 0..<callers {
+                group.addTask {
+                    // Registered BEFORE entering the cache, so the loader
+                    // cannot finish until every caller is already inside.
+                    await gate.register()
+                    return await cache.value()
+                }
             }
+            for await value in group { observed.insert(value) }
         }
 
+        XCTAssertEqual(
+            observed, [1], "every caller must observe the one shared load"
+        )
         let loads = await counter.count
         XCTAssertEqual(loads, 1, "a concurrent burst must share one load")
     }
+
+    /// `HEAD /health` is exempt from every bucket, so it also has to REACH a
+    /// handler. `.autoGenerateHeadEndpoints` is off and only GET was
+    /// registered, so without an explicit HEAD route it fell through to the
+    /// not-found responder and answered 404 — unmetered, and enough to depool a
+    /// live machine, since the read-replica allowlist forwards HEAD
+    /// (`limit_except GET HEAD`).
+    func testHeadHealthIsRoutedOnBothApplications() async throws {
+        let (service, _) = try await makeService("public-read-head-health")
+        let publicApp = makePublicReadApplication(
+            service: service, host: "127.0.0.1", port: 8081
+        )
+        let loopback = makeApplication(
+            service: service, host: "127.0.0.1", port: 8080
+        )
+
+        try await publicApp.test(.router) { client in
+            try await client.execute(uri: "/health", method: .head) { response in
+                XCTAssertEqual(
+                    response.status, .ok, "HEAD /health must reach the handler"
+                )
+                XCTAssertEqual(
+                    response.body.readableBytes, 0,
+                    "a HEAD response carries no body"
+                )
+                XCTAssertEqual(response.headers[.cacheControl], statusCacheControl)
+            }
+        }
+        try await loopback.test(.router) { client in
+            try await client.execute(uri: "/health", method: .head) { response in
+                XCTAssertEqual(response.status, .ok)
+                XCTAssertEqual(response.body.readableBytes, 0)
+            }
+        }
+    }
+
+    /// The live-vs-cached split is the stated reason `lattice status` and the
+    /// E2E height polls still work, so it needs an executable invariant on each
+    /// side — the cache's own unit tests would stay green if the cached closure
+    /// were wired into the loopback application by mistake.
+    func testPublicHealthIsCachedWhileLoopbackStaysLive() async throws {
+        let (service, _) = try await makeService("public-read-health-wiring")
+        // A frozen clock: the public cache cannot expire mid-test, so this
+        // asserts the WIRING rather than racing a 3-second wall clock.
+        let frozen = TestClock()
+        let publicApp = makePublicReadApplication(
+            service: service, host: "127.0.0.1", port: 8081,
+            healthClock: { frozen.now }
+        )
+        let loopback = makeApplication(
+            service: service, host: "127.0.0.1", port: 8080
+        )
+
+        try await loopback.test(.router) { loopbackClient in
+            try await publicApp.test(.router) { publicClient in
+                let before = try await healthHeight(loopbackClient)
+                let publicBefore = try await healthHeight(publicClient)
+                XCTAssertEqual(publicBefore, before)
+
+                _ = try await mineOneBlock(client: loopbackClient)
+
+                let loopbackAfter = try await healthHeight(loopbackClient)
+                XCTAssertEqual(
+                    loopbackAfter, before + 1,
+                    "loopback /health must read the live snapshot"
+                )
+                let publicAfter = try await healthHeight(publicClient)
+                XCTAssertEqual(
+                    publicAfter, publicBefore,
+                    "public /health must serve the cached snapshot"
+                )
+            }
+        }
+    }
 }
 
-/// Counts loads and yields, so the cache's in-flight coalescing is actually
-/// exercised rather than completing before a second caller can arrive.
+/// Reads `/health` and returns the reported height.
+private func healthHeight(_ client: some TestClientProtocol) async throws -> UInt64 {
+    var height: UInt64?
+    try await client.execute(uri: "/health", method: .get) { response in
+        XCTAssertEqual(response.status, .ok)
+        height = try JSONDecoder().decode(
+            ChainServiceStatusResponse.self,
+            from: Data(response.body.readableBytesView)
+        ).height
+    }
+    return try XCTUnwrap(height)
+}
+
+/// Mines exactly one block atop the current tip through the loopback
+/// template/work routes; genesis is at max target, so nonce 0 always solves it.
+private func mineOneBlock(client: some TestClientProtocol) async throws -> String {
+    var template: MiningTemplateResponse?
+    try await client.execute(
+        uri: "/v1/mining/templates",
+        method: .post,
+        headers: [.contentType: "application/json"],
+        body: ByteBuffer(bytes: try JSONEncoder().encode(MiningTemplateRequest()))
+    ) { response in
+        template = try JSONDecoder().decode(
+            MiningTemplateResponse.self,
+            from: Data(response.body.readableBytesView)
+        )
+    }
+    let issued = try XCTUnwrap(template)
+    var tipCID: String?
+    try await client.execute(
+        uri: "/v1/mining/work",
+        method: .post,
+        headers: [.contentType: "application/json"],
+        body: ByteBuffer(bytes: try JSONEncoder().encode(
+            SubmitWorkRequest(workID: issued.workID, nonce: 0)
+        ))
+    ) { response in
+        let submitted = try JSONDecoder().decode(
+            SubmitWorkResponse.self,
+            from: Data(response.body.readableBytesView)
+        )
+        XCTAssertTrue(submitted.accepted)
+        tipCID = submitted.tipCID
+    }
+    return try XCTUnwrap(tipCID)
+}
+
+/// Parks the loader until every caller has registered, so a load cannot
+/// complete while any caller is still outside the cache.
+private actor CallerGate {
+    private let expected: Int
+    private var registered = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(expected: Int) { self.expected = expected }
+
+    func register() {
+        registered += 1
+        guard registered >= expected else { return }
+        let pending = waiters
+        waiters = []
+        for continuation in pending { continuation.resume() }
+    }
+
+    func waitForAll() async {
+        if registered >= expected { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+}
+
+/// Counts loads; `CallerGate` supplies the ordering the coalescing test needs.
 private actor LoadCounter {
     private(set) var count = 0
 
-    func record() async -> Int {
+    func record() -> Int {
         count += 1
-        await Task.yield()
         return count
     }
 }

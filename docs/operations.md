@@ -120,6 +120,13 @@ actor that also serves sync and block admission. The exemption is limited to
 `GET` and `HEAD`, the only methods a health check uses; `/health` under any
 other method is charged normally rather than being handed a free path to a 404.
 
+That snapshot cache is a **work bound, not a rate limit**, so it is always in
+effect on the public listener — including when all three rates are `0`. An
+operator who turns rate limiting off entirely still gets a `/health` on that
+port that is up to `max-age` seconds old, with no opt-out. The loopback
+`--rpc-port` is never cached: `lattice status` and anything watching height
+advance should read there.
+
 Known gap: nginx's per-client `limit_conn` (a cap on one client's *in-flight*
 requests) has no analogue here — a router middleware sees requests, not
 connection lifetime, so a token bucket bounds requests *started*, never

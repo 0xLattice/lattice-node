@@ -182,6 +182,14 @@ actor ShortTTLSnapshotCache<Value: Sendable> {
         inFlight = task
         let value = await task.value
         inFlight = nil
+        // Timestamped at load COMPLETION, not at its start. The content is as
+        // of the start, so true staleness is `ttl + loadDuration` and can
+        // exceed the advertised max-age under a slow tip walk. That is
+        // deliberate: timestamping at the start would make any load slower than
+        // the TTL land already-expired, so every request would reload and the
+        // cache would stop bounding anything in exactly the case it exists for
+        // — a slow node under load. Bounded extra staleness is the better trade
+        // than losing the work bound.
         cached = (value, clock())
         return value
     }
@@ -258,8 +266,13 @@ actor PublicReadRateLimiter {
     /// the per-client path which precedes the listener check — so without this
     /// gate an attacker cycling source addresses would pay one full scan per
     /// request at ARRIVAL rate, turning a cheap request into a large one. Kept
-    /// as a lower bound: inserts lower it, a sweep recomputes it exactly. Being
-    /// conservative costs at most one futile scan, never a missed eviction.
+    /// as a lower bound: inserts lower it, a sweep recomputes it exactly, so it
+    /// can never miss an eviction. It does NOT promise only one futile scan —
+    /// refreshing the currently-minimal entry just before its completion and
+    /// then presenting a new source address re-arms the gate — but each such
+    /// scan is O(ceiling), it takes an event to trigger, and the listener
+    /// bucket caps the rate of those events. Strictly better than the ungated
+    /// form, which scanned on every insert once the map sat at ceiling.
     private var earliestPossibleEviction = Double.infinity
     private var listener: Bucket?
 

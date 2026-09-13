@@ -509,7 +509,8 @@ func makePublicReadApplication(
         ExplorerPeersResponse(count: 0, peers: [])
     },
     discoverProviders: @Sendable @escaping (String) async -> [String] = { _ in [] },
-    limits: PublicReadRateLimits = .default
+    limits: PublicReadRateLimits = .default,
+    healthClock: @escaping @Sendable () -> Double = PublicReadRateLimiter.monotonicSeconds
 ) -> Application<RouterResponder<PublicReadRequestContext>> {
     // This listener faces the public internet with nothing in front of it, so
     // it carries its own arrival-rate ceilings. Its context is NOT
@@ -529,7 +530,9 @@ func makePublicReadApplication(
     // is bounded by collapsing the work instead: readSnapshot() is isolated on
     // the same ChainProcess actor that serves sync and block admission, and
     // this makes a flood cost one call per TTL however fast it arrives.
-    let health = ShortTTLSnapshotCache(ttl: statusCacheMaxAgeSeconds) {
+    let health = ShortTTLSnapshotCache(
+        ttl: statusCacheMaxAgeSeconds, clock: healthClock
+    ) {
         await service.readSnapshot()
     }
     addPublicReadRoutes(
@@ -570,13 +573,26 @@ private func addPublicReadRoutes<Context: RequestContext>(
     // /health is the public, non-mutating status: readSnapshot() takes no
     // operation gate and reconciles nothing, so a health-check/explorer poll
     // can never head-of-line-block or mutate consensus/mempool state.
-    router.get("health") { request, context in
+    let health: @Sendable (Request, Context) async throws -> Response = {
+        request, context in
         try jsonCached(
             await healthSnapshot(),
             cacheControl: statusCacheControl,
             request: request,
             context: context
         )
+    }
+    router.get("health", use: health)
+    // HEAD is registered explicitly, not via `.autoGenerateHeadEndpoints`: that
+    // option would synthesise a HEAD for EVERY GET on both applications, which
+    // is far broader than this needs. Without it `HEAD /health` falls through
+    // to the not-found responder and answers 404 — and the read-replica
+    // allowlist permits HEAD (`limit_except GET HEAD`), so an operator pointing
+    // a HEAD health check here would depool a perfectly live machine. Same
+    // response, minus the body, exactly as Hummingbird's own auto-generated
+    // HEAD endpoint does it.
+    router.head("health") { request, context in
+        try await health(request, context).createHeadResponse()
     }
     router.get("v1/blocks/:cid") { request, context in
         guard let cid = context.parameters.get("cid"), isPlausibleCID(cid) else {
@@ -1025,8 +1041,13 @@ let immutableCacheControl = "public, max-age=31536000, immutable"
 /// this age — /health is exempt from every rate limit, so its cost is bounded
 /// by collapsing the work rather than by refusing requests, and reusing the
 /// max-age already advertised keeps that within the contract clients are told.
-let statusCacheMaxAgeSeconds = 3.0
-let statusCacheControl = "public, max-age=\(Int(statusCacheMaxAgeSeconds))"
+/// Declared as the integer the header carries, with the cache's TTL derived
+/// from it — never the other way round. A `Double` source truncated into
+/// `max-age` could advertise 3 while caching 3.9, i.e. serve staler than
+/// promised with nothing to show for it; deriving this direction cannot.
+let statusCacheMaxAge = 3
+let statusCacheControl = "public, max-age=\(statusCacheMaxAge)"
+let statusCacheMaxAgeSeconds = Double(statusCacheMaxAge)
 
 private func jsonCached<Value: Encodable, Context: RequestContext>(
     _ value: Value,
