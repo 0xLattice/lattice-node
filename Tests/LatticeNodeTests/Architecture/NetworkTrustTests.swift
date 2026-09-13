@@ -7021,6 +7021,118 @@ final class NetworkTrustTests: XCTestCase {
         await fixture.runtime.stop()
     }
 
+    /// One peer's in-flight range sync must not silence every OTHER peer's
+    /// frontier pull. The edge test is PER PEER — our acquired tip against that
+    /// peer's own claimed height — so a third party's claim has no bearing on
+    /// whether we are at the edge with this one. A peer that claims a tall tip
+    /// takes the single range-sync slot with a bare, unverified number and then
+    /// stalls; while it holds the slot, a peer we are genuinely at the edge with
+    /// must still have its frontier pulled, or one free identity withholds every
+    /// honest peer's losing-fork leaves from fork choice for the whole redrive
+    /// budget.
+    func testStalledRangeSyncDoesNotSuppressAnotherPeersFrontierPull()
+        async throws
+    {
+        let fixture = try await overlayRuntime(
+            keyByte: 0xd7,
+            requestTimeout: .seconds(5)
+        )
+        let genesisCID = try BlockHeader(
+            node: await fixture.process.canonicalTipBlock()
+        ).rawCID
+        let stalling = SilentDeepPeer(claimedHeight: 5_000)
+        let deepClient = Ivy(config: IvyConfig(
+            signingKey: signingKey(0xd8),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        await deepClient.installTestDelegate(stalling)
+        let topics = TopicRecorder()
+        let edgeClient = Ivy(config: IvyConfig(
+            signingKey: signingKey(0xd9),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        // Held in a local: the overlay retains its delegate weakly, so an
+        // inline temporary would be released before the first message arrives.
+        let edgeDelegate = TransactionTopicRecordingPeer(recorder: topics)
+        await edgeClient.installTestDelegate(edgeDelegate)
+        let service = networkService(
+            process: fixture.process,
+            runtime: fixture.runtime
+        )
+        do {
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: transactionServiceHandlers(service)
+            )
+            // The at-edge peer joins first, while the node is idle: its hello
+            // reply is the node its own tip, and no frontier pull can follow yet,
+            // because a hello carries no peer height.
+            try await connectAndHello(
+                edgeClient,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            try await waitForTopic(NodeNetworkTopic.blockAnnouncement, in: topics)
+            // Now the tall claim commits the one range-sync slot: the node opens
+            // the common-ancestor negotiation, which this peer never answers.
+            try await connectAndHello(
+                deepClient,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            try await waitUntil("range sync commits to the stalling peer") {
+                await stalling.ancestorRequestCount() > 0
+            }
+            // This peer's tip is our own genesis: held, and at our edge.
+            guard case .enqueued = await edgeClient.sendMessage(
+                to: fixture.peerID,
+                topic: NodeNetworkTopic.blockAnnouncement,
+                payload: try BlockAnnouncementMessage(
+                    blockCID: genesisCID,
+                    height: 0
+                ).encoded()
+            ) else {
+                throw NetworkTestError.failedSend
+            }
+            try await waitUntil("the at-edge peer frontier is pulled") {
+                await topics.count(
+                    of: NodeNetworkTopic.acceptedLeavesRequest
+                ) > 0
+            }
+            let pulls = await topics.count(
+                of: NodeNetworkTopic.acceptedLeavesRequest
+            )
+            XCTAssertEqual(
+                pulls,
+                1,
+                "the at-edge peer's frontier is pulled once"
+            )
+            // The pull landed WHILE the slot was still held: that is the point.
+            let anchor = await fixture.runtime.rangeSyncAnchorForTesting()
+            XCTAssertNotNil(
+                anchor,
+                "the stalling peer must still hold the range-sync slot, "
+                    + "or the test proved nothing about suppression"
+            )
+        } catch {
+            await deepClient.stop()
+            await edgeClient.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await deepClient.stop()
+        await edgeClient.stop()
+        await fixture.runtime.stop()
+    }
+
     /// A frontier page seeds candidates only as the one answer to the one
     /// request we sent: an unsolicited or mismatched-requestID page seeds
     /// nothing, the matching page seeds, and a second matching page seeds
@@ -7896,10 +8008,12 @@ final class NetworkTrustTests: XCTestCase {
         await fixture.runtime.stop()
     }
 
-    /// While a range sync is in flight we are by definition not at the edge:
-    /// another peer attesting height 1 must not trigger a frontier pull until
-    /// the sync clears.
-    func testNoFrontierPullWhileARangeSyncIsInFlight() async throws {
+    /// The frontier pull is gated on the PER-PEER edge — our acquired tip
+    /// against THAT peer own claimed height — never on whether some other peer
+    /// holds the single range-sync slot. A peer genuinely above our edge is
+    /// therefore not pulled while a sync runs, and still not pulled once it
+    /// clears: the answer follows the heights, not the slot.
+    func testNoFrontierPullFromAPeerAboveOurEdge() async throws {
         let fixture = try await overlayRuntime(
             keyByte: 0xc9,
             requestTimeout: .milliseconds(300)
@@ -7913,15 +8027,15 @@ final class NetworkTrustTests: XCTestCase {
             mode: .overlay
         ))
         await deepClient.installTestDelegate(deep)
-        let shallow = FrontierRequestCapturingPeer()
-        let shallowClient = Ivy(config: IvyConfig(
+        let aboveEdge = FrontierRequestCapturingPeer()
+        let aboveEdgeClient = Ivy(config: IvyConfig(
             signingKey: signingKey(0x73),
             listenPort: 0,
             stunServers: [],
             healthConfig: PeerHealthConfig(enabled: false),
             mode: .overlay
         ))
-        await shallowClient.installTestDelegate(shallow)
+        await aboveEdgeClient.installTestDelegate(aboveEdge)
         do {
             try await fixture.runtime.start(
                 process: fixture.process,
@@ -7937,44 +8051,47 @@ final class NetworkTrustTests: XCTestCase {
                 await deep.ancestorRequestCount() >= 1
             }
             try await connectAndHello(
-                shallowClient,
+                aboveEdgeClient,
                 peerID: fixture.peerID,
                 endpoint: fixture.endpoint,
                 hello: fixture.hello
             )
-            try await waitUntil("shallow hello landed") {
-                await shallow.count(of: NodeNetworkTopic.blockAnnouncement) >= 1
+            try await waitUntil("aboveEdge hello landed") {
+                await aboveEdge.count(of: NodeNetworkTopic.blockAnnouncement) >= 1
             }
-            guard case .enqueued = await shallowClient.sendMessage(
+            guard case .enqueued = await aboveEdgeClient.sendMessage(
                 to: fixture.peerID,
                 topic: NodeNetworkTopic.blockAnnouncement,
                 payload: try BlockAnnouncementMessage(
-                    blockCID: testCID("shallow-tip"),
-                    height: 1
+                    blockCID: testCID("above-edge-tip"),
+                    height: 50
                 ).encoded()
             ) else {
                 throw NetworkTestError.failedSend
             }
             try await Task.sleep(for: .milliseconds(400))
-            let duringSync = await shallow.count(
+            let duringSync = await aboveEdge.count(
                 of: NodeNetworkTopic.acceptedLeavesRequest
             )
-            XCTAssertEqual(duringSync, 0, "no pull while a range sync is in flight")
+            XCTAssertEqual(duringSync, 0, "a peer above our edge is not pulled")
 
-            // The deep peer leaves: the sync clears, and the re-entry probe
-            // finds the shallow peer at the edge.
+            // The deep peer leaves and the slot is released: still no pull,
+            // because it was this peer own height — not the slot — that put it
+            // out of reach of the edge test.
             await deepClient.stop()
-            try await waitUntil("pull after the sync clears") {
-                await shallow.count(of: NodeNetworkTopic.acceptedLeavesRequest) == 1
-            }
+            try await Task.sleep(for: .milliseconds(400))
+            let afterClear = await aboveEdge.count(
+                of: NodeNetworkTopic.acceptedLeavesRequest
+            )
+            XCTAssertEqual(afterClear, 0, "above the edge, slot or no slot")
         } catch {
             await deepClient.stop()
-            await shallowClient.stop()
+            await aboveEdgeClient.stop()
             await fixture.runtime.stop()
             throw error
         }
         await deepClient.stop()
-        await shallowClient.stop()
+        await aboveEdgeClient.stop()
         await fixture.runtime.stop()
     }
 
