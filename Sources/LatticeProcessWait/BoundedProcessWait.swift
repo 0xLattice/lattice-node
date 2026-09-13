@@ -31,6 +31,15 @@ public enum ProcessWaitOutcome: Sendable, Equatable {
     case exited(status: Int32)
     /// The deadline fired first; the child's process group was signalled.
     case deadlineExceeded
+    /// The deadline task was cancelled before it fired, so this wait was
+    /// never bounded by it. NOT a clean result: nothing was signalled and the
+    /// child may still be running.
+    ///
+    /// Unreachable today -- the timer is unstructured, so only `wait()`
+    /// cancels it, and only after an outcome already exists. It is here so
+    /// that a later restructure which breaks that invariant fails loudly
+    /// instead of leaving a caller waiting forever believing it is bounded.
+    case boundCancelled
 }
 
 /// Output collected from a bounded spawn.
@@ -138,91 +147,26 @@ public struct ProcessTeardownTarget: Sendable, Equatable {
     }
 }
 
-/// One signal attempt made during teardown, with its raw result.
-///
-/// DIAGNOSTIC ONLY: a few integers recorded unconditionally, reported only on
-/// a caller's failure path. It exists because a teardown that signals the
-/// RIGHT group and still leaves a live member behind cannot be diagnosed from
-/// the outcome alone -- the question is what each kill(2) actually returned,
-/// and whether the detached escalation ran at all.
-public struct ProcessTeardownStep: Sendable, Equatable, CustomStringConvertible {
-    public enum Stage: String, Sendable, Equatable {
-        case sigterm
-        case escalationEntered
-        case probe
-        case sigkill
-    }
-
-    public let stage: Stage
-    public let result: Int32
-    /// errno captured immediately after the call; 0 when result == 0.
-    public let failure: Int32
-    /// Milliseconds since teardown began, so a signal delayed past the
-    /// caller's own polling window is visible rather than inferred.
-    public let millisSinceStart: Int64
-
-    public init(
-        stage: Stage, result: Int32, failure: Int32, millisSinceStart: Int64
-    ) {
-        self.stage = stage
-        self.result = result
-        self.failure = failure
-        self.millisSinceStart = millisSinceStart
-    }
-
-    public var description: String {
-        "\(stage.rawValue)(r=\(result) e=\(failure) t=\(millisSinceStart)ms)"
-    }
-}
-
 /// SIGTERM the captured target, escalating to SIGKILL after the grace.
 /// Returns immediately; the escalation runs detached.
+///
+/// `onSignalFailure` receives `errno` for any signal that FAILS. Discarding
+/// kill(2)'s return value is how a teardown that never happened reads as
+/// success -- the same silent-failure shape as an unreported degraded
+/// teardown, and the reason a signalling question took a day to answer.
 public func terminateProcessGroup(
     _ target: ProcessTeardownTarget,
-    report: (@Sendable (ProcessTeardownStep) -> Void)? = nil
+    onSignalFailure: (@Sendable (Int32) -> Void)? = nil
 ) {
-    let start = ContinuousClock.now
     let signalled = target.group.map { -$0 } ?? target.pid
-
-    let term = kill(signalled, SIGTERM)
-    report?(ProcessTeardownStep(
-        stage: .sigterm,
-        result: term,
-        failure: term == 0 ? 0 : errno,
-        millisSinceStart: elapsedMilliseconds(since: start)
-    ))
-
+    if kill(signalled, SIGTERM) != 0 { onSignalFailure?(errno) }
     Task.detached {
         try? await Task.sleep(for: terminationGrace)
-        report?(ProcessTeardownStep(
-            stage: .escalationEntered,
-            result: 0,
-            failure: 0,
-            millisSinceStart: elapsedMilliseconds(since: start)
-        ))
         // Only escalate if something is still there -- the guard the
         // superseded MiningWorkerSubprocess had, and it costs nothing.
-        let probe = kill(signalled, 0)
-        report?(ProcessTeardownStep(
-            stage: .probe,
-            result: probe,
-            failure: probe == 0 ? 0 : errno,
-            millisSinceStart: elapsedMilliseconds(since: start)
-        ))
-        guard probe == 0 else { return }
-        let killed = kill(signalled, SIGKILL)
-        report?(ProcessTeardownStep(
-            stage: .sigkill,
-            result: killed,
-            failure: killed == 0 ? 0 : errno,
-            millisSinceStart: elapsedMilliseconds(since: start)
-        ))
+        guard kill(signalled, 0) == 0 else { return }
+        if kill(signalled, SIGKILL) != 0 { onSignalFailure?(errno) }
     }
-}
-
-private func elapsedMilliseconds(since start: ContinuousClock.Instant) -> Int64 {
-    let parts = start.duration(to: ContinuousClock.now).components
-    return parts.seconds * 1_000 + parts.attoseconds / 1_000_000_000_000_000
 }
 
 /// Starts `process` under a hard deadline, returning a handle whose `wait()`
@@ -249,8 +193,10 @@ public final class BoundedProcessWait: @unchecked Sendable {
     private let lock = NSLock()
     /// Captured at spawn, never re-derived. See ProcessTeardownTarget.
     private var teardown: ProcessTeardownTarget?
-    /// Diagnostic record of what the teardown signals returned.
-    private var teardownSteps: [ProcessTeardownStep] = []
+    /// errno from the last teardown signal that failed, if any.
+    private var teardownSignalFailure: Int32?
+    /// An unexpected error from the deadline task, if one ever occurs.
+    private var timerFailure: String?
     private var waiters: [CheckedContinuation<ProcessWaitOutcome, Never>] = []
     private var outcome: ProcessWaitOutcome?
     private var timer: Task<Void, Never>?
@@ -266,19 +212,35 @@ public final class BoundedProcessWait: @unchecked Sendable {
         return teardown
     }
 
-    /// What each teardown signal returned, in order. Diagnostic: a caller
-    /// reports this on ITS failure path, where "the right group was signalled
-    /// and a member survived" is otherwise indistinguishable from "the signal
-    /// never went out".
-    public var recordedTeardownSteps: [ProcessTeardownStep] {
+    /// errno from the last teardown signal that FAILED, or nil when every
+    /// signal succeeded. Surfaced for the same reason isTeardownDegraded is:
+    /// a kill(2) whose return value is discarded lets a teardown that never
+    /// happened read as a clean one.
+    public var lastTeardownSignalFailure: Int32? {
         lock.lock()
         defer { lock.unlock() }
-        return teardownSteps
+        return teardownSignalFailure
     }
 
-    private func recordTeardownStep(_ step: ProcessTeardownStep) {
+    private func recordTeardownSignalFailure(_ code: Int32) {
         lock.lock()
-        teardownSteps.append(step)
+        teardownSignalFailure = code
+        lock.unlock()
+    }
+
+    /// An unexpected error from the deadline task, or nil. `Task.sleep`
+    /// throws only cancellation today, so a non-nil value means the bound
+    /// ended for a reason this code did not anticipate -- which has to be
+    /// visible rather than swallowed by an untyped catch.
+    public var unexpectedTimerFailure: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return timerFailure
+    }
+
+    private func recordTimerFailure(_ description: String) {
+        lock.lock()
+        timerFailure = description
         lock.unlock()
     }
 
@@ -317,8 +279,24 @@ public final class BoundedProcessWait: @unchecked Sendable {
         timer = Task { [weak self] in
             do {
                 try await Task.sleep(for: deadline)
+            } catch is CancellationError {
+                // NOT "the child exited first" -- this task never looks at
+                // the child. Cancellation means the BOUND was removed.
+                //
+                // The timer is unstructured, so only `wait()` cancels it, and
+                // only after an outcome already exists: this settles nothing
+                // today. It is here so that a later restructure which breaks
+                // that invariant fails loudly instead of leaving a caller
+                // waiting forever while believing it is bounded.
+                self?.settle(.boundCancelled)
+                return
             } catch {
-                return  // cancelled: the child exited first
+                // Task.sleep throws nothing else today. An untyped catch that
+                // returned in silence is precisely how a bound removes itself
+                // without telling anyone, so record it and still unblock.
+                self?.recordTimerFailure(String(describing: error))
+                self?.settle(.boundCancelled)
+                return
             }
             // SETTLE FIRST. Signalling before settling let our own SIGTERM
             // kill the child, whose terminationHandler then won the race and
@@ -329,8 +307,10 @@ public final class BoundedProcessWait: @unchecked Sendable {
             // its real status and is never signalled.
             guard let self, self.settle(.deadlineExceeded) else { return }
             onDeadline?(pid)
-            terminateProcessGroup(captured) { [weak self] step in
-                self?.recordTeardownStep(step)
+            // Strong capture: a dropped record must never read as
+            // "no failure occurred".
+            terminateProcessGroup(captured) { code in
+                self.recordTeardownSignalFailure(code)
             }
         }
     }
@@ -349,8 +329,8 @@ public final class BoundedProcessWait: @unchecked Sendable {
             let captured = teardown
             lock.unlock()
             if let captured {
-                terminateProcessGroup(captured) { [weak self] step in
-                    self?.recordTeardownStep(step)
+                terminateProcessGroup(captured) { code in
+                    self.recordTeardownSignalFailure(code)
                 }
             }
         }

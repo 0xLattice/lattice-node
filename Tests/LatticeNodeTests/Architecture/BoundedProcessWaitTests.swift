@@ -135,39 +135,25 @@ final class BoundedProcessWaitTests: XCTestCase {
         guard let grandchild else {
             return XCTFail("the stub never recorded a grandchild pid")
         }
-        // The SIGKILL escalation is asynchronous; poll within a bound.
-        var alive = true
-        for _ in 0..<50 where alive {
+        // "No longer RUNNING", not "the pid stops answering". A zombie
+        // still answers kill(pid, 0) and still reports its old group, while
+        // holding no resources and running no code, so the pid check alone
+        // read a corpse as live for the whole poll.
+        //
+        // It reproduced only on CI, whose container PID 1 is a process that
+        // never reaps an adopted orphan. A local container has bash as PID 1
+        // and macOS has launchd, so both looked green.
+        //
+        // Do not simplify this back to a bare kill(pid, 0).
+        var running = true
+        for _ in 0..<50 where running {
             usleep(100_000)
-            alive = kill(grandchild, 0) == 0
+            running = kill(grandchild, 0) == 0
+                && kernelProcessState(grandchild) != "Z"
         }
-        // FAILURE-PATH DIAGNOSTIC. XCTest assertion messages are
-        // autoclosures, so none of this is evaluated while the test is green.
-        // CI reproduces this at roughly 67% while a local container manages
-        // about 5%, so CI is the only oracle here and it has to report enough
-        // to tell the two mechanisms apart:
-        //   isDegraded == true  -> capture saw the child sharing OUR group,
-        //     so teardown was a pid-only kill: correctly reported, still
-        //     leaking, and the group was never established when we looked.
-        //   grandchildPgidNow != capturedGroup -> the grandchild was never in
-        //     the group the signal addressed, so it escaped by topology
-        //     rather than by a lost race.
-        // A pgid of -1 means the process is gone (ESRCH).
-        let captured = handle.capturedTeardown
-        let childPid = handle.processIdentifier
         XCTAssertFalse(
-            alive,
-            """
-            grandchild \(grandchild) survived: only the pid was killed
-            DIAG capturedPid=\(captured?.pid.description ?? "nil") \
-            capturedGroup=\(captured?.group?.description ?? "nil") \
-            isDegraded=\(captured?.isDegraded.description ?? "nil") \
-            childPgidNow=\(getpgid(childPid)) \
-            ourPgid=\(getpgid(0)) \
-            grandchildPgidNow=\(getpgid(grandchild))
-            SIGNALS \(handle.recordedTeardownSteps.map(\.description).joined(separator: " "))
-            KERNEL grandchild=\(kernelProcessState(grandchild)) child=\(kernelProcessState(childPid))
-            """
+            running,
+            "grandchild \(grandchild) still running: teardown missed it"
         )
     }
 
@@ -397,6 +383,43 @@ final class BoundedProcessWaitTests: XCTestCase {
             XCTAssertEqual(
                 outcome, .deadlineExceeded,
                 "our own SIGTERM must not be reported as a normal exit"
+            )
+        }
+    }
+
+    /// The deadline path must keep reporting `.deadlineExceeded`, never the
+    /// new `.boundCancelled`.
+    ///
+    /// SCOPE, stated plainly: `.boundCancelled` is unreachable through the
+    /// public API today, because the timer is unstructured and only `wait()`
+    /// cancels it -- and only after an outcome already exists. So this does
+    /// NOT exercise that case; a test that appeared to would be testing a
+    /// fiction. What it pins is that adding the case left the live path
+    /// alone, and that cancelling a waiter does not silently downgrade a
+    /// fired deadline into "never bounded".
+    func testCancellingAWaiterDoesNotReportTheBoundAsRemoved() throws {
+        let stub = try script("sleep 60")
+        defer { try? FileManager.default.removeItem(at: stub) }
+        let process = Process()
+        process.executableURL = stub
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        let handle = try runBounded(process, deadline: .seconds(2))
+
+        withinDeadline(30, "cancelled waiter") {
+            let first = Task { await handle.wait() }
+            try? await Task.sleep(for: .milliseconds(100))
+            first.cancel()
+            _ = await first.value
+
+            let outcome = await handle.wait()
+            XCTAssertNotEqual(
+                outcome, .boundCancelled,
+                "a cancelled waiter must not report the bound as removed"
+            )
+            XCTAssertNil(
+                handle.unexpectedTimerFailure,
+                "the deadline task must not have failed unexpectedly"
             )
         }
     }
