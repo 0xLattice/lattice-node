@@ -128,9 +128,31 @@ final class BoundedProcessWaitTests: XCTestCase {
             usleep(100_000)
             alive = kill(grandchild, 0) == 0
         }
+        // FAILURE-PATH DIAGNOSTIC. XCTest assertion messages are
+        // autoclosures, so none of this is evaluated while the test is green.
+        // CI reproduces this at roughly 67% while a local container manages
+        // about 5%, so CI is the only oracle here and it has to report enough
+        // to tell the two mechanisms apart:
+        //   isDegraded == true  -> capture saw the child sharing OUR group,
+        //     so teardown was a pid-only kill: correctly reported, still
+        //     leaking, and the group was never established when we looked.
+        //   grandchildPgidNow != capturedGroup -> the grandchild was never in
+        //     the group the signal addressed, so it escaped by topology
+        //     rather than by a lost race.
+        // A pgid of -1 means the process is gone (ESRCH).
+        let captured = handle.capturedTeardown
+        let childPid = handle.processIdentifier
         XCTAssertFalse(
             alive,
-            "grandchild \(grandchild) survived: only the pid was killed"
+            """
+            grandchild \(grandchild) survived: only the pid was killed
+            DIAG capturedPid=\(captured?.pid.description ?? "nil") \
+            capturedGroup=\(captured?.group?.description ?? "nil") \
+            isDegraded=\(captured?.isDegraded.description ?? "nil") \
+            childPgidNow=\(getpgid(childPid)) \
+            ourPgid=\(getpgid(0)) \
+            grandchildPgidNow=\(getpgid(grandchild))
+            """
         )
     }
 
