@@ -51,6 +51,9 @@ public func spawnCollectingOutput(
         deadline: ContinuousClock.now + deadline
     )
     return BoundedSpawnResult(
-        output: read.data, outcome: outcome, outputComplete: read.complete
+        output: read.data,
+        outcome: outcome,
+        outputComplete: read.complete,
+        teardownDegraded: handle.isTeardownDegraded
     )
 }

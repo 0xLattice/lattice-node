@@ -61,6 +61,14 @@ func runningPid(_ layout: HostLayout, _ path: String) -> Int32? {
         )
         if !read.complete {
             terminateProcessGroup(teardown)
+            if teardown.isDegraded {
+                // Do not report a clean teardown we did not perform: only the
+                // pid could be signalled, so anything the probe spawned is
+                // still running.
+                FileHandle.standardError.write(Data(
+                    "warning: pid probe \(probe.processIdentifier) could not be torn down as a group; its descendants may still be running\n".utf8
+                ))
+            }
             // A probe that timed out says NOTHING about the pid, and a
             // truncated name would fail the suffix check below and report a
             // live node as stopped -- which invites a double spawn. Same

@@ -40,13 +40,25 @@ public struct BoundedSpawnResult: Sendable {
     /// stdout reached EOF. `false` means the read itself hit the deadline,
     /// so `output` is a prefix.
     public let outputComplete: Bool
+    /// Teardown could only signal the pid, so descendants may have survived.
+    ///
+    /// Deliberately SEPARATE from `outcome`: teardown quality and wait
+    /// outcome vary independently. A deadline can fire with a clean subtree
+    /// teardown, and a child can exit normally having left descendants
+    /// behind. Folding this into `.deadlineExceeded` would conflate two axes
+    /// and leave no way to say "exited normally, teardown degraded".
+    public let teardownDegraded: Bool
 
     public init(
-        output: Data, outcome: ProcessWaitOutcome, outputComplete: Bool
+        output: Data,
+        outcome: ProcessWaitOutcome,
+        outputComplete: Bool,
+        teardownDegraded: Bool
     ) {
         self.output = output
         self.outcome = outcome
         self.outputComplete = outputComplete
+        self.teardownDegraded = teardownDegraded
     }
 }
 
@@ -82,22 +94,46 @@ public struct ProcessTeardownTarget: Sendable, Equatable {
     }
 
     /// Captures the target immediately after `run()`.
-    ///
-    /// A child's pid can never equal our own process group id -- our group
-    /// leader predates the child -- so `-pid` can never reach the supervisor.
-    /// The one unsafe case is a child SHARING our group, which means it was
-    /// never placed in a group of its own; that is recorded as degraded
-    /// rather than signalled blindly.
-    ///
-    /// When the child is already gone and `getpgid` fails, the group is still
-    /// addressed: surviving descendants may hold it open, and an empty group
-    /// makes the signal a harmless no-op. Absence of the child is not a
-    /// teardown failure, but it is also not a reason to skip the subtree.
     public static func capture(pid: Int32) -> ProcessTeardownTarget {
-        let childGroup = getpgid(pid)
-        if childGroup > 0, childGroup == getpgid(0) {
+        let ourGroup = getpgid(0)
+
+        // API SAFETY -- not pid recycling. This is public and nothing
+        // constrains a caller to a pid it spawned, so a caller passing our
+        // own group leader's pid would otherwise fall through to
+        // `group: pid` and `kill(-pid)` would signal the SUPERVISOR's group.
+        //
+        // Do not delete this by reconstructing the POSIX argument. That
+        // argument is sound but narrower than this guard: for children WE
+        // fork, `pid == ourGroup` is unreachable, because a process group id
+        // is pinned for the group's lifetime and we are always a member of
+        // our own group, so the leader's pid cannot be recycled even once it
+        // exits and is reaped. It says nothing about an arbitrary pid handed
+        // in by a caller.
+        if pid == ourGroup {
             return ProcessTeardownTarget(pid: pid, group: nil)
         }
+
+        let childGroup = getpgid(pid)
+        if childGroup > 0 {
+            // A child SHARING our group was never placed in one of its own;
+            // signalling that group would take the supervisor with it.
+            if childGroup == ourGroup {
+                return ProcessTeardownTarget(pid: pid, group: nil)
+            }
+            // Use what was MEASURED. Returning `pid` here regardless would be
+            // correct only under the assumption that the child leads its own
+            // group: a child in a THIRD group would make `kill(-pid)` address
+            // a group whose leader does not exist -- ESRCH, nothing signalled
+            // at all, which is worse than the pid-only kill this replaced and
+            // exactly as silent.
+            return ProcessTeardownTarget(pid: pid, group: childGroup)
+        }
+
+        // Already gone, so its group cannot be read -- but descendants may
+        // still hold that group open, and for a child we spawned the group id
+        // is its pid by construction. An empty group makes this a harmless
+        // no-op. Absence of the child is not a teardown failure, but it is
+        // not a reason to skip the subtree either.
         return ProcessTeardownTarget(pid: pid, group: pid)
     }
 }
@@ -146,12 +182,19 @@ public final class BoundedProcessWait: @unchecked Sendable {
 
     public var processIdentifier: Int32 { process.processIdentifier }
 
+    /// The target captured AT SPAWN. Exposed so a regression that moved the
+    /// capture back to kill time fails a test rather than silently degrading
+    /// every teardown.
+    public var capturedTeardown: ProcessTeardownTarget? {
+        lock.lock()
+        defer { lock.unlock() }
+        return teardown
+    }
+
     /// True when teardown can only signal the pid, so descendants survive it.
     /// Exposed so a caller can SAY SO rather than report a clean teardown.
     public var isTeardownDegraded: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return teardown?.isDegraded ?? false
+        capturedTeardown?.isDegraded ?? false
     }
 
     init(process: Process) {

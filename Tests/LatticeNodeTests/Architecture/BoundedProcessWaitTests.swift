@@ -62,8 +62,9 @@ final class BoundedProcessWaitTests: XCTestCase {
     }
 
     /// END-TO-END COMPANION, NOT A DISCRIMINATOR. Measured across 18 Linux
-    /// runs, the sibling teardown assertion below reported the truth only
-    /// intermittently (1 failure in 18) because it depends on losing a race.
+    /// runs, the sibling teardown assertion below caught the defect in only
+    /// 1 of 18 runs -- roughly once in eighteen it tells the truth, because
+    /// it depends on losing a race.
     /// Do NOT read its green as proof that teardown works; the deterministic
     /// pins are testCapturedGroupSurvivesAReapedChild and
     /// testDeadlineOutcomeSurvivesOurOwnSigterm.
@@ -304,6 +305,27 @@ final class BoundedProcessWaitTests: XCTestCase {
             captured.isDegraded,
             "absence of the child is not a teardown failure"
         )
+
+        // The fix is that the HANDLE captured at spawn and kept it. Asserting
+        // only `capture`'s post-reap behaviour would still pass if someone
+        // moved the capture back to kill time.
+        XCTAssertEqual(
+            handle.capturedTeardown?.group, pid,
+            "the handle must hold a group captured while the child was alive"
+        )
+        XCTAssertFalse(handle.isTeardownDegraded)
+    }
+
+    /// API SAFETY. `capture` is public and nothing constrains a caller to a
+    /// pid it spawned; handed our own group leader's pid it must refuse to
+    /// return a group, or `kill(-pid)` would signal the supervisor.
+    func testCapturingOurOwnGroupLeaderIsDegraded() {
+        let target = ProcessTeardownTarget.capture(pid: getpgid(0))
+        XCTAssertTrue(
+            target.isDegraded,
+            "our own process group must never be returned as a signal target"
+        )
+        XCTAssertNil(target.group)
     }
 
     /// A child sharing OUR process group is the one genuinely unsafe case --

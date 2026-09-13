@@ -210,10 +210,16 @@ struct Mine: AsyncParsableCommand {
                     // windowed retarget finds the target block time on its
                     // own — no miner-side pacing needed.
                     refusedStreak = 0
-                case .roundDeadlineExceeded(let deadline):
+                case .roundDeadlineExceeded(let deadline, let degraded):
                     // Loud by construction: a silent kill-and-continue is
                     // the original failure mode wearing a fix's clothes.
                     log("ROUND DEADLINE EXCEEDED after \(deadline): the coordinator process group was killed and the round abandoned. Reward cursor stays at \(cursor). Raise mine.roundDeadlineMultiplier in lattice.json if rounds here legitimately run this long.")
+                    if degraded {
+                        // State the fact; do not decide for the operator what
+                        // it means. A teardown that could only signal the pid
+                        // is not the clean one the line above implies.
+                        log("ROUND TEARDOWN DEGRADED: only the coordinator pid could be signalled, not its process group, so processes it spawned may still be running and holding resources. Check for stray lattice-miner processes.")
+                    }
                     refusedStreak = 0
                 case .workerTrouble(let detail):
                     log("reward \(cursor) retrying after \(detail)")
@@ -332,7 +338,10 @@ enum CoordinatorOutcome {
     case refusal
     case workerTrouble(String)
     /// The round outlived its derived bound; its process group was killed.
-    case roundDeadlineExceeded(Duration)
+    /// Carries whether that teardown was DEGRADED -- only the pid could be
+    /// signalled -- separately from the deadline itself, because the two vary
+    /// independently.
+    case roundDeadlineExceeded(Duration, teardownDegraded: Bool)
 }
 
 final class InterruptFlag: @unchecked Sendable {
@@ -388,7 +397,9 @@ func runCoordinatorOnce(
         at: layout.pidFile(for: "mine-coordinator")
     )
     if result.outcome == .deadlineExceeded {
-        return .roundDeadlineExceeded(deadline)
+        return .roundDeadlineExceeded(
+            deadline, teardownDegraded: result.teardownDegraded
+        )
     }
     let lines = String(decoding: result.output, as: UTF8.self)
         .split(separator: "\n").reversed()

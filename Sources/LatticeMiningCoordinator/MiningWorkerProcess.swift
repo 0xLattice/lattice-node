@@ -102,7 +102,17 @@ public struct MiningWorkerProcessClient: Sendable {
             }
         )
         let waitOutcome = await handle.wait()
-        if waitOutcome == .deadlineExceeded { return nil }
+        if waitOutcome == .deadlineExceeded {
+            // NOT consuming handle.isTeardownDegraded here is deliberate, and
+            // it is a known gap rather than a judgement that the information
+            // is irrelevant: a worker with a backend shim does spawn children,
+            // so a degraded teardown here could leak a subtree. This process
+            // has no observable channel for it -- stdout is a JSON contract
+            // the CLI parses, and the CLI sends this process's stderr to
+            // /dev/null -- so a log would be written nowhere. Surfacing it
+            // needs an error-channel decision, not a print.
+            return nil
+        }
 
         // On cancellation (e.g. stale work) the worker result is irrelevant.
         // Check before the post-exit read so a cancelled worker that forked a
