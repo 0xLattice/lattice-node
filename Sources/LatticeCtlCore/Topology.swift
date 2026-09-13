@@ -65,13 +65,13 @@ public struct TopologyMine: Codable {
     /// child's exit signal can wait forever (#62). Raise it on a host whose
     /// rounds legitimately run long; lower it to notice a wedge sooner.
     /// Absent = the default headroom.
-    public var roundDeadlineMultiplier: UInt64?
+    public var roundDeadlineMultiplier: Int?
 
     public init(
         chain: String, worker: String? = nil, workers: Int? = nil,
         batchSize: UInt64? = nil, rewards: String? = nil,
         minWork: [String: String]? = nil,
-        roundDeadlineMultiplier: UInt64? = nil
+        roundDeadlineMultiplier: Int? = nil
     ) {
         self.chain = chain
         self.worker = worker

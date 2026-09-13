@@ -63,6 +63,13 @@ final class LatticeCtlTopologyTests: XCTestCase {
             mine: TopologyMine(chain: "Nexus", roundDeadlineMultiplier: 0)
         ).validated())
 
+        // Negative reaches the NAMED refusal now that the field is Int: as
+        // UInt64 it surfaced as a raw Codable error at load instead.
+        XCTAssertThrowsError(try Topology(
+            chains: ["Nexus": chain(4001)],
+            mine: TopologyMine(chain: "Nexus", roundDeadlineMultiplier: -1)
+        ).validated())
+
         let absent = try Topology(
             chains: ["Nexus": chain(4001)],
             mine: TopologyMine(chain: "Nexus")

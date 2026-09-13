@@ -294,23 +294,25 @@ struct Child: AsyncParsableCommand {
                     try await Task.sleep(for: .seconds(10))
                 }
             } else if !recorded {
-                // Derived from the parent's own advertised template expiry,
-                // never a magic number; if the node will not say, refuse by
-                // name rather than inventing one.
-                // From the ROOT chain's node: that is the one these rounds
-                // mine against, and for a grandchild it is not the parent.
-                guard let expiry = await observedTemplateExpiry(
-                    rootChain.rpc, rewardsFile: nil
-                ) else {
-                    throw CtlError("the root node at rpc \(rootChain.rpc) is not advertising template expiry, so a bounded mining round cannot be derived; start it (or use --external-mining-wait-seconds) and re-run")
-                }
-                let deployRoundDeadline = MiningRoundDeadline.deadline(
-                    templateExpiry: expiry,
-                    longestCompletedRound: .zero,
-                    multiplier: topology.mine?.roundDeadlineMultiplier
-                        ?? MiningRoundDeadline.defaultMultiplier
-                )
+                let multiplier = topology.mine?.roundDeadlineMultiplier
+                    ?? MiningRoundDeadline.defaultMultiplier
                 for _ in 0..<20 {
+                    // Observed per attempt, from the ROOT chain's node --
+                    // the one these rounds mine against, which for a
+                    // grandchild is not the parent. Per attempt, because a
+                    // transient RPC failure must not abort a deploy that
+                    // used to retry; this loop's own budget bounds it.
+                    guard let expiry = await observedTemplateExpiry(
+                        rootChain.rpc, rewardsFile: nil
+                    ) else {
+                        try await Task.sleep(for: .seconds(2))
+                        continue
+                    }
+                    let deployRoundDeadline = MiningRoundDeadline.deadline(
+                        templateExpiry: expiry,
+                        longestCompletedRound: .zero,
+                        multiplier: multiplier
+                    )
                     let coordinator = Process()
                     coordinator.executableURL = try nodeBinary()
                         .deletingLastPathComponent()

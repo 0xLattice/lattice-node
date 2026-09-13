@@ -75,10 +75,12 @@ lattice mine status  # cursor position and batch runway
 - `roundDeadlineMultiplier` is optional (default `10`): headroom on the
   mining round deadline. `mine run` bounds every coordinator round by the
   node's advertised template expiry plus the longest round that has actually
-  completed, times this. A round that overruns is killed — process group and
+  completed (capped at one more expiry, so a slow round cannot ratchet the
+  bound upward), times this. A round that overruns is killed — process group and
   all — logged as `ROUND DEADLINE EXCEEDED`, and the loop continues without
   advancing the reward cursor. Raise it where rounds legitimately run long;
-  lower it to notice a wedged round sooner. Values below `1` are refused.
+  lower it to notice a wedged round sooner. Values below `1` are refused
+  by name.
 
 ## Verbs
 

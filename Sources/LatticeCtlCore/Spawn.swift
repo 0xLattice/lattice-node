@@ -34,7 +34,6 @@ public func spawnCollectingOutput(
     let devNull = FileHandle(forWritingAtPath: "/dev/null")
     defer { try? devNull?.close() }
     process.standardError = devNull ?? FileHandle.nullDevice
-    let readDeadline = ContinuousClock.now + deadline
     let handle = try runBounded(
         process, deadline: deadline, onDeadline: onDeadline
     )
@@ -42,9 +41,14 @@ public func spawnCollectingOutput(
     let outcome = await handle.wait()
     try? stdout.fileHandleForWriting.close()
     defer { try? stdout.fileHandleForReading.close() }
+    // The drain gets its OWN budget rather than the remainder of the exit
+    // wait, which may have consumed the whole round: after a group kill the
+    // child's last line is still worth collecting. Bounded by the same
+    // derived round bound, so this adds no constant, and in practice it
+    // returns at once because the child is gone and EOF is already there.
     let read = readToEndBounded(
         fileDescriptor: stdout.fileHandleForReading.fileDescriptor,
-        deadline: readDeadline
+        deadline: ContinuousClock.now + deadline
     )
     return BoundedSpawnResult(
         output: read.data, outcome: outcome, outputComplete: read.complete

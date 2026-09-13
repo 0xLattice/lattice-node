@@ -78,6 +78,9 @@ public func terminateProcessGroup(pid: Int32) {
     kill(target, SIGTERM)
     Task.detached {
         try? await Task.sleep(for: terminationGrace)
+        // Only escalate if something is still there -- the guard the
+        // superseded MiningWorkerSubprocess had, and it costs nothing.
+        guard kill(target, 0) == 0 else { return }
         kill(target, SIGKILL)
     }
 }
@@ -104,10 +107,16 @@ public func runBounded(
 public final class BoundedProcessWait: @unchecked Sendable {
     private let process: Process
     private let lock = NSLock()
-    private var continuation: CheckedContinuation<ProcessWaitOutcome, Never>?
-    private var pending: ProcessWaitOutcome?
-    private var settled = false
+    private var waiters: [CheckedContinuation<ProcessWaitOutcome, Never>] = []
+    private var outcome: ProcessWaitOutcome?
     private var timer: Task<Void, Never>?
+
+    /// Whether no outcome has been recorded yet.
+    private var isPending: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return outcome == nil
+    }
 
     public var processIdentifier: Int32 { process.processIdentifier }
 
@@ -136,9 +145,14 @@ public final class BoundedProcessWait: @unchecked Sendable {
             } catch {
                 return  // cancelled: the child exited first
             }
+            // The child may have exited while this task slept. Do not
+            // signal a group that already won the race: the outcome would be
+            // right either way, but onDeadline would announce a deadline
+            // that decided nothing.
+            guard let self, self.isPending else { return }
             onDeadline?(pid)
             terminateProcessGroup(pid: pid)
-            self?.settle(.deadlineExceeded)
+            self.settle(.deadlineExceeded)
         }
     }
 
@@ -146,7 +160,7 @@ public final class BoundedProcessWait: @unchecked Sendable {
     /// cancellation the group is signalled, preserving the prompt-reap
     /// behaviour the mining worker relies on.
     public func wait() async -> ProcessWaitOutcome {
-        let outcome = await withTaskCancellationHandler {
+        let result = await withTaskCancellationHandler {
             await withCheckedContinuation {
                 (cont: CheckedContinuation<ProcessWaitOutcome, Never>) in
                 attach(cont)
@@ -158,38 +172,42 @@ public final class BoundedProcessWait: @unchecked Sendable {
             }
         }
         timer?.cancel()
-        return outcome
+        return result
     }
 
+    /// The outcome is RETAINED, never consumed, and waiters are a list: this
+    /// is a public API whose whole promise is that a wait cannot hang, so a
+    /// second `wait()` must return the same answer at once rather than park
+    /// on a continuation nobody will resume, and concurrent waits must all
+    /// wake rather than stranding the earlier one.
     private func attach(
         _ cont: CheckedContinuation<ProcessWaitOutcome, Never>
     ) {
         lock.lock()
-        if let ready = pending {
-            pending = nil
+        if let decided = outcome {
             lock.unlock()
-            cont.resume(returning: ready)
+            cont.resume(returning: decided)
             return
         }
-        continuation = cont
+        waiters.append(cont)
         lock.unlock()
     }
 
-    private func settle(_ outcome: ProcessWaitOutcome) {
+    private func settle(_ result: ProcessWaitOutcome) {
         lock.lock()
-        if settled {
+        if outcome != nil {
             lock.unlock()
             return
         }
-        settled = true
-        if let waiting = continuation {
-            continuation = nil
-            lock.unlock()
-            waiting.resume(returning: outcome)
-            return
-        }
-        pending = outcome
+        outcome = result
+        let pending = waiters
+        waiters = []
         lock.unlock()
+        // Never resume while holding the lock: a terminationHandler running
+        // on a Foundation queue could otherwise re-enter and deadlock.
+        for waiter in pending {
+            waiter.resume(returning: result)
+        }
     }
 }
 
@@ -215,16 +233,30 @@ public func readToEndBounded(
     while true {
         let remaining = ContinuousClock.now.duration(to: deadline)
         guard remaining > .zero else { return (data, false) }
-        let scaled = remaining.components.seconds
-            .multipliedReportingOverflow(by: 1_000)
-        let waitMilliseconds: Int32 = scaled.overflow
-            ? Int32.max
-            : Int32(clamping: scaled.partialValue + 1)
+        // Include the sub-second part. Truncating to whole seconds gave a
+        // 1 ms budget for any remainder under a second, so a drain with less
+        // than a second left effectively did not wait at all and discarded
+        // output a child had already written.
+        let components = remaining.components
+        let scaled = components.seconds.multipliedReportingOverflow(by: 1_000)
+        let waitMilliseconds: Int32
+        if scaled.overflow {
+            waitMilliseconds = Int32.max
+        } else {
+            let fraction = components.attoseconds / 1_000_000_000_000_000
+            let total = scaled.partialValue
+                .addingReportingOverflow(fraction + 1)
+            waitMilliseconds = total.overflow
+                ? Int32.max
+                : Int32(clamping: total.partialValue)
+        }
         var descriptor = pollfd(
             fd: fileDescriptor, events: Int16(POLLIN), revents: 0
         )
         let ready = poll(&descriptor, 1, waitMilliseconds)
-        if ready == 0 { return (data, false) }
+        // Re-check the deadline rather than trusting one timeout return:
+        // the guard at the top of the loop owns expiry.
+        if ready == 0 { continue }
         if ready < 0 {
             if errno == EINTR { continue }
             return (data, false)

@@ -49,7 +49,7 @@ final class BoundedProcessWaitTests: XCTestCase {
     /// `readDataToEndOfFile()` for an EOF that never comes, so the loop parks
     /// forever with the coordinator already dead. The bounded path returns.
     func testSpawnReturnsWhenAChildExitsButAGrandchildHoldsStdoutOpen() throws {
-        let stub = try script("sleep 600 &\necho ready\nexit 0")
+        let stub = try script("sleep 60 &\necho ready\nexit 0")
         defer { try? FileManager.default.removeItem(at: stub) }
 
         withinDeadline(30, "spawn with an stdout-holding grandchild") {
@@ -73,7 +73,7 @@ final class BoundedProcessWaitTests: XCTestCase {
             .appendingPathComponent("grandchild-\(UUID().uuidString).pid")
         defer { try? FileManager.default.removeItem(at: marker) }
         let stub = try script(
-            "sh -c 'echo $$ > \(marker.path); sleep 600' &\nsleep 600"
+            "sh -c 'echo $$ > \(marker.path); sleep 60' &\nsleep 60"
         )
         defer { try? FileManager.default.removeItem(at: stub) }
 
@@ -165,5 +165,54 @@ final class BoundedProcessWaitTests: XCTestCase {
             ),
             .seconds(30)
         )
+    }
+
+    /// A completed round is bounded only by the PREVIOUS deadline, so feeding
+    /// it back unclamped ratchets the bound by the multiplier every time --
+    /// 300s, 3300s, 33300s -- and a few slow-but-completing rounds would
+    /// recreate the multi-day freeze the bound exists to stop.
+    func testMeasuredRoundCannotRatchetTheBound() {
+        let first = MiningRoundDeadline.deadline(
+            templateExpiry: .seconds(30),
+            longestCompletedRound: .zero,
+            multiplier: 10
+        )
+        XCTAssertEqual(first, .seconds(300))
+        // A round that completed just inside that deadline must not widen it
+        // beyond the clamp.
+        let second = MiningRoundDeadline.deadline(
+            templateExpiry: .seconds(30),
+            longestCompletedRound: first,
+            multiplier: 10
+        )
+        XCTAssertEqual(second, .seconds(600))
+        // And that is a fixed point: no sequence of rounds climbs past it.
+        XCTAssertEqual(
+            MiningRoundDeadline.deadline(
+                templateExpiry: .seconds(30),
+                longestCompletedRound: second,
+                multiplier: 10
+            ),
+            .seconds(600)
+        )
+    }
+
+    /// A second wait on a settled handle must return the same answer at once.
+    /// This is a public API whose whole promise is that a wait cannot hang.
+    func testSecondWaitReturnsTheSameOutcomeInsteadOfHanging() throws {
+        let stub = try script("exit 3")
+        defer { try? FileManager.default.removeItem(at: stub) }
+        let process = Process()
+        process.executableURL = stub
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        let handle = try runBounded(process, deadline: .seconds(30))
+
+        withinDeadline(30, "repeated wait") {
+            let first = await handle.wait()
+            let second = await handle.wait()
+            XCTAssertEqual(first, .exited(status: 3))
+            XCTAssertEqual(second, first)
+        }
     }
 }

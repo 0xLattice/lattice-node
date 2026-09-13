@@ -95,8 +95,6 @@ public struct MiningWorkerProcessClient: Sendable {
         // past template expiry no nonce it finds can be submitted. Routed
         // through the shared bounded wait so a lost termination callback
         // cannot park the coordinator (#62).
-        let readDeadline = ContinuousClock.now
-            + .milliseconds(Int64(clamping: work.expiresInMilliseconds ?? 0))
         let handle = try runBounded(
             process,
             deadline: work.expiresInMilliseconds.map {
@@ -115,13 +113,25 @@ public struct MiningWorkerProcessClient: Sendable {
         // stdout: a single post-exit read. The worker's stdout is one small
         // JSON line, so it cannot fill the pipe buffer before the child exits.
         try? stdout.fileHandleForWriting.close()
-        let output = readToEndBounded(
+        // A FRESH drain budget, not the remainder of the exit wait: the
+        // worker has exited, so EOF is already there unless a grandchild
+        // holds the write end -- which is exactly what must stay bounded.
+        let read = readToEndBounded(
             fileDescriptor: stdout.fileHandleForReading.fileDescriptor,
-            deadline: work.expiresInMilliseconds == nil
-                ? ContinuousClock.now + .seconds(5)
-                : readDeadline
-        ).data
+            deadline: ContinuousClock.now + (
+                work.expiresInMilliseconds.map {
+                    Duration.milliseconds(Int64(clamping: $0))
+                } ?? .seconds(5)
+            )
+        )
         try? stdout.fileHandleForReading.close()
+        // A truncated read is NAMED, never silently decoded as garbage.
+        guard read.complete else {
+            throw MiningWorkerProcessError.invalidOutput(
+                "stdout truncated at the worker deadline"
+            )
+        }
+        let output = read.data
 
         if process.terminationStatus != 0 {
             // Read only the last 4 KB: the stderr file has no pipe backpressure,

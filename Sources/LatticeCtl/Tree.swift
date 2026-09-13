@@ -56,6 +56,11 @@ func runningPid(_ layout: HostLayout, _ path: String) -> Int32? {
         )
         if !read.complete {
             terminateProcessGroup(pid: probe.processIdentifier)
+            // A probe that timed out says NOTHING about the pid, and a
+            // truncated name would fail the suffix check below and report a
+            // live node as stopped -- which invites a double spawn. Same
+            // convention as the run() failure above: assume running.
+            return pid
         }
         let name = String(decoding: read.data, as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)

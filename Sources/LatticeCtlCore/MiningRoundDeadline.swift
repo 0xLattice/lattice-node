@@ -19,23 +19,26 @@ public enum MiningRoundDeadline {
     /// Headroom when the operator names none. A round is expected to finish
     /// within one template expiry plus one batch; ten times that leaves slack
     /// for a slow or contended host while staying far short of "forever".
-    public static let defaultMultiplier: UInt64 = 10
+    public static let defaultMultiplier: Int = 10
 
     /// The deadline for the next round.
     ///
     /// - Parameters:
     ///   - templateExpiry: what the node advertised for this chain's work.
     ///   - longestCompletedRound: the longest round observed to COMPLETE in
-    ///     this process. A wedged round never completes, so it can never
-    ///     inflate the bound that would have caught it.
+    ///     this process. CLAMPED to one template expiry: a completed round is
+    ///     itself bounded only by the PREVIOUS deadline, so feeding it back
+    ///     unclamped would ratchet the bound by the multiplier every time
+    ///     (300s, 3300s, 33300s...) and a few slow-but-completing rounds
+    ///     would recreate the very freeze this bound exists to stop.
     ///   - multiplier: operator headroom; below 1 is floored, since a
     ///     deadline shorter than the round's own bound kills healthy rounds.
     public static func deadline(
         templateExpiry: Duration,
         longestCompletedRound: Duration,
-        multiplier: UInt64
+        multiplier: Int
     ) -> Duration {
-        let base = templateExpiry + longestCompletedRound
+        let base = templateExpiry + min(longestCompletedRound, templateExpiry)
         let headroom = Int64(clamping: max(multiplier, 1))
         let seconds = base.components.seconds
             .multipliedReportingOverflow(by: headroom)

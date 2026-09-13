@@ -149,15 +149,22 @@ struct Mine: AsyncParsableCommand {
                         settings, cursor: cursor, layout: layout
                     )
                     if templateExpiry == nil {
+                        // NEVER the cursor's reward line. The node answers
+                        // 400 once that line is no longer mineable -- the
+                        // same "already spent on-chain" condition the
+                        // refusal branch below heals -- and a nil expiry
+                        // would then wedge this loop forever WITHOUT ever
+                        // reaching that branch. Template lifetime is
+                        // node-wide, so an empty rewards body observes it
+                        // without entangling it with reward validity.
                         templateExpiry = await observedTemplateExpiry(
-                            settings.rpc, rewardsFile: rewardsFile
+                            settings.rpc, rewardsFile: nil
                         )
                     }
                     guard let expiry = templateExpiry else {
                         // No observation, no derived bound -- and an
-                        // unbounded round is the defect itself. Say so and
-                        // retry rather than inventing a number.
-                        log("reward \(cursor) waiting: the node is not advertising template expiry, so a round deadline cannot be derived")
+                        // unbounded round is the defect itself.
+                        log("reward \(cursor) waiting: the node is not answering template requests, so a round deadline cannot be derived")
                         try? await Task.sleep(for: .seconds(5))
                         continue
                     }
@@ -177,11 +184,18 @@ struct Mine: AsyncParsableCommand {
                     try? await Task.sleep(for: .seconds(5))
                     continue
                 }
-                if case .roundDeadlineExceeded = outcome {} else {
+                // Only a round that actually produced a coordinator
+                // result measures batch time. A round that burned its budget
+                // failing -- worker/node trouble, or the deadline itself --
+                // would inflate the very bound meant to catch it.
+                switch outcome {
+                case .accepted, .harmless, .carrier, .refusal:
                     longestCompletedRound = max(
                         longestCompletedRound,
                         started.duration(to: ContinuousClock.now)
                     )
+                case .workerTrouble, .roundDeadlineExceeded:
+                    break
                 }
                 switch outcome {
                 case .accepted(let tip):
@@ -405,7 +419,11 @@ func runCoordinatorOnce(
             return .refusal
         }
     }
-    return .workerTrouble("coordinator produced no result line")
+    return .workerTrouble(
+        result.outputComplete
+            ? "coordinator produced no result line"
+            : "coordinator output was truncated at the round deadline"
+    )
 }
 
 /// The round bound the NODE itself advertises: `expiresInMilliseconds` from
