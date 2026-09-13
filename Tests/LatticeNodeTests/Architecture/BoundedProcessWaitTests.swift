@@ -61,6 +61,19 @@ final class BoundedProcessWaitTests: XCTestCase {
         return url
     }
 
+
+    /// Kernel state char for a pid. Z is a zombie: exited, not yet reaped,
+    /// which kill(pid, 0) still calls alive. "n/a" where no procfs exists.
+    private func kernelProcessState(_ pid: Int32) -> String {
+        let path = "/proc/" + String(pid) + "/stat"
+        guard let raw = try? String(
+            contentsOf: URL(fileURLWithPath: path), encoding: .utf8
+        ), let close = raw.lastIndex(of: ")") else { return "n/a" }
+        return raw[raw.index(after: close)...]
+            .split(separator: " ", omittingEmptySubsequences: true)
+            .first.map(String.init) ?? "n/a"
+    }
+
     /// END-TO-END COMPANION, NOT A DISCRIMINATOR. Measured across 18 Linux
     /// runs, the sibling teardown assertion below caught the defect in only
     /// 1 of 18 runs -- roughly once in eighteen it tells the truth, because
@@ -153,6 +166,7 @@ final class BoundedProcessWaitTests: XCTestCase {
             ourPgid=\(getpgid(0)) \
             grandchildPgidNow=\(getpgid(grandchild))
             SIGNALS \(handle.recordedTeardownSteps.map(\.description).joined(separator: " "))
+            KERNEL grandchild=\(kernelProcessState(grandchild)) child=\(kernelProcessState(childPid))
             """
         )
     }
