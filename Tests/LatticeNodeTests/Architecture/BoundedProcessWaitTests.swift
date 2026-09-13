@@ -384,43 +384,10 @@ final class BoundedProcessWaitTests: XCTestCase {
                 outcome, .deadlineExceeded,
                 "our own SIGTERM must not be reported as a normal exit"
             )
-        }
-    }
-
-    /// The deadline path must keep reporting `.deadlineExceeded`, never the
-    /// new `.boundCancelled`.
-    ///
-    /// SCOPE, stated plainly: `.boundCancelled` is unreachable through the
-    /// public API today, because the timer is unstructured and only `wait()`
-    /// cancels it -- and only after an outcome already exists. So this does
-    /// NOT exercise that case; a test that appeared to would be testing a
-    /// fiction. What it pins is that adding the case left the live path
-    /// alone, and that cancelling a waiter does not silently downgrade a
-    /// fired deadline into "never bounded".
-    func testCancellingAWaiterDoesNotReportTheBoundAsRemoved() throws {
-        let stub = try script("sleep 60")
-        defer { try? FileManager.default.removeItem(at: stub) }
-        let process = Process()
-        process.executableURL = stub
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        let handle = try runBounded(process, deadline: .seconds(2))
-
-        withinDeadline(30, "cancelled waiter") {
-            let first = Task { await handle.wait() }
-            try? await Task.sleep(for: .milliseconds(100))
-            first.cancel()
-            _ = await first.value
-
-            let outcome = await handle.wait()
-            XCTAssertNotEqual(
-                outcome, .boundCancelled,
-                "a cancelled waiter must not report the bound as removed"
-            )
-            XCTAssertNil(
-                handle.unexpectedTimerFailure,
-                "the deadline task must not have failed unexpectedly"
-            )
+            // The deadline task must not have swallowed anything on the way:
+            // an untyped catch returning in silence is how a bound removes
+            // itself without telling anyone.
+            XCTAssertNil(handle.unexpectedTimerFailure)
         }
     }
 }

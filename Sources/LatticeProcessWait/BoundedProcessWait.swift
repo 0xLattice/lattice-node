@@ -31,15 +31,6 @@ public enum ProcessWaitOutcome: Sendable, Equatable {
     case exited(status: Int32)
     /// The deadline fired first; the child's process group was signalled.
     case deadlineExceeded
-    /// The deadline task was cancelled before it fired, so this wait was
-    /// never bounded by it. NOT a clean result: nothing was signalled and the
-    /// child may still be running.
-    ///
-    /// Unreachable today -- the timer is unstructured, so only `wait()`
-    /// cancels it, and only after an outcome already exists. It is here so
-    /// that a later restructure which breaks that invariant fails loudly
-    /// instead of leaving a caller waiting forever believing it is bounded.
-    case boundCancelled
 }
 
 /// Output collected from a bounded spawn.
@@ -283,19 +274,19 @@ public final class BoundedProcessWait: @unchecked Sendable {
                 // NOT "the child exited first" -- this task never looks at
                 // the child. Cancellation means the BOUND was removed.
                 //
-                // The timer is unstructured, so only `wait()` cancels it, and
-                // only after an outcome already exists: this settles nothing
-                // today. It is here so that a later restructure which breaks
-                // that invariant fails loudly instead of leaving a caller
-                // waiting forever while believing it is bounded.
-                self?.settle(.boundCancelled)
+                // Returning is safe ONLY because of an invariant this file
+                // maintains: the timer is unstructured, so `wait()` is the
+                // only thing that cancels it, and only once an outcome
+                // already exists. If the timer is ever made structured, a
+                // cancelled bound could strand a caller waiting forever while
+                // believing it is bounded, and this must then settle an
+                // outcome that says so rather than return.
                 return
             } catch {
                 // Task.sleep throws nothing else today. An untyped catch that
                 // returned in silence is precisely how a bound removes itself
-                // without telling anyone, so record it and still unblock.
+                // without telling anyone, so record it rather than swallow it.
                 self?.recordTimerFailure(String(describing: error))
-                self?.settle(.boundCancelled)
                 return
             }
             // SETTLE FIRST. Signalling before settling let our own SIGTERM
