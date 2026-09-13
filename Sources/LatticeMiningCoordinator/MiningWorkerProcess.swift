@@ -103,14 +103,22 @@ public struct MiningWorkerProcessClient: Sendable {
         )
         let waitOutcome = await handle.wait()
         if waitOutcome == .deadlineExceeded {
-            // NOT consuming handle.isTeardownDegraded here is deliberate, and
-            // it is a known gap rather than a judgement that the information
-            // is irrelevant: a worker with a backend shim does spawn children,
-            // so a degraded teardown here could leak a subtree. This process
-            // has no observable channel for it -- stdout is a JSON contract
-            // the CLI parses, and the CLI sends this process's stderr to
-            // /dev/null -- so a log would be written nowhere. Surfacing it
-            // needs an error-channel decision, not a print.
+            // handle.isTeardownDegraded is NOT consumed here, and that is a
+            // KNOWN GAP tracked by #146 -- not a judgement that the
+            // information does not apply to this site.
+            //
+            // It does apply: a worker is not always a leaf. lattice-miner
+            // with a GPU backend shim spawns children, so a degraded teardown
+            // here leaks a subtree -- the #62 failure one level down, and
+            // silent in the same way.
+            //
+            // It is unwired because this process has NO OBSERVABLE CHANNEL
+            // for it. stdout is a JSON contract the CLI parses for the round
+            // result, so a line there corrupts the contract; stderr is
+            // discarded by the CLI's spawnCollectingOutput, so a line there
+            // is written nowhere. Surfacing it requires choosing an error
+            // channel -- a wire-format or spawn-plumbing change -- which is
+            // scope beyond the #62 fix. See #146 for the options.
             return nil
         }
 
