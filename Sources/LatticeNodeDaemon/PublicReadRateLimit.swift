@@ -15,6 +15,7 @@
 
 import ArgumentParser
 import Dispatch
+import HTTPTypes
 import Hummingbird
 import NIOCore
 
@@ -99,8 +100,15 @@ struct PublicReadRateLimits: Sendable {
 /// Which budget a request is billed to. One-for-one with the nginx
 /// `zone=expensive` locations, plus the health-check exemption.
 enum PublicReadRouteClass: Sendable, Equatable {
-    /// A platform health check that public load can throttle turns load into a
-    /// depooled machine. Exempt from every limit, per-client and listener-wide.
+    /// Exempt from every bucket, per-client AND listener-wide. A platform
+    /// health check that public load can throttle turns load into a DEPOOLED
+    /// MACHINE — on the testnet follower that machine carries Nexus, the child
+    /// and the grandchild, so a cheap flood would become a total outage. The
+    /// cost of that exemption is bounded by collapsing the work instead: the
+    /// public listener serves /health from a short-TTL cached snapshot
+    /// (`ShortTTLSnapshotCache`), so a flood costs one read per TTL however
+    /// fast it arrives — a strictly tighter bound than a rate limit, which
+    /// would still admit `--public-read-max-rate` walks per second.
     case exempt
     case general
     /// A recent-block walk, a peer fan-out, or hundreds of content fetches.
@@ -113,11 +121,16 @@ enum PublicReadRouteClass: Sendable, Equatable {
     /// budget and hand an attacker the expensive routes at the general rate.
     /// `String.split(separator:)` omits empty subsequences by default, which is
     /// the same rule.
-    init(path: String) {
+    init(method: HTTPRequest.Method, path: String) {
         let components = path.split(separator: "/")
         switch components.count {
         case 1 where components[0] == "health":
-            self = .exempt
+            // The exemption exists for ONE reason: a platform health check must
+            // never be refused. Those are GET (fly's `http_checks`) or HEAD, so
+            // nothing legitimate needs it under another method, and leaving it
+            // method-insensitive would hand a caller a free, unmetered path to
+            // the router — a `POST /health` 404 that no bucket ever sees.
+            self = (method == .get || method == .head) ? .exempt : .general
         case 2 where components[0] == "v1" && components[1] == "blocks":
             // The recent-block list. `/v1/blocks/<cid>` is block DETAIL and
             // stays general, exactly as in nginx.
@@ -134,12 +147,54 @@ enum PublicReadRouteClass: Sendable, Equatable {
     }
 }
 
+/// One value, recomputed at most once per `ttl` however often it is asked for,
+/// with concurrent askers coalesced onto a single in-flight load.
+///
+/// This is what bounds `/health`, which is exempt from every rate limit. Its
+/// handler is not free — `readSnapshot()` is actor-isolated on `ChainProcess`,
+/// the same actor serving sync and block admission, and `Cache-Control` only
+/// asks the CLIENT to cache, so without this every request pays. The TTL is the
+/// max-age the node already advertises for that snapshot, so serving one that
+/// old from memory changes no contract it does not already publish.
+actor ShortTTLSnapshotCache<Value: Sendable> {
+    private let ttl: Double
+    private let clock: @Sendable () -> Double
+    private let load: @Sendable () async -> Value
+    private var cached: (value: Value, at: Double)?
+    private var inFlight: Task<Value, Never>?
+
+    init(
+        ttl: Double,
+        clock: @escaping @Sendable () -> Double = PublicReadRateLimiter.monotonicSeconds,
+        load: @escaping @Sendable () async -> Value
+    ) {
+        self.ttl = ttl
+        self.clock = clock
+        self.load = load
+    }
+
+    func value() async -> Value {
+        if let cached, clock() - cached.at < ttl { return cached.value }
+        // Coalesce: without this a burst arriving on a cold cache would each
+        // start their own walk, which is the stampede the cache exists to stop.
+        if let inFlight { return await inFlight.value }
+        let task = Task { [load] in await load() }
+        inFlight = task
+        let value = await task.value
+        inFlight = nil
+        cached = (value, clock())
+        return value
+    }
+}
+
 /// Token buckets: one pair per tracked client plus one for the whole listener.
 ///
 /// Known gap, stated rather than solved: nginx's per-client `limit_conn` (a cap
 /// on one client's IN-FLIGHT requests) has no analogue here. A router
-/// middleware sees requests, not connection lifetime. Arrival rate plus the
-/// listener ceiling bound load; concurrency is not directly capped.
+/// middleware sees requests, not connection lifetime, so a token bucket bounds
+/// requests STARTED, never requests RESIDENT. Concurrency is therefore bounded
+/// only indirectly, through arrival rate — and that bound loosens exactly when
+/// handler latency rises, which is when it matters most.
 actor PublicReadRateLimiter {
     private struct Bucket {
         let capacity: Double
@@ -168,8 +223,12 @@ actor PublicReadRateLimiter {
             return true
         }
 
-        func isRefilled(at now: Double) -> Bool {
-            refilled(at: now) >= capacity
+        /// The time this bank is full again — i.e. the time it stops being
+        /// worth any memory.
+        func refillCompletion() -> Double {
+            guard refillPerSecond > 0 else { return .infinity }
+            let deficit = capacity - tokens
+            return deficit > 0 ? updatedAt + deficit / refillPerSecond : updatedAt
         }
     }
 
@@ -178,9 +237,11 @@ actor PublicReadRateLimiter {
         var general: Bucket?
         var expensive: Bucket?
 
-        func isRefilled(at now: Double) -> Bool {
-            (general?.isRefilled(at: now) ?? true)
-                && (expensive?.isRefilled(at: now) ?? true)
+        func refillCompletion() -> Double {
+            max(
+                general?.refillCompletion() ?? -.infinity,
+                expensive?.refillCompletion() ?? -.infinity
+            )
         }
     }
 
@@ -192,6 +253,14 @@ actor PublicReadRateLimiter {
     /// rate) times the longest a bank takes to refill.
     private let clientCeiling: Int
     private var clients: [String: ClientBuckets] = [:]
+    /// The earliest time any tracked entry could be fully refilled, and so the
+    /// earliest a sweep could free anything. A sweep is O(map), and it runs on
+    /// the per-client path which precedes the listener check — so without this
+    /// gate an attacker cycling source addresses would pay one full scan per
+    /// request at ARRIVAL rate, turning a cheap request into a large one. Kept
+    /// as a lower bound: inserts lower it, a sweep recomputes it exactly. Being
+    /// conservative costs at most one futile scan, never a missed eviction.
+    private var earliestPossibleEviction = Double.infinity
     private var listener: Bucket?
 
     /// `nil` when every ceiling is `0`: fully off costs nothing at all.
@@ -252,12 +321,22 @@ actor PublicReadRateLimiter {
         if let existing = clients[client] {
             buckets = existing
         } else {
-            if clients.count >= clientCeiling {
-                clients = clients.filter { !$0.value.isRefilled(at: now) }
+            if clients.count >= clientCeiling, now >= earliestPossibleEviction {
+                // Fully refilled entries hold no state worth keeping, so they
+                // are what makes room.
+                clients = clients.filter { $0.value.refillCompletion() > now }
+                earliestPossibleEviction = clients.values
+                    .map { $0.refillCompletion() }.min() ?? .infinity
             }
             guard clients.count < clientCeiling else {
                 // Untracked rather than tracked-badly: the listener ceiling
-                // alone bounds this request.
+                // alone bounds this request. This state is attacker-SUSTAINABLE
+                // — enough distinct addresses hold the map full and new clients
+                // then get no per-client budget — and that is the deliberate
+                // fallback, not an oversight: in exactly that scenario the
+                // listener bucket is the binding constraint anyway. It is the
+                // reason the listener ceiling must not also be disabled on a
+                // directly exposed node.
                 return true
             }
             buckets = ClientBuckets()
@@ -268,6 +347,9 @@ actor PublicReadRateLimiter {
         let admitted = bucket.take(at: now)
         if expensive { buckets.expensive = bucket } else { buckets.general = bucket }
         clients[client] = buckets
+        earliestPossibleEviction = min(
+            earliestPossibleEviction, buckets.refillCompletion()
+        )
         return admitted
     }
 
@@ -302,7 +384,9 @@ struct PublicReadRateLimitMiddleware<Context: RemoteAddressRequestContext>: Rout
     ) async throws -> Response {
         guard await limiter.admit(
             client: Self.clientKey(context.remoteAddress),
-            route: PublicReadRouteClass(path: request.uri.path)
+            route: PublicReadRouteClass(
+                method: request.method, path: request.uri.path
+            )
         ) else {
             throw HTTPError(.tooManyRequests)
         }
@@ -314,6 +398,15 @@ struct PublicReadRateLimitMiddleware<Context: RemoteAddressRequestContext>: Rout
     /// make every request a new client with a full bank. No forwarded-for
     /// header is consulted — there is no trusted proxy in front of this
     /// listener, so any such header is attacker-chosen.
+    ///
+    /// Two properties a future change must not break:
+    /// - A peer that is neither IP nor unix-domain keys to `""`, collapsing
+    ///   every such peer into one bucket. Not reachable on a TCP listener.
+    /// - The whole IPv6 address is the key, which is only safe because this
+    ///   listener binds `0.0.0.0` and therefore only ever sees IPv4 peers. A
+    ///   single IPv6 client is routinely handed a /64, so if this ever becomes
+    ///   dual-stack the key MUST become the /64 prefix — otherwise one client
+    ///   owns 2^64 independent banks and the per-client ceiling means nothing.
     static func clientKey(_ address: SocketAddress?) -> String {
         guard let address else { return "" }
         return address.ipAddress ?? address.pathname ?? ""

@@ -105,9 +105,27 @@ it enforces its own arrival-rate ceilings — the same numbers
 values are printed on the startup banner. The expensive set is `/v1/blocks`
 (a recent-block walk), `/api/chain/endpoints` (a peer fan-out), and a block's
 `/transactions` or `/children` (hundreds of content fetches at `?limit=100`);
-`/v1/blocks/<cid>` is block detail and is general. **`/health` is exempt from
-all three** — a platform health check that public load can throttle turns load
-into a depooled machine.
+`/v1/blocks/<cid>` is block detail and is general.
+
+**`GET`/`HEAD` `/health` is exempt from all three** — a platform health check
+that public load can throttle turns load into a depooled machine, and on the
+testnet follower that machine carries every chain in the path, so a cheap flood
+would become a total outage. Its cost is bounded by collapsing the work instead
+of by refusing requests: the public listener serves `/health` from a
+server-side snapshot cache with the same `max-age` it already advertises, so a
+flood costs one `readSnapshot()` per interval however fast it arrives. That is
+a tighter bound than a rate limit, which would still admit
+`--public-read-max-rate` snapshot walks per second into the `ChainProcess`
+actor that also serves sync and block admission. The exemption is limited to
+`GET` and `HEAD`, the only methods a health check uses; `/health` under any
+other method is charged normally rather than being handed a free path to a 404.
+
+Known gap: nginx's per-client `limit_conn` (a cap on one client's *in-flight*
+requests) has no analogue here — a router middleware sees requests, not
+connection lifetime, so a token bucket bounds requests *started*, never
+requests *resident*. Concurrency is therefore bounded only indirectly, through
+arrival rate, and that bound loosens exactly when handler latency rises — which
+is when it matters most.
 
 The client of the two per-client ceilings is the **peer socket address**, with
 the port dropped. The node has no proxy it can trust, so it never reads a
@@ -118,11 +136,6 @@ identifies the proxy, so a per-client limit throttles the entire internet as
 one user, and the explorer home page alone issues ~20 parallel requests.
 `--public-read-max-rate` is address-agnostic and keeps bounding the listener.
 `deploy/testnet-follower/entrypoint.sh` ships exactly that configuration.
-
-Known gap: nginx's per-client `limit_conn` (a cap on one client's *in-flight*
-requests) has no analogue here — a router middleware sees requests, not
-connection lifetime. Arrival rate plus the listener ceiling bound load;
-concurrency is not directly capped.
 
 ## Metrics
 

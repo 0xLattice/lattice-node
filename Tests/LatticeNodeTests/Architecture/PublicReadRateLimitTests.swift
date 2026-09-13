@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import HTTPTypes
 import Hummingbird
 import HummingbirdTesting
 import NIOCore
@@ -90,9 +91,12 @@ final class PublicReadRateLimitTests: XCTestCase {
 
         // The classification itself, stated as an invariant rather than
         // inferred from the HTTP result below.
-        XCTAssertEqual(PublicReadRouteClass(path: escaped), .expensive)
         XCTAssertEqual(
-            PublicReadRouteClass(path: "/api/block/\(cid)/children"), .expensive
+            PublicReadRouteClass(method: .get, path: escaped), .expensive
+        )
+        XCTAssertEqual(
+            PublicReadRouteClass(method: .get, path: "/api/block/\(cid)/children"),
+            .expensive
         )
 
         try await app.test(.router) { client in
@@ -122,7 +126,9 @@ final class PublicReadRateLimitTests: XCTestCase {
             "/api/block/bafy/transactions",
             "/api/block/bafy/children",
         ] {
-            XCTAssertEqual(PublicReadRouteClass(path: path), .expensive, path)
+            XCTAssertEqual(
+                PublicReadRouteClass(method: .get, path: path), .expensive, path
+            )
         }
         for path in [
             "/v1/blocks/bafy",
@@ -134,10 +140,25 @@ final class PublicReadRateLimitTests: XCTestCase {
             "/api/mempool",
             "/unknown",
         ] {
-            XCTAssertEqual(PublicReadRouteClass(path: path), .general, path)
+            XCTAssertEqual(
+                PublicReadRouteClass(method: .get, path: path), .general, path
+            )
         }
-        XCTAssertEqual(PublicReadRouteClass(path: "/health"), .exempt)
-        XCTAssertEqual(PublicReadRouteClass(path: "//health//"), .exempt)
+        XCTAssertEqual(PublicReadRouteClass(method: .get, path: "/health"), .exempt)
+        XCTAssertEqual(PublicReadRouteClass(method: .head, path: "/health"), .exempt)
+        // Matching the router, which omits empty components.
+        XCTAssertEqual(PublicReadRouteClass(method: .get, path: "//health//"), .exempt)
+
+        // The exemption exists so a health check cannot be refused, and health
+        // checks are GET/HEAD. Any other method must be charged rather than
+        // handed a free, unmetered path to a 404.
+        for method in [HTTPRequest.Method.post, .put, .delete, .options] {
+            XCTAssertEqual(
+                PublicReadRouteClass(method: method, path: "/health"),
+                .general,
+                "\(method) /health must not be exempt"
+            )
+        }
     }
 
     /// `URI.path` excludes the query string, so a caller-chosen query cannot
@@ -308,6 +329,90 @@ final class PublicReadRateLimitTests: XCTestCase {
         XCTAssertEqual(
             limits.listenerRate * PublicReadRateLimits.listenerBankSeconds, 200
         )
+    }
+    /// The deliberate decision behind the `/health` exemption: it is exempt
+    /// from the LISTENER bucket too, not just the per-client ones. Charging it
+    /// there would mean a sustained flood empties the bucket, the health check
+    /// 429s, and the platform depools a machine that carries every chain in the
+    /// path — load amplified into an outage. The cost is bounded by collapsing
+    /// the work instead (see the snapshot-cache tests below).
+    func testExemptRouteIsNotChargedToTheListenerBucketEither() async throws {
+        let clock = TestClock()
+        // Listener bank = max(1, 1 x 1) = exactly one token.
+        let limits = try PublicReadRateLimits.validated(
+            generalRate: 0, expensiveRate: 0, listenerRate: 1
+        )
+        let limiter = try XCTUnwrap(
+            PublicReadRateLimiter(limits: limits, clock: { clock.now })
+        )
+
+        var admitted = await limiter.admit(client: "a", route: .general)
+        XCTAssertTrue(admitted)
+        admitted = await limiter.admit(client: "a", route: .general)
+        XCTAssertFalse(admitted, "the listener bank is spent")
+        // Same instant, same empty listener bucket: the health check still wins.
+        for _ in 0..<100 {
+            let health = await limiter.admit(client: "a", route: .exempt)
+            XCTAssertTrue(
+                health,
+                "a health check must never be refused by public load"
+            )
+        }
+    }
+
+    /// What bounds `/health` instead of a rate limit: the work collapses.
+    func testHealthSnapshotCollapsesAFloodToOneLoadPerInterval() async throws {
+        let clock = TestClock()
+        let counter = LoadCounter()
+        let cache = ShortTTLSnapshotCache<Int>(
+            ttl: statusCacheMaxAgeSeconds, clock: { clock.now }
+        ) {
+            await counter.record()
+        }
+
+        for _ in 0..<500 { _ = await cache.value() }
+        var loads = await counter.count
+        XCTAssertEqual(
+            loads, 1, "500 requests inside the TTL must cost one snapshot"
+        )
+
+        clock.advance(statusCacheMaxAgeSeconds)
+        _ = await cache.value()
+        loads = await counter.count
+        XCTAssertEqual(loads, 2, "past the TTL it refreshes, once")
+    }
+
+    /// A cold cache under a simultaneous burst must not stampede the loader —
+    /// otherwise the cache bounds nothing in exactly the case it exists for.
+    func testConcurrentBurstOnAColdCacheIsCoalescedIntoOneLoad() async throws {
+        let clock = TestClock()
+        let counter = LoadCounter()
+        let cache = ShortTTLSnapshotCache<Int>(
+            ttl: statusCacheMaxAgeSeconds, clock: { clock.now }
+        ) {
+            await counter.record()
+        }
+
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<200 {
+                group.addTask { _ = await cache.value() }
+            }
+        }
+
+        let loads = await counter.count
+        XCTAssertEqual(loads, 1, "a concurrent burst must share one load")
+    }
+}
+
+/// Counts loads and yields, so the cache's in-flight coalescing is actually
+/// exercised rather than completing before a second caller can arrive.
+private actor LoadCounter {
+    private(set) var count = 0
+
+    func record() async -> Int {
+        count += 1
+        await Task.yield()
+        return count
     }
 }
 

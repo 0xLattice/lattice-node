@@ -21,9 +21,10 @@ were removed because those roles do not exist in Lattice.
    never reads a forwarded-for one, so its only client identity is the peer
    socket — which there identifies the proxy, and a per-client limit keyed on
    it throttles the whole internet as one user. The listener-wide ceiling is
-   address-agnostic and stays on. `/health` is exempt from all three, so
-   public load can never throttle a platform health check into depooling the
-   machine.
+   address-agnostic and stays on. `GET`/`HEAD` `/health` is exempt from all
+   three, so public load can never throttle a platform health check into
+   depooling the machine; its cost is bounded instead by serving it from a
+   short-TTL cached snapshot, so a flood costs one read per interval.
 4. Expose the same-chain overlay and, where required, the parent/child fact
    plane as separate ports.
 5. Run `lattice-mining-coordinator` and external `lattice-miner` workers as

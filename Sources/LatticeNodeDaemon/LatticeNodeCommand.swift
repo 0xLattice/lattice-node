@@ -462,7 +462,12 @@ func makeApplication(
         to: router,
         service: service,
         peers: peers,
-        discoverProviders: discoverProviders
+        discoverProviders: discoverProviders,
+        // Loopback reads the live snapshot: `lattice status` and the E2E
+        // suites poll this to watch height advance, and the public listener's
+        // staleness window is a defence against public load that does not
+        // apply here.
+        healthSnapshot: { await service.readSnapshot() }
     )
     // Operator surface below: registered ONLY on this loopback application.
     // /v1/status stays on the reconciling status() (expires the mempool, prunes
@@ -518,11 +523,21 @@ func makePublicReadApplication(
             limiter: limiter
         ))
     }
+    // /health is exempt from every bucket, so that a health check can never be
+    // refused by public load — a refused check depools the machine, and on the
+    // testnet follower that machine carries every chain in the path. The cost
+    // is bounded by collapsing the work instead: readSnapshot() is isolated on
+    // the same ChainProcess actor that serves sync and block admission, and
+    // this makes a flood cost one call per TTL however fast it arrives.
+    let health = ShortTTLSnapshotCache(ttl: statusCacheMaxAgeSeconds) {
+        await service.readSnapshot()
+    }
     addPublicReadRoutes(
         to: router,
         service: service,
         peers: peers,
-        discoverProviders: discoverProviders
+        discoverProviders: discoverProviders,
+        healthSnapshot: { await health.value() }
     )
     return Application(
         responder: router.buildResponder(),
@@ -537,7 +552,8 @@ private func addPublicReadRoutes<Context: RequestContext>(
     to router: Router<Context>,
     service: ChainService,
     peers: @Sendable @escaping () async -> ExplorerPeersResponse,
-    discoverProviders: @Sendable @escaping (String) async -> [String]
+    discoverProviders: @Sendable @escaping (String) async -> [String],
+    healthSnapshot: @Sendable @escaping () async -> ChainServiceStatusResponse
 ) {
     // CORS is scoped to READ methods only. The POST write routes stay off the
     // allow-list on purpose: they consume application/json, so a cross-origin
@@ -556,7 +572,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
     // can never head-of-line-block or mutate consensus/mempool state.
     router.get("health") { request, context in
         try jsonCached(
-            await service.readSnapshot(),
+            await healthSnapshot(),
             cacheControl: statusCacheControl,
             request: request,
             context: context
@@ -1004,8 +1020,13 @@ private func explorerParseOffset(_ request: Request) throws -> Int {
 
 /// A block or transaction served by CID never changes once accepted.
 let immutableCacheControl = "public, max-age=31536000, immutable"
-/// Chain status/health is a live snapshot; cache it only briefly.
-let statusCacheControl = "public, max-age=3"
+/// Chain status/health is a live snapshot; cache it only briefly. The public
+/// listener also serves /health from a server-side snapshot cache of exactly
+/// this age — /health is exempt from every rate limit, so its cost is bounded
+/// by collapsing the work rather than by refusing requests, and reusing the
+/// max-age already advertised keeps that within the contract clients are told.
+let statusCacheMaxAgeSeconds = 3.0
+let statusCacheControl = "public, max-age=\(Int(statusCacheMaxAgeSeconds))"
 
 private func jsonCached<Value: Encodable, Context: RequestContext>(
     _ value: Value,
