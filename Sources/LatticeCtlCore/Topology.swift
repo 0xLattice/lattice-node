@@ -58,11 +58,20 @@ public struct TopologyMine: Codable {
     /// passed to the coordinator as `--min-work`. A chain left out mines at
     /// its scheduled target.
     public var minWork: [String: String]?
+    /// Headroom multiplier on the mining round deadline. The loop measures a
+    /// round's own bound — the node's advertised template expiry plus the
+    /// longest round that has actually completed — and refuses to wait longer
+    /// than that times this. It exists because a supervisor that trusts a
+    /// child's exit signal can wait forever (#62). Raise it on a host whose
+    /// rounds legitimately run long; lower it to notice a wedge sooner.
+    /// Absent = the default headroom.
+    public var roundDeadlineMultiplier: UInt64?
 
     public init(
         chain: String, worker: String? = nil, workers: Int? = nil,
         batchSize: UInt64? = nil, rewards: String? = nil,
-        minWork: [String: String]? = nil
+        minWork: [String: String]? = nil,
+        roundDeadlineMultiplier: UInt64? = nil
     ) {
         self.chain = chain
         self.worker = worker
@@ -70,6 +79,7 @@ public struct TopologyMine: Codable {
         self.batchSize = batchSize
         self.rewards = rewards
         self.minWork = minWork
+        self.roundDeadlineMultiplier = roundDeadlineMultiplier
     }
 }
 
@@ -136,6 +146,9 @@ public struct Topology: Codable {
         }
         if let mine, chains[mine.chain] == nil {
             throw CtlError("mine.chain \(mine.chain) is not in the tree")
+        }
+        if let multiplier = mine?.roundDeadlineMultiplier, multiplier < 1 {
+            throw CtlError("mine.roundDeadlineMultiplier must be at least 1; a round deadline shorter than the round's own bound would kill every healthy round")
         }
         return self
     }

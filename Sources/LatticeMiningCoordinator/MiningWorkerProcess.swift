@@ -1,5 +1,6 @@
 import Foundation
 import LatticeMinerCore
+import LatticeProcessWait
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)
@@ -50,8 +51,7 @@ public struct MiningWorkerProcessClient: Sendable {
             throw MiningWorkerProcessError.missingExecutable(executableURL.path)
         }
 
-        let handle = MiningWorkerSubprocess()
-        let process = handle.process
+        let process = Process()
         process.executableURL = executableURL
         process.arguments = arguments + [
             "--work-id", work.workId,
@@ -91,7 +91,20 @@ public struct MiningWorkerProcessClient: Sendable {
             try? FileManager.default.removeItem(at: stderrURL)
         }
 
-        try await handle.run()
+        // The worker's own bound, derived from the work the node issued:
+        // past template expiry no nonce it finds can be submitted. Routed
+        // through the shared bounded wait so a lost termination callback
+        // cannot park the coordinator (#62).
+        let readDeadline = ContinuousClock.now
+            + .milliseconds(Int64(clamping: work.expiresInMilliseconds ?? 0))
+        let handle = try runBounded(
+            process,
+            deadline: work.expiresInMilliseconds.map {
+                .milliseconds(Int64(clamping: $0))
+            }
+        )
+        let waitOutcome = await handle.wait()
+        if waitOutcome == .deadlineExceeded { return nil }
 
         // On cancellation (e.g. stale work) the worker result is irrelevant.
         // Check before the post-exit read so a cancelled worker that forked a
@@ -102,7 +115,12 @@ public struct MiningWorkerProcessClient: Sendable {
         // stdout: a single post-exit read. The worker's stdout is one small
         // JSON line, so it cannot fill the pipe buffer before the child exits.
         try? stdout.fileHandleForWriting.close()
-        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        let output = readToEndBounded(
+            fileDescriptor: stdout.fileHandleForReading.fileDescriptor,
+            deadline: work.expiresInMilliseconds == nil
+                ? ContinuousClock.now + .seconds(5)
+                : readDeadline
+        ).data
         try? stdout.fileHandleForReading.close()
 
         if process.terminationStatus != 0 {
@@ -144,94 +162,6 @@ public struct MiningWorkerProcessClient: Sendable {
         return (try? handle.readToEnd()) ?? Data()
     }
 
-}
-
-private final class MiningWorkerSubprocess: @unchecked Sendable {
-    let process = Process()
-
-    /// How long to wait after SIGTERM before escalating to SIGKILL. Some shells
-    /// (e.g. dash `sh -c`) don't reliably propagate SIGTERM to their children,
-    /// and on swift-corelibs-foundation a bare `terminate()` does not promptly
-    /// reap such a child, so we force-kill after a short grace period.
-    private static let terminationGraceNanoseconds: UInt64 = 200_000_000
-
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Void, Never>?
-    private var didFinish = false
-    private var cancelRequested = false
-
-    private func withLock<T>(_ body: () -> T) -> T {
-        lock.lock()
-        defer { lock.unlock() }
-        return body()
-    }
-
-    /// Runs the process to completion, resuming off `terminationHandler` rather
-    /// than parking a thread on the synchronous `waitUntilExit()`. On task
-    /// cancellation it sends SIGTERM and escalates to SIGKILL after a short
-    /// grace so the child is reaped promptly and reliably across platforms.
-    func run() async throws {
-        process.terminationHandler = { [weak self] _ in
-            self?.finish()
-        }
-
-        try process.run()
-
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                let resumeNow = withLock { () -> Bool in
-                    if didFinish { return true }
-                    continuation = cont
-                    return false
-                }
-                if resumeNow {
-                    cont.resume()
-                }
-            }
-        } onCancel: {
-            requestTermination()
-        }
-    }
-
-    private func finish() {
-        let cont = withLock { () -> CheckedContinuation<Void, Never>? in
-            let pending = continuation
-            continuation = nil
-            didFinish = true
-            return pending
-        }
-        cont?.resume()
-    }
-
-    private func requestTermination() {
-        let proceed = withLock { () -> Bool in
-            if cancelRequested || didFinish { return false }
-            cancelRequested = true
-            return true
-        }
-        guard proceed else { return }
-
-        // SIGTERM first; the terminationHandler will resume the continuation if
-        // the child exits in response.
-        if process.isRunning {
-            process.terminate()
-        }
-
-        // Escalate to SIGKILL after a grace period for children that ignore or
-        // don't propagate SIGTERM. Detached so the cancel handler returns
-        // immediately.
-        let pid = process.processIdentifier
-        Task.detached { [weak self] in
-            try? await Task.sleep(
-                nanoseconds: MiningWorkerSubprocess.terminationGraceNanoseconds
-            )
-            guard let self else { return }
-            let finished = self.withLock { self.didFinish }
-            if !finished, self.process.isRunning {
-                kill(pid, SIGKILL)
-            }
-        }
-    }
 }
 
 extension MiningCoordinatorWorker {

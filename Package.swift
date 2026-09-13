@@ -92,6 +92,8 @@ let package = Package(
                 "LatticeLightClient",
             ]),
         .target(
+            name: "LatticeProcessWait"),
+        .target(
             name: "LatticeMinerCore",
             dependencies: [
                 .product(name: "Lattice", package: "lattice"),
@@ -101,6 +103,7 @@ let package = Package(
             name: "LatticeMiningCoordinator",
             dependencies: [
                 "LatticeMinerCore",
+                "LatticeProcessWait",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "cashew", package: "cashew"),
             ]),
@@ -115,6 +118,7 @@ let package = Package(
             name: "LatticeCtlCore",
             dependencies: [
                 "LatticeNode",
+                "LatticeProcessWait",
                 .product(name: "Lattice", package: "lattice"),
             ]),
         .executableTarget(
@@ -122,6 +126,7 @@ let package = Package(
             dependencies: [
                 "LatticeNode",
                 "LatticeCtlCore",
+                "LatticeProcessWait",
                 "LatticeMinerCore",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy"),
@@ -151,6 +156,7 @@ let package = Package(
             dependencies: [
                 "LatticeNode",
                 "LatticeCtlCore",
+                "LatticeProcessWait",
                 "LatticeNodeDaemon",
                 "LatticeMinerCore",
                 "CSQLite",

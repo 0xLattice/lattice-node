@@ -60,8 +60,9 @@ final class ProcessSpawnTests: XCTestCase {
             do {
                 output = try await spawnCollectingOutput(
                     executable: stub, arguments: [],
+                    deadline: .seconds(30),
                     onSpawn: { _ in pidCounter.bump() }
-                )
+                ).output
             } catch {
                 XCTFail("spawn \(iteration) threw (fd leak?): \(error)")
                 return
