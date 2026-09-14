@@ -209,7 +209,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                     parentCarrier: context.parentCarrier,
                     parentContentSource: parentContentSource,
                     rewards: context.rewards,
-                    minimumWork: context.minimumWork
+                    minimumWork: context.minimumWork,
+                    commitMinimumWorkTarget: context.commitMinimumWorkTarget
                 )
             },
             candidateReservations: { [weak service] update in

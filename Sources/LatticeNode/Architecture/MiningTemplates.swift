@@ -48,17 +48,20 @@ public struct ChildSchedulingWitness: Sendable {
     }
 }
 
+/// The committed target of the block a candidate schedules its search on,
+/// and that block's directory path below the candidate (empty when it is the
+/// candidate itself).
 func schedulingTargets(
     for candidate: DirectChildCandidate
-) async -> UInt256? {
+) async -> (target: UInt256, path: [String])? {
     if let witness = candidate.searchWitness {
         guard let targets = await witness.proof.schedulingTargets(
             root: candidate.block,
             terminal: witness.terminal
         ) else { return nil }
-        return targets.searchTarget
+        return (targets.searchTarget, witness.proof.directoryPath)
     }
-    return candidate.block.target
+    return (candidate.block.target, [])
 }
 
 /// The most work any valid target can represent. Target 0 is met by no hash
@@ -82,6 +85,25 @@ public func minimumWorkTarget(_ work: UInt256) -> UInt256 {
     return exact ? quotient : quotient - UInt256(1)
 }
 
+/// What a miner searches one chain's block for: the block's committed target,
+/// or the miner's minimum-work target where that is harder. The threshold is
+/// `binding` when it is the harder one — a hash between the two still makes a
+/// valid block, one the miner declined to produce.
+struct SearchThreshold {
+    let target: UInt256
+    let binding: Bool
+
+    init(committed: UInt256, minimumWork: UInt256?) {
+        if let work = minimumWork, minimumWorkTarget(work) < committed {
+            target = minimumWorkTarget(work)
+            binding = true
+        } else {
+            target = committed
+            binding = false
+        }
+    }
+}
+
 public struct MiningTemplate: Sendable {
     public let workID: String
     public let block: Block
@@ -90,14 +112,19 @@ public struct MiningTemplate: Sendable {
     public let expiresAt: ContinuousClock.Instant
     let childCandidates: [DirectChildCandidate]
     let searchWitness: ChildSchedulingWitness?
+    /// The search threshold of this block and of each direct child's block —
+    /// never their committed targets. Where a minimum work binds, the
+    /// committed target is easier, and advertising it would hand the miner
+    /// back exactly the hits it declined.
+    let thresholds: [UInt256]
 
-    /// Every distinct target a nonce for this work can clear, easiest first,
-    /// so the first is `searchTarget`. A carrier leaves the work open and the
-    /// miner keeps searching toward the rest, skipping hits between them, so
-    /// the list must be complete. It is only when every direct child is a
-    /// leaf: a child carrying children of its own can clear descendant targets
-    /// this node never sees, so such work advertises `searchTarget` alone and
-    /// the miner stops at its first hit.
+    /// Every distinct threshold a nonce for this work can clear, easiest
+    /// first, so the first is `searchTarget`. A carrier leaves the work open
+    /// and the miner keeps searching toward the rest, skipping hits between
+    /// them, so the list must be complete. It is only when every direct child
+    /// is a leaf: a child carrying children of its own can clear descendant
+    /// thresholds this node never sees, so such work advertises `searchTarget`
+    /// alone and the miner stops at its first hit.
     var targets: [UInt256] {
         guard let emptyChildren = Self.emptyChildrenCID,
               childCandidates.allSatisfy({
@@ -105,11 +132,9 @@ public struct MiningTemplate: Sendable {
               }) else {
             return [searchTarget]
         }
-        var targets: Set<UInt256> = [searchTarget, block.target]
-        for child in childCandidates {
-            targets.insert(child.block.target)
-        }
-        return targets.filter { $0 <= searchTarget }.sorted(by: >)
+        return Set(thresholds + [searchTarget])
+            .filter { $0 <= searchTarget }
+            .sorted(by: >)
     }
 
     private static let emptyChildrenCID = try? HeaderImpl<
@@ -166,7 +191,8 @@ public actor MiningTemplateBook {
         parentCarrier: Block? = nil,
         timestamp: Int64,
         transactionLimit: Int = .max,
-        minimumWork: UInt256? = nil,
+        minimumWork: [[String]: UInt256] = [:],
+        commitMinimumWorkTarget: Bool = false,
         fetcher: any Fetcher
     ) async throws -> MiningTemplate {
         let template = try await assemble(
@@ -177,6 +203,7 @@ public actor MiningTemplateBook {
             timestamp: timestamp,
             transactionLimit: transactionLimit,
             minimumWork: minimumWork,
+            commitMinimumWorkTarget: commitMinimumWorkTarget,
             fetcher: fetcher
         )
         return issue(template)
@@ -235,7 +262,8 @@ public actor MiningTemplateBook {
         parentCarrier: Block? = nil,
         timestamp: Int64,
         transactionLimit: Int = .max,
-        minimumWork: UInt256? = nil,
+        minimumWork: [[String]: UInt256] = [:],
+        commitMinimumWorkTarget: Bool = false,
         fetcher: any Fetcher
     ) async throws -> MiningTemplate {
         try await assemble(
@@ -246,6 +274,7 @@ public actor MiningTemplateBook {
             timestamp: timestamp,
             transactionLimit: transactionLimit,
             minimumWork: minimumWork,
+            commitMinimumWorkTarget: commitMinimumWorkTarget,
             fetcher: fetcher
         )
     }
@@ -257,19 +286,25 @@ public actor MiningTemplateBook {
         parentCarrier: Block?,
         timestamp: Int64,
         transactionLimit: Int,
-        minimumWork: UInt256?,
+        minimumWork: [[String]: UInt256],
+        commitMinimumWorkTarget: Bool,
         fetcher: any Fetcher
     ) async throws -> MiningTemplate {
         precondition(transactionLimit >= 0)
-        // A miner's minimum work only ever makes this block harder than the
-        // schedule, which validity permits (`target <= parent.nextTarget`);
-        // Lattice derives `nextTarget` from the target actually used. Without
-        // one the builder takes the schedule exactly as before.
-        let target = minimumWork.map {
-            min(previous.nextTarget, minimumWorkTarget($0))
-        }
+        // The committed target is consensus data every descendant inherits
+        // through the retarget, so by default the block commits the schedule
+        // (nil: the builder takes `previous.nextTarget`) and a miner's minimum
+        // work only narrows what it searches for. Committing the harder target
+        // instead is an operator's explicit choice: validity permits it
+        // (`target <= parent.nextTarget`), and Lattice derives `nextTarget`
+        // from the target actually used.
+        let target = commitMinimumWorkTarget
+            ? minimumWork[chainPath].map {
+                min(previous.nextTarget, minimumWorkTarget($0))
+            }
+            : nil
         var childBlocks: [String: Block] = [:]
-        var childTargets: [String: UInt256] = [:]
+        var childTargets: [String: (target: UInt256, path: [String])] = [:]
         for child in children {
             guard _isBoundedDirectoryAtom(child.directory) else {
                 throw MiningTemplateError.invalidChildDirectory
@@ -277,11 +312,11 @@ public actor MiningTemplateBook {
             guard childBlocks[child.directory] == nil else {
                 throw MiningTemplateError.duplicateChildDirectory
             }
-            guard let searchTarget = await schedulingTargets(for: child) else {
+            guard let scheduled = await schedulingTargets(for: child) else {
                 throw MiningCandidateValidationError.invalid
             }
             childBlocks[child.directory] = child.block
-            childTargets[child.directory] = searchTarget
+            childTargets[child.directory] = scheduled
         }
         // A stale/conflicting pool entry must never suppress all external work.
         // Accept valid chunks greedily and bisect only the chunks that fail the
@@ -336,6 +371,8 @@ public actor MiningTemplateBook {
             root: candidate,
             children: children,
             targets: childTargets,
+            chainPath: chainPath,
+            minimumWork: minimumWork,
             fetcher: fetcher
         )
         let template = MiningTemplate(
@@ -345,26 +382,55 @@ public actor MiningTemplateBook {
             chainPath: chainPath,
             expiresAt: ContinuousClock.now + lifetime,
             childCandidates: children,
-            searchWitness: scheduling.searchWitness
+            searchWitness: scheduling.searchWitness,
+            thresholds: scheduling.thresholds
         )
         return template
     }
 
+    /// The easiest threshold in the template, bounded by its hardest binding
+    /// one. A nonce commits every chain in the template at once, so a hash
+    /// that clears one chain's threshold can land between another chain's
+    /// binding threshold and its easier committed target — a valid block the
+    /// miner declined. Stopping the search at the hardest binding threshold
+    /// means any hash that meets `searchTarget` clears every binding threshold
+    /// here. A child candidate carries its own subtree's bound the same way:
+    /// its witness names the block that sets its search target, which this
+    /// level re-derives from the proof and the miner's minimum work.
     private nonisolated static func scheduling(
         root: Block,
         children: [DirectChildCandidate],
-        targets: [String: UInt256],
+        targets: [String: (target: UInt256, path: [String])],
+        chainPath: [String],
+        minimumWork: [[String]: UInt256],
         fetcher: any Fetcher
     ) async throws -> (
         searchTarget: UInt256,
-        searchWitness: ChildSchedulingWitness?
+        searchWitness: ChildSchedulingWitness?,
+        thresholds: [UInt256]
     ) {
         let rootHeader = try BlockHeader(node: root)
-        var searchTarget = root.target
-        var searchWitness: ChildSchedulingWitness?
+        let rootThreshold = SearchThreshold(
+            committed: root.target,
+            minimumWork: minimumWork[chainPath]
+        )
+        var thresholds = [rootThreshold.target]
+        var easiest = rootThreshold.target
+        var easiestWitness: ChildSchedulingWitness?
+        var bound = rootThreshold.binding ? rootThreshold.target : nil
+        var boundWitness: ChildSchedulingWitness?
+        func bind(
+            _ threshold: SearchThreshold,
+            _ witness: ChildSchedulingWitness
+        ) {
+            guard threshold.binding,
+                  bound.map({ threshold.target < $0 }) ?? true else { return }
+            bound = threshold.target
+            boundWitness = witness
+        }
 
         for child in children.sorted(by: { $0.directory < $1.directory }) {
-            guard let childSearchTarget = targets[child.directory] else {
+            guard let scheduled = targets[child.directory] else {
                 throw MiningCandidateValidationError.invalid
             }
             let direct = try await ChildBlockProof.generate(
@@ -372,22 +438,39 @@ public actor MiningTemplateBook {
                 childDirectory: child.directory,
                 fetcher: fetcher
             )
-            if childSearchTarget > searchTarget {
-                searchTarget = childSearchTarget
-                if let descendant = child.searchWitness {
-                    searchWitness = ChildSchedulingWitness(
-                        proof: direct.composing(hop: descendant.proof),
-                        terminal: descendant.terminal
-                    )
-                } else {
-                    searchWitness = ChildSchedulingWitness(
-                        proof: direct,
-                        terminal: child.block
-                    )
-                }
+            let childPath = chainPath + [child.directory]
+            let own = SearchThreshold(
+                committed: child.block.target,
+                minimumWork: minimumWork[childPath]
+            )
+            let ownWitness = ChildSchedulingWitness(
+                proof: direct,
+                terminal: child.block
+            )
+            thresholds.append(own.target)
+            bind(own, ownWitness)
+            var childThreshold = own
+            var childWitness = ownWitness
+            if let descendant = child.searchWitness {
+                childThreshold = SearchThreshold(
+                    committed: scheduled.target,
+                    minimumWork: minimumWork[childPath + scheduled.path]
+                )
+                childWitness = ChildSchedulingWitness(
+                    proof: direct.composing(hop: descendant.proof),
+                    terminal: descendant.terminal
+                )
+                bind(childThreshold, childWitness)
+            }
+            if childThreshold.target > easiest {
+                easiest = childThreshold.target
+                easiestWitness = childWitness
             }
         }
-        return (searchTarget, searchWitness)
+        if let bound, bound < easiest {
+            return (bound, boundWitness, thresholds)
+        }
+        return (easiest, easiestWitness, thresholds)
     }
 
     private nonisolated static func makeCandidate(

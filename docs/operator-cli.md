@@ -77,11 +77,18 @@ lattice mine status  # cursor position and batch runway
   slots in here.
 - `rewards` is optional; without it, mined blocks pay nobody.
 - `minWork` is optional: chain path → minimum work per block (`2^N` or a
-  decimal integer), passed to the coordinator as `--min-work`. It asks for
-  blocks harder than the schedule — the miner's choice, never a validity rule
-  — and matters most on a chain launched at the maximum target, where it is
-  what keeps a fresh chain from bursting. See
-  [operations.md](operations.md#minimum-work-per-block).
+  decimal integer), passed to the coordinator as `--min-work`. It filters
+  which hashes the miner searches for and submits — the miner's choice, never
+  a validity rule — while blocks still commit their scheduled target, and
+  matters most on a chain launched at the maximum target, where it is what
+  keeps a fresh chain from bursting. Under the scheduled target a filter that
+  paces blocks near the target rate leaves committed difficulty at the
+  maximum. See [operations.md](operations.md#minimum-work-per-block).
+- `commitMinWorkTarget` is optional (default `false`): `true` commits each
+  `minWork` target into that chain's blocks instead of the scheduled target
+  (coordinator `--commit-min-work-target`), making the chain's difficulty
+  schedule follow this miner's preference. It needs at least one `minWork`
+  entry.
 - `roundDeadlineMultiplier` is optional (default `10`): headroom on the
   mining round deadline. `mine run` bounds every coordinator round by the
   node's advertised template expiry plus the longest round that has actually

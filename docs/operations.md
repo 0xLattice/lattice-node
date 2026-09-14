@@ -190,11 +190,12 @@ Custom workers (GPU or remote hardware) implement the contract in
 A chain whose genesis sits at the maximum target hands out near-free blocks
 until the retarget catches up: a fresh chain can mine a burst of them in
 seconds, and the correction that follows overshoots by as much as it was
-behind. A miner can decline to take those blocks. `--min-work <chain
-path>=<work>` asks the node to build that chain's block at the harder of the
-requested target and the scheduled one; `nextTarget` is recomputed from the
-target actually used, so the retarget sees real difficulty from block 1 and no
-burst happens.
+behind. A miner can decline to produce those blocks. `--min-work <chain
+path>=<work>` is a filter on the miner's own search: the node still builds
+that chain's block at its scheduled (canonical) target, and the template asks
+the miner for a hash meeting `min(scheduled target, floor(2^256 / work) - 1)`.
+A hash that clears the block's committed target but not that threshold is
+never searched for, and the node refuses it if submitted (`missesSearchTarget`).
 
 ```bash
 lattice-mining-coordinator \
@@ -204,21 +205,50 @@ lattice-mining-coordinator \
   --min-work Nexus/testnet/swap=2^20
 ```
 
-- It is an operator choice, never consensus. Validity requires only that a
-  block be as hard as its parent scheduled (`target <= parent.nextTarget`), so
-  mining harder is always permitted and nodes keep accepting other miners'
-  blocks at the scheduled target. Fork choice is untouched. Unset — the
-  default — templates and blocks are exactly as before.
-- Choose the value as work per block: roughly `expected hashrate ×
-  targetBlockTime`. At 1 GH/s against a one-hour target block time that is
-  3.6e12, so `2^42`. Both `2^N` and plain decimal integers are accepted, up to
-  2^255 — the work of target 1, the hardest any block can ask for. More than
-  that is refused outright, by the miner and by the node, rather than quietly
-  becoming a target no one can ever hit.
-- Set it per chain, and set it before launching a fresh chain: every chain
-  that starts at the maximum target bursts on its own, Nexus and each child
-  alike. One coordinator covers the chain it mines and every chain merged-mined
-  under it, one `--min-work` each.
+- It is an operator choice, never consensus. Validity, admission and fork
+  choice are untouched, and nodes keep accepting other miners' blocks at the
+  scheduled target. Unset, templates are exactly the schedule.
+- Blocks commit the canonical target because the committed target is
+  consensus data: every later block inherits it through the retarget. If
+  miners could raise it at will, the difficulty schedule would follow miner
+  preference, and other miners would gain a reason to extend the parent with
+  a canonical-target sibling on a faster schedule.
+- The trade-off is real. Fork choice credits `workForTarget(block.target)`,
+  so a block committing the maximum target carries about one unit of work
+  however hard the miner searched for it. A filter that paces blocks near the
+  target block time therefore keeps committed difficulty pinned at the
+  maximum: the retarget only sees solve times, and on-schedule blocks give it
+  nothing to correct. Difficulty climbs only through blocks faster than the
+  target, and because the retarget (a linearly weighted moving average of
+  solve times) is unclamped, a run of fast blocks can over-correct it in a
+  single step. Choose the value knowing it paces blocks without raising the
+  schedule: roughly `expected hashrate × targetBlockTime` keeps the rate near
+  target (1 GH/s against a one-hour target is 3.6e12, so `2^42`); a smaller
+  value lets blocks arrive faster, which is what moves the target. Both `2^N`
+  and plain decimal integers are accepted, up to 2^255 — the work of target 1,
+  the hardest any block can ask for. More than that is refused outright, by
+  the miner and by the node, rather than quietly becoming a target no one can
+  ever hit.
+- One coordinator covers the chain it mines and every chain merged-mined
+  under it, one `--min-work` each. One nonce commits every chain in the
+  template at once, so a hash meeting one chain's threshold can land between
+  another chain's threshold and its easier committed target — a valid block
+  that chain's filter declined. Wherever a filter is harder than its chain's
+  scheduled target, the search therefore stops at the hardest such threshold
+  in the template, including descendants below a child. Merged-mined chains
+  then advance no faster than that filter allows: for example, a filtered
+  Nexus pinned at the maximum target holds every merged child to the Nexus
+  threshold, even a child with no filter of its own.
+
+`--commit-min-work-target` (`mine.commitMinWorkTarget` in `lattice.json`) is
+the operator opt-in to the earlier behaviour, off by default: each filtered
+chain's block commits the harder `min(scheduled target, floor(2^256 / work) -
+1)`. Validity permits it (`target <= parent.nextTarget`) and `nextTarget` is
+recomputed from the target actually used, so the retarget sees real difficulty
+from block 1 and the search is never held to another chain's filter — at the
+cost of a committed target, and so a difficulty schedule, that follows this
+miner's preference. It needs at least one `--min-work`, and reaches child
+chains with the minimum work it applies to.
 
 If block production stalls:
 

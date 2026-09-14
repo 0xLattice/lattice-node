@@ -152,7 +152,8 @@ final class LatticeCtlTopologyTests: XCTestCase {
             mine: TopologyMine(
                 chain: "Nexus", worker: "cpu", workers: 2,
                 batchSize: 1_000, rewards: "rewards.jsonl",
-                minWork: ["Nexus": "2^32"]
+                minWork: ["Nexus": "2^32"],
+                commitMinWorkTarget: true
             )
         )
         try topology.save(root: root)
@@ -160,6 +161,13 @@ final class LatticeCtlTopologyTests: XCTestCase {
         XCTAssertEqual(loaded.chains["Nexus"]?.listen, 4001)
         XCTAssertEqual(loaded.mine?.batchSize, 1_000)
         XCTAssertEqual(loaded.mine?.minWork, ["Nexus": "2^32"])
+        XCTAssertEqual(loaded.mine?.commitMinWorkTarget, true)
+        // Absent is the default: blocks commit the schedule.
+        let legacy = try JSONDecoder().decode(
+            TopologyMine.self,
+            from: Data(#"{"chain":"Nexus","minWork":{"Nexus":"2^32"}}"#.utf8)
+        )
+        XCTAssertNil(legacy.commitMinWorkTarget)
     }
 
     func testLayoutSeparatesIdentityFromWipeableChains() {

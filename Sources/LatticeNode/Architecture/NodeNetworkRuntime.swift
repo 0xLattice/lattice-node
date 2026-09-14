@@ -1401,6 +1401,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                         parentData: parentData,
                         rewards: rewards,
                         minimumWork: minimumWork,
+                        commitMinimumWorkTarget: context.commitMinimumWorkTarget,
                         deadline: deadline,
                         generation: generation,
                         process: process
@@ -6500,6 +6501,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         parentData: Data,
         rewards: [MiningReward],
         minimumWork: [MiningMinimumWork],
+        commitMinimumWorkTarget: Bool,
         deadline: ContinuousClock.Instant,
         generation: UInt64,
         process: ChainProcess
@@ -6538,7 +6540,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
             parentCID: parentCID,
             parentData: parentData,
             rewards: rewards,
-            minimumWork: minimumWork
+            minimumWork: minimumWork,
+            commitMinimumWorkTarget: commitMinimumWorkTarget
         )
         guard let payload = try? request.encoded() else { return nil }
         return await withCheckedContinuation { continuation in
@@ -6973,7 +6976,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
                         ChildCandidateRequestContext(
                             parentCarrier: parent,
                             rewards: request.rewards,
-                            minimumWork: request.minimumWork
+                            minimumWork: request.minimumWork,
+                            commitMinimumWorkTarget: request.commitMinimumWorkTarget
                         ),
                         session
                     )

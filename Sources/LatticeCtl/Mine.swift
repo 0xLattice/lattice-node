@@ -300,6 +300,9 @@ func minerSettings(_ layout: HostLayout) throws -> MinerSettings {
     if MinerLoopLogic.minimumWorkField(minimumWorkArguments(mine)) == nil {
         throw CtlError("mine.minWork maps chain paths to work per block, as 2^N or a positive decimal integer")
     }
+    if mine.commitMinWorkTarget == true, minimumWorkArguments(mine).isEmpty {
+        throw CtlError("mine.commitMinWorkTarget commits the mine.minWork targets and needs at least one mine.minWork entry")
+    }
     return MinerSettings(
         mine: mine, rpc: chain.rpc, workerExecutable: worker, batch: batch
     )
@@ -379,6 +382,9 @@ func runCoordinatorOnce(
     }
     for entry in minimumWorkArguments(settings.mine) {
         arguments += ["--min-work", entry]
+    }
+    if settings.mine.commitMinWorkTarget == true {
+        arguments.append("--commit-min-work-target")
     }
     // Delegate to the shared spawn path (fresh /dev/null per spawn +
     // terminationHandler reaping) that ProcessSpawnTests pins.

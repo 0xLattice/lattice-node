@@ -209,6 +209,79 @@ final class MiningTemplateBookTests: XCTestCase {
         XCTAssertEqual(nested.targets, [UInt256.max])
     }
 
+    /// A binding minimum work below a direct child is invisible to the root
+    /// except through the child's witness. The middle chain bounds its search
+    /// at its leaf's binding threshold even though a sibling leaf is easier,
+    /// and names that leaf as its witness, so the root re-derives the same
+    /// bound instead of searching toward the easy sibling — whose hits would
+    /// clear the bound leaf's committed maximum target.
+    func testNestedBindingMinimumWorkBoundsTheRootSearch() async throws {
+        let hard = try await chainFixture(target: UInt256(4))
+        let middleGenesis = try await BlockBuilder.buildChildGenesis(
+            spec: NexusGenesis.spec,
+            parentState: hard.genesis.postState,
+            timestamp: 1,
+            target: UInt256(4),
+            fetcher: hard.store
+        )
+        func leaf() async throws -> Block {
+            let genesis = try await BlockBuilder.buildChildGenesis(
+                spec: NexusGenesis.spec,
+                parentState: middleGenesis.postState,
+                timestamp: 1,
+                target: .max,
+                fetcher: hard.store
+            )
+            return try await BlockBuilder.buildBlock(
+                previous: genesis,
+                timestamp: 2,
+                fetcher: hard.store
+            )
+        }
+        let bound = try await leaf()
+        let easy = try await leaf()
+        let work = UInt256(1) << 20
+        let threshold = minimumWorkTarget(work)
+        let plan: [[String]: UInt256] = [["Nexus", "Middle", "Bound"]: work]
+
+        let middle = try await MiningTemplateBook(
+            chainPath: ["Nexus", "Middle"]
+        ).build(
+            previous: middleGenesis,
+            transactions: [],
+            children: [
+                DirectChildCandidate(directory: "Bound", block: bound),
+                DirectChildCandidate(directory: "Easy", block: easy),
+            ],
+            timestamp: 2,
+            minimumWork: plan,
+            fetcher: hard.store
+        )
+        XCTAssertEqual(middle.searchTarget, threshold)
+        XCTAssertEqual(middle.targets, [threshold, UInt256(4)])
+        XCTAssertEqual(middle.searchWitness?.proof.directoryPath, ["Bound"])
+
+        let root = try await MiningTemplateBook(chainPath: ["Nexus"]).build(
+            previous: hard.genesis,
+            transactions: [],
+            children: [DirectChildCandidate(
+                directory: "Middle",
+                block: middle.block,
+                searchWitness: middle.searchWitness
+            )],
+            timestamp: 2,
+            minimumWork: plan,
+            fetcher: hard.store
+        )
+        XCTAssertEqual(root.block.target, UInt256(4))
+        XCTAssertEqual(root.searchTarget, threshold)
+        XCTAssertEqual(root.targets, [threshold])
+        XCTAssertEqual(
+            root.searchWitness?.proof.directoryPath,
+            ["Middle", "Bound"]
+        )
+    }
+
     func testMinimumWorkTargetIsTheEasiestTargetMeetingTheWork() {
         // Target 0 is met by no hash and Lattice rejects it, so the most work
         // any valid target can represent is workForTarget(1) = 2^255. Every
@@ -241,12 +314,52 @@ final class MiningTemplateBookTests: XCTestCase {
         XCTAssertEqual(minimumWorkTarget(ceiling), UInt256(1))
     }
 
+    /// By default a minimum work never touches the block: on a chain launched
+    /// at the maximum target every block still commits the scheduled target,
+    /// and only the search narrows. The advertised thresholds are the filter
+    /// target alone — never the easy committed target, which would hand the
+    /// miner back the hits it declined.
+    func testMinimumWorkByDefaultCommitsTheScheduledTargetAndFiltersTheSearch()
+        async throws
+    {
+        let work = UInt256(1) << 12
+        let filterTarget = minimumWorkTarget(work)
+        let fixture = try await chainFixture()
+        let book = MiningTemplateBook(chainPath: ["Nexus"])
+        var previous = fixture.genesis
+        for height in 1...3 {
+            let template = try await book.build(
+                previous: previous,
+                transactions: [],
+                children: [],
+                timestamp: Int64(height) * 1_000,
+                minimumWork: [["Nexus"]: work],
+                fetcher: fixture.store
+            )
+            XCTAssertEqual(template.block.target, previous.nextTarget)
+            XCTAssertEqual(template.block.target, .max)
+            XCTAssertEqual(template.searchTarget, filterTarget)
+            XCTAssertEqual(template.targets, [filterTarget])
+            XCTAssertFalse(template.targets.contains(template.block.target))
+            let midstate = ProofOfWork.midstate(for: template.block)
+            var nonce: UInt64 = 0
+            while ProofOfWork.hash(midstate: midstate, nonce: nonce)
+                > template.searchTarget {
+                nonce += 1
+            }
+            let block = ProofOfWork.withNonce(template.block, nonce: nonce)
+            try await BlockHeader(node: block).storeBlock(storer: fixture.store)
+            try await block.postState.storeRecursively(storer: fixture.store)
+            previous = block
+        }
+    }
+
     /// A chain launched at the maximum target mines a burst of near-free
     /// blocks: every block sits at the genesis target, and the retarget —
     /// which derives `nextTarget` from the target actually used — keeps
-    /// proposing it. A miner's minimum work hardens the blocks it asks for
-    /// from block 1, and the schedule then carries the real difficulty.
-    func testMinimumWorkHoldsAFreshMaxTargetChainAtTheFilterTarget()
+    /// proposing it. An operator who opts in to committing the minimum-work
+    /// target hardens the blocks from block 1, and the schedule then follows.
+    func testCommittedMinimumWorkHoldsAFreshMaxTargetChainAtTheFilterTarget()
         async throws
     {
         let work = UInt256(1) << 12
@@ -264,9 +377,11 @@ final class MiningTemplateBookTests: XCTestCase {
                     transactions: [],
                     children: [],
                     timestamp: Int64(height) * 1_000,
-                    minimumWork: minimumWork,
+                    minimumWork: minimumWork.map { [["Nexus"]: $0] } ?? [:],
+                    commitMinimumWorkTarget: true,
                     fetcher: fixture.store
                 )
+                XCTAssertEqual(template.searchTarget, template.block.target)
                 let midstate = ProofOfWork.midstate(for: template.block)
                 var nonce: UInt64 = 0
                 while ProofOfWork.hash(midstate: midstate, nonce: nonce)
@@ -318,28 +433,47 @@ final class MiningTemplateBookTests: XCTestCase {
 
         let easy = UInt256(1) << 8
         XCTAssertGreaterThan(minimumWorkTarget(easy), hardTarget)
-        let scheduled = try await book.build(
-            previous: fixture.genesis,
-            transactions: [],
-            children: [],
-            timestamp: 1_000,
-            minimumWork: easy,
-            fetcher: fixture.store
-        )
-        XCTAssertEqual(scheduled.block.target, hardTarget)
+        for commit in [false, true] {
+            let scheduled = try await book.build(
+                previous: fixture.genesis,
+                transactions: [],
+                children: [],
+                timestamp: 1_000,
+                minimumWork: [["Nexus"]: easy],
+                commitMinimumWorkTarget: commit,
+                fetcher: fixture.store
+            )
+            XCTAssertEqual(scheduled.block.target, hardTarget)
+            XCTAssertEqual(scheduled.searchTarget, hardTarget)
+            XCTAssertEqual(scheduled.targets, [hardTarget])
+        }
 
-        // Harder than an already hard schedule still applies.
+        // Harder than an already hard schedule still applies: to the search
+        // by default, and to the committed target only when opted in.
         let harder = UInt256(1) << 64
         let filtered = try await book.build(
             previous: fixture.genesis,
             transactions: [],
             children: [],
             timestamp: 1_001,
-            minimumWork: harder,
+            minimumWork: [["Nexus"]: harder],
             fetcher: fixture.store
         )
-        XCTAssertEqual(filtered.block.target, minimumWorkTarget(harder))
-        XCTAssertLessThan(filtered.block.target, hardTarget)
+        XCTAssertEqual(filtered.block.target, hardTarget)
+        XCTAssertEqual(filtered.searchTarget, minimumWorkTarget(harder))
+        XCTAssertEqual(filtered.targets, [minimumWorkTarget(harder)])
+        XCTAssertLessThan(filtered.searchTarget, hardTarget)
+        let committed = try await book.build(
+            previous: fixture.genesis,
+            transactions: [],
+            children: [],
+            timestamp: 1_002,
+            minimumWork: [["Nexus"]: harder],
+            commitMinimumWorkTarget: true,
+            fetcher: fixture.store
+        )
+        XCTAssertEqual(committed.block.target, minimumWorkTarget(harder))
+        XCTAssertEqual(committed.searchTarget, minimumWorkTarget(harder))
     }
 
     /// No minimum work is the schedule, exactly as before.
@@ -588,7 +722,8 @@ final class MiningTemplateBookTests: XCTestCase {
             chainPath: first.chainPath,
             expiresAt: ContinuousClock.now + .seconds(30),
             childCandidates: first.childCandidates,
-            searchWitness: nil
+            searchWitness: nil,
+            thresholds: [UInt256(7)]
         )
 
         let issued = await book.issue(conflicting)
@@ -602,7 +737,8 @@ final class MiningTemplateBookTests: XCTestCase {
             chainPath: first.chainPath,
             expiresAt: ContinuousClock.now + .milliseconds(250),
             childCandidates: first.childCandidates,
-            searchWitness: first.searchWitness
+            searchWitness: first.searchWitness,
+            thresholds: first.thresholds
         )
         _ = await book.issue(shortLived)
         let reused = await book.issue(MiningTemplate(
@@ -612,7 +748,8 @@ final class MiningTemplateBookTests: XCTestCase {
             chainPath: conflicting.chainPath,
             expiresAt: ContinuousClock.now + .seconds(30),
             childCandidates: conflicting.childCandidates,
-            searchWitness: conflicting.searchWitness
+            searchWitness: conflicting.searchWitness,
+            thresholds: conflicting.thresholds
         ))
         let response = MiningTemplateResponse(
             template: reused,
@@ -628,7 +765,8 @@ final class MiningTemplateBookTests: XCTestCase {
             chainPath: first.chainPath,
             expiresAt: ContinuousClock.now - .seconds(1),
             childCandidates: first.childCandidates,
-            searchWitness: first.searchWitness
+            searchWitness: first.searchWitness,
+            thresholds: first.thresholds
         ))
         let replacement = await book.issue(MiningTemplate(
             workID: conflicting.workID,
@@ -637,7 +775,8 @@ final class MiningTemplateBookTests: XCTestCase {
             chainPath: conflicting.chainPath,
             expiresAt: ContinuousClock.now + .seconds(30),
             childCandidates: conflicting.childCandidates,
-            searchWitness: conflicting.searchWitness
+            searchWitness: conflicting.searchWitness,
+            thresholds: conflicting.thresholds
         ))
         XCTAssertEqual(replacement.searchTarget, conflicting.searchTarget)
     }

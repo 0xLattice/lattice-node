@@ -24,10 +24,16 @@ private enum NetworkTestError: Error {
 
 private actor MinimumWorkRecorder {
     private var values: [[MiningMinimumWork]] = []
+    private var commits: [Bool] = []
 
-    func record(_ value: [MiningMinimumWork]) { values.append(value) }
+    func record(_ value: [MiningMinimumWork], commit: Bool) {
+        values.append(value)
+        commits.append(commit)
+    }
 
     func last() -> [MiningMinimumWork]? { values.last }
+
+    func lastCommit() -> Bool? { commits.last }
 }
 
 private func inertNetworkHandlers() -> NodeNetworkHandlers {
@@ -2864,6 +2870,47 @@ final class NetworkTrustTests: XCTestCase {
         }).encoded())
         XCTAssertThrowsError(
             try ChildCandidateRequestMessage.decoded(encoded + Data([0]))
+        )
+
+        // The operator's opt-in to commit the minimum-work target is one
+        // trailing byte, and only when there is minimum work to commit.
+        let committing = try ChildCandidateRequestMessage(
+            requestID: 21,
+            budgetMilliseconds: 750,
+            childPath: ["Nexus", "Payments"],
+            parentCID: parentCID,
+            parentData: parentData,
+            rewards: [],
+            minimumWork: entries,
+            commitMinimumWorkTarget: true
+        ).encoded()
+        XCTAssertEqual(committing, encoded + Data([1]))
+        let decodedCommitting = try ChildCandidateRequestMessage.decoded(
+            committing
+        )
+        XCTAssertTrue(decodedCommitting.commitMinimumWorkTarget)
+        XCTAssertEqual(decodedCommitting.minimumWork, entries)
+        XCTAssertFalse(
+            try ChildCandidateRequestMessage.decoded(encoded)
+                .commitMinimumWorkTarget
+        )
+        XCTAssertEqual(
+            try ChildCandidateRequestMessage(
+                requestID: 21,
+                budgetMilliseconds: 750,
+                childPath: ["Nexus", "Payments"],
+                parentCID: parentCID,
+                parentData: parentData,
+                rewards: [],
+                commitMinimumWorkTarget: true
+            ).encoded(),
+            legacy
+        )
+        XCTAssertThrowsError(
+            try ChildCandidateRequestMessage.decoded(legacy + Data([1]))
+        )
+        XCTAssertThrowsError(
+            try ChildCandidateRequestMessage.decoded(committing + Data([1]))
         )
         var emptyTrailer = legacy
         emptyTrailer.append(contentsOf: [2, 0, 0, 0])
@@ -5877,7 +5924,10 @@ final class NetworkTrustTests: XCTestCase {
         let received = MinimumWorkRecorder()
         let childHandlers = NodeNetworkHandlers(
             childCandidateBuilder: { context, _ in
-                await received.record(context.minimumWork)
+                await received.record(
+                    context.minimumWork,
+                    commit: context.commitMinimumWorkTarget
+                )
                 return fixture.candidate
             },
             candidateReservations: { _ in true },
@@ -5916,6 +5966,22 @@ final class NetworkTrustTests: XCTestCase {
             // child's: only the child's entry crosses.
             let forwarded = await received.last()
             XCTAssertEqual(forwarded, [childEntry])
+            let forwardedCommit = await received.lastCommit()
+            XCTAssertEqual(forwardedCommit, false)
+
+            // The operator's opt-in to commit minimum-work targets crosses
+            // with the entries it applies to.
+            let committing = await fixture.parentRuntime.directChildCandidates(
+                ChildCandidateRequestContext(
+                    parentCarrier: fixture.context.parentCarrier,
+                    rewards: [],
+                    minimumWork: [childEntry],
+                    commitMinimumWorkTarget: true
+                )
+            )
+            XCTAssertEqual(committing.count, 1)
+            let forwardedOptIn = await received.lastCommit()
+            XCTAssertEqual(forwardedOptIn, true)
         } catch {
             await fixture.childRuntime.stop()
             await fixture.parentRuntime.stop()

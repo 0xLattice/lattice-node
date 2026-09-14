@@ -72,9 +72,14 @@ public struct TopologyMine: Codable {
     /// A `lattice-rewards emit-batch` file; the cursor lives beside it.
     public var rewards: String?
     /// Minimum work per block by chain path (e.g. `{"Nexus": "2^32"}`),
-    /// passed to the coordinator as `--min-work`. A chain left out mines at
-    /// its scheduled target.
+    /// passed to the coordinator as `--min-work`. The miner only searches for
+    /// and submits hashes that meet it; blocks still commit their scheduled
+    /// target. A chain left out mines at its scheduled target.
     public var minWork: [String: String]?
+    /// `true` commits each `minWork` target into that chain's blocks instead
+    /// of the scheduled target (coordinator `--commit-min-work-target`).
+    /// Absent or `false` — the default — blocks commit the schedule.
+    public var commitMinWorkTarget: Bool?
     /// Headroom multiplier on the mining round deadline. The loop measures a
     /// round's own bound — the node's advertised template expiry plus the
     /// longest round that has actually completed — and refuses to wait longer
@@ -88,6 +93,7 @@ public struct TopologyMine: Codable {
         chain: String, worker: String? = nil, workers: Int? = nil,
         batchSize: UInt64? = nil, rewards: String? = nil,
         minWork: [String: String]? = nil,
+        commitMinWorkTarget: Bool? = nil,
         roundDeadlineMultiplier: Int? = nil
     ) {
         self.chain = chain
@@ -96,6 +102,7 @@ public struct TopologyMine: Codable {
         self.batchSize = batchSize
         self.rewards = rewards
         self.minWork = minWork
+        self.commitMinWorkTarget = commitMinWorkTarget
         self.roundDeadlineMultiplier = roundDeadlineMultiplier
     }
 }
