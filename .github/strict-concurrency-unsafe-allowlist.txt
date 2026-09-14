@@ -1,7 +1,6 @@
 # Every @unchecked Sendable or nonisolated(unsafe) site must be listed here with
 # a rationale. This keeps strict-concurrency escapes visible in review.
 Sources/LatticeMinerCore/ProofOfWork.swift|private struct SendableSearchArgs: @unchecked Sendable {|SHA256 midstate is copied into worker arguments and not mutated after task creation.
-Sources/LatticeMiningCoordinator/MiningWorkerProcess.swift|private final class MiningWorkerSubprocess: @unchecked Sendable {|Owns one Foundation.Process whose lifecycle is confined to a single search call; cancellation only invokes its synchronized termination path.
 Sources/LatticeNode/Architecture/NodeSQLite.swift|final class NodeSQLite: @unchecked Sendable {|SQLite is opened FULLMUTEX and every operation uses that serialized handle without exposing it.
 Sources/LatticeNode/Architecture/IvyContentBridge.swift|public final class AttributionCapture: @unchecked Sendable {|All access to the optional attribution value is guarded by AttributionCapture's NSLock.
 Sources/LatticeNode/Architecture/IvyContentBridge.swift|private final class Trace: @unchecked Sendable {|All mutable attribution state is guarded by Trace's NSLock.
@@ -16,3 +15,4 @@ Tests/LatticeNodeTests/Architecture/ProcessStderrReuseTests.swift|private final 
 Tests/LatticeNodeTests/Architecture/ChainServiceTests.swift|private final class ValidateStepRecorder: @unchecked Sendable {|Test-only recorder of validate-walk step heights; its [UInt64] is guarded by ValidateStepRecorder's NSLock.
 Tests/LatticeNodeTests/Architecture/ChainServiceTests.swift|private final class CountingValidateBodySource: @unchecked Sendable {|Test-only validate-body source; its fetched-list and withheld-set are guarded by CountingValidateBodySource's NSLock.
 Tests/LatticeNodeTests/Architecture/PublicReadRateLimitTests.swift|private final class TestClock: @unchecked Sendable {|Test-only injected monotonic clock; its seconds value is guarded by TestClock's NSLock.
+Sources/LatticeProcessWait/BoundedProcessWait.swift|public final class BoundedProcessWait: @unchecked Sendable {|Owns one Foundation.Process; all continuation, pending-outcome and settled state is guarded by the handle NSLock, and the process reference is only read for its pid and termination handler.

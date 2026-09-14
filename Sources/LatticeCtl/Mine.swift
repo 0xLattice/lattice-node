@@ -11,6 +11,7 @@ import FoundationNetworking
 import ArgumentParser
 import LatticeCtlCore
 import LatticeMinerCore
+import LatticeProcessWait
 
 struct Mine: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -133,15 +134,48 @@ struct Mine: AsyncParsableCommand {
             let source = DispatchSource.makeSignalSource(signal: SIGTERM)
             source.setEventHandler { stopRequested.raise() }
             source.resume()
+            let multiplier = settings.mine.roundDeadlineMultiplier
+                ?? MiningRoundDeadline.defaultMultiplier
+            // Measured, not assumed: a wedged round never completes, so it
+            // can never widen the bound that would have caught it.
+            var longestCompletedRound = Duration.zero
+            var templateExpiry: Duration?
             log("mining loop start at reward cursor \(cursor)")
             while !stopRequested.isRaised {
                 let outcome: CoordinatorOutcome
+                let started = ContinuousClock.now
                 do {
                     let rewardsFile = try prepareRewardsFile(
                         settings, cursor: cursor, layout: layout
                     )
+                    if templateExpiry == nil {
+                        // NEVER the cursor's reward line. The node answers
+                        // 400 once that line is no longer mineable -- the
+                        // same "already spent on-chain" condition the
+                        // refusal branch below heals -- and a nil expiry
+                        // would then wedge this loop forever WITHOUT ever
+                        // reaching that branch. Template lifetime is
+                        // node-wide, so an empty rewards body observes it
+                        // without entangling it with reward validity.
+                        templateExpiry = await observedTemplateExpiry(
+                            settings.rpc, rewardsFile: nil
+                        )
+                    }
+                    guard let expiry = templateExpiry else {
+                        // No observation, no derived bound -- and an
+                        // unbounded round is the defect itself.
+                        log("reward \(cursor) waiting: the node is not answering template requests, so a round deadline cannot be derived")
+                        try? await Task.sleep(for: .seconds(5))
+                        continue
+                    }
+                    let deadline = MiningRoundDeadline.deadline(
+                        templateExpiry: expiry,
+                        longestCompletedRound: longestCompletedRound,
+                        multiplier: multiplier
+                    )
                     outcome = try await runCoordinatorOnce(
-                        settings, rewardsFile: rewardsFile, layout: layout
+                        settings, rewardsFile: rewardsFile, layout: layout,
+                        deadline: deadline
                     )
                 } catch {
                     // A spawn/IO failure proves nothing about the reward and
@@ -149,6 +183,19 @@ struct Mine: AsyncParsableCommand {
                     log("reward \(cursor) retrying after spawn error: \(error)")
                     try? await Task.sleep(for: .seconds(5))
                     continue
+                }
+                // Only a round that actually produced a coordinator
+                // result measures batch time. A round that burned its budget
+                // failing -- worker/node trouble, or the deadline itself --
+                // would inflate the very bound meant to catch it.
+                switch outcome {
+                case .accepted, .harmless, .carrier, .refusal:
+                    longestCompletedRound = max(
+                        longestCompletedRound,
+                        started.duration(to: ContinuousClock.now)
+                    )
+                case .workerTrouble, .roundDeadlineExceeded:
+                    break
                 }
                 switch outcome {
                 case .accepted(let tip):
@@ -162,6 +209,17 @@ struct Mine: AsyncParsableCommand {
                     // A child chain advanced; no reward consumed. The
                     // windowed retarget finds the target block time on its
                     // own — no miner-side pacing needed.
+                    refusedStreak = 0
+                case .roundDeadlineExceeded(let deadline, let degraded):
+                    // Loud by construction: a silent kill-and-continue is
+                    // the original failure mode wearing a fix's clothes.
+                    log("ROUND DEADLINE EXCEEDED after \(deadline): the coordinator process group was killed and the round abandoned. Reward cursor stays at \(cursor). Raise mine.roundDeadlineMultiplier in lattice.json if rounds here legitimately run this long.")
+                    if degraded {
+                        // State the fact; do not decide for the operator what
+                        // it means. A teardown that could only signal the pid
+                        // is not the clean one the line above implies.
+                        log("ROUND TEARDOWN DEGRADED: only the coordinator pid could be signalled, not its process group, so processes it spawned may still be running and holding resources. Check for stray lattice-miner processes.")
+                    }
                     refusedStreak = 0
                 case .workerTrouble(let detail):
                     log("reward \(cursor) retrying after \(detail)")
@@ -279,6 +337,11 @@ enum CoordinatorOutcome {
     case carrier
     case refusal
     case workerTrouble(String)
+    /// The round outlived its derived bound; its process group was killed.
+    /// Carries whether that teardown was DEGRADED -- only the pid could be
+    /// signalled -- separately from the deadline itself, because the two vary
+    /// independently.
+    case roundDeadlineExceeded(Duration, teardownDegraded: Bool)
 }
 
 final class InterruptFlag: @unchecked Sendable {
@@ -299,7 +362,8 @@ final class InterruptFlag: @unchecked Sendable {
 }
 
 func runCoordinatorOnce(
-    _ settings: MinerSettings, rewardsFile: URL?, layout: HostLayout
+    _ settings: MinerSettings, rewardsFile: URL?, layout: HostLayout,
+    deadline: Duration
 ) async throws -> CoordinatorOutcome {
     let executable = try nodeBinary().deletingLastPathComponent()
         .appendingPathComponent("lattice-mining-coordinator")
@@ -318,9 +382,10 @@ func runCoordinatorOnce(
     }
     // Delegate to the shared spawn path (fresh /dev/null per spawn +
     // terminationHandler reaping) that ProcessSpawnTests pins.
-    let data = try await spawnCollectingOutput(
+    let result = try await spawnCollectingOutput(
         executable: executable,
         arguments: arguments,
+        deadline: deadline,
         onSpawn: { pid in
             try? writePidFile(
                 layout, "mine-coordinator",
@@ -331,7 +396,12 @@ func runCoordinatorOnce(
     try? FileManager.default.removeItem(
         at: layout.pidFile(for: "mine-coordinator")
     )
-    let lines = String(decoding: data, as: UTF8.self)
+    if result.outcome == .deadlineExceeded {
+        return .roundDeadlineExceeded(
+            deadline, teardownDegraded: result.teardownDegraded
+        )
+    }
+    let lines = String(decoding: result.output, as: UTF8.self)
         .split(separator: "\n").reversed()
     for line in lines {
         guard let object = try? JSONSerialization.jsonObject(
@@ -360,7 +430,40 @@ func runCoordinatorOnce(
             return .refusal
         }
     }
-    return .workerTrouble("coordinator produced no result line")
+    return .workerTrouble(
+        result.outputComplete
+            ? "coordinator produced no result line"
+            : "coordinator output was truncated at the round deadline"
+    )
+}
+
+/// The round bound the NODE itself advertises: `expiresInMilliseconds` from
+/// a template request. Observed, never assumed -- the mining round deadline
+/// is derived from this plus measured batch time, so no template lifetime is
+/// hardcoded on this side of the RPC.
+func observedTemplateExpiry(
+    _ rpc: UInt16, rewardsFile: URL?
+) async -> Duration? {
+    guard let url = URL(
+        string: "http://127.0.0.1:\(rpc)/v1/mining/templates"
+    ) else { return nil }
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = rewardsFile.flatMap { try? Data(contentsOf: $0) }
+        ?? Data(#"{"rewards":[]}"#.utf8)
+    request.timeoutInterval = 15
+    guard let (data, response) = try? await URLSession.shared.data(
+        for: request
+    ), let http = response as? HTTPURLResponse, http.statusCode == 200,
+       let object = try? JSONSerialization.jsonObject(
+           with: data
+       ) as? [String: Any],
+       let milliseconds = (object["expiresInMilliseconds"] as? NSNumber)?
+           .int64Value, milliseconds > 0 else {
+        return nil
+    }
+    return .milliseconds(milliseconds)
 }
 
 enum ProbeResult { case accepted, refused, unavailable }

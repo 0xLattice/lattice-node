@@ -46,7 +46,8 @@ lattice mine status  # cursor position and batch runway
     "workers": 4,
     "batchSize": 2000000000,
     "rewards": "reward-batch.jsonl",
-    "minWork": {"Nexus": "2^32"}
+    "minWork": {"Nexus": "2^32"},
+    "roundDeadlineMultiplier": 10
   }
 }
 ```
@@ -81,6 +82,15 @@ lattice mine status  # cursor position and batch runway
   — and matters most on a chain launched at the maximum target, where it is
   what keeps a fresh chain from bursting. See
   [operations.md](operations.md#minimum-work-per-block).
+- `roundDeadlineMultiplier` is optional (default `10`): headroom on the
+  mining round deadline. `mine run` bounds every coordinator round by the
+  node's advertised template expiry plus the longest round that has actually
+  completed (capped at one more expiry, so a slow round cannot ratchet the
+  bound upward), times this. A round that overruns is killed — process group and
+  all — logged as `ROUND DEADLINE EXCEEDED`, and the loop continues without
+  advancing the reward cursor. Raise it where rounds legitimately run long;
+  lower it to notice a wedged round sooner. Values below `1` are refused
+  by name.
 
 ## Verbs
 

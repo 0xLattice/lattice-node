@@ -48,6 +48,35 @@ final class LatticeCtlTopologyTests: XCTestCase {
         ]).validated())
     }
 
+    /// Round-deadline headroom belongs to the operator, and a bad value is a
+    /// NAMED refusal rather than a precondition trap: it arrives from an
+    /// operator-edited file, so a typo must not crash the process.
+    func testRoundDeadlineMultiplierIsOperatorSettableAndRefusesZero() throws {
+        let validated = try Topology(
+            chains: ["Nexus": chain(4001)],
+            mine: TopologyMine(chain: "Nexus", roundDeadlineMultiplier: 3)
+        ).validated()
+        XCTAssertEqual(validated.mine?.roundDeadlineMultiplier, 3)
+
+        XCTAssertThrowsError(try Topology(
+            chains: ["Nexus": chain(4001)],
+            mine: TopologyMine(chain: "Nexus", roundDeadlineMultiplier: 0)
+        ).validated())
+
+        // Negative reaches the NAMED refusal now that the field is Int: as
+        // UInt64 it surfaced as a raw Codable error at load instead.
+        XCTAssertThrowsError(try Topology(
+            chains: ["Nexus": chain(4001)],
+            mine: TopologyMine(chain: "Nexus", roundDeadlineMultiplier: -1)
+        ).validated())
+
+        let absent = try Topology(
+            chains: ["Nexus": chain(4001)],
+            mine: TopologyMine(chain: "Nexus")
+        ).validated()
+        XCTAssertNil(absent.mine?.roundDeadlineMultiplier)
+    }
+
     func testValidationRejectsPortCollisions() {
         XCTAssertThrowsError(try Topology(chains: [
             "Nexus": chain(4001),

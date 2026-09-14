@@ -10,6 +10,7 @@ import FoundationNetworking
 import ArgumentParser
 import Lattice
 import LatticeCtlCore
+import LatticeProcessWait
 import LatticeNode
 
 func nodeBinary() throws -> URL {
@@ -46,11 +47,36 @@ func runningPid(_ layout: HostLayout, _ path: String) -> Int32? {
         probe.standardOutput = out
         probe.standardError = FileHandle.nullDevice
         guard (try? probe.run()) != nil else { return pid }
-        let name = String(
-            decoding: out.fileHandleForReading.readDataToEndOfFile(),
-            as: UTF8.self
-        ).trimmingCharacters(in: .whitespacesAndNewlines)
-        probe.waitUntilExit()
+        // Captured while the probe is alive, for the same reason the bounded
+        // wait does it: a group derived after the child is reaped is gone.
+        let teardown = ProcessTeardownTarget.capture(
+            pid: probe.processIdentifier
+        )
+        // Bounded, and never `waitUntilExit()`: a pid-name probe must not
+        // outlive the question it answers (#62). This bound is a local
+        // liveness allowance, not a round parameter -- `ps` has none.
+        let read = readToEndBounded(
+            fileDescriptor: out.fileHandleForReading.fileDescriptor,
+            deadline: ContinuousClock.now + .seconds(5)
+        )
+        if !read.complete {
+            terminateProcessGroup(teardown)
+            if teardown.isDegraded {
+                // Do not report a clean teardown we did not perform: only the
+                // pid could be signalled, so anything the probe spawned is
+                // still running.
+                FileHandle.standardError.write(Data(
+                    "warning: pid probe \(probe.processIdentifier) could not be torn down as a group; its descendants may still be running\n".utf8
+                ))
+            }
+            // A probe that timed out says NOTHING about the pid, and a
+            // truncated name would fail the suffix check below and report a
+            // live node as stopped -- which invites a double spawn. Same
+            // convention as the run() failure above: assume running.
+            return pid
+        }
+        let name = String(decoding: read.data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard name.hasSuffix(expected) else { return nil }
     }
     return pid

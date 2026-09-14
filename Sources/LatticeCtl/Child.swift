@@ -17,6 +17,7 @@ import FoundationNetworking
 import ArgumentParser
 import Lattice
 import LatticeCtlCore
+import LatticeProcessWait
 import LatticeNode
 import UInt256
 import VolumeBroker
@@ -293,7 +294,25 @@ struct Child: AsyncParsableCommand {
                     try await Task.sleep(for: .seconds(10))
                 }
             } else if !recorded {
+                let multiplier = topology.mine?.roundDeadlineMultiplier
+                    ?? MiningRoundDeadline.defaultMultiplier
                 for _ in 0..<20 {
+                    // Observed per attempt, from the ROOT chain's node --
+                    // the one these rounds mine against, which for a
+                    // grandchild is not the parent. Per attempt, because a
+                    // transient RPC failure must not abort a deploy that
+                    // used to retry; this loop's own budget bounds it.
+                    guard let expiry = await observedTemplateExpiry(
+                        rootChain.rpc, rewardsFile: nil
+                    ) else {
+                        try await Task.sleep(for: .seconds(2))
+                        continue
+                    }
+                    let deployRoundDeadline = MiningRoundDeadline.deadline(
+                        templateExpiry: expiry,
+                        longestCompletedRound: .zero,
+                        multiplier: multiplier
+                    )
                     let coordinator = Process()
                     coordinator.executableURL = try nodeBinary()
                         .deletingLastPathComponent()
@@ -309,8 +328,15 @@ struct Child: AsyncParsableCommand {
                     let devNull = FileHandle(forWritingAtPath: "/dev/null")
                     coordinator.standardOutput = devNull ?? FileHandle.nullDevice
                     coordinator.standardError = devNull ?? FileHandle.nullDevice
-                    try coordinator.run()
-                    coordinator.waitUntilExit()
+                    // Bounded like every other coordinator round (#62):
+                    // a deploy that parks forever on an exited coordinator
+                    // strands a recorded genesis CID.
+                    let round = try runBounded(
+                        coordinator, deadline: deployRoundDeadline
+                    )
+                    if await round.wait() == .deadlineExceeded {
+                        print("mining round exceeded \(deployRoundDeadline) and its process group was killed; retrying")
+                    }
                     try? devNull?.close()
                     if await parentRecordedGenesis(
                         rpc: parentChain.rpc,

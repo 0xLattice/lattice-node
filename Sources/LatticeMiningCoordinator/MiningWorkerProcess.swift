@@ -1,5 +1,6 @@
 import Foundation
 import LatticeMinerCore
+import LatticeProcessWait
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)
@@ -50,8 +51,7 @@ public struct MiningWorkerProcessClient: Sendable {
             throw MiningWorkerProcessError.missingExecutable(executableURL.path)
         }
 
-        let handle = MiningWorkerSubprocess()
-        let process = handle.process
+        let process = Process()
         process.executableURL = executableURL
         process.arguments = arguments + [
             "--work-id", work.workId,
@@ -91,7 +91,36 @@ public struct MiningWorkerProcessClient: Sendable {
             try? FileManager.default.removeItem(at: stderrURL)
         }
 
-        try await handle.run()
+        // The worker's own bound, derived from the work the node issued:
+        // past template expiry no nonce it finds can be submitted. Routed
+        // through the shared bounded wait so a lost termination callback
+        // cannot park the coordinator (#62).
+        let handle = try runBounded(
+            process,
+            deadline: work.expiresInMilliseconds.map {
+                .milliseconds(Int64(clamping: $0))
+            }
+        )
+        let waitOutcome = await handle.wait()
+        if waitOutcome == .deadlineExceeded {
+            // handle.isTeardownDegraded is NOT consumed here, and that is a
+            // KNOWN GAP tracked by #146 -- not a judgement that the
+            // information does not apply to this site.
+            //
+            // It does apply: a worker is not always a leaf. lattice-miner
+            // with a GPU backend shim spawns children, so a degraded teardown
+            // here leaks a subtree -- the #62 failure one level down, and
+            // silent in the same way.
+            //
+            // It is unwired because this process has NO OBSERVABLE CHANNEL
+            // for it. stdout is a JSON contract the CLI parses for the round
+            // result, so a line there corrupts the contract; stderr is
+            // discarded by the CLI's spawnCollectingOutput, so a line there
+            // is written nowhere. Surfacing it requires choosing an error
+            // channel -- a wire-format or spawn-plumbing change -- which is
+            // scope beyond the #62 fix. See #146 for the options.
+            return nil
+        }
 
         // On cancellation (e.g. stale work) the worker result is irrelevant.
         // Check before the post-exit read so a cancelled worker that forked a
@@ -102,8 +131,25 @@ public struct MiningWorkerProcessClient: Sendable {
         // stdout: a single post-exit read. The worker's stdout is one small
         // JSON line, so it cannot fill the pipe buffer before the child exits.
         try? stdout.fileHandleForWriting.close()
-        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        // A FRESH drain budget, not the remainder of the exit wait: the
+        // worker has exited, so EOF is already there unless a grandchild
+        // holds the write end -- which is exactly what must stay bounded.
+        let read = readToEndBounded(
+            fileDescriptor: stdout.fileHandleForReading.fileDescriptor,
+            deadline: ContinuousClock.now + (
+                work.expiresInMilliseconds.map {
+                    Duration.milliseconds(Int64(clamping: $0))
+                } ?? .seconds(5)
+            )
+        )
         try? stdout.fileHandleForReading.close()
+        // A truncated read is NAMED, never silently decoded as garbage.
+        guard read.complete else {
+            throw MiningWorkerProcessError.invalidOutput(
+                "stdout truncated at the worker deadline"
+            )
+        }
+        let output = read.data
 
         if process.terminationStatus != 0 {
             // Read only the last 4 KB: the stderr file has no pipe backpressure,
@@ -144,94 +190,6 @@ public struct MiningWorkerProcessClient: Sendable {
         return (try? handle.readToEnd()) ?? Data()
     }
 
-}
-
-private final class MiningWorkerSubprocess: @unchecked Sendable {
-    let process = Process()
-
-    /// How long to wait after SIGTERM before escalating to SIGKILL. Some shells
-    /// (e.g. dash `sh -c`) don't reliably propagate SIGTERM to their children,
-    /// and on swift-corelibs-foundation a bare `terminate()` does not promptly
-    /// reap such a child, so we force-kill after a short grace period.
-    private static let terminationGraceNanoseconds: UInt64 = 200_000_000
-
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Void, Never>?
-    private var didFinish = false
-    private var cancelRequested = false
-
-    private func withLock<T>(_ body: () -> T) -> T {
-        lock.lock()
-        defer { lock.unlock() }
-        return body()
-    }
-
-    /// Runs the process to completion, resuming off `terminationHandler` rather
-    /// than parking a thread on the synchronous `waitUntilExit()`. On task
-    /// cancellation it sends SIGTERM and escalates to SIGKILL after a short
-    /// grace so the child is reaped promptly and reliably across platforms.
-    func run() async throws {
-        process.terminationHandler = { [weak self] _ in
-            self?.finish()
-        }
-
-        try process.run()
-
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                let resumeNow = withLock { () -> Bool in
-                    if didFinish { return true }
-                    continuation = cont
-                    return false
-                }
-                if resumeNow {
-                    cont.resume()
-                }
-            }
-        } onCancel: {
-            requestTermination()
-        }
-    }
-
-    private func finish() {
-        let cont = withLock { () -> CheckedContinuation<Void, Never>? in
-            let pending = continuation
-            continuation = nil
-            didFinish = true
-            return pending
-        }
-        cont?.resume()
-    }
-
-    private func requestTermination() {
-        let proceed = withLock { () -> Bool in
-            if cancelRequested || didFinish { return false }
-            cancelRequested = true
-            return true
-        }
-        guard proceed else { return }
-
-        // SIGTERM first; the terminationHandler will resume the continuation if
-        // the child exits in response.
-        if process.isRunning {
-            process.terminate()
-        }
-
-        // Escalate to SIGKILL after a grace period for children that ignore or
-        // don't propagate SIGTERM. Detached so the cancel handler returns
-        // immediately.
-        let pid = process.processIdentifier
-        Task.detached { [weak self] in
-            try? await Task.sleep(
-                nanoseconds: MiningWorkerSubprocess.terminationGraceNanoseconds
-            )
-            guard let self else { return }
-            let finished = self.withLock { self.didFinish }
-            if !finished, self.process.isRunning {
-                kill(pid, SIGKILL)
-            }
-        }
-    }
 }
 
 extension MiningCoordinatorWorker {
