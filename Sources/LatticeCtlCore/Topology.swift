@@ -105,6 +105,17 @@ public struct TopologyMine: Codable {
         self.commitMinWorkTarget = commitMinWorkTarget
         self.roundDeadlineMultiplier = roundDeadlineMultiplier
     }
+
+    /// `minWork` as coordinator `--min-work` values, in path order.
+    public var minimumWorkEntries: [String] {
+        (minWork ?? [:]).sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
+    }
+
+    /// The coordinator arguments for `minWork` and `commitMinWorkTarget`.
+    public var coordinatorMinimumWorkArguments: [String] {
+        minimumWorkEntries.flatMap { ["--min-work", $0] }
+            + (commitMinWorkTarget == true ? ["--commit-min-work-target"] : [])
+    }
 }
 
 public struct Topology: Codable {
@@ -170,6 +181,9 @@ public struct Topology: Codable {
         }
         if let mine, chains[mine.chain] == nil {
             throw CtlError("mine.chain \(mine.chain) is not in the tree")
+        }
+        if let mine, mine.commitMinWorkTarget == true, mine.minimumWorkEntries.isEmpty {
+            throw CtlError("mine.commitMinWorkTarget commits the mine.minWork targets and needs at least one mine.minWork entry")
         }
         if let multiplier = mine?.roundDeadlineMultiplier, multiplier < 1 {
             throw CtlError("mine.roundDeadlineMultiplier must be at least 1; a round deadline shorter than the round's own bound would kill every healthy round")

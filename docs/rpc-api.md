@@ -130,8 +130,14 @@ chain and for chains merged-mined under it (`work` is a hex `UInt256`; each
 once). The named chain's candidate still commits its scheduled target; its
 search threshold becomes `min(scheduled target, floor(2^256 / work) - 1)` —
 harder than the schedule, never easier — and each descendant entry travels
-with the child candidate request down the hierarchy plane, so every level
-derives the same thresholds. It is a template choice of the miner that asked,
+with the child candidate request down the hierarchy plane. A child node
+returns a witness naming the block that sets its search target. Where that
+witness names a filtered descendant, the Nexus re-derives the descendant's
+threshold from it; for every other filtered chain two or more levels down it
+caps `searchTarget` at that entry's `floor(2^256 / work) - 1` outright. That
+fails closed against a child node that ignores or predates the entry, and is
+stricter than needed when that chain's committed target is already harder
+than its filter or the chain is absent from the template. It is a template choice of the miner that asked,
 not consensus: admission, validation, and fork choice are untouched, and a
 block from any other miner at the scheduled target is still accepted. Absent,
 templates are exactly the schedule.
@@ -139,7 +145,10 @@ templates are exactly the schedule.
 `commitMinimumWorkTarget` (default `false`) is the operator opt-in to commit
 each `minimumWork` threshold into that chain's block as its target instead of
 the scheduled one. It travels with the descendant entries to the child that
-builds each block.
+builds each block, as one trailing byte on the candidate request. A child node
+that predates it refuses that request as malformed, so the template goes
+without that child; the parent records each such missing candidate in its
+trace log (`LATTICE_SYNC_TRACE`).
 
 An entry naming an unknown or duplicate path, zero work, or more work than any
 valid target can represent is refused with `400` `invalidMinimumWork`. That
@@ -151,7 +160,11 @@ than the 1 MiB payload cap the rewards field also honours is refused with `400`
 
 Response fields:
 
-- `workID`: CID of the nonce-zero candidate.
+- `workID`: CID of the nonce-zero candidate. When the request carries
+  `minimumWork` or `commitMinimumWorkTarget`, the CID is followed by `-` and a
+  digest of both: the block does not change with the miner's filter, so two
+  requests with different filters must not share one work item and its
+  `searchTarget`. Treat it as opaque.
 - `block`: the complete candidate block.
 - `searchTarget`: the threshold the miner must hit. It is the easiest
   (numerically largest) of the Nexus candidate's own threshold and the search

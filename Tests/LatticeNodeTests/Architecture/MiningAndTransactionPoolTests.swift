@@ -280,6 +280,239 @@ final class MiningTemplateBookTests: XCTestCase {
             root.searchWitness?.proof.directoryPath,
             ["Middle", "Bound"]
         )
+
+        // A tie between the bound and the easiest threshold must still name
+        // the binding block. The middle chain commits exactly the threshold:
+        // its own non-binding block ties the bound leaf.
+        let tiedGenesis = try await BlockBuilder.buildChildGenesis(
+            spec: NexusGenesis.spec,
+            parentState: hard.genesis.postState,
+            timestamp: 1,
+            target: threshold,
+            fetcher: hard.store
+        )
+        func tiedLeaf(
+            under parent: Block,
+            target: UInt256
+        ) async throws -> Block {
+            let genesis = try await BlockBuilder.buildChildGenesis(
+                spec: NexusGenesis.spec,
+                parentState: parent.postState,
+                timestamp: 1,
+                target: target,
+                fetcher: hard.store
+            )
+            return try await BlockBuilder.buildBlock(
+                previous: genesis,
+                timestamp: 2,
+                fetcher: hard.store
+            )
+        }
+        let tiedBound = try await tiedLeaf(under: tiedGenesis, target: .max)
+        let nestedTie = try await MiningTemplateBook(
+            chainPath: ["Nexus", "Middle"]
+        ).build(
+            previous: tiedGenesis,
+            transactions: [],
+            children: [DirectChildCandidate(directory: "Bound", block: tiedBound)],
+            timestamp: 2,
+            minimumWork: plan,
+            fetcher: hard.store
+        )
+        XCTAssertEqual(nestedTie.block.target, threshold)
+        XCTAssertEqual(nestedTie.searchTarget, threshold)
+        XCTAssertEqual(nestedTie.searchWitness?.proof.directoryPath, ["Bound"])
+
+        // A sibling tie: a non-binding sibling committing exactly the
+        // threshold sorts first and must not take the witness.
+        let tiedSibling = try await tiedLeaf(
+            under: middleGenesis,
+            target: threshold
+        )
+        let siblingBound = try await tiedLeaf(under: middleGenesis, target: .max)
+        let siblingTie = try await MiningTemplateBook(
+            chainPath: ["Nexus", "Middle"]
+        ).build(
+            previous: middleGenesis,
+            transactions: [],
+            children: [
+                DirectChildCandidate(directory: "Alpha", block: tiedSibling),
+                DirectChildCandidate(directory: "Bound", block: siblingBound),
+            ],
+            timestamp: 2,
+            minimumWork: plan,
+            fetcher: hard.store
+        )
+        XCTAssertEqual(siblingTie.searchTarget, threshold)
+        XCTAssertEqual(siblingTie.searchWitness?.proof.directoryPath, ["Bound"])
+
+        // At the root an easy sibling sets the easiest threshold, so only
+        // the binding witness keeps the search at the bound.
+        let easyRootGenesis = try await BlockBuilder.buildChildGenesis(
+            spec: NexusGenesis.spec,
+            parentState: hard.genesis.postState,
+            timestamp: 1,
+            target: .max,
+            fetcher: hard.store
+        )
+        let easyRootLeaf = try await BlockBuilder.buildBlock(
+            previous: easyRootGenesis,
+            timestamp: 2,
+            fetcher: hard.store
+        )
+        for tie in [nestedTie, siblingTie] {
+            let tiedRoot = try await MiningTemplateBook(
+                chainPath: ["Nexus"]
+            ).build(
+                previous: hard.genesis,
+                transactions: [],
+                children: [
+                    DirectChildCandidate(
+                        directory: "Middle",
+                        block: tie.block,
+                        searchWitness: tie.searchWitness
+                    ),
+                    DirectChildCandidate(directory: "Zed", block: easyRootLeaf),
+                ],
+                timestamp: 2,
+                minimumWork: plan,
+                fetcher: hard.store
+            )
+            XCTAssertEqual(tiedRoot.searchTarget, threshold)
+            XCTAssertEqual(
+                tiedRoot.searchWitness?.proof.directoryPath,
+                ["Middle", "Bound"]
+            )
+        }
+    }
+
+    /// A child's witness is a valid proof, not a promise that it names the
+    /// chain setting the child's bound: a node that predates the miner's
+    /// filter, or builds without it, names its easiest block or none. The
+    /// root caps its search at every filter below a direct child that the
+    /// witness does not resolve, so the hidden filter still holds.
+    func testUnresolvedDescendantMinimumWorkCapsTheRootSearch() async throws {
+        let hard = try await chainFixture(target: UInt256(4))
+        let work = UInt256(1) << 20
+        let threshold = minimumWorkTarget(work)
+        let plan: [[String]: UInt256] = [["Nexus", "Middle", "Bound"]: work]
+        func childBlock(
+            parentState: LatticeStateHeader,
+            target: UInt256
+        ) async throws -> (genesis: Block, block: Block) {
+            let genesis = try await BlockBuilder.buildChildGenesis(
+                spec: NexusGenesis.spec,
+                parentState: parentState,
+                timestamp: 1,
+                target: target,
+                fetcher: hard.store
+            )
+            let block = try await BlockBuilder.buildBlock(
+                previous: genesis,
+                timestamp: 2,
+                fetcher: hard.store
+            )
+            return (genesis, block)
+        }
+        let easyMiddle = try await childBlock(
+            parentState: hard.genesis.postState,
+            target: .max
+        )
+        let hardMiddle = try await childBlock(
+            parentState: hard.genesis.postState,
+            target: UInt256(4)
+        )
+        for (middleGenesis, siblings) in [
+            (easyMiddle.genesis, [String]()),
+            (hardMiddle.genesis, ["Alpha"]),
+        ] {
+            var children: [DirectChildCandidate] = []
+            for directory in siblings + ["Bound"] {
+                children.append(DirectChildCandidate(
+                    directory: directory,
+                    block: try await childBlock(
+                        parentState: middleGenesis.postState,
+                        target: .max
+                    ).block
+                ))
+            }
+            // Built without the plan, as a node that never saw it would.
+            let middle = try await MiningTemplateBook(
+                chainPath: ["Nexus", "Middle"]
+            ).build(
+                previous: middleGenesis,
+                transactions: [],
+                children: children,
+                timestamp: 2,
+                fetcher: hard.store
+            )
+            XCTAssertNotEqual(
+                middle.searchWitness?.proof.directoryPath,
+                ["Bound"]
+            )
+            let root = try await MiningTemplateBook(chainPath: ["Nexus"]).build(
+                previous: hard.genesis,
+                transactions: [],
+                children: [DirectChildCandidate(
+                    directory: "Middle",
+                    block: middle.block,
+                    searchWitness: middle.searchWitness
+                )],
+                timestamp: 2,
+                minimumWork: plan,
+                fetcher: hard.store
+            )
+            XCTAssertEqual(root.searchTarget, threshold, "siblings \(siblings)")
+        }
+    }
+
+    /// Blocks no longer differ by the miner's filter, so the cache must not
+    /// let two search policies share one work item: each would be judged
+    /// against the other's search target.
+    func testDifferentMinimumWorkNeverSharesATemplate() async throws {
+        let fixture = try await chainFixture()
+        let book = MiningTemplateBook(chainPath: ["Nexus"])
+        let work = UInt256(1) << 12
+        func build(
+            _ plan: [[String]: UInt256],
+            commit: Bool = false
+        ) async throws -> MiningTemplate {
+            try await book.build(
+                previous: fixture.genesis,
+                transactions: [],
+                children: [],
+                timestamp: 1_000,
+                minimumWork: plan,
+                commitMinimumWorkTarget: commit,
+                fetcher: fixture.store
+            )
+        }
+        let open = try await build([:])
+        let filtered = try await build([["Nexus"]: work])
+        let looser = try await build([["Nexus"]: work >> 4])
+        XCTAssertEqual(open.block.toData(), filtered.block.toData())
+        XCTAssertEqual(open.searchTarget, .max)
+        XCTAssertEqual(filtered.searchTarget, minimumWorkTarget(work))
+        XCTAssertEqual(looser.searchTarget, minimumWorkTarget(work >> 4))
+        XCTAssertEqual(
+            Set([open.workID, filtered.workID, looser.workID]).count,
+            3
+        )
+        // Submissions are judged against each work item's own policy.
+        let midstate = ProofOfWork.midstate(for: open.block)
+        var declined: UInt64 = 0
+        while ProofOfWork.hash(midstate: midstate, nonce: declined)
+            <= minimumWorkTarget(work) {
+            declined += 1
+        }
+        _ = try await book.submission(workID: open.workID, nonce: declined)
+        await XCTAssertThrowsErrorAsync(
+            try await book.submission(workID: filtered.workID, nonce: declined)
+        ) { error in
+            XCTAssertEqual(error as? MiningTemplateError, .missesSearchTarget)
+        }
+        // A request without any policy keeps the plain block CID.
+        XCTAssertEqual(open.workID, try BlockHeader(node: open.block).rawCID)
     }
 
     func testMinimumWorkTargetIsTheEasiestTargetMeetingTheWork() {

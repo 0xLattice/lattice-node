@@ -10,7 +10,6 @@ import Foundation
 import FoundationNetworking
 #endif
 import ArgumentParser
-import LatticeMinerCore
 import LatticeMiningCoordinator
 
 @available(macOS 15.0, *)
@@ -198,31 +197,15 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
         } else {
             data = Data(#"{"rewards":[]}"#.utf8)
         }
-        guard data.count <= 1 << 20,
-              var object = try JSONSerialization.jsonObject(with: data)
-                as? [String: Any],
-              object["rewards"] is [Any] else {
-            throw ValidationError(
-                "--rewards-file must be a JSON {\"rewards\":[...]} request no larger than 1 MiB"
+        do {
+            return try MiningTemplateRequestBody.make(
+                rewardsRequest: data,
+                deployment: deployment,
+                minimumWork: minimumWork,
+                commitMinimumWorkTarget: commitMinimumWorkTarget
             )
+        } catch let refusal as MiningTemplateRequestBody.Refusal {
+            throw ValidationError(refusal.description)
         }
-        if deployment { object["mode"] = "deployment" }
-        if !minimumWork.isEmpty {
-            guard let field = MinerLoopLogic.minimumWorkField(minimumWork) else {
-                throw ValidationError(
-                    "--min-work takes <chain path>=<work>, work as 2^N or a positive decimal integer, at most once per chain"
-                )
-            }
-            object["minimumWork"] = field
-        }
-        if commitMinimumWorkTarget {
-            guard !minimumWork.isEmpty else {
-                throw ValidationError(
-                    "--commit-min-work-target commits the --min-work targets and needs at least one --min-work"
-                )
-            }
-            object["commitMinimumWorkTarget"] = true
-        }
-        return try JSONSerialization.data(withJSONObject: object)
     }
 }

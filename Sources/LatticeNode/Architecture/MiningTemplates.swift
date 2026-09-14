@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 import Ivy
 import Lattice
@@ -366,7 +367,11 @@ public actor MiningTemplateBook {
                 chunks.append(chunk[..<midpoint])
             }
         }
-        let workID = try BlockHeader(node: candidate).rawCID
+        let workID = Self.workID(
+            blockCID: try BlockHeader(node: candidate).rawCID,
+            minimumWork: minimumWork,
+            commitMinimumWorkTarget: commitMinimumWorkTarget
+        )
         let scheduling = try await Self.scheduling(
             root: candidate,
             children: children,
@@ -386,6 +391,31 @@ public actor MiningTemplateBook {
             thresholds: scheduling.thresholds
         )
         return template
+    }
+
+    /// Blocks no longer differ by the miner's filter, so the block CID alone
+    /// would let two search policies share one cached work item, each judged
+    /// against the other's search target. A request with a plan or the opt-in
+    /// gets the CID plus a digest of both; one with neither keeps the CID.
+    private nonisolated static func workID(
+        blockCID: String,
+        minimumWork: [[String]: UInt256],
+        commitMinimumWorkTarget: Bool
+    ) -> String {
+        guard !minimumWork.isEmpty || commitMinimumWorkTarget else {
+            return blockCID
+        }
+        let policy = minimumWork
+            .map { ($0.key.joined(separator: "/"), $0.value.toHexString()) }
+            .sorted { $0.0 < $1.0 }
+            .map { "\($0.0)=\($0.1)" }
+            .joined(separator: "\n")
+            + "\ncommit=\(commitMinimumWorkTarget)"
+        let digest = SHA256.hash(data: Data(policy.utf8))
+            .prefix(16)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "\(blockCID)-\(digest)"
     }
 
     /// The easiest threshold in the template, bounded by its hardest binding
@@ -419,6 +449,7 @@ public actor MiningTemplateBook {
         var easiestWitness: ChildSchedulingWitness?
         var bound = rootThreshold.binding ? rootThreshold.target : nil
         var boundWitness: ChildSchedulingWitness?
+        var unresolvedCap: UInt256?
         func bind(
             _ threshold: SearchThreshold,
             _ witness: ChildSchedulingWitness
@@ -466,11 +497,28 @@ public actor MiningTemplateBook {
                 easiest = childThreshold.target
                 easiestWitness = childWitness
             }
+            // A witness is a valid proof, not a promise that it names the
+            // chain setting the child's bound: a child node that predates or
+            // ignores the plan names another block, or none. Every filter
+            // below this child that its witness does not resolve caps the
+            // search outright — over-strict when that chain's committed target
+            // is already harder than its filter or the chain is absent, but
+            // never hiding a declined block.
+            for (path, work) in minimumWork
+            where path.count > childPath.count
+                && Array(path.prefix(childPath.count)) == childPath
+                && path != childPath + scheduled.path {
+                let cap = minimumWorkTarget(work)
+                unresolvedCap = min(unresolvedCap ?? cap, cap)
+            }
         }
-        if let bound, bound < easiest {
-            return (bound, boundWitness, thresholds)
-        }
-        return (easiest, easiestWitness, thresholds)
+        let searchTarget = [bound, unresolvedCap]
+            .compactMap { $0 }
+            .reduce(easiest, min)
+        // Any binding bound names its witness, even when it ties the easiest
+        // threshold: the level above re-derives the bound only from a witness
+        // naming the binding block.
+        return (searchTarget, bound == nil ? easiestWitness : boundWitness, thresholds)
     }
 
     private nonisolated static func makeCandidate(

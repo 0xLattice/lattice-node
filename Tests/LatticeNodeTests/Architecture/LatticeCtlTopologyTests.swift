@@ -168,6 +168,45 @@ final class LatticeCtlTopologyTests: XCTestCase {
             from: Data(#"{"chain":"Nexus","minWork":{"Nexus":"2^32"}}"#.utf8)
         )
         XCTAssertNil(legacy.commitMinWorkTarget)
+        XCTAssertEqual(
+            legacy.coordinatorMinimumWorkArguments,
+            ["--min-work", "Nexus=2^32"]
+        )
+    }
+
+    /// `mine.commitMinWorkTarget` reaches the coordinator as its flag, and
+    /// without any `mine.minWork` it would commit nothing, so the file is
+    /// refused by name.
+    func testCommitMinWorkTargetPassesThroughAndNeedsMinimumWork() throws {
+        func topology(_ mine: TopologyMine) -> Topology {
+            Topology(chains: ["Nexus": chain(4001)], mine: mine)
+        }
+        let optedIn = TopologyMine(
+            chain: "Nexus",
+            minWork: ["Nexus/Payments": "2^20", "Nexus": "2^32"],
+            commitMinWorkTarget: true
+        )
+        XCTAssertEqual(
+            try topology(optedIn).validated().mine?
+                .coordinatorMinimumWorkArguments,
+            [
+                "--min-work", "Nexus=2^32",
+                "--min-work", "Nexus/Payments=2^20",
+                "--commit-min-work-target",
+            ]
+        )
+        for minWork in [nil, [String: String]()] {
+            XCTAssertThrowsError(try topology(TopologyMine(
+                chain: "Nexus",
+                minWork: minWork,
+                commitMinWorkTarget: true
+            )).validated()) { error in
+                XCTAssertEqual(
+                    (error as? CtlError)?.description,
+                    "mine.commitMinWorkTarget commits the mine.minWork targets and needs at least one mine.minWork entry"
+                )
+            }
+        }
     }
 
     func testLayoutSeparatesIdentityFromWipeableChains() {

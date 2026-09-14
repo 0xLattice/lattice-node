@@ -581,6 +581,48 @@ public actor MiningCoordinator {
     }
 }
 
+/// The `POST /v1/mining/templates` body a coordinator sends: the externally
+/// signed rewards request with the operator's mining options merged in.
+public enum MiningTemplateRequestBody {
+    public struct Refusal: Error, CustomStringConvertible {
+        public let description: String
+    }
+
+    public static func make(
+        rewardsRequest data: Data,
+        deployment: Bool,
+        minimumWork: [String],
+        commitMinimumWorkTarget: Bool
+    ) throws -> Data {
+        guard data.count <= 1 << 20,
+              var object = try JSONSerialization.jsonObject(with: data)
+                as? [String: Any],
+              object["rewards"] is [Any] else {
+            throw Refusal(
+                description: "--rewards-file must be a JSON {\"rewards\":[...]} request no larger than 1 MiB"
+            )
+        }
+        if deployment { object["mode"] = "deployment" }
+        if !minimumWork.isEmpty {
+            guard let field = MinerLoopLogic.minimumWorkField(minimumWork) else {
+                throw Refusal(
+                    description: "--min-work takes <chain path>=<work>, work as 2^N or a positive decimal integer, at most once per chain"
+                )
+            }
+            object["minimumWork"] = field
+        }
+        if commitMinimumWorkTarget {
+            guard !minimumWork.isEmpty else {
+                throw Refusal(
+                    description: "--commit-min-work-target commits the --min-work targets and needs at least one --min-work"
+                )
+            }
+            object["commitMinimumWorkTarget"] = true
+        }
+        return try JSONSerialization.data(withJSONObject: object)
+    }
+}
+
 public final class HTTPMiningCoordinatorNodeClient: MiningCoordinatorNodeClient {
     private let apiBaseURL: URL
     private let templateRequestBody: Data

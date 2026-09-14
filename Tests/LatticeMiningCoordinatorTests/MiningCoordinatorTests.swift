@@ -283,6 +283,54 @@ private actor RangeRecorder {
     }
 }
 
+final class MiningTemplateRequestBodyTests: XCTestCase {
+    private let rewards = Data(#"{"rewards":[]}"#.utf8)
+
+    private func object(_ data: Data) throws -> [String: Any] {
+        try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+    }
+
+    func testMinimumWorkAloneLeavesTheOptInOff() throws {
+        let body = try object(MiningTemplateRequestBody.make(
+            rewardsRequest: rewards,
+            deployment: false,
+            minimumWork: ["Nexus=2^8"],
+            commitMinimumWorkTarget: false
+        ))
+        XCTAssertNotNil(body["minimumWork"])
+        XCTAssertNil(body["commitMinimumWorkTarget"])
+    }
+
+    func testCommitMinWorkTargetReachesTheRequest() throws {
+        let body = try object(MiningTemplateRequestBody.make(
+            rewardsRequest: rewards,
+            deployment: false,
+            minimumWork: ["Nexus=2^8"],
+            commitMinimumWorkTarget: true
+        ))
+        XCTAssertEqual(body["commitMinimumWorkTarget"] as? Bool, true)
+        XCTAssertEqual((body["minimumWork"] as? [Any])?.count, 1)
+    }
+
+    /// The opt-in commits the minimum-work targets; without one it would
+    /// silently do nothing, so it is refused by name.
+    func testCommitMinWorkTargetWithoutMinimumWorkIsRefused() {
+        XCTAssertThrowsError(try MiningTemplateRequestBody.make(
+            rewardsRequest: rewards,
+            deployment: false,
+            minimumWork: [],
+            commitMinimumWorkTarget: true
+        )) { error in
+            XCTAssertEqual(
+                (error as? MiningTemplateRequestBody.Refusal)?.description,
+                "--commit-min-work-target commits the --min-work targets and needs at least one --min-work"
+            )
+        }
+    }
+}
+
 final class MiningCoordinatorTests: XCTestCase {
     private let work = MiningCoordinatorWork(
         workId: "work-1",

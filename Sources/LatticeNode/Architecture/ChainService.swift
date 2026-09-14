@@ -1543,6 +1543,22 @@ public actor ChainService {
         }
     }
 
+    /// A child candidate for one parent request, built from every field of the
+    /// request context, so a caller relaying the hierarchy plane cannot drop
+    /// part of the miner's plan.
+    public func miningCandidate(
+        for context: ChildCandidateRequestContext,
+        parentContentSource: any ContentSource
+    ) async throws -> DirectChildCandidate {
+        try await miningCandidate(
+            parentCarrier: context.parentCarrier,
+            parentContentSource: parentContentSource,
+            rewards: context.rewards,
+            minimumWork: context.minimumWork,
+            commitMinimumWorkTarget: context.commitMinimumWorkTarget
+        )
+    }
+
     /// Hierarchy-only child candidate construction. The authenticated parent
     /// supplies the provisional carrier whose `prevState` this block must bind.
     public func miningCandidate(

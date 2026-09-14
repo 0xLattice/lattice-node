@@ -213,12 +213,15 @@ lattice-mining-coordinator \
   miners could raise it at will, the difficulty schedule would follow miner
   preference, and other miners would gain a reason to extend the parent with
   a canonical-target sibling on a faster schedule.
-- The trade-off is real. Fork choice credits `workForTarget(block.target)`,
-  so a block committing the maximum target carries about one unit of work
-  however hard the miner searched for it. A filter that paces blocks near the
-  target block time therefore keeps committed difficulty pinned at the
-  maximum: the retarget only sees solve times, and on-schedule blocks give it
-  nothing to correct. Difficulty climbs only through blocks faster than the
+- The trade-off is real. Fork choice credits a Nexus block
+  `workForTarget(block.target)`, so a Nexus block committing the maximum
+  target carries about one unit of work however hard the miner searched for
+  it. (A child block is credited the larger of its own target's work and that
+  of the strongest ancestor carrier its hash also satisfies, so a max-target
+  child carried by a valid Nexus block is credited the Nexus target's work.)
+  A filter that paces blocks near the target block time therefore keeps
+  committed difficulty pinned at the maximum: the retarget only sees solve
+  times, and on-schedule blocks give it nothing to correct. Difficulty climbs only through blocks faster than the
   target, and because the retarget (a linearly weighted moving average of
   solve times) is unclamped, a run of fast blocks can over-correct it in a
   single step. Choose the value knowing it paces blocks without raising the
@@ -236,19 +239,35 @@ lattice-mining-coordinator \
   that chain's filter declined. Wherever a filter is harder than its chain's
   scheduled target, the search therefore stops at the hardest such threshold
   in the template, including descendants below a child. Merged-mined chains
-  then advance no faster than that filter allows: for example, a filtered
-  Nexus pinned at the maximum target holds every merged child to the Nexus
-  threshold, even a child with no filter of its own.
+  then advance no faster than that filter allows, in both directions:
+  - a filtered Nexus pinned at the maximum target holds every merged child to
+    the Nexus threshold, even a child with no filter of its own;
+  - a child filter harder than the Nexus schedule holds this miner's Nexus
+    production to the child's threshold — a Nexus block at its easier
+    committed target would carry the declined child block — and, because
+    those Nexus blocks then arrive no faster than the child filter allows,
+    keeps the Nexus committed target where it is (at the maximum, on a fresh
+    chain).
+- A filter two or more levels below the Nexus is visible to the Nexus only
+  through the witness each child node returns with its candidate. Where that
+  witness does not name the filtered chain — a child node without this
+  behaviour, or one that never received the entry — the Nexus caps the search
+  at that filter's target outright. This fails closed, and it can be stricter
+  than needed: when that chain's committed target is already harder than its
+  filter, or when the chain is not in the template at all.
 
 `--commit-min-work-target` (`mine.commitMinWorkTarget` in `lattice.json`) is
 the operator opt-in to the earlier behaviour, off by default: each filtered
 chain's block commits the harder `min(scheduled target, floor(2^256 / work) -
 1)`. Validity permits it (`target <= parent.nextTarget`) and `nextTarget` is
 recomputed from the target actually used, so the retarget sees real difficulty
-from block 1 and the search is never held to another chain's filter — at the
+from block 1 and the search is not held to another chain's filter — at the
 cost of a committed target, and so a difficulty schedule, that follows this
 miner's preference. It needs at least one `--min-work`, and reaches child
-chains with the minimum work it applies to.
+chains with the minimum work it applies to. A child node that predates the
+opt-in refuses such a candidate request as malformed rather than misreading
+it, so an opted-in miner mines without that child; the parent node records
+each such missing candidate in its trace log (`LATTICE_SYNC_TRACE`).
 
 If block production stalls:
 
