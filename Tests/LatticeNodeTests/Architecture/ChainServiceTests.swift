@@ -874,7 +874,10 @@ final class ChainServiceTests: XCTestCase {
                 SubmitTransactionRequest(transaction: transaction)
             )
             let candidate = try await fixture.service.miningCandidate(
-                parentCarrier: fixture.parentCarrier,
+                for: ChildCandidateRequestContext(
+                    parentCarrier: fixture.parentCarrier,
+                    rewards: []
+                ),
                 parentContentSource: FetcherContentSource(fixture.parent)
             )
             return (candidate, await fixture.service.status())
@@ -885,7 +888,10 @@ final class ChainServiceTests: XCTestCase {
             SubmitTransactionRequest(transaction: transaction)
         )
         let sizedCandidate = try await sizing.service.miningCandidate(
-            parentCarrier: sizing.parentCarrier,
+            for: ChildCandidateRequestContext(
+                parentCarrier: sizing.parentCarrier,
+                rewards: []
+            ),
             parentContentSource: FetcherContentSource(sizing.parent)
         )
         let logicalSize = try await sizedCandidate.block.logicalContentByteSize(
@@ -955,7 +961,10 @@ final class ChainServiceTests: XCTestCase {
                 )
             }
             return try await fixture.service.miningCandidate(
-                parentCarrier: fixture.parentCarrier,
+                for: ChildCandidateRequestContext(
+                    parentCarrier: fixture.parentCarrier,
+                    rewards: []
+                ),
                 parentContentSource: FetcherContentSource(fixture.parent)
             )
         }
@@ -967,7 +976,10 @@ final class ChainServiceTests: XCTestCase {
             )
         }
         let six = try await sizing.service.miningCandidate(
-            parentCarrier: sizing.parentCarrier,
+            for: ChildCandidateRequestContext(
+                parentCarrier: sizing.parentCarrier,
+                rewards: []
+            ),
             parentContentSource: FetcherContentSource(sizing.parent)
         )
         let sixSize = try await six.block.logicalContentByteSize(
@@ -981,7 +993,10 @@ final class ChainServiceTests: XCTestCase {
             )
         }
         let seven = try await fullSizing.service.miningCandidate(
-            parentCarrier: fullSizing.parentCarrier,
+            for: ChildCandidateRequestContext(
+                parentCarrier: fullSizing.parentCarrier,
+                rewards: []
+            ),
             parentContentSource: FetcherContentSource(fullSizing.parent)
         )
         let sevenSize = try await seven.block.logicalContentByteSize(
@@ -1052,7 +1067,10 @@ final class ChainServiceTests: XCTestCase {
             }
             return (
                 try await service.miningCandidate(
-                    parentCarrier: fixture.parentCarrier,
+                    for: ChildCandidateRequestContext(
+                        parentCarrier: fixture.parentCarrier,
+                        rewards: []
+                    ),
                     parentContentSource: FetcherContentSource(fixture.parent)
                 ),
                 fixture.process
@@ -1130,7 +1148,10 @@ final class ChainServiceTests: XCTestCase {
         )
         func scheduledDirectory() async throws -> String {
             let candidate = try await stableService.miningCandidate(
-                parentCarrier: stableFixture.parentCarrier,
+                for: ChildCandidateRequestContext(
+                    parentCarrier: stableFixture.parentCarrier,
+                    rewards: []
+                ),
                 parentContentSource: FetcherContentSource(stableFixture.parent)
             )
             return try XCTUnwrap(
@@ -2202,9 +2223,11 @@ final class ChainServiceTests: XCTestCase {
             SubmitTransactionRequest(transaction: ordinary)
         )
         let livenessCandidate = try await childService.miningCandidate(
-            parentCarrier: nextParentCarrier,
-            parentContentSource: FetcherContentSource(parentProcess),
-            rewards: []
+            for: ChildCandidateRequestContext(
+                parentCarrier: nextParentCarrier,
+                rewards: []
+            ),
+            parentContentSource: FetcherContentSource(parentProcess)
         )
         let selectedTransactions = try await livenessCandidate.block.transactions
             .resolve(fetcher: childProcess)
@@ -2226,12 +2249,14 @@ final class ChainServiceTests: XCTestCase {
         let candidate: DirectChildCandidate
         do {
             candidate = try await childService.miningCandidate(
-                parentCarrier: nextParentCarrier,
-                parentContentSource: FetcherContentSource(parentProcess),
-                rewards: [MiningReward(
-                    chainPath: ["Nexus", "Payments"],
-                    transaction: childReward
-                )]
+                for: ChildCandidateRequestContext(
+                    parentCarrier: nextParentCarrier,
+                    rewards: [MiningReward(
+                        chainPath: ["Nexus", "Payments"],
+                        transaction: childReward
+                    )]
+                ),
+                parentContentSource: FetcherContentSource(parentProcess)
             )
         } catch {
             XCTFail("contextual child candidate failed: \(error)")
@@ -2286,12 +2311,18 @@ final class ChainServiceTests: XCTestCase {
         )
 
         let first = try await fixture.service.miningCandidate(
-            parentCarrier: firstCarrier,
+            for: ChildCandidateRequestContext(
+                parentCarrier: firstCarrier,
+                rewards: []
+            ),
             parentContentSource: FetcherContentSource(fixture.parent)
         )
         try await Task.sleep(for: .milliseconds(20))
         let second = try await fixture.service.miningCandidate(
-            parentCarrier: secondCarrier,
+            for: ChildCandidateRequestContext(
+                parentCarrier: secondCarrier,
+                rewards: []
+            ),
             parentContentSource: FetcherContentSource(fixture.parent)
         )
 
@@ -2318,7 +2349,10 @@ final class ChainServiceTests: XCTestCase {
                 fetcher: fixture.parent
             )
             let candidate = try await fixture.service.miningCandidate(
-                parentCarrier: carrier,
+                for: ChildCandidateRequestContext(
+                    parentCarrier: carrier,
+                    rewards: []
+                ),
                 parentContentSource: FetcherContentSource(fixture.parent)
             )
             candidateCIDs.insert(try BlockHeader(node: candidate.block).rawCID)

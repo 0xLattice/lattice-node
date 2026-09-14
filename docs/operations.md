@@ -253,21 +253,39 @@ lattice-mining-coordinator \
   witness does not name the filtered chain — a child node without this
   behaviour, or one that never received the entry — the Nexus caps the search
   at that filter's target outright. This fails closed, and it can be stricter
-  than needed: when that chain's committed target is already harder than its
-  filter, or when the chain is not in the template at all.
+  than needed:
+  - when the chain is not in the template at all;
+  - whenever that filter does not bind, meaning the chain's committed target
+    is already at or harder than the filter target. Each child node returns a
+    single witness, the block that sets its own search target, so a
+    non-binding filtered chain two or more levels down is normally not the one
+    it names, and the Nexus caps every descendant path the witness does not
+    name. This happens with or without `--commit-min-work-target`: under the
+    opt-in every filtered chain commits its filter target, so no filter binds,
+    and in a tree three or more levels deep the search is still held to those
+    deeper filters.
+
+  The cap costs only this miner's own template (a search harder than its
+  blocks need); it never admits a declined block and has no consensus effect.
+  Removing it would need each child node to return one witness per filtered
+  path in its subtree, a change to the child candidate wire format. That
+  belongs with the merged-mining design for deployed child chains and is not
+  made here.
 
 `--commit-min-work-target` (`mine.commitMinWorkTarget` in `lattice.json`) is
 the operator opt-in to the earlier behaviour, off by default: each filtered
 chain's block commits the harder `min(scheduled target, floor(2^256 / work) -
 1)`. Validity permits it (`target <= parent.nextTarget`) and `nextTarget` is
 recomputed from the target actually used, so the retarget sees real difficulty
-from block 1 and the search is not held to another chain's filter — at the
-cost of a committed target, and so a difficulty schedule, that follows this
-miner's preference. It needs at least one `--min-work`, and reaches child
+from block 1. Nexus and its direct children are then not held to one
+another's filters, but filters two or more levels below a direct child can
+still hold the search, as described above. The cost is a committed target, and
+so a difficulty schedule, that follows this miner's preference. It needs at least one `--min-work`, and reaches child
 chains with the minimum work it applies to. A child node that predates the
 opt-in refuses such a candidate request as malformed rather than misreading
-it, so an opted-in miner mines without that child; the parent node records
-each such missing candidate in its trace log (`LATTICE_SYNC_TRACE`).
+it, so an opted-in miner mines without that child. The parent node's trace
+log (`LATTICE_SYNC_TRACE`) records every child that returned no candidate for
+an opted-in request, whatever the cause; a pre-opt-in child is one.
 
 If block production stalls:
 

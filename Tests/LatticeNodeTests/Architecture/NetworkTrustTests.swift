@@ -6039,9 +6039,8 @@ final class NetworkTrustTests: XCTestCase {
             childCandidateBuilder: { [weak childService] context, parentSource in
                 guard let childService else { return nil }
                 return try await childService.miningCandidate(
-                    parentCarrier: context.parentCarrier,
-                    parentContentSource: parentSource,
-                    rewards: context.rewards
+                    for: context,
+                    parentContentSource: parentSource
                 )
             },
             candidateReservations: { [weak reservationGate] update in

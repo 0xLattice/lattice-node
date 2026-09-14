@@ -1561,12 +1561,14 @@ public actor ChainService {
 
     /// Hierarchy-only child candidate construction. The authenticated parent
     /// supplies the provisional carrier whose `prevState` this block must bind.
-    public func miningCandidate(
+    /// Private and without defaults: `miningCandidate(for:)` is the only way
+    /// in, so no caller can build a candidate from part of the miner's plan.
+    private func miningCandidate(
         parentCarrier: Block,
         parentContentSource: any ContentSource,
-        rewards: [MiningReward] = [],
-        minimumWork: [MiningMinimumWork] = [],
-        commitMinimumWorkTarget: Bool = false
+        rewards: [MiningReward],
+        minimumWork: [MiningMinimumWork],
+        commitMinimumWorkTarget: Bool
     ) async throws -> DirectChildCandidate {
         await acquireOperation()
         defer { releaseOperation() }

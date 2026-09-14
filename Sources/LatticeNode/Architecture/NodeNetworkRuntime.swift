@@ -1406,14 +1406,16 @@ public actor NodeNetworkRuntime: IvyDelegate {
                         generation: generation,
                         process: process
                     )
-                    // A child node that predates the opt-in refuses the
-                    // request's trailing byte as malformed and answers nothing,
-                    // so an opted-in miner loses that child with no other sign.
+                    // No candidate has many causes (deadline, capacity, a
+                    // restarted runtime). One is specific to the opt-in: a
+                    // child node that predates it refuses the request's
+                    // trailing byte as malformed and answers nothing, so an
+                    // opted-in miner would otherwise lose that child silently.
                     if candidate == nil,
                        context.commitMinimumWorkTarget,
                        !minimumWork.isEmpty {
                         SyncTrace.log(
-                            "child candidate path=\(path.joined(separator: "/")) missing with commitMinimumWorkTarget; a child node without the opt-in refuses such requests"
+                            "child candidate path=\(path.joined(separator: "/")) not returned for a commitMinimumWorkTarget request; one possible cause is a child node without the opt-in, which refuses such requests"
                         )
                     }
                     return (rank, candidate)

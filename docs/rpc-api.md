@@ -135,9 +135,15 @@ returns a witness naming the block that sets its search target. Where that
 witness names a filtered descendant, the Nexus re-derives the descendant's
 threshold from it; for every other filtered chain two or more levels down it
 caps `searchTarget` at that entry's `floor(2^256 / work) - 1` outright. That
-fails closed against a child node that ignores or predates the entry, and is
-stricter than needed when that chain's committed target is already harder
-than its filter or the chain is absent from the template. It is a template choice of the miner that asked,
+fails closed against a child node that ignores or predates the entry. It is
+stricter than needed when the chain is absent from the template, and whenever
+that filter does not bind (the chain's committed target is at or harder than
+the filter target), with or without `commitMinimumWorkTarget`: each child
+returns a single witness, so a non-binding filtered chain two or more levels
+down is normally left unnamed and still caps the search. Removing that
+over-strictness needs a child to return one witness per filtered path in its
+subtree, a change to the child candidate wire format that this API does not
+make. It is a template choice of the miner that asked,
 not consensus: admission, validation, and fork choice are untouched, and a
 block from any other miner at the scheduled target is still accepted. Absent,
 templates are exactly the schedule.
@@ -147,8 +153,8 @@ each `minimumWork` threshold into that chain's block as its target instead of
 the scheduled one. It travels with the descendant entries to the child that
 builds each block, as one trailing byte on the candidate request. A child node
 that predates it refuses that request as malformed, so the template goes
-without that child; the parent records each such missing candidate in its
-trace log (`LATTICE_SYNC_TRACE`).
+without that child. The parent's trace log (`LATTICE_SYNC_TRACE`) records every
+child that returned no candidate for such a request, whatever the cause.
 
 An entry naming an unknown or duplicate path, zero work, or more work than any
 valid target can represent is refused with `400` `invalidMinimumWork`. That
@@ -185,7 +191,7 @@ Response fields:
 ### `POST /v1/mining/work`
 
 ```json
-{"workID": "<candidate-cid>", "nonce": 123456}
+{"workID": "<workID from the template>", "nonce": 123456}
 ```
 
 Response fields are `accepted`, `disposition`, `tipCID`,
