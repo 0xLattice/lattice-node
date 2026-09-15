@@ -874,7 +874,10 @@ final class ChainServiceTests: XCTestCase {
                 SubmitTransactionRequest(transaction: transaction)
             )
             let candidate = try await fixture.service.miningCandidate(
-                parentCarrier: fixture.parentCarrier,
+                for: ChildCandidateRequestContext(
+                    parentCarrier: fixture.parentCarrier,
+                    rewards: []
+                ),
                 parentContentSource: FetcherContentSource(fixture.parent)
             )
             return (candidate, await fixture.service.status())
@@ -885,7 +888,10 @@ final class ChainServiceTests: XCTestCase {
             SubmitTransactionRequest(transaction: transaction)
         )
         let sizedCandidate = try await sizing.service.miningCandidate(
-            parentCarrier: sizing.parentCarrier,
+            for: ChildCandidateRequestContext(
+                parentCarrier: sizing.parentCarrier,
+                rewards: []
+            ),
             parentContentSource: FetcherContentSource(sizing.parent)
         )
         let logicalSize = try await sizedCandidate.block.logicalContentByteSize(
@@ -955,7 +961,10 @@ final class ChainServiceTests: XCTestCase {
                 )
             }
             return try await fixture.service.miningCandidate(
-                parentCarrier: fixture.parentCarrier,
+                for: ChildCandidateRequestContext(
+                    parentCarrier: fixture.parentCarrier,
+                    rewards: []
+                ),
                 parentContentSource: FetcherContentSource(fixture.parent)
             )
         }
@@ -967,7 +976,10 @@ final class ChainServiceTests: XCTestCase {
             )
         }
         let six = try await sizing.service.miningCandidate(
-            parentCarrier: sizing.parentCarrier,
+            for: ChildCandidateRequestContext(
+                parentCarrier: sizing.parentCarrier,
+                rewards: []
+            ),
             parentContentSource: FetcherContentSource(sizing.parent)
         )
         let sixSize = try await six.block.logicalContentByteSize(
@@ -981,7 +993,10 @@ final class ChainServiceTests: XCTestCase {
             )
         }
         let seven = try await fullSizing.service.miningCandidate(
-            parentCarrier: fullSizing.parentCarrier,
+            for: ChildCandidateRequestContext(
+                parentCarrier: fullSizing.parentCarrier,
+                rewards: []
+            ),
             parentContentSource: FetcherContentSource(fullSizing.parent)
         )
         let sevenSize = try await seven.block.logicalContentByteSize(
@@ -1052,7 +1067,10 @@ final class ChainServiceTests: XCTestCase {
             }
             return (
                 try await service.miningCandidate(
-                    parentCarrier: fixture.parentCarrier,
+                    for: ChildCandidateRequestContext(
+                        parentCarrier: fixture.parentCarrier,
+                        rewards: []
+                    ),
                     parentContentSource: FetcherContentSource(fixture.parent)
                 ),
                 fixture.process
@@ -1130,7 +1148,10 @@ final class ChainServiceTests: XCTestCase {
         )
         func scheduledDirectory() async throws -> String {
             let candidate = try await stableService.miningCandidate(
-                parentCarrier: stableFixture.parentCarrier,
+                for: ChildCandidateRequestContext(
+                    parentCarrier: stableFixture.parentCarrier,
+                    rewards: []
+                ),
                 parentContentSource: FetcherContentSource(stableFixture.parent)
             )
             return try XCTUnwrap(
@@ -1332,11 +1353,11 @@ final class ChainServiceTests: XCTestCase {
     }
 
     /// The full node path on a fresh Nexus whose genesis is at the maximum
-    /// target: with a minimum work the miner asked for, every block is built
-    /// at that target and Lattice accepts each one — validity recomputes
-    /// `nextTarget` from the target actually used. Without it the same chain
-    /// hands out the genesis target, block after free block.
-    func testMinimumWorkMinesEveryNexusBlockAtTheFilterTarget() async throws {
+    /// target, by default: every block commits the scheduled target, the
+    /// search is the miner's filter, a hash that meets the filter is a valid
+    /// block the node canonicalizes, and a hash that clears the committed
+    /// target but misses the filter is refused before admission.
+    func testMinimumWorkByDefaultMinesScheduledBlocksAtTheFilter() async throws {
         let work = UInt256(1) << 10
         let filterTarget = minimumWorkTarget(work)
         let process = try await nexusProcess()
@@ -1345,6 +1366,65 @@ final class ChainServiceTests: XCTestCase {
             chainPath: ["Nexus"],
             work: work
         )])
+        for _ in 0..<4 {
+            let previous = try await process.canonicalTipBlock()
+            let template = try await service.miningTemplate(request)
+            XCTAssertEqual(template.block.target, previous.nextTarget)
+            XCTAssertEqual(template.block.target, .max)
+            XCTAssertEqual(template.searchTarget, filterTarget)
+            XCTAssertEqual(template.targets, [filterTarget])
+
+            // Clears the committed target (every hash does) but not the
+            // filter: the miner declined this block, so the node refuses it.
+            let declined = firstNonce(of: template.block, from: 0) {
+                $0 > filterTarget
+            }
+            await XCTAssertThrowsErrorAsync(
+                try await service.submitWork(SubmitWorkRequest(
+                    workID: template.workID,
+                    nonce: declined
+                ))
+            ) { error in
+                XCTAssertEqual(
+                    error as? MiningTemplateError,
+                    .missesSearchTarget
+                )
+            }
+            let tipAfterRefusal = await process.status().tipCID
+            XCTAssertEqual(tipAfterRefusal, try BlockHeader(node: previous).rawCID)
+
+            // Meeting the filter necessarily meets the committed target, and
+            // the node's own admission agrees.
+            let nonce = firstNonce(of: template.block, from: 0) {
+                $0 <= template.searchTarget
+            }
+            let response = try await service.submitWork(SubmitWorkRequest(
+                workID: template.workID,
+                nonce: nonce
+            ))
+            XCTAssertEqual(response.disposition, .canonicalized)
+            let tip = try await process.canonicalTipBlock()
+            XCTAssertEqual(tip.target, .max)
+            XCTAssertLessThanOrEqual(tip.proofOfWorkHash(), filterTarget)
+        }
+    }
+
+    /// The operator opt-in, on a fresh Nexus whose genesis is at the maximum
+    /// target: every block is built at the minimum-work target and Lattice
+    /// accepts each one — validity recomputes `nextTarget` from the target
+    /// actually used. Without a minimum work the same chain hands out the
+    /// genesis target, block after free block.
+    func testCommittedMinimumWorkMinesEveryNexusBlockAtTheFilterTarget()
+        async throws
+    {
+        let work = UInt256(1) << 10
+        let filterTarget = minimumWorkTarget(work)
+        let process = try await nexusProcess()
+        let service = makeService(process: process)
+        let request = MiningTemplateRequest(
+            minimumWork: [MiningMinimumWork(chainPath: ["Nexus"], work: work)],
+            commitMinimumWorkTarget: true
+        )
         for _ in 0..<4 {
             let template = try await service.miningTemplate(request)
             XCTAssertEqual(template.block.target, filterTarget)
@@ -1370,14 +1450,15 @@ final class ChainServiceTests: XCTestCase {
     }
 
     /// The minimum work is the miner's choice, not a rule the node enforces:
-    /// after filtered blocks it still accepts another producer's block at the
-    /// scheduled (easier) target.
+    /// after blocks committed at the minimum-work target it still accepts
+    /// another producer's block at the scheduled (easier) target.
     func testNodeAcceptsAnUnfilteredBlockAtTheScheduledTarget() async throws {
         let work = UInt256(1) << 10
         let process = try await nexusProcess()
         let service = makeService(process: process)
         let template = try await service.miningTemplate(MiningTemplateRequest(
-            minimumWork: [MiningMinimumWork(chainPath: ["Nexus"], work: work)]
+            minimumWork: [MiningMinimumWork(chainPath: ["Nexus"], work: work)],
+            commitMinimumWorkTarget: true
         ))
         let nonce = firstNonce(of: template.block, from: 0) {
             $0 <= template.block.target
@@ -1405,60 +1486,56 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertTrue(outcome.decision.isAccepted)
     }
 
-    /// Merged mining: each chain's block in one template is built at its own
-    /// effective target, and the node classifies a submitted nonce against
-    /// those targets — a hash that clears a chain's scheduled target but
-    /// misses its minimum work advances nothing.
+    /// Merged mining, by default: every block in the template commits its
+    /// scheduled target, and each chain's minimum work shapes only the
+    /// thresholds the miner searches for. The node classifies a submitted
+    /// nonce against those thresholds — a hash that clears a chain's
+    /// committed target but misses its minimum work advances nothing.
     func testMergedTemplateAppliesEachChainsOwnMinimumWork() async throws {
-        let fixture = try await activeChildService(spec: NexusGenesis.spec)
-        // The parent already retargeted to a hard schedule; its child is a
-        // fresh chain still at the maximum genesis target.
+        // The parent already retargeted to a harder schedule (about 2^-12 of
+        // the maximum, so every nonce search below takes a few thousand
+        // hashes at most on average); its child is a fresh chain still at the
+        // maximum genesis target.
+        let fixture = try await activeChildService(
+            spec: NexusGenesis.spec,
+            carrierInterval: 879
+        )
         let parentTip = try await fixture.parent.canonicalTipBlock()
         let parentTarget = parentTip.nextTarget
-        XCTAssertLessThan(parentTarget, UInt256.max >> 16)
+        XCTAssertLessThan(parentTarget, UInt256.max >> 11)
         let childWork = UInt256(1) << 4
         let childTarget = minimumWorkTarget(childWork)
         // Asking for less work than the parent's own schedule changes nothing
-        // there: the filter never makes a block easier.
+        // there: the filter never makes a search easier.
         let parentWork = UInt256(1) << 8
         XCTAssertGreaterThan(minimumWorkTarget(parentWork), parentTarget)
-        let childCandidates = MinedChildCandidates()
-        let service = makeService(
-            process: fixture.parent,
-            childCandidateProvider: { context in
-                let candidate = try await fixture.service.miningCandidate(
-                    parentCarrier: context.parentCarrier,
-                    parentContentSource: FetcherContentSource(fixture.parent),
-                    rewards: context.rewards,
-                    minimumWork: context.minimumWork
-                )
-                await childCandidates.record(candidate.block)
-                return [candidate]
-            }
-        )
-        let template = try await service.miningTemplate(MiningTemplateRequest(
-            minimumWork: [
+        let merged = mergedMiningService(fixture)
+        let template = try await merged.service.miningTemplate(
+            MiningTemplateRequest(minimumWork: [
                 MiningMinimumWork(chainPath: ["Nexus"], work: parentWork),
                 MiningMinimumWork(
                     chainPath: ["Nexus", "Payments"],
                     work: childWork
                 ),
-            ]
-        ))
-        let lastChildCandidate = await childCandidates.last()
+            ])
+        )
+        let lastChildCandidate = await merged.children.last()
         let childBlock = try XCTUnwrap(lastChildCandidate)
+        let childTip = try await fixture.process.canonicalTipBlock()
         XCTAssertEqual(template.block.target, parentTarget)
-        XCTAssertEqual(childBlock.target, childTarget)
+        XCTAssertEqual(childBlock.target, childTip.nextTarget)
+        XCTAssertEqual(childBlock.target, .max)
         XCTAssertEqual(template.searchTarget, childTarget)
         XCTAssertEqual(template.targets, [childTarget, parentTarget])
+        XCTAssertFalse(template.targets.contains(childBlock.target))
 
-        // The child genesis is at the maximum target, so this hash clears the
-        // child's SCHEDULE and misses its minimum work: no child block.
+        // This hash clears the child's committed (maximum) target and misses
+        // its minimum work: no child block.
         let tooEasy = firstNonce(of: template.block, from: 0) {
             $0 > childTarget
         }
         await XCTAssertThrowsErrorAsync(
-            try await service.submitWork(SubmitWorkRequest(
+            try await merged.service.submitWork(SubmitWorkRequest(
                 workID: template.workID,
                 nonce: tooEasy
             ))
@@ -1468,11 +1545,11 @@ final class ChainServiceTests: XCTestCase {
         let tipAfterRefusal = await fixture.parent.status().tipCID
         XCTAssertEqual(tipAfterRefusal, template.block.parent?.rawCID)
 
-        // Between the two minimums: the child advances, the parent does not.
+        // Between the two thresholds: the child advances, the parent does not.
         let carrierNonce = firstNonce(of: template.block, from: 0) {
             $0 <= childTarget && $0 > parentTarget
         }
-        let carried = try await service.submitWork(SubmitWorkRequest(
+        let carried = try await merged.service.submitWork(SubmitWorkRequest(
             workID: template.workID,
             nonce: carrierNonce
         ))
@@ -1482,7 +1559,7 @@ final class ChainServiceTests: XCTestCase {
             of: template.block,
             from: carrierNonce + 1
         ) { $0 <= parentTarget }
-        let accepted = try await service.submitWork(SubmitWorkRequest(
+        let accepted = try await merged.service.submitWork(SubmitWorkRequest(
             workID: template.workID,
             nonce: parentNonce
         ))
@@ -1491,6 +1568,283 @@ final class ChainServiceTests: XCTestCase {
             accepted.durableChildProofs.map(\.directory),
             ["Payments"]
         )
+    }
+
+    /// One nonce commits every chain at once. With the parent's minimum work
+    /// harder than its schedule, a hash that clears only the child's threshold
+    /// can still clear the parent's committed target — a valid parent block
+    /// the miner declined. The search therefore stops at the parent's
+    /// threshold, and such a hash is refused rather than admitted.
+    func testMergedSearchStopsAtABindingParentMinimumWork() async throws {
+        // Parent schedule about 2^-4 of the maximum, filter 2^8: each nonce
+        // search below takes a few hundred hashes on average.
+        let fixture = try await activeChildService(
+            spec: NexusGenesis.spec,
+            carrierInterval: 225_000
+        )
+        let parentTip = try await fixture.parent.canonicalTipBlock()
+        let parentTarget = parentTip.nextTarget
+        let parentWork = UInt256(1) << 8
+        let parentThreshold = minimumWorkTarget(parentWork)
+        XCTAssertLessThan(parentThreshold, parentTarget)
+        XCTAssertGreaterThan(parentTarget, UInt256.max >> 5)
+        let merged = mergedMiningService(fixture)
+        // No minimum work for the child: its threshold is its schedule.
+        let template = try await merged.service.miningTemplate(
+            MiningTemplateRequest(minimumWork: [
+                MiningMinimumWork(chainPath: ["Nexus"], work: parentWork),
+            ])
+        )
+        let lastChildCandidate = await merged.children.last()
+        let childBlock = try XCTUnwrap(lastChildCandidate)
+        XCTAssertEqual(template.block.target, parentTarget)
+        XCTAssertEqual(childBlock.target, .max)
+        XCTAssertEqual(template.searchTarget, parentThreshold)
+        XCTAssertEqual(template.targets, [parentThreshold])
+
+        let declined = firstNonce(of: template.block, from: 0) {
+            $0 <= parentTarget && $0 > parentThreshold
+        }
+        await XCTAssertThrowsErrorAsync(
+            try await merged.service.submitWork(SubmitWorkRequest(
+                workID: template.workID,
+                nonce: declined
+            ))
+        ) { error in
+            XCTAssertEqual(error as? MiningTemplateError, .missesSearchTarget)
+        }
+        let tipAfterRefusal = await fixture.parent.status().tipCID
+        XCTAssertEqual(tipAfterRefusal, template.block.parent?.rawCID)
+
+        let nonce = firstNonce(of: template.block, from: 0) {
+            $0 <= parentThreshold
+        }
+        let accepted = try await merged.service.submitWork(SubmitWorkRequest(
+            workID: template.workID,
+            nonce: nonce
+        ))
+        XCTAssertEqual(accepted.disposition, .canonicalized)
+        XCTAssertEqual(
+            accepted.durableChildProofs.map(\.directory),
+            ["Payments"]
+        )
+    }
+
+    /// The same bound from the other side: a child minimum work harder than
+    /// the parent's schedule. A hash that clears the parent's target but not
+    /// the child's threshold would publish a parent block committing a child
+    /// block at its maximum target — one the miner declined — so the search
+    /// stops at the child's threshold.
+    func testMergedSearchStopsAtABindingChildMinimumWork() async throws {
+        // Parent schedule about 2^-4 of the maximum, filter 2^8: each nonce
+        // search below takes a few hundred hashes on average.
+        let fixture = try await activeChildService(
+            spec: NexusGenesis.spec,
+            carrierInterval: 225_000
+        )
+        let parentTip = try await fixture.parent.canonicalTipBlock()
+        let parentTarget = parentTip.nextTarget
+        let childWork = UInt256(1) << 8
+        let childThreshold = minimumWorkTarget(childWork)
+        XCTAssertLessThan(childThreshold, parentTarget)
+        XCTAssertGreaterThan(parentTarget, UInt256.max >> 5)
+        let merged = mergedMiningService(fixture)
+        let template = try await merged.service.miningTemplate(
+            MiningTemplateRequest(minimumWork: [
+                MiningMinimumWork(
+                    chainPath: ["Nexus", "Payments"],
+                    work: childWork
+                ),
+            ])
+        )
+        let lastChildCandidate = await merged.children.last()
+        let childBlock = try XCTUnwrap(lastChildCandidate)
+        XCTAssertEqual(template.block.target, parentTarget)
+        XCTAssertEqual(childBlock.target, .max)
+        XCTAssertEqual(template.searchTarget, childThreshold)
+        XCTAssertEqual(template.targets, [childThreshold])
+
+        let declined = firstNonce(of: template.block, from: 0) {
+            $0 <= parentTarget && $0 > childThreshold
+        }
+        await XCTAssertThrowsErrorAsync(
+            try await merged.service.submitWork(SubmitWorkRequest(
+                workID: template.workID,
+                nonce: declined
+            ))
+        ) { error in
+            XCTAssertEqual(error as? MiningTemplateError, .missesSearchTarget)
+        }
+        let tipAfterRefusal = await fixture.parent.status().tipCID
+        XCTAssertEqual(tipAfterRefusal, template.block.parent?.rawCID)
+
+        let nonce = firstNonce(of: template.block, from: 0) {
+            $0 <= childThreshold
+        }
+        let accepted = try await merged.service.submitWork(SubmitWorkRequest(
+            workID: template.workID,
+            nonce: nonce
+        ))
+        XCTAssertEqual(accepted.disposition, .canonicalized)
+        XCTAssertEqual(
+            accepted.durableChildProofs.map(\.directory),
+            ["Payments"]
+        )
+    }
+
+    /// The operator opt-in reaches the child that builds its own block: each
+    /// chain commits its minimum-work target, and nothing bounds the search
+    /// because no committed target is easier than its threshold.
+    func testCommittedMinimumWorkBuildsEachMergedChainAtItsOwnTarget()
+        async throws
+    {
+        let fixture = try await activeChildService(
+            spec: NexusGenesis.spec,
+            carrierInterval: 225_000
+        )
+        let parentTip = try await fixture.parent.canonicalTipBlock()
+        let parentWork = UInt256(1) << 8
+        let parentThreshold = minimumWorkTarget(parentWork)
+        XCTAssertLessThan(parentThreshold, parentTip.nextTarget)
+        let childWork = UInt256(1) << 4
+        let childTarget = minimumWorkTarget(childWork)
+        let merged = mergedMiningService(fixture)
+        let template = try await merged.service.miningTemplate(
+            MiningTemplateRequest(
+                minimumWork: [
+                    MiningMinimumWork(chainPath: ["Nexus"], work: parentWork),
+                    MiningMinimumWork(
+                        chainPath: ["Nexus", "Payments"],
+                        work: childWork
+                    ),
+                ],
+                commitMinimumWorkTarget: true
+            )
+        )
+        let lastChildCandidate = await merged.children.last()
+        let childBlock = try XCTUnwrap(lastChildCandidate)
+        XCTAssertEqual(template.block.target, parentThreshold)
+        XCTAssertEqual(childBlock.target, childTarget)
+        XCTAssertEqual(template.searchTarget, childTarget)
+        XCTAssertEqual(template.targets, [childTarget, parentThreshold])
+
+        let carrierNonce = firstNonce(of: template.block, from: 0) {
+            $0 <= childTarget && $0 > parentThreshold
+        }
+        let carried = try await merged.service.submitWork(SubmitWorkRequest(
+            workID: template.workID,
+            nonce: carrierNonce
+        ))
+        XCTAssertEqual(carried.disposition, .carrier)
+    }
+
+    /// Submission through a three-level hierarchy: a filter on the grandchild
+    /// is visible to the Nexus only through the child's witness, and a hash
+    /// that clears every committed target but misses that filter is refused
+    /// at the Nexus rather than published inside an accepted block.
+    func testNestedMinimumWorkBoundsSubmissionThroughTheHierarchy()
+        async throws
+    {
+        // Parent schedule about 2^-4 of the maximum, filter 2^8: each nonce
+        // search below takes a few hundred hashes on average.
+        let fixture = try await activeChildService(
+            spec: NexusGenesis.spec,
+            carrierInterval: 225_000
+        )
+        let parentTarget = try await fixture.parent.canonicalTipBlock()
+            .nextTarget
+        let work = UInt256(1) << 8
+        let threshold = minimumWorkTarget(work)
+        XCTAssertLessThan(threshold, parentTarget)
+        let payments = makeService(
+            process: fixture.process,
+            childCandidateProvider: { context in
+                let genesis = try await BlockBuilder.buildChildGenesis(
+                    spec: NexusGenesis.spec,
+                    parentState: context.parentCarrier.prevState,
+                    timestamp: context.parentCarrier.timestamp,
+                    target: .max,
+                    fetcher: fixture.process
+                )
+                let grandchild = try await BlockBuilder.buildBlock(
+                    previous: genesis,
+                    transactions: [],
+                    parentChainBlock: context.parentCarrier,
+                    timestamp: context.parentCarrier.timestamp + 1,
+                    fetcher: fixture.process
+                )
+                return [DirectChildCandidate(
+                    directory: "Grandchild",
+                    block: grandchild
+                )]
+            }
+        )
+        let merged = mergedMiningService(fixture, child: payments)
+        let template = try await merged.service.miningTemplate(
+            MiningTemplateRequest(minimumWork: [MiningMinimumWork(
+                chainPath: ["Nexus", "Payments", "Grandchild"],
+                work: work
+            )])
+        )
+        let lastChildCandidate = await merged.children.last()
+        let childBlock = try XCTUnwrap(lastChildCandidate)
+        let grandchildHeader: BlockHeader? = try childBlock.children.node?
+            .get(key: "Grandchild")
+        XCTAssertEqual(template.block.target, parentTarget)
+        XCTAssertEqual(childBlock.target, .max)
+        XCTAssertEqual(grandchildHeader?.node?.target, .max)
+        XCTAssertEqual(template.searchTarget, threshold)
+        XCTAssertEqual(template.targets, [threshold])
+
+        let declined = firstNonce(of: template.block, from: 0) {
+            $0 <= parentTarget && $0 > threshold
+        }
+        await XCTAssertThrowsErrorAsync(
+            try await merged.service.submitWork(SubmitWorkRequest(
+                workID: template.workID,
+                nonce: declined
+            ))
+        ) { error in
+            XCTAssertEqual(error as? MiningTemplateError, .missesSearchTarget)
+        }
+        let tipAfterRefusal = await fixture.parent.status().tipCID
+        XCTAssertEqual(tipAfterRefusal, template.block.parent?.rawCID)
+
+        let nonce = firstNonce(of: template.block, from: 0) { $0 <= threshold }
+        let accepted = try await merged.service.submitWork(SubmitWorkRequest(
+            workID: template.workID,
+            nonce: nonce
+        ))
+        XCTAssertEqual(accepted.disposition, .canonicalized)
+        XCTAssertEqual(
+            accepted.durableChildProofs.map(\.directory),
+            ["Payments"]
+        )
+    }
+
+    /// A parent service whose child candidates come from the fixture's child
+    /// service (or `child`), forwarding the miner's plan exactly as the
+    /// hierarchy plane.
+    private func mergedMiningService(
+        _ fixture: ActiveChildServiceFixture,
+        child: ChainService? = nil
+    ) -> (service: ChainService, children: MinedChildCandidates) {
+        let children = MinedChildCandidates()
+        let childService = child ?? fixture.service
+        let service = makeService(
+            process: fixture.parent,
+            childCandidateProvider: { context in
+                // The same entry point the daemon relays the hierarchy plane
+                // through, so these tests pin its pass-through.
+                let candidate = try await childService.miningCandidate(
+                    for: context,
+                    parentContentSource: FetcherContentSource(fixture.parent)
+                )
+                await children.record(candidate.block)
+                return [candidate]
+            }
+        )
+        return (service, children)
     }
 
     /// Target 0 is met by no hash and Lattice rejects it, so no target can
@@ -1520,7 +1874,7 @@ final class ChainServiceTests: XCTestCase {
                 work: ceiling
             )]
         ))
-        XCTAssertEqual(template.block.target, UInt256(1))
+        XCTAssertEqual(template.searchTarget, UInt256(1))
 
         // A plan past the payload cap `rewards` also honours is a named
         // refusal here, not a child candidate that silently goes missing for
@@ -1551,6 +1905,7 @@ final class ChainServiceTests: XCTestCase {
             from: Data(#"{"rewards":[]}"#.utf8)
         )
         XCTAssertTrue(legacy.minimumWork.isEmpty)
+        XCTAssertFalse(legacy.commitMinimumWorkTarget)
         let template = try await service.miningTemplate(legacy)
         let genesis = try await process.canonicalTipBlock()
         let scheduled = try await BlockBuilder.buildBlock(
@@ -1564,6 +1919,11 @@ final class ChainServiceTests: XCTestCase {
             try JSONEncoder().encode(MiningTemplateRequest()),
             Data(#"{"rewards":[]}"#.utf8)
         )
+        let optedIn = try JSONDecoder().decode(
+            MiningTemplateRequest.self,
+            from: Data(#"{"rewards":[],"commitMinimumWorkTarget":true}"#.utf8)
+        )
+        XCTAssertTrue(optedIn.commitMinimumWorkTarget)
     }
 
     func testAuthenticatedProviderSuppliesOrdinaryChildCandidate() async throws {
@@ -1863,9 +2223,11 @@ final class ChainServiceTests: XCTestCase {
             SubmitTransactionRequest(transaction: ordinary)
         )
         let livenessCandidate = try await childService.miningCandidate(
-            parentCarrier: nextParentCarrier,
-            parentContentSource: FetcherContentSource(parentProcess),
-            rewards: []
+            for: ChildCandidateRequestContext(
+                parentCarrier: nextParentCarrier,
+                rewards: []
+            ),
+            parentContentSource: FetcherContentSource(parentProcess)
         )
         let selectedTransactions = try await livenessCandidate.block.transactions
             .resolve(fetcher: childProcess)
@@ -1887,12 +2249,14 @@ final class ChainServiceTests: XCTestCase {
         let candidate: DirectChildCandidate
         do {
             candidate = try await childService.miningCandidate(
-                parentCarrier: nextParentCarrier,
-                parentContentSource: FetcherContentSource(parentProcess),
-                rewards: [MiningReward(
-                    chainPath: ["Nexus", "Payments"],
-                    transaction: childReward
-                )]
+                for: ChildCandidateRequestContext(
+                    parentCarrier: nextParentCarrier,
+                    rewards: [MiningReward(
+                        chainPath: ["Nexus", "Payments"],
+                        transaction: childReward
+                    )]
+                ),
+                parentContentSource: FetcherContentSource(parentProcess)
             )
         } catch {
             XCTFail("contextual child candidate failed: \(error)")
@@ -1947,12 +2311,18 @@ final class ChainServiceTests: XCTestCase {
         )
 
         let first = try await fixture.service.miningCandidate(
-            parentCarrier: firstCarrier,
+            for: ChildCandidateRequestContext(
+                parentCarrier: firstCarrier,
+                rewards: []
+            ),
             parentContentSource: FetcherContentSource(fixture.parent)
         )
         try await Task.sleep(for: .milliseconds(20))
         let second = try await fixture.service.miningCandidate(
-            parentCarrier: secondCarrier,
+            for: ChildCandidateRequestContext(
+                parentCarrier: secondCarrier,
+                rewards: []
+            ),
             parentContentSource: FetcherContentSource(fixture.parent)
         )
 
@@ -1979,7 +2349,10 @@ final class ChainServiceTests: XCTestCase {
                 fetcher: fixture.parent
             )
             let candidate = try await fixture.service.miningCandidate(
-                parentCarrier: carrier,
+                for: ChildCandidateRequestContext(
+                    parentCarrier: carrier,
+                    rewards: []
+                ),
                 parentContentSource: FetcherContentSource(fixture.parent)
             )
             candidateCIDs.insert(try BlockHeader(node: candidate.block).rawCID)
@@ -3678,8 +4051,14 @@ final class ChainServiceTests: XCTestCase {
         let parentCarrier: Block
     }
 
+    /// `carrierInterval` is the milliseconds between the Nexus genesis and the
+    /// carrier recording the child. The parent schedule that follows is the
+    /// maximum target scaled by `carrierInterval / targetBlockTime`, so a test
+    /// that searches nonces can pick a parent target it solves in a handful
+    /// of hashes.
     private func activeChildService(
-        spec: ChainSpec
+        spec: ChainSpec,
+        carrierInterval: Int64 = 1
     ) async throws -> ActiveChildServiceFixture {
         let parent = try await nexusProcess()
         let parentGenesis = try await parent.canonicalTipBlock()
@@ -3688,6 +4067,7 @@ final class ChainServiceTests: XCTestCase {
             parentGenesis: parentGenesis,
             childTimestamp: 1,
             carrierNonce: 0,
+            carrierInterval: carrierInterval,
             spec: spec
         )
         let directory = FileManager.default.temporaryDirectory
@@ -3732,6 +4112,7 @@ final class ChainServiceTests: XCTestCase {
         parentGenesis: Block,
         childTimestamp: Int64,
         carrierNonce: UInt64,
+        carrierInterval: Int64 = 1,
         spec: ChainSpec = NexusGenesis.spec
     ) async throws -> AnchoredChildGenesis {
         // A self-contained child genesis (empty parentState) recorded on the
@@ -3761,7 +4142,7 @@ final class ChainServiceTests: XCTestCase {
         let carrier = try await BlockBuilder.buildBlock(
             previous: parentGenesis,
             transactions: [authorization],
-            timestamp: parentGenesis.timestamp + 1,
+            timestamp: parentGenesis.timestamp + carrierInterval,
             nonce: carrierNonce,
             fetcher: parent
         )

@@ -118,8 +118,8 @@ assembled.
 }
 ```
 
-`rewards` and `minimumWork` are the only request fields and may be empty or
-absent; other fields are ignored. Each reward is an externally signed
+`rewards`, `minimumWork` and `commitMinimumWorkTarget` are the only request
+fields and may be empty or absent; other fields are ignored. Each reward is an externally signed
 transaction for one absolute chain path; process identity is never converted
 into wallet identity. There is no template mode: transactions carrying a
 `GenesisAction` are selected from the pool like any other transaction.
@@ -127,13 +127,34 @@ into wallet identity. There is no template mode: transactions carrying a
 `minimumWork` is the requesting miner's own minimum work per block, for this
 chain and for chains merged-mined under it (`work` is a hex `UInt256`; each
 `chainPath` is absolute and must name this chain or a descendant, at most
-once). The named chain's candidate is built at `min(scheduled target,
-floor(2^256 / work) - 1)` — harder than the schedule, never easier — and each
-descendant entry travels with the child candidate request down the hierarchy
-plane, so a child's block carries its own minimum. It is a template choice of
-the miner that asked, not consensus: admission, validation, and fork choice are
-untouched, and a block from any other miner at the scheduled target is still
-accepted. Absent, templates are exactly as they were.
+once). The named chain's candidate still commits its scheduled target; its
+search threshold becomes `min(scheduled target, floor(2^256 / work) - 1)` —
+harder than the schedule, never easier — and each descendant entry travels
+with the child candidate request down the hierarchy plane. A child node
+returns a witness naming the block that sets its search target. Where that
+witness names a filtered descendant, the Nexus re-derives the descendant's
+threshold from it; for every other filtered chain two or more levels down it
+caps `searchTarget` at that entry's `floor(2^256 / work) - 1` outright. That
+fails closed against a child node that ignores or predates the entry. It is
+stricter than needed when the chain is absent from the template, and whenever
+that filter does not bind (the chain's committed target is at or harder than
+the filter target), with or without `commitMinimumWorkTarget`: each child
+returns a single witness, so a non-binding filtered chain two or more levels
+down is normally left unnamed and still caps the search. Removing that
+over-strictness needs a child to return one witness per filtered path in its
+subtree, a change to the child candidate wire format that this API does not
+make. It is a template choice of the miner that asked,
+not consensus: admission, validation, and fork choice are untouched, and a
+block from any other miner at the scheduled target is still accepted. Absent,
+templates are exactly the schedule.
+
+`commitMinimumWorkTarget` (default `false`) is the operator opt-in to commit
+each `minimumWork` threshold into that chain's block as its target instead of
+the scheduled one. It travels with the descendant entries to the child that
+builds each block, as one trailing byte on the candidate request. A child node
+that predates it refuses that request as malformed, so the template goes
+without that child. The parent's trace log (`LATTICE_SYNC_TRACE`) records every
+child that returned no candidate for such a request, whatever the cause.
 
 An entry naming an unknown or duplicate path, zero work, or more work than any
 valid target can represent is refused with `400` `invalidMinimumWork`. That
@@ -145,16 +166,24 @@ than the 1 MiB payload cap the rewards field also honours is refused with `400`
 
 Response fields:
 
-- `workID`: CID of the nonce-zero candidate.
+- `workID`: CID of the nonce-zero candidate. When the request carries
+  `minimumWork` or `commitMinimumWorkTarget`, the CID is followed by `-` and a
+  digest of both: the block does not change with the miner's filter, so two
+  requests with different filters must not share one work item and its
+  `searchTarget`. Treat it as opaque.
 - `block`: the complete candidate block.
 - `searchTarget`: the threshold the miner must hit. It is the easiest
-  (numerically largest) of the Nexus candidate's own target and the search
+  (numerically largest) of the Nexus candidate's own threshold and the search
   targets of the attached child candidates, each of which already accounts for
   its own descendants. A nonce that meets `searchTarget` but not the Nexus
-  target can still advance a descendant chain.
-- `targets`: every target a nonce for this work can clear — the Nexus root and
-  each direct child — easiest first, so it begins with `searchTarget`. The list
-  is complete only when no direct child carries children of its own; otherwise
+  threshold can still advance a descendant chain. Where any chain's minimum
+  work is harder than its committed target, `searchTarget` is no easier than
+  the hardest such threshold: one nonce commits every chain, and a hash above
+  it could clear that chain's committed target without its minimum work.
+- `targets`: every threshold a nonce for this work can clear — the Nexus root
+  and each direct child — easiest first, so it begins with `searchTarget`.
+  They are thresholds, never the blocks' committed targets. The list is
+  complete only when no direct child carries children of its own; otherwise
   it is `searchTarget` alone.
 - `chainPath`: always `["Nexus"]` on this route.
 - `expiresInMilliseconds`: template lifetime.
@@ -162,7 +191,7 @@ Response fields:
 ### `POST /v1/mining/work`
 
 ```json
-{"workID": "<candidate-cid>", "nonce": 123456}
+{"workID": "<workID from the template>", "nonce": 123456}
 ```
 
 Response fields are `accepted`, `disposition`, `tipCID`,

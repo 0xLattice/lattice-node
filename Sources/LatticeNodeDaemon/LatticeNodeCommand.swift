@@ -206,10 +206,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             childCandidateBuilder: { [weak service] context, parentContentSource in
                 guard let service else { return nil }
                 return try await service.miningCandidate(
-                    parentCarrier: context.parentCarrier,
-                    parentContentSource: parentContentSource,
-                    rewards: context.rewards,
-                    minimumWork: context.minimumWork
+                    for: context,
+                    parentContentSource: parentContentSource
                 )
             },
             candidateReservations: { [weak service] update in

@@ -297,17 +297,12 @@ func minerSettings(_ layout: HostLayout) throws -> MinerSettings {
         batch = text.split(separator: "\n").map(String.init)
             .filter { !$0.isEmpty }
     }
-    if MinerLoopLogic.minimumWorkField(minimumWorkArguments(mine)) == nil {
+    if MinerLoopLogic.minimumWorkField(mine.minimumWorkEntries) == nil {
         throw CtlError("mine.minWork maps chain paths to work per block, as 2^N or a positive decimal integer")
     }
     return MinerSettings(
         mine: mine, rpc: chain.rpc, workerExecutable: worker, batch: batch
     )
-}
-
-/// `mine.minWork` as coordinator `--min-work` values, in path order.
-func minimumWorkArguments(_ mine: TopologyMine) -> [String] {
-    (mine.minWork ?? [:]).sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
 }
 
 func readCursor(_ layout: HostLayout) -> Int {
@@ -377,9 +372,7 @@ func runCoordinatorOnce(
     if let rewardsFile {
         arguments += ["--rewards-file", rewardsFile.path]
     }
-    for entry in minimumWorkArguments(settings.mine) {
-        arguments += ["--min-work", entry]
-    }
+    arguments += settings.mine.coordinatorMinimumWorkArguments
     // Delegate to the shared spawn path (fresh /dev/null per spawn +
     // terminationHandler reaping) that ProcessSpawnTests pins.
     let result = try await spawnCollectingOutput(

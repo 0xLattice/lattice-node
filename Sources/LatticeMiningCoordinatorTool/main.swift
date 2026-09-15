@@ -10,7 +10,6 @@ import Foundation
 import FoundationNetworking
 #endif
 import ArgumentParser
-import LatticeMinerCore
 import LatticeMiningCoordinator
 
 @available(macOS 15.0, *)
@@ -41,9 +40,15 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
 
     @Option(
         name: .long,
-        help: "Minimum work per block for one chain: <chain path>=<work>, work as 2^N or a decimal integer (e.g. Nexus=2^32). Repeat once per chain. That chain's blocks are built at the harder of this and the scheduled target. Unset chains mine at the schedule."
+        help: "Minimum work per block for one chain: <chain path>=<work>, work as 2^N or a decimal integer (e.g. Nexus=2^32). Repeat once per chain. The miner only searches for and submits hashes that meet it; that chain's blocks still commit their scheduled target. Unset chains mine at the schedule."
     )
     var minWork: [String] = []
+
+    @Flag(
+        name: .long,
+        help: "Commit each --min-work target into that chain's blocks instead of the scheduled target. Off by default: the committed target is inherited by every later block through the retarget, so this makes the chain's difficulty follow this miner's preference."
+    )
+    var commitMinWorkTarget = false
 
     @Flag(name: .long, help: "Run exactly one coordinator batch (emitting a JSON result) and exit.")
     var once = false
@@ -66,7 +71,8 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
             templateRequestBody: try Self.loadTemplateRequest(
                 path: rewardsFile,
                 deployment: deployment,
-                minimumWork: minWork
+                minimumWork: minWork,
+                commitMinimumWorkTarget: commitMinWorkTarget
             )
         )
 
@@ -182,7 +188,8 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
     private static func loadTemplateRequest(
         path: String?,
         deployment: Bool,
-        minimumWork: [String]
+        minimumWork: [String],
+        commitMinimumWorkTarget: Bool
     ) throws -> Data {
         let data: Data
         if let path {
@@ -190,23 +197,15 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
         } else {
             data = Data(#"{"rewards":[]}"#.utf8)
         }
-        guard data.count <= 1 << 20,
-              var object = try JSONSerialization.jsonObject(with: data)
-                as? [String: Any],
-              object["rewards"] is [Any] else {
-            throw ValidationError(
-                "--rewards-file must be a JSON {\"rewards\":[...]} request no larger than 1 MiB"
+        do {
+            return try MiningTemplateRequestBody.make(
+                rewardsRequest: data,
+                deployment: deployment,
+                minimumWork: minimumWork,
+                commitMinimumWorkTarget: commitMinimumWorkTarget
             )
+        } catch let refusal as MiningTemplateRequestBody.Refusal {
+            throw ValidationError(refusal.description)
         }
-        if deployment { object["mode"] = "deployment" }
-        if !minimumWork.isEmpty {
-            guard let field = MinerLoopLogic.minimumWorkField(minimumWork) else {
-                throw ValidationError(
-                    "--min-work takes <chain path>=<work>, work as 2^N or a positive decimal integer, at most once per chain"
-                )
-            }
-            object["minimumWork"] = field
-        }
-        return try JSONSerialization.data(withJSONObject: object)
     }
 }

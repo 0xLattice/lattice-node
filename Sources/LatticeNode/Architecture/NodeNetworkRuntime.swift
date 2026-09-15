@@ -1401,10 +1401,23 @@ public actor NodeNetworkRuntime: IvyDelegate {
                         parentData: parentData,
                         rewards: rewards,
                         minimumWork: minimumWork,
+                        commitMinimumWorkTarget: context.commitMinimumWorkTarget,
                         deadline: deadline,
                         generation: generation,
                         process: process
                     )
+                    // No candidate has many causes (deadline, capacity, a
+                    // restarted runtime). One is specific to the opt-in: a
+                    // child node that predates it refuses the request's
+                    // trailing byte as malformed and answers nothing, so an
+                    // opted-in miner would otherwise lose that child silently.
+                    if candidate == nil,
+                       context.commitMinimumWorkTarget,
+                       !minimumWork.isEmpty {
+                        SyncTrace.log(
+                            "child candidate path=\(path.joined(separator: "/")) not returned for a commitMinimumWorkTarget request; one possible cause is a child node without the opt-in, which refuses such requests"
+                        )
+                    }
                     return (rank, candidate)
                 }
             }
@@ -6500,6 +6513,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         parentData: Data,
         rewards: [MiningReward],
         minimumWork: [MiningMinimumWork],
+        commitMinimumWorkTarget: Bool,
         deadline: ContinuousClock.Instant,
         generation: UInt64,
         process: ChainProcess
@@ -6538,7 +6552,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
             parentCID: parentCID,
             parentData: parentData,
             rewards: rewards,
-            minimumWork: minimumWork
+            minimumWork: minimumWork,
+            commitMinimumWorkTarget: commitMinimumWorkTarget
         )
         guard let payload = try? request.encoded() else { return nil }
         return await withCheckedContinuation { continuation in
@@ -6973,7 +6988,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
                         ChildCandidateRequestContext(
                             parentCarrier: parent,
                             rewards: request.rewards,
-                            minimumWork: request.minimumWork
+                            minimumWork: request.minimumWork,
+                            commitMinimumWorkTarget: request.commitMinimumWorkTarget
                         ),
                         session
                     )

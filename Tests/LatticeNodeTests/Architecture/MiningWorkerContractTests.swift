@@ -76,7 +76,8 @@ final class MiningWorkerContractTests: XCTestCase {
                 chainPath: ["Nexus"],
                 expiresAt: ContinuousClock.now + .seconds(30),
                 childCandidates: [],
-                searchWitness: nil
+                searchWitness: nil,
+                thresholds: [.max]
             ),
             maximumLifetimeMilliseconds: 30_000
         )

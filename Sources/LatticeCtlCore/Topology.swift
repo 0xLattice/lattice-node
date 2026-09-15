@@ -72,9 +72,14 @@ public struct TopologyMine: Codable {
     /// A `lattice-rewards emit-batch` file; the cursor lives beside it.
     public var rewards: String?
     /// Minimum work per block by chain path (e.g. `{"Nexus": "2^32"}`),
-    /// passed to the coordinator as `--min-work`. A chain left out mines at
-    /// its scheduled target.
+    /// passed to the coordinator as `--min-work`. The miner only searches for
+    /// and submits hashes that meet it; blocks still commit their scheduled
+    /// target. A chain left out mines at its scheduled target.
     public var minWork: [String: String]?
+    /// `true` commits each `minWork` target into that chain's blocks instead
+    /// of the scheduled target (coordinator `--commit-min-work-target`).
+    /// Absent or `false` — the default — blocks commit the schedule.
+    public var commitMinWorkTarget: Bool?
     /// Headroom multiplier on the mining round deadline. The loop measures a
     /// round's own bound — the node's advertised template expiry plus the
     /// longest round that has actually completed — and refuses to wait longer
@@ -88,6 +93,7 @@ public struct TopologyMine: Codable {
         chain: String, worker: String? = nil, workers: Int? = nil,
         batchSize: UInt64? = nil, rewards: String? = nil,
         minWork: [String: String]? = nil,
+        commitMinWorkTarget: Bool? = nil,
         roundDeadlineMultiplier: Int? = nil
     ) {
         self.chain = chain
@@ -96,7 +102,19 @@ public struct TopologyMine: Codable {
         self.batchSize = batchSize
         self.rewards = rewards
         self.minWork = minWork
+        self.commitMinWorkTarget = commitMinWorkTarget
         self.roundDeadlineMultiplier = roundDeadlineMultiplier
+    }
+
+    /// `minWork` as coordinator `--min-work` values, in path order.
+    public var minimumWorkEntries: [String] {
+        (minWork ?? [:]).sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
+    }
+
+    /// The coordinator arguments for `minWork` and `commitMinWorkTarget`.
+    public var coordinatorMinimumWorkArguments: [String] {
+        minimumWorkEntries.flatMap { ["--min-work", $0] }
+            + (commitMinWorkTarget == true ? ["--commit-min-work-target"] : [])
     }
 }
 
@@ -163,6 +181,9 @@ public struct Topology: Codable {
         }
         if let mine, chains[mine.chain] == nil {
             throw CtlError("mine.chain \(mine.chain) is not in the tree")
+        }
+        if let mine, mine.commitMinWorkTarget == true, mine.minimumWorkEntries.isEmpty {
+            throw CtlError("mine.commitMinWorkTarget commits the mine.minWork targets and needs at least one mine.minWork entry")
         }
         if let multiplier = mine?.roundDeadlineMultiplier, multiplier < 1 {
             throw CtlError("mine.roundDeadlineMultiplier must be at least 1; a round deadline shorter than the round's own bound would kill every healthy round")
