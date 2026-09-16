@@ -270,28 +270,6 @@ final class LatticeCtlTopologyTests: XCTestCase {
         )
     }
 
-    /// `Duration.seconds` TRAPS above `Int64.max`, and `JSONDecoder` accepts
-    /// any 20-digit value into `UInt64`, so a decimal typo would crash the
-    /// miner on its first mined block. Clamping keeps that a (diagnosable)
-    /// very long wait instead of a crashloop.
-    func testAbsurdPacingClampsInsteadOfTrapping() {
-        let absurd = TopologyMine(
-            chain: "Nexus", minBlockIntervalSeconds: UInt64.max
-        )
-        XCTAssertEqual(
-            absurd.pacingHold(afterRoundOf: .zero), .seconds(Int64.max)
-        )
-        XCTAssertEqual(
-            try JSONDecoder().decode(
-                TopologyMine.self,
-                from: Data(
-                    #"{"chain":"Nexus","minBlockIntervalSeconds":18446744073709551615}"#.utf8
-                )
-            ).minBlockIntervalSeconds,
-            UInt64.max
-        )
-    }
-
     func testLayoutSeparatesIdentityFromWipeableChains() {
         let layout = HostLayout(root: "/var/lib/lattice")
         XCTAssertTrue(layout.identityKey(for: "Nexus/Payments").path

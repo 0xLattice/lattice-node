@@ -98,11 +98,11 @@ lattice mine status  # cursor position and batch runway
   retarget loses the feedback it needs — it eases every block and nothing it
   does changes what it measures. Pacing fixes the spacing the retarget reads
   and leaves the work to the schedule, so difficulty converges on its own.
-  Only a parent block starts a hold — but the hold suspends the whole round,
-  and on a merged-mining tree a child's blocks are co-mined by that same
-  round. So the cadence throttles the entire subtree, not just the parent: a
-  child chain gets no hashing at all while the parent is holding, and its own
-  retarget will read the resulting gaps. Set it with the whole tree in mind.
+  Only a parent block starts a hold — but the hold withholds the next round
+  entirely, and on a merged-mining tree a child's blocks are co-mined by that
+  same round. So the cadence throttles the whole subtree, not just the parent:
+  a child chain gets none of this miner's hashing until the hold expires, and
+  its own retarget will read the resulting gaps. Set it with the tree in mind.
 - `roundDeadlineMultiplier` is optional (default `10`): headroom on the
   mining round deadline. `mine run` bounds every coordinator round by the
   node's advertised template expiry plus the longest round that has actually

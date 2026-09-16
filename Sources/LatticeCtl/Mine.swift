@@ -219,8 +219,8 @@ struct Mine: AsyncParsableCommand {
                     // A child chain advanced; no reward consumed and no parent
                     // block was produced, so this starts no pacing hold. Note
                     // that is about the TRIGGER, not the effect: a hold
-                    // suspends the round, and this round is what co-mines the
-                    // children, so pacing throttles the whole subtree.
+                    // withholds the next round, and a round is what co-mines
+                    // the children, so pacing throttles the whole subtree.
                     refusedStreak = 0
                 case .roundDeadlineExceeded(let deadline, let degraded):
                     // Loud by construction: a silent kill-and-continue is
