@@ -210,15 +210,17 @@ struct Mine: AsyncParsableCommand {
                         afterRoundOf: started.duration(to: ContinuousClock.now)
                     )
                     if hold > .zero {
-                        log("pacing: holding \(hold) so the next block is mine.minBlockIntervalSeconds from this one")
+                        log("pacing: holding \(hold) so the next block is at least mine.minBlockIntervalSeconds from this one")
                         await holdFor(hold, stopRequested: stopRequested)
                     }
                 case .harmless:
                     refusedStreak = 0
                 case .carrier:
                     // A child chain advanced; no reward consumed and no parent
-                    // block was produced, so the parent cadence is untouched:
-                    // mine.minBlockIntervalSeconds paces parent blocks only.
+                    // block was produced, so this starts no pacing hold. Note
+                    // that is about the TRIGGER, not the effect: a hold
+                    // suspends the round, and this round is what co-mines the
+                    // children, so pacing throttles the whole subtree.
                     refusedStreak = 0
                 case .roundDeadlineExceeded(let deadline, let degraded):
                     // Loud by construction: a silent kill-and-continue is

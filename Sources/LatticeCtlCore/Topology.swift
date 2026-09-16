@@ -129,9 +129,13 @@ public struct TopologyMine: Codable {
     /// spacing template builds is what spaces the timestamps the retarget
     /// reads. Pure, so the release — a round slower than the cadence waits not
     /// at all — is an executable invariant rather than a timing test.
+    /// Clamped, not because the value needs a policy bound -- an operator may
+    /// pick any cadence -- but because `Duration.seconds` TRAPS above
+    /// `Int64.max`, and a decimal typo decodes into `UInt64` happily. The trap
+    /// would land on the first mined block, far from the edit that caused it.
     public func pacingHold(afterRoundOf elapsed: Duration) -> Duration {
         guard let seconds = minBlockIntervalSeconds else { return .zero }
-        return max(.zero, .seconds(seconds) - elapsed)
+        return max(.zero, .seconds(Int64(clamping: seconds)) - elapsed)
     }
 
     /// The coordinator arguments for `minWork` and `commitMinWorkTarget`.

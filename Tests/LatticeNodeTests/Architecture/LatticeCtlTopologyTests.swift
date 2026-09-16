@@ -256,11 +256,39 @@ final class LatticeCtlTopologyTests: XCTestCase {
 
     /// Pacing is spacing, not work: it must not reach the coordinator, whose
     /// `--min-work` fixes work per block and is what breaks retarget feedback.
+    /// Set alongside a real `minWork` so the assertion can only pass by the
+    /// cadence being absent — with `minWork` nil the argument list is empty by
+    /// construction and the test would prove nothing.
     func testPacingIsNotACoordinatorArgument() {
         XCTAssertEqual(
-            TopologyMine(chain: "Nexus", minBlockIntervalSeconds: 600)
-                .coordinatorMinimumWorkArguments,
-            []
+            TopologyMine(
+                chain: "Nexus",
+                minWork: ["Nexus": "2^40"],
+                minBlockIntervalSeconds: 600
+            ).coordinatorMinimumWorkArguments,
+            ["--min-work", "Nexus=2^40"]
+        )
+    }
+
+    /// `Duration.seconds` TRAPS above `Int64.max`, and `JSONDecoder` accepts
+    /// any 20-digit value into `UInt64`, so a decimal typo would crash the
+    /// miner on its first mined block. Clamping keeps that a (diagnosable)
+    /// very long wait instead of a crashloop.
+    func testAbsurdPacingClampsInsteadOfTrapping() {
+        let absurd = TopologyMine(
+            chain: "Nexus", minBlockIntervalSeconds: UInt64.max
+        )
+        XCTAssertEqual(
+            absurd.pacingHold(afterRoundOf: .zero), .seconds(Int64.max)
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                TopologyMine.self,
+                from: Data(
+                    #"{"chain":"Nexus","minBlockIntervalSeconds":18446744073709551615}"#.utf8
+                )
+            ).minBlockIntervalSeconds,
+            UInt64.max
         )
     }
 
