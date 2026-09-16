@@ -80,6 +80,15 @@ public struct TopologyMine: Codable {
     /// of the scheduled target (coordinator `--commit-min-work-target`).
     /// Absent or `false` — the default — blocks commit the schedule.
     public var commitMinWorkTarget: Bool?
+    /// Shortest gap, in seconds, between the template builds of two
+    /// consecutive parent blocks this miner produces. A floor, never a
+    /// ceiling: a round that already ran longer waits not at all, so the
+    /// cadence stops binding by itself once the schedule alone is slower than
+    /// it. Unlike `minWork`, which fixes the work per block and so leaves the
+    /// retarget with no feedback, this fixes the spacing the retarget reads
+    /// and leaves the work to the schedule. Absent = produce blocks as fast as
+    /// they solve.
+    public var minBlockIntervalSeconds: UInt64?
     /// Headroom multiplier on the mining round deadline. The loop measures a
     /// round's own bound — the node's advertised template expiry plus the
     /// longest round that has actually completed — and refuses to wait longer
@@ -94,6 +103,7 @@ public struct TopologyMine: Codable {
         batchSize: UInt64? = nil, rewards: String? = nil,
         minWork: [String: String]? = nil,
         commitMinWorkTarget: Bool? = nil,
+        minBlockIntervalSeconds: UInt64? = nil,
         roundDeadlineMultiplier: Int? = nil
     ) {
         self.chain = chain
@@ -103,12 +113,25 @@ public struct TopologyMine: Codable {
         self.rewards = rewards
         self.minWork = minWork
         self.commitMinWorkTarget = commitMinWorkTarget
+        self.minBlockIntervalSeconds = minBlockIntervalSeconds
         self.roundDeadlineMultiplier = roundDeadlineMultiplier
     }
 
     /// `minWork` as coordinator `--min-work` values, in path order.
     public var minimumWorkEntries: [String] {
         (minWork ?? [:]).sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
+    }
+
+    /// How long to hold the next round so consecutive parent blocks are at
+    /// least `minBlockIntervalSeconds` apart, given how long the round that
+    /// just produced a block already took. Measured from the round's START,
+    /// because a block's timestamp is fixed when its template is built:
+    /// spacing template builds is what spaces the timestamps the retarget
+    /// reads. Pure, so the release — a round slower than the cadence waits not
+    /// at all — is an executable invariant rather than a timing test.
+    public func pacingHold(afterRoundOf elapsed: Duration) -> Duration {
+        guard let seconds = minBlockIntervalSeconds else { return .zero }
+        return max(.zero, .seconds(seconds) - elapsed)
     }
 
     /// The coordinator arguments for `minWork` and `commitMinWorkTarget`.
