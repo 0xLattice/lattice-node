@@ -209,6 +209,67 @@ final class LatticeCtlTopologyTests: XCTestCase {
         }
     }
 
+    /// The cadence is a FLOOR on block spacing, not a fixed block time. A
+    /// round that already outran it waits not at all, so the pacing stops
+    /// binding by itself once the schedule alone is slower — which is the
+    /// whole reason it can be switched on without a second step to switch it
+    /// off. A hold that kept growing with the round would instead pin block
+    /// time forever and leave the retarget with no feedback, the very failure
+    /// `minWork` has.
+    func testPacingIsAFloorThatReleasesItself() {
+        let paced = TopologyMine(chain: "Nexus", minBlockIntervalSeconds: 600)
+        XCTAssertEqual(paced.pacingHold(afterRoundOf: .zero), .seconds(600))
+        XCTAssertEqual(paced.pacingHold(afterRoundOf: .seconds(100)), .seconds(500))
+        // Exactly at the cadence, and past it: no wait, and never negative.
+        XCTAssertEqual(paced.pacingHold(afterRoundOf: .seconds(600)), .zero)
+        XCTAssertEqual(paced.pacingHold(afterRoundOf: .seconds(9_000)), .zero)
+        // Unset means unpaced: blocks go out as fast as they solve.
+        XCTAssertEqual(
+            TopologyMine(chain: "Nexus").pacingHold(afterRoundOf: .zero), .zero
+        )
+    }
+
+    /// The cadence has to survive a round-trip through `lattice.json`, and an
+    /// older file that predates it must still load.
+    func testPacingRoundTripsAndIsOptional() throws {
+        let encoded = try JSONEncoder().encode(
+            TopologyMine(chain: "Nexus", minBlockIntervalSeconds: 3_300)
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(TopologyMine.self, from: encoded)
+                .minBlockIntervalSeconds,
+            3_300
+        )
+        XCTAssertNil(
+            try JSONDecoder().decode(
+                TopologyMine.self, from: Data(#"{"chain":"Nexus"}"#.utf8)
+            ).minBlockIntervalSeconds
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                TopologyMine.self,
+                from: Data(#"{"chain":"Nexus","minBlockIntervalSeconds":600}"#.utf8)
+            ).minBlockIntervalSeconds,
+            600
+        )
+    }
+
+    /// Pacing is spacing, not work: it must not reach the coordinator, whose
+    /// `--min-work` fixes work per block and is what breaks retarget feedback.
+    /// Set alongside a real `minWork` so the assertion can only pass by the
+    /// cadence being absent — with `minWork` nil the argument list is empty by
+    /// construction and the test would prove nothing.
+    func testPacingIsNotACoordinatorArgument() {
+        XCTAssertEqual(
+            TopologyMine(
+                chain: "Nexus",
+                minWork: ["Nexus": "2^40"],
+                minBlockIntervalSeconds: 600
+            ).coordinatorMinimumWorkArguments,
+            ["--min-work", "Nexus=2^40"]
+        )
+    }
+
     func testLayoutSeparatesIdentityFromWipeableChains() {
         let layout = HostLayout(root: "/var/lib/lattice")
         XCTAssertTrue(layout.identityKey(for: "Nexus/Payments").path

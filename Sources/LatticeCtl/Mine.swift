@@ -140,7 +140,10 @@ struct Mine: AsyncParsableCommand {
             // can never widen the bound that would have caught it.
             var longestCompletedRound = Duration.zero
             var templateExpiry: Duration?
-            log("mining loop start at reward cursor \(cursor)")
+            log("mining loop start at reward cursor \(cursor)"
+                + (settings.mine.minBlockIntervalSeconds.map {
+                    ", pacing parent blocks at least \($0)s apart"
+                } ?? ""))
             while !stopRequested.isRaised {
                 let outcome: CoordinatorOutcome
                 let started = ContinuousClock.now
@@ -203,12 +206,21 @@ struct Mine: AsyncParsableCommand {
                     cursor += 1
                     writeCursor(layout, cursor)
                     refusedStreak = 0
+                    let hold = settings.mine.pacingHold(
+                        afterRoundOf: started.duration(to: ContinuousClock.now)
+                    )
+                    if hold > .zero {
+                        log("pacing: holding \(hold) so the next block is at least mine.minBlockIntervalSeconds from this one")
+                        await holdFor(hold, stopRequested: stopRequested)
+                    }
                 case .harmless:
                     refusedStreak = 0
                 case .carrier:
-                    // A child chain advanced; no reward consumed. The
-                    // windowed retarget finds the target block time on its
-                    // own — no miner-side pacing needed.
+                    // A child chain advanced; no reward consumed and no parent
+                    // block was produced, so this starts no pacing hold. Note
+                    // that is about the TRIGGER, not the effect: a hold
+                    // withholds the next round, and a round is what co-mines
+                    // the children, so pacing throttles the whole subtree.
                     refusedStreak = 0
                 case .roundDeadlineExceeded(let deadline, let degraded):
                     // Loud by construction: a silent kill-and-continue is
@@ -248,6 +260,19 @@ struct Mine: AsyncParsableCommand {
                         try await Task.sleep(for: .seconds(5))
                     }
                 }
+            }
+        }
+
+        /// Wait out a pacing hold in slices, giving up the moment a stop is
+        /// requested: `mine stop` must not have to sit through a long cadence.
+        private func holdFor(
+            _ hold: Duration, stopRequested: InterruptFlag
+        ) async {
+            let until = ContinuousClock.now.advanced(by: hold)
+            while !stopRequested.isRaised {
+                let remaining = ContinuousClock.now.duration(to: until)
+                guard remaining > .zero else { return }
+                try? await Task.sleep(for: min(remaining, .seconds(1)))
             }
         }
 

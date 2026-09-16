@@ -89,6 +89,20 @@ lattice mine status  # cursor position and batch runway
   (coordinator `--commit-min-work-target`), making the chain's difficulty
   schedule follow this miner's preference. It needs at least one `minWork`
   entry.
+- `minBlockIntervalSeconds` is optional: the shortest gap between the template
+  builds of two consecutive parent blocks this miner produces. It is a floor,
+  never a fixed block time — a round that already ran longer waits not at all,
+  so the cadence stops binding by itself once the schedule alone is slower.
+  Prefer it to `minWork` for holding a fresh chain's rate: `minWork` fixes the
+  work per block, so block time stops responding to the target and the
+  retarget loses the feedback it needs — it eases every block and nothing it
+  does changes what it measures. Pacing fixes the spacing the retarget reads
+  and leaves the work to the schedule, so difficulty converges on its own.
+  Only a parent block starts a hold — but the hold withholds the next round
+  entirely, and on a merged-mining tree a child's blocks are co-mined by that
+  same round. So the cadence throttles the whole subtree, not just the parent:
+  a child chain gets none of this miner's hashing until the hold expires, and
+  its own retarget will read the resulting gaps. Set it with the tree in mind.
 - `roundDeadlineMultiplier` is optional (default `10`): headroom on the
   mining round deadline. `mine run` bounds every coordinator round by the
   node's advertised template expiry plus the longest round that has actually
