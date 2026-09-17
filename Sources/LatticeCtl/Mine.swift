@@ -166,6 +166,12 @@ struct Mine: AsyncParsableCommand {
                         settings, cursor: cursor, layout: layout
                     )
                     if templateExpiry == nil {
+                        // Marked BEFORE the attempt: an attempt can itself take
+                        // the full timeout, so stamping it afterwards would
+                        // report ~0 elapsed in the very line that says the node
+                        // did not answer for that long.
+                        unusableTemplateSince = unusableTemplateSince
+                            ?? ContinuousClock.now
                         // NEVER the cursor's reward line. The node answers
                         // 400 once that line is no longer mineable -- the
                         // same "already spent on-chain" condition the
@@ -174,12 +180,6 @@ struct Mine: AsyncParsableCommand {
                         // reaching that branch. Template lifetime is
                         // node-wide, so an empty rewards body observes it
                         // without entangling it with reward validity.
-                        // Marked BEFORE the attempt: an attempt can itself take
-                        // the full timeout, so stamping it afterwards would
-                        // report ~0 elapsed in the very line that says the node
-                        // did not answer for that long.
-                        unusableTemplateSince = unusableTemplateSince
-                            ?? ContinuousClock.now
                         templateExpiry = await observedTemplateExpiry(
                             settings.rpc, rewardsFile: nil
                         )
@@ -309,8 +309,9 @@ struct Mine: AsyncParsableCommand {
             }
         }
 
-        /// Wait out a pacing hold in slices, giving up the moment a stop is
-        /// requested: `mine stop` must not have to sit through a long cadence.
+        /// Wait out a hold in slices, giving up the moment a stop is
+        /// requested: `mine stop` must not have to sit through a long wait.
+        /// Used for the block cadence and for the stalled-batch backoff.
         private func holdFor(
             _ hold: Duration, stopRequested: InterruptFlag
         ) async {
