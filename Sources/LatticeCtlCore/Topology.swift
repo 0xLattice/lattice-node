@@ -137,6 +137,14 @@ public struct TopologyMine: Codable {
     /// that then fail fetching the same template.
     public static let defaultTemplateTimeoutSeconds: UInt64 = 60
 
+    /// The ceiling, and it is the same number for the same reason: above the
+    /// coordinator's own fetch timeout there is no legal value at all. The
+    /// probe would observe an expiry and every round would then die fetching
+    /// the same template. So this setting is usefully adjustable DOWNWARD
+    /// only -- a host that needs longer than this to build a template cannot
+    /// be fixed here, because the coordinator's side is not settable at all.
+    public static let maximumTemplateTimeoutSeconds: UInt64 = 60
+
     /// `templateTimeoutSeconds` or the default, in seconds.
     public var resolvedTemplateTimeoutSeconds: UInt64 {
         templateTimeoutSeconds ?? Self.defaultTemplateTimeoutSeconds
@@ -235,6 +243,10 @@ public struct Topology: Codable {
         }
         if let timeout = mine?.templateTimeoutSeconds, timeout < 1 {
             throw CtlError("mine.templateTimeoutSeconds must be at least 1; a zero timeout can never observe a template expiry, so no round deadline could be derived and the miner would never mine")
+        }
+        if let timeout = mine?.templateTimeoutSeconds,
+           timeout > TopologyMine.maximumTemplateTimeoutSeconds {
+            throw CtlError("mine.templateTimeoutSeconds must be at most \(TopologyMine.maximumTemplateTimeoutSeconds); the coordinator's own template fetch is fixed at that, so a longer probe would observe expiries for rounds that then die fetching the same template")
         }
         if let multiplier = mine?.roundDeadlineMultiplier, multiplier < 1 {
             throw CtlError("mine.roundDeadlineMultiplier must be at least 1; a round deadline shorter than the round's own bound would kill every healthy round")

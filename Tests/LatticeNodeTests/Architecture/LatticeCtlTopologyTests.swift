@@ -308,14 +308,56 @@ final class LatticeCtlTopologyTests: XCTestCase {
         }
     }
 
-    /// The default is the coordinator's own request timeout, not a number
-    /// picked for headroom: a probe that tolerated MORE than the mining path
-    /// would observe an expiry for rounds that then die fetching the same
-    /// template. Nothing else enforces this, so pin it here — if the
-    /// coordinator ever sets its own timeout, this should be revisited
-    /// together with it.
-    func testTemplateTimeoutDefaultMatchesTheCoordinatorsOwnLimit() {
-        XCTAssertEqual(TopologyMine.defaultTemplateTimeoutSeconds, 60)
+    /// `HTTPMiningCoordinatorNodeClient.fetchWork()` sets no `timeoutInterval`,
+    /// so a round actually runs under the `URLRequest` default. A probe that
+    /// tolerated MORE than that would observe an expiry for rounds that then
+    /// die fetching the same template, reporting `nodeFailed` and pointing an
+    /// operator at the worker instead of at template build time.
+    ///
+    /// Compared against the live `URLRequest` default rather than a literal:
+    /// asserting the constant equals 60 would restate the constant and pass
+    /// green even if `fetchWork()` later set a shorter timeout of its own,
+    /// which is the one change that would actually break this.
+    func testTemplateTimeoutCeilingDoesNotExceedTheCoordinatorsOwnLimit() {
+        let coordinatorLimit = URLRequest(
+            url: URL(string: "http://127.0.0.1:8080/v1/mining/templates")!
+        ).timeoutInterval
+        XCTAssertLessThanOrEqual(
+            TimeInterval(TopologyMine.maximumTemplateTimeoutSeconds),
+            coordinatorLimit
+        )
+        XCTAssertLessThanOrEqual(
+            TimeInterval(TopologyMine.defaultTemplateTimeoutSeconds),
+            coordinatorLimit
+        )
+    }
+
+    /// Above the coordinator's own limit there is no legal value: every round
+    /// would die inside `fetchWork` regardless of what the probe observed. The
+    /// docs said so; refusing it means an operator cannot write it down.
+    func testTemplateTimeoutAboveTheCoordinatorsLimitIsRefused() {
+        XCTAssertThrowsError(try Topology(
+            chains: ["Nexus": chain(4001)],
+            mine: TopologyMine(
+                chain: "Nexus",
+                templateTimeoutSeconds:
+                    TopologyMine.maximumTemplateTimeoutSeconds + 1
+            )
+        ).validated()) { error in
+            XCTAssertEqual(
+                (error as? CtlError)?.description,
+                "mine.templateTimeoutSeconds must be at most \(TopologyMine.maximumTemplateTimeoutSeconds); the coordinator's own template fetch is fixed at that, so a longer probe would observe expiries for rounds that then die fetching the same template"
+            )
+        }
+        // The ceiling itself is legal.
+        XCTAssertNoThrow(try Topology(
+            chains: ["Nexus": chain(4001)],
+            mine: TopologyMine(
+                chain: "Nexus",
+                templateTimeoutSeconds:
+                    TopologyMine.maximumTemplateTimeoutSeconds
+            )
+        ).validated())
     }
 
     func testLayoutSeparatesIdentityFromWipeableChains() {

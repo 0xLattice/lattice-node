@@ -111,10 +111,16 @@ lattice mine status  # cursor position and batch runway
   what `POST /v1/mining/templates` actually costs on this host.** Below that,
   no round deadline can be derived and the miner does not mine at all, logging
   `NOT MINING` and retrying; a compiled-in 15s sitting under a 16.6s build is
-  exactly how that happened once. Do not raise it past the coordinator's own
-  request timeout either: a probe that tolerates more than the mining path does
-  will observe an expiry for rounds that then die fetching the same template.
-  Values below `1` are refused.
+  exactly how that happened once.
+
+  **The usable range is 1–60, and it is only usefully adjusted downward.** The
+  coordinator's own template fetch is fixed at 60s and is not settable at all,
+  so a probe tolerating more would observe an expiry for rounds that then die
+  fetching the same template. Which means a host needing longer than 60s to
+  build a template **cannot be fixed with this setting** — below the build cost
+  it wedges, above 60 every round dies in the coordinator. That host needs the
+  build itself to get faster (#154). Values outside 1–60 are refused rather
+  than left as advice.
 - `roundDeadlineMultiplier` is optional (default `10`): headroom on the
   mining round deadline. `mine run` bounds every coordinator round by the
   node's advertised template expiry plus the longest round that has actually
