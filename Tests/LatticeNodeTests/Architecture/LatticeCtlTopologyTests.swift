@@ -1,3 +1,7 @@
+import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import XCTest
 import LatticeCtlCore
 
@@ -268,6 +272,102 @@ final class LatticeCtlTopologyTests: XCTestCase {
             ).coordinatorMinimumWorkArguments,
             ["--min-work", "Nexus=2^40"]
         )
+    }
+
+    /// The compiled-in 15s that wedged #153 is now an operator setting. It has
+    /// to survive `lattice.json`, default when absent so existing files keep
+    /// working, and refuse a value that would recreate the wedge.
+    func testTemplateTimeoutIsOperatorSettable() throws {
+        XCTAssertEqual(
+            TopologyMine(chain: "Nexus").resolvedTemplateTimeoutSeconds,
+            TopologyMine.defaultTemplateTimeoutSeconds
+        )
+        XCTAssertEqual(
+            TopologyMine(chain: "Nexus", templateTimeoutSeconds: 180)
+                .resolvedTemplateTimeoutSeconds,
+            180
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                TopologyMine.self,
+                from: Data(#"{"chain":"Nexus","templateTimeoutSeconds":180}"#.utf8)
+            ).resolvedTemplateTimeoutSeconds,
+            180
+        )
+        // A file written before this setting existed must still load.
+        XCTAssertNil(
+            try JSONDecoder().decode(
+                TopologyMine.self, from: Data(#"{"chain":"Nexus"}"#.utf8)
+            ).templateTimeoutSeconds
+        )
+        // Zero can never observe an expiry, so it is the wedge by another name.
+        XCTAssertThrowsError(try Topology(
+            chains: ["Nexus": chain(4001)],
+            mine: TopologyMine(chain: "Nexus", templateTimeoutSeconds: 0)
+        ).validated()) { error in
+            XCTAssertEqual(
+                (error as? CtlError)?.description,
+                "mine.templateTimeoutSeconds must be at least 1; a zero timeout can never observe a template expiry, so no round deadline could be derived and the miner would never mine"
+            )
+        }
+    }
+
+    /// `HTTPMiningCoordinatorNodeClient.fetchWork()` sets no `timeoutInterval`,
+    /// so a round actually runs under the `URLRequest` default. A probe that
+    /// tolerated MORE than that would observe an expiry for rounds that then
+    /// die fetching the same template, reporting `nodeFailed` and pointing an
+    /// operator at the worker instead of at template build time.
+    ///
+    /// Compared against the live `URLRequest` default rather than a literal,
+    /// which would merely restate the constant it tests.
+    ///
+    /// What this pins is our constants against the framework default — it
+    /// catches raising either of them, and a platform whose default is lower.
+    /// It CANNOT see a `timeoutInterval` that `fetchWork()` sets of its own:
+    /// this target does not depend on LatticeMiningCoordinator, so a fresh
+    /// `URLRequest` still reports the framework value and this stays green.
+    /// Pinning that properly needs the coordinator's timeout to become an
+    /// explicit named constant first — #156.
+    func testTemplateTimeoutCeilingDoesNotExceedTheCoordinatorsOwnLimit() {
+        let coordinatorLimit = URLRequest(
+            url: URL(string: "http://127.0.0.1:8080/v1/mining/templates")!
+        ).timeoutInterval
+        XCTAssertLessThanOrEqual(
+            TimeInterval(TopologyMine.maximumTemplateTimeoutSeconds),
+            coordinatorLimit
+        )
+        XCTAssertLessThanOrEqual(
+            TimeInterval(TopologyMine.defaultTemplateTimeoutSeconds),
+            coordinatorLimit
+        )
+    }
+
+    /// Above the coordinator's own limit there is no legal value: every round
+    /// would die inside `fetchWork` regardless of what the probe observed. The
+    /// docs said so; refusing it means an operator cannot write it down.
+    func testTemplateTimeoutAboveTheCoordinatorsLimitIsRefused() {
+        XCTAssertThrowsError(try Topology(
+            chains: ["Nexus": chain(4001)],
+            mine: TopologyMine(
+                chain: "Nexus",
+                templateTimeoutSeconds:
+                    TopologyMine.maximumTemplateTimeoutSeconds + 1
+            )
+        ).validated()) { error in
+            XCTAssertEqual(
+                (error as? CtlError)?.description,
+                "mine.templateTimeoutSeconds must be at most \(TopologyMine.maximumTemplateTimeoutSeconds); the coordinator's own template fetch is fixed at that, so a longer probe would observe expiries for rounds that then die fetching the same template"
+            )
+        }
+        // The ceiling itself is legal.
+        XCTAssertNoThrow(try Topology(
+            chains: ["Nexus": chain(4001)],
+            mine: TopologyMine(
+                chain: "Nexus",
+                templateTimeoutSeconds:
+                    TopologyMine.maximumTemplateTimeoutSeconds
+            )
+        ).validated())
     }
 
     func testLayoutSeparatesIdentityFromWipeableChains() {

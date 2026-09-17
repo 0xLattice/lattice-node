@@ -303,7 +303,10 @@ struct Child: AsyncParsableCommand {
                     // transient RPC failure must not abort a deploy that
                     // used to retry; this loop's own budget bounds it.
                     guard let expiry = await observedTemplateExpiry(
-                        rootChain.rpc, rewardsFile: nil
+                        rootChain.rpc, rewardsFile: nil,
+                        timeoutSeconds: topology.mine?
+                            .resolvedTemplateTimeoutSeconds
+                            ?? TopologyMine.defaultTemplateTimeoutSeconds
                     ) else {
                         try await Task.sleep(for: .seconds(2))
                         continue

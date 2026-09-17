@@ -96,7 +96,15 @@ def template_probe(reward_line):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=15):
+        # 60s, not 15s: this bounds how long the node takes to BUILD a
+        # template, which is unrelated to the template's own lifetime and can
+        # exceed it -- a measured build was 16.6s against a 30s lifetime. At
+        # 15s this probe returns "unavailable" instead of "refused" on any
+        # such node, so a genuinely spent nonce never heals and the supervisor
+        # stalls on it. 60s matches the coordinator's own fetch timeout, which
+        # is the ceiling: tolerating more would pass nonces whose rounds then
+        # die fetching the same template.
+        with urllib.request.urlopen(request, timeout=60):
             return "accepted"
     except urllib.error.HTTPError as error:
         return "refused" if error.code == 400 else "unavailable"
