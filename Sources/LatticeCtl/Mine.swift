@@ -140,6 +140,7 @@ struct Mine: AsyncParsableCommand {
             // can never widen the bound that would have caught it.
             var longestCompletedRound = Duration.zero
             var templateExpiry: Duration?
+            var unobservedTemplateStreak = 0
             log("mining loop start at reward cursor \(cursor)"
                 + (settings.mine.minBlockIntervalSeconds.map {
                     ", pacing parent blocks at least \($0)s apart"
@@ -166,11 +167,16 @@ struct Mine: AsyncParsableCommand {
                     }
                     guard let expiry = templateExpiry else {
                         // No observation, no derived bound -- and an
-                        // unbounded round is the defect itself.
-                        log("reward \(cursor) waiting: the node is not answering template requests, so a round deadline cannot be derived")
+                        // unbounded round is the defect itself. But say so as
+                        // the standstill it is: this retries forever, and the
+                        // old wording read like a passing hiccup while the
+                        // miner produced nothing for as long as it lasted.
+                        unobservedTemplateStreak += 1
+                        log("reward \(cursor) NOT MINING: no template answer within \(Int(templateObservationTimeout))s, so no round deadline can be derived (attempt \(unobservedTemplateStreak)). Mining is stopped until the node answers; check how long `POST /v1/mining/templates` takes.")
                         try? await Task.sleep(for: .seconds(5))
                         continue
                     }
+                    unobservedTemplateStreak = 0
                     let deadline = MiningRoundDeadline.deadline(
                         templateExpiry: expiry,
                         longestCompletedRound: longestCompletedRound,
@@ -455,6 +461,18 @@ func runCoordinatorOnce(
     )
 }
 
+/// How long to wait for the node to ANSWER a template request. This bounds
+/// how long the node takes to BUILD a template, which is a different quantity
+/// from the template LIFETIME the answer reports, and is not bounded by it: a
+/// node can spend longer assembling a template than the template is then valid
+/// for. The previous 15s silently assumed otherwise, and once a real node took
+/// 16.6s to build one, every observation timed out -- so no round bound could
+/// ever be derived and `mine run` refused to mine at all, forever, on any
+/// restart. Generous on purpose: this runs once per loop, not per round, and
+/// the cost of waiting is one slow startup while the cost of being too tight
+/// is a miner that never starts.
+private let templateObservationTimeout: TimeInterval = 120
+
 /// The round bound the NODE itself advertises: `expiresInMilliseconds` from
 /// a template request. Observed, never assumed -- the mining round deadline
 /// is derived from this plus measured batch time, so no template lifetime is
@@ -470,7 +488,7 @@ func observedTemplateExpiry(
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = rewardsFile.flatMap { try? Data(contentsOf: $0) }
         ?? Data(#"{"rewards":[]}"#.utf8)
-    request.timeoutInterval = 15
+    request.timeoutInterval = templateObservationTimeout
     guard let (data, response) = try? await URLSession.shared.data(
         for: request
     ), let http = response as? HTTPURLResponse, http.statusCode == 200,
@@ -494,7 +512,7 @@ func templateProbe(_ rpc: UInt16, _ rewardLine: String) async -> ProbeResult {
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = Data(rewardLine.utf8)
-    request.timeoutInterval = 15
+    request.timeoutInterval = templateObservationTimeout
     guard let (_, response) = try? await URLSession.shared.data(
         for: request
     ), let http = response as? HTTPURLResponse else { return .unavailable }
