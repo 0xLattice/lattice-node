@@ -131,15 +131,17 @@ struct Mine: AsyncParsableCommand {
             // block would leave the cursor behind the chain.
             //
             // The flag is only read at the top of the loop and inside
-            // `holdFor`, so it does NOT cut short an in-flight template
-            // observation: a SIGTERM landing mid-probe waits out the rest of
-            // `templateObservationTimeout` before this notices. On a node
-            // answering normally that is invisible, but on one slow enough to
-            // need that timeout, `mine stop` can reach its own 60s grace and
-            // SIGKILL instead. Nothing is lost when it does -- no coordinator
-            // is in flight on this path, and the cursor is written atomically
-            // on each accept -- but the stop is not the graceful one this
-            // comment otherwise describes.
+            // `holdFor`, so it does NOT cut short an in-flight HTTP call. A
+            // SIGTERM landing mid-probe waits out the rest of
+            // `templateObservationTimeout` before this notices, and the
+            // refusal-heal branch is worse: up to three `templateProbe` calls
+            // plus a `health` call back to back. On a node answering normally
+            // none of that is visible, but on one slow enough to need these
+            // timeouts a stop can outlast `mine stop`'s own 60s grace, and on
+            // the refusal path `TimeoutStopSec` too, ending in SIGKILL.
+            // Nothing is lost when it does -- the cursor only advances after
+            // an accepted block and is written atomically -- but the stop is
+            // then not the graceful one this comment otherwise describes.
             let stopRequested = InterruptFlag()
             signal(SIGTERM, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: SIGTERM)
@@ -172,6 +174,12 @@ struct Mine: AsyncParsableCommand {
                         // reaching that branch. Template lifetime is
                         // node-wide, so an empty rewards body observes it
                         // without entangling it with reward validity.
+                        // Marked BEFORE the attempt: an attempt can itself take
+                        // the full timeout, so stamping it afterwards would
+                        // report ~0 elapsed in the very line that says the node
+                        // did not answer for that long.
+                        unusableTemplateSince = unusableTemplateSince
+                            ?? ContinuousClock.now
                         templateExpiry = await observedTemplateExpiry(
                             settings.rpc, rewardsFile: nil
                         )
@@ -193,9 +201,13 @@ struct Mine: AsyncParsableCommand {
                         // anywhere from milliseconds (a fast non-200) to the
                         // full timeout, so a count says nothing about how long
                         // this has been down, which is the actual question.
-                        let since = unusableTemplateSince ?? ContinuousClock.now
-                        unusableTemplateSince = since
-                        log("reward \(cursor) NOT MINING: no usable template answer from the node (no reply within \(Int(templateObservationTimeout))s, a non-200, or a reply with no expiry), so no round deadline can be derived. Stopped for \(since.duration(to: ContinuousClock.now)) so far; check `POST /v1/mining/templates` on this node.")
+                        // Whole seconds, because `Duration` renders through a
+                        // Double: an hour down prints as "3664.9999999999995
+                        // seconds" otherwise, burying the one number the line
+                        // exists to carry.
+                        let downFor = (unusableTemplateSince ?? ContinuousClock.now)
+                            .duration(to: ContinuousClock.now)
+                        log("reward \(cursor) NOT MINING: no usable template answer from the node (no reply within \(Int(templateObservationTimeout))s, a non-200, or a reply with no expiry), so no round deadline can be derived. Stopped for \(downFor.components.seconds)s so far; check `POST /v1/mining/templates` on this node.")
                         try? await Task.sleep(for: .seconds(5))
                         continue
                     }
@@ -284,7 +296,12 @@ struct Mine: AsyncParsableCommand {
                     } else if await health(rpc: rpc) != nil,
                               await templateProbe(rpc, batch[cursor]) == .refused {
                         log("REWARD BATCH STALLED at \(cursor): this line and the next are both refused; re-emit the batch")
-                        try await Task.sleep(for: .seconds(60))
+                        // Stop-aware: this is the longest wait in the loop, and
+                        // it sits on the path whose probes already delay a stop
+                        // the most. A bare sleep here made `mine stop` wait out
+                        // a full minute of a wait that exists only to avoid
+                        // spinning.
+                        await holdFor(.seconds(60), stopRequested: stopRequested)
                     } else {
                         try await Task.sleep(for: .seconds(5))
                     }
