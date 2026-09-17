@@ -270,6 +270,54 @@ final class LatticeCtlTopologyTests: XCTestCase {
         )
     }
 
+    /// The compiled-in 15s that wedged #153 is now an operator setting. It has
+    /// to survive `lattice.json`, default when absent so existing files keep
+    /// working, and refuse a value that would recreate the wedge.
+    func testTemplateTimeoutIsOperatorSettable() throws {
+        XCTAssertEqual(
+            TopologyMine(chain: "Nexus").resolvedTemplateTimeoutSeconds,
+            TopologyMine.defaultTemplateTimeoutSeconds
+        )
+        XCTAssertEqual(
+            TopologyMine(chain: "Nexus", templateTimeoutSeconds: 180)
+                .resolvedTemplateTimeoutSeconds,
+            180
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                TopologyMine.self,
+                from: Data(#"{"chain":"Nexus","templateTimeoutSeconds":180}"#.utf8)
+            ).resolvedTemplateTimeoutSeconds,
+            180
+        )
+        // A file written before this setting existed must still load.
+        XCTAssertNil(
+            try JSONDecoder().decode(
+                TopologyMine.self, from: Data(#"{"chain":"Nexus"}"#.utf8)
+            ).templateTimeoutSeconds
+        )
+        // Zero can never observe an expiry, so it is the wedge by another name.
+        XCTAssertThrowsError(try Topology(
+            chains: ["Nexus": chain(4001)],
+            mine: TopologyMine(chain: "Nexus", templateTimeoutSeconds: 0)
+        ).validated()) { error in
+            XCTAssertEqual(
+                (error as? CtlError)?.description,
+                "mine.templateTimeoutSeconds must be at least 1; a zero timeout can never observe a template expiry, so no round deadline could be derived and the miner would never mine"
+            )
+        }
+    }
+
+    /// The default is the coordinator's own request timeout, not a number
+    /// picked for headroom: a probe that tolerated MORE than the mining path
+    /// would observe an expiry for rounds that then die fetching the same
+    /// template. Nothing else enforces this, so pin it here — if the
+    /// coordinator ever sets its own timeout, this should be revisited
+    /// together with it.
+    func testTemplateTimeoutDefaultMatchesTheCoordinatorsOwnLimit() {
+        XCTAssertEqual(TopologyMine.defaultTemplateTimeoutSeconds, 60)
+    }
+
     func testLayoutSeparatesIdentityFromWipeableChains() {
         let layout = HostLayout(root: "/var/lib/lattice")
         XCTAssertTrue(layout.identityKey(for: "Nexus/Payments").path

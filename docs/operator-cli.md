@@ -103,6 +103,18 @@ lattice mine status  # cursor position and batch runway
   same round. So the cadence throttles the whole subtree, not just the parent:
   a child chain gets none of this miner's hashing until the hold expires, and
   its own retarget will read the resulting gaps. Set it with the tree in mind.
+- `templateTimeoutSeconds` is optional (default `60`): how long to wait for the
+  node to ANSWER a template request. This bounds how long the node takes to
+  BUILD a template, which is a different quantity from the template lifetime
+  the answer reports and is not bounded by it — a node can spend longer
+  assembling a template than the template is then valid for. **Set it above
+  what `POST /v1/mining/templates` actually costs on this host.** Below that,
+  no round deadline can be derived and the miner does not mine at all, logging
+  `NOT MINING` and retrying; a compiled-in 15s sitting under a 16.6s build is
+  exactly how that happened once. Do not raise it past the coordinator's own
+  request timeout either: a probe that tolerates more than the mining path does
+  will observe an expiry for rounds that then die fetching the same template.
+  Values below `1` are refused.
 - `roundDeadlineMultiplier` is optional (default `10`): headroom on the
   mining round deadline. `mine run` bounds every coordinator round by the
   node's advertised template expiry plus the longest round that has actually

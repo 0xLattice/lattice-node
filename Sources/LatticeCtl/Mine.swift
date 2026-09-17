@@ -133,7 +133,7 @@ struct Mine: AsyncParsableCommand {
             // The flag is only read at the top of the loop and inside
             // `holdFor`, so it does NOT cut short an in-flight HTTP call. A
             // SIGTERM landing mid-probe waits out the rest of
-            // `templateObservationTimeout` before this notices, and the
+            // mine.templateTimeoutSeconds before this notices, and the
             // refusal-heal branch is worse: up to three `templateProbe` calls
             // plus a `health` call back to back. On a node answering normally
             // none of that is visible, but on one slow enough to need these
@@ -149,6 +149,7 @@ struct Mine: AsyncParsableCommand {
             source.resume()
             let multiplier = settings.mine.roundDeadlineMultiplier
                 ?? MiningRoundDeadline.defaultMultiplier
+            let templateTimeout = settings.mine.resolvedTemplateTimeoutSeconds
             // Measured, not assumed: a wedged round never completes, so it
             // can never widen the bound that would have caught it.
             var longestCompletedRound = Duration.zero
@@ -181,7 +182,8 @@ struct Mine: AsyncParsableCommand {
                         // node-wide, so an empty rewards body observes it
                         // without entangling it with reward validity.
                         templateExpiry = await observedTemplateExpiry(
-                            settings.rpc, rewardsFile: nil
+                            settings.rpc, rewardsFile: nil,
+                            timeoutSeconds: templateTimeout
                         )
                     }
                     guard let expiry = templateExpiry else {
@@ -207,7 +209,7 @@ struct Mine: AsyncParsableCommand {
                         // exists to carry.
                         let downFor = (unusableTemplateSince ?? ContinuousClock.now)
                             .duration(to: ContinuousClock.now)
-                        log("reward \(cursor) NOT MINING: no usable template answer from the node (no reply within \(Int(templateObservationTimeout))s, a non-200, or a reply with no expiry), so no round deadline can be derived. Stopped for \(downFor.components.seconds)s so far; check `POST /v1/mining/templates` on this node.")
+                        log("reward \(cursor) NOT MINING: no usable template answer from the node (no reply within \(templateTimeout)s, a non-200, or a reply with no expiry), so no round deadline can be derived. Stopped for \(downFor.components.seconds)s so far; check `POST /v1/mining/templates` on this node.")
                         try? await Task.sleep(for: .seconds(5))
                         continue
                     }
@@ -286,15 +288,15 @@ struct Mine: AsyncParsableCommand {
                         continue
                     }
                     let rpc = settings.rpc
-                    if await templateProbe(rpc, batch[cursor]) == .refused,
+                    if await templateProbe(rpc, batch[cursor], timeoutSeconds: templateTimeout) == .refused,
                        cursor + 1 < batch.count,
-                       await templateProbe(rpc, batch[cursor + 1]) == .accepted {
+                       await templateProbe(rpc, batch[cursor + 1], timeoutSeconds: templateTimeout) == .accepted {
                         log("reward \(cursor) already spent on-chain; advancing")
                         cursor += 1
                         writeCursor(layout, cursor)
                         refusedStreak = 0
                     } else if await health(rpc: rpc) != nil,
-                              await templateProbe(rpc, batch[cursor]) == .refused {
+                              await templateProbe(rpc, batch[cursor], timeoutSeconds: templateTimeout) == .refused {
                         log("REWARD BATCH STALLED at \(cursor): this line and the next are both refused; re-emit the batch")
                         // Stop-aware: this is the longest wait in the loop, and
                         // it sits on the path whose probes already delay a stop
@@ -502,31 +504,12 @@ func runCoordinatorOnce(
     )
 }
 
-/// How long to wait for the node to ANSWER a template request. This bounds
-/// how long the node takes to BUILD a template, which is a different quantity
-/// from the template LIFETIME the answer reports, and is not bounded by it: a
-/// node can spend longer assembling a template than the template is then valid
-/// for. The previous 15s silently assumed otherwise, and once a real node took
-/// 16.6s to build one, every observation timed out -- so no round bound could
-/// ever be derived and `mine run` refused to mine at all, forever, on any
-/// restart.
-///
-/// 60s is not arbitrary and must not be raised past the coordinator: it is the
-/// URLRequest default that `HTTPMiningCoordinatorNodeClient.fetchWork()` runs
-/// under, having set no `timeoutInterval` of its own. A probe that tolerated
-/// MORE than the mining path does would be worse than the bug it fixes -- it
-/// would observe an expiry, derive a deadline, and then spawn a coordinator
-/// per round that dies fetching the same template, reporting `nodeFailed` and
-/// pointing at the worker instead of at template build time. The probe must
-/// predict whether a round can actually run.
-private let templateObservationTimeout: TimeInterval = 60
-
 /// The round bound the NODE itself advertises: `expiresInMilliseconds` from
 /// a template request. Observed, never assumed -- the mining round deadline
 /// is derived from this plus measured batch time, so no template lifetime is
 /// hardcoded on this side of the RPC.
 func observedTemplateExpiry(
-    _ rpc: UInt16, rewardsFile: URL?
+    _ rpc: UInt16, rewardsFile: URL?, timeoutSeconds: UInt64
 ) async -> Duration? {
     guard let url = URL(
         string: "http://127.0.0.1:\(rpc)/v1/mining/templates"
@@ -536,7 +519,7 @@ func observedTemplateExpiry(
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = rewardsFile.flatMap { try? Data(contentsOf: $0) }
         ?? Data(#"{"rewards":[]}"#.utf8)
-    request.timeoutInterval = templateObservationTimeout
+    request.timeoutInterval = TimeInterval(timeoutSeconds)
     guard let (data, response) = try? await URLSession.shared.data(
         for: request
     ), let http = response as? HTTPURLResponse, http.statusCode == 200,
@@ -552,7 +535,9 @@ func observedTemplateExpiry(
 
 enum ProbeResult { case accepted, refused, unavailable }
 
-func templateProbe(_ rpc: UInt16, _ rewardLine: String) async -> ProbeResult {
+func templateProbe(
+    _ rpc: UInt16, _ rewardLine: String, timeoutSeconds: UInt64
+) async -> ProbeResult {
     guard let url = URL(
         string: "http://127.0.0.1:\(rpc)/v1/mining/templates"
     ) else { return .unavailable }
@@ -560,7 +545,7 @@ func templateProbe(_ rpc: UInt16, _ rewardLine: String) async -> ProbeResult {
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = Data(rewardLine.utf8)
-    request.timeoutInterval = templateObservationTimeout
+    request.timeoutInterval = TimeInterval(timeoutSeconds)
     guard let (_, response) = try? await URLSession.shared.data(
         for: request
     ), let http = response as? HTTPURLResponse else { return .unavailable }
