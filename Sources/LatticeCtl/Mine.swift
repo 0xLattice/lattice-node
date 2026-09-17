@@ -129,6 +129,17 @@ struct Mine: AsyncParsableCommand {
             // Finish the in-flight batch and persist the cursor on SIGTERM:
             // killing mid-iteration can orphan a coordinator whose accepted
             // block would leave the cursor behind the chain.
+            //
+            // The flag is only read at the top of the loop and inside
+            // `holdFor`, so it does NOT cut short an in-flight template
+            // observation: a SIGTERM landing mid-probe waits out the rest of
+            // `templateObservationTimeout` before this notices. On a node
+            // answering normally that is invisible, but on one slow enough to
+            // need that timeout, `mine stop` can reach its own 60s grace and
+            // SIGKILL instead. Nothing is lost when it does -- no coordinator
+            // is in flight on this path, and the cursor is written atomically
+            // on each accept -- but the stop is not the graceful one this
+            // comment otherwise describes.
             let stopRequested = InterruptFlag()
             signal(SIGTERM, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: SIGTERM)
@@ -140,7 +151,7 @@ struct Mine: AsyncParsableCommand {
             // can never widen the bound that would have caught it.
             var longestCompletedRound = Duration.zero
             var templateExpiry: Duration?
-            var unobservedTemplateStreak = 0
+            var unusableTemplateSince: ContinuousClock.Instant?
             log("mining loop start at reward cursor \(cursor)"
                 + (settings.mine.minBlockIntervalSeconds.map {
                     ", pacing parent blocks at least \($0)s apart"
@@ -171,12 +182,24 @@ struct Mine: AsyncParsableCommand {
                         // the standstill it is: this retries forever, and the
                         // old wording read like a passing hiccup while the
                         // miner produced nothing for as long as it lasted.
-                        unobservedTemplateStreak += 1
-                        log("reward \(cursor) NOT MINING: no template answer within \(Int(templateObservationTimeout))s, so no round deadline can be derived (attempt \(unobservedTemplateStreak)). Mining is stopped until the node answers; check how long `POST /v1/mining/templates` takes.")
+                        //
+                        // State the OBSERVATION, not a cause: no usable answer
+                        // covers a timeout, a transport failure, a non-200
+                        // (the node answers 409 while bootstrapping and 503
+                        // when the mempool or parent is unavailable -- both
+                        // fast), and a reply carrying no expiry. Naming any one
+                        // of them would send an operator after the wrong thing.
+                        // Elapsed, not an attempt count: an attempt here spans
+                        // anywhere from milliseconds (a fast non-200) to the
+                        // full timeout, so a count says nothing about how long
+                        // this has been down, which is the actual question.
+                        let since = unusableTemplateSince ?? ContinuousClock.now
+                        unusableTemplateSince = since
+                        log("reward \(cursor) NOT MINING: no usable template answer from the node (no reply within \(Int(templateObservationTimeout))s, a non-200, or a reply with no expiry), so no round deadline can be derived. Stopped for \(since.duration(to: ContinuousClock.now)) so far; check `POST /v1/mining/templates` on this node.")
                         try? await Task.sleep(for: .seconds(5))
                         continue
                     }
-                    unobservedTemplateStreak = 0
+                    unusableTemplateSince = nil
                     let deadline = MiningRoundDeadline.deadline(
                         templateExpiry: expiry,
                         longestCompletedRound: longestCompletedRound,
@@ -468,10 +491,17 @@ func runCoordinatorOnce(
 /// for. The previous 15s silently assumed otherwise, and once a real node took
 /// 16.6s to build one, every observation timed out -- so no round bound could
 /// ever be derived and `mine run` refused to mine at all, forever, on any
-/// restart. Generous on purpose: this runs once per loop, not per round, and
-/// the cost of waiting is one slow startup while the cost of being too tight
-/// is a miner that never starts.
-private let templateObservationTimeout: TimeInterval = 120
+/// restart.
+///
+/// 60s is not arbitrary and must not be raised past the coordinator: it is the
+/// URLRequest default that `HTTPMiningCoordinatorNodeClient.fetchWork()` runs
+/// under, having set no `timeoutInterval` of its own. A probe that tolerated
+/// MORE than the mining path does would be worse than the bug it fixes -- it
+/// would observe an expiry, derive a deadline, and then spawn a coordinator
+/// per round that dies fetching the same template, reporting `nodeFailed` and
+/// pointing at the worker instead of at template build time. The probe must
+/// predict whether a round can actually run.
+private let templateObservationTimeout: TimeInterval = 60
 
 /// The round bound the NODE itself advertises: `expiresInMilliseconds` from
 /// a template request. Observed, never assumed -- the mining round deadline
