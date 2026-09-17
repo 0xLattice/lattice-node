@@ -1,3 +1,7 @@
+import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import XCTest
 import LatticeCtlCore
 
@@ -314,10 +318,16 @@ final class LatticeCtlTopologyTests: XCTestCase {
     /// die fetching the same template, reporting `nodeFailed` and pointing an
     /// operator at the worker instead of at template build time.
     ///
-    /// Compared against the live `URLRequest` default rather than a literal:
-    /// asserting the constant equals 60 would restate the constant and pass
-    /// green even if `fetchWork()` later set a shorter timeout of its own,
-    /// which is the one change that would actually break this.
+    /// Compared against the live `URLRequest` default rather than a literal,
+    /// which would merely restate the constant it tests.
+    ///
+    /// What this pins is our constants against the framework default — it
+    /// catches raising either of them, and a platform whose default is lower.
+    /// It CANNOT see a `timeoutInterval` that `fetchWork()` sets of its own:
+    /// this target does not depend on LatticeMiningCoordinator, so a fresh
+    /// `URLRequest` still reports the framework value and this stays green.
+    /// Pinning that properly needs the coordinator's timeout to become an
+    /// explicit named constant first — #156.
     func testTemplateTimeoutCeilingDoesNotExceedTheCoordinatorsOwnLimit() {
         let coordinatorLimit = URLRequest(
             url: URL(string: "http://127.0.0.1:8080/v1/mining/templates")!

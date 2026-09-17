@@ -137,13 +137,20 @@ public struct TopologyMine: Codable {
     /// that then fail fetching the same template.
     public static let defaultTemplateTimeoutSeconds: UInt64 = 60
 
-    /// The ceiling, and it is the same number for the same reason: above the
+    /// The ceiling, and it is the SAME constant for the same reason: above the
     /// coordinator's own fetch timeout there is no legal value at all. The
     /// probe would observe an expiry and every round would then die fetching
     /// the same template. So this setting is usefully adjustable DOWNWARD
     /// only -- a host that needs longer than this to build a template cannot
     /// be fixed here, because the coordinator's side is not settable at all.
-    public static let maximumTemplateTimeoutSeconds: UInt64 = 60
+    ///
+    /// Bound rather than repeated: `validated()` can only check a value the
+    /// operator WROTE, so a tree omitting the field resolves to the default
+    /// unchecked. Were these two numbers able to drift, lowering the ceiling
+    /// alone would leave every default-valued tree probing above it, silently
+    /// and with nothing to refuse.
+    public static let maximumTemplateTimeoutSeconds: UInt64 =
+        defaultTemplateTimeoutSeconds
 
     /// `templateTimeoutSeconds` or the default, in seconds.
     public var resolvedTemplateTimeoutSeconds: UInt64 {
