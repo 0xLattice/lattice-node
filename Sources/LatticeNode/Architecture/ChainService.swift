@@ -95,8 +95,12 @@ public struct MiningTemplateRequest: Codable, Sendable {
     public let minimumWork: [MiningMinimumWork]
     /// Operator opt-in, off by default: build each `minimumWork` chain's block
     /// at the harder minimum-work target rather than its scheduled target.
-    /// The committed target is inherited through the retarget, so this makes
-    /// that chain's difficulty schedule follow the miner's preference.
+    ///
+    /// This sets a chain's STARTING difficulty and nothing more. Block 1 is the
+    /// difficulty anchor, so the target it commits is where the schedule
+    /// begins; from block 2 on the schedule is measured from that anchor, and
+    /// committing a harder target only spends more work to meet the same
+    /// schedule. It is a launch-time lever, not a per-block floor.
     public let commitMinimumWorkTarget: Bool
 
     public init(
@@ -1624,6 +1628,14 @@ public actor ChainService {
     ) async throws -> MiningTemplate {
         let fetcher: any Fetcher = fetcher ?? process
         let previous = try await process.validatedTipBlock()
+        // Read the anchor from consensus state once, here, and hand it down.
+        // The builder can rediscover it by walking to height 1, but that walk
+        // is O(chain depth) and runs per candidate assembly -- many times per
+        // template. Nil is still correct (the builder falls back); it is just
+        // slow, so this is a performance path, not a validity one.
+        let difficultyAnchor = await process.difficultyAnchor(
+            forBlockHash: try BlockHeader(node: previous).rawCID
+        )
         let spec = try await chainSpec(for: previous)
         let rewardPlan = try await validatedRewardPlan(rewards)
         let minimumWorkPlan = try validatedMinimumWorkPlan(minimumWork)
@@ -1674,6 +1686,7 @@ public actor ChainService {
                 transactionLimit: poolLimit + (reward == nil ? 0 : 1),
                 minimumWork: minimumWorkPlan.works,
                 commitMinimumWorkTarget: commitMinimumWorkTarget,
+                difficultyAnchor: difficultyAnchor,
                 fetcher: fetcher
             )
             try requireReward(rewardPlan.current, in: provisional.block)
@@ -1728,6 +1741,7 @@ public actor ChainService {
                 timestamp: timestamp,
                 minimumWork: minimumWorkPlan.works,
                 commitMinimumWorkTarget: commitMinimumWorkTarget,
+                difficultyAnchor: difficultyAnchor,
                 fetcher: fetcher
             )
             try requireReward(rewardPlan.current, in: template.block)
@@ -1750,6 +1764,7 @@ public actor ChainService {
                     timestamp: timestamp,
                     minimumWork: minimumWorkPlan.works,
                     commitMinimumWorkTarget: commitMinimumWorkTarget,
+                    difficultyAnchor: difficultyAnchor,
                     fetcher: fetcher
                 )
                 if try await blockFits(
@@ -1772,6 +1787,7 @@ public actor ChainService {
                             timestamp: timestamp,
                             minimumWork: minimumWorkPlan.works,
                             commitMinimumWorkTarget: commitMinimumWorkTarget,
+                            difficultyAnchor: difficultyAnchor,
                             fetcher: fetcher
                         )
                         if try await blockFits(

@@ -588,10 +588,16 @@ final class MiningTemplateBookTests: XCTestCase {
     }
 
     /// A chain launched at the maximum target mines a burst of near-free
-    /// blocks: every block sits at the genesis target, and the retarget —
-    /// which derives `nextTarget` from the target actually used — keeps
-    /// proposing it. An operator who opts in to committing the minimum-work
-    /// target hardens the blocks from block 1, and the schedule then follows.
+    /// blocks: every block sits at the genesis target and the schedule, anchored
+    /// on block 1, keeps proposing it. An operator who opts in to committing the
+    /// minimum-work target hardens block 1, and because block 1 IS the anchor
+    /// the whole schedule starts there instead.
+    ///
+    /// Both runs here mine exactly on schedule, so `nextTarget` holds the
+    /// anchor's target throughout. That is the absolute schedule holding still,
+    /// not the retarget following each block's own target — see
+    /// `testCommittedMinimumWorkSetsTheAnchorNotAPerBlockFloor`, which separates
+    /// the two.
     func testCommittedMinimumWorkHoldsAFreshMaxTargetChainAtTheFilterTarget()
         async throws
     {
@@ -647,12 +653,73 @@ final class MiningTemplateBookTests: XCTestCase {
         XCTAssertEqual(
             filtered.map(\.nextTarget),
             Array(repeating: filterTarget, count: 5),
-            "the retarget must follow the targets actually mined"
+            "on schedule, every block holds the target block 1 anchored"
         )
         for block in filtered {
             XCTAssertGreaterThanOrEqual(workForTarget(block.target), work)
             XCTAssertLessThanOrEqual(block.proofOfWorkHash(), block.target)
         }
+    }
+
+    /// Committing the minimum-work target sets the chain's STARTING difficulty
+    /// and nothing else. Block 1 is the difficulty anchor, so the target it
+    /// commits is where the schedule begins; from block 2 on, the schedule is
+    /// measured from that anchor, so mining harder than it buys the miner more
+    /// work without moving the target its successors must meet.
+    ///
+    /// This is what distinguishes the absolute schedule from the windowed
+    /// retarget it replaced. That one recomputed `nextTarget` from the block's
+    /// OWN target, so any block mined harder became a permanent floor and an
+    /// operator's filter ratcheted the whole chain. Here only block 1 can do it.
+    func testCommittedMinimumWorkSetsTheAnchorNotAPerBlockFloor() async throws {
+        let anchorWork = UInt256(1) << 12
+        let harderWork = UInt256(1) << 20
+        let anchorTarget = minimumWorkTarget(anchorWork)
+        let harderTarget = minimumWorkTarget(harderWork)
+        XCTAssertLessThan(harderTarget, anchorTarget, "precondition: the second level is genuinely harder")
+
+        let fixture = try await chainFixture()
+        let book = MiningTemplateBook(chainPath: ["Nexus"])
+
+        func extend(_ previous: Block, height: Int, work: UInt256) async throws -> Block {
+            let template = try await book.build(
+                previous: previous,
+                transactions: [],
+                children: [],
+                timestamp: Int64(height) * 1_000,
+                minimumWork: [["Nexus"]: work],
+                commitMinimumWorkTarget: true,
+                fetcher: fixture.store
+            )
+            let midstate = ProofOfWork.midstate(for: template.block)
+            var nonce: UInt64 = 0
+            while ProofOfWork.hash(midstate: midstate, nonce: nonce) > template.block.target {
+                nonce += 1
+            }
+            let block = ProofOfWork.withNonce(template.block, nonce: nonce)
+            try await BlockHeader(node: block).storeBlock(storer: fixture.store)
+            try await block.postState.storeRecursively(storer: fixture.store)
+            return block
+        }
+
+        // Block 1 anchors the schedule at the operator's chosen level.
+        let one = try await extend(fixture.genesis, height: 1, work: anchorWork)
+        XCTAssertEqual(one.target, anchorTarget, "block 1 commits the operator's level")
+        XCTAssertEqual(one.nextTarget, anchorTarget, "and anchors the schedule there")
+
+        // Block 2 is mined MUCH harder. Under the windowed retarget its own
+        // target would have become the new schedule; under an absolute schedule
+        // it must not, because the anchor is unchanged and block 2 is on time.
+        let two = try await extend(one, height: 2, work: harderWork)
+        XCTAssertEqual(two.target, harderTarget, "the miner really did commit the harder target")
+        XCTAssertEqual(
+            two.nextTarget, anchorTarget,
+            "mining harder than the anchor must not move the schedule its successors inherit"
+        )
+        XCTAssertNotEqual(
+            two.nextTarget, two.target,
+            "if these were equal the schedule would still be following the block's own target"
+        )
     }
 
     /// The filter never makes a block easier than the schedule.
