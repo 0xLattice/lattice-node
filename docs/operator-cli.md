@@ -82,22 +82,27 @@ lattice mine status  # cursor position and batch runway
   a validity rule — while blocks still commit their scheduled target, and
   matters most on a chain launched at the maximum target, where it is what
   keeps a fresh chain from bursting. Under the scheduled target a filter that
-  paces blocks near the target rate leaves committed difficulty at the
-  maximum. See [operations.md](operations.md#minimum-work-per-block).
+  paces blocks near the target rate leaves committed difficulty where the
+  chain's anchor put it. See [operations.md](operations.md#minimum-work-per-block).
 - `commitMinWorkTarget` is optional (default `false`): `true` commits each
   `minWork` target into that chain's blocks instead of the scheduled target
-  (coordinator `--commit-min-work-target`), making the chain's difficulty
-  schedule follow this miner's preference. It needs at least one `minWork`
-  entry.
+  (coordinator `--commit-min-work-target`). On a FRESH chain this sets where
+  the difficulty schedule starts, because block 1 is the chain's difficulty
+  anchor — that is what it is for. On a running chain it does not move the
+  schedule at all, since later targets are measured from that anchor rather
+  than from each block's own target; it only spends more work. It needs at
+  least one `minWork` entry.
 - `minBlockIntervalSeconds` is optional: the shortest gap between the template
   builds of two consecutive parent blocks this miner produces. It is a floor,
   never a fixed block time — a round that already ran longer waits not at all,
   so the cadence stops binding by itself once the schedule alone is slower.
   Prefer it to `minWork` for holding a fresh chain's rate: `minWork` fixes the
-  work per block, so block time stops responding to the target and the
-  retarget loses the feedback it needs — it eases every block and nothing it
-  does changes what it measures. Pacing fixes the spacing the retarget reads
-  and leaves the work to the schedule, so difficulty converges on its own.
+  work per block, so block time stops responding to the target. (Under the
+  windowed retarget this was worse than a nuisance — the feedback loop never
+  closed, and difficulty ran away. The absolute schedule has no such loop,
+  because it measures elapsed time against height rather than reading recent
+  solve times, but pacing is still the honest way to hold a rate.) Pacing
+  fixes the spacing and leaves the work to the schedule.
   Only a parent block starts a hold — but the hold withholds the next round
   entirely, and on a merged-mining tree a child's blocks are co-mined by that
   same round. So the cadence throttles the whole subtree, not just the parent:

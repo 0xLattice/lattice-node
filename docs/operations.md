@@ -208,11 +208,11 @@ lattice-mining-coordinator \
 - It is an operator choice, never consensus. Validity, admission and fork
   choice are untouched, and nodes keep accepting other miners' blocks at the
   scheduled target. Unset, templates are exactly the schedule.
-- Blocks commit the canonical target because the committed target is
-  consensus data: every later block inherits it through the retarget. If
-  miners could raise it at will, the difficulty schedule would follow miner
-  preference, and other miners would gain a reason to extend the parent with
-  a canonical-target sibling on a faster schedule.
+- Blocks commit the canonical target by default. The difficulty schedule is
+  absolute, measured from the chain's height-1 anchor, so committing a harder
+  target does NOT move the schedule for later blocks — it only spends more
+  work meeting the same one. The single exception is block 1 itself, which IS
+  the anchor: the target it commits is where the chain's schedule begins.
 - The trade-off is real. Fork choice credits a Nexus block
   `workForTarget(block.target)`, so a Nexus block committing the maximum
   target carries about one unit of work however hard the miner searched for
@@ -220,12 +220,13 @@ lattice-mining-coordinator \
   of the strongest ancestor carrier its hash also satisfies, so a max-target
   child carried by a valid Nexus block is credited the Nexus target's work.)
   A filter that paces blocks near the target block time therefore keeps
-  committed difficulty pinned at the maximum: the retarget only sees solve
-  times, and on-schedule blocks give it nothing to correct. Difficulty climbs only through blocks faster than the
-  target, and because the retarget (a linearly weighted moving average of
-  solve times) is unclamped, a run of fast blocks can over-correct it in a
-  single step. Choose the value knowing it paces blocks without raising the
-  schedule: roughly `expected hashrate × targetBlockTime` keeps the rate near
+  committed difficulty where the anchor put it: the schedule reads only the
+  anchor and the block, and on-schedule blocks are exactly what it holds
+  still for. Difficulty climbs only through blocks faster than the target, and
+  it climbs at most one doubling per half-life (`retargetWindow ×
+  targetBlockTime`) — there is no single-step over-correction to fear, and
+  equally no way to harden quickly. Choose the value knowing it paces blocks
+  without raising the schedule: roughly `expected hashrate × targetBlockTime` keeps the rate near
   target (1 GH/s against a one-hour target is 3.6e12, so `2^42`); a smaller
   value lets blocks arrive faster, which is what moves the target. Both `2^N`
   and plain decimal integers are accepted, up to 2^255 — the work of target 1,
@@ -275,12 +276,16 @@ lattice-mining-coordinator \
 `--commit-min-work-target` (`mine.commitMinWorkTarget` in `lattice.json`) is
 the operator opt-in to the earlier behaviour, off by default: each filtered
 chain's block commits the harder `min(scheduled target, floor(2^256 / work) -
-1)`. Validity permits it (`target <= parent.nextTarget`) and `nextTarget` is
-recomputed from the target actually used, so the retarget sees real difficulty
-from block 1. Nexus and its direct children are then not held to one
+1)`. Validity permits it (`target <= parent.nextTarget`). Note what this does and
+does not do: it sets the chain's STARTING difficulty, because block 1 is the
+difficulty anchor, and after that the schedule is measured from that anchor
+rather than from each block's own target. It is a launch-time lever, not a
+per-block floor — on an already-running chain it buys work without moving the
+schedule. Nexus and its direct children are then not held to one
 another's filters, but filters two or more levels below a direct child can
-still hold the search, as described above. The cost is a committed target, and
-so a difficulty schedule, that follows this miner's preference. It needs at least one `--min-work`, and reaches child
+still hold the search, as described above. The cost is a committed target that later blocks must be at least as hard as
+through `target <= parent.nextTarget`, and on a fresh chain a schedule
+anchored wherever the first block lands. It needs at least one `--min-work`, and reaches child
 chains with the minimum work it applies to. A child node that predates the
 opt-in refuses such a candidate request as malformed rather than misreading
 it, so an opted-in miner mines without that child. The parent node's trace

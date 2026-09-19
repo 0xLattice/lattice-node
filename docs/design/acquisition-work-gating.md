@@ -30,7 +30,8 @@ offer to how much work stands behind it.
   block, its securing-work proof), then header linkage. It resolves the parent
   and spec, and checks the version, that the spec matches the parent's, that
   the block's `prevState` equals the parent's `postState`, the height, the
-  timestamp, and the target schedule across the retarget window.
+  timestamp, and the target schedule, which is measured from the chain's
+  height-1 difficulty anchor.
 - **Permanent storage.** A weighed block's block boundary and consensus facts
   are staged durably. Lattice "never prunes accepted graph or verified
   local-work facts" (spec §12.5, invariant 9; §9.7), and recovery replays those
@@ -54,13 +55,20 @@ extended for a fraction of the cost of the chain it claims to rival.
 
 Timestamps must strictly increase and may not run ahead of real time. That
 limits how *deep* a branch can grow while staying cheap, but not how *wide*.
-Nor does it stop an abandoned tip from easing. With no clamp committed, the
-newest interval carries the most weight in the retarget window. So one block
-with a late timestamp eases the next target roughly in proportion to the gap,
-about 145-fold for a year-old Nexus tip. The late block itself must still meet
-the old schedule. But the gap stays in the window, and the few blocks that
-follow keep easing, so the schedule can be driven to the maximum target for
-roughly one block's work at the old difficulty.
+Nor does it stop an abandoned tip from easing. The schedule is absolute: it
+compares elapsed time since the anchor against `targetBlockTime × heights`, so
+a branch extending a long-abandoned tip is enormously behind schedule and the
+target eases by `2^(drift / halfLife)`. For a year-old Nexus tip that is about
+73 half-lives, which saturates at the maximum target immediately — so the
+schedule reaches the maximum for roughly one block's work at the old
+difficulty, as before, and by a more direct route than the windowed retarget's
+145-fold single step.
+
+What stops this being free weight is fork choice, not the schedule. A block at
+the maximum target is credited `workForTarget(UInt256.max)`, which is **1**, so
+a branch mined at the eased target earns one unit per block however fast it is
+extended. Easing is what lets an honestly stalled chain recover; it buys an
+attacker cheap blocks, not cheap weight.
 
 The honest chain's difficulty protects the honest chain's tip. It does nothing
 to make a deep side branch expensive.
@@ -207,10 +215,16 @@ Acquisition spends in three steps, and only the last is permanent:
   into the consensus graph or relayed. A block's work is credited only once all
   of its checks have completed. A top-down walk meets a block's descendants
   before its ancestors, so the schedule checks for the top of the walk complete
-  only as the walk descends far enough to cover their retarget window. Until
-  then that work stays uncredited and the pending blocks occupy the budget. The
-  window is committed by the chain, and §3.5 already lets a node decline to
-  operate a chain whose committed parameters exceed its resources.
+  only as the walk descends far enough to resolve their difficulty anchor.
+  Until then that work stays uncredited and the pending blocks occupy the
+  budget.
+
+  A node holding the parent in its consensus graph reads the anchor from it in
+  O(1). A node that does not — an out-of-order arrival, which is exactly this
+  path — falls back to walking the ancestry to height 1, which is O(chain
+  depth) rather than the `retargetWindow` ancestors the windowed rule needed.
+  That is bounded by the offered branch's depth, not by a committed parameter,
+  and it grows with the chain. It is a cost to watch as Nexus deepens.
 - **Keep.** Once the work that would enter a comparison reaches the bar, the
   offers behind it go through ordinary acquisition unchanged: weighed when
   possessed, stored durably, counted, and executed if they become load-bearing.

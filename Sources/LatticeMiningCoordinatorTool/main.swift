@@ -46,7 +46,7 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
 
     @Flag(
         name: .long,
-        help: "Commit each --min-work target into that chain's blocks instead of the scheduled target. Off by default: the committed target is inherited by every later block through the retarget, so this makes the chain's difficulty follow this miner's preference."
+        help: "Commit each --min-work target into that chain's blocks instead of the scheduled target. Off by default. On a fresh chain this sets where the difficulty schedule starts, because block 1 is the chain's difficulty anchor; on a running chain it does not move the schedule, since later targets are measured from that anchor rather than from each block's own target."
     )
     var commitMinWorkTarget = false
 

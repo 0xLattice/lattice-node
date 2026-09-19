@@ -1446,6 +1446,11 @@ final class ChainServiceTests: XCTestCase {
             // the schedule only hardens from here because the harness outruns
             // `targetBlockTime`.
             XCTAssertLessThanOrEqual(template.block.target, committedSoFar)
+            // ...and still anchored there: the schedule hardens by a fraction
+            // of a doubling per block, so a few blocks in it is nowhere near
+            // half the anchor. Without this bound a schedule that collapsed to
+            // target 1 after block 1 would satisfy the assertion above.
+            XCTAssertGreaterThan(template.block.target, filterTarget >> 1)
             committedSoFar = template.block.target
             XCTAssertEqual(template.searchTarget, template.block.target)
             XCTAssertGreaterThanOrEqual(
@@ -1471,6 +1476,75 @@ final class ChainServiceTests: XCTestCase {
     /// The minimum work is the miner's choice, not a rule the node enforces:
     /// after blocks committed at the minimum-work target it still accepts
     /// another producer's block at the scheduled (easier) target.
+    /// The invariant this wiring rests on: the anchor carried in consensus
+    /// state and the anchor recovered by walking the ancestry are the SAME
+    /// anchor, so a node that has the parent in its graph and a node that does
+    /// not compute the identical `nextTarget`.
+    ///
+    /// Nothing else asserts this directly. It is otherwise caught only second
+    /// hand — a wrong anchor yields a target the node's own validator rejects,
+    /// which surfaces as some unrelated block failing to be accepted, several
+    /// steps from the cause.
+    func testCarriedAnchorAndWalkedAnchorScheduleTheSameTarget() async throws {
+        let process = try await nexusProcess()
+
+        for _ in 0..<4 {
+            let previous = try await process.canonicalTipBlock()
+            let previousHash = try BlockHeader(node: previous).rawCID
+            let carried = await process.difficultyAnchor(
+                forBlockHash: previousHash
+            )
+            if previous.height == 0 {
+                XCTAssertNil(
+                    carried,
+                    "genesis precedes the schedule and carries no anchor"
+                )
+            } else {
+                XCTAssertEqual(
+                    carried?.blockHeight, 1,
+                    "every block's anchor is its height-1 ancestor"
+                )
+            }
+
+            // Same parent, same timestamp: the only difference is where the
+            // anchor came from.
+            //
+            // Space the blocks by half a target block time rather than 1ms.
+            // The schedule reads `elapsed` since the ANCHOR, and elapsed
+            // clamps at zero, so with 1ms spacing every candidate sits at
+            // essentially zero elapsed and two different anchor timestamps
+            // round to the same fixed-point exponent -- the comparison then
+            // cannot see an anchor being wrong at all.
+            let timestamp = previous.timestamp + 1_800_000
+            let threaded = try await BlockBuilder.buildBlock(
+                previous: previous,
+                timestamp: timestamp,
+                difficultyAnchor: carried,
+                fetcher: process
+            )
+            let walked = try await BlockBuilder.buildBlock(
+                previous: previous,
+                timestamp: timestamp,
+                difficultyAnchor: nil,
+                fetcher: process
+            )
+            XCTAssertEqual(
+                threaded.nextTarget, walked.nextTarget,
+                "carried and walked anchors must schedule the same target at height \(threaded.height)"
+            )
+            XCTAssertEqual(threaded.target, walked.target)
+
+            let mined = threaded.replacingNonce(
+                firstNonce(of: threaded, from: 0) { $0 <= threaded.target }
+            )
+            let outcome = try await process.admit(BlockHeader(node: mined))
+            XCTAssertTrue(
+                outcome.decision.isAccepted,
+                "a block scheduled from the carried anchor must satisfy the validator"
+            )
+        }
+    }
+
     func testNodeAcceptsAnUnfilteredBlockAtTheScheduledTarget() async throws {
         let work = UInt256(1) << 10
         let process = try await nexusProcess()
@@ -1492,34 +1566,54 @@ final class ChainServiceTests: XCTestCase {
         // This is block 1, so it commits the filter target exactly and anchors
         // the schedule there.
         XCTAssertEqual(tip.target, minimumWorkTarget(work))
-        try await Task.sleep(for: .milliseconds(5))
-        let scheduled = try await BlockBuilder.buildBlock(
-            previous: tip,
-            timestamp: tip.timestamp + 1,
-            fetcher: process
+
+        // Now hand the node a HARDER filter, and do not commit it. The point of
+        // this test is an asymmetry, so the filter has to be one the node was
+        // actually GIVEN: a filter this test merely computes proves nothing,
+        // because the node would refuse nothing either way.
+        let harderWork = work << 4
+        let harderFilter = minimumWorkTarget(harderWork)
+        let harderTemplate = try await service.miningTemplate(
+            MiningTemplateRequest(
+                minimumWork: [MiningMinimumWork(
+                    chainPath: ["Nexus"], work: harderWork
+                )],
+                commitMinimumWorkTarget: false
+            )
         )
-        XCTAssertEqual(scheduled.target, tip.nextTarget)
-        // Block 1 anchored the schedule at its own committed target, so the
-        // scheduled target IS that level -- not something easier, as it was
-        // under the windowed retarget. The claim this test makes still holds
-        // and is made directly: a block carrying less work than a miner's
-        // filter demands is accepted anyway, because the filter is the miner's
-        // policy and not a rule the node enforces.
-        let harderFilter = minimumWorkTarget(work << 4)
+        XCTAssertEqual(harderTemplate.searchTarget, harderFilter)
         XCTAssertGreaterThan(
-            scheduled.target, harderFilter,
-            "precondition: the schedule is easier than this harder filter"
+            harderTemplate.block.target, harderFilter,
+            "precondition: the committed schedule is easier than the filter"
         )
-        let mined = scheduled.replacingNonce(
-            firstNonce(of: scheduled, from: 0) {
-                $0 <= scheduled.target && $0 > harderFilter
-            }
-        )
+
+        // A hash that clears the committed target but misses the filter. The
+        // miner's own search refuses it...
+        let missesFilter = firstNonce(of: harderTemplate.block, from: 0) {
+            $0 <= harderTemplate.block.target && $0 > harderFilter
+        }
+        await XCTAssertThrowsErrorAsync(
+            try await service.submitWork(SubmitWorkRequest(
+                workID: harderTemplate.workID,
+                nonce: missesFilter
+            ))
+        ) { error in
+            XCTAssertEqual(error as? MiningTemplateError, .missesSearchTarget)
+        }
+
+        // ...and yet the node admits that very block. The filter bounds what
+        // this miner searches for; it is not a rule the node enforces on work
+        // that reaches it.
+        let unfiltered = harderTemplate.block.replacingNonce(missesFilter)
         XCTAssertGreaterThan(
-            mined.proofOfWorkHash(), harderFilter,
-            "the block must genuinely miss the harder filter, or this proves nothing"
+            unfiltered.proofOfWorkHash(), harderFilter,
+            "the block must genuinely miss the filter, or this proves nothing"
         )
-        let outcome = try await process.admit(try BlockHeader(node: mined))
+        XCTAssertLessThanOrEqual(
+            unfiltered.proofOfWorkHash(), unfiltered.target,
+            "and must still carry the work its committed target demands"
+        )
+        let outcome = try await process.admit(try BlockHeader(node: unfiltered))
         XCTAssertTrue(
             outcome.decision.isAccepted,
             "minimum work is the miner's choice, not a rule the node enforces"
@@ -4507,14 +4601,30 @@ private func XCTAssertThrowsErrorAsync<T>(
 private func firstNonce(
     of block: Block,
     from start: UInt64,
+    maxAttempts: UInt64 = 1 << 24,
+    file: StaticString = #filePath,
+    line: UInt = #line,
     where accepts: (UInt256) -> Bool
 ) -> UInt64 {
     let midstate = ProofOfWork.midstate(for: block)
     var nonce = start
-    while !accepts(ProofOfWork.hash(midstate: midstate, nonce: nonce)) {
+    // Bounded on purpose. A predicate can be UNSATISFIABLE rather than merely
+    // unlikely -- searching for a hash strictly above a target that is the
+    // maximum can never succeed, because no hash exceeds the maximum -- and an
+    // unbounded scan turns that into a hang instead of a failure. One such
+    // search spun for over two hours before it was noticed.
+    while nonce - start < maxAttempts {
+        if accepts(ProofOfWork.hash(midstate: midstate, nonce: nonce)) {
+            return nonce
+        }
         nonce += 1
     }
-    return nonce
+    XCTFail(
+        "no nonce satisfied the predicate in \(maxAttempts) attempts; "
+            + "the search is probably unsatisfiable (target \(block.target.toHexString()))",
+        file: file, line: line
+    )
+    return start
 }
 
 private extension Block {
