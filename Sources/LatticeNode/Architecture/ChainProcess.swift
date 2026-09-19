@@ -1192,6 +1192,17 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         await canonicalTip()?.height
     }
 
+    /// The difficulty anchor carried for `hash`, inherited at admission and
+    /// read in O(1). The block builder needs it to schedule `nextTarget`, and
+    /// without it the builder falls back to walking the ancestry to height 1 --
+    /// which is O(chain depth) per template, redone every mining round. Nil
+    /// when not active or when the block is not in consensus state; the
+    /// fallback still covers that.
+    func difficultyAnchor(forBlockHash hash: String) async -> DifficultyAnchor? {
+        guard case .active(let level) = runtimePhase else { return nil }
+        return await level.chain.difficultyAnchor(forBlockHash: hash)
+    }
+
     /// The CURRENT canonical (weighed-inclusive) main-chain tip as one
     /// (cid, height) pair, or nil when not active. The height is that CID's
     /// own — immutable — so the pair is consistent even if a reorg lands

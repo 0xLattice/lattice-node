@@ -1178,18 +1178,15 @@ final class ChainServiceTests: XCTestCase {
             parent: process,
             parentGenesis: genesis,
             childTimestamp: 1,
-            carrierNonce: 0
+            carrierNonce: 0,
+            carrierTarget: UInt256.max >> 12
         )
         let anchoredParent = try await process.canonicalTipBlock()
-        // The anchored carrier's next target is the unclamped proportional
-        // retarget for its solve interval (Nexus commits no maxTargetChange).
-        XCTAssertEqual(
-            anchoredParent.nextTarget,
-            NexusGenesis.spec.calculateWindowedTarget(
-                previousTarget: anchoredParent.target,
-                ancestorTimestamps: [anchoredParent.timestamp, genesis.timestamp]
-            )
-        )
+        // The anchored carrier is block 1, so it anchors the difficulty
+        // schedule on its own committed target: there is no interval before it
+        // to measure, and the schedule starts where it says it starts.
+        XCTAssertEqual(anchoredParent.nextTarget, anchoredParent.target)
+        XCTAssertEqual(anchoredParent.target, UInt256.max >> 12)
         let store = try testNodeStore(
             databasePath: directory.appendingPathComponent("state.db"),
             nexusGenesisCID: configuration.nexusGenesisCID,
@@ -1273,7 +1270,8 @@ final class ChainServiceTests: XCTestCase {
             parent: process,
             parentGenesis: genesis,
             childTimestamp: 1,
-            carrierNonce: 0
+            carrierNonce: 0,
+            carrierTarget: UInt256.max >> 12
         )
         let publishedBlocks = PublishedBlocks()
         let service = makeService(
@@ -1366,11 +1364,19 @@ final class ChainServiceTests: XCTestCase {
             chainPath: ["Nexus"],
             work: work
         )])
+        // The committed target is the schedule. Block 1 commits the genesis
+        // maximum, and from there the schedule hardens a little each block
+        // because the harness mines far faster than `targetBlockTime` -- it is
+        // ahead of schedule, so the absolute schedule answers by hardening.
+        // It never eases, and stays far easier than the miner's filter.
+        var scheduledSoFar = UInt256.max
         for _ in 0..<4 {
             let previous = try await process.canonicalTipBlock()
             let template = try await service.miningTemplate(request)
             XCTAssertEqual(template.block.target, previous.nextTarget)
-            XCTAssertEqual(template.block.target, .max)
+            XCTAssertLessThanOrEqual(template.block.target, scheduledSoFar)
+            XCTAssertGreaterThan(template.block.target, filterTarget)
+            scheduledSoFar = template.block.target
             XCTAssertEqual(template.searchTarget, filterTarget)
             XCTAssertEqual(template.targets, [filterTarget])
 
@@ -1404,17 +1410,19 @@ final class ChainServiceTests: XCTestCase {
             ))
             XCTAssertEqual(response.disposition, .canonicalized)
             let tip = try await process.canonicalTipBlock()
-            XCTAssertEqual(tip.target, .max)
+            XCTAssertEqual(tip.target, template.block.target)
+            XCTAssertGreaterThan(tip.target, filterTarget)
             XCTAssertLessThanOrEqual(tip.proofOfWorkHash(), filterTarget)
         }
     }
 
     /// The operator opt-in, on a fresh Nexus whose genesis is at the maximum
-    /// target: every block is built at the minimum-work target and Lattice
-    /// accepts each one — validity recomputes `nextTarget` from the target
-    /// actually used. Without a minimum work the same chain hands out the
-    /// genesis target, block after free block.
-    func testCommittedMinimumWorkMinesEveryNexusBlockAtTheFilterTarget()
+    /// target: block 1 is built at the minimum-work target and Lattice accepts
+    /// it, which ANCHORS the chain's schedule there. Later blocks follow that
+    /// schedule rather than re-committing the filter — the filter is a launch
+    /// lever, not a per-block floor. Without a minimum work the same chain
+    /// hands out the genesis target, block after free block.
+    func testCommittedMinimumWorkAnchorsTheScheduleAtTheFilterTarget()
         async throws
     {
         let work = UInt256(1) << 10
@@ -1425,10 +1433,26 @@ final class ChainServiceTests: XCTestCase {
             minimumWork: [MiningMinimumWork(chainPath: ["Nexus"], work: work)],
             commitMinimumWorkTarget: true
         )
-        for _ in 0..<4 {
+        var committedSoFar = filterTarget
+        for round in 0..<4 {
             let template = try await service.miningTemplate(request)
-            XCTAssertEqual(template.block.target, filterTarget)
-            XCTAssertEqual(template.searchTarget, filterTarget)
+            if round == 0 {
+                XCTAssertEqual(
+                    template.block.target, filterTarget,
+                    "block 1 commits the operator's level and anchors the schedule there"
+                )
+            }
+            // Never easier than the anchor, and never easier than the filter:
+            // the schedule only hardens from here because the harness outruns
+            // `targetBlockTime`.
+            XCTAssertLessThanOrEqual(template.block.target, committedSoFar)
+            // ...and still anchored there: the schedule hardens by a fraction
+            // of a doubling per block, so a few blocks in it is nowhere near
+            // half the anchor. Without this bound a schedule that collapsed to
+            // target 1 after block 1 would satisfy the assertion above.
+            XCTAssertGreaterThan(template.block.target, filterTarget >> 1)
+            committedSoFar = template.block.target
+            XCTAssertEqual(template.searchTarget, template.block.target)
             XCTAssertGreaterThanOrEqual(
                 workForTarget(template.block.target), work
             )
@@ -1452,6 +1476,75 @@ final class ChainServiceTests: XCTestCase {
     /// The minimum work is the miner's choice, not a rule the node enforces:
     /// after blocks committed at the minimum-work target it still accepts
     /// another producer's block at the scheduled (easier) target.
+    /// The invariant this wiring rests on: the anchor carried in consensus
+    /// state and the anchor recovered by walking the ancestry are the SAME
+    /// anchor, so a node that has the parent in its graph and a node that does
+    /// not compute the identical `nextTarget`.
+    ///
+    /// Nothing else asserts this directly. It is otherwise caught only second
+    /// hand — a wrong anchor yields a target the node's own validator rejects,
+    /// which surfaces as some unrelated block failing to be accepted, several
+    /// steps from the cause.
+    func testCarriedAnchorAndWalkedAnchorScheduleTheSameTarget() async throws {
+        let process = try await nexusProcess()
+
+        for _ in 0..<4 {
+            let previous = try await process.canonicalTipBlock()
+            let previousHash = try BlockHeader(node: previous).rawCID
+            let carried = await process.difficultyAnchor(
+                forBlockHash: previousHash
+            )
+            if previous.height == 0 {
+                XCTAssertNil(
+                    carried,
+                    "genesis precedes the schedule and carries no anchor"
+                )
+            } else {
+                XCTAssertEqual(
+                    carried?.blockHeight, 1,
+                    "every block's anchor is its height-1 ancestor"
+                )
+            }
+
+            // Same parent, same timestamp: the only difference is where the
+            // anchor came from.
+            //
+            // Space the blocks by half a target block time rather than 1ms.
+            // The schedule reads `elapsed` since the ANCHOR, and elapsed
+            // clamps at zero, so with 1ms spacing every candidate sits at
+            // essentially zero elapsed and two different anchor timestamps
+            // round to the same fixed-point exponent -- the comparison then
+            // cannot see an anchor being wrong at all.
+            let timestamp = previous.timestamp + 1_800_000
+            let threaded = try await BlockBuilder.buildBlock(
+                previous: previous,
+                timestamp: timestamp,
+                difficultyAnchor: carried,
+                fetcher: process
+            )
+            let walked = try await BlockBuilder.buildBlock(
+                previous: previous,
+                timestamp: timestamp,
+                difficultyAnchor: nil,
+                fetcher: process
+            )
+            XCTAssertEqual(
+                threaded.nextTarget, walked.nextTarget,
+                "carried and walked anchors must schedule the same target at height \(threaded.height)"
+            )
+            XCTAssertEqual(threaded.target, walked.target)
+
+            let mined = threaded.replacingNonce(
+                firstNonce(of: threaded, from: 0) { $0 <= threaded.target }
+            )
+            let outcome = try await process.admit(BlockHeader(node: mined))
+            XCTAssertTrue(
+                outcome.decision.isAccepted,
+                "a block scheduled from the carried anchor must satisfy the validator"
+            )
+        }
+    }
+
     func testNodeAcceptsAnUnfilteredBlockAtTheScheduledTarget() async throws {
         let work = UInt256(1) << 10
         let process = try await nexusProcess()
@@ -1470,20 +1563,61 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertEqual(filtered.disposition, .canonicalized)
 
         let tip = try await process.canonicalTipBlock()
+        // This is block 1, so it commits the filter target exactly and anchors
+        // the schedule there.
         XCTAssertEqual(tip.target, minimumWorkTarget(work))
-        try await Task.sleep(for: .milliseconds(5))
-        let scheduled = try await BlockBuilder.buildBlock(
-            previous: tip,
-            timestamp: tip.timestamp + 1,
-            fetcher: process
+
+        // Now hand the node a HARDER filter, and do not commit it. The point of
+        // this test is an asymmetry, so the filter has to be one the node was
+        // actually GIVEN: a filter this test merely computes proves nothing,
+        // because the node would refuse nothing either way.
+        let harderWork = work << 4
+        let harderFilter = minimumWorkTarget(harderWork)
+        let harderTemplate = try await service.miningTemplate(
+            MiningTemplateRequest(
+                minimumWork: [MiningMinimumWork(
+                    chainPath: ["Nexus"], work: harderWork
+                )],
+                commitMinimumWorkTarget: false
+            )
         )
-        XCTAssertEqual(scheduled.target, tip.nextTarget)
-        XCTAssertGreaterThan(scheduled.target, minimumWorkTarget(work))
-        let mined = scheduled.replacingNonce(
-            firstNonce(of: scheduled, from: 0) { $0 <= scheduled.target }
+        XCTAssertEqual(harderTemplate.searchTarget, harderFilter)
+        XCTAssertGreaterThan(
+            harderTemplate.block.target, harderFilter,
+            "precondition: the committed schedule is easier than the filter"
         )
-        let outcome = try await process.admit(try BlockHeader(node: mined))
-        XCTAssertTrue(outcome.decision.isAccepted)
+
+        // A hash that clears the committed target but misses the filter. The
+        // miner's own search refuses it...
+        let missesFilter = firstNonce(of: harderTemplate.block, from: 0) {
+            $0 <= harderTemplate.block.target && $0 > harderFilter
+        }
+        await XCTAssertThrowsErrorAsync(
+            try await service.submitWork(SubmitWorkRequest(
+                workID: harderTemplate.workID,
+                nonce: missesFilter
+            ))
+        ) { error in
+            XCTAssertEqual(error as? MiningTemplateError, .missesSearchTarget)
+        }
+
+        // ...and yet the node admits that very block. The filter bounds what
+        // this miner searches for; it is not a rule the node enforces on work
+        // that reaches it.
+        let unfiltered = harderTemplate.block.replacingNonce(missesFilter)
+        XCTAssertGreaterThan(
+            unfiltered.proofOfWorkHash(), harderFilter,
+            "the block must genuinely miss the filter, or this proves nothing"
+        )
+        XCTAssertLessThanOrEqual(
+            unfiltered.proofOfWorkHash(), unfiltered.target,
+            "and must still carry the work its committed target demands"
+        )
+        let outcome = try await process.admit(try BlockHeader(node: unfiltered))
+        XCTAssertTrue(
+            outcome.decision.isAccepted,
+            "minimum work is the miner's choice, not a rule the node enforces"
+        )
     }
 
     /// Merged mining, by default: every block in the template commits its
@@ -1498,7 +1632,7 @@ final class ChainServiceTests: XCTestCase {
         // maximum genesis target.
         let fixture = try await activeChildService(
             spec: NexusGenesis.spec,
-            carrierInterval: 879
+            carrierTarget: UInt256.max >> 12
         )
         let parentTip = try await fixture.parent.canonicalTipBlock()
         let parentTarget = parentTip.nextTarget
@@ -1580,7 +1714,7 @@ final class ChainServiceTests: XCTestCase {
         // search below takes a few hundred hashes on average.
         let fixture = try await activeChildService(
             spec: NexusGenesis.spec,
-            carrierInterval: 225_000
+            carrierTarget: UInt256.max >> 4
         )
         let parentTip = try await fixture.parent.canonicalTipBlock()
         let parentTarget = parentTip.nextTarget
@@ -1640,7 +1774,7 @@ final class ChainServiceTests: XCTestCase {
         // search below takes a few hundred hashes on average.
         let fixture = try await activeChildService(
             spec: NexusGenesis.spec,
-            carrierInterval: 225_000
+            carrierTarget: UInt256.max >> 4
         )
         let parentTip = try await fixture.parent.canonicalTipBlock()
         let parentTarget = parentTip.nextTarget
@@ -1700,7 +1834,7 @@ final class ChainServiceTests: XCTestCase {
     {
         let fixture = try await activeChildService(
             spec: NexusGenesis.spec,
-            carrierInterval: 225_000
+            carrierTarget: UInt256.max >> 4
         )
         let parentTip = try await fixture.parent.canonicalTipBlock()
         let parentWork = UInt256(1) << 8
@@ -1749,7 +1883,7 @@ final class ChainServiceTests: XCTestCase {
         // search below takes a few hundred hashes on average.
         let fixture = try await activeChildService(
             spec: NexusGenesis.spec,
-            carrierInterval: 225_000
+            carrierTarget: UInt256.max >> 4
         )
         let parentTarget = try await fixture.parent.canonicalTipBlock()
             .nextTarget
@@ -2726,8 +2860,10 @@ final class ChainServiceTests: XCTestCase {
         }
     }
 
-    /// Mine `depth` blocks on `producer` (Nexus genesis target is max, so PoW is
-    /// trivial) and return them in ascending-height order.
+    /// Mine `depth` blocks on `producer` and return them in ascending-height
+    /// order. Only block 1 inherits the genesis maximum; from there the
+    /// absolute schedule hardens slightly each block, so the nonce has to be
+    /// solved rather than taken from the template.
     private func mineNexusChain(
         on producer: ChainProcess,
         depth: Int
@@ -2737,14 +2873,17 @@ final class ChainServiceTests: XCTestCase {
         for _ in 0..<depth {
             let template = try await producerService
                 .miningTemplate(MiningTemplateRequest())
-            let outcome = try await producer.admit(
-                BlockHeader(node: template.block)
+            let block = template.block.replacingNonce(
+                firstNonce(of: template.block, from: 0) {
+                    $0 <= template.block.target
+                }
             )
+            let outcome = try await producer.admit(BlockHeader(node: block))
             XCTAssertTrue(
                 outcome.decision.isAccepted,
                 "producer block must be accepted"
             )
-            blocks.append(template.block)
+            blocks.append(block)
         }
         return blocks
     }
@@ -3043,7 +3182,7 @@ final class ChainServiceTests: XCTestCase {
             on: attackProducer, depth: 6, miner: CryptoUtils.generateKeyPair()
         )
         let truth = attack[5]
-        let forged = Block(
+        let unsolvedForgery = Block(
             version: truth.version,
             parent: truth.parent,
             transactions: truth.transactions,
@@ -3058,17 +3197,23 @@ final class ChainServiceTests: XCTestCase {
             timestamp: truth.timestamp,
             nonce: truth.nonce
         )
-        // The forgery keeps the honest block's nonce, so its proof of work is
-        // never re-solved — it passes only because this harness mines at the
-        // maximum target, where every hash qualifies. Assert that precondition
-        // rather than lean on it: if the harness ever mines against a real
-        // target, this fires and says to re-solve the nonce, instead of the
-        // forgery being refused for want of work and the whole exclusion path
-        // silently going uncovered. (This repo has already been bitten by a
-        // max-target genesis masking a securing-work bug.)
-        XCTAssertEqual(
-            forged.target, UInt256.max,
-            "trivial-work harness: re-solve the forged nonce before tightening targets"
+        // Changing `postState` changes the proof-of-work preimage, so the
+        // honest block's nonce no longer solves the forgery. Under the old
+        // windowed retarget this harness sat at exactly the maximum target,
+        // where every hash qualifies and the stale nonce went unnoticed; the
+        // absolute schedule hardens slightly each block, so it must be
+        // re-solved. Leaving it stale would get the forgery refused for want
+        // of work and silently uncover the whole exclusion path -- this repo
+        // has already been bitten by a max-target genesis masking a
+        // securing-work bug.
+        let forged = unsolvedForgery.replacingNonce(
+            firstNonce(of: unsolvedForgery, from: 0) {
+                $0 <= unsolvedForgery.target
+            }
+        )
+        XCTAssertLessThanOrEqual(
+            forged.proofOfWorkHash(), forged.target,
+            "the forgery must carry real work, or exclusion is never exercised"
         )
         XCTAssertEqual(
             forged.target, truth.target,
@@ -3983,14 +4128,24 @@ final class ChainServiceTests: XCTestCase {
                     transaction: reward
                 )])
             )
-            let outcome = try await producer.admit(
-                BlockHeader(node: template.block)
+            // Solve the block rather than admitting the template's nonce as
+            // mined. Under the old windowed retarget this chain sat at exactly
+            // the maximum target, where nonce 0 always qualified; the absolute
+            // schedule hardens slightly each block, so an unsolved block is
+            // refused for want of work -- and because that stalls the tip, the
+            // NEXT reward transaction's nonce is then wrong, which surfaces as
+            // `invalidRewardTransaction` several blocks away from the cause.
+            let block = template.block.replacingNonce(
+                firstNonce(of: template.block, from: 0) {
+                    $0 <= template.block.target
+                }
             )
+            let outcome = try await producer.admit(BlockHeader(node: block))
             XCTAssertTrue(
                 outcome.decision.isAccepted,
                 "reward block \(index) must be accepted"
             )
-            blocks.append(template.block)
+            blocks.append(block)
         }
         return blocks
     }
@@ -4058,7 +4213,8 @@ final class ChainServiceTests: XCTestCase {
     /// of hashes.
     private func activeChildService(
         spec: ChainSpec,
-        carrierInterval: Int64 = 1
+        carrierInterval: Int64 = 1,
+        carrierTarget: UInt256? = nil
     ) async throws -> ActiveChildServiceFixture {
         let parent = try await nexusProcess()
         let parentGenesis = try await parent.canonicalTipBlock()
@@ -4068,6 +4224,7 @@ final class ChainServiceTests: XCTestCase {
             childTimestamp: 1,
             carrierNonce: 0,
             carrierInterval: carrierInterval,
+            carrierTarget: carrierTarget,
             spec: spec
         )
         let directory = FileManager.default.temporaryDirectory
@@ -4113,6 +4270,7 @@ final class ChainServiceTests: XCTestCase {
         childTimestamp: Int64,
         carrierNonce: UInt64,
         carrierInterval: Int64 = 1,
+        carrierTarget: UInt256? = nil,
         spec: ChainSpec = NexusGenesis.spec
     ) async throws -> AnchoredChildGenesis {
         // A self-contained child genesis (empty parentState) recorded on the
@@ -4139,13 +4297,25 @@ final class ChainServiceTests: XCTestCase {
         try await VolumeImpl<Transaction>(node: authorization).storeRecursively(
             storer: parent
         )
-        let carrier = try await BlockBuilder.buildBlock(
+        // The carrier is the parent's block 1, which IS its difficulty anchor:
+        // the target it commits is where the chain's schedule begins. A test
+        // that needs a hard parent has to commit one here and mine it, the way
+        // a launch does. It cannot mine its way down instead -- the absolute
+        // schedule moves one doubling per `retargetWindow` blocks, so reaching
+        // a hard target by retargeting would take thousands of blocks.
+        let built = try await BlockBuilder.buildBlock(
             previous: parentGenesis,
             transactions: [authorization],
             timestamp: parentGenesis.timestamp + carrierInterval,
+            target: carrierTarget,
             nonce: carrierNonce,
             fetcher: parent
         )
+        let carrier = carrierTarget == nil
+            ? built
+            : built.replacingNonce(
+                firstNonce(of: built, from: carrierNonce) { $0 <= built.target }
+            )
         let carrierHeader = try BlockHeader(node: carrier)
         let parentAdmission = try await parent.admit(carrierHeader)
         XCTAssertNotNil(parentAdmission.parentCarrierLink)
@@ -4431,14 +4601,30 @@ private func XCTAssertThrowsErrorAsync<T>(
 private func firstNonce(
     of block: Block,
     from start: UInt64,
+    maxAttempts: UInt64 = 1 << 24,
+    file: StaticString = #filePath,
+    line: UInt = #line,
     where accepts: (UInt256) -> Bool
 ) -> UInt64 {
     let midstate = ProofOfWork.midstate(for: block)
     var nonce = start
-    while !accepts(ProofOfWork.hash(midstate: midstate, nonce: nonce)) {
+    // Bounded on purpose. A predicate can be UNSATISFIABLE rather than merely
+    // unlikely -- searching for a hash strictly above a target that is the
+    // maximum can never succeed, because no hash exceeds the maximum -- and an
+    // unbounded scan turns that into a hang instead of a failure. One such
+    // search spun for over two hours before it was noticed.
+    while nonce - start < maxAttempts {
+        if accepts(ProofOfWork.hash(midstate: midstate, nonce: nonce)) {
+            return nonce
+        }
         nonce += 1
     }
-    return nonce
+    XCTFail(
+        "no nonce satisfied the predicate in \(maxAttempts) attempts; "
+            + "the search is probably unsatisfiable (target \(block.target.toHexString()))",
+        file: file, line: line
+    )
+    return start
 }
 
 private extension Block {

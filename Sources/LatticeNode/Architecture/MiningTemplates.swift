@@ -194,6 +194,7 @@ public actor MiningTemplateBook {
         transactionLimit: Int = .max,
         minimumWork: [[String]: UInt256] = [:],
         commitMinimumWorkTarget: Bool = false,
+        difficultyAnchor: DifficultyAnchor? = nil,
         fetcher: any Fetcher
     ) async throws -> MiningTemplate {
         let template = try await assemble(
@@ -205,6 +206,7 @@ public actor MiningTemplateBook {
             transactionLimit: transactionLimit,
             minimumWork: minimumWork,
             commitMinimumWorkTarget: commitMinimumWorkTarget,
+            difficultyAnchor: difficultyAnchor,
             fetcher: fetcher
         )
         return issue(template)
@@ -265,6 +267,7 @@ public actor MiningTemplateBook {
         transactionLimit: Int = .max,
         minimumWork: [[String]: UInt256] = [:],
         commitMinimumWorkTarget: Bool = false,
+        difficultyAnchor: DifficultyAnchor? = nil,
         fetcher: any Fetcher
     ) async throws -> MiningTemplate {
         try await assemble(
@@ -276,6 +279,7 @@ public actor MiningTemplateBook {
             transactionLimit: transactionLimit,
             minimumWork: minimumWork,
             commitMinimumWorkTarget: commitMinimumWorkTarget,
+            difficultyAnchor: difficultyAnchor,
             fetcher: fetcher
         )
     }
@@ -289,16 +293,20 @@ public actor MiningTemplateBook {
         transactionLimit: Int,
         minimumWork: [[String]: UInt256],
         commitMinimumWorkTarget: Bool,
+        difficultyAnchor: DifficultyAnchor?,
         fetcher: any Fetcher
     ) async throws -> MiningTemplate {
         precondition(transactionLimit >= 0)
-        // The committed target is consensus data every descendant inherits
-        // through the retarget, so by default the block commits the schedule
-        // (nil: the builder takes `previous.nextTarget`) and a miner's minimum
-        // work only narrows what it searches for. Committing the harder target
-        // instead is an operator's explicit choice: validity permits it
-        // (`target <= parent.nextTarget`), and Lattice derives `nextTarget`
-        // from the target actually used.
+        // By default the block commits the schedule (nil: the builder takes
+        // `previous.nextTarget`) and a miner's minimum work only narrows what
+        // it searches for. Committing the harder target instead is an
+        // operator's explicit choice, and validity permits it
+        // (`target <= parent.nextTarget`).
+        //
+        // It changes the schedule only at block 1, which is the difficulty
+        // anchor. Everywhere else `nextTarget` is measured from that anchor
+        // rather than from this block's own target, so committing harder buys
+        // more work against the same schedule.
         let target = commitMinimumWorkTarget
             ? minimumWork[chainPath].map {
                 min(previous.nextTarget, minimumWorkTarget($0))
@@ -331,6 +339,7 @@ public actor MiningTemplateBook {
             timestamp: timestamp,
             target: target,
             chainPath: chainPath,
+            difficultyAnchor: difficultyAnchor,
             fetcher: fetcher
         )
         var chunks = transactions.isEmpty ? [] : [transactions[...]]
@@ -351,6 +360,7 @@ public actor MiningTemplateBook {
                     timestamp: timestamp,
                     target: target,
                     chainPath: chainPath,
+                    difficultyAnchor: difficultyAnchor,
                     fetcher: fetcher
                 )
                 selected.append(contentsOf: chunk)
@@ -529,6 +539,7 @@ public actor MiningTemplateBook {
         timestamp: Int64,
         target: UInt256?,
         chainPath: [String],
+        difficultyAnchor: DifficultyAnchor?,
         fetcher: any Fetcher
     ) async throws -> Block {
         let candidate = try await BlockBuilder.buildBlock(
@@ -539,6 +550,7 @@ public actor MiningTemplateBook {
             timestamp: timestamp,
             target: target,
             nonce: 0,
+            difficultyAnchor: difficultyAnchor,
             fetcher: fetcher
         )
         if transactions.contains(where: {
