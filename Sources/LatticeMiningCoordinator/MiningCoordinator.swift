@@ -591,8 +591,7 @@ public enum MiningTemplateRequestBody {
     public static func make(
         rewardsRequest data: Data,
         deployment: Bool,
-        minimumWork: [String],
-        commitMinimumWorkTarget: Bool
+        minimumWork: [String]
     ) throws -> Data {
         guard data.count <= 1 << 20,
               var object = try JSONSerialization.jsonObject(with: data)
@@ -610,14 +609,6 @@ public enum MiningTemplateRequestBody {
                 )
             }
             object["minimumWork"] = field
-        }
-        if commitMinimumWorkTarget {
-            guard !minimumWork.isEmpty else {
-                throw Refusal(
-                    description: "--commit-min-work-target commits the --min-work targets and needs at least one --min-work"
-                )
-            }
-            object["commitMinimumWorkTarget"] = true
         }
         return try JSONSerialization.data(withJSONObject: object)
     }

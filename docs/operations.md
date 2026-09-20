@@ -261,10 +261,7 @@ lattice-mining-coordinator \
     single witness, the block that sets its own search target, so a
     non-binding filtered chain two or more levels down is normally not the one
     it names, and the Nexus caps every descendant path the witness does not
-    name. This happens with or without `--commit-min-work-target`: under the
-    opt-in every filtered chain commits its filter target, so no filter binds,
-    and in a tree three or more levels deep the search is still held to those
-    deeper filters.
+    name.
 
   The cap costs only this miner's own template (a search harder than its
   blocks need); it never admits a declined block and has no consensus effect.
@@ -273,24 +270,45 @@ lattice-mining-coordinator \
   belongs with the merged-mining design for deployed child chains and is not
   made here.
 
-`--commit-min-work-target` (`mine.commitMinWorkTarget` in `lattice.json`) is
-the operator opt-in to the earlier behaviour, off by default: each filtered
-chain's block commits the harder `min(scheduled target, floor(2^256 / work) -
-1)`. Validity permits it (`target <= parent.nextTarget`). Note what this does and
-does not do: it sets the chain's STARTING difficulty, because block 1 is the
-difficulty anchor, and after that the schedule is measured from that anchor
-rather than from each block's own target. It is a launch-time lever, not a
-per-block floor — on an already-running chain it buys work without moving the
-schedule. Nexus and its direct children are then not held to one
-another's filters, but filters two or more levels below a direct child can
-still hold the search, as described above. The cost is a committed target that later blocks must be at least as hard as
-through `target <= parent.nextTarget`, and on a fresh chain a schedule
-anchored wherever the first block lands. It needs at least one `--min-work`, and reaches child
-chains with the minimum work it applies to. A child node that predates the
-opt-in refuses such a candidate request as malformed rather than misreading
-it, so an opted-in miner mines without that child. The parent node's trace
-log (`LATTICE_SYNC_TRACE`) records every child that returned no candidate for
-an opted-in request, whatever the cause; a pre-opt-in child is one.
+### What the filter is for
+
+**A minimum-work filter adjusts the RATE at which a miner produces blocks. It
+never changes what a block commits.**
+
+That is the whole model, and the two halves matter equally.
+
+A block always commits its *scheduled* target — `parent.nextTarget`, which the
+absolute schedule derives from the chain's height-1 anchor. The filter sits in
+front of the miner's own search: hashes easier than
+`floor(2^256 / work) - 1` are neither searched for nor submitted. Declining
+them makes this miner's blocks take longer to find, and that is the entire
+effect.
+
+Difficulty then follows, because the schedule reads elapsed time against
+height. Blocks arriving faster than `targetBlockTime` pull the target harder;
+slower, easier. So an operator sets the filter to choose a starting block
+rate, and the chain converges on the difficulty that rate implies — at one
+doubling per half-life, `retargetWindow × targetBlockTime`.
+
+This is why it is a chain-launch instrument. A new chain's genesis commits the
+maximum target by convention, so without a filter the first blocks are free and
+arrive as fast as the miner can hash. The filter sets a sane opening rate;
+everything after that is the schedule's job.
+
+**Difficulty is what the chain reads from observed timing — never what a miner
+declares.** A miner that could commit its own filter target would be publishing
+private policy as consensus data, inherited by every later block through the
+anchor. There is deliberately no setting that does this.
+
+Two consequences worth knowing:
+
+- **Pacing at exactly `targetBlockTime` cancels the signal.** If
+  `minBlockIntervalSeconds` equals the target block time, blocks land exactly on
+  schedule, drift stays zero, and difficulty never moves from wherever the
+  anchor put it. Pace below the target block time, or not at all, if you want
+  the schedule to converge.
+- **The filter is two-sided.** Set so blocks arrive faster than the target and
+  difficulty rises; slower and it falls. It is a throttle, not a floor.
 
 If block production stalls:
 

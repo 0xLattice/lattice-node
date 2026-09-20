@@ -24,16 +24,12 @@ private enum NetworkTestError: Error {
 
 private actor MinimumWorkRecorder {
     private var values: [[MiningMinimumWork]] = []
-    private var commits: [Bool] = []
 
-    func record(_ value: [MiningMinimumWork], commit: Bool) {
+    func record(_ value: [MiningMinimumWork]) {
         values.append(value)
-        commits.append(commit)
     }
 
     func last() -> [MiningMinimumWork]? { values.last }
-
-    func lastCommit() -> Bool? { commits.last }
 }
 
 private func inertNetworkHandlers() -> NodeNetworkHandlers {
@@ -2873,26 +2869,15 @@ final class NetworkTrustTests: XCTestCase {
         )
 
         // The operator's opt-in to commit the minimum-work target is one
-        // trailing byte, and only when there is minimum work to commit.
-        let committing = try ChildCandidateRequestMessage(
-            requestID: 21,
-            budgetMilliseconds: 750,
-            childPath: ["Nexus", "Payments"],
-            parentCID: parentCID,
-            parentData: parentData,
-            rewards: [],
-            minimumWork: entries,
-            commitMinimumWorkTarget: true
-        ).encoded()
-        XCTAssertEqual(committing, encoded + Data([1]))
-        let decodedCommitting = try ChildCandidateRequestMessage.decoded(
-            committing
+        // The wire carries a search plan and nothing more: there is no
+        // trailing commit byte, so a filter cannot travel as a commitment.
+        XCTAssertEqual(
+            try ChildCandidateRequestMessage.decoded(encoded).minimumWork,
+            entries
         )
-        XCTAssertTrue(decodedCommitting.commitMinimumWorkTarget)
-        XCTAssertEqual(decodedCommitting.minimumWork, entries)
-        XCTAssertFalse(
-            try ChildCandidateRequestMessage.decoded(encoded)
-                .commitMinimumWorkTarget
+        XCTAssertThrowsError(
+            try ChildCandidateRequestMessage.decoded(encoded + Data([1])),
+            "a trailing byte is not part of this message"
         )
         XCTAssertEqual(
             try ChildCandidateRequestMessage(
@@ -2901,16 +2886,12 @@ final class NetworkTrustTests: XCTestCase {
                 childPath: ["Nexus", "Payments"],
                 parentCID: parentCID,
                 parentData: parentData,
-                rewards: [],
-                commitMinimumWorkTarget: true
+                rewards: []
             ).encoded(),
             legacy
         )
         XCTAssertThrowsError(
             try ChildCandidateRequestMessage.decoded(legacy + Data([1]))
-        )
-        XCTAssertThrowsError(
-            try ChildCandidateRequestMessage.decoded(committing + Data([1]))
         )
         var emptyTrailer = legacy
         emptyTrailer.append(contentsOf: [2, 0, 0, 0])
@@ -5924,10 +5905,7 @@ final class NetworkTrustTests: XCTestCase {
         let received = MinimumWorkRecorder()
         let childHandlers = NodeNetworkHandlers(
             childCandidateBuilder: { context, _ in
-                await received.record(
-                    context.minimumWork,
-                    commit: context.commitMinimumWorkTarget
-                )
+                await received.record(context.minimumWork)
                 return fixture.candidate
             },
             candidateReservations: { _ in true },
@@ -5966,22 +5944,19 @@ final class NetworkTrustTests: XCTestCase {
             // child's: only the child's entry crosses.
             let forwarded = await received.last()
             XCTAssertEqual(forwarded, [childEntry])
-            let forwardedCommit = await received.lastCommit()
-            XCTAssertEqual(forwardedCommit, false)
 
-            // The operator's opt-in to commit minimum-work targets crosses
-            // with the entries it applies to.
-            let committing = await fixture.parentRuntime.directChildCandidates(
+            // Asking twice forwards the same plan both times: there is no
+            // second, stickier form of the request that commits it.
+            let again = await fixture.parentRuntime.directChildCandidates(
                 ChildCandidateRequestContext(
                     parentCarrier: fixture.context.parentCarrier,
                     rewards: [],
-                    minimumWork: [childEntry],
-                    commitMinimumWorkTarget: true
+                    minimumWork: [childEntry]
                 )
             )
-            XCTAssertEqual(committing.count, 1)
-            let forwardedOptIn = await received.lastCommit()
-            XCTAssertEqual(forwardedOptIn, true)
+            XCTAssertEqual(again.count, 1)
+            let forwardedAgain = await received.last()
+            XCTAssertEqual(forwardedAgain, [childEntry])
         } catch {
             await fixture.childRuntime.stop()
             await fixture.parentRuntime.stop()

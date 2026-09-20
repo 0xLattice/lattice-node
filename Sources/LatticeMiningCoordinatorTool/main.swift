@@ -44,12 +44,6 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
     )
     var minWork: [String] = []
 
-    @Flag(
-        name: .long,
-        help: "Commit each --min-work target into that chain's blocks instead of the scheduled target. Off by default. On a fresh chain this sets where the difficulty schedule starts, because block 1 is the chain's difficulty anchor; on a running chain it does not move the schedule, since later targets are measured from that anchor rather than from each block's own target."
-    )
-    var commitMinWorkTarget = false
-
     @Flag(name: .long, help: "Run exactly one coordinator batch (emitting a JSON result) and exit.")
     var once = false
 
@@ -71,8 +65,7 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
             templateRequestBody: try Self.loadTemplateRequest(
                 path: rewardsFile,
                 deployment: deployment,
-                minimumWork: minWork,
-                commitMinimumWorkTarget: commitMinWorkTarget
+                minimumWork: minWork
             )
         )
 
@@ -188,8 +181,7 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
     private static func loadTemplateRequest(
         path: String?,
         deployment: Bool,
-        minimumWork: [String],
-        commitMinimumWorkTarget: Bool
+        minimumWork: [String]
     ) throws -> Data {
         let data: Data
         if let path {
@@ -201,8 +193,7 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
             return try MiningTemplateRequestBody.make(
                 rewardsRequest: data,
                 deployment: deployment,
-                minimumWork: minimumWork,
-                commitMinimumWorkTarget: commitMinimumWorkTarget
+                minimumWork: minimumWork
             )
         } catch let refusal as MiningTemplateRequestBody.Refusal {
             throw ValidationError(refusal.description)

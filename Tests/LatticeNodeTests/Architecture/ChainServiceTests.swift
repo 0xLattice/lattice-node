@@ -1416,63 +1416,6 @@ final class ChainServiceTests: XCTestCase {
         }
     }
 
-    /// The operator opt-in, on a fresh Nexus whose genesis is at the maximum
-    /// target: block 1 is built at the minimum-work target and Lattice accepts
-    /// it, which ANCHORS the chain's schedule there. Later blocks follow that
-    /// schedule rather than re-committing the filter — the filter is a launch
-    /// lever, not a per-block floor. Without a minimum work the same chain
-    /// hands out the genesis target, block after free block.
-    func testCommittedMinimumWorkAnchorsTheScheduleAtTheFilterTarget()
-        async throws
-    {
-        let work = UInt256(1) << 10
-        let filterTarget = minimumWorkTarget(work)
-        let process = try await nexusProcess()
-        let service = makeService(process: process)
-        let request = MiningTemplateRequest(
-            minimumWork: [MiningMinimumWork(chainPath: ["Nexus"], work: work)],
-            commitMinimumWorkTarget: true
-        )
-        var committedSoFar = filterTarget
-        for round in 0..<4 {
-            let template = try await service.miningTemplate(request)
-            if round == 0 {
-                XCTAssertEqual(
-                    template.block.target, filterTarget,
-                    "block 1 commits the operator's level and anchors the schedule there"
-                )
-            }
-            // Never easier than the anchor, and never easier than the filter:
-            // the schedule only hardens from here because the harness outruns
-            // `targetBlockTime`.
-            XCTAssertLessThanOrEqual(template.block.target, committedSoFar)
-            // ...and still anchored there: the schedule hardens by a fraction
-            // of a doubling per block, so a few blocks in it is nowhere near
-            // half the anchor. Without this bound a schedule that collapsed to
-            // target 1 after block 1 would satisfy the assertion above.
-            XCTAssertGreaterThan(template.block.target, filterTarget >> 1)
-            committedSoFar = template.block.target
-            XCTAssertEqual(template.searchTarget, template.block.target)
-            XCTAssertGreaterThanOrEqual(
-                workForTarget(template.block.target), work
-            )
-            let nonce = firstNonce(of: template.block, from: 0) {
-                $0 <= template.block.target
-            }
-            let response = try await service.submitWork(SubmitWorkRequest(
-                workID: template.workID,
-                nonce: nonce
-            ))
-            XCTAssertEqual(response.disposition, .canonicalized)
-        }
-
-        let burstProcess = try await nexusProcess()
-        let burst = try await makeService(process: burstProcess)
-            .miningTemplate(MiningTemplateRequest())
-        XCTAssertEqual(burst.block.target, .max)
-        XCTAssertLessThan(filterTarget, .max)
-    }
-
     /// The minimum work is the miner's choice, not a rule the node enforces:
     /// after blocks committed at the minimum-work target it still accepts
     /// another producer's block at the scheduled (easier) target.
@@ -1550,11 +1493,16 @@ final class ChainServiceTests: XCTestCase {
         let process = try await nexusProcess()
         let service = makeService(process: process)
         let template = try await service.miningTemplate(MiningTemplateRequest(
-            minimumWork: [MiningMinimumWork(chainPath: ["Nexus"], work: work)],
-            commitMinimumWorkTarget: true
+            minimumWork: [MiningMinimumWork(chainPath: ["Nexus"], work: work)]
         ))
+        // The block commits the SCHEDULE; the filter only narrows the search,
+        // so the nonce has to clear the search target, not the block's.
+        XCTAssertLessThan(
+            template.searchTarget, template.block.target,
+            "precondition: the filter is harder than the schedule here"
+        )
         let nonce = firstNonce(of: template.block, from: 0) {
-            $0 <= template.block.target
+            $0 <= template.searchTarget
         }
         let filtered = try await service.submitWork(SubmitWorkRequest(
             workID: template.workID,
@@ -1563,9 +1511,10 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertEqual(filtered.disposition, .canonicalized)
 
         let tip = try await process.canonicalTipBlock()
-        // This is block 1, so it commits the filter target exactly and anchors
-        // the schedule there.
-        XCTAssertEqual(tip.target, minimumWorkTarget(work))
+        // Block 1 commits the scheduled target -- the genesis maximum -- not
+        // the filter. The filter shaped only what this miner searched for.
+        XCTAssertEqual(tip.target, UInt256.max)
+        XCTAssertLessThanOrEqual(tip.proofOfWorkHash(), minimumWorkTarget(work))
 
         // Now hand the node a HARDER filter, and do not commit it. The point of
         // this test is an asymmetry, so the filter has to be one the node was
@@ -1577,8 +1526,7 @@ final class ChainServiceTests: XCTestCase {
             MiningTemplateRequest(
                 minimumWork: [MiningMinimumWork(
                     chainPath: ["Nexus"], work: harderWork
-                )],
-                commitMinimumWorkTarget: false
+                )]
             )
         )
         XCTAssertEqual(harderTemplate.searchTarget, harderFilter)
@@ -1826,52 +1774,6 @@ final class ChainServiceTests: XCTestCase {
         )
     }
 
-    /// The operator opt-in reaches the child that builds its own block: each
-    /// chain commits its minimum-work target, and nothing bounds the search
-    /// because no committed target is easier than its threshold.
-    func testCommittedMinimumWorkBuildsEachMergedChainAtItsOwnTarget()
-        async throws
-    {
-        let fixture = try await activeChildService(
-            spec: NexusGenesis.spec,
-            carrierTarget: UInt256.max >> 4
-        )
-        let parentTip = try await fixture.parent.canonicalTipBlock()
-        let parentWork = UInt256(1) << 8
-        let parentThreshold = minimumWorkTarget(parentWork)
-        XCTAssertLessThan(parentThreshold, parentTip.nextTarget)
-        let childWork = UInt256(1) << 4
-        let childTarget = minimumWorkTarget(childWork)
-        let merged = mergedMiningService(fixture)
-        let template = try await merged.service.miningTemplate(
-            MiningTemplateRequest(
-                minimumWork: [
-                    MiningMinimumWork(chainPath: ["Nexus"], work: parentWork),
-                    MiningMinimumWork(
-                        chainPath: ["Nexus", "Payments"],
-                        work: childWork
-                    ),
-                ],
-                commitMinimumWorkTarget: true
-            )
-        )
-        let lastChildCandidate = await merged.children.last()
-        let childBlock = try XCTUnwrap(lastChildCandidate)
-        XCTAssertEqual(template.block.target, parentThreshold)
-        XCTAssertEqual(childBlock.target, childTarget)
-        XCTAssertEqual(template.searchTarget, childTarget)
-        XCTAssertEqual(template.targets, [childTarget, parentThreshold])
-
-        let carrierNonce = firstNonce(of: template.block, from: 0) {
-            $0 <= childTarget && $0 > parentThreshold
-        }
-        let carried = try await merged.service.submitWork(SubmitWorkRequest(
-            workID: template.workID,
-            nonce: carrierNonce
-        ))
-        XCTAssertEqual(carried.disposition, .carrier)
-    }
-
     /// Submission through a three-level hierarchy: a filter on the grandchild
     /// is visible to the Nexus only through the child's witness, and a hash
     /// that clears every committed target but misses that filter is refused
@@ -2039,7 +1941,6 @@ final class ChainServiceTests: XCTestCase {
             from: Data(#"{"rewards":[]}"#.utf8)
         )
         XCTAssertTrue(legacy.minimumWork.isEmpty)
-        XCTAssertFalse(legacy.commitMinimumWorkTarget)
         let template = try await service.miningTemplate(legacy)
         let genesis = try await process.canonicalTipBlock()
         let scheduled = try await BlockBuilder.buildBlock(
@@ -2053,11 +1954,14 @@ final class ChainServiceTests: XCTestCase {
             try JSONEncoder().encode(MiningTemplateRequest()),
             Data(#"{"rewards":[]}"#.utf8)
         )
-        let optedIn = try JSONDecoder().decode(
+        // A request from an older miner that still asks for its filter to be
+        // committed decodes fine and is simply not honoured: the key is gone,
+        // so the block commits the schedule like any other.
+        let legacyOptIn = try JSONDecoder().decode(
             MiningTemplateRequest.self,
             from: Data(#"{"rewards":[],"commitMinimumWorkTarget":true}"#.utf8)
         )
-        XCTAssertTrue(optedIn.commitMinimumWorkTarget)
+        XCTAssertTrue(legacyOptIn.minimumWork.isEmpty)
     }
 
     func testAuthenticatedProviderSuppliesOrdinaryChildCandidate() async throws {

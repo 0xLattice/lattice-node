@@ -677,9 +677,6 @@ struct ChildCandidateRequestMessage: Sendable {
     /// Encoded after the parent block only when non-empty, so a request
     /// without minimum work keeps its exact prior layout.
     let minimumWork: [MiningMinimumWork]
-    /// One trailing `1` byte after the minimum work, only when set and there
-    /// is minimum work for it to commit; otherwise the layout is unchanged.
-    let commitMinimumWorkTarget: Bool
 
     init(
         requestID: UInt64,
@@ -688,8 +685,7 @@ struct ChildCandidateRequestMessage: Sendable {
         parentCID: String,
         parentData: Data,
         rewards: [MiningReward],
-        minimumWork: [MiningMinimumWork] = [],
-        commitMinimumWorkTarget: Bool = false
+        minimumWork: [MiningMinimumWork] = []
     ) {
         self.requestID = requestID
         self.budgetMilliseconds = budgetMilliseconds
@@ -698,8 +694,6 @@ struct ChildCandidateRequestMessage: Sendable {
         self.parentData = parentData
         self.rewards = rewards
         self.minimumWork = minimumWork
-        self.commitMinimumWorkTarget = commitMinimumWorkTarget
-            && !minimumWork.isEmpty
     }
 
     func encoded() throws -> Data {
@@ -731,7 +725,6 @@ struct ChildCandidateRequestMessage: Sendable {
             + 2 + parentBytes.count + 4 + rewardBytes.count
             + 4 + parentData.count
             + (minimumWorkBytes.isEmpty ? 0 : 4 + minimumWorkBytes.count)
-            + (commitMinimumWorkTarget ? 1 : 0)
         guard size <= Self.maximumEncodedBytes else {
             throw NodeNetworkWireError.oversized
         }
@@ -752,9 +745,6 @@ struct ChildCandidateRequestMessage: Sendable {
         if !minimumWorkBytes.isEmpty {
             data.appendUInt32(UInt32(minimumWorkBytes.count))
             data.append(minimumWorkBytes)
-            if commitMinimumWorkTarget {
-                data.append(1)
-            }
         }
         return data
     }
@@ -820,7 +810,6 @@ struct ChildCandidateRequestMessage: Sendable {
         let parentData = Data(data[position..<blockEnd])
         position = blockEnd
         var minimumWork: [MiningMinimumWork] = []
-        var commitMinimumWorkTarget = false
         if position < data.endIndex {
             guard let length = data.readUInt32(at: &position), length > 0,
                   data.distance(from: position, to: data.endIndex) >= Int(length) else {
@@ -836,13 +825,6 @@ struct ChildCandidateRequestMessage: Sendable {
             }
             minimumWork = entries
             position = entriesEnd
-            if position < data.endIndex {
-                guard data.distance(from: position, to: data.endIndex) == 1,
-                      data[position] == 1 else {
-                    throw NodeNetworkWireError.malformed
-                }
-                commitMinimumWorkTarget = true
-            }
         }
         let message = Self(
             requestID: requestID,
@@ -851,8 +833,7 @@ struct ChildCandidateRequestMessage: Sendable {
             parentCID: parentCID,
             parentData: parentData,
             rewards: rewards,
-            minimumWork: minimumWork,
-            commitMinimumWorkTarget: commitMinimumWorkTarget
+            minimumWork: minimumWork
         )
         guard try message.encoded() == data else {
             throw NodeNetworkWireError.nonCanonical

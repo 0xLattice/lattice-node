@@ -193,7 +193,6 @@ public actor MiningTemplateBook {
         timestamp: Int64,
         transactionLimit: Int = .max,
         minimumWork: [[String]: UInt256] = [:],
-        commitMinimumWorkTarget: Bool = false,
         difficultyAnchor: DifficultyAnchor? = nil,
         fetcher: any Fetcher
     ) async throws -> MiningTemplate {
@@ -205,7 +204,6 @@ public actor MiningTemplateBook {
             timestamp: timestamp,
             transactionLimit: transactionLimit,
             minimumWork: minimumWork,
-            commitMinimumWorkTarget: commitMinimumWorkTarget,
             difficultyAnchor: difficultyAnchor,
             fetcher: fetcher
         )
@@ -266,7 +264,6 @@ public actor MiningTemplateBook {
         timestamp: Int64,
         transactionLimit: Int = .max,
         minimumWork: [[String]: UInt256] = [:],
-        commitMinimumWorkTarget: Bool = false,
         difficultyAnchor: DifficultyAnchor? = nil,
         fetcher: any Fetcher
     ) async throws -> MiningTemplate {
@@ -278,7 +275,6 @@ public actor MiningTemplateBook {
             timestamp: timestamp,
             transactionLimit: transactionLimit,
             minimumWork: minimumWork,
-            commitMinimumWorkTarget: commitMinimumWorkTarget,
             difficultyAnchor: difficultyAnchor,
             fetcher: fetcher
         )
@@ -292,26 +288,25 @@ public actor MiningTemplateBook {
         timestamp: Int64,
         transactionLimit: Int,
         minimumWork: [[String]: UInt256],
-        commitMinimumWorkTarget: Bool,
         difficultyAnchor: DifficultyAnchor?,
         fetcher: any Fetcher
     ) async throws -> MiningTemplate {
         precondition(transactionLimit >= 0)
-        // By default the block commits the schedule (nil: the builder takes
-        // `previous.nextTarget`) and a miner's minimum work only narrows what
-        // it searches for. Committing the harder target instead is an
-        // operator's explicit choice, and validity permits it
-        // (`target <= parent.nextTarget`).
+        // The block ALWAYS commits the schedule (nil: the builder takes
+        // `previous.nextTarget`). A miner's minimum work narrows what that
+        // miner searches for and nothing else.
         //
-        // It changes the schedule only at block 1, which is the difficulty
-        // anchor. Everywhere else `nextTarget` is measured from that anchor
-        // rather than from this block's own target, so committing harder buys
-        // more work against the same schedule.
-        let target = commitMinimumWorkTarget
-            ? minimumWork[chainPath].map {
-                min(previous.nextTarget, minimumWorkTarget($0))
-            }
-            : nil
+        // This is the whole point of the filter. It is a RATE control: the
+        // miner declines hashes easier than its own bar, so its blocks take
+        // longer to find, and the schedule reads that arrival rate and moves
+        // difficulty accordingly. Difficulty stays something the chain
+        // DISCOVERS from observed timing, never something a miner asserts.
+        //
+        // Letting the filter set the committed target instead would publish
+        // one miner's private policy as consensus data that every later block
+        // inherits through the anchor -- which is exactly the coupling the
+        // absolute schedule exists to remove.
+        let target: UInt256? = nil
         var childBlocks: [String: Block] = [:]
         var childTargets: [String: (target: UInt256, path: [String])] = [:]
         for child in children {
@@ -380,7 +375,6 @@ public actor MiningTemplateBook {
         let workID = Self.workID(
             blockCID: try BlockHeader(node: candidate).rawCID,
             minimumWork: minimumWork,
-            commitMinimumWorkTarget: commitMinimumWorkTarget
         )
         let scheduling = try await Self.scheduling(
             root: candidate,
@@ -403,16 +397,15 @@ public actor MiningTemplateBook {
         return template
     }
 
-    /// Blocks no longer differ by the miner's filter, so the block CID alone
-    /// would let two search policies share one cached work item, each judged
-    /// against the other's search target. A request with a plan or the opt-in
-    /// gets the CID plus a digest of both; one with neither keeps the CID.
+    /// Blocks never differ by the miner's filter, so the block CID alone would
+    /// let two search policies share one cached work item, each judged against
+    /// the other's search target. A request carrying a plan gets the CID plus a
+    /// digest of it; one without keeps the CID.
     private nonisolated static func workID(
         blockCID: String,
-        minimumWork: [[String]: UInt256],
-        commitMinimumWorkTarget: Bool
+        minimumWork: [[String]: UInt256]
     ) -> String {
-        guard !minimumWork.isEmpty || commitMinimumWorkTarget else {
+        guard !minimumWork.isEmpty else {
             return blockCID
         }
         let policy = minimumWork
@@ -420,7 +413,6 @@ public actor MiningTemplateBook {
             .sorted { $0.0 < $1.0 }
             .map { "\($0.0)=\($0.1)" }
             .joined(separator: "\n")
-            + "\ncommit=\(commitMinimumWorkTarget)"
         let digest = SHA256.hash(data: Data(policy.utf8))
             .prefix(16)
             .map { String(format: "%02x", $0) }

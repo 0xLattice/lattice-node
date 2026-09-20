@@ -76,10 +76,6 @@ public struct TopologyMine: Codable {
     /// and submits hashes that meet it; blocks still commit their scheduled
     /// target. A chain left out mines at its scheduled target.
     public var minWork: [String: String]?
-    /// `true` commits each `minWork` target into that chain's blocks instead
-    /// of the scheduled target (coordinator `--commit-min-work-target`).
-    /// Absent or `false` — the default — blocks commit the schedule.
-    public var commitMinWorkTarget: Bool?
     /// Shortest gap, in seconds, between the template builds of two
     /// consecutive parent blocks this miner produces. A floor, never a
     /// ceiling: a round that already ran longer waits not at all, so the
@@ -112,7 +108,6 @@ public struct TopologyMine: Codable {
         chain: String, worker: String? = nil, workers: Int? = nil,
         batchSize: UInt64? = nil, rewards: String? = nil,
         minWork: [String: String]? = nil,
-        commitMinWorkTarget: Bool? = nil,
         minBlockIntervalSeconds: UInt64? = nil,
         templateTimeoutSeconds: UInt64? = nil,
         roundDeadlineMultiplier: Int? = nil
@@ -123,7 +118,6 @@ public struct TopologyMine: Codable {
         self.batchSize = batchSize
         self.rewards = rewards
         self.minWork = minWork
-        self.commitMinWorkTarget = commitMinWorkTarget
         self.minBlockIntervalSeconds = minBlockIntervalSeconds
         self.templateTimeoutSeconds = templateTimeoutSeconds
         self.roundDeadlineMultiplier = roundDeadlineMultiplier
@@ -174,10 +168,10 @@ public struct TopologyMine: Codable {
         return max(.zero, .seconds(seconds) - elapsed)
     }
 
-    /// The coordinator arguments for `minWork` and `commitMinWorkTarget`.
+    /// The coordinator arguments for `minWork`.
     public var coordinatorMinimumWorkArguments: [String] {
         minimumWorkEntries.flatMap { ["--min-work", $0] }
-            + (commitMinWorkTarget == true ? ["--commit-min-work-target"] : [])
+
     }
 }
 
@@ -244,9 +238,6 @@ public struct Topology: Codable {
         }
         if let mine, chains[mine.chain] == nil {
             throw CtlError("mine.chain \(mine.chain) is not in the tree")
-        }
-        if let mine, mine.commitMinWorkTarget == true, mine.minimumWorkEntries.isEmpty {
-            throw CtlError("mine.commitMinWorkTarget commits the mine.minWork targets and needs at least one mine.minWork entry")
         }
         if let timeout = mine?.templateTimeoutSeconds, timeout < 1 {
             throw CtlError("mine.templateTimeoutSeconds must be at least 1; a zero timeout can never observe a template expiry, so no round deadline could be derived and the miner would never mine")
