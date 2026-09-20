@@ -156,8 +156,7 @@ final class LatticeCtlTopologyTests: XCTestCase {
             mine: TopologyMine(
                 chain: "Nexus", worker: "cpu", workers: 2,
                 batchSize: 1_000, rewards: "rewards.jsonl",
-                minWork: ["Nexus": "2^32"],
-                commitMinWorkTarget: true
+                minWork: ["Nexus": "2^32"]
             )
         )
         try topology.save(root: root)
@@ -165,52 +164,34 @@ final class LatticeCtlTopologyTests: XCTestCase {
         XCTAssertEqual(loaded.chains["Nexus"]?.listen, 4001)
         XCTAssertEqual(loaded.mine?.batchSize, 1_000)
         XCTAssertEqual(loaded.mine?.minWork, ["Nexus": "2^32"])
-        XCTAssertEqual(loaded.mine?.commitMinWorkTarget, true)
-        // Absent is the default: blocks commit the schedule.
+        // Blocks always commit the schedule; the filter is a search plan.
         let legacy = try JSONDecoder().decode(
             TopologyMine.self,
             from: Data(#"{"chain":"Nexus","minWork":{"Nexus":"2^32"}}"#.utf8)
         )
-        XCTAssertNil(legacy.commitMinWorkTarget)
         XCTAssertEqual(
             legacy.coordinatorMinimumWorkArguments,
             ["--min-work", "Nexus=2^32"]
         )
     }
 
-    /// `mine.commitMinWorkTarget` reaches the coordinator as its flag, and
-    /// without any `mine.minWork` it would commit nothing, so the file is
-    /// refused by name.
-    func testCommitMinWorkTargetPassesThroughAndNeedsMinimumWork() throws {
-        func topology(_ mine: TopologyMine) -> Topology {
-            Topology(chains: ["Nexus": chain(4001)], mine: mine)
-        }
-        let optedIn = TopologyMine(
+    /// `mine.minWork` reaches the coordinator as a search plan. There is no
+    /// companion setting that commits it: a miner's filter shapes that miner's
+    /// search and never the blocks it produces.
+    func testMinimumWorkPassesThroughAsASearchPlan() throws {
+        let mine = TopologyMine(
             chain: "Nexus",
-            minWork: ["Nexus/Payments": "2^20", "Nexus": "2^32"],
-            commitMinWorkTarget: true
+            minWork: ["Nexus/Payments": "2^20", "Nexus": "2^32"]
         )
+        let topology = Topology(chains: ["Nexus": chain(4001)], mine: mine)
         XCTAssertEqual(
-            try topology(optedIn).validated().mine?
-                .coordinatorMinimumWorkArguments,
+            try topology.validated().mine?.coordinatorMinimumWorkArguments,
             [
                 "--min-work", "Nexus=2^32",
                 "--min-work", "Nexus/Payments=2^20",
-                "--commit-min-work-target",
-            ]
+            ],
+            "the plan crosses, and nothing that would commit it"
         )
-        for minWork in [nil, [String: String]()] {
-            XCTAssertThrowsError(try topology(TopologyMine(
-                chain: "Nexus",
-                minWork: minWork,
-                commitMinWorkTarget: true
-            )).validated()) { error in
-                XCTAssertEqual(
-                    (error as? CtlError)?.description,
-                    "mine.commitMinWorkTarget commits the mine.minWork targets and needs at least one mine.minWork entry"
-                )
-            }
-        }
     }
 
     /// The cadence is a FLOOR on block spacing, not a fixed block time. A

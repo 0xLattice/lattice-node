@@ -292,42 +292,20 @@ final class MiningTemplateRequestBodyTests: XCTestCase {
         )
     }
 
-    func testMinimumWorkAloneLeavesTheOptInOff() throws {
+    /// The filter reaches the request as a SEARCH plan and nothing else.
+    /// There is no way to ask for it to be committed into blocks -- difficulty
+    /// is what the chain reads from arrival rate, not what a miner declares.
+    func testMinimumWorkReachesTheRequestAsASearchPlanOnly() throws {
         let body = try object(MiningTemplateRequestBody.make(
             rewardsRequest: rewards,
             deployment: false,
-            minimumWork: ["Nexus=2^8"],
-            commitMinimumWorkTarget: false
+            minimumWork: ["Nexus=2^8"]
         ))
-        XCTAssertNotNil(body["minimumWork"])
-        XCTAssertNil(body["commitMinimumWorkTarget"])
-    }
-
-    func testCommitMinWorkTargetReachesTheRequest() throws {
-        let body = try object(MiningTemplateRequestBody.make(
-            rewardsRequest: rewards,
-            deployment: false,
-            minimumWork: ["Nexus=2^8"],
-            commitMinimumWorkTarget: true
-        ))
-        XCTAssertEqual(body["commitMinimumWorkTarget"] as? Bool, true)
         XCTAssertEqual((body["minimumWork"] as? [Any])?.count, 1)
-    }
-
-    /// The opt-in commits the minimum-work targets; without one it would
-    /// silently do nothing, so it is refused by name.
-    func testCommitMinWorkTargetWithoutMinimumWorkIsRefused() {
-        XCTAssertThrowsError(try MiningTemplateRequestBody.make(
-            rewardsRequest: rewards,
-            deployment: false,
-            minimumWork: [],
-            commitMinimumWorkTarget: true
-        )) { error in
-            XCTAssertEqual(
-                (error as? MiningTemplateRequestBody.Refusal)?.description,
-                "--commit-min-work-target commits the --min-work targets and needs at least one --min-work"
-            )
-        }
+        XCTAssertNil(
+            body["commitMinimumWorkTarget"],
+            "a miner's filter must never travel as a commitment"
+        )
     }
 }
 

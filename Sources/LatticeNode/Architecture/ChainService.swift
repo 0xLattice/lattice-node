@@ -78,8 +78,12 @@ public struct MiningReward: Codable, Sendable {
 /// template choice, never a validity rule: that chain's block still commits
 /// its scheduled target, and the template's search thresholds become
 /// `min(scheduled target, minimumWorkTarget(work))`, so the miner neither
-/// searches for nor submits a hash that misses it. With
-/// `commitMinimumWorkTarget` the block commits that harder target instead.
+/// searches for nor submits a hash that misses it.
+///
+/// It is a RATE control, and only that. Declining easier hashes makes this
+/// miner's blocks take longer to find; the schedule reads that arrival rate
+/// and moves difficulty accordingly. Difficulty remains something the chain
+/// discovers from observed timing, never something a miner asserts.
 public struct MiningMinimumWork: Codable, Sendable, Equatable {
     public let chainPath: [String]
     public let work: UInt256
@@ -93,30 +97,18 @@ public struct MiningMinimumWork: Codable, Sendable, Equatable {
 public struct MiningTemplateRequest: Codable, Sendable {
     public let rewards: [MiningReward]
     public let minimumWork: [MiningMinimumWork]
-    /// Operator opt-in, off by default: build each `minimumWork` chain's block
-    /// at the harder minimum-work target rather than its scheduled target.
-    ///
-    /// This sets a chain's STARTING difficulty and nothing more. Block 1 is the
-    /// difficulty anchor, so the target it commits is where the schedule
-    /// begins; from block 2 on the schedule is measured from that anchor, and
-    /// committing a harder target only spends more work to meet the same
-    /// schedule. It is a launch-time lever, not a per-block floor.
-    public let commitMinimumWorkTarget: Bool
 
     public init(
         rewards: [MiningReward] = [],
-        minimumWork: [MiningMinimumWork] = [],
-        commitMinimumWorkTarget: Bool = false
+        minimumWork: [MiningMinimumWork] = []
     ) {
         self.rewards = rewards
         self.minimumWork = minimumWork
-        self.commitMinimumWorkTarget = commitMinimumWorkTarget
     }
 
     private enum CodingKeys: String, CodingKey {
         case rewards
         case minimumWork
-        case commitMinimumWorkTarget
     }
 
     public init(from decoder: any Decoder) throws {
@@ -129,10 +121,6 @@ public struct MiningTemplateRequest: Codable, Sendable {
             [MiningMinimumWork].self,
             forKey: .minimumWork
         ) ?? []
-        commitMinimumWorkTarget = try container.decodeIfPresent(
-            Bool.self,
-            forKey: .commitMinimumWorkTarget
-        ) ?? false
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -140,9 +128,6 @@ public struct MiningTemplateRequest: Codable, Sendable {
         try container.encode(rewards, forKey: .rewards)
         if !minimumWork.isEmpty {
             try container.encode(minimumWork, forKey: .minimumWork)
-        }
-        if commitMinimumWorkTarget {
-            try container.encode(true, forKey: .commitMinimumWorkTarget)
         }
     }
 }
@@ -230,21 +215,17 @@ public struct ChildCandidateRequestContext: Sendable {
     public let rewards: [MiningReward]
     /// The requesting miner's minimum work for descendant chains.
     public let minimumWork: [MiningMinimumWork]
-    /// See `MiningTemplateRequest.commitMinimumWorkTarget`.
-    public let commitMinimumWorkTarget: Bool
     public let excludedDirectories: Set<String>
 
     public init(
         parentCarrier: Block,
         rewards: [MiningReward],
         minimumWork: [MiningMinimumWork] = [],
-        commitMinimumWorkTarget: Bool = false,
         excludedDirectories: Set<String> = []
     ) {
         self.parentCarrier = parentCarrier
         self.rewards = rewards
         self.minimumWork = minimumWork
-        self.commitMinimumWorkTarget = commitMinimumWorkTarget
         self.excludedDirectories = excludedDirectories
     }
 }
@@ -1447,7 +1428,6 @@ public actor ChainService {
                 assembled = try await buildMiningTemplate(
                     rewards: request.rewards,
                     minimumWork: request.minimumWork,
-                    commitMinimumWorkTarget: request.commitMinimumWorkTarget,
                     parentCarrier: nil
                 )
             } catch {
@@ -1558,8 +1538,7 @@ public actor ChainService {
             parentCarrier: context.parentCarrier,
             parentContentSource: parentContentSource,
             rewards: context.rewards,
-            minimumWork: context.minimumWork,
-            commitMinimumWorkTarget: context.commitMinimumWorkTarget
+            minimumWork: context.minimumWork
         )
     }
 
@@ -1571,8 +1550,7 @@ public actor ChainService {
         parentCarrier: Block,
         parentContentSource: any ContentSource,
         rewards: [MiningReward],
-        minimumWork: [MiningMinimumWork],
-        commitMinimumWorkTarget: Bool
+        minimumWork: [MiningMinimumWork]
     ) async throws -> DirectChildCandidate {
         await acquireOperation()
         defer { releaseOperation() }
@@ -1588,7 +1566,6 @@ public actor ChainService {
         let template = try await buildMiningTemplate(
             rewards: rewards,
             minimumWork: minimumWork,
-            commitMinimumWorkTarget: commitMinimumWorkTarget,
             parentCarrier: parentCarrier,
             fetcher: fetcher
         )
@@ -1622,7 +1599,6 @@ public actor ChainService {
     private func buildMiningTemplate(
         rewards: [MiningReward],
         minimumWork: [MiningMinimumWork],
-        commitMinimumWorkTarget: Bool,
         parentCarrier: Block?,
         fetcher: (any Fetcher)? = nil
     ) async throws -> MiningTemplate {
@@ -1685,7 +1661,6 @@ public actor ChainService {
                 timestamp: timestamp,
                 transactionLimit: poolLimit + (reward == nil ? 0 : 1),
                 minimumWork: minimumWorkPlan.works,
-                commitMinimumWorkTarget: commitMinimumWorkTarget,
                 difficultyAnchor: difficultyAnchor,
                 fetcher: fetcher
             )
@@ -1718,8 +1693,7 @@ public actor ChainService {
                 context: ChildCandidateRequestContext(
                     parentCarrier: provisional.block,
                     rewards: rewardPlan.descendants,
-                    minimumWork: minimumWorkPlan.descendants,
-                    commitMinimumWorkTarget: commitMinimumWorkTarget
+                    minimumWork: minimumWorkPlan.descendants
                 )
             )
             var optionalChildren = provided
@@ -1740,7 +1714,6 @@ public actor ChainService {
                 parentCarrier: parentCarrier,
                 timestamp: timestamp,
                 minimumWork: minimumWorkPlan.works,
-                commitMinimumWorkTarget: commitMinimumWorkTarget,
                 difficultyAnchor: difficultyAnchor,
                 fetcher: fetcher
             )
@@ -1763,7 +1736,6 @@ public actor ChainService {
                     parentCarrier: parentCarrier,
                     timestamp: timestamp,
                     minimumWork: minimumWorkPlan.works,
-                    commitMinimumWorkTarget: commitMinimumWorkTarget,
                     difficultyAnchor: difficultyAnchor,
                     fetcher: fetcher
                 )
@@ -1786,7 +1758,6 @@ public actor ChainService {
                             parentCarrier: parentCarrier,
                             timestamp: timestamp,
                             minimumWork: minimumWorkPlan.works,
-                            commitMinimumWorkTarget: commitMinimumWorkTarget,
                             difficultyAnchor: difficultyAnchor,
                             fetcher: fetcher
                         )

@@ -483,7 +483,6 @@ final class MiningTemplateBookTests: XCTestCase {
                 children: [],
                 timestamp: 1_000,
                 minimumWork: plan,
-                commitMinimumWorkTarget: commit,
                 fetcher: fixture.store
             )
         }
@@ -587,141 +586,6 @@ final class MiningTemplateBookTests: XCTestCase {
         }
     }
 
-    /// A chain launched at the maximum target mines a burst of near-free
-    /// blocks: every block sits at the genesis target and the schedule, anchored
-    /// on block 1, keeps proposing it. An operator who opts in to committing the
-    /// minimum-work target hardens block 1, and because block 1 IS the anchor
-    /// the whole schedule starts there instead.
-    ///
-    /// Both runs here mine exactly on schedule, so `nextTarget` holds the
-    /// anchor's target throughout. That is the absolute schedule holding still,
-    /// not the retarget following each block's own target — see
-    /// `testCommittedMinimumWorkSetsTheAnchorNotAPerBlockFloor`, which separates
-    /// the two.
-    func testCommittedMinimumWorkHoldsAFreshMaxTargetChainAtTheFilterTarget()
-        async throws
-    {
-        let work = UInt256(1) << 12
-        let filterTarget = minimumWorkTarget(work)
-        // Blocks exactly on schedule (the fixture's targetBlockTime), so the
-        // retarget proposes the target that was actually used.
-        func mine(minimumWork: UInt256?) async throws -> [Block] {
-            let fixture = try await chainFixture()
-            let book = MiningTemplateBook(chainPath: ["Nexus"])
-            var previous = fixture.genesis
-            var mined: [Block] = []
-            for height in 1...5 {
-                let template = try await book.build(
-                    previous: previous,
-                    transactions: [],
-                    children: [],
-                    timestamp: Int64(height) * 1_000,
-                    minimumWork: minimumWork.map { [["Nexus"]: $0] } ?? [:],
-                    commitMinimumWorkTarget: true,
-                    fetcher: fixture.store
-                )
-                XCTAssertEqual(template.searchTarget, template.block.target)
-                let midstate = ProofOfWork.midstate(for: template.block)
-                var nonce: UInt64 = 0
-                while ProofOfWork.hash(midstate: midstate, nonce: nonce)
-                    > template.block.target {
-                    nonce += 1
-                }
-                let block = ProofOfWork.withNonce(template.block, nonce: nonce)
-                try await BlockHeader(node: block).storeBlock(
-                    storer: fixture.store
-                )
-                try await block.postState.storeRecursively(
-                    storer: fixture.store
-                )
-                mined.append(block)
-                previous = block
-            }
-            return mined
-        }
-
-        let burst = try await mine(minimumWork: nil)
-        XCTAssertEqual(burst.map(\.target), Array(repeating: .max, count: 5))
-        XCTAssertEqual(
-            burst.map(\.nextTarget), Array(repeating: .max, count: 5)
-        )
-
-        let filtered = try await mine(minimumWork: work)
-        XCTAssertEqual(
-            filtered.map(\.target), Array(repeating: filterTarget, count: 5)
-        )
-        XCTAssertEqual(
-            filtered.map(\.nextTarget),
-            Array(repeating: filterTarget, count: 5),
-            "on schedule, every block holds the target block 1 anchored"
-        )
-        for block in filtered {
-            XCTAssertGreaterThanOrEqual(workForTarget(block.target), work)
-            XCTAssertLessThanOrEqual(block.proofOfWorkHash(), block.target)
-        }
-    }
-
-    /// Committing the minimum-work target sets the chain's STARTING difficulty
-    /// and nothing else. Block 1 is the difficulty anchor, so the target it
-    /// commits is where the schedule begins; from block 2 on, the schedule is
-    /// measured from that anchor, so mining harder than it buys the miner more
-    /// work without moving the target its successors must meet.
-    ///
-    /// This is what distinguishes the absolute schedule from the windowed
-    /// retarget it replaced. That one recomputed `nextTarget` from the block's
-    /// OWN target, so any block mined harder became a permanent floor and an
-    /// operator's filter ratcheted the whole chain. Here only block 1 can do it.
-    func testCommittedMinimumWorkSetsTheAnchorNotAPerBlockFloor() async throws {
-        let anchorWork = UInt256(1) << 12
-        let harderWork = UInt256(1) << 20
-        let anchorTarget = minimumWorkTarget(anchorWork)
-        let harderTarget = minimumWorkTarget(harderWork)
-        XCTAssertLessThan(harderTarget, anchorTarget, "precondition: the second level is genuinely harder")
-
-        let fixture = try await chainFixture()
-        let book = MiningTemplateBook(chainPath: ["Nexus"])
-
-        func extend(_ previous: Block, height: Int, work: UInt256) async throws -> Block {
-            let template = try await book.build(
-                previous: previous,
-                transactions: [],
-                children: [],
-                timestamp: Int64(height) * 1_000,
-                minimumWork: [["Nexus"]: work],
-                commitMinimumWorkTarget: true,
-                fetcher: fixture.store
-            )
-            let midstate = ProofOfWork.midstate(for: template.block)
-            var nonce: UInt64 = 0
-            while ProofOfWork.hash(midstate: midstate, nonce: nonce) > template.block.target {
-                nonce += 1
-            }
-            let block = ProofOfWork.withNonce(template.block, nonce: nonce)
-            try await BlockHeader(node: block).storeBlock(storer: fixture.store)
-            try await block.postState.storeRecursively(storer: fixture.store)
-            return block
-        }
-
-        // Block 1 anchors the schedule at the operator's chosen level.
-        let one = try await extend(fixture.genesis, height: 1, work: anchorWork)
-        XCTAssertEqual(one.target, anchorTarget, "block 1 commits the operator's level")
-        XCTAssertEqual(one.nextTarget, anchorTarget, "and anchors the schedule there")
-
-        // Block 2 is mined MUCH harder. Under the windowed retarget its own
-        // target would have become the new schedule; under an absolute schedule
-        // it must not, because the anchor is unchanged and block 2 is on time.
-        let two = try await extend(one, height: 2, work: harderWork)
-        XCTAssertEqual(two.target, harderTarget, "the miner really did commit the harder target")
-        XCTAssertEqual(
-            two.nextTarget, anchorTarget,
-            "mining harder than the anchor must not move the schedule its successors inherit"
-        )
-        XCTAssertNotEqual(
-            two.nextTarget, two.target,
-            "if these were equal the schedule would still be following the block's own target"
-        )
-    }
-
     /// The filter never makes a block easier than the schedule.
     func testMinimumWorkEasierThanTheScheduleLeavesTheScheduleInForce()
         async throws
@@ -733,14 +597,13 @@ final class MiningTemplateBookTests: XCTestCase {
 
         let easy = UInt256(1) << 8
         XCTAssertGreaterThan(minimumWorkTarget(easy), hardTarget)
-        for commit in [false, true] {
+        do {
             let scheduled = try await book.build(
                 previous: fixture.genesis,
                 transactions: [],
                 children: [],
                 timestamp: 1_000,
                 minimumWork: [["Nexus"]: easy],
-                commitMinimumWorkTarget: commit,
                 fetcher: fixture.store
             )
             XCTAssertEqual(scheduled.block.target, hardTarget)
@@ -748,8 +611,8 @@ final class MiningTemplateBookTests: XCTestCase {
             XCTAssertEqual(scheduled.targets, [hardTarget])
         }
 
-        // Harder than an already hard schedule still applies: to the search
-        // by default, and to the committed target only when opted in.
+        // Harder than an already hard schedule applies to the SEARCH, and only
+        // to the search.
         let harder = UInt256(1) << 64
         let filtered = try await book.build(
             previous: fixture.genesis,
@@ -763,17 +626,46 @@ final class MiningTemplateBookTests: XCTestCase {
         XCTAssertEqual(filtered.searchTarget, minimumWorkTarget(harder))
         XCTAssertEqual(filtered.targets, [minimumWorkTarget(harder)])
         XCTAssertLessThan(filtered.searchTarget, hardTarget)
-        let committed = try await book.build(
-            previous: fixture.genesis,
-            transactions: [],
-            children: [],
-            timestamp: 1_002,
-            minimumWork: [["Nexus"]: harder],
-            commitMinimumWorkTarget: true,
-            fetcher: fixture.store
+        XCTAssertEqual(
+            filtered.block.target, hardTarget,
+            "the committed target is the schedule, whatever the miner filters for"
         )
-        XCTAssertEqual(committed.block.target, minimumWorkTarget(harder))
-        XCTAssertEqual(committed.searchTarget, minimumWorkTarget(harder))
+    }
+
+    /// THE invariant: a miner's filter changes what that miner searches for and
+    /// never what the block commits.
+    ///
+    /// A filter that could set the committed target would publish one miner's
+    /// private policy as consensus data, inherited by every later block through
+    /// the difficulty anchor. The filter is a RATE control -- declining easier
+    /// hashes makes blocks take longer to find, and the schedule reads that
+    /// arrival rate. Difficulty stays something the chain discovers from
+    /// observed timing.
+    func testTheFilterMovesTheSearchAndNeverTheCommittedTarget() async throws {
+        let fixture = try await chainFixture()
+        let book = MiningTemplateBook(chainPath: ["Nexus"])
+        let scheduled = fixture.genesis.nextTarget
+
+        // Sweep filters from far easier than the schedule to far harder.
+        for work in [UInt256(1) << 4, UInt256(1) << 20, UInt256(1) << 64] {
+            let template = try await book.build(
+                previous: fixture.genesis,
+                transactions: [],
+                children: [],
+                timestamp: 1_000 + Int64(work.description.count),
+                minimumWork: [["Nexus"]: work],
+                fetcher: fixture.store
+            )
+            XCTAssertEqual(
+                template.block.target, scheduled,
+                "the committed target must be the schedule for every filter"
+            )
+            // The search is the harder of the two; the block is unmoved.
+            XCTAssertEqual(
+                template.searchTarget,
+                min(scheduled, minimumWorkTarget(work))
+            )
+        }
     }
 
     /// No minimum work is the schedule, exactly as before.
@@ -820,7 +712,7 @@ final class MiningTemplateBookTests: XCTestCase {
         )
 
         let template = try await MiningTemplateBook(
-            chainPath: ["Nexus"],
+            chainPath: ["Nexus"]
         ).build(
             previous: fixture.genesis,
             transactions: [valid, stale],
@@ -877,7 +769,7 @@ final class MiningTemplateBookTests: XCTestCase {
         let ordered = await pool.transactions(limit: .max)
 
         let template = try await MiningTemplateBook(
-            chainPath: ["Nexus"],
+            chainPath: ["Nexus"]
         ).build(
             previous: fixture.genesis,
             transactions: ordered,

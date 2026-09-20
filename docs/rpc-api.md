@@ -118,8 +118,8 @@ assembled.
 }
 ```
 
-`rewards`, `minimumWork` and `commitMinimumWorkTarget` are the only request
-fields and may be empty or absent; other fields are ignored. Each reward is an externally signed
+`rewards` and `minimumWork` are the only request fields and may be empty or
+absent; other fields are ignored. Each reward is an externally signed
 transaction for one absolute chain path; process identity is never converted
 into wallet identity. There is no template mode: transactions carrying a
 `GenesisAction` are selected from the pool like any other transaction.
@@ -138,7 +138,7 @@ caps `searchTarget` at that entry's `floor(2^256 / work) - 1` outright. That
 fails closed against a child node that ignores or predates the entry. It is
 stricter than needed when the chain is absent from the template, and whenever
 that filter does not bind (the chain's committed target is at or harder than
-the filter target), with or without `commitMinimumWorkTarget`: each child
+the filter target): each child
 returns a single witness, so a non-binding filtered chain two or more levels
 down is normally left unnamed and still caps the search. Removing that
 over-strictness needs a child to return one witness per filtered path in its
@@ -148,27 +148,19 @@ not consensus: admission, validation, and fork choice are untouched, and a
 block from any other miner at the scheduled target is still accepted. Absent,
 templates are exactly the schedule.
 
-`commitMinimumWorkTarget` (default `false`) is the operator opt-in to commit
-each `minimumWork` threshold into that chain's block as its target instead of
-the scheduled one. It travels with the descendant entries to the child that
-builds each block, as one trailing byte on the candidate request. A child node
-that predates it refuses that request as malformed, so the template goes
-without that child. The parent's trace log (`LATTICE_SYNC_TRACE`) records every
-child that returned no candidate for such a request, whatever the cause.
-
-An entry naming an unknown or duplicate path, zero work, or more work than any
-valid target can represent is refused with `400` `invalidMinimumWork`. That
-ceiling is `workForTarget(1)` = 2^255: target 0 is met by no hash and consensus
-rejects it, so target 1 is the hardest a block can ask for, and work above it is
-refused rather than clamped to a target that would deliver less. A plan larger
-than the 1 MiB payload cap the rewards field also honours is refused with `400`
-`minimumWorkPlanTooLarge`.
+A minimum-work filter is a RATE control and nothing else. A block always
+commits its scheduled target; declining easier hashes only makes this miner's
+blocks take longer to find, and the absolute schedule then reads that arrival
+rate and moves difficulty accordingly. There is deliberately no field that
+commits a filter target into a block: difficulty is what the chain reads from
+observed timing, never what a miner declares. A request from an older miner
+carrying `commitMinimumWorkTarget` decodes and is ignored.
 
 Response fields:
 
 - `workID`: CID of the nonce-zero candidate. When the request carries
-  `minimumWork` or `commitMinimumWorkTarget`, the CID is followed by `-` and a
-  digest of both: the block does not change with the miner's filter, so two
+  `minimumWork`, the CID is followed by `-` and a digest of it: the block does
+  not change with the miner's filter, so two
   requests with different filters must not share one work item and its
   `searchTarget`. Treat it as opaque.
 - `block`: the complete candidate block.
