@@ -906,6 +906,77 @@ final class CandidateAcquirerTests: XCTestCase {
         )
     }
 
+    func testExpiredLaterWaitWithDependentsReentersAdmission() throws {
+        // A missing parent genesis or continuity fact parks `.later`, and that
+        // solicitation — like the evidence one — is fired only from inside an
+        // admission attempt. So a depended-upon `.later` park must re-enter
+        // admission when its window expires, or the park and every successor
+        // behind it fossilize: at expiry the attempt keeps `.waiting` while
+        // `expiresAt` is cleared, and `retry` skips a nil-`expiresAt` attempt
+        // forever. There is no wake path short of a restart.
+        //
+        // This used to be unreachable in practice: a live parent answered in a
+        // round trip, so the 2 h ceiling never arrived. It is reachable now —
+        // a parent that has not upgraded does not serve the v2 fact topic at
+        // all, so an unanswered query is the EXPECTED steady state for the
+        // length of a roll, and a roll can outlast two hours.
+        let ceiling = Duration.seconds(2 * 60 * 60)
+        var acquirer = CandidateAcquirer(
+            retryWindow: .seconds(64),
+            evidenceRetryWindow: .seconds(4)
+        )
+        XCTAssertTrue(acquirer.observe(.init(
+            blockCID: "needs-parent-fact", package: nil
+        )).accepted)
+        let start = ContinuousClock.now
+        let blocked = try XCTUnwrap(acquirer.next())
+        XCTAssertEqual(blocked.blockCID, "needs-parent-fact")
+        XCTAssertTrue(acquirer.complete(
+            blocked.ticket, resolution: .wait(.later), now: start
+        ))
+
+        // A successor parks on it, making it depended-upon — the branch that
+        // fossilizes rather than being reclaimed.
+        XCTAssertTrue(acquirer.observe(.init(
+            blockCID: "successor", package: nil
+        )).accepted)
+        let successor = try XCTUnwrap(acquirer.next())
+        XCTAssertEqual(
+            successor.blockCID, "successor",
+            "the parked predecessor must not be offered again here"
+        )
+        XCTAssertTrue(acquirer.complete(
+            successor.ticket,
+            resolution: .predecessor("needs-parent-fact"),
+            now: start
+        ))
+
+        // Cross the ceiling. Anything short of it takes the ordinary paced
+        // retry and proves nothing about expiry.
+        acquirer.retry(now: start.advanced(by: ceiling + .seconds(1)))
+        let retried = try XCTUnwrap(
+            acquirer.next(),
+            """
+            An expired depended-upon `.later` park must re-enter admission and \
+            re-fire its parent query. Fossilizing it strands this block and \
+            every successor behind it until the process restarts.
+            """
+        )
+        XCTAssertEqual(retried.blockCID, "needs-parent-fact")
+
+        // The renewed park arms a FRESH ceiling, so the child keeps asking for
+        // as long as the parent stays stale and heals itself once it rolls.
+        let second = start.advanced(by: ceiling + .seconds(1))
+        XCTAssertTrue(acquirer.complete(
+            retried.ticket, resolution: .wait(.later), now: second
+        ))
+        acquirer.retry(now: second.advanced(by: ceiling + .seconds(1)))
+        XCTAssertEqual(
+            acquirer.next()?.blockCID, "needs-parent-fact",
+            "the retry cycle must not decay after one renewal"
+        )
+    }
+
     func testWeighedSurvivesRepeatedWeighedObserves() throws {
         var acquirer = CandidateAcquirer()
         XCTAssertTrue(acquirer.observe(.init(

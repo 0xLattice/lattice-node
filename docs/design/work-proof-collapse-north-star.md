@@ -89,12 +89,14 @@ not alter the fact. Backward, sideways, unrelated, or disconnected movement is
 invalid. Repeated state roots use existential reachability rather than a
 hidden arrival-dependent anchor.
 
-The terminal directory carrier must separately bind
-`child.parentState == carrier.prevState`. The carrier itself need not be a
-valid parent block: its entering state must simply be a state the parent
-legitimately reached.
+The terminal directory carrier binds `child.parentState == carrier.prevState`
+for ADMISSION only. That binding is not an anchor and never was: the carrier
+need not be a valid parent block, so both sides of the comparison may be chosen
+by one party. What establishes that the child's `parentState` is a state the
+parent legitimately reached is continuity, proved at every height including
+block 1 (spec §5.3 step 6, which carries no height-1 exemption).
 
-Each chain process already durably records every connected block only after
+Each chain process durably records every connected block after
 semantic validation. That recovered `ChainBlockFact` graph is the transition
 store; no second delta database or header replay protocol exists.
 

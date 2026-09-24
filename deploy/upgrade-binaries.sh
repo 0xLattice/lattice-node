@@ -8,6 +8,15 @@
 #
 # Stop the node and miner first (`lattice mine stop`, `lattice down`);
 # restart them after (`lattice up`, `lattice mine start`).
+#
+# This swaps binaries only — it never touches the data directory, and it
+# cannot tell whether the target image is one you can roll back from. Some
+# upgrades are ONE-WAY: once the node accepts a block, the previous image can
+# no longer open that data directory, and it reports `corrupt` rather than
+# offering a reset. Executed-state attestation is one such step. Before an
+# upgrade you have not already rolled elsewhere, snapshot `state.db` and
+# `volumes.db` TOGETHER (a matched pair is the only way back) — see "Upgrading
+# to executed-state attestation is one-way" in docs/operations.md.
 set -eu
 
 TAG="${1:?usage: upgrade-binaries.sh <image-tag, e.g. sha-888bab7>}"

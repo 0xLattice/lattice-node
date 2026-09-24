@@ -144,7 +144,7 @@ final class PortableEvidenceProtocolTests: XCTestCase {
         let continuity = ParentChainFactMessage(
             requestID: 2,
             fact: .continuity(
-                fromStateCID: protocolCID("from-state"),
+                fromStateCID: LatticeState.emptyHeader.rawCID,
                 toStateCID: protocolCID("to-state")
             )
         )
@@ -170,6 +170,17 @@ final class PortableEvidenceProtocolTests: XCTestCase {
             fact: .continuity(
                 fromStateCID: protocolCID("same-state"),
                 toStateCID: protocolCID("same-state")
+            )
+        ).encoded())
+        // A general reachability question is not a shape this protocol
+        // defines: every child block anchors at the parent chain's genesis,
+        // so any other `from` is malformed. This is what keeps a served
+        // continuity query O(1) instead of an ancestry walk run for a peer.
+        XCTAssertThrowsError(try ParentChainFactMessage(
+            requestID: 5,
+            fact: .continuity(
+                fromStateCID: protocolCID("from-state"),
+                toStateCID: protocolCID("to-state")
             )
         ).encoded())
     }

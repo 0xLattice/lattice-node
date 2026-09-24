@@ -568,7 +568,7 @@ struct CandidateAcquirer {
                 guard attempt.expiresAt != nil else { continue }
                 if deadline <= now {
                     if waitingOn[blockCID]?.isEmpty == false {
-                        if reason == .evidence {
+                        if reason == .evidence || reason == .later {
                             // The evidence solicitation is a lossy single
                             // round-trip fired only from inside an admission
                             // attempt: the locate send, the remote reply, and
@@ -578,6 +578,19 @@ struct CandidateAcquirer {
                             // window expires — fossilizing it would wedge the
                             // whole successor chain behind one lost message.
                             // A fresh window is armed at the next park.
+                            //
+                            // `.later` is the same shape and needs the same
+                            // treatment: a missing parent genesis or continuity
+                            // fact parks here, and that solicitation is ALSO
+                            // fired only from inside an admission attempt. It
+                            // used to resolve within a round trip, so the
+                            // expiry was unreachable in practice — but an
+                            // unanswered parent query is now the EXPECTED
+                            // steady state while a parent has not yet upgraded
+                            // (it does not serve the v2 fact topic at all), so
+                            // a roll window longer than this ceiling would
+                            // otherwise fossilize the park and every successor
+                            // behind it, with no wake path short of a restart.
                             attempt.expiresAt = nil
                             attempt.state = .ready
                             record.attempts[rootCID] = attempt

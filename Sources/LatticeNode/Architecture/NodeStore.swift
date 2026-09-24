@@ -386,6 +386,12 @@ actor NodeStore {
             // consistency. The fact itself is still persisted via normalizedFacts
             // so recovery replays it and rebuilds the excluded set.
             case .exclusion(let fact): fact.blockHash
+            // A validation, like an exclusion, is a standalone judgment on an
+            // already-durable block: it rides with no routes, artifacts or
+            // carrier evidence, so its subject hash is inert for route gating.
+            // Carried for consistency; the fact is persisted via
+            // normalizedFacts so recovery replays it.
+            case .validation(let fact): fact.blockHash
             }
         })
         guard pendingRoutes.allSatisfy({
@@ -1262,9 +1268,34 @@ actor NodeStore {
         ).compactMap { $0["block_cid"]?.textValue })
     }
 
+    /// Every block this store has executed, at either tier (`1` eager, `2`
+    /// walk-validated). Used once per boot to carry pre-existing history across
+    /// the introduction of durable validation facts: rows written before that
+    /// fact existed carry no fact, and without them a chain would come back
+    /// having forgotten every execution and would attest nothing.
+    ///
+    /// `>= 1` and not `== 1` so the walk-validated tier (`2`) counts too. The
+    /// column's DEFAULT of `1` is not what makes legacy rows qualify — every
+    /// row is inserted with an explicit `validated ? 1 : 0`, and the schema
+    /// epoch wipes any store old enough to predate the column, so the default
+    /// never fires. What makes them qualify is that they were written `1` or
+    /// `2` by an image that really did execute them.
+    func executedBlockCIDs() throws -> Set<String> {
+        Set(try database.query(
+            "SELECT block_cid FROM accepted_blocks WHERE validated >= 1"
+        ).compactMap { $0["block_cid"]?.textValue })
+    }
+
     /// Return a walk-validated block to the weighed tier (its owner pin is
     /// gone, so its state may be evicted); the walk re-validates it on
     /// candidacy.
+    ///
+    /// Retention bookkeeping ONLY. It does not retract the durable validation
+    /// fact, and must not: execution is a judgment about immutable bytes, so
+    /// evicting a cached post-state does not unmake it. Being unable to SERVE a
+    /// state is availability, never a verdict (spec §9.9), whereas retracting
+    /// the fact would make a restarted node disagree with a live one about what
+    /// its own chain produced.
     func demoteValidated(blockCID: String) throws {
         try database.transaction {
             _ = try database.execute(

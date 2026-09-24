@@ -486,6 +486,90 @@ again, which requires its configured parent to confirm the recorded CID.
 Before running a recursive removal, resolve and verify the explicit path. Never
 target a home directory, workspace root, or an unresolved environment variable.
 
+## Upgrading to executed-state attestation is one-way
+
+The image that records execution as a durable admission fact writes a batch
+shape the previous image cannot decode. **Once a node has accepted a single
+block on the new image, the previous image can no longer open that data
+directory.**
+
+The schema epoch is deliberately NOT bumped. Bumping it would force every node
+to wipe on upgrade, which is exactly what the boot-time migration exists to
+avoid — it carries pre-existing executions across so an upgraded chain does not
+come back having forgotten every one. The cost of keeping the epoch is that a
+downgrade has no clean path.
+
+Because the epoch still matches, the old binary passes its schema check and
+then fails later, while replaying the durable log. It reports:
+
+```
+The node store is corrupt: <decoding error>
+```
+
+That message is misleading here — the store is intact. It is `corrupt`, not
+`wipeRequired`, so the old image offers no reset instruction even though a
+reset is what a rollback would need.
+
+Plan the roll accordingly:
+
+- **Snapshot `state.db` and `volumes.db` together, before first start on the
+  new image.** Restoring that matched pair is the only way back to the old
+  image without resyncing.
+- Otherwise a rollback is a whole-directory wipe plus a resync, per the section
+  above.
+- Roll one node first and let it accept a block before proceeding, so the
+  one-way step is taken deliberately rather than fleet-wide at once.
+
+### Roll parents before children
+
+The parent-chain fact topic moved to `...v2` because the ANSWER changed
+meaning, not merely the request's shape. A `v1` parent attests any *connected*
+state — including one it only weighed, a declared post-state it never executed.
+A `v2` parent attests only what it **executed**.
+
+A child cannot tell the two apart from the reply, which echoes the request
+either way. Left at `v1`, an upgraded child would bind a withdrawal to an
+unexecuted claim whenever its parent had not rolled yet — the exact exposure
+this change closes, reappearing inside the upgrade window.
+
+The topic bump makes that impossible rather than merely discouraged: a `v1`
+parent does not recognise the topic, drops it unread, and the child parks and
+retries. So the mixed-version window is **safe but stalled**, in both
+directions:
+
+- **New child, old parent:** the child's continuity questions go unanswered. It
+  parks on `.wait(.later)` and retries; admission of blocks needing a new
+  anchor waits. No wrong answer is ever accepted.
+- **Old child, new parent:** an old child asks the `v1` topic, which the new
+  parent no longer serves, and also asks with a `from` the new rule rejects.
+  Same outcome — silent retry, no durable damage.
+- **A new child cannot DEPLOY or ADOPT against an old parent.** Genesis
+  confirmation rides the same topic, and a child will not activate an adopted
+  genesis without it, so it sits in `awaitingGenesis` polling. This is the case
+  an operator is most likely to hit mid-roll: defer child deploys until the
+  parent has rolled.
+
+Neither direction corrupts state or requires a wipe; both simply make no
+progress until the other side rolls. **Roll parents first**, then children, to
+keep that window short.
+
+### What the migration grandfathers
+
+The boot migration converts the old tier column into durable execution facts
+without re-validating. Those rows were written by an image whose parent-state
+rules were weaker, so an execution it recorded is re-affirmed rather than
+re-checked.
+
+This matters only for a chain that could have been fed a forged parent anchor
+*before* the upgrade — that is, a child chain. It does not apply to a root: a
+root anchors to no parent, so its recorded executions are its own, and
+migrating them re-affirms nothing it did not genuinely run.
+
+So a root upgrades in place safely. **A child chain carried across this upgrade
+should be redeployed rather than migrated**, unless you are satisfied its
+history predates any exposure. A child deployed fresh after the upgrade is
+unaffected.
+
 ## Common failures
 
 ### `invalidNexusGenesis`

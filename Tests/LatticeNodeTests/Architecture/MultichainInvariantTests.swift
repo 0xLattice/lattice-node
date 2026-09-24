@@ -6,6 +6,151 @@ import cashew
 @testable import LatticeNode
 
 final class MultichainInvariantTests: XCTestCase {
+    /// The height-1 anchor closes end to end against a REAL parent process.
+    ///
+    /// Block 1 no longer rides on its carrier proof: it must prove its
+    /// `parentState` is a state the parent chain produced. This exercises the
+    /// whole loop rather than either half — admission demands the evidence, a
+    /// live parent that executed its own chain answers, the link is built from
+    /// that answer, and admission then succeeds. Each half was covered
+    /// separately; the seam between the two repositories was not.
+    func testBlockOneAnchorResolvesAgainstALiveParent() async throws {
+        let parentStorage = temporaryDirectory()
+        let childStorage = temporaryDirectory()
+        let parentConfiguration = try configuration(
+            path: ["Nexus"],
+            storage: parentStorage,
+            privateKeyHex: String(repeating: "51", count: 32)
+        )
+        let childConfiguration = try configuration(
+            path: ["Nexus", "Payments"],
+            storage: childStorage,
+            privateKeyHex: String(repeating: "52", count: 32),
+            parentPublicKey: parentConfiguration.processPublicKey
+        )
+
+        let parent = try await ChainProcess.open(configuration: parentConfiguration)
+        let parentGenesis = try await parent.canonicalTipBlock()
+        let seed = ChildGenesisSeed(
+            spec: NexusGenesis.spec, premineTo: nil, timestamp: 1
+        )
+        let childGenesis = try await ChildGenesisBuilder.build(
+            seed: seed, chainPath: ["Nexus", "Payments"], fetcher: parent
+        )
+        let authorization = try signedGenesisAnchorTransaction(
+            directory: "Payments",
+            childGenesisCID: try BlockHeader(node: childGenesis).rawCID
+        )
+        try await VolumeImpl<Transaction>(node: authorization)
+            .storeRecursively(storer: parent)
+        let unminedRecording = try await BlockBuilder.buildBlock(
+            previous: parentGenesis, transactions: [authorization],
+            timestamp: 1, nonce: 0, fetcher: parent
+        )
+        let recordingCarrier = try XCTUnwrap(BlockBuilder.mine(
+            block: unminedRecording, target: parentGenesis.nextTarget
+        ))
+        let recordingOutcome = try await parent.admit(
+            try BlockHeader(node: recordingCarrier)
+        )
+        XCTAssertTrue(recordingOutcome.decision.isAccepted)
+
+        // Block 1 anchors at the state that records the genesis.
+        let provisional = try await BlockBuilder.buildBlock(
+            previous: recordingCarrier, timestamp: 2, nonce: 0, fetcher: parent
+        )
+        let childBlock = try await BlockBuilder.buildBlock(
+            previous: childGenesis, parentChainBlock: provisional,
+            timestamp: 2, fetcher: parent
+        )
+        let anchorState = childBlock.parentState.rawCID
+        XCTAssertNotEqual(
+            anchorState, LatticeState.emptyHeader.rawCID,
+            "block 1 must commit a real parent state or the anchor is vacuous"
+        )
+
+        let unminedCarrier = try await BlockBuilder.buildBlock(
+            previous: recordingCarrier, children: ["Payments": childBlock],
+            timestamp: 2, nonce: 0, fetcher: parent
+        )
+        let carrier = try XCTUnwrap(BlockBuilder.mine(
+            block: unminedCarrier,
+            target: min(recordingCarrier.nextTarget, childBlock.target)
+        ))
+        _ = try await parent.prepareChildProofs(for: carrier, capacity: 16)
+        let carrierHeader = try BlockHeader(node: carrier)
+        let carrierOutcome = try await parent.admit(
+            carrierHeader, preparingChildDirectories: ["Payments"]
+        )
+        XCTAssertTrue(carrierOutcome.decision.isAccepted)
+        _ = try await parent.retryPendingChildProofs(carrierCID: carrierHeader.rawCID)
+        let issued = try await parent.issuedChildEvidence(
+            childCID: try BlockHeader(node: childBlock).rawCID,
+            directory: "Payments",
+            rootCID: carrierHeader.rawCID
+        )
+        let evidence = try XCTUnwrap(issued)
+
+        let child = try await ChainProcess.open(configuration: childConfiguration)
+        let bootstrapped = try await child.activateSeededChildGenesis(
+            seed: seed, confirmParentRecordedGenesis: { _ in true }
+        )
+        XCTAssertTrue(bootstrapped)
+        let childContent = MultichainContentStore()
+        try await BlockHeader(node: childBlock)
+            .storeBlock(fetcher: parent, storer: childContent)
+        let childBlockHeader = BlockHeader(
+            rawCID: try BlockHeader(node: childBlock).rawCID,
+            node: nil, encryptionInfo: nil
+        )
+
+        // 1. The carrier proof alone is no longer enough.
+        let withoutLink = try await child.admit(
+            childBlockHeader,
+            authenticatedChildPackage: AuthenticatedChildPackage(
+                package: ChildValidationPackage(proof: evidence.proof)
+            ),
+            remoteSource: childContent
+        )
+        XCTAssertFalse(
+            withoutLink.decision.isAccepted,
+            "block 1 must prove its anchor, not inherit it from a carrier"
+        )
+
+        // 2. A live parent that executed its own chain answers the question.
+        let parentConfirms = await parent.hasProducedParentState(anchorState
+        )
+        XCTAssertTrue(
+            parentConfirms,
+            """
+            The parent could not confirm a state it produced and executed. \
+            Every child would stall here, retriably and silently.
+            """
+        )
+
+        // 3. The link built from that answer admits the block.
+        let admitted = try await child.admit(
+            childBlockHeader,
+            authenticatedChildPackage: AuthenticatedChildPackage(
+                package: ChildValidationPackage(
+                    proof: evidence.proof,
+                    parentStateContinuityLink: ParentStateContinuityLink(
+                        parentPath: ["Nexus"],
+                        fromStateCID: LatticeState.emptyHeader.rawCID,
+                        toStateCID: anchorState
+                    )
+                )
+            ),
+            remoteSource: childContent
+        )
+        XCTAssertTrue(
+            admitted.decision.isAccepted,
+            "the anchor the parent confirmed must admit the block"
+        )
+        let status = await child.status()
+        XCTAssertEqual(status.tipCID, try BlockHeader(node: childBlock).rawCID)
+    }
+
     func testDirectParentPackageReplaysOnlyToItsDeclaredChildAcrossRestarts()
         async throws {
         let parentStorage = temporaryDirectory()
@@ -153,13 +298,27 @@ final class MultichainInvariantTests: XCTestCase {
         XCTAssertEqual(evidence.proof.rootCID, carrierHeader.rawCID)
         XCTAssertEqual(evidence.proof.directoryPath, ["Payments"])
 
-        // A co-mined height-1 block is authenticated by its carrier proof alone;
-        // the genesis link is only for genesis admission (the child already
-        // self-admitted its genesis). validateParentFacts requires a nil link here.
+        // A height-1 block proves its `parentState` like every other height
+        // (spec §5.3 step 6, which carries no height-1 exemption). The carrier
+        // proof cannot establish it: that compares the child's declared
+        // `parentState` against a CARRIER's `prevState`, and a carrier need not
+        // be admitted, connected, valid or canonical (§9.5) — so both sides may
+        // be chosen by one party.
+        //
+        // The predecessor is the child's genesis, whose `parentState` is
+        // `emptyHeader`, so the link runs from there to the block's declared
+        // parent state. In production the node derives this itself: admission
+        // answers `crossChainEvidenceRequired(.parentStateContinuity(...))`, the
+        // node asks its parent, and builds the link from the reply.
         let package = AuthenticatedChildPackage(
             package: ChildValidationPackage(
                 proof: evidence.proof,
-                parentGenesisLink: nil
+                parentGenesisLink: nil,
+                parentStateContinuityLink: ParentStateContinuityLink(
+                    parentPath: [DEFAULT_ROOT_DIRECTORY],
+                    fromStateCID: LatticeState.emptyHeader.rawCID,
+                    toStateCID: childBlock.parentState.rawCID
+                )
             )
         )
         let childBlockHeader = BlockHeader(

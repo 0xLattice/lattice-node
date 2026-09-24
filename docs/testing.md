@@ -85,7 +85,7 @@ cross-component invariants:
   same-chain predecessor instead of being misclassified as malformed genesis;
 - a suspended authenticated direct child cannot block a healthy sibling's
   bounded root round;
-- parent-state continuity is reflexive and transitive over connected accepted
+- parent-state continuity is reflexive and transitive over connected, executed
   parent history, including noncanonical branches, and exact parent facts may
   be relayed by same-chain peers after restart;
 - staged facts and retained Volume roots reopen together, or recovery fails

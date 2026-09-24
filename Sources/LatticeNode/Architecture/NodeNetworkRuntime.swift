@@ -3749,11 +3749,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     childGenesisCID: childGenesisCID,
                     parentStateCID: parentStateCID
                 )) != nil
-            case .continuity(let fromStateCID, let toStateCID):
-                found = await process.hasParentStateContinuity(
-                    from: fromStateCID,
-                    to: toStateCID
-                )
+            case .continuity(_, let toStateCID):
+                // `decoded` already refused any `from` but the empty state, so
+                // this is only ever the anchor question — answered by the
+                // executed-from-genesis frontier, walking no chain and
+                // independently of height. That is why this path needs neither
+                // a visit budget nor a rate limit.
+                found = await process.hasProducedParentState(toStateCID)
             }
             guard found else { return }
             _ = await hierarchy.sendMessage(

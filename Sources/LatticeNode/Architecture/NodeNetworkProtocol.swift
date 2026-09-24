@@ -40,10 +40,23 @@ enum NodeNetworkTopic {
         "lattice.hierarchy.child-candidate.reservation.request.v1"
     static let childCandidateReservationResponse =
         "lattice.hierarchy.child-candidate.reservation.response.v1"
+    // v2: the ANSWER changed meaning, not just the request shape. A v1 parent
+    // attested any CONNECTED state, including one only weighed — a declared
+    // post-state it never executed. A v2 parent attests only what it EXECUTED.
+    // A v2 child cannot tell the two apart from the reply (it echoes the
+    // request either way), so leaving the topic at v1 would let an upgraded
+    // child bind a withdrawal to an unexecuted claim whenever its parent had
+    // not rolled yet — the exact exposure this change exists to close, hiding
+    // in the upgrade window.
+    //
+    // Bumping it makes the roll self-enforcing instead of procedural: a v1
+    // parent does not know this topic, drops it unread, and the child parks on
+    // `.wait(.later)` and retries. Fail closed and noisy-by-absence beats a
+    // confident wrong answer.
     static let parentChainFactRequest =
-        "lattice.hierarchy.parent-chain-fact.request.v1"
+        "lattice.hierarchy.parent-chain-fact.request.v2"
     static let parentChainFactResponse =
-        "lattice.hierarchy.parent-chain-fact.response.v1"
+        "lattice.hierarchy.parent-chain-fact.response.v2"
     static let childGenesisAnchorRequest =
         "lattice.hierarchy.child-genesis-anchor.request.v1"
     static let childGenesisAnchorResponse =
@@ -95,9 +108,29 @@ struct ParentChainFactMessage: NodeJSONMessage, Equatable, Sendable {
                 throw NodeNetworkWireError.malformed
             }
         case .continuity(let fromStateCID, let toStateCID):
+            // `from` must be the empty state. Every child block anchors its
+            // `parentState` at the PARENT CHAIN'S GENESIS, so Lattice builds
+            // exactly one shape of continuity requirement and no correct child
+            // can ask for another — which makes any other `from` malformed, not
+            // merely unusual.
+            //
+            // This is the whole bound on serving cost. That shape is answered
+            // by the executed-from-genesis frontier without walking the chain
+            // — cost independent of HEIGHT, bounded by the blocks declaring
+            // that one post-state, each costing a proof-of-work solve — while
+            // a general `from` would run a full ancestry walk on the consensus
+            // actor for a peer. Refusing it here is not a budget: the
+            // question the protocol actually asks is still answered in full,
+            // and identically on every node, so nothing is left to ration.
+            //
+            // Answering it anyway would also attest a continuity claim this
+            // node never checked — the response echoes the request verbatim —
+            // which is the same "unverified treated as verification" shape the
+            // executed-frontier rule exists to close.
             guard _isCanonicalWireCID(fromStateCID),
                   _isCanonicalWireCID(toStateCID),
-                  fromStateCID != toStateCID else {
+                  fromStateCID != toStateCID,
+                  fromStateCID == LatticeState.emptyHeader.rawCID else {
                 throw NodeNetworkWireError.malformed
             }
         }

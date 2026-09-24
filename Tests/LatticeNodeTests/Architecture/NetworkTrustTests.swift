@@ -5425,7 +5425,10 @@ final class NetworkTrustTests: XCTestCase {
                     for: testCID("child-block"),
                     requirement: .parentStateContinuity(
                         parentPath: ["Nexus"],
-                        fromStateCID: testCID("from-state"),
+                        // The protocol's only continuity shape: anchored at
+                        // the parent chain's genesis. A synthetic `from` is
+                        // refused as malformed and never reaches the wire.
+                        fromStateCID: LatticeState.emptyHeader.rawCID,
                         toStateCID: testCID("to-state")
                     ),
                     package: package

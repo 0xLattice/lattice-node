@@ -10,11 +10,6 @@ public struct NodeResourcePolicy: Sendable, Equatable {
     public let maximumAcquisitionVolumes: Int
     public let maximumAcquisitionMembers: Int
     public let maximumAcquisitionStorageBytes: Int
-    /// Per-query visit budget for serving a child's parent-state continuity
-    /// question. The walk runs on the consensus actor, so this bounds how
-    /// long one fact-plane query can hold it. Exhaustion is served as
-    /// silence, which a child already treats as retryable unavailability.
-    public let maximumContinuityBlockVisits: Int
     /// Storage budget for handed-off contextual candidates awaiting
     /// admission. A handoff is a local cache of durable ownership, not a
     /// consensus commitment: an evicted candidate whose branch returns is
@@ -54,7 +49,6 @@ public struct NodeResourcePolicy: Sendable, Equatable {
         maximumAcquisitionVolumes: Int = 20_548,
         maximumAcquisitionMembers: Int = Int(UInt16.max),
         maximumAcquisitionStorageBytes: Int = 64 * 1_024 * 1_024,
-        maximumContinuityBlockVisits: Int = 4_096,
         maximumRetainedHandoffCandidates: Int = 1_024,
         childEvidenceBackfillCarrierWindow: Int = 256,
         maximumRetainedOffChainValidatedBlocks: Int = 1_024,
@@ -68,7 +62,6 @@ public struct NodeResourcePolicy: Sendable, Equatable {
                 && maximumAcquisitionVolumes > 0
                 && maximumAcquisitionMembers > 0
                 && maximumAcquisitionStorageBytes > 0
-                && maximumContinuityBlockVisits > 0
                 && maximumRetainedHandoffCandidates > 0
                 && childEvidenceBackfillCarrierWindow > 0
                 && maximumRetainedOffChainValidatedBlocks >= 0
@@ -81,7 +74,6 @@ public struct NodeResourcePolicy: Sendable, Equatable {
         self.maximumAcquisitionVolumes = maximumAcquisitionVolumes
         self.maximumAcquisitionMembers = maximumAcquisitionMembers
         self.maximumAcquisitionStorageBytes = maximumAcquisitionStorageBytes
-        self.maximumContinuityBlockVisits = maximumContinuityBlockVisits
         self.maximumRetainedHandoffCandidates = maximumRetainedHandoffCandidates
         self.childEvidenceBackfillCarrierWindow = childEvidenceBackfillCarrierWindow
         self.maximumRetainedOffChainValidatedBlocks =
