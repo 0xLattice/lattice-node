@@ -42,7 +42,19 @@ The suites are grouped by the boundary they actually cross:
   heavier conflicting-nonce branch that excludes the settlement, and spends
   both already-withdrawn child proceeds from the winning parent branch. These
   tests use only public HTTP APIs and Ivy sockets; they do not inject parent
-  packages in-process.
+  packages in-process. The operator-CLI scenarios (`LatticeCtlE2ETests`,
+  opt-in with `E2E_CTL=1`, their own CI lane) drive the shipped `lattice`
+  verbs with real CPU mining: multichain hosts that sync, child and grandchild
+  token swaps, deploy interruption and resumption, and §9.10 run attribution
+  through three nodes across a middle-chain outage — full Nexus blocks mined
+  by hand through the coordinator's RPC carry both descendants, Nexus then
+  mines alone while the middle chain's node is down, the returning node is
+  credited that work and pushes it to the grandchild, and the grandchild's
+  credit survives a crash restart
+  (`testNexusWorkReachesTheGrandchildAcrossAMiddleChainOutage`). The
+  coordinator is stopped for that phase because it hunts the easiest target
+  and so also produces child-only carriers, whose child blocks have no chain
+  committer to be credited through.
 - `LatticeMinerCoreTests` and `LatticeMiningCoordinatorTests`: nonce search, work allocation, staleness, subprocess cancellation, and current RPC payloads.
 
 The test bar is boundary-focused rather than timing-focused. Tests inject missing
@@ -99,7 +111,13 @@ cross-component invariants:
   committer and directory, once — a repeat is refused, never doubled — and the
   credit survives the child's restart from its durable fact log
   (`testParentRunWorkIsCreditedAtTheChildBlockItCommits` in the multichain
-  invariants);
+  invariants), and admitting a block a parent block carried asks the parent
+  for that committer's run, so a push made before the block was held here,
+  or one missed while away, never waits for the next parent block; a run
+  flows through every level — what Nexus attributes to the middle chain's
+  committing block reaches the grandchild, and the middle chain's service
+  pushes the run that credit changed to its own children without waiting
+  for a re-ask (`testParentRunWorkPropagatesTwoLevelsDown`);
 - staged facts and retained Volume roots reopen together, or recovery fails
   closed.
 

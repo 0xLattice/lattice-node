@@ -243,6 +243,10 @@ public typealias ChildProofPublisher = @Sendable (
 /// A parent pushes the run it credits to a committing block to the children
 /// of that directory (§9.10), on every change to that run.
 public typealias ParentRunReportPublisher = @Sendable (ParentRunReport) async throws -> Void
+/// Ask this chain's configured parent for the runs of the committing blocks
+/// behind one block admitted here (§9.10) — one ask per admission, so the
+/// credit for those runs never waits for a push or a reconnect.
+public typealias ParentRunReportRequester = @Sendable ([String]) async -> Void
 public typealias AcceptedBlockPublisher = @Sendable (_ blockCID: String) async throws -> Void
 public typealias AcceptedTransactionPublisher = @Sendable (
     _ volumeRootCID: String
@@ -539,6 +543,7 @@ public actor ChainService {
         ChildCandidateReservationReconciler
     private let childProofPublisher: ChildProofPublisher
     private let parentRunReportPublisher: ParentRunReportPublisher
+    private let parentRunReportRequester: ParentRunReportRequester
     private let acceptedBlockPublisher: AcceptedBlockPublisher
     private let acceptedTransactionPublisher: AcceptedTransactionPublisher
     private let maximumChildCandidates: Int
@@ -594,6 +599,7 @@ public actor ChainService {
             },
         childProofPublisher: @escaping ChildProofPublisher,
         parentRunReportPublisher: @escaping ParentRunReportPublisher = { _ in },
+        parentRunReportRequester: @escaping ParentRunReportRequester = { _ in },
         acceptedBlockPublisher: @escaping AcceptedBlockPublisher,
         acceptedTransactionPublisher: @escaping AcceptedTransactionPublisher = { _ in },
         validateBodySource: ValidateBodyAdmission? = nil,
@@ -616,6 +622,7 @@ public actor ChainService {
             childCandidateReservationReconciler
         self.childProofPublisher = childProofPublisher
         self.parentRunReportPublisher = parentRunReportPublisher
+        self.parentRunReportRequester = parentRunReportRequester
         self.acceptedBlockPublisher = acceptedBlockPublisher
         self.acceptedTransactionPublisher = acceptedTransactionPublisher
         self.pool = TransactionPool(
@@ -2192,7 +2199,8 @@ public actor ChainService {
         await process.runReport(committer: committer, directory: directory)
     }
 
-    /// The committers this chain asks its parent to re-serve on a reconnect.
+    /// The committers this chain asks its parent to re-serve after each
+    /// evidence catch-up round.
     public func recentCommitters() async throws -> [String] {
         try await process.recentCommitters()
     }
@@ -2205,12 +2213,55 @@ public actor ChainService {
         // A canonical change is reconciled exactly once, on the queued
         // worker under the service gate — the same path every admission's
         // commit takes.
-        return try await process.applyParentRunReport(
+        let application = try await process.applyParentRunReport(
             report,
             canonicalCommitPublisher: { [self] commit in
                 await enqueueCanonicalCommit(commit)
             }
         )
+        // §9.10: a strengthening credits one run per served directory
+        // exactly as an admission does, so this chain's own children are
+        // pushed the runs it changed — the credit reaches the next level
+        // without waiting for a re-ask. Delivery is a hint, as below.
+        let traced: String
+        switch application {
+        case .credited(let commit, let childBlock):
+            traced = "credited at \(childBlock.prefix(16)) tip=\(commit?.tipHash.prefix(16) ?? "unchanged")"
+        case .refused(let outcome):
+            traced = "refused \(ChainProcess.refusalName(outcome))"
+        }
+        SyncTrace.log("run-report applied: \(traced)")
+        if case .credited(_, let childBlock) = application {
+            await pushChangedRuns(of: childBlock)
+        }
+        return application
+    }
+
+    /// The run value last pushed per (directory, committer), so a run is
+    /// pushed once per value it reaches: an admission's push and a credit's
+    /// push of the same run can race, and the loser would only be refused as
+    /// not stronger. One small entry per committer ever pushed — the same
+    /// order as the run table itself. It records that a value was ANNOUNCED,
+    /// not delivered: a child not connected at the time, or one that joins
+    /// later, recovers it by its own ask — on admitting a block that
+    /// committer carried, and after each evidence round.
+    private var pushedRunWork: [String: WorkSum] = [:]
+
+    /// §9.10: every admitted block or strengthening with verifiable work
+    /// credits one run per served directory; push each changed run to the
+    /// children of its directory. A run that is only its committer has
+    /// nothing a child could credit (`runWork − ownWork` is zero) and is not
+    /// pushed: a carrier's own admission would otherwise announce a run to a
+    /// child that has not yet admitted the block it carries.
+    private func pushChangedRuns(of blockHash: String) async {
+        for report in await process.runReports(changedBy: blockHash) {
+            SyncTrace.log("run changed by \(blockHash.prefix(16)): dir=\(report.directory) committer=\(report.blockHash.prefix(16)) run=\(report.runWork) own=\(report.ownWork)")
+            guard report.runWork > report.ownWork else { continue }
+            let key = "\(report.directory)/\(report.blockHash)"
+            if let last = pushedRunWork[key], last >= report.runWork { continue }
+            pushedRunWork[key] = report.runWork
+            try? await parentRunReportPublisher(report)
+        }
     }
 
     private func reconcileCanonicalCommitOrResetLocked(
@@ -2278,14 +2329,18 @@ public actor ChainService {
             outcome: outcome,
             candidateHandoffs: candidateHandoffs
         )
-        // §9.10: every admitted block or strengthening with verifiable work
-        // credits one run per served directory; push each changed run to the
-        // children of its directory. Delivery is a hint — a push that does not
-        // land is re-served by the child's request on its next hello.
+        // §9.10: push the runs this admission changed (see `pushChangedRuns`),
+        // and — this chain being the child — ask the parent for the run of
+        // the block that carried what was just admitted: a push the parent
+        // made before this block was held here was refused, and a block
+        // caught up on after the hello was never asked for.
         if outcome.decision.isAccepted {
-            let reports = await process.runReports(changedBy: header.rawCID)
-            for report in reports {
-                try? await parentRunReportPublisher(report)
+            await pushChangedRuns(of: header.rawCID)
+            if outcome.parentCarrierLink != nil,
+               let committers = try? await process.incomingCarrierCommitters(
+                   of: header.rawCID
+               ), !committers.isEmpty {
+                await parentRunReportRequester(committers)
             }
         }
         if outcome.decision.isAccepted, candidateHandoffs == nil {

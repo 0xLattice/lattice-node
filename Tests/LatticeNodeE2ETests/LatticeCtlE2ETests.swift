@@ -2,6 +2,9 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
+import Lattice
+import LatticeMinerCore
+import LatticeNode
 import XCTest
 
 /// Black-box E2Es for the `lattice` operator CLI: real shipped binaries,
@@ -709,6 +712,267 @@ final class LatticeCtlE2ETests: XCTestCase {
             let empty = await drained(stallsRPC)
             return now > beforeSpend && empty
         }
+    }
+
+    /// Lattice §9.10 through three real nodes and the real wire: Nexus's
+    /// work reaches the grandchild through the middle chain, each level
+    /// talking only to its immediate parent — across an outage of the middle
+    /// chain's node, the case where the parent mines blocks that commit
+    /// nothing into the child and only the run report carries them.
+    ///
+    /// Shape: a CLI host brings up Nexus, Market and its grandchild Stalls
+    /// and the coordinator co-mines them. The coordinator then stops, and
+    /// full Nexus blocks are mined by hand through the RPC it uses — to
+    /// Nexus's own target, so each is a chain block carrying Market's
+    /// candidate (which carries Stalls's) — until both descendants' tips sit
+    /// on chain committers. Market's node goes down; three more full Nexus
+    /// blocks are mined alone, so the run of the last block that carried
+    /// Market grows and nothing else mints. Market returns and is credited
+    /// on its re-ask; Stalls — which never went away and mined nothing — is
+    /// credited through Market (Market's push of the run the credit changed,
+    /// or Stalls's own ask; the wire cannot order those two, so the push
+    /// itself is pinned by the multichain unit test). Then Stalls restarts
+    /// twice, the second time by SIGKILL: each hello re-serves its
+    /// committers' runs and every one is refused as not stronger, and after
+    /// the crash nothing new is credited — only a credit replayed from its
+    /// own fact log explains that. The counters are the ones an operator
+    /// watches on /metrics.
+    func testNexusWorkReachesTheGrandchildAcrossAMiddleChainOutage() async throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lattice-node-e2e-ctlkeys-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: scratch, withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let miner = try await makeKey(scratch, "minerRun")
+        let holder = try await makeKey(scratch, "holderRun")
+
+        let host = try await bringUpMiningHost(miner: miner)
+        let marketRPC = try await deployChild(
+            host, directory: "Market",
+            premineTo: holder.address,
+            fund: try await makeKey(scratch, "fundMarketRun")
+        )
+        let stallsRPC = try await deployChild(
+            host, directory: "Stalls", parent: "Nexus/Market",
+            premineTo: holder.address,
+            fund: try await makeKey(scratch, "fundStallsRun")
+        )
+        _ = try await runCtl(["mine", "start"], root: host.root)
+
+        func height(_ rpc: UInt16) async -> Int? {
+            await health(rpc)?["height"] as? Int
+        }
+        func active(_ rpc: UInt16) async -> Bool {
+            await health(rpc)?["phase"] as? String == "active"
+        }
+        let applied = "lattice_parent_run_reports_applied_total"
+        let refused = "lattice_parent_run_reports_refused_total"
+        // The weighed tip: /health reports the validated height, which lags
+        // admission while the validate walk catches up and would count
+        // blocks mined before the outage as mined during it.
+        func nexusWeighedHeight() async -> Int? {
+            await metric(host.nexusRPC, "lattice_chain_tip_height", label: "tier=\"weighed\"")
+        }
+
+        // One miner advances all three chains: the grandchild moves without
+        // mining of its own.
+        try await waitFor("both descendants co-mined", seconds: 120) {
+            let market = await height(marketRPC) ?? 0
+            let stalls = await height(stallsRPC) ?? 0
+            return market >= 1 && stalls >= 1
+        }
+        // From here the blocks are mined by hand through the RPC the
+        // coordinator itself uses, searching to Nexus's OWN target so every
+        // block is a chain block. The coordinator hunts the easiest target
+        // and so also produces child-only carriers — Nexus-shaped blocks that
+        // meet a child's target but not Nexus's, which Nexus never admits;
+        // a child whose tip sits on one has no chain committer to be credited
+        // through. Stopping it also means nothing pushes from here on, so the
+        // outage blocks are the only work a credit can be.
+        _ = try await runCtl(["mine", "stop"], root: host.root)
+        try await waitForStableHeight(host.nexusRPC)
+        // Each descendant's tip is carried by a chain block: a full Nexus
+        // block collects Market's candidate, which carries Stalls's.
+        let marketBeforeCarryValue = await height(marketRPC)
+        let stallsBeforeCarryValue = await height(stallsRPC)
+        let marketBeforeCarry = try XCTUnwrap(marketBeforeCarryValue)
+        let stallsBeforeCarry = try XCTUnwrap(stallsBeforeCarryValue)
+        try await waitFor("descendants carried by full Nexus blocks", seconds: 180) {
+            _ = try? await self.mineFullBlock(host.nexusRPC)
+            let market = await height(marketRPC) ?? 0
+            let stalls = await height(stallsRPC) ?? 0
+            return market > marketBeforeCarry && stalls > stallsBeforeCarry
+        }
+
+        // Outage: Market's node goes down. Nexus mines on alone, and with no
+        // Market candidate to carry, its blocks commit nothing into Market —
+        // work only a run report can deliver.
+        try await stopChain(host, "Nexus/Market")
+        for _ in 0..<3 { _ = try await mineFullBlock(host.nexusRPC) }
+        let stallsAppliedBeforeValue = await metric(stallsRPC, applied)
+        let stallsAppliedBefore = try XCTUnwrap(stallsAppliedBeforeValue)
+
+        // Market returns: on its hello Nexus re-serves the runs of Market's
+        // committers, and the last carrier's run now holds the outage blocks.
+        // Counters restart with the process, so any credit here is new.
+        _ = try await runCtl(["up"], root: host.root)
+        try await waitFor("Market back", seconds: 60) { await active(marketRPC) }
+        try await waitFor("Market credited Nexus's run", seconds: 60) {
+            (await metric(marketRPC, applied) ?? 0) >= 1
+        }
+        // Two levels down: Stalls, which never went away and mined nothing,
+        // is credited the same work through Market.
+        try await waitFor("Stalls credited Market's run", seconds: 60) {
+            (await metric(stallsRPC, applied) ?? 0) > stallsAppliedBefore
+        }
+        let marketConflictsValue = await metric(marketRPC, refused, label: "reason=\"locationConflict\"")
+        let stallsConflictsValue = await metric(stallsRPC, refused, label: "reason=\"locationConflict\"")
+        let marketConflicts = try XCTUnwrap(marketConflictsValue)
+        let stallsConflicts = try XCTUnwrap(stallsConflictsValue)
+        XCTAssertEqual(marketConflicts, 0, "a location conflict is a parent naming the wrong block")
+        XCTAssertEqual(stallsConflicts, 0)
+
+        // Durable: a restarted Stalls is re-served its committers' runs on
+        // its hello and refuses every one as not stronger — which only a
+        // credit replayed from its own fact log explains. Twice: the first
+        // restart also absorbs any push Stalls missed while reconnecting
+        // during Market's outage, so by the second nothing served can be new
+        // — and the second is a crash, not a graceful stop.
+        for (restart, signal) in [(1, SIGTERM), (2, SIGKILL)] {
+            try await stopChain(host, "Nexus/Market/Stalls", signal: signal)
+            _ = try await runCtl(["up"], root: host.root)
+            try await waitFor("Stalls back (restart \(restart))", seconds: 60) {
+                await active(stallsRPC)
+            }
+            try await waitFor("re-served runs refused as not stronger (restart \(restart))", seconds: 60) {
+                (await metric(stallsRPC, refused, label: "reason=\"notStronger\"") ?? 0) >= 1
+            }
+        }
+        // Counters restart with the process: what this one shows is only
+        // what the re-serve after the crash did — read once the answers have
+        // had time to land, not at the first refusal.
+        try await Task.sleep(for: e2eScaled(.seconds(2)))
+        let appliedAfterCrashValue = await metric(stallsRPC, applied)
+        let appliedAfterCrash = try XCTUnwrap(appliedAfterCrashValue)
+        XCTAssertEqual(appliedAfterCrash, 0, "nothing new to credit: every credit was already durable")
+    }
+
+    /// Mine one FULL block through the RPC the coordinator uses — the
+    /// template collects the children's candidates — searching to the chain's
+    /// own target rather than the easiest one, so the block is a chain block
+    /// and never a child-only carrier. Returns the accepted block's CID.
+    private func mineFullBlock(_ rpc: UInt16) async throws -> String {
+        let template: MiningTemplateResponse = try await postJSON(
+            rpc, "/v1/mining/templates", MiningTemplateRequest(rewards: []), timeout: 40
+        )
+        let midstate = ProofOfWork.midstate(for: template.block)
+        var nonce: UInt64 = 0
+        while ProofOfWork.hash(midstate: midstate, nonce: nonce) > template.block.target {
+            nonce += 1
+        }
+        let response: SubmitWorkResponse = try await postJSON(
+            rpc, "/v1/mining/work",
+            SubmitWorkRequest(workID: template.workID, nonce: nonce), timeout: 60
+        )
+        guard response.accepted else { throw CtlE2EError("full block refused") }
+        return try BlockHeader(node: ProofOfWork.withNonce(template.block, nonce: nonce)).rawCID
+    }
+
+    private func postJSON<Request: Encodable, Response: Decodable>(
+        _ rpc: UInt16, _ path: String, _ body: Request, timeout: TimeInterval
+    ) async throws -> Response {
+        guard let url = URL(string: "http://127.0.0.1:\(rpc)\(path)") else {
+            throw CtlE2EError("bad url \(path)")
+        }
+        var request = URLRequest(url: url, timeoutInterval: timeout)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(body)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw CtlE2EError("\(path): \(String(decoding: data.prefix(200), as: UTF8.self))")
+        }
+        return try JSONDecoder().decode(Response.self, from: data)
+    }
+
+    /// A block in flight when the miner stops can still land; settled is two
+    /// equal weighed-tip samples a beat apart.
+    private func waitForStableHeight(_ rpc: UInt16) async throws {
+        var previous: Int?
+        try await waitFor("height settled after mining stopped", seconds: 60) {
+            guard let now = await self.metric(
+                rpc, "lattice_chain_tip_height", label: "tier=\"weighed\""
+            ) else { return false }
+            defer { previous = now }
+            if previous == now { return true }
+            try? await Task.sleep(for: e2eScaled(.seconds(2)))
+            return false
+        }
+    }
+
+    /// Stop one chain's node the way `lattice down` would (SIGTERM, then
+    /// SIGKILL if it lingers), or crash it outright with SIGKILL, leaving the
+    /// rest of the tree running; `lattice up` brings it back.
+    private func stopChain(
+        _ host: CtlHost, _ path: String, signal: Int32 = SIGTERM
+    ) async throws {
+        let pidFile = host.root.appendingPathComponent("run")
+            .appendingPathComponent(path.replacingOccurrences(of: "/", with: "-") + ".pid")
+        let text = try String(contentsOf: pidFile, encoding: .utf8)
+        guard let pid = text.split(separator: " ").first.flatMap({ Int32($0) }) else {
+            throw CtlE2EError("no pid recorded for \(path)")
+        }
+        kill(pid, signal)
+        if signal != SIGKILL {
+            let grace = ContinuousClock.now + e2eScaled(.seconds(10))
+            while ContinuousClock.now < grace, isAlive(pid) {
+                try await Task.sleep(for: .milliseconds(200))
+            }
+            if isAlive(pid) { kill(pid, SIGKILL) }
+        }
+        try await waitFor("\(path) stopped", seconds: 30) { !self.isAlive(pid) }
+        try? FileManager.default.removeItem(at: pidFile)
+    }
+
+    /// Alive and not a zombie: a container's PID 1 may never reap, so a
+    /// bare `kill(pid, 0)` can keep answering for a process that exited.
+    private func isAlive(_ pid: Int32) -> Bool {
+        let probe = Process()
+        probe.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        probe.arguments = ["ps", "-o", "stat=", "-p", String(pid)]
+        let out = Pipe()
+        probe.standardOutput = out
+        probe.standardError = FileHandle.nullDevice
+        guard (try? probe.run()) != nil else { return kill(pid, 0) == 0 }
+        let state = String(
+            decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        probe.waitUntilExit()
+        return !state.isEmpty && !state.contains("Z")
+    }
+
+    /// A sample from the node's loopback `/metrics`, summed over the samples
+    /// of `name` — narrowed to those carrying `label` (e.g. `tier="weighed"`)
+    /// when given. Nil when the scrape itself failed, so an assertion of zero
+    /// cannot pass against a node that is not answering.
+    private func metric(_ rpc: UInt16, _ name: String, label: String? = nil) async -> Int? {
+        guard let url = URL(string: "http://127.0.0.1:\(rpc)/metrics") else { return nil }
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200 else {
+            return nil
+        }
+        var total = 0
+        for line in String(decoding: data, as: UTF8.self).split(separator: "\n")
+        where line.hasPrefix(name + "{") {
+            if let label, !line.contains(label) { continue }
+            if let value = line.split(separator: " ").last.flatMap({ Int($0) }) {
+                total += value
+            }
+        }
+        return total
     }
 
     /// The deploy that lost a testnet child: its anchor reached the parent,

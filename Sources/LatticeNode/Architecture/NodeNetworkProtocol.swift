@@ -222,8 +222,10 @@ struct ParentRunReportMessage: NodeJSONMessage, Equatable, Sendable {
 let maximumParentRunReportRequestCommitters = 256
 
 /// A child asks its authenticated immediate parent to re-serve the runs of the
-/// committers it names — the fallback for a push it missed while its session
-/// was down. The parent answers with one `ParentRunReportMessage` per named
+/// committers it names — on admitting a block one of them carried, and for
+/// its recent committers after each evidence catch-up round: the fallback for
+/// a push it could not yet bind or missed while its session was down. The
+/// parent answers with one `ParentRunReportMessage` per named
 /// committer that commits into the asking child's directory, and nothing for
 /// the rest: a committer the parent does not serve is silence, not a claim.
 struct ParentRunReportRequestMessage: NodeJSONMessage, Equatable, Sendable {

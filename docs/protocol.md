@@ -113,9 +113,16 @@ never paid.
 Because that anchor is the only continuity question the protocol defines, it is
 also the only continuity question a parent answers. (A parent also serves run
 reports for the directories it hosts: it pushes the changed run of each served
-directory's nearest committer after every accepted admission, and re-serves
-the runs of the committers a child names after it reconnects. Those report
-work; they answer nothing about continuity or validity.) A request naming any
+directory's nearest committer after every accepted admission and after every
+credit it is itself handed by its own parent — so a run flows down every
+level without a re-ask — for each run a child could actually credit (its
+`runWork` exceeds its `ownWork`), once per value it reaches; and it serves
+the runs of the committers a child names: a child asks for a block's
+committers when it admits a block they carried, and for its recent committers
+after every evidence catch-up round, so a push it could not yet bind or one
+it missed while away is recovered without waiting for the next parent block.
+Those report work; they answer nothing about continuity or validity.) A
+request naming any
 other `from` is
 malformed, not merely unusual: no correct child can produce one, and serving it
 would mean running a general ancestry walk on the consensus actor on a peer's
@@ -128,9 +135,10 @@ while a truncated one is silently wrong and splits honest nodes by local policy.
 
 A restarted child recomputes fork choice entirely from its durable fact log:
 accepted blocks, proof-derived work, and the attributed work-only batches it
-credited from parent run reports. After (re)connecting it asks its parent for
-the runs of the committers it names, the fallback for a push it missed; a
-credit it already holds never depends on the parent being reachable again.
+credited from parent run reports. It asks its parent for a committer's run
+when it admits a block that committer carried and after each evidence round,
+the fallback for a push it missed; a credit it already holds never depends on
+the parent being reachable again.
 When admission needs a new genesis or continuity
 fact, the child asks its authenticated immediate-parent process. A positive
 answer is an unsigned acknowledgement bound to that live session and exact

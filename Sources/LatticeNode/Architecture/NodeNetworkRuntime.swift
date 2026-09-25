@@ -87,7 +87,8 @@ public typealias NetworkParentRunReportHandler = @Sendable (
 public typealias NetworkRunReportServingHandler = @Sendable (
     _ directory: String
 ) async -> Void
-/// The committers this chain asks its parent to re-serve on a reconnect.
+/// The committers this chain asks its parent to re-serve after each
+/// evidence catch-up round.
 public typealias NetworkRecentCommitterProvider = @Sendable () async -> [String]
 
 /// All service callbacks used by one network-runtime generation. Supplying the
@@ -3598,6 +3599,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     generation: generation,
                     process: process
                 )
+            } else {
+                // The round is complete — its evidence retained, its
+                // candidates queued: ask for the runs of the committers this
+                // chain already accepted blocks from (§9.10).
+                await self.requestParentRunReports(
+                    generation: generation, process: process
+                )
             }
         }
     }
@@ -3819,18 +3827,21 @@ public actor NodeNetworkRuntime: IvyDelegate {
             )
 
         case (NodeNetworkTopic.parentRunReportRequest, .child(let childPath)):
-            // A child re-asks for the runs of committers it names — the
-            // fallback for a push it missed. One in flight per peer, like the
-            // fact query; each answer is an O(1) read, and a committer this
-            // node does not serve is silence, never a claim.
+            // A child asks for the runs of committers it names — on admitting
+            // a block one of them carried, and after each evidence round.
+            // Not behind the per-peer query guard: a dropped ask would be a
+            // credit the child recovers only by chance, and the guard never
+            // bounded rate anyway (one message per session is handled at a
+            // time; Tally paces the plane). The serve below is a set lookup
+            // for a directory already served, one anchored-genesis lookup
+            // for one that is not, like the genesis-anchor arm; each named
+            // committer is then one O(1) read, at most
+            // `maximumParentRunReportRequestCommitters` of them. A committer
+            // this node does not serve is silence, never a claim.
             guard let request = try?
                     ParentRunReportRequestMessage.decoded(message.payload),
-                  let directory = childPath.last,
-                  parentStateQueryGuard.acquire(peer.key)
+                  let directory = childPath.last
             else { return }
-            defer {
-                parentStateQueryGuard.release(peer.key)
-            }
             // A child re-asks right after its hello, while this node's
             // serve-on-hello may still be walking the graph; serve first
             // (idempotent, gated on the directory being anchored here) so the
@@ -3839,6 +3850,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // sequences what this node publishes, not who may ask.
             guard isCurrentRuntime(generation: generation, process: process) else { return }
             await handlers?.runReportServing?(directory)
+            SyncTrace.log("run-report request from child dir=\(directory) committers=\(request.committerCIDs.count)")
             for committer in request.committerCIDs {
                 guard isCurrentRuntime(generation: generation, process: process),
                       hierarchySessions[peer.key]?.sessionID == peer.sessionID,
@@ -3846,7 +3858,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
                           committer: committer, directory: directory
                       ),
                       let payload = try? ParentRunReportMessage(report).encoded()
-                else { continue }
+                else {
+                    SyncTrace.log("run-report request committer=\(committer.prefix(16)) silence")
+                    continue
+                }
+                SyncTrace.log("run-report answer committer=\(committer.prefix(16)) run=\(report.runWork) own=\(report.ownWork)")
                 _ = await hierarchy.sendMessage(
                     to: peer,
                     topic: NodeNetworkTopic.parentRunReport,
@@ -3860,6 +3876,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // own lease; a refusal is counted there, never acted on here.
             guard let report = try? ParentRunReportMessage.decoded(message.payload),
                   let handler = handlers?.parentRunReport else { return }
+            SyncTrace.log("run-report received committer=\(report.report.blockHash.prefix(16)) run=\(report.report.runWork) own=\(report.report.ownWork)")
             try? await handler(report.report)
 
         case (NodeNetworkTopic.childGenesisAnchorRequest,
@@ -4183,11 +4200,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
             return
         }
         if case .parent = role {
+            // The run re-ask follows the evidence round this starts, once
+            // the blocks it brings are held here (`scheduleParentEvidencePage`).
             await requestEvidenceIndex(
-                generation: generation,
-                process: process
-            )
-            await requestParentRunReports(
                 generation: generation,
                 process: process
             )
@@ -6308,33 +6323,58 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
     }
 
-    /// After (re)connecting to the parent, ask it to re-serve the runs of the
-    /// committers this chain knows: the fallback for pushes missed while the
-    /// session was down. Nothing to ask means nothing is sent.
+    /// Ask the parent for the runs of the committers this chain recently
+    /// accepted blocks from — after every evidence catch-up round: the
+    /// fallback for pushes missed while the session was down. The blocks a
+    /// round itself brings are queued as candidates, not yet accepted, so
+    /// they are asked for one by one as they are admitted (the service's
+    /// requester). Nothing to ask means nothing is sent.
     private func requestParentRunReports(
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        guard let committers = await handlers?.recentCommitters?() else { return }
+        await requestParentRunReports(
+            committers: committers, generation: generation, process: process
+        )
+    }
+
+    /// Ask the parent for the runs of the committers of a block just
+    /// admitted here (§9.10) — one message for all of them. Public for the
+    /// service's admission effects.
+    public func requestParentRunReports(committers: [String]) async {
+        guard isRunning, let process else { return }
+        await requestParentRunReports(
+            committers: committers, generation: runtimeGeneration, process: process
+        )
+    }
+
+    private func requestParentRunReports(
+        committers: [String],
         generation: UInt64,
         process: ChainProcess
     ) async {
         guard !configuration.address.isNexus,
               isCurrentRuntime(generation: generation, process: process),
               let parent = configuredParentPeer(),
-              let committers = await handlers?.recentCommitters?(),
               !committers.isEmpty,
               let payload = try? ParentRunReportRequestMessage(
                   requestID: makeRequestID(),
                   committerCIDs: committers
               ).encoded()
         else { return }
-        _ = await hierarchy.sendMessage(
+        let sent = await hierarchy.sendMessage(
             to: parent,
             topic: NodeNetworkTopic.parentRunReportRequest,
             payload: payload
         )
+        SyncTrace.log("run-report request committers=\(committers.count) sent=\(sent)")
     }
 
     /// Push one run report to every authenticated child of its directory
-    /// (§9.10). A push that does not land is re-served by the child's request
-    /// on its next hello, so no delivery result is acted on.
+    /// (§9.10). A push that does not land is re-served by the child's own
+    /// ask — on admitting a block that committer carried, and after each
+    /// evidence round — so no delivery result is acted on.
     public func announceParentRunReport(_ report: ParentRunReport) async {
         guard isRunning, let process,
               let payload = try? ParentRunReportMessage(report).encoded()
