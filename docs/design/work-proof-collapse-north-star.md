@@ -48,15 +48,15 @@ The blocks on the directory path do not need to be valid, admitted, connected,
 or canonical on their own chains. Work validity is deliberately orthogonal to
 block validity.
 
-The contribution of one root to one child location is:
-
-```
-max(workForTarget(block.target))
-```
-
-over every content-bound block on the committed directory path whose target is
-beaten by the root hash. The terminal child's target must be beaten. Repeated
-evidence for the same grind and child location keeps the maximum. Conflicting
+The contribution of one root to one child location is `workForTarget` of the
+ROOT-MOST content-bound block on the committed directory path whose target the
+root hash beats, raised if greater by the terminal child's own target. Position
+picks the pricer; the child overrides only a pricer easier than itself. It is
+NOT a maximum over every beaten target (Lattice 34.0.0, spec §9.5). The
+terminal child's target must be beaten. Repeated evidence for the same grind
+and child location keeps the
+strongest verified value; that per-location ratchet is a different rule from
+the along-the-path selection. Conflicting
 claims for one grind and chain-local location are rejected. Different grind
 identities sum. A proof cannot affect fork choice until its terminal child is
 accepted and connected in that child's chain.
@@ -89,12 +89,19 @@ not alter the fact. Backward, sideways, unrelated, or disconnected movement is
 invalid. Repeated state roots use existential reachability rather than a
 hidden arrival-dependent anchor.
 
-The terminal directory carrier binds `child.parentState == carrier.prevState`
-for ADMISSION only. That binding is not an anchor and never was: the carrier
-need not be a valid parent block, so both sides of the comparison may be chosen
-by one party. What establishes that the child's `parentState` is a state the
-parent legitimately reached is continuity, proved at every height including
-block 1 (spec §5.3 step 6, which carries no height-1 exemption).
+The terminal directory carrier binds `child.parentState == carrier.prevState`.
+That binding is not an anchor and never was: the carrier need not be a valid
+parent block, so both sides of the comparison may be chosen by one party. What
+establishes that the child's `parentState` is a state the parent legitimately
+reached is continuity, proved at every height including block 1 (spec §5.3
+step 6, which carries no height-1 exemption).
+
+The binding still gates **work**, not only admission: it is enforced inside
+`ChildBlockProof.verifySecuringWork`, which returns `.protocolInvalid` before
+any `VerifiedWorkContribution` is minted, so a failure withholds the work
+contribution and the admission together. Work crediting and the vertical
+binding are therefore NOT separated today — separating them is a proposed
+change, not current behaviour.
 
 Each chain process durably records every connected block after
 semantic validation. That recovered `ChainBlockFact` graph is the transition
@@ -206,7 +213,13 @@ ties, invalid carriers, reordering, duplication, and restart.
 
 The replacement passes only when:
 
-1. No root contributes more than its strongest target-derived bound.
+1. A verified observation of a root whose root hash clears the terminal
+   child's target credits exactly `workForTarget` of the root-most target it
+   cleared along that proof, raised if greater by the terminal child's own
+   (never a max over every cleared target; Lattice 34.0.0, spec §9.5); an
+   observation that does not clear the terminal target yields no contribution
+   at all — no work fact, and the block is not admitted; a location holds the
+   strongest such observation.
 2. No root is counted twice at one chain-local location.
 3. Optimized and reference totals and tips match exactly.
 4. No branch gains weight without equivalent physical work.

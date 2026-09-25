@@ -1,8 +1,8 @@
 # Recursive commitments, independent processes
 
 The canonical design rationale is in Lattice's
-[philosophy](https://github.com/adalinxx/Lattice/blob/26.0.1/docs/philosophy.md)
-and [foundational architecture](https://github.com/adalinxx/Lattice/blob/26.0.1/docs/foundational-architecture.md).
+[philosophy](https://github.com/adalinxx/Lattice/blob/34.0.0/docs/philosophy.md)
+and [foundational architecture](https://github.com/adalinxx/Lattice/blob/34.0.0/docs/foundational-architecture.md).
 This page records only the consequences for `lattice-node`.
 
 The hierarchy is recursive data, not a recursive runtime. A mined root may

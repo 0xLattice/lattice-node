@@ -1,8 +1,8 @@
 # Consensus and fork-choice ownership
 
 Consensus is defined by Lattice, not by `lattice-node`. The canonical rules are
-the [protocol specification](https://github.com/adalinxx/Lattice/blob/27.0.0/docs/spec.md)
-and [work and fork-choice rationale](https://github.com/adalinxx/Lattice/blob/27.0.0/docs/consensus-fork-choice.md).
+the [protocol specification](https://github.com/adalinxx/Lattice/blob/34.0.0/docs/spec.md)
+and [work and fork-choice rationale](https://github.com/adalinxx/Lattice/blob/34.0.0/docs/consensus-fork-choice.md).
 
 The node owns only the operational boundary around those rules:
 
@@ -13,9 +13,13 @@ The node owns only the operational boundary around those rules:
 - derive each unique grind's work from its content-addressed child proof; and
 - project the one canonical chain delta returned by Lattice.
 
-Work observations are joined by grind identity before they are totaled. One
-root contributes at most its strongest target-derived quantity to one
-chain-local location; different roots sum. The contribution affects GHOST only
+Work observations are joined by grind identity before they are totaled. A
+verified observation of one root whose root hash clears the terminal child's
+target credits exactly `workForTarget` of the root-most target it cleared along
+that proof, raised if greater by the terminal child's own (never a max over
+every cleared target; Lattice 34.0.0, spec §9.5); an observation that does not
+clear the terminal target credits nothing; one chain-local location holds the
+strongest such observation; different roots sum. The contribution affects GHOST only
 after its terminal child is accepted and connected. Parent admission,
 canonicity, and later ancestry do not create or remove that physical work.
 Exact work ties use Lattice's deterministic segment-base CID rule, never

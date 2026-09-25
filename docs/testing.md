@@ -63,9 +63,13 @@ cross-component invariants:
 - a durable canonical commit reserves reconciliation before a later template
   or transaction can observe the new chain state;
 - optional child-proof materialization never suppresses canonical publication;
-- one physical grind contributes at most its strongest target-derived quantity
-  to one chain-local location; distinct grinds sum, and replay cannot multiply
-  weight;
+- a verified observation of one physical grind whose root hash clears the
+  terminal child's target credits exactly `workForTarget` of the root-most
+  target it cleared along that proof, raised if greater by the terminal
+  child's own (never a max over every cleared target; Lattice 34.0.0, spec
+  §9.5); an observation that does not clear the terminal target credits
+  nothing; one chain-local location holds the strongest such observation;
+  distinct grinds sum, and replay cannot multiply weight;
 - evidence inventories retain their exact cursor across
   transient Ivy/Tally pressure on a live parent session;
 - a failed hierarchy hello or durable evidence hint recycles only that exact

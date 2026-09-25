@@ -217,7 +217,7 @@ lattice-mining-coordinator \
   `workForTarget(block.target)`, so a Nexus block committing the maximum
   target carries about one unit of work however hard the miner searched for
   it. (A child block is credited the larger of its own target's work and that
-  of the strongest ancestor carrier its hash also satisfies, so a max-target
+  of the root-most ancestor carrier its hash also satisfies, so a max-target
   child carried by a valid Nexus block is credited the Nexus target's work.)
   A filter that paces blocks near the target block time therefore keeps
   committed difficulty where the anchor put it: the schedule reads only the

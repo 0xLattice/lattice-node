@@ -276,12 +276,17 @@ node's observable behaviour against it; it does not restate it.
    reference only where neither applies.
 
    Sources: Lattice spec §9.2, §9.4, §9.9 and §12.5 (items 4–6, 10); Lattice
-   [consensus-fork-choice](https://github.com/adalinxx/Lattice/blob/30.4.0/docs/consensus-fork-choice.md);
+   [consensus-fork-choice](https://github.com/adalinxx/Lattice/blob/34.0.0/docs/consensus-fork-choice.md);
    the exact reference gate in the
    [work-proof collapse north star](work-proof-collapse-north-star.md).
 2. **One grind is counted once per location.**
-   - No root contributes more than its strongest target-derived bound at one
-     chain-local location.
+   - A verified observation of a root whose root hash clears the terminal
+     child's target credits exactly `workForTarget` of the root-most target
+     it cleared along that proof, raised if greater by the terminal child's
+     own (never a max over every cleared target; Lattice 34.0.0, spec §9.5);
+     an observation that does not clear the terminal target yields no
+     contribution at all — no work fact, and the block is not admitted; one
+     chain-local location holds the strongest such observation.
    - A conflicting location is rejected atomically.
    - Distinct grinds sum.
    - Replay never multiplies weight.
@@ -542,7 +547,7 @@ because boundary-focused testing needed the same things:
   protocols. This lets `NodeStoreTests` interpose a `BlockingVolumeBroker`.
 - **Precedent for seeded runs.** Lattice's `LatticeSim` drives the real
   `ChainState` fork choice from a seed and requires "the same trace
-  byte-for-byte" ([consensus simulator](https://github.com/adalinxx/Lattice/blob/30.4.0/docs/consensus-simulator.md)).
+  byte-for-byte" ([consensus simulator](https://github.com/adalinxx/Lattice/blob/34.0.0/docs/consensus-simulator.md)).
   The wire fuzzers use a portable seeded generator rather than the system one.
 
 ### Where no seam exists
@@ -620,6 +625,10 @@ mechanism for ordering, crash, partition, skew and peer-misbehaviour bugs.**
     maximum. Genesis commits the maximum target by convention, and block 1's
     schedule is the maximum (spec §5.1 and §5.5). Later blocks reach harder,
     differing targets by mining harder than scheduled and by retargeting.
+  - Some worlds must contain an inverted hierarchy — a deeper chain committing
+    a HARDER target than a shallower one — because only there do the
+    root-most and max-over-path pricings differ (spec §9.5). A generator that
+    never produces one cannot falsify the pricing gate in invariant 2 above.
   - Spec §9.1 credits `floor(2^256 / (target + 1))`, which is 1 at the maximum
     target. If every block sat there, every block would weigh the same, and
     weight comparisons would collapse to block counts.
