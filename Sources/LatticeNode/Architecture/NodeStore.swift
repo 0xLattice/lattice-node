@@ -1795,6 +1795,33 @@ actor NodeStore {
         )
     }
 
+    /// The committing parent blocks of the blocks this chain ACCEPTED with a
+    /// carrier proof, distinct, newest first (Lattice §9.10). Durable, so it
+    /// is the answer to "whom does this chain ask its parent to re-serve"
+    /// after a restart. Joined on `accepted_blocks` deliberately: the relay
+    /// evidence table also records carriers of blocks this chain refused —
+    /// every merged-mining round whose root missed this chain's target — and
+    /// those are not committers of anything here.
+    func incomingCarrierCommitters(limit: Int) throws -> [String] {
+        let rows = try database.query(
+            "SELECT e.parent_carrier_cid FROM issued_child_proofs AS p INNER JOIN issued_child_edges AS e ON e.edge_cid = p.edge_cid INNER JOIN accepted_blocks AS a ON a.block_cid = e.child_cid WHERE p.scope = ?1 GROUP BY e.parent_carrier_cid ORDER BY MAX(p.rowid) DESC LIMIT ?2",
+            params: [.text(IssuedChildProofScope.incomingCarrier.rawValue), .int(Int64(limit))]
+        )
+        return rows.compactMap { $0["parent_carrier_cid"]?.textValue }
+    }
+
+    /// The ACCEPTED block of this chain that `committer` commits, from the
+    /// carrier proof verified at that block's admission — the edge was derived
+    /// from the sparse proof, never taken from the wire — or nil for a
+    /// committer of nothing this chain accepted.
+    func incomingCarrierChildBlock(committer: String) throws -> String? {
+        let rows = try database.query(
+            "SELECT e.child_cid FROM issued_child_proofs AS p INNER JOIN issued_child_edges AS e ON e.edge_cid = p.edge_cid INNER JOIN accepted_blocks AS a ON a.block_cid = e.child_cid WHERE p.scope = ?1 AND e.parent_carrier_cid = ?2 LIMIT 1",
+            params: [.text(IssuedChildProofScope.incomingCarrier.rawValue), .text(committer)]
+        )
+        return rows.first?["child_cid"]?.textValue
+    }
+
     func issuedChildEvidence(
         scope: IssuedChildProofScope,
         edgeCID: String,

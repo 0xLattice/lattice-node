@@ -264,8 +264,9 @@ node's observable behaviour against it; it does not restate it.
 1. **Fork choice matches a straightforward reference.** Take the facts a node
    holds: weighed blocks, verified grind locations and recorded exclusions.
    - The node's fork-choice head over those facts must equal the head a plain
-     GHOST reference model selects from the same facts, with excluded subtrees
-     removed.
+     GHOST reference model selects from the same facts, with every excluded
+     subtree still weighed and the descent never stepping into an excluded
+     block.
    - The reference ranks by greatest effective `trueCumWork` and breaks exact
      ties by the smaller segment-base CID.
    - The result does not depend on arrival or replay order.
@@ -276,14 +277,14 @@ node's observable behaviour against it; it does not restate it.
    reference only where neither applies.
 
    Sources: Lattice spec §9.2, §9.4, §9.9 and §12.5 (items 4–6, 10); Lattice
-   [consensus-fork-choice](https://github.com/adalinxx/Lattice/blob/34.0.0/docs/consensus-fork-choice.md);
+   [consensus-fork-choice](https://github.com/adalinxx/Lattice/blob/35.0.1/docs/consensus-fork-choice.md);
    the exact reference gate in the
    [work-proof collapse north star](work-proof-collapse-north-star.md).
 2. **One grind is counted once per location.**
    - A verified observation of a root whose root hash clears the terminal
      child's target credits exactly `workForTarget` of the root-most target
      it cleared along that proof, raised if greater by the terminal child's
-     own (never a max over every cleared target; Lattice 34.0.0, spec §9.5);
+     own (never a max over every cleared target; Lattice 35.0.1, spec §9.5);
      an observation that does not clear the terminal target yields no
      contribution at all — no work fact, and the block is not admitted; one
      chain-local location holds the strongest such observation.
@@ -296,12 +297,14 @@ node's observable behaviour against it; it does not restate it.
 3. **Work counts only where the rules place it.**
    - Work verified along a proof path does not depend on the validity,
      admission, connectivity or canonicity of the intermediate carriers.
-   - Effective weight contains only connected, accepted same-chain locations
-     derived from verified proof bytes, outside any subtree excluded as proven
-     invalid.
+   - Weight contains only connected, accepted same-chain locations: grind
+     contributions derived from verified proof bytes, and attributed runs the
+     child bound and derived from its configured parent's report, keyed by
+     committer and directory. Exclusion removes none of it; the descent never
+     steps into an excluded block.
    - Parent canonicity alone never changes child weight.
 
-   Sources: spec §9.5, §9.9 and §12.5 (items 2, 5, 7).
+   Sources: spec §9.5, §9.9, §9.10 and §12.5 (items 2, 5, 7).
 4. **Durability precedes visibility.** No graph mutation, canonical publication
    or served reference is observable before the batch behind it is durable. A
    storage failure leaves the accepted graph unchanged. Sources: spec §9.3 and
@@ -325,8 +328,8 @@ node's observable behaviour against it; it does not restate it.
    adversarially first".
 8. **Exclusion is durable and replayed identically.** An excluded subtree stays
    excluded across restart. Later work beneath it never resurrects it, and it
-   remains held and served. Sources: spec §9.9; "Exclusion is chain-local and
-   never touches exported work" in deferred execution.
+   remains held, weighed and served. Sources: spec §9.9; "Exclusion is
+   chain-local and never touches work" in deferred execution.
 9. **Recovery selects exactly what the durable facts determine.**
    - After recovery, a node's head is the head fork choice selects over its
      durable facts.
@@ -547,7 +550,7 @@ because boundary-focused testing needed the same things:
   protocols. This lets `NodeStoreTests` interpose a `BlockingVolumeBroker`.
 - **Precedent for seeded runs.** Lattice's `LatticeSim` drives the real
   `ChainState` fork choice from a seed and requires "the same trace
-  byte-for-byte" ([consensus simulator](https://github.com/adalinxx/Lattice/blob/34.0.0/docs/consensus-simulator.md)).
+  byte-for-byte" ([consensus simulator](https://github.com/adalinxx/Lattice/blob/35.0.1/docs/consensus-simulator.md)).
   The wire fuzzers use a portable seeded generator rather than the system one.
 
 ### Where no seam exists

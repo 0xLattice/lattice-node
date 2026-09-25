@@ -14,6 +14,222 @@ final class MultichainInvariantTests: XCTestCase {
     /// live parent that executed its own chain answers, the link is built from
     /// that answer, and admission then succeeds. Each half was covered
     /// separately; the seam between the two repositories was not.
+    /// Parent-attributed run work (Lattice §9.10), end to end through the
+    /// process API: the parent serves runs for the directory it prepares
+    /// proofs for; the carrier's own run attributes nothing; a parent block
+    /// mined on top of the carrier raises that run and the child credits the
+    /// difference, once — a repeat is refused, the credit survives the
+    /// child's restart, a report naming the wrong block is refused and
+    /// counted, and the child remembers the committer to re-ask for.
+    func testParentRunWorkIsCreditedAtTheChildBlockItCommits() async throws {
+        let parentStorage = temporaryDirectory()
+        let childStorage = temporaryDirectory()
+        let parentConfiguration = try configuration(
+            path: ["Nexus"], storage: parentStorage,
+            privateKeyHex: String(repeating: "61", count: 32)
+        )
+        let childConfiguration = try configuration(
+            path: ["Nexus", "Payments"], storage: childStorage,
+            privateKeyHex: String(repeating: "62", count: 32),
+            parentPublicKey: parentConfiguration.processPublicKey
+        )
+        let parent = try await ChainProcess.open(configuration: parentConfiguration)
+        let parentGenesis = try await parent.canonicalTipBlock()
+        let seed = ChildGenesisSeed(spec: NexusGenesis.spec, premineTo: nil, timestamp: 1)
+        let childGenesis = try await ChildGenesisBuilder.build(
+            seed: seed, chainPath: ["Nexus", "Payments"], fetcher: parent
+        )
+        let authorization = try signedGenesisAnchorTransaction(
+            directory: "Payments",
+            childGenesisCID: try BlockHeader(node: childGenesis).rawCID
+        )
+        try await VolumeImpl<Transaction>(node: authorization).storeRecursively(storer: parent)
+        let unminedRecording = try await BlockBuilder.buildBlock(
+            previous: parentGenesis, transactions: [authorization],
+            timestamp: 1, nonce: 0, fetcher: parent
+        )
+        let recordingCarrier = try XCTUnwrap(BlockBuilder.mine(
+            block: unminedRecording, target: parentGenesis.nextTarget
+        ))
+        let recordingOutcome = try await parent.admit(try BlockHeader(node: recordingCarrier))
+        XCTAssertTrue(recordingOutcome.decision.isAccepted)
+        let provisional = try await BlockBuilder.buildBlock(
+            previous: recordingCarrier, timestamp: 2, nonce: 0, fetcher: parent
+        )
+        let childBlock = try await BlockBuilder.buildBlock(
+            previous: childGenesis, parentChainBlock: provisional, timestamp: 2, fetcher: parent
+        )
+        let childBlockCID = try BlockHeader(node: childBlock).rawCID
+        let unminedCarrier = try await BlockBuilder.buildBlock(
+            previous: recordingCarrier, children: ["Payments": childBlock],
+            timestamp: 2, nonce: 0, fetcher: parent
+        )
+        let carrier = try XCTUnwrap(BlockBuilder.mine(
+            block: unminedCarrier,
+            target: min(recordingCarrier.nextTarget, childBlock.target)
+        ))
+        _ = try await parent.prepareChildProofs(for: carrier, capacity: 16)
+        let carrierHeader = try BlockHeader(node: carrier)
+        // Not served yet: nothing hosts Payments until the parent prepares
+        // proofs for it — that is the operator's declaration, made through the
+        // service, which also pushes every changed run to a publisher.
+        let servedBefore = await parent.servedRunDirectoryList()
+        XCTAssertEqual(servedBefore, [])
+        let pushed = ParentRunReportSink()
+        let parentService = ChainService(
+            process: parent,
+            childCandidateProvider: { _ in [] },
+            childProofPublisher: { _ in },
+            parentRunReportPublisher: { report in await pushed.record(report) },
+            acceptedBlockPublisher: { _ in }
+        )
+        let carrierOutcome = try await parentService.admitNetworkCandidate(
+            carrierHeader,
+            authenticatedChildPackage: nil,
+            preparingChildDirectories: ["Payments"],
+            contentSource: FetcherContentSource(parent)
+        )
+        XCTAssertTrue(carrierOutcome.decision.isAccepted)
+        _ = try await parent.retryPendingChildProofs(carrierCID: carrierHeader.rawCID)
+        let issued = try await parent.issuedChildEvidence(
+            childCID: childBlockCID, directory: "Payments", rootCID: carrierHeader.rawCID
+        )
+        let evidence = try XCTUnwrap(issued)
+
+        let served = await parent.servedRunDirectoryList()
+        XCTAssertEqual(served, ["Payments"], "preparing proofs for a directory serves its runs")
+        let carrierReports = await parent.runReports(changedBy: carrierHeader.rawCID)
+        XCTAssertEqual(carrierReports.count, 1)
+        let carrierReport = try XCTUnwrap(carrierReports.first)
+        let pushedAfterCarrier = await pushed.received()
+        XCTAssertEqual(pushedAfterCarrier, [carrierReport], "the carrier's own admission pushed its run")
+        XCTAssertEqual(carrierReport.blockHash, carrierHeader.rawCID)
+        XCTAssertEqual(carrierReport.directory, "Payments")
+        XCTAssertEqual(carrierReport.childBlock, childBlockCID)
+        XCTAssertEqual(carrierReport.runWork, carrierReport.ownWork, "the carrier alone: nothing to attribute")
+
+        // The child admits block 1 with the carrier proof and the anchor.
+        // Optional so the storage lock is released before the reopen below
+        // (the file's idiom: the lock lives with the process).
+        var childProcess: ChainProcess? = try await ChainProcess.open(configuration: childConfiguration)
+        func child() throws -> ChainProcess { try XCTUnwrap(childProcess) }
+        let bootstrapped = try await child().activateSeededChildGenesis(
+            seed: seed, confirmParentRecordedGenesis: { _ in true }
+        )
+        XCTAssertTrue(bootstrapped)
+        let childContent = MultichainContentStore()
+        try await BlockHeader(node: childBlock).storeBlock(fetcher: parent, storer: childContent)
+        let childBlockHeader = BlockHeader(rawCID: childBlockCID, node: nil, encryptionInfo: nil)
+        let admitted = try await child().admit(
+            childBlockHeader,
+            authenticatedChildPackage: AuthenticatedChildPackage(package: ChildValidationPackage(
+                proof: evidence.proof,
+                parentStateContinuityLink: ParentStateContinuityLink(
+                    parentPath: ["Nexus"],
+                    fromStateCID: LatticeState.emptyHeader.rawCID,
+                    toStateCID: childBlock.parentState.rawCID
+                )
+            )),
+            remoteSource: childContent
+        )
+        XCTAssertTrue(admitted.decision.isAccepted)
+        let remembered = try await child().recentCommitters()
+        XCTAssertEqual(remembered, [carrierHeader.rawCID], "the child remembers whom to re-ask")
+        // A directory this chain never anchored a child genesis for is not
+        // served, whoever names it.
+        await parent.serveRuns(for: "Markets")
+        let servedAfterStranger = await parent.servedRunDirectoryList()
+        XCTAssertEqual(servedAfterStranger, ["Payments"], "a stranger's directory is refused")
+
+        // The carrier's own run attributes nothing: refused, visibly.
+        let carrierOnly = try await child().applyParentRunReport(carrierReport)
+        guard case .refused(.notStronger) = carrierOnly else {
+            return XCTFail("a run with nothing beyond the committer must be refused as not stronger, got \(carrierOnly)")
+        }
+
+        // A parent block on top of the carrier joins its run.
+        let unminedSuccessor = try await BlockBuilder.buildBlock(
+            previous: carrier, timestamp: 3, nonce: 0, fetcher: parent
+        )
+        let successor = try XCTUnwrap(BlockBuilder.mine(
+            block: unminedSuccessor, target: carrier.nextTarget
+        ))
+        let successorHeader = try BlockHeader(node: successor)
+        // Through the service, so the emission path is the one under test:
+        // every accepted admission pushes each served directory's changed run.
+        let successorOutcome = try await parentService.admitNetworkCandidate(
+            successorHeader,
+            authenticatedChildPackage: nil,
+            preparingChildDirectories: [],
+            contentSource: FetcherContentSource(parent)
+        )
+        XCTAssertTrue(successorOutcome.decision.isAccepted)
+        let pushedReports = await pushed.received()
+        XCTAssertEqual(pushedReports.count, 2, "one push per changed run, per admission")
+        let successorReports = await parent.runReports(changedBy: successorHeader.rawCID)
+        XCTAssertEqual(pushedReports.suffix(1).map { $0 }, successorReports, "the push carries exactly the changed run")
+        XCTAssertEqual(successorReports.count, 1, "the successor's admission changed exactly the carrier's run")
+        let grown = try XCTUnwrap(successorReports.first)
+        XCTAssertEqual(grown.blockHash, carrierHeader.rawCID, "credited to the nearest committer")
+        XCTAssertGreaterThan(grown.runWork, grown.ownWork)
+        let byRequest = await parent.runReport(committer: carrierHeader.rawCID, directory: "Payments")
+        XCTAssertEqual(byRequest, grown, "the re-serve request answers with the same report")
+        let unserved = await parent.runReport(committer: carrierHeader.rawCID, directory: "Markets")
+        XCTAssertNil(unserved)
+
+        // The child credits it — once.
+        let first = try await child().applyParentRunReport(grown)
+        guard case .credited = first else {
+            return XCTFail("a grown run must be credited, got \(first)")
+        }
+        let repeated = try await child().applyParentRunReport(grown)
+        guard case .refused(.notStronger) = repeated else {
+            return XCTFail("the same report twice is one credit, got \(repeated)")
+        }
+        var counters = try await child().parentReportCounters()
+        XCTAssertEqual(counters.applied, 1)
+        XCTAssertEqual(counters.refusals["notStronger"], 2)
+
+        // A report naming the wrong child block is refused and counted.
+        let misnamed = ParentRunReport(
+            blockHash: grown.blockHash, directory: grown.directory,
+            childBlock: try BlockHeader(node: childGenesis).rawCID,
+            grinds: grown.grinds, runWork: grown.runWork, ownWork: grown.ownWork,
+            revision: grown.revision
+        )
+        let misnamedOutcome = try await child().applyParentRunReport(misnamed)
+        guard case .refused(.notCommitterOfChild) = misnamedOutcome else {
+            return XCTFail("a report naming a block the committer does not commit is refused, got \(misnamedOutcome)")
+        }
+        counters = try await child().parentReportCounters()
+        XCTAssertEqual(counters.refusals["notCommitterOfChild"], 1)
+        // A committer this chain never admitted a block from names nothing:
+        // the location is local knowledge, never the report's.
+        let stranger = ParentRunReport(
+            blockHash: successorHeader.rawCID, directory: grown.directory,
+            childBlock: childBlockCID, grinds: grown.grinds,
+            runWork: grown.runWork, ownWork: grown.ownWork, revision: grown.revision
+        )
+        let strangerOutcome = try await child().applyParentRunReport(stranger)
+        guard case .refused(.notCommitterOfChild) = strangerOutcome else {
+            return XCTFail("an unknown committer must be refused, got \(strangerOutcome)")
+        }
+        counters = try await child().parentReportCounters()
+        XCTAssertEqual(counters.refusals["unknownCommitter"], 1)
+
+        // The credit is durable: after a restart the same report is still
+        // "not stronger", which only a replayed attributed fact explains.
+        childProcess = nil
+        let reopened = try await ChainProcess.open(configuration: childConfiguration)
+        let afterRestart = try await reopened.applyParentRunReport(grown)
+        guard case .refused(.notStronger) = afterRestart else {
+            return XCTFail("the attributed credit must survive a restart, got \(afterRestart)")
+        }
+        // ... and so does whom to re-ask: the fallback works after a restart.
+        let rememberedAfterRestart = try await reopened.recentCommitters()
+        XCTAssertEqual(rememberedAfterRestart, [carrierHeader.rawCID])
+    }
+
     func testBlockOneAnchorResolvesAgainstALiveParent() async throws {
         let parentStorage = temporaryDirectory()
         let childStorage = temporaryDirectory()
@@ -428,6 +644,12 @@ final class MultichainInvariantTests: XCTestCase {
             signatures: [key.publicKey: signature],
             body: bodyHeader
         )
+    }
+
+    private actor ParentRunReportSink {
+        private var reports: [ParentRunReport] = []
+        func record(_ report: ParentRunReport) { reports.append(report) }
+        func received() -> [ParentRunReport] { reports }
     }
 
     private func temporaryDirectory() -> URL {

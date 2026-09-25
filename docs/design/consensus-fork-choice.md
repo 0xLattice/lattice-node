@@ -1,8 +1,8 @@
 # Consensus and fork-choice ownership
 
 Consensus is defined by Lattice, not by `lattice-node`. The canonical rules are
-the [protocol specification](https://github.com/adalinxx/Lattice/blob/34.0.0/docs/spec.md)
-and [work and fork-choice rationale](https://github.com/adalinxx/Lattice/blob/34.0.0/docs/consensus-fork-choice.md).
+the [protocol specification](https://github.com/adalinxx/Lattice/blob/35.0.1/docs/spec.md)
+and [work and fork-choice rationale](https://github.com/adalinxx/Lattice/blob/35.0.1/docs/consensus-fork-choice.md).
 
 The node owns only the operational boundary around those rules:
 
@@ -17,17 +17,25 @@ Work observations are joined by grind identity before they are totaled. A
 verified observation of one root whose root hash clears the terminal child's
 target credits exactly `workForTarget` of the root-most target it cleared along
 that proof, raised if greater by the terminal child's own (never a max over
-every cleared target; Lattice 34.0.0, spec §9.5); an observation that does not
+every cleared target; Lattice 35.0.1, spec §9.5); an observation that does not
 clear the terminal target credits nothing; one chain-local location holds the
 strongest such observation; different roots sum. The contribution affects GHOST only
-after its terminal child is accepted and connected. Parent admission,
-canonicity, and later ancestry do not create or remove that physical work.
+after its terminal child is accepted and connected. Parent admission and
+canonicity do not create or remove that physical work; later parent blocks
+descending from the committer add their own work to the child block through
+the committer's run (spec §9.10), never to a grind's contribution.
 Exact work ties use Lattice's deterministic segment-base CID rule, never
 arrival order or an incumbent preference.
 
-The node must not implement a second fork-choice metric, accept peer-supplied
-work totals, recursively choose descendant tips, or send parent canonical-tip
-commands across the hierarchy plane.
+The node must not implement a second fork-choice metric, recursively choose
+descendant tips, or send parent canonical-tip commands across the hierarchy
+plane. It never accepts a work total as fork-choice input. The one report it
+accepts about work it did not verify is the run report of spec §9.10, and only
+from its configured immediate parent: the node binds it (own directory, the
+named child block, one of the committer's grinds already credited there),
+derives the credit itself as `runWork − ownWork` under an identity keyed by the
+committer and directory, applies it only as a strict increase over the value it
+holds, and never revokes it.
 
 ## Sync trust boundary
 

@@ -243,7 +243,9 @@ which has these properties:
   parent link as well as its proven work. Without links, work could not be
   assigned to the comparisons it would enter.
 - **It combines work by grind identity (§9.1).** This applies both within the
-  record and against work already counted in the kept graph. Summing overlaps
+  record and against work already counted in the kept graph. An attributed
+  run (§9.10) is keyed by `(committer, directory)` — deliberately not a grind —
+  and counts once beside the committer's grinds. Summing overlaps
   would let N one-block leaves on a cheap spine each claim the spine's work.
   Failing to combine them would leave a branch that is heavier only through its
   side branches uncounted, and the node on the lighter chain.
@@ -262,7 +264,10 @@ done, lets a re-offer skip the walk. That makes the record safe against
 poisoning. An attacker who announces an honest leaf first and stalls its
 ancestry leaves only a partial lower bound, which the honest peers' offers then
 extend. And an entry cannot be inflated, because work proves itself and one
-grind secures only one location per chain (§9.1). Work the record already knows
+grind secures only one location per chain (§9.1); an attributed run, keyed by
+`(committer, directory)` rather than by a grind, is likewise held at one child
+location and counts once beside the committer's grinds (§9.10). Work the record
+already knows
 still orders acquisition, and it is judged again whenever the bar drops.
 
 Keeping must be tied to the bytes that were tallied. A content-addressed leaf
@@ -321,7 +326,9 @@ Every uncertainty lowers the bar:
   would otherwise hold. Weight on the offer's own side counts whether or not it
   is validated.
 - **Exclusion recomputes it.** When a subtree is proven invalid and excluded,
-  the margins it supported shrink and every tally is judged again.
+  its work still weighs but the descent never steps into it (§9.9), so the
+  comparisons it was winning are re-decided among selectable paths, the margins
+  it supported shrink, and every tally is judged again.
 - **Narrowing margins let tallies in.** The bar is not fixed when an offer
   arrives. When a comparison tightens toward a tie, offers that were below its
   old margin cross the new one and are kept.
@@ -468,8 +475,8 @@ counterexample:
    attaches at fork F, far below F's margin.
 2. Under budget pressure the gating node releases B, keeping an entry for it.
 3. B's only provider then goes offline for good.
-4. An exclusion removes validated incumbent weight at F, and F's comparison
-   narrows. Known work on B's side still falls short of the margin, but known
+4. An exclusion makes the validated incumbent at F unselectable, and F's
+   comparison narrows. Known work on B's side still falls short of the margin, but known
    work plus B reaches it.
 5. The node that kept everything switches head. The gating node's accounting
    reaches the margin and it re-solicits, but nobody serves B, so it does not

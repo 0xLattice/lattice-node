@@ -80,8 +80,18 @@ that can reach fork choice would be consensus-relevant, so the chain's own
 target is the only work gate.
 
 Parent canonicity never affects work. An authenticated parent process may issue
-genesis and parent-state continuity facts; it cannot declare the child valid,
-assign work, or choose the child's tip. Every child block anchors its
+genesis and parent-state continuity facts and serves the run reports of spec
+§9.10 for the directories it hosts; it cannot declare the child valid or
+choose the child's tip. A run report names a quantity, and only a quantity:
+the child binds it — its own directory, the block THIS chain's verified
+carrier proof says that committer commits (a report naming any other block is
+refused), one of the committer's grinds already credited there — and derives
+the credit itself, `runWork − ownWork`,
+under an identity keyed by the committer and directory, applied only as a
+strict increase and never revoked. The quantity is the configured immediate
+parent's word: the same trust the child already extends to that process for
+state continuity, which gates minting outright, so no new trust class is
+introduced. Every child block anchors its
 `parentState` directly to the PARENT CHAIN'S GENESIS — not to its predecessor:
 the state must be reachable from the empty state through the parent's connected,
 EXECUTED same-chain graph, which is to say it is a state real parent history
@@ -101,7 +111,12 @@ unexecuted claim would let a forged `receiptState` settle a withdrawal that was
 never paid.
 
 Because that anchor is the only continuity question the protocol defines, it is
-also the only one a parent answers. A request naming any other `from` is
+also the only continuity question a parent answers. (A parent also serves run
+reports for the directories it hosts: it pushes the changed run of each served
+directory's nearest committer after every accepted admission, and re-serves
+the runs of the committers a child names after it reconnects. Those report
+work; they answer nothing about continuity or validity.) A request naming any
+other `from` is
 malformed, not merely unusual: no correct child can produce one, and serving it
 would mean running a general ancestry walk on the consensus actor on a peer's
 behalf. Refusing the shape is not a budget — the question the protocol actually
@@ -111,8 +126,12 @@ walks no chain and is independent of height. A truncated answer would have been
 worse than a refusal: a refused question is retried,
 while a truncated one is silently wrong and splits honest nodes by local policy.
 
-A restarted child can recompute fork choice entirely from durable accepted
-blocks and proof-derived work. When admission needs a new genesis or continuity
+A restarted child recomputes fork choice entirely from its durable fact log:
+accepted blocks, proof-derived work, and the attributed work-only batches it
+credited from parent run reports. After (re)connecting it asks its parent for
+the runs of the committers it names, the fallback for a push it missed; a
+credit it already holds never depends on the parent being reachable again.
+When admission needs a new genesis or continuity
 fact, the child asks its authenticated immediate-parent process. A positive
 answer is an unsigned acknowledgement bound to that live session and exact
 request; peers cannot relay it.
@@ -152,7 +171,12 @@ The node uses two Ivy sessions:
 - the public same-chain overlay exchanges announcements and same-path content;
 - the private hierarchy plane connects one configured immediate parent with its
   direct children and carries contextual candidates, exact parent-fact queries,
-  and root-bound proof facts.
+  root-bound proof facts, and parent run reports
+  (`lattice.hierarchy.parent-run-report.v1`, pushed by the parent whenever a
+  served run changes; `lattice.hierarchy.parent-run-report.request.v1`, a
+  child's request for the runs of the committers it names). A parent that does
+  not know the topic drops it unread and the child keeps the credit it already
+  holds, so parents roll before children.
 
 Both planes currently require node protocol version 4. Parent-fact
 request/response semantics are versioned, so mixed-version peers refuse the

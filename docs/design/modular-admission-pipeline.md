@@ -101,13 +101,15 @@ are rebuildable projections.
 
 ## Hierarchy boundary
 
-The parent remains child-agnostic. It:
+The parent learns nothing from its children. It:
 
 - commits child data in ordinary block state;
 - serves complete committed Volumes;
 - answers whether one parent state is transitively reachable from another in
   its connected accepted graph;
-- acknowledges an exact continuity or genesis query from that graph.
+- acknowledges an exact continuity or genesis query from that graph;
+- maintains run state for the directories it hosts and serves each
+  committer's run report to that directory's children (spec §9.10).
 
 It does not ingest child consensus, child payloads, child provider state, or
 child weights. A grandchild repeats the same immediate-parent rule; no ancestor

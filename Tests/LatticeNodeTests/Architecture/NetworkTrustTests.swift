@@ -670,10 +670,17 @@ private actor HierarchyRetryRecorder {
     private var helloSessions: [Data] = []
     private var indexSessions: [Data] = []
     private var parentFactRequests = 0
+    private var runReportRequests: [ParentRunReportRequestMessage] = []
 
     init(withholdFirstHello: Bool = false) {
         self.withholdFirstHello = withholdFirstHello
     }
+
+    func recordRunReportRequest(_ request: ParentRunReportRequestMessage) {
+        runReportRequests.append(request)
+    }
+
+    func runReportRequestsSeen() -> [ParentRunReportRequestMessage] { runReportRequests }
 
     func record(_ topic: String, sessionID: Data) -> Bool {
         switch topic {
@@ -749,10 +756,39 @@ private final class HierarchyRetryPeer: IvyDelegate, Sendable {
                 topic: NodeNetworkTopic.childEvidenceIndexResponse,
                 payload: payload
             )
+        case NodeNetworkTopic.parentRunReportRequest:
+            // A parent re-serving the runs of the committers a child names
+            // (§9.10): one report per committer, as the real serve arm does.
+            guard let request = try? ParentRunReportRequestMessage.decoded(
+                message.payload
+            ) else { return }
+            await recorder.recordRunReportRequest(request)
+            for committer in request.committerCIDs {
+                guard let payload = try? ParentRunReportMessage(
+                    directory: "Retry",
+                    committerCID: committer,
+                    childBlockCID: testCID("run-report-child-block"),
+                    grinds: [committer],
+                    runWork: WorkSum(UInt256(9)),
+                    ownWork: WorkSum(UInt256(4)),
+                    revision: 7
+                ).encoded() else { continue }
+                _ = await ivy.sendMessage(
+                    to: peer,
+                    topic: NodeNetworkTopic.parentRunReport,
+                    payload: payload
+                )
+            }
         default:
             break
         }
     }
+}
+
+private actor ParentRunReportSink {
+    private var reports: [ParentRunReport] = []
+    func record(_ report: ParentRunReport) { reports.append(report) }
+    func received() -> [ParentRunReport] { reports }
 }
 
 private struct HierarchyRetryFixture {
@@ -5389,6 +5425,66 @@ final class NetworkTrustTests: XCTestCase {
     }
 
     /// The validate walk's evidence request suspends on the parent's answer.
+    /// §9.10 over a real hierarchy session, child side: once the parent role
+    /// is granted the child asks for the runs of the committers it names, the
+    /// parent's reply arrives on the push topic, and the report reaches the
+    /// service handler with its fields intact. A child with nothing to ask
+    /// sends nothing (pinned by the request list being exactly its committers).
+    func testChildAsksItsParentForRunReportsOnHelloAndReceivesTheReply()
+        async throws
+    {
+        let fixture = try await hierarchyRetryFixture(keyByte: 0x6A, summary: nil)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: fixture.storage)
+        }
+        let committer = testCID("run-report-committer")
+        let sink = ParentRunReportSink()
+        do {
+            try await fixture.parent.start()
+            try await fixture.runtime.start(
+                process: fixture.process,
+                handlers: NodeNetworkHandlers(
+                    admission: { _ in
+                        NodeAdmissionOutcome(
+                            decision: .duplicate,
+                            parentCarrierLink: nil,
+                            sameChainPredecessor: nil
+                        )
+                    },
+                    parentRunReport: { report in await sink.record(report) },
+                    recentCommitters: { [committer] }
+                )
+            )
+            try await waitUntil("parent role granted") {
+                !(await fixture.recorder.sessionTrace()).hellos.isEmpty
+            }
+            try await waitUntil("run-report request sent to the parent") {
+                !(await fixture.recorder.runReportRequestsSeen()).isEmpty
+            }
+            let requests = await fixture.recorder.runReportRequestsSeen()
+            XCTAssertEqual(requests.map(\.committerCIDs), [[committer]],
+                           "exactly the committers this chain knows, once per session")
+            try await waitUntil("the parent's report reached the handler") {
+                !(await sink.received()).isEmpty
+            }
+            let received = await sink.received()
+            let report = try XCTUnwrap(received.first)
+            XCTAssertEqual(report.blockHash, committer)
+            XCTAssertEqual(report.directory, "Retry")
+            XCTAssertEqual(report.childBlock, testCID("run-report-child-block"))
+            XCTAssertEqual(report.grinds, [committer])
+            XCTAssertEqual(report.runWork, WorkSum(UInt256(9)))
+            XCTAssertEqual(report.ownWork, WorkSum(UInt256(4)))
+            XCTAssertEqual(report.revision, 7)
+            await fixture.parent.stop()
+            await fixture.runtime.stop()
+        } catch {
+            await fixture.parent.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+    }
+
     /// When the parent session drops while it is in flight, the request must
     /// resolve nil (the walk parks and retries) — never stay suspended: an
     /// unresumed continuation would leave the walk worker alive and every

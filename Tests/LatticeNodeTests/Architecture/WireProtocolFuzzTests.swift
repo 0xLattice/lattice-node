@@ -1,5 +1,6 @@
 import Foundation
 import Lattice
+import UInt256
 import XCTest
 @testable import LatticeNode
 
@@ -137,6 +138,19 @@ final class WireProtocolFuzzTests: XCTestCase {
                     toStateCID: cids[3]
                 )
             )),
+            try seed(ParentRunReportMessage(
+                directory: "Payments",
+                committerCID: cids[0],
+                childBlockCID: cids[1],
+                grinds: [cids[2], cids[3]],
+                runWork: WorkSum(UInt256(17)),
+                ownWork: WorkSum(UInt256(5)),
+                revision: 29
+            )),
+            try seed(ParentRunReportRequestMessage(
+                requestID: 31,
+                committerCIDs: [cids[0], cids[4]]
+            )),
         ]
     }
 
@@ -255,6 +269,8 @@ final class WireProtocolFuzzTests: XCTestCase {
             probe(ReadEndpointResponseMessage.self),
             probe(PortableAttachmentLocateRequestMessage.self),
             probe(ParentChainFactMessage.self),
+            probe(ParentRunReportMessage.self),
+            probe(ParentRunReportRequestMessage.self),
         ]
     }
 

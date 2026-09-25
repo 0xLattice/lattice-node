@@ -78,6 +78,18 @@ public typealias NetworkCandidateReservationHandler = @Sendable (
     _ update: NetworkCandidateReservationUpdate
 ) async -> Bool
 
+/// A run report from the configured parent, to be credited at the child block
+/// it names (§9.10). The service derives the credit under its own lease.
+public typealias NetworkParentRunReportHandler = @Sendable (
+    _ report: ParentRunReport
+) async throws -> Void
+/// A child wired in for `directory`: start serving its runs.
+public typealias NetworkRunReportServingHandler = @Sendable (
+    _ directory: String
+) async -> Void
+/// The committers this chain asks its parent to re-serve on a reconnect.
+public typealias NetworkRecentCommitterProvider = @Sendable () async -> [String]
+
 /// All service callbacks used by one network-runtime generation. Supplying the
 /// complete value at startup prevents a live runtime from being partially
 /// wired or changing behavior beneath authenticated sessions.
@@ -87,19 +99,28 @@ public struct NodeNetworkHandlers: Sendable {
     public let admission: NetworkAdmissionHandler
     public let transaction: NetworkTransactionHandler?
     public let transactionInventory: TransactionInventoryProvider?
+    public let parentRunReport: NetworkParentRunReportHandler?
+    public let runReportServing: NetworkRunReportServingHandler?
+    public let recentCommitters: NetworkRecentCommitterProvider?
 
     public init(
         childCandidateBuilder: ContextualChildCandidateBuilder? = nil,
         candidateReservations: NetworkCandidateReservationHandler? = nil,
         admission: @escaping NetworkAdmissionHandler,
         transaction: NetworkTransactionHandler? = nil,
-        transactionInventory: TransactionInventoryProvider? = nil
+        transactionInventory: TransactionInventoryProvider? = nil,
+        parentRunReport: NetworkParentRunReportHandler? = nil,
+        runReportServing: NetworkRunReportServingHandler? = nil,
+        recentCommitters: NetworkRecentCommitterProvider? = nil
     ) {
         self.childCandidateBuilder = childCandidateBuilder
         self.candidateReservations = candidateReservations
         self.admission = admission
         self.transaction = transaction
         self.transactionInventory = transactionInventory
+        self.parentRunReport = parentRunReport
+        self.runReportServing = runReportServing
+        self.recentCommitters = recentCommitters
     }
 }
 
@@ -3797,6 +3818,42 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 process: process
             )
 
+        case (NodeNetworkTopic.parentRunReportRequest, .child(let childPath)):
+            // A child re-asks for the runs of committers it names — the
+            // fallback for a push it missed. One in flight per peer, like the
+            // fact query; each answer is an O(1) read, and a committer this
+            // node does not serve is silence, never a claim.
+            guard let request = try?
+                    ParentRunReportRequestMessage.decoded(message.payload),
+                  let directory = childPath.last,
+                  parentStateQueryGuard.acquire(peer.key)
+            else { return }
+            defer {
+                parentStateQueryGuard.release(peer.key)
+            }
+            for committer in request.committerCIDs {
+                guard isCurrentRuntime(generation: generation, process: process),
+                      hierarchySessions[peer.key]?.sessionID == peer.sessionID,
+                      let report = await process.runReport(
+                          committer: committer, directory: directory
+                      ),
+                      let payload = try? ParentRunReportMessage(report).encoded()
+                else { continue }
+                _ = await hierarchy.sendMessage(
+                    to: peer,
+                    topic: NodeNetworkTopic.parentRunReport,
+                    payload: payload
+                )
+            }
+
+        case (NodeNetworkTopic.parentRunReport, .parent):
+            // The parent's word on the run behind one of this chain's blocks
+            // (§9.10). The service binds it and derives the credit under its
+            // own lease; a refusal is counted there, never acted on here.
+            guard let report = try? ParentRunReportMessage.decoded(message.payload),
+                  let handler = handlers?.parentRunReport else { return }
+            try? await handler(report.report)
+
         case (NodeNetworkTopic.childGenesisAnchorRequest,
               .child(let childPath)):
             guard let request = try?
@@ -4122,11 +4179,21 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 generation: generation,
                 process: process
             )
+            await requestParentRunReports(
+                generation: generation,
+                process: process
+            )
         } else if case .child(let childPath) = role {
             guard await waitForChildEvidenceReady(peer: peer) else {
                 _ = clearHierarchyAuthorization(for: peer.key)
                 await hierarchy.recycleSession(ifCurrent: peer)
                 return
+            }
+            // A child wired in: serve its runs from now on. The service
+            // refuses a directory this chain never anchored a child genesis
+            // for, so a hello alone names nothing (idempotent otherwise).
+            if let directory = childPath.last {
+                await handlers?.runReportServing?(directory)
             }
             await acquireCandidateReservationReconciliation()
             defer { releaseCandidateReservationReconciliation() }
@@ -6230,6 +6297,56 @@ public actor NodeNetworkRuntime: IvyDelegate {
             } else if requeue {
                 retryParentFactCandidate(pending)
             }
+        }
+    }
+
+    /// After (re)connecting to the parent, ask it to re-serve the runs of the
+    /// committers this chain knows: the fallback for pushes missed while the
+    /// session was down. Nothing to ask means nothing is sent.
+    private func requestParentRunReports(
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        guard !configuration.address.isNexus,
+              isCurrentRuntime(generation: generation, process: process),
+              let parent = configuredParentPeer(),
+              let committers = await handlers?.recentCommitters?(),
+              !committers.isEmpty,
+              let payload = try? ParentRunReportRequestMessage(
+                  requestID: makeRequestID(),
+                  committerCIDs: committers
+              ).encoded()
+        else { return }
+        _ = await hierarchy.sendMessage(
+            to: parent,
+            topic: NodeNetworkTopic.parentRunReportRequest,
+            payload: payload
+        )
+    }
+
+    /// Push one run report to every authenticated child of its directory
+    /// (§9.10). A push that does not land is re-served by the child's request
+    /// on its next hello, so no delivery result is acted on.
+    public func announceParentRunReport(_ report: ParentRunReport) async {
+        guard isRunning, let process,
+              let payload = try? ParentRunReportMessage(report).encoded()
+        else { return }
+        let generation = runtimeGeneration
+        let children = hierarchyPeers.compactMap {
+            key, role -> AuthenticatedPeer? in
+            guard case .child(let path) = role,
+                  path.last == report.directory else { return nil }
+            return hierarchySessions[key]
+        }
+        for peer in children {
+            guard isCurrentRuntime(generation: generation, process: process),
+                  hierarchySessions[peer.key]?.sessionID == peer.sessionID
+            else { continue }
+            _ = await hierarchy.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.parentRunReport,
+                payload: payload
+            )
         }
     }
 

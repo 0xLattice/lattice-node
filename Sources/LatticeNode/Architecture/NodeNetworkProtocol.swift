@@ -61,6 +61,16 @@ enum NodeNetworkTopic {
         "lattice.hierarchy.child-genesis-anchor.request.v1"
     static let childGenesisAnchorResponse =
         "lattice.hierarchy.child-genesis-anchor.response.v1"
+    // §9.10: a parent PUSHES the run it credits to one of its committing
+    // blocks to the children of that directory, on every change to that run
+    // — every admitted block or strengthening with verifiable work — and a
+    // child may ask for the runs of committers it names, the fallback for a
+    // push missed while its session was down. A parent that does not know
+    // this topic drops it unread and the child simply keeps the credit it
+    // already holds: parents roll before children.
+    static let parentRunReport = "lattice.hierarchy.parent-run-report.v1"
+    static let parentRunReportRequest =
+        "lattice.hierarchy.parent-run-report.request.v1"
 
     static func plane(for topic: String) -> Plane? {
         switch topic {
@@ -79,7 +89,8 @@ enum NodeNetworkTopic {
              childCandidateRequest, childCandidateResponse,
              childCandidateReservationRequest, childCandidateReservationResponse,
              parentChainFactRequest, parentChainFactResponse,
-             childGenesisAnchorRequest, childGenesisAnchorResponse: .hierarchy
+             childGenesisAnchorRequest, childGenesisAnchorResponse,
+             parentRunReport, parentRunReportRequest: .hierarchy
         default: nil
         }
     }
@@ -133,6 +144,99 @@ struct ParentChainFactMessage: NodeJSONMessage, Equatable, Sendable {
                   fromStateCID == LatticeState.emptyHeader.rawCID else {
                 throw NodeNetworkWireError.malformed
             }
+        }
+    }
+}
+
+/// The run a parent credits to one of its committing blocks (Lattice §9.10),
+/// pushed to the children of `directory` whenever that run changes. The
+/// quantity is the parent's word — the trust a child already extends to its
+/// configured parent for state continuity — but the child binds the report
+/// before reading any number: its own directory, this child block, one of the
+/// committer's grinds already credited there. Malformed here means it could
+/// not have come from a correct parent: `ownWork` never exceeds `runWork`.
+struct ParentRunReportMessage: NodeJSONMessage, Equatable, Sendable {
+    let directory: String
+    let committerCID: String
+    let childBlockCID: String
+    let grinds: [String]
+    let runWork: WorkSum
+    let ownWork: WorkSum
+    let revision: UInt64
+
+    init(
+        directory: String, committerCID: String, childBlockCID: String,
+        grinds: [String], runWork: WorkSum, ownWork: WorkSum, revision: UInt64
+    ) {
+        self.directory = directory
+        self.committerCID = committerCID
+        self.childBlockCID = childBlockCID
+        self.grinds = grinds
+        self.runWork = runWork
+        self.ownWork = ownWork
+        self.revision = revision
+    }
+
+    init(_ report: ParentRunReport) {
+        self.init(
+            directory: report.directory,
+            committerCID: report.blockHash,
+            childBlockCID: report.childBlock,
+            grinds: report.grinds.sorted(),
+            runWork: report.runWork,
+            ownWork: report.ownWork,
+            revision: report.revision
+        )
+    }
+
+    var report: ParentRunReport {
+        ParentRunReport(
+            blockHash: committerCID,
+            directory: directory,
+            childBlock: childBlockCID,
+            grinds: Set(grinds),
+            runWork: runWork,
+            ownWork: ownWork,
+            revision: revision
+        )
+    }
+
+    func validate() throws {
+        guard _isBoundedWireAtom(directory), !directory.isEmpty,
+              _isCanonicalWireCID(committerCID),
+              _isCanonicalWireCID(childBlockCID),
+              !grinds.isEmpty,
+              Set(grinds).count == grinds.count,
+              grinds.allSatisfy(_isCanonicalWireCID),
+              ownWork <= runWork else {
+            throw NodeNetworkWireError.malformed
+        }
+    }
+}
+
+/// The most committers one re-serve request may name — what a correct child
+/// asks for (its newest carriers, `ChainProcess.recentCommitterCapacity`).
+/// Structural, not a budget: a larger request is one no correct child sends,
+/// so it is malformed rather than served slowly. Each named committer costs
+/// the parent one O(1) read and at most one push.
+let maximumParentRunReportRequestCommitters = 256
+
+/// A child asks its authenticated immediate parent to re-serve the runs of the
+/// committers it names — the fallback for a push it missed while its session
+/// was down. The parent answers with one `ParentRunReportMessage` per named
+/// committer that commits into the asking child's directory, and nothing for
+/// the rest: a committer the parent does not serve is silence, not a claim.
+struct ParentRunReportRequestMessage: NodeJSONMessage, Equatable, Sendable {
+    let requestID: UInt64
+    let committerCIDs: [String]
+
+    func validate() throws {
+        guard requestID != 0,
+              !committerCIDs.isEmpty,
+              committerCIDs.count <= maximumParentRunReportRequestCommitters,
+              Set(committerCIDs).count == committerCIDs.count,
+              committerCIDs.allSatisfy(_isCanonicalWireCID) else {
+            throw NodeNetworkWireError.malformed
         }
     }
 }

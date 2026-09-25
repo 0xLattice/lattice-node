@@ -84,9 +84,10 @@ Invariants:
 
 - **Acted-on decisions are uniform over obtained bytes.** Every decision
   a node acts on is identical to that of a node which validated every
-  block whose bytes it obtained. Computed weight may permanently include
-  work a validating node would have excluded; the pivotality rule
-  guarantees such weight never reaches an action. A validate-at-admission
+  block whose bytes it obtained. Computed weight includes work beneath
+  blocks a validating node has excluded — as does that node's own, since
+  exclusion removes no weight (spec §9.9); the pivotality rule guarantees
+  such weight never reaches an action. A validate-at-admission
   node and a deferred-execution node therefore differ only in *when*
   work is examined, never in any decision either acts on, and the two
   interoperate on one network.
@@ -106,16 +107,18 @@ Invariants:
   the verdict, and the inputs that proved it are retained as an
   obligation — an unre-derivable marking is not a judgment. Anything
   short of a completed deterministic check is retryable, never recorded.
-- **Exclusion is chain-local and never touches exported work.** A proven
-  execution-invalid block's subtree is excluded from the excluding
-  chain's *own* effective weight, and fork choice re-projects — a staged,
-  durable, replayed fact like any other, so a restart recomputes the same
-  head. But a securing grind's contribution to a child chain is
-  independent of carrier validity, so the work facts the chain *serves*
-  are unaffected: exported inherited weight remains monotone. Nothing is
-  ever pruned — verified work facts and invalidity evidence are both kept
-  forever; exclusion changes what the chain's own head computation
-  counts, not what the chain knows or serves.
+- **Exclusion is chain-local and never touches work.** A proven
+  execution-invalid block's subtree keeps its weight — work weighs,
+  validity selects (spec §9.9) — but the excluding chain's *own* canonical
+  descent never steps into it, so nothing at or below it is selected,
+  extended or attested; the exclusion is a staged, durable, replayed fact
+  like any other, so a restart selects the same head. A securing grind's
+  contribution to a child chain is independent of carrier validity, so
+  the work facts the chain *serves* are likewise unaffected, and the runs
+  it serves only grow (spec §9.10). Nothing is ever pruned — verified work
+  facts and invalidity evidence are both kept forever; exclusion changes
+  where the chain's own descent may step, not what it weighs, knows or
+  serves.
 - **Children consume continuity from the validated subgraph only.** A
   weighed block's declared post-state is an unverified claim, so
   parent-state continuity paths are computed over validated blocks alone.
@@ -149,13 +152,14 @@ move bytes in order, execute exactly what matters.**
 
 ## Boundaries
 
-- Weight comparison, heaviest selection, and monotone inherited weight
-  are untouched. What changes is what acceptance *asserts*: the accepted
+- Weight comparison and heaviest selection are untouched. What changes is
+  what acceptance *asserts*: the accepted
   graph records possessed, structurally-verified work; validity becomes a
   second, recorded, deterministic judgment. The consensus spec must be
   amended explicitly, at minimum: the meaning of "accepted" in the
-  effective-work invariant (and its new "not within a proven-invalid
-  subtree" rider); the never-prunes invariant's rider that exclusion is
+  effective-work invariant (and its rider that exclusion removes no
+  weight while the descent never steps into an excluded block); the
+  never-prunes invariant's rider that exclusion is
   not pruning and excluded facts remain served; the admission procedure's
   split into per-tier gates with per-tier durability ordering, the
   invalidity marking included; and continuity's "connected accepted

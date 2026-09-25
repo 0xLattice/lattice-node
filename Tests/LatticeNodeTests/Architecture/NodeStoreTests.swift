@@ -1253,6 +1253,54 @@ final class NodeStoreTests: XCTestCase {
         XCTAssertEqual(Set(incomingCoverage.keys), [fixture.childCID])
     }
 
+    /// The re-ask list and the local location binding (Lattice §9.10) are
+    /// drawn from carrier edges of blocks this chain ACCEPTED: an edge recorded
+    /// for a block that was never accepted — a merged-mining round whose root
+    /// missed this chain's target — names no committer here, and one committer
+    /// is listed once, newest first.
+    func testIncomingCarrierCommittersCoverOnlyAcceptedBlocks() async throws {
+        let store = try makeStore(chainPath: ["Nexus", "Child"])
+        let fixture = try await childProofFixture()
+        for proof in [fixture.first, fixture.second] {
+            try await store.persistIssuedHierarchyArtifacts(
+                AdmissionHierarchyArtifacts(
+                    carrierLink: try decode(ParentCarrierLink.self, json: """
+                        {"parentPath":["Nexus","Child"],"carrierCID":"\(fixture.childCID)","rootCID":"\(proof.rootCID)"}
+                        """),
+                    carrierEvidence: AdmissionCarrierEvidence(
+                        proof: proof,
+                        childCID: fixture.childCID
+                    ),
+                    parentGenesisLinks: []
+                )
+            )
+        }
+        let derivedFirst = await DirectChildEdge.derive(from: fixture.first)
+        let derivedSecond = await DirectChildEdge.derive(from: fixture.second)
+        let firstEdge = try XCTUnwrap(derivedFirst)
+        let secondEdge = try XCTUnwrap(derivedSecond)
+
+        // Evidence recorded, block not accepted: nothing to re-ask, no location.
+        let before = try await store.incomingCarrierCommitters(limit: 256)
+        XCTAssertEqual(before, [], "a carrier of a block this chain did not accept commits nothing here")
+        let unbound = try await store.incomingCarrierChildBlock(committer: firstEdge.parentCarrierCID)
+        XCTAssertNil(unbound)
+
+        // The block is accepted: both carriers are committers, newest edge first,
+        // each once, and both bind to this chain's block.
+        try await store.stage(
+            blockBatch(postStateCID: "child-state", blockHash: fixture.childCID),
+            volumeRoots: []
+        )
+        let after = try await store.incomingCarrierCommitters(limit: 256)
+        XCTAssertEqual(after, [secondEdge.parentCarrierCID, firstEdge.parentCarrierCID])
+        XCTAssertEqual(Set(after).count, after.count, "distinct")
+        let bound = try await store.incomingCarrierChildBlock(committer: firstEdge.parentCarrierCID)
+        XCTAssertEqual(bound, fixture.childCID)
+        let limited = try await store.incomingCarrierCommitters(limit: 1)
+        XCTAssertEqual(limited, [secondEdge.parentCarrierCID], "the bound counts committers, newest first")
+    }
+
     func testIncomingCarrierProofRootsPageAcrossContexts() async throws {
         let store = try makeStore(chainPath: ["Nexus", "Child"])
         let fixture = try await childProofFixture()

@@ -7,13 +7,24 @@ lattice-node changes.
 
 ## Motivation
 
-Child security is the physical work that explicitly commits to a child block.
-It does not grow merely because a later parent block descends from a carrier.
-Every accepted child block therefore receives ordinary, immutable work facts
-derived from content-addressed proofs. Once admitted, normal same-chain GHOST
-is sufficient.
+Child security is the physical work that commits to a child block, directly or
+indirectly. A grind's directory proof commits to the child explicitly. A later
+parent block that descends from that committer without re-committing commits
+to it indirectly, and its work counts too — once, through run attribution
+(spec §9.10). What never counts is parent canonicity: runs follow parent
+pointers, not the parent's canonical chain. Every accepted child block
+therefore receives ordinary, immutable work facts: proof-derived contributions
+for its grinds, and one attributed-run contribution per committer. Once
+admitted, normal same-chain GHOST is sufficient.
 
-This removes the exceptional live inherited-work projection. It also preserves
+This removes the exceptional live inherited-work projection — the trusted feed
+that pushed a snapshot of the parent's weight, with revisions and completion
+markers, into a separate inherited branch of GHOST. Run attribution is a
+different mechanism, not that feed under another name: there is no snapshot
+and no projection. The child binds each report to its own directory, the
+named child block, and a grind already credited there; derives the credit
+itself; and stages it as an ordinary durable work fact under its own identity,
+`AttributedRunIdentity(committer, directory)`. It also preserves
 Lattice's central property: content-addressed data is portable and verifiable,
 while each chain remains sovereign over validity, storage policy, and fork
 choice.
@@ -31,7 +42,9 @@ Never use one graph as evidence for another:
 
 Directory descent is not parent-chain descent. A root may descend through
 several child directories in one proof. A later block in the parent's own chain
-adds no child work unless it explicitly commits to the child.
+adds child work only through the run of its nearest committing ancestor, by
+parent pointer (spec §9.10); a parent block with no ancestor committing into
+the directory adds none.
 
 ## Securing-work rule
 
@@ -52,7 +65,7 @@ The contribution of one root to one child location is `workForTarget` of the
 ROOT-MOST content-bound block on the committed directory path whose target the
 root hash beats, raised if greater by the terminal child's own target. Position
 picks the pricer; the child overrides only a pricer easier than itself. It is
-NOT a maximum over every beaten target (Lattice 34.0.0, spec §9.5). The
+NOT a maximum over every beaten target (Lattice 35.0.1, spec §9.5). The
 terminal child's target must be beaten. Repeated evidence for the same grind
 and child location keeps the
 strongest verified value; that per-location ratchet is a different rule from
@@ -61,8 +74,23 @@ claims for one grind and chain-local location are rejected. Different grind
 identities sum. A proof cannot affect fork choice until its terminal child is
 accepted and connected in that child's chain.
 
-Proof-derived contributions become ordinary `VerifiedWorkContribution` facts.
-There is no inherited branch in GHOST.
+The second source of a child location's weight is the attributed run (spec
+§9.10). The configured immediate parent process partitions its connected graph
+into runs, one per commitment into the child's directory, and serves
+`(committer, directory, childBlock, grinds, runWork, ownWork, revision)`. The
+child binds the report — its own directory, this child block, one of the
+committer's grinds already credited there — and credits `runWork − ownWork`
+under `AttributedRunIdentity(committer, directory)`: a contribution separate
+from any grind, keyed by the committer, ratcheting on its own value
+(idempotent, monotone, refused rather than saturated, never revoked). The
+quantity is the parent process's word, the trust the child already extends to
+it for state continuity; the location and the binding are checked locally,
+and a verified path can replace the reported one with no consensus change.
+
+Proof-derived and attributed-run contributions alike become ordinary
+`VerifiedWorkContribution` facts at a child location. There is no inherited
+branch in GHOST: an attributed run is summed like any other contribution,
+under its own identity, and is never a projection of the parent's weight.
 
 ## Parent-state continuity
 
@@ -184,7 +212,10 @@ second CAS, or second fork-choice implementation.
 
 Delete only after the gate below passes:
 
-- securing/inherited-work request and push topics
+- securing/inherited-work request and push topics — not the §9.10 run-report
+  topics `lattice.hierarchy.parent-run-report.v1` and
+  `lattice.hierarchy.parent-run-report.request.v1`, which carry a report the
+  child binds and derives into a work fact, never a weight snapshot
 - inherited-work snapshots, revisions, completion markers, and projections
 - parent-work SQL facts and cursors
 - parent-work readiness and `awaitingParent`
@@ -216,7 +247,7 @@ The replacement passes only when:
 1. A verified observation of a root whose root hash clears the terminal
    child's target credits exactly `workForTarget` of the root-most target it
    cleared along that proof, raised if greater by the terminal child's own
-   (never a max over every cleared target; Lattice 34.0.0, spec §9.5); an
+   (never a max over every cleared target; Lattice 35.0.1, spec §9.5); an
    observation that does not clear the terminal target yields no contribution
    at all — no work fact, and the block is not admitted; a location holds the
    strongest such observation.
@@ -262,4 +293,7 @@ process boundary; reproduce the same tip and transition graph after restart;
 recover from malformed or unavailable providers; resist bounded unknown-child
 floods; match the reference model; pass the declared security gate; and run
 with no inherited-work feed, portable validity certificate, recursive
-child-side parent validator, or duplicate validated-delta store.
+child-side parent validator, or duplicate validated-delta store. The §9.10 run
+report is the one exception, and not a feed: the parent serves it for the
+directories it hosts, and the child binds it and derives an ordinary durable
+work fact from it under its own identity.

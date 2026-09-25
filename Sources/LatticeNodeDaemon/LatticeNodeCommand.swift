@@ -171,6 +171,10 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                     childCID: publication.childCID
                 )
             },
+            parentRunReportPublisher: { [weak network] report in
+                guard let network else { throw CancellationError() }
+                await network.announceParentRunReport(report)
+            },
             acceptedBlockPublisher: { [weak network] blockCID in
                 guard let network else { throw CancellationError() }
                 try await network.publishAcceptedBlock(blockCID)
@@ -233,6 +237,17 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             transactionInventory: { [weak service] in
                 guard let service else { return [] }
                 return await service.transactionInventoryRoots()
+            },
+            parentRunReport: { [weak service] report in
+                guard let service else { throw CancellationError() }
+                _ = try await service.applyParentRunReport(report)
+            },
+            runReportServing: { [weak service] directory in
+                await service?.serveRuns(for: directory)
+            },
+            recentCommitters: { [weak service] in
+                guard let service else { return [] }
+                return (try? await service.recentCommitters()) ?? []
             }
         )
         try await network.start(process: process, handlers: handlers)

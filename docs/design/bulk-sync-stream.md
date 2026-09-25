@@ -127,8 +127,9 @@ whose parts are not yet available is an **availability gap**: retried
 indefinitely, never a verdict, and the node keeps acting on its last validated
 tip meanwhile. Execution that completes and *fails* — a deterministic mismatch
 of the declared `postState`, or a committed validity rule — records an
-**invalidity exclusion**: the proven-invalid subtree is removed from this
-chain's own effective weight and fork choice re-projects.
+**invalidity exclusion**: the proven-invalid subtree keeps its weight, but this
+chain's canonical descent never steps into the excluded block, so nothing at or
+below it is selected, extended, or attested (spec §9.9).
 
 ### The data-availability linchpin
 
@@ -155,8 +156,9 @@ availability could split. This is the one part to model adversarially first.
   fact and a validated-subgraph notion. This is consensus-adjacent and is
   treated with that gravity — the spec (§9) is amended: "accepted" means
   *weighed*; validity is a second recorded, deterministic judgment; continuity
-  is computed over the validated subgraph; exclusion is not pruning and
-  excluded facts remain served.
+  is attested on the executed-from-genesis frontier; exclusion removes no
+  weight — the descent never steps into an excluded block — and is not
+  pruning: excluded facts remain served.
 - **Deferral without the exclusion seam is forbidden.** Weight may not enter
   fork choice pre-execution unless a proven-invalid subtree can be excluded
   from what the chain acts on. The two land as one unit.

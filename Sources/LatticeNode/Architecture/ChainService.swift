@@ -240,6 +240,9 @@ public typealias ChildCandidateReservationReconciler = @Sendable (
 public typealias ChildProofPublisher = @Sendable (
     DirectChildProofPublication
 ) async throws -> Void
+/// A parent pushes the run it credits to a committing block to the children
+/// of that directory (§9.10), on every change to that run.
+public typealias ParentRunReportPublisher = @Sendable (ParentRunReport) async throws -> Void
 public typealias AcceptedBlockPublisher = @Sendable (_ blockCID: String) async throws -> Void
 public typealias AcceptedTransactionPublisher = @Sendable (
     _ volumeRootCID: String
@@ -535,6 +538,7 @@ public actor ChainService {
     private let childCandidateReservationReconciler:
         ChildCandidateReservationReconciler
     private let childProofPublisher: ChildProofPublisher
+    private let parentRunReportPublisher: ParentRunReportPublisher
     private let acceptedBlockPublisher: AcceptedBlockPublisher
     private let acceptedTransactionPublisher: AcceptedTransactionPublisher
     private let maximumChildCandidates: Int
@@ -567,6 +571,7 @@ public actor ChainService {
     private let validateEvidenceSource: ValidateEvidenceSource?
     private let validateWalkRetryInterval: Duration
     private var validateWalkRetryTask: Task<Void, Never>?
+    private var validateWalkParkedCount: UInt64 = 0
     #if DEBUG
     // Test seam: invoked with each height about to be `.validate`-admitted, in
     // walk order. Lets tests assert strictly-forward progress (never tip-first).
@@ -588,6 +593,7 @@ public actor ChainService {
                 $0.reservations.isEmpty && $0.handoffs.isEmpty
             },
         childProofPublisher: @escaping ChildProofPublisher,
+        parentRunReportPublisher: @escaping ParentRunReportPublisher = { _ in },
         acceptedBlockPublisher: @escaping AcceptedBlockPublisher,
         acceptedTransactionPublisher: @escaping AcceptedTransactionPublisher = { _ in },
         validateBodySource: ValidateBodyAdmission? = nil,
@@ -609,6 +615,7 @@ public actor ChainService {
         self.childCandidateReservationReconciler =
             childCandidateReservationReconciler
         self.childProofPublisher = childProofPublisher
+        self.parentRunReportPublisher = parentRunReportPublisher
         self.acceptedBlockPublisher = acceptedBlockPublisher
         self.acceptedTransactionPublisher = acceptedTransactionPublisher
         self.pool = TransactionPool(
@@ -700,13 +707,17 @@ public actor ChainService {
     /// `/health` does (one validated-tip walk plus the live pool count).
     public func metricsExposition(peers: Int, processStartTime: Date) async -> String {
         let tips = await process.metricsTipHeights()
+        let reports = await process.parentReportCounters()
         return renderNodeMetrics(NodeMetricsSample(
             chainPath: process.configuration.chainPath,
             validatedTipHeight: tips.validated,
             weighedTipHeight: tips.weighed,
             overlayPeers: peers,
             mempoolTransactions: await pool.count,
-            processStartTime: processStartTime
+            processStartTime: processStartTime,
+            parentReportsApplied: reports.applied,
+            parentReportRefusals: reports.refusals,
+            validateWalkParked: validateWalkParkedCount
         ))
     }
 
@@ -1144,6 +1155,11 @@ public actor ChainService {
         contentSource: any ContentSource,
         weighed: Bool = false
     ) async throws -> NodeAdmissionOutcome {
+        // Preparing proofs for a directory is the other way a node declares it
+        // hosts that child (§9.10): serve its runs from here on. Idempotent.
+        for directory in preparingChildDirectories {
+            await process.serveRuns(for: directory)
+        }
         let outcome = try await process.admit(
             header,
             authenticatedChildPackage: authenticatedChildPackage,
@@ -2140,13 +2156,61 @@ public actor ChainService {
                 // re-arms the walk.
                 scheduleValidateWalkRetry()
                 return
-            case .temporarilyInvalid, .invalid, .localFailure, .carrier:
+            case .temporarilyInvalid:
+                // A parked verdict: a not-yet-admissible timestamp, or a root
+                // exclusion with no other executed root to stand on (§9.9).
+                // The decision does not say which, and a height-0 park can be
+                // either (a root's future timestamp parks the same way), so
+                // poll for both like an availability gap: the timestamp case
+                // resolves by itself, and the root case is a chain with an
+                // invalid own genesis — dead until a new root lands — where
+                // one genesis-sized prepare per interval is the cost of not
+                // guessing. Counted where the operator can see it.
+                validateWalkParkedCount += 1
+                scheduleValidateWalkRetry()
+                return
+            case .invalid, .localFailure, .carrier:
                 // Ordering / non-availability park: keep acting on the last
                 // validated tip. A later commit re-arms the walk; no self-retry
                 // (retrying an invalidity with no new fact would hot-loop).
                 return
             }
         }
+    }
+
+    // MARK: - Parent-attributed run work (§9.10)
+
+    /// Serve run reports for a hosted child directory. Called when a child
+    /// wires in and when this process prepares proofs for a directory;
+    /// idempotent, re-called after every restart.
+    public func serveRuns(for directory: String) async {
+        await process.serveRuns(for: directory)
+    }
+
+    /// One committer's run report for a child's re-serve request.
+    public func runReport(committer: String, directory: String) async -> ParentRunReport? {
+        await process.runReport(committer: committer, directory: directory)
+    }
+
+    /// The committers this chain asks its parent to re-serve on a reconnect.
+    public func recentCommitters() async throws -> [String] {
+        try await process.recentCommitters()
+    }
+
+    /// Credit a parent's run report at the child block it names. The commit,
+    /// if the canonical chain moved, is published like any admission's.
+    public func applyParentRunReport(
+        _ report: ParentRunReport
+    ) async throws -> ChainProcess.ParentReportApplication {
+        // A canonical change is reconciled exactly once, on the queued
+        // worker under the service gate — the same path every admission's
+        // commit takes.
+        return try await process.applyParentRunReport(
+            report,
+            canonicalCommitPublisher: { [self] commit in
+                await enqueueCanonicalCommit(commit)
+            }
+        )
     }
 
     private func reconcileCanonicalCommitOrResetLocked(
@@ -2214,6 +2278,16 @@ public actor ChainService {
             outcome: outcome,
             candidateHandoffs: candidateHandoffs
         )
+        // §9.10: every admitted block or strengthening with verifiable work
+        // credits one run per served directory; push each changed run to the
+        // children of its directory. Delivery is a hint — a push that does not
+        // land is re-served by the child's request on its next hello.
+        if outcome.decision.isAccepted {
+            let reports = await process.runReports(changedBy: header.rawCID)
+            for report in reports {
+                try? await parentRunReportPublisher(report)
+            }
+        }
         if outcome.decision.isAccepted, candidateHandoffs == nil {
             Task { [weak self] in
                 await self?.reconcileRetainedCandidateDescendants()

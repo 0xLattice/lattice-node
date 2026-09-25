@@ -400,7 +400,8 @@ searching is the defence.
   seconds. Staleness is measured from this node's own acquired tip, which
   advances only on proof of work it verified itself; no peer's announced or
   claimed height is consulted. A tip that moves *backwards* (a reorg, an
-  exclusion re-projection) is not progress and does not reset the timer.
+  exclusion changing the selectable path) is not progress and does not reset
+  the timer.
 - **Response.** Re-dial every configured `--peer` this node holds no session
   with (which also clears the overlay's reconnect suppression, the one state in
   which it has permanently given up on a configured peer), then run one

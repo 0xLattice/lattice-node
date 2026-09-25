@@ -107,6 +107,27 @@ final class MetricsTests: XCTestCase {
         }
     }
 
+    func testMetricsExposeParentReportAndValidateWalkCounters() throws {
+        let rendered = renderNodeMetrics(NodeMetricsSample(
+            chainPath: ["Nexus", "Payments"],
+            validatedTipHeight: 1,
+            weighedTipHeight: 1,
+            overlayPeers: 0,
+            mempoolTransactions: 0,
+            processStartTime: Date(timeIntervalSince1970: 0),
+            parentReportsApplied: 3,
+            parentReportRefusals: ["notStronger": 2, "locationConflict": 1],
+            validateWalkParked: 4
+        ))
+        let samples = try parseExposition(rendered)
+        let chain = "chain=\"Nexus/Payments\""
+        XCTAssertEqual(samples["lattice_parent_run_reports_applied_total{\(chain)}"], "3")
+        XCTAssertEqual(samples["lattice_parent_run_reports_refused_total{\(chain),reason=\"notStronger\"}"], "2")
+        XCTAssertEqual(samples["lattice_parent_run_reports_refused_total{\(chain),reason=\"locationConflict\"}"], "1")
+        XCTAssertEqual(samples["lattice_validate_walk_parked_total{\(chain)}"], "4")
+        XCTAssertTrue(rendered.contains("# TYPE lattice_parent_run_reports_applied_total counter"))
+    }
+
     func testMetricsEscapeOperatorSuppliedChainPath() async throws {
         // Renderer: every escape the format defines, plus a CRLF, whose line
         // feed must not survive as a raw newline inside a label value.

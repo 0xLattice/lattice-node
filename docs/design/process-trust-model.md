@@ -93,8 +93,10 @@ incoming edge after validation and may relay complete content-verified root
 Volumes to same-chain peers.
 
 No child sends an edge inventory, accepted topology, coverage claim, or work
-back to its parent. The parent is child-agnostic outside bounded candidate and
-proof publication. The child owns the exact vertical relation used for
+back to its parent. Downstream, the parent maintains run state for the
+directories it hosts (spec §9.10) and serves each committer's run to that
+directory's children beside bounded candidate and proof publication; upstream,
+it learns nothing. The child owns the exact vertical relation used for
 consensus projection.
 ## Genesis authority
 

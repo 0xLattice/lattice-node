@@ -66,7 +66,7 @@ cross-component invariants:
 - a verified observation of one physical grind whose root hash clears the
   terminal child's target credits exactly `workForTarget` of the root-most
   target it cleared along that proof, raised if greater by the terminal
-  child's own (never a max over every cleared target; Lattice 34.0.0, spec
+  child's own (never a max over every cleared target; Lattice 35.0.1, spec
   §9.5); an observation that does not clear the terminal target credits
   nothing; one chain-local location holds the strongest such observation;
   distinct grinds sum, and replay cannot multiply weight;
@@ -76,8 +76,9 @@ cross-component invariants:
   session; reconnect repeats authorization and the complete evidence index;
 - proof recovery on a connected noncanonical carrier is announced after an
   already-completed empty index without changing the parent's canonical tip;
-- a parent remains child-agnostic: child topology and derived weight stay in
-  the child process and are never returned upstream;
+- nothing flows upstream: child topology and derived weight stay in the child
+  process and are never returned to a parent; a parent maintains run state only
+  for the directories it hosts (spec §9.10) and serves it downstream;
 - a child restarted after acknowledging a contextual candidate reservation
   still serves that exact candidate from durable Volumes; more than one
   offer window of abandoned parent carriers cannot evict an issued candidate,
@@ -92,6 +93,13 @@ cross-component invariants:
 - parent-state continuity is reflexive and transitive over connected, executed
   parent history, including noncanonical branches, and exact parent facts may
   be relayed by same-chain peers after restart;
+- a parent's run report is credited only at the child block it commits, bound
+  to the child's own directory and to one of the committer's grinds already
+  credited there, as `runWork − ownWork` under an identity keyed by the
+  committer and directory, once — a repeat is refused, never doubled — and the
+  credit survives the child's restart from its durable fact log
+  (`testParentRunWorkIsCreditedAtTheChildBlockItCommits` in the multichain
+  invariants);
 - staged facts and retained Volume roots reopen together, or recovery fails
   closed.
 
