@@ -2293,7 +2293,10 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// the served set is NOT persisted (Lattice's lives in memory), so callers
     /// re-serve after every restart. One whole-graph walk per directory, on
     /// the consensus actor; the node-side set is updated only after the walk,
-    /// so a report asked for meanwhile is answered from a settled table.
+    /// so a report asked for meanwhile finds the directory unserved and is
+    /// answered with silence — a caller that must answer (the run report
+    /// request arm) awaits this call first, which serializes behind the
+    /// in-flight walk on the chain actor and costs nothing once served.
     func serveRuns(for directory: String) async {
         guard case .active(let level) = runtimePhase,
               !servedRunDirectories.contains(directory),

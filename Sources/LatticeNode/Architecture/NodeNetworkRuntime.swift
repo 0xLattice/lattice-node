@@ -3831,6 +3831,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
             defer {
                 parentStateQueryGuard.release(peer.key)
             }
+            // A child re-asks right after its hello, while this node's
+            // serve-on-hello may still be walking the graph; serve first
+            // (idempotent, gated on the directory being anchored here) so the
+            // answer is never silence for want of a settled table. Unlike the
+            // hello path this does not wait for evidence-ready: that gate
+            // sequences what this node publishes, not who may ask.
+            guard isCurrentRuntime(generation: generation, process: process) else { return }
+            await handlers?.runReportServing?(directory)
             for committer in request.committerCIDs {
                 guard isCurrentRuntime(generation: generation, process: process),
                       hierarchySessions[peer.key]?.sessionID == peer.sessionID,

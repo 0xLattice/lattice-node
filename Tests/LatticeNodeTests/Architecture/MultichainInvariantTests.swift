@@ -217,6 +217,40 @@ final class MultichainInvariantTests: XCTestCase {
         counters = try await child().parentReportCounters()
         XCTAssertEqual(counters.refusals["unknownCommitter"], 1)
 
+        // The parent's word on the QUANTITY is trusted by design (the same
+        // trust as continuity). Pin the blast radius of a lying parent: an
+        // absurd quantity is credited and moves nothing but this block's
+        // weight — no throw, no wedge — an honest report after it is merely
+        // "not stronger", and a value one contribution cannot carry is refused
+        // rather than saturated.
+        let absurd = ParentRunReport(
+            blockHash: grown.blockHash, directory: grown.directory, childBlock: grown.childBlock,
+            grinds: grown.grinds, runWork: grown.ownWork + (UInt256.max - UInt256(1)),
+            ownWork: grown.ownWork, revision: grown.revision + 1
+        )
+        let inflated = try await child().applyParentRunReport(absurd)
+        guard case .credited = inflated else {
+            return XCTFail("a lying quantity is the parent's word: credited, got \(inflated)")
+        }
+        let honestAfterLie = try await child().applyParentRunReport(grown)
+        guard case .refused(.notStronger) = honestAfterLie else {
+            return XCTFail("an honest report after a lie is merely not stronger, got \(honestAfterLie)")
+        }
+        let overflow = ParentRunReport(
+            blockHash: grown.blockHash, directory: grown.directory, childBlock: grown.childBlock,
+            grinds: grown.grinds, runWork: grown.ownWork + WorkSum(UInt256.max) + WorkSum(UInt256(1)),
+            ownWork: grown.ownWork, revision: grown.revision + 2
+        )
+        let unrepresentable = try await child().applyParentRunReport(overflow)
+        guard case .refused(.unrepresentable) = unrepresentable else {
+            return XCTFail("a quantity one contribution cannot carry is refused, got \(unrepresentable)")
+        }
+        // The radius of a lie: it lands at the block the parent names, as a
+        // write-once ratchet, so that branch is pinned for good — the trust
+        // an operator extends by configuring a parent. Nothing else moves.
+        let tipAfterLie = try await child().status().tipCID
+        XCTAssertEqual(tipAfterLie, childBlockCID, "credited at the named block; the tip is where it was")
+
         // The credit is durable: after a restart the same report is still
         // "not stronger", which only a replayed attributed fact explains.
         childProcess = nil
@@ -228,6 +262,158 @@ final class MultichainInvariantTests: XCTestCase {
         // ... and so does whom to re-ask: the fallback works after a restart.
         let rememberedAfterRestart = try await reopened.recentCommitters()
         XCTAssertEqual(rememberedAfterRestart, [carrierHeader.rawCID])
+    }
+
+    /// The recursion §9.10 promises, through three real processes: Nexus → A
+    /// → B. A2 — an A block carried by Nexus's N2 — commits B's block 1, so it
+    /// is both B1's committer on A and the block Nexus's run report credits.
+    /// Nexus mines N3 on N2: N2's run grows, Nexus reports it, A credits A2;
+    /// A2's own work rose, and A2 is the root of its own run for B, so A
+    /// serves B a larger run and B credits the difference. Work minted on
+    /// Nexus moves B's weight two levels down, each level talking only to its
+    /// immediate parent.
+    func testParentRunWorkPropagatesTwoLevelsDown() async throws {
+        let nexusConfiguration = try configuration(
+            path: ["Nexus"], storage: temporaryDirectory(),
+            privateKeyHex: String(repeating: "71", count: 32)
+        )
+        let aConfiguration = try configuration(
+            path: ["Nexus", "A"], storage: temporaryDirectory(),
+            privateKeyHex: String(repeating: "72", count: 32),
+            parentPublicKey: nexusConfiguration.processPublicKey
+        )
+        let bConfiguration = try configuration(
+            path: ["Nexus", "A", "B"], storage: temporaryDirectory(),
+            privateKeyHex: String(repeating: "73", count: 32),
+            parentPublicKey: aConfiguration.processPublicKey
+        )
+        let nexus = try await ChainProcess.open(configuration: nexusConfiguration)
+        let a = try await ChainProcess.open(configuration: aConfiguration)
+        let b = try await ChainProcess.open(configuration: bConfiguration)
+
+        // Nexus anchors A; A comes up.
+        let aSeed = ChildGenesisSeed(spec: NexusGenesis.spec, premineTo: nil, timestamp: 1)
+        let aGenesis = try await ChildGenesisBuilder.build(seed: aSeed, chainPath: ["Nexus", "A"], fetcher: nexus)
+        let nexusGenesis = try await nexus.canonicalTipBlock()
+        let n0 = try await record(anchorOf: aGenesis, directory: "A", on: nexus, previous: nexusGenesis, chainPath: ["Nexus"], timestamp: 1)
+        let aUp = try await a.activateSeededChildGenesis(seed: aSeed, confirmParentRecordedGenesis: { _ in true })
+        XCTAssertTrue(aUp)
+
+        // A1, carried by N1, records B's anchor; B comes up.
+        let bSeed = ChildGenesisSeed(spec: NexusGenesis.spec, premineTo: nil, timestamp: 1)
+        let bGenesis = try await ChildGenesisBuilder.build(seed: bSeed, chainPath: ["Nexus", "A", "B"], fetcher: nexus)
+        let bAnchor = try signedGenesisAnchorTransaction(
+            directory: "B", childGenesisCID: try BlockHeader(node: bGenesis).rawCID, chainPath: ["Nexus", "A"]
+        )
+        try await VolumeImpl<Transaction>(node: bAnchor).storeRecursively(storer: nexus)
+        let a1 = try await carry(
+            childOf: aGenesis, transactions: [bAnchor], directory: "A",
+            parent: nexus, parentTip: n0, child: a, timestamp: 2
+        )
+        let bUp = try await b.activateSeededChildGenesis(seed: bSeed, confirmParentRecordedGenesis: { _ in true })
+        XCTAssertTrue(bUp)
+
+        // B1 against A's tip A1; A2 (on A1) commits B1; N2 (on N1) commits A2.
+        let provisionalA = try await BlockBuilder.buildBlock(previous: a1.block, timestamp: 3, nonce: 0, fetcher: nexus)
+        let b1 = try await BlockBuilder.buildBlock(
+            previous: bGenesis, parentChainBlock: provisionalA, timestamp: 3, fetcher: nexus
+        )
+        let provisionalN = try await BlockBuilder.buildBlock(previous: a1.carrier, timestamp: 3, nonce: 0, fetcher: nexus)
+        let a2 = try await BlockBuilder.buildBlock(
+            previous: a1.block, children: ["B": b1], parentChainBlock: provisionalN, timestamp: 3, fetcher: nexus
+        )
+        let unminedN2 = try await BlockBuilder.buildBlock(
+            previous: a1.carrier, children: ["A": a2], timestamp: 3, nonce: 0, fetcher: nexus
+        )
+        let n2 = try XCTUnwrap(BlockBuilder.mine(block: unminedN2, target: min(a1.carrier.nextTarget, a2.target)))
+        let n2Header = try BlockHeader(node: n2)
+        _ = try await nexus.prepareChildProofs(for: n2, capacity: 16)
+        let n2Outcome = try await nexus.admit(n2Header, preparingChildDirectories: ["A"])
+        XCTAssertTrue(n2Outcome.decision.isAccepted)
+        _ = try await nexus.retryPendingChildProofs(carrierCID: n2Header.rawCID)
+        let a2CID = try BlockHeader(node: a2).rawCID
+        let a2Issued = try await nexus.issuedChildEvidence(childCID: a2CID, directory: "A", rootCID: n2Header.rawCID)
+        let a2Evidence = try XCTUnwrap(a2Issued)
+        // A2's prevState is A1's post-state: A executed A1, Nexus never did.
+        // What A pulls from Nexus's node joins what A already holds.
+        let aContent = MultichainContentStore()
+        try await BlockHeader(node: a2).storeBlock(fetcher: UnionFetcher([nexus, a]), storer: aContent)
+        // The carrier package brings the committed child block along.
+        try await BlockHeader(node: b1).storeBlock(fetcher: UnionFetcher([a, nexus]), storer: aContent)
+        let a2Outcome = try await a.admit(
+            BlockHeader(rawCID: a2CID, node: nil, encryptionInfo: nil),
+            authenticatedChildPackage: AuthenticatedChildPackage(package: ChildValidationPackage(
+                proof: a2Evidence.proof,
+                parentStateContinuityLink: ParentStateContinuityLink(
+                    parentPath: ["Nexus"], fromStateCID: LatticeState.emptyHeader.rawCID,
+                    toStateCID: a2.parentState.rawCID
+                )
+            )),
+            preparingChildDirectories: ["B"],
+            remoteSource: aContent
+        )
+        XCTAssertTrue(a2Outcome.decision.isAccepted, "A2 admitted on A with N2's proof")
+        // A issues B1's proof from the carrier it now possesses.
+        _ = try await a.retryPendingChildProofs(carrierCID: a2CID, remoteSource: aContent)
+        // The proof's root is the Nexus block whose work secures it, not A2.
+        let b1CID = try BlockHeader(node: b1).rawCID
+        let b1Issued = try await a.issuedChildEvidence(childCID: b1CID, directory: "B", rootCID: n2Header.rawCID)
+        let b1Evidence = try XCTUnwrap(b1Issued)
+        let bContent = MultichainContentStore()
+        try await BlockHeader(node: b1).storeBlock(fetcher: UnionFetcher([a, nexus]), storer: bContent)
+        let b1Outcome = try await b.admit(
+            BlockHeader(rawCID: b1CID, node: nil, encryptionInfo: nil),
+            authenticatedChildPackage: AuthenticatedChildPackage(package: ChildValidationPackage(
+                proof: b1Evidence.proof,
+                parentStateContinuityLink: ParentStateContinuityLink(
+                    parentPath: ["Nexus", "A"], fromStateCID: LatticeState.emptyHeader.rawCID,
+                    toStateCID: b1.parentState.rawCID
+                )
+            )),
+            remoteSource: bContent
+        )
+        XCTAssertTrue(b1Outcome.decision.isAccepted, "B1 admitted on B with A2's proof")
+
+        // A serves B: A2's run for B is A2 alone so far.
+        await a.serveRuns(for: "B")
+        let servedOnA = await a.servedRunDirectoryList()
+        XCTAssertEqual(servedOnA, ["B"], "A anchored B, so A serves it")
+        let runBeforeValue = await a.runReport(committer: a2CID, directory: "B")
+        let runBefore = try XCTUnwrap(runBeforeValue)
+        XCTAssertEqual(runBefore.childBlock, b1CID)
+        XCTAssertEqual(runBefore.runWork, runBefore.ownWork)
+        let nothingYet = try await b.applyParentRunReport(runBefore)
+        guard case .refused(.notStronger) = nothingYet else { return XCTFail("nothing to credit yet: \(nothingYet)") }
+
+        // Nexus mines N3 on N2: N2's run grows; Nexus reports it; A credits A2.
+        await nexus.serveRuns(for: "A")
+        let n3 = try await mine(on: nexus, previous: n2, timestamp: 4)
+        let nexusReports = await nexus.runReports(changedBy: try BlockHeader(node: n3).rawCID)
+        let nexusReport = try XCTUnwrap(nexusReports.first { $0.childBlock == a2CID })
+        XCTAssertEqual(nexusReport.blockHash, n2Header.rawCID)
+        XCTAssertGreaterThan(nexusReport.runWork, nexusReport.ownWork)
+        let aCredited = try await a.applyParentRunReport(nexusReport)
+        guard case .credited = aCredited else { return XCTFail("A must credit Nexus's run: \(aCredited)") }
+
+        // The credit landed at A2, which roots its own run for B: the run A
+        // serves B grew by exactly what Nexus attributed, while A2's own
+        // grinds — what B already holds — did not change. B credits the
+        // difference: two levels down, undiminished.
+        let runAfterValue = await a.runReport(committer: a2CID, directory: "B")
+        let runAfter = try XCTUnwrap(runAfterValue)
+        XCTAssertEqual(runAfter.ownWork, runBefore.ownWork, "an attributed run is no grind of A2")
+        XCTAssertEqual(runAfter.grinds, runBefore.grinds)
+        XCTAssertEqual(
+            runAfter.runWork.subtracting(runBefore.runWork),
+            nexusReport.runWork.subtracting(nexusReport.ownWork),
+            "what Nexus attributed at A2 is what A's run for B grew by"
+        )
+        let bCredited = try await b.applyParentRunReport(runAfter)
+        guard case .credited = bCredited else { return XCTFail("B must credit A's grown run: \(bCredited)") }
+        let bCounters = await b.parentReportCounters()
+        XCTAssertEqual(bCounters.applied, 1)
+        let bAgain = try await b.applyParentRunReport(runAfter)
+        guard case .refused(.notStronger) = bAgain else { return XCTFail("once: \(bAgain)") }
     }
 
     func testBlockOneAnchorResolvesAgainstALiveParent() async throws {
@@ -617,7 +803,8 @@ final class MultichainInvariantTests: XCTestCase {
 
     private func signedGenesisAnchorTransaction(
         directory: String,
-        childGenesisCID: String
+        childGenesisCID: String,
+        chainPath: [String] = ["Nexus"]
     ) throws -> Transaction {
         let key = CryptoUtils.generateKeyPair()
         let body = TransactionBody(
@@ -633,7 +820,7 @@ final class MultichainInvariantTests: XCTestCase {
             signers: [CryptoUtils.createAddress(from: key.publicKey)],
             fee: 0,
             nonce: 0,
-            chainPath: ["Nexus"]
+            chainPath: chainPath
         )
         let bodyHeader = try HeaderImpl<TransactionBody>(node: body)
         let signature = try XCTUnwrap(TransactionSigning.sign(
@@ -644,6 +831,107 @@ final class MultichainInvariantTests: XCTestCase {
             signatures: [key.publicKey: signature],
             body: bodyHeader
         )
+    }
+
+    /// Record `anchorTransaction`'s genesis anchor in a new block on `chain`
+    /// (built on `previous`), admitted eagerly. Returns the block.
+    private func record(
+        anchorOf childGenesis: Block, directory: String, on chain: ChainProcess,
+        previous: Block, chainPath: [String], timestamp: Int64
+    ) async throws -> Block {
+        let authorization = try signedGenesisAnchorTransaction(
+            directory: directory, childGenesisCID: try BlockHeader(node: childGenesis).rawCID,
+            chainPath: chainPath
+        )
+        try await VolumeImpl<Transaction>(node: authorization).storeRecursively(storer: chain)
+        let unmined = try await BlockBuilder.buildBlock(
+            previous: previous, transactions: [authorization], timestamp: timestamp, nonce: 0, fetcher: chain
+        )
+        let mined = try XCTUnwrap(BlockBuilder.mine(block: unmined, target: previous.nextTarget))
+        let outcome = try await chain.admit(try BlockHeader(node: mined))
+        XCTAssertTrue(outcome.decision.isAccepted, "recording block on \(chainPath)")
+        return mined
+    }
+
+    /// Mine and admit a plain block on `chain` on top of `previous`.
+    private func mine(on chain: ChainProcess, previous: Block, timestamp: Int64) async throws -> Block {
+        let unmined = try await BlockBuilder.buildBlock(
+            previous: previous, timestamp: timestamp, nonce: 0, fetcher: chain
+        )
+        let mined = try XCTUnwrap(BlockBuilder.mine(block: unmined, target: previous.nextTarget))
+        let outcome = try await chain.admit(try BlockHeader(node: mined))
+        XCTAssertTrue(outcome.decision.isAccepted)
+        return mined
+    }
+
+    private struct Carried {
+        /// The child block, admitted on the child chain.
+        let block: Block
+        /// The parent block that commits it, admitted on the parent chain.
+        let carrier: Block
+    }
+
+    /// Build the next block of a child chain on `childOf` (with `transactions`),
+    /// have the ROOT `parent` carry it in a new mined parent block on `parentTip`
+    /// that commits it into `directory`, and admit it on `child` with the
+    /// carrier proof and the continuity link the parent attests.
+    private func carry(
+        childOf previous: Block, transactions: [Transaction], directory: String,
+        parent: ChainProcess, parentTip: Block, child: ChainProcess, timestamp: Int64
+    ) async throws -> Carried {
+        let provisional = try await BlockBuilder.buildBlock(
+            previous: parentTip, timestamp: timestamp, nonce: 0, fetcher: parent
+        )
+        let childBlock = try await BlockBuilder.buildBlock(
+            previous: previous, transactions: transactions, parentChainBlock: provisional,
+            timestamp: timestamp, fetcher: parent
+        )
+        let unminedCarrier = try await BlockBuilder.buildBlock(
+            previous: parentTip, children: [directory: childBlock],
+            timestamp: timestamp, nonce: 0, fetcher: parent
+        )
+        let carrier = try XCTUnwrap(BlockBuilder.mine(
+            block: unminedCarrier, target: min(parentTip.nextTarget, childBlock.target)
+        ))
+        _ = try await parent.prepareChildProofs(for: carrier, capacity: 16)
+        let carrierHeader = try BlockHeader(node: carrier)
+        let carrierOutcome = try await parent.admit(carrierHeader, preparingChildDirectories: [directory])
+        XCTAssertTrue(carrierOutcome.decision.isAccepted, "carrier into \(directory)")
+        _ = try await parent.retryPendingChildProofs(carrierCID: carrierHeader.rawCID)
+        let childBlockCID = try BlockHeader(node: childBlock).rawCID
+        let issued = try await parent.issuedChildEvidence(
+            childCID: childBlockCID, directory: directory, rootCID: carrierHeader.rawCID
+        )
+        let evidence = try XCTUnwrap(issued)
+        let content = MultichainContentStore()
+        try await BlockHeader(node: childBlock).storeBlock(fetcher: parent, storer: content)
+        let admitted = try await child.admit(
+            BlockHeader(rawCID: childBlockCID, node: nil, encryptionInfo: nil),
+            authenticatedChildPackage: AuthenticatedChildPackage(package: ChildValidationPackage(
+                proof: evidence.proof,
+                parentStateContinuityLink: ParentStateContinuityLink(
+                    parentPath: Array(child.configuration.chainPath.dropLast()),
+                    fromStateCID: LatticeState.emptyHeader.rawCID,
+                    toStateCID: childBlock.parentState.rawCID
+                )
+            )),
+            remoteSource: content
+        )
+        XCTAssertTrue(admitted.decision.isAccepted, "child block into \(directory)")
+        return Carried(block: childBlock, carrier: carrier)
+    }
+
+    /// Content a chain assembles from more than one holder, in order.
+    private struct UnionFetcher: Fetcher {
+        let sources: [any Fetcher]
+        init(_ sources: [any Fetcher]) { self.sources = sources }
+        func fetch(rawCid: String) async throws -> Data {
+            var last: any Error = DataErrors.nodeNotAvailable
+            for source in sources {
+                do { return try await source.fetch(rawCid: rawCid) } catch { last = error }
+            }
+            throw last
+        }
     }
 
     private actor ParentRunReportSink {
