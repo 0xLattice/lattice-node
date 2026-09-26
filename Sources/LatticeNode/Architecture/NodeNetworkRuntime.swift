@@ -838,7 +838,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
               }) ?? true {
             if enqueueCandidate(candidate) { return true }
             do {
-                try await Task.sleep(for: .milliseconds(10))
+                // Not `Task.sleep(for:)`: see ChainService.scheduleValidateWalkRetry.
+                try await Task.sleep(nanoseconds: 10_000_000)
             } catch {
                 return false
             }

@@ -286,7 +286,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                     )) == true {
                         return
                     }
-                    try? await Task.sleep(for: .seconds(1))
+                    // Not `Task.sleep(for:)`: see ChainService.scheduleValidateWalkRetry.
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
                 }
             }
         } else {
