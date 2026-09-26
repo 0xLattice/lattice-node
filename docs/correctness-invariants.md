@@ -3,8 +3,8 @@
 ## NODE-SEMANTICS-001 — every admission outcome has one node meaning
 
 `canonicalized`, `acceptedSide`, `carrier`, `duplicate`, `unavailable`,
-`temporarilyInvalid`, `invalid`, `localFailure`, and `storageFailed` remain
-distinct at the node boundary.
+`temporarilyInvalid`, `invalid`, and `localFailure` remain distinct at the
+node boundary.
 
 ## NODE-SEMANTICS-002 — side validity is not canonicity
 
@@ -16,8 +16,8 @@ distinct at the node boundary.
 
 ## NODE-SEMANTICS-004 — local durability is not peer behavior
 
-`localFailure` and `storageFailed` are local observations and cannot penalize a
-peer.
+`localFailure` is a local observation (a store or durability error is not a
+verdict) and cannot penalize a peer.
 
 ## NODE-SEMANTICS-005 — only obtained invalid evidence is punishable
 

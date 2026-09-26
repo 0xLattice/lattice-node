@@ -4,9 +4,12 @@ This is the HTTP surface of the current one-process/one-chain daemon.
 
 Base URL: `http://127.0.0.1:<rpc-port>`
 
-The listener is unauthenticated and therefore loopback-only. Put a
+The operator listener is unauthenticated and therefore loopback-only. Put a
 same-host authenticated proxy in front of it if another machine must call it;
-the daemon itself rejects non-loopback bind addresses.
+the daemon itself rejects non-loopback bind addresses. A second, public
+read-only listener (`--public-read-port`) serves the bounded `GET` allowlist
+in the "Public reads" routes below on all interfaces, with per-address and
+listener-wide rate limits; it exposes no write or operator route.
 
 Every request targets the chain owned by that process. There is no `chainPath`
 query selector. Whenever a path appears in a body or response, it is an
