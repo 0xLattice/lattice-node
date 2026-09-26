@@ -2746,8 +2746,15 @@ actor NodeStore {
                 params: [.text(candidateCID)]
             ).isEmpty else { return nil }
         }
+        // Every handoff still in flight relays its children too — until the
+        // handed-off candidate is an ACCEPTED block, when the handoff is
+        // complete: the block is durable here and its children hold theirs
+        // through the proofs it issues. A handoff row outlives acceptance
+        // (a weighed admission owns the boundary, not the body it pins), so
+        // relaying by row alone grows without bound and past the request's
+        // per-peer cap, after which every new reservation is refused.
         effectiveCandidateCIDs.formUnion(try database.query(
-            "SELECT candidate_cid FROM contextual_candidates WHERE handoff = 1"
+            "SELECT candidate_cid FROM contextual_candidates WHERE handoff = 1 AND candidate_cid NOT IN (SELECT block_cid FROM accepted_blocks)"
         ).compactMap { $0["candidate_cid"]?.textValue })
         var children: [ChildCandidateReservationReference] = []
         for candidateCID in effectiveCandidateCIDs.sorted() {

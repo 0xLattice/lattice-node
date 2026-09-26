@@ -2424,6 +2424,73 @@ final class NodeStoreTests: XCTestCase {
         XCTAssertNil(releasedShared)
     }
 
+    /// A handed-off candidate's children are relayed down while the handoff
+    /// is in flight and not once the candidate is an accepted block — even
+    /// though the row outlives acceptance (a weighed admission owns the
+    /// boundary, so the row keeps pinning the body). Relayed by row alone,
+    /// the set grows past the request's per-peer cap and every reservation
+    /// after that is refused for good.
+    func testCompletedHandoffStopsRelayingItsChildren() async throws {
+        let directory = temporaryDirectory()
+        let broker = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let store = try makeStore(
+            path: directory.appendingPathComponent("state.db"),
+            broker: broker
+        )
+        let candidate = try VolumeImpl<PublicKey>(
+            node: PublicKey(key: "completed-handoff-candidate")
+        )
+        try await candidate.store(storer: broker)
+        let grandchild = try VolumeImpl<PublicKey>(
+            node: PublicKey(key: "completed-handoff-grandchild")
+        )
+        let descendant = ChildCandidateReservationReference(
+            peerKey: try PeerKey(
+                rawRepresentation: Data(
+                    repeating: 0xbc,
+                    count: PeerKey.byteCount
+                )
+            ),
+            candidateCID: grandchild.rawCID
+        )
+        try await store.persistContextualCandidateRoots(
+            candidateCID: candidate.rawCID,
+            roots: [candidate.rawCID],
+            children: [descendant],
+            capacity: 16
+        )
+        let issued = try await store.replaceIssuedContextualCandidates(
+            [candidate.rawCID], capacity: 16
+        )
+        XCTAssertTrue(issued)
+        let began = try await store.beginContextualCandidateHandoff(
+            candidateCID: candidate.rawCID
+        )
+        XCTAssertTrue(began)
+        let inFlight = try await store.contextualCandidateChildren(candidateCIDs: [])
+        XCTAssertEqual(inFlight, [descendant], "in flight: relayed")
+
+        // Accepted weighed: the batch owns no body, so the row (and its pin)
+        // survives — and the handoff is complete all the same.
+        try await store.stage(
+            blockBatch(postStateCID: "completed-handoff-state", blockHash: candidate.rawCID),
+            volumeRoots: []
+        )
+        let removed = try await store.removeContextualCandidateIfAdmitted(
+            candidateCID: candidate.rawCID
+        )
+        XCTAssertFalse(removed, "the weighed batch does not own the body: the row stays")
+        let afterAcceptance = try await store.contextualCandidateChildren(candidateCIDs: [])
+        XCTAssertEqual(afterAcceptance, [], "accepted: the handoff is complete, nothing to relay")
+        let current = try await store.currentContextualCandidateChildren()
+        XCTAssertEqual(current, [])
+        _ = try await broker.evictUnpinned(graceSeconds: 0)
+        let stillPinned = await broker.fetchVolumeLocal(root: candidate.rawCID)
+        XCTAssertNotNil(stillPinned, "the row still pins the body for the validate walk")
+    }
+
     func testHandoffClearsIssuedAndSnapshotCannotDemoteHandoff()
         async throws
     {
