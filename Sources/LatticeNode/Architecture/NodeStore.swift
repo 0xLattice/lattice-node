@@ -2541,6 +2541,7 @@ actor NodeStore {
                 )
             }
             try touchContextualCandidateOfferLocked(candidateCID)
+            try await evictExcessHandoffCandidates()
             return
         }
         try await recoveryVolumeBroker.pinBatch(
@@ -2789,6 +2790,14 @@ actor NodeStore {
     /// that returns re-enters through ordinary verified acquisition. Newest
     /// handoffs survive, so a live reservation-to-admission window keeps its
     /// pinned roots.
+    /// The candidates this chain built that a parent's evidence has named
+    /// as carried and that no admission has yet owned.
+    func handoffCandidateCIDs() throws -> [String] {
+        try database.query(
+            "SELECT candidate_cid FROM contextual_candidates WHERE handoff = 1 ORDER BY handoff_seq"
+        ).compactMap { $0["candidate_cid"]?.textValue }
+    }
+
     func enforceHandoffCandidateBudget() async throws {
         await acquirePreparedMutation()
         defer { releasePreparedMutation() }

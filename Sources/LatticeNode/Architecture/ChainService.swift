@@ -1597,6 +1597,19 @@ public actor ChainService {
               (try? BlockHeader(node: parentCarrier)) != nil else {
             throw ChainServiceError.invalidParentCarrier
         }
+        // The same inputs build the same candidate, up to its timestamp: a
+        // state change that touched none of them (a transaction the pool
+        // would not select, a walk step that moved nothing here) rebuilds
+        // nothing. Every input a candidate is a function of is in this key.
+        let inputs = await templateDigestLocked()
+            + "|" + parentCarrier.prevState.rawCID
+            + "|" + rewards.map { $0.transaction.body.rawCID }.joined(separator: ",")
+            + "|" + minimumWork.map { "\($0.chainPath.joined(separator: "/"))=\($0.work)" }
+                .joined(separator: ",")
+        if inputs == lastCandidateInputs, let candidate = lastCandidate {
+            SyncTrace.log("child candidate unchanged h=\(candidate.block.height)")
+            return candidate
+        }
         let fetcher = CoalescingFetcher(CompositeContentSource([
             process,
             parentContentSource,
@@ -1624,12 +1637,17 @@ public actor ChainService {
             children: template.childCandidates,
             capacity: Self.templateCapacity
         )
-        return DirectChildCandidate(
+        let candidate = DirectChildCandidate(
             directory: process.configuration.address.directory,
             block: template.block,
             searchWitness: template.searchWitness
         )
+        lastCandidateInputs = inputs
+        lastCandidate = candidate
+        return candidate
     }
+    private var lastCandidateInputs: String?
+    private var lastCandidate: DirectChildCandidate?
 
     private func buildMiningTemplate(
         rewards: [MiningReward],

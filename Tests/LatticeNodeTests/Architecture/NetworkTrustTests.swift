@@ -5877,7 +5877,14 @@ final class NetworkTrustTests: XCTestCase {
                 if !indexed { try await Task.sleep(for: .milliseconds(10)) }
             }
             XCTAssertTrue(indexed, "the carrier's evidence is indexed")
-            try await Task.sleep(for: .milliseconds(500))
+            // The hint that follows the index is the one the budget refuses;
+            // wait for that refusal to be on record, not for the clock.
+            var refused = 0
+            for _ in 0..<1_000 where refused == 0 {
+                refused = await fixture.runtime.refusedChildEvidenceHintCountForTesting()
+                if refused == 0 { try await Task.sleep(for: .milliseconds(10)) }
+            }
+            XCTAssertEqual(refused, 1, "the hint was refused and remembered")
             let connectedAfterRejection = await fixture.child.connectedPeers
             XCTAssertTrue(
                 connectedAfterRejection.contains(parentID),
@@ -5893,7 +5900,7 @@ final class NetworkTrustTests: XCTestCase {
             hierarchyTally.resetPeer(childID)
             await fixture.runtime.chainStateChanged()
             var resent: [ChildEvidenceAvailableMessage] = []
-            for _ in 0..<500 {
+            for _ in 0..<2_000 {
                 resent = await fixture.recorder.snapshot().available
                 if !resent.isEmpty { break }
                 try await Task.sleep(for: .milliseconds(10))
@@ -5904,9 +5911,10 @@ final class NetworkTrustTests: XCTestCase {
             XCTAssertEqual(resent.count, 1)
             XCTAssertEqual(resent.first?.childCID, fixture.childCID)
             XCTAssertEqual(resent.first?.rootCID, fixture.carrierCID)
-            XCTAssertTrue(resent.first.map {
-                CIDIdentity.isCanonical($0.attachmentCID)
-            } ?? false)
+            XCTAssertTrue(
+                resent.first.map { CIDIdentity.isCanonical($0.attachmentCID) } ?? false,
+                "attachment \(resent.first?.attachmentCID ?? "none")"
+            )
             let pending = try await fixture.process.pendingChildProofCarrierCIDs()
             let status = await fixture.process.status()
             XCTAssertTrue(pending.isEmpty)
@@ -6357,6 +6365,23 @@ final class NetworkTrustTests: XCTestCase {
             }
             XCTAssertEqual(next.first?.block.height, 2, "built on the carried block")
             XCTAssertEqual(next.first?.block.parent?.rawCID, firstHeader.rawCID)
+
+            // The rule is about ignorance, not the parent block: a child
+            // offering on the carried block's parent after being told
+            // (here, on a fresh session) is carried. Otherwise one carry
+            // could halt a directory for good.
+            await fixture.childRuntime.stop()
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess,
+                handlers: childHandlers
+            )
+            var again: [DirectChildCandidate] = []
+            for _ in 0..<250 {
+                again = await fixture.parentRuntime.directChildCandidates(fixture.context)
+                if !again.isEmpty { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            XCTAssertFalse(again.isEmpty, "a new session's offer is carried whatever its parent")
         } catch {
             await fixture.childRuntime.stop()
             await fixture.parentRuntime.stop()

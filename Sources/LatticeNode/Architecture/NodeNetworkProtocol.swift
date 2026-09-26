@@ -1000,6 +1000,21 @@ struct ChildCandidateAvailableMessage: Sendable {
         return data
     }
 
+    /// The frame's head — sequence, path and candidate CID — read without
+    /// decoding the block, so a receiver can tell a candidate it already
+    /// holds or an older one from a new one before paying for the decode.
+    /// Nothing here is trusted: a frame the head admits is still decoded
+    /// and content-bound in full.
+    static func peek(_ data: Data) -> (sequence: UInt64, childPath: [String], childCID: String)? {
+        guard data.count <= _maximumNodeMessageSize else { return nil }
+        var position = data.startIndex
+        guard let sequence = data.readUInt64(at: &position), sequence != 0,
+              let childPath = data.readChainPath(at: &position),
+              let childCID = data.readString(at: &position),
+              _isBoundedWireAtom(childCID) else { return nil }
+        return (sequence, childPath, childCID)
+    }
+
     static func decoded(_ data: Data) throws -> Self {
         guard data.count <= _maximumNodeMessageSize else {
             throw NodeNetworkWireError.oversized

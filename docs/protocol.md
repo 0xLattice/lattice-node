@@ -230,16 +230,22 @@ minimum work for the child's subtree — and the child pushes back its current
 candidate for that tip whenever one of its inputs changes. Both messages
 carry a sequence that is monotonic per session; a lower one is dropped. The
 parent holds the latest candidate per child peer — a candidate it already
-holds is ignored whatever sequence it wears, and one larger than a whole
-carrier is never held — and a template carries every held candidate built on
+holds, or an older one, is dropped from the frame's head without decoding
+the block — and a template carries every held candidate built on
 its current tip's post-state, except a sibling of a child block this chain
-already carried (a candidate on the same child parent): that block already
-weighs at the child, and a sibling would only reorg the child's tip to the
-heavier carrier. Nothing is requested at template time and no child can
-stall parent consensus. A child builds no candidate while its
-validate walk is stepping or while its last candidate awaits validation (a
-second at the same height would only fork it), and offers when the walk
-stops, caught up or parked, on the tip it reached. Candidates are
+already carried (a candidate on the same child parent) that the child
+offered before this chain told it of the carry: that block already weighs
+at the child, and an uninformed sibling would only reorg the child's tip to
+the heavier carrier. A sibling the child offers after being told is
+carried; it is then the child's own choice. Nothing is requested at
+template time and no child can stall parent consensus. A child builds no
+candidate while its validate walk is stepping, while its validated tip is
+behind its weighed tip and the walk can still step (the request arms the
+walk), or while a candidate it built that the parent's evidence has named
+is ready for or in its admission; it offers when the walk or the admission
+decides, on the tip it reached, and it rebuilds only when an input of the
+candidate changed.
+Candidates are
 offers, not miner-work durability: the child keeps a candidate's content by
 its own bounded budget, oldest offer first, until the carried block's
 admission owns the roots or the budget sheds it, and a candidate named in the

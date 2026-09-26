@@ -2409,7 +2409,11 @@ final class ChainServiceTests: XCTestCase {
         )
     }
 
-    func testAbandonedParentCarriersDoNotExhaustChildCandidates() async throws {
+    /// Many carriers on one parent tip share one parent state, so they
+    /// share one candidate: the child rebuilds only when an input of the
+    /// candidate changed, and a carrier's timestamp is not one. Twenty
+    /// requests cost one build and hold one candidate.
+    func testCarriersOnOneParentTipShareOneChildCandidate() async throws {
         let fixture = try await activeChildService(spec: NexusGenesis.spec)
         var candidateCIDs: Set<String> = []
 
@@ -2430,7 +2434,7 @@ final class ChainServiceTests: XCTestCase {
             candidateCIDs.insert(try BlockHeader(node: candidate.block).rawCID)
         }
 
-        XCTAssertEqual(candidateCIDs.count, 20)
+        XCTAssertEqual(candidateCIDs.count, 1, "one candidate for one parent state")
     }
 
 

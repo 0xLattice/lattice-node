@@ -157,6 +157,15 @@ struct CandidateAcquirer {
     }
 
     var hasReadyCandidate: Bool { !readySet.isEmpty }
+    /// Whether the block is ready for, or in, an admission attempt — not
+    /// parked on evidence, content or time.
+    func isAwaitingAdmission(_ blockCID: String) -> Bool {
+        guard let record = records[blockCID] else { return false }
+        return record.attempts.values.contains { attempt in
+            if case .waiting = attempt.state { return false }
+            return true
+        }
+    }
     var hasTimedWait: Bool {
         records.values.contains { record in
             record.attempts.values.contains {

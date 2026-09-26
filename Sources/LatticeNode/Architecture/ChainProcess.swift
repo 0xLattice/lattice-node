@@ -2069,6 +2069,11 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         }
     }
 
+    /// Ungated: the handoff candidates (see `NodeStore.handoffCandidateCIDs`).
+    func handoffCandidateCIDs() async throws -> [String] {
+        try await store.handoffCandidateCIDs()
+    }
+
     func pendingChildProofCarrierCIDs() async throws -> [String] {
         await acquireOperation()
         defer { releaseOperation() }
