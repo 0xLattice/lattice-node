@@ -855,9 +855,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     "durable parent evidence could not be replayed"
                 )
             }
+            // A parent-carried block is a network block: weighed on its
+            // proof, executed when fork choice would step into it.
             candidates.append(CandidateSeed(
                 blockCID: childCID,
-                package: item.package
+                package: item.package,
+                weighed: true
             ))
         }
         return candidates
@@ -1403,6 +1406,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard let directory = $0.2.last else { return false }
             return !context.excludedDirectories.contains(directory)
         }
+        SyncTrace.log("child candidates: asking \(children.map { $0.2.joined(separator: "/") }) of \(hierarchyPeers.count) hierarchy peers; ready=\(childEvidenceReadyPeers.count) dirty=\(dirtyCandidateReservationPeers.count) excluded=\(context.excludedDirectories.sorted())")
 
         var candidates: [(Int, DirectChildCandidate)] = []
         await withTaskGroup(of: (Int, DirectChildCandidate?).self) { group in
@@ -1464,7 +1468,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             )
             guard desired[reference.peerKey]!.count
                     <= ChildCandidateReservationRequestMessage.maximumCandidateCIDs
-            else { return false }
+            else {
+                SyncTrace.log("reconcile refused: child \(reference.peerKey.hex.prefix(8)) reservations over the per-peer cap")
+                return false
+            }
         }
         var handoffs: [PeerKey: Set<String>] = [:]
         for reference in Set(update.handoffs) {
@@ -1476,7 +1483,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     <= ChildCandidateReservationRequestMessage.maximumCandidateCIDs,
                   desired[reference.peerKey]?.contains(reference.candidateCID)
                     != true
-            else { return false }
+            else {
+                SyncTrace.log("reconcile refused: child \(reference.peerKey.hex.prefix(8)) reservations=\(desired[reference.peerKey]?.count ?? 0) handoffs=\(handoffs[reference.peerKey]!.count) over the per-peer cap or overlapping")
+                return false
+            }
         }
         let currentPeers = Set(desiredCandidateReservations.keys)
             .union(desired.keys).union(handoffs.keys)
@@ -1496,8 +1506,22 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard isRunning, let process else {
             return update.reservations.isEmpty && update.handoffs.isEmpty
         }
+        // Every dirty peer is in the working set, whether or not anything
+        // is desired of it: a child whose last reservation was refused or
+        // timed out has no desired entry and is asked for nothing (it is
+        // dirty), so without this it would never be visited again, never
+        // flushed, and never asked — dirty for good.
+        // A peer that left mid-exchange is nobody's to reconcile: its
+        // refusal, landing after its session was cleared, must not keep a
+        // mark that no session will ever clear.
+        for peerKey in dirtyCandidateReservationPeers
+        where hierarchyPeers[peerKey] == nil {
+            dirtyCandidateReservationPeers.remove(peerKey)
+            desiredCandidateReservations.removeValue(forKey: peerKey)
+        }
         let peers = Set(desiredCandidateReservations.keys)
             .union(desired.keys).union(handoffs.keys)
+            .union(dirtyCandidateReservationPeers)
             .sorted()
         let changedPeers = peers.filter { peerKey in
             let next = desired[peerKey] ?? []
@@ -1549,6 +1573,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                   let peer = hierarchySessions[peerKey],
                   childEvidenceReadyPeers.contains(peerKey) else {
                 if !next.subtracting(previous).isEmpty {
+                    SyncTrace.log("reconcile refused: child peer \(peerKey.hex.prefix(8)) absent or not ready; additions=\(next.subtracting(previous).count)")
                     dirtyCandidateReservationPeers.insert(peerKey)
                     rejected = true
                     continue
@@ -1587,7 +1612,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     desiredCandidateReservations[attempt.peerKey] = attempt.target
                     dirtyCandidateReservationPeers.remove(attempt.peerKey)
                 } else {
-                    dirtyCandidateReservationPeers.insert(attempt.peerKey)
+                    SyncTrace.log("reconcile refused: child \(attempt.peerKey.hex.prefix(8)) rejected \(attempt.target.count) reservations")
+                    if hierarchyPeers[attempt.peerKey] != nil {
+                        dirtyCandidateReservationPeers.insert(attempt.peerKey)
+                    }
                     rejected = true
                 }
             }
@@ -1651,7 +1679,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // will replace this target afterward.
         guard case .child(let childPath)? = hierarchyPeers[peerKey],
               let peer = hierarchySessions[peerKey],
-              childEvidenceReadyPeers.contains(peerKey) else { return }
+              childEvidenceReadyPeers.contains(peerKey) else {
+            SyncTrace.log("reservation flush skipped: child \(peerKey.hex.prefix(8)) absent or not ready")
+            return
+        }
         let accepted = await requestCandidateReservation(
             candidateCIDs: target.sorted(),
             handoffCIDs: handoffs.sorted(),
@@ -1816,6 +1847,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         } else {
             false
         }
+        SyncTrace.log("reservation answer: accepted=\(accepted) evidence=\(evidenceResult) allows=\(parentEvidence.allowsReservation(for: session, after: evidenceResult)) candidates=\(request.candidateCIDs.count) handoffs=\(request.handoffCIDs.count)")
         guard isCurrentRuntime(generation: generation, process: process),
               parentEvidenceSession(for: peer) == session,
               let payload = try? ChildCandidateReservationResponseMessage(
@@ -1823,11 +1855,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 childPath: request.childPath,
                 accepted: accepted
               ).encoded() else { return }
-        _ = await hierarchy.sendMessage(
+        let sent = await hierarchy.sendMessage(
             to: peer,
             topic: NodeNetworkTopic.childCandidateReservationResponse,
             payload: payload
         )
+        if case .enqueued = sent {} else {
+            SyncTrace.log("reservation answer \(request.requestID) not sent: \(sent)")
+        }
     }
 
     private func cancelParentEvidence(for key: PeerKey) {
@@ -3444,11 +3479,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // peer misbehavior: the recovery succeeded, so never let callers
             // recycle the session over it. The rejection already requested
             // inventory recovery, which re-derives the item later.
+            // A portable attachment carries the same verified proof the
+            // parent serves: a network block, weighed.
             _ = enqueueCandidate(CandidateSeed(
                 blockCID: evidence.edge.childCID,
                 package: AuthenticatedChildPackage(
                     package: ChildValidationPackage(proof: evidence.proof)
-                )
+                ),
+                weighed: true
             ))
             return true
         }
@@ -3520,7 +3558,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // congestion; only verification failures return false (and recycle).
         _ = enqueueCandidate(CandidateSeed(
             blockCID: edge.childCID,
-            package: gated
+            package: gated,
+            weighed: true
         ))
         return true
     }
@@ -3735,7 +3774,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
             return .failed
         }
         return await enqueueRetainedParentCandidate(
-            CandidateSeed(blockCID: summary.childCID, package: gated),
+            // Weighed, like every network-sourced block: the verified proof is
+            // all the weighed tier needs, so the block enters fork choice with
+            // its work at once and is executed when the chain would step into
+            // it. Admitted eagerly it would first wait on a continuity fact —
+            // a deferral whose only memory was this process.
+            CandidateSeed(blockCID: summary.childCID, package: gated, weighed: true),
             generation: generation,
             process: process
         ) ? .handled : .failed
@@ -4094,14 +4138,22 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard let response = try?
                     ChildCandidateReservationResponseMessage.decoded(
                         message.payload
-                    ),
-                  let pending = pendingCandidateReservations[
+                    ) else {
+                SyncTrace.log("reservation response from \(childPath.joined(separator: "/")) dropped: undecodable")
+                return
+            }
+            guard let pending = pendingCandidateReservations[
                     response.requestID
                   ],
                   pending.peer.key == peer.key,
                   pending.peer.sessionID == peer.sessionID,
                   pending.childPath == childPath,
-                  response.childPath == childPath else { return }
+                  response.childPath == childPath else {
+                let pending = pendingCandidateReservations[response.requestID]
+                SyncTrace.log("reservation response from \(childPath.joined(separator: "/")) dropped: request \(response.requestID) pending=\(pending != nil) sameSession=\(pending?.peer.sessionID == peer.sessionID) path=\(response.childPath == childPath)")
+                return
+            }
+            SyncTrace.log("reservation response from \(childPath.joined(separator: "/")): accepted=\(response.accepted)")
             finishCandidateReservation(
                 response.requestID,
                 accepted: response.accepted,
@@ -6747,7 +6799,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard isCurrentRuntime(generation: generation, process: process),
               hierarchySessions[peer.key]?.sessionID == peer.sessionID,
               pendingCandidateReservations.count < Self.maximumPendingRequests
-        else { return false }
+        else {
+            SyncTrace.log("reservation request not sent to \(childPath.joined(separator: "/")): current=\(isCurrentRuntime(generation: generation, process: process)) session=\(hierarchySessions[peer.key]?.sessionID == peer.sessionID) pending=\(pendingCandidateReservations.count)")
+            return false
+        }
         let request = ChildCandidateReservationRequestMessage(
             requestID: makeRequestID(),
             childPath: childPath,
@@ -6774,6 +6829,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     payload: payload
                 )
                 guard case .enqueued = result else {
+                    SyncTrace.log("reservation request send failed to \(childPath.joined(separator: "/")): \(result)")
                     await self.finishCandidateReservation(
                         request.requestID,
                         accepted: false,
@@ -6800,7 +6856,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
             } catch {
                 return
             }
-            await self?.finishCandidateReservation(
+            guard let self else { return }
+            if await self.pendingCandidateReservations[requestID] != nil {
+                SyncTrace.log("reservation request \(requestID) timed out")
+            }
+            await self.finishCandidateReservation(
                 requestID,
                 accepted: false,
                 generation: generation

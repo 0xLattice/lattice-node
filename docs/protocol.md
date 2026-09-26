@@ -135,10 +135,29 @@ while a truncated one is silently wrong and splits honest nodes by local policy.
 
 A restarted child recomputes fork choice entirely from its durable fact log:
 accepted blocks, proof-derived work, and the attributed work-only batches it
-credited from parent run reports. It asks its parent for a committer's run
-when it admits a block that committer carried and after each evidence round,
-the fallback for a push it missed; a credit it already holds never depends on
-the parent being reachable again.
+credited from parent run reports. A block its parent carried is a network
+block: admitted weighed on the verified proof — in fork choice with its work
+at once, executed when the chain would step into it — never held back for a
+continuity fact or a rule not yet met. Its carriage is relayed at once,
+with the acceptance, as for a carrier this chain refused: deeper chains are owed the proof of carriage whatever this
+chain makes of the block, and the proofs this chain composes for its own
+children follow from that relay. Only the parent-process facts it issues —
+the genesis links a child's first block anchors to — wait for its
+validation, since a child must not anchor to state this chain has not
+executed. Until an admission DECIDES it
+(accepted, a duplicate, or refused for a reason no retry would change: the
+grind missed this chain's target, the block or its evidence is invalid, the
+node could not verify it), its evidence stays in the parent-evidence inbox,
+the one durable record of a block still to be admitted, replayed on every
+restart. Decided is exactly what the node never retries: a deferral persists
+nothing, and a decision consumes the entry whether or not it leaves relay
+evidence behind. So no stop or crash between a deferral and its retry can
+lose a parent-carried block, no refusal can hold an inbox slot for good,
+and a child never stays on a branch its parent chain has left for want of
+one. It asks its parent for a committer's run when it admits a block that
+committer carried and after each evidence round, the fallback for a push it
+missed; a credit it already holds never depends on the parent being
+reachable again.
 When admission needs a new genesis or continuity
 fact, the child asks its authenticated immediate-parent process. A positive
 answer is an unsigned acknowledgement bound to that live session and exact

@@ -4,10 +4,10 @@ import Foundation
 /// deliberately log-quiet; this is a field-diagnosis seam, not a general
 /// logging facility. Zero cost when disabled.
 ///
-/// `LATTICE_SYNC_TRACE=1` writes to stderr. Any other non-empty value is
-/// treated as a file path — needed under `lattice up`, which discards child
-/// stderr. The pid is suffixed so sibling node processes sharing the env
-/// (root + child under one `lattice up`) never interleave writes.
+/// `LATTICE_SYNC_TRACE=1` writes to stderr, which `lattice up` sends to the
+/// chain's log file. Any other non-empty value is treated as a file path;
+/// the pid is suffixed so sibling node processes sharing the env (root +
+/// child under one `lattice up`) never interleave writes.
 enum SyncTrace {
     private static let destination: FileHandle? = {
         guard let value = ProcessInfo.processInfo

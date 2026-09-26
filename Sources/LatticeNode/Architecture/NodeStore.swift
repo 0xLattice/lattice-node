@@ -2412,6 +2412,25 @@ actor NodeStore {
         """)
     }
 
+    /// Drop the inbox entries for one (block, root) an admission decided
+    /// without persisting relay evidence; the persist and stage paths consume
+    /// theirs by attachment. Nothing else removes an entry.
+    func consumeParentEvidence(childCID: String, rootCID: String) async throws {
+        let present = try database.query(
+            "SELECT 1 FROM parent_evidence_inbox WHERE child_cid = ?1 AND root_cid = ?2 LIMIT 1",
+            params: [.text(childCID), .text(rootCID)]
+        )
+        guard !present.isEmpty else { return }
+        try database.execute(
+            "DELETE FROM parent_evidence_inbox WHERE child_cid = ?1 AND root_cid = ?2",
+            params: [.text(childCID), .text(rootCID)]
+        )
+        try? await recoveryVolumeBroker.advanceRetainedRoots(
+            scope: parentEvidenceInboxRetentionScope,
+            roots: parentEvidenceInboxRoots()
+        )
+    }
+
     func parentEvidenceInboxHasCapacity() throws -> Bool {
         let count = try database.query(
             "SELECT COUNT(*) AS count FROM parent_evidence_inbox"
@@ -2713,15 +2732,29 @@ actor NodeStore {
                 "contextual candidate reservation is malformed"
             )
         }
-        var effectiveCandidateCIDs = candidateCIDs
-        for candidateCID in candidateCIDs.sorted() {
+        // A reservation for a candidate this chain has ACCEPTED is satisfied
+        // by the accepted block itself — durable under its admission batch,
+        // better held than any candidate — and its children are reconciled by
+        // that admission, not by this request. A weighed admission lands
+        // before the parent's reservation for the candidate it just carried,
+        // so the candidate row is already gone; refusing here would leave
+        // the parent never asking this chain for a candidate again.
+        var effectiveCandidateCIDs = try candidateCIDs.filter { !(try hasAcceptedBlock($0)) }
+        for candidateCID in effectiveCandidateCIDs.sorted() {
             guard try !database.query(
                 "SELECT 1 FROM contextual_candidates WHERE candidate_cid = ?1",
                 params: [.text(candidateCID)]
             ).isEmpty else { return nil }
         }
+        // Every handoff still in flight relays its children too — until the
+        // handed-off candidate is an ACCEPTED block, when the handoff is
+        // complete: the block is durable here and its children hold theirs
+        // through the proofs it issues. A handoff row outlives acceptance
+        // (a weighed admission owns the boundary, not the body it pins), so
+        // relaying by row alone grows without bound and past the request's
+        // per-peer cap, after which every new reservation is refused.
         effectiveCandidateCIDs.formUnion(try database.query(
-            "SELECT candidate_cid FROM contextual_candidates WHERE handoff = 1"
+            "SELECT candidate_cid FROM contextual_candidates WHERE handoff = 1 AND NOT EXISTS (SELECT 1 FROM accepted_blocks WHERE accepted_blocks.block_cid = contextual_candidates.candidate_cid)"
         ).compactMap { $0["candidate_cid"]?.textValue })
         var children: [ChildCandidateReservationReference] = []
         for candidateCID in effectiveCandidateCIDs.sorted() {
@@ -2824,20 +2857,24 @@ actor NodeStore {
     }
 
     func replaceIssuedContextualCandidates(
-        _ desired: Set<String>,
-        handoffs: Set<String> = [],
+        _ requestedDesired: Set<String>,
+        handoffs requestedHandoffs: Set<String> = [],
         capacity: Int
     ) async throws -> Bool {
         guard capacity > 0,
-              desired.count + handoffs.count <= capacity,
-              desired.isDisjoint(with: handoffs),
-              desired.union(handoffs).allSatisfy(CIDIdentity.isCanonical) else {
+              requestedDesired.count + requestedHandoffs.count <= capacity,
+              requestedDesired.isDisjoint(with: requestedHandoffs),
+              requestedDesired.union(requestedHandoffs).allSatisfy(CIDIdentity.isCanonical) else {
             throw NodeStoreError.invalidConfiguration(
                 "issued contextual candidate set is malformed"
             )
         }
         await acquirePreparedMutation()
         defer { releasePreparedMutation() }
+        // An accepted block satisfies a reservation or handoff for it (see
+        // `contextualCandidateChildren`): nothing to retain, nothing to mark.
+        let desired = try requestedDesired.filter { !(try hasAcceptedBlock($0)) }
+        let handoffs = try requestedHandoffs.filter { !(try hasAcceptedBlock($0)) }
         for candidateCID in desired {
             guard try !database.query(
                 "SELECT 1 FROM contextual_candidates WHERE candidate_cid = ?1",

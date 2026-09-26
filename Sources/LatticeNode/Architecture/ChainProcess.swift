@@ -717,6 +717,9 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         // genesis attachment. That is an ordering dependency, not malformed
         // genesis. Keep the authenticated candidate parked behind its direct
         // predecessor so ordinary same-chain wake-up admits it after bootstrap.
+        // Nothing is persisted for it: its evidence stays in the parent-evidence
+        // inbox, the one durable record of a block still to be admitted, until
+        // the admission that decides it.
         let bootstrapCandidate = try await Self.resolvedCandidate(
             blockHeader,
             fetcher: attemptFetcher
@@ -743,16 +746,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     sameChainPredecessor: nil
                 )
             }
-            let evidence = try await Self.canonicalCarrierEvidence(
-                blockHeader,
-                authenticatedPackage: authenticatedChildPackage,
-                fetcher: attemptFetcher
-            )
-            try await persistHierarchyArtifacts(
-                relayLink,
-                carrierEvidence: evidence,
-                pendingChildProofRoutes: pendingChildProofRoutes
-            )
             return NodeAdmissionOutcome(
                 decision: .unavailable(nil),
                 parentCarrierLink: relayLink,
@@ -875,6 +868,25 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             parentCarrierLink: link,
             sameChainPredecessor: nil
         )
+    }
+
+    /// Whether an admission decided the block: accepted (made durable by
+    /// `stage`), a duplicate of one, or refused for a reason no retry would
+    /// change — the grind that carried it missed this chain's target (a
+    /// carrier for deeper chains only, which merged mining produces every
+    /// round it clears only a deeper target), the block or its evidence is
+    /// invalid, or this node could not verify it. Decided is exactly the set
+    /// the candidate acquirer never retries, by the same predicate: what it
+    /// would retry (evidence not yet held, a rule not yet met) is a deferral.
+    /// A deferral persists nothing; the block's evidence stays in the
+    /// parent-evidence inbox and is replayed on restart, so no stop or crash
+    /// between a deferral and its retry can lose a parent-carried block. A
+    /// decision consumes the entry, relay or no relay: an entry no retry is
+    /// coming for would be re-admitted at every start and, at capacity,
+    /// refuse every later parent-carried block.
+    static func isDecided(_ result: ChainLocalBlockResult) -> Bool {
+        let decision = NodeAdmissionDecision(result)
+        return !(decision.shouldRetryWhenEvidenceChanges || decision.shouldRetryLater)
     }
 
     func recoveredAuthenticatedChildPackage(
@@ -1143,7 +1155,31 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         // its content-verified carrier remains valid relay data for deeper
         // chains. Persist that relay with no genesis facts; a later duplicate
         // retry promotes the exact genesis facts after the predecessor connects.
-        if (!admissionStaged || result.sameChainPredecessor != nil),
+        // Only for a DECIDED block: persisting the relay consumes the block's
+        // parent-evidence inbox entry, the one durable record that it is still
+        // to be admitted, so a deferral persists nothing and keeps that entry.
+        //
+        // A WEIGHED acceptance of a parent-carried block stages its incoming
+        // evidence, but Lattice issues no parent-process fact for a block it
+        // has not executed, so `stage` wrote no carrier link for it. The
+        // RELAY of its carriage is another matter: content-verified before
+        // any execution, owed to deeper chains whatever this chain makes of
+        // the block (a carrier it refused gets it too), and what child-proof
+        // recovery composes this block's outgoing proofs from. It goes here,
+        // with no genesis facts (validation issues those), under the same
+        // lease as the stage; the link is Lattice's to mint, so it cannot yet
+        // land in the stage's own write, and recovery tolerates the gap.
+        let relayUnissued: Bool
+        if admissionStaged, result.sameChainPredecessor == nil,
+           carrierEvidence != nil, let link = result.parentCarrierLink {
+            relayUnissued = try await store.issuedParentCarrierLink(
+                carrierCID: blockHeader.rawCID, rootCID: link.rootCID
+            ) == nil
+        } else {
+            relayUnissued = false
+        }
+        if (!admissionStaged || result.sameChainPredecessor != nil || relayUnissued),
+           Self.isDecided(result),
            let link = result.parentCarrierLink {
             try await store.persistIssuedHierarchyArtifacts(
                 AdmissionHierarchyArtifacts(
@@ -1160,6 +1196,16 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     parentGenesisLinks: directParentGenesisLinks
                 ),
                 pendingChildProofCapacity: Self.preparedChildProofCapacity
+            )
+        }
+        // Decided with nothing persisted above — refused before a carrier
+        // link was derived (the block or its proof), or a duplicate whose
+        // promotion staged nothing — still consumes the inbox entry: no retry
+        // is coming for it.
+        if Self.isDecided(result), let authenticatedPackage {
+            try await store.consumeParentEvidence(
+                childCID: blockHeader.rawCID,
+                rootCID: authenticatedPackage.package.proof.rootCID
             )
         }
         var receipt: CanonicalCommitReceipt?
@@ -2860,11 +2906,22 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 }
                 proof = upstreamProof.composing(hop: prepared.proof)
             }
+            // No relay link for this root: the incoming evidence landed and
+            // the link's own write did not (a stop between the two, or a
+            // store written before the link was persisted at all). Nothing
+            // to compose from yet — the route stays pending, and validation
+            // or a re-delivery issues the link — and never a reason not to
+            // boot.
             guard try await store.issuedParentCarrierLink(
                 carrierCID: carrierCID,
                 rootCID: proof.rootCID
             ) != nil else {
-                throw ChainProcessError.malformedAuthenticatedChildProof
+                SyncTrace.log(
+                    "child proof deferred: no relay link yet carrier="
+                        + carrierCID.prefix(12) + " root=" + proof.rootCID.prefix(12)
+                        + " directory=" + prepared.directory
+                )
+                continue
             }
             if try await store.issuedChildEvidence(
                 childCID: prepared.childCID,

@@ -54,7 +54,12 @@ The suites are grouped by the boundary they actually cross:
   (`testNexusWorkReachesTheGrandchildAcrossAMiddleChainOutage`). The
   coordinator is stopped for that phase because it hunts the easiest target
   and so also produces child-only carriers, whose child blocks have no chain
-  committer to be credited through.
+  committer to be credited through. A second scenario keeps the coordinator
+  mining and stops the middle chain's node mid-round, the deploy case that
+  cut a deferred parent-carried block off from its retry: after the restart
+  the node must be credited the outage work, which only that block's
+  committer can deliver
+  (`testChildStoppedDuringCoMiningIsCreditedAfterRestart`).
 - `LatticeMinerCoreTests` and `LatticeMiningCoordinatorTests`: nonce search, work allocation, staleness, subprocess cancellation, and current RPC payloads.
 
 The test bar is boundary-focused rather than timing-focused. Tests inject missing
@@ -113,7 +118,31 @@ cross-component invariants:
   (`testParentRunWorkIsCreditedAtTheChildBlockItCommits` in the multichain
   invariants), and admitting a block a parent block carried asks the parent
   for that committer's run, so a push made before the block was held here,
-  or one missed while away, never waits for the next parent block; a run
+  or one missed while away, never waits for the next parent block; a
+  parent-carried block is admitted weighed on its proof, its relay link
+  persisted with the acceptance (child-proof recovery composes from that
+  evidence and reads the link beside it; a link it does not find is not a
+  reason to refuse to boot), and until an
+  admission decides it its evidence stays in the parent-evidence inbox — a
+  deferral persists nothing, the entry survives a restart and the block is
+  accepted once the rule is met; a carrier refused for good is relayed and
+  consumed and never re-admitted; a refusal with no carrier link to relay is
+  consumed all the same, and decided is exactly the set the acquirer never
+  retries; a restarted child admits the block from its inbox alone,
+  weighed, with content served by the parent; no admission of a block
+  reached through an overlay portable attachment is eager
+  (`testDeferredCarriedBlockKeepsItsEvidenceInTheInboxAcrossRestart`,
+  `testCarrierRefusedForGoodIsDecidedAndConsumed`,
+  `testDecidedRefusalWithoutACarrierLinkIsConsumed`,
+  `testDecidedIsExactlyWhatTheAcquirerNeverRetries`,
+  `testRestartedChildAdmitsTheParentCarriedBlockFromItsInboxWeighed`,
+  `testPortableAttachmentsKeepDistinctRootsForTheSameChildWhileAdmissionIsBlocked`);
+  a child whose reservation was refused or timed out is asked again — the
+  next reconcile visits every dirty child, whether or not anything is
+  desired of it (`testRefusedReservationLeavesTheChildAskableAgain`); a
+  handed-off candidate's children are relayed down only while the handoff
+  is in flight, not once the candidate is an accepted block
+  (`testCompletedHandoffStopsRelayingItsChildren`); a run
   flows through every level — what Nexus attributes to the middle chain's
   committing block reaches the grandchild, and the middle chain's service
   pushes the run that credit changed to its own children without waiting

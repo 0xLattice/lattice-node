@@ -494,11 +494,11 @@ final class LatticeCtlE2ETests: XCTestCase {
 
         // 1. Seller locks 100 on the child, demanding 60 on the parent.
         let heightBeforeDeposit = await childHeight()
-        try await runCtl([
-            "tx", "deposit", "--chain", "Nexus/Market",
+        try await submitUntilAccepted("child accepts the deposit", host, [
+            "deposit", "--chain", "Nexus/Market",
             "--key", seller.file.path,
             "--swap-nonce", "7", "--demand", "60", "--lock", "100",
-        ], root: host.root)
+        ])
         try await waitFor("deposit mined on the child", seconds: 180) {
             let height = await childHeight()
             let drained = await mempoolDrained(childRPC)
@@ -507,11 +507,11 @@ final class LatticeCtlE2ETests: XCTestCase {
 
         // 2. Buyer pays the demanded 60 on the parent with a receipt. The
         // buyer's nonce follows its mined rewards; `tx` reads it from state.
-        try await runCtl([
-            "tx", "receipt", "--chain", "Nexus", "--key", buyer.file.path,
+        try await submitUntilAccepted("parent accepts the receipt", host, [
+            "receipt", "--chain", "Nexus", "--key", buyer.file.path,
             "--swap-nonce", "7", "--demand", "60",
             "--demander", seller.address, "--directory", "Market",
-        ], root: host.root)
+        ])
         try await waitFor("receipt mined on the parent", seconds: 180) {
             await mempoolDrained(host.nexusRPC)
         }
@@ -655,11 +655,11 @@ final class LatticeCtlE2ETests: XCTestCase {
 
         // 1. Seller locks 100 on the grandchild, demanding 60 on Market.
         let beforeDeposit = await height(stallsRPC)
-        try await runCtl([
-            "tx", "deposit", "--chain", "Nexus/Market/Stalls",
+        try await submitUntilAccepted("grandchild accepts the deposit", host, [
+            "deposit", "--chain", "Nexus/Market/Stalls",
             "--key", seller.file.path,
             "--swap-nonce", "9", "--demand", "60", "--lock", "100",
-        ], root: host.root)
+        ])
         try await waitFor("deposit mined on the grandchild", seconds: 240) {
             let now = await height(stallsRPC)
             let empty = await drained(stallsRPC)
@@ -702,11 +702,14 @@ final class LatticeCtlE2ETests: XCTestCase {
         }
 
         // 4. The credit is real: the buyer spends it onward to the sink.
+        // Retried like every other submit here: the tip moving under the
+        // preflight refuses a submit outright (`templateContextChanged`),
+        // and at the coordinator's block rate it does so routinely.
         let beforeSpend = await height(stallsRPC)
-        try await runCtl([
-            "tx", "send", "--chain", "Nexus/Market/Stalls",
+        try await submitUntilAccepted("grandchild accepts the spend", host, [
+            "send", "--chain", "Nexus/Market/Stalls",
             "--key", buyer.file.path, "--to", sink.address, "--amount", "40",
-        ], root: host.root)
+        ])
         try await waitFor("dependent spend mined on the grandchild", seconds: 240) {
             let now = await height(stallsRPC)
             let empty = await drained(stallsRPC)
@@ -909,6 +912,70 @@ final class LatticeCtlE2ETests: XCTestCase {
             try? await Task.sleep(for: e2eScaled(.seconds(2)))
             return false
         }
+    }
+
+    /// The shape merged mining produces, with a stop in it: the coordinator
+    /// mines all three chains; Market's node is stopped mid-round (SIGTERM,
+    /// the deploy case — its shutdown grace is where a parent-carried block
+    /// it had just deferred gets cut off with no retry in memory), while
+    /// the coordinator's next solves keep carrying that block's sibling on
+    /// Nexus's chain. Mining then stops; Market restarts. It must admit the
+    /// owed block from its durable edge and be credited the Nexus work above
+    /// that block's committer — the run its own tip could never be credited
+    /// through, sitting on a carrier Nexus never admitted. The losing
+    /// interleaving is the coordinator's to produce, so this is the realistic
+    /// scenario, not the deterministic guard: that is the process and
+    /// network unit tests, which fail if a deferral consumes the inbox or the
+    /// inbox is seeded eagerly.
+    func testChildStoppedDuringCoMiningIsCreditedAfterRestart() async throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lattice-node-e2e-ctlkeys-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let miner = try await makeKey(scratch, "minerCrash")
+        let holder = try await makeKey(scratch, "holderCrash")
+        let host = try await bringUpMiningHost(miner: miner)
+        let marketRPC = try await deployChild(
+            host, directory: "Market", premineTo: holder.address,
+            fund: try await makeKey(scratch, "fundMarketCrash")
+        )
+        let stallsRPC = try await deployChild(
+            host, directory: "Stalls", parent: "Nexus/Market", premineTo: holder.address,
+            fund: try await makeKey(scratch, "fundStallsCrash")
+        )
+        _ = try await runCtl(["mine", "start"], root: host.root)
+        func height(_ rpc: UInt16) async -> Int? { await health(rpc)?["height"] as? Int }
+        func active(_ rpc: UInt16) async -> Bool { await health(rpc)?["phase"] as? String == "active" }
+        let applied = "lattice_parent_run_reports_applied_total"
+        func nexusWeighedHeight() async -> Int? {
+            await metric(host.nexusRPC, "lattice_chain_tip_height", label: "tier=\"weighed\"")
+        }
+        try await waitFor("both descendants co-mined", seconds: 120) {
+            let market = await height(marketRPC) ?? 0
+            let stalls = await height(stallsRPC) ?? 0
+            return market >= 1 && stalls >= 1
+        }
+        // Stop Market mid-round, while the coordinator keeps mining.
+        try await stopChain(host, "Nexus/Market")
+        let nexusAtCrashValue = await nexusWeighedHeight()
+        let nexusAtCrash = try XCTUnwrap(nexusAtCrashValue, "Nexus metrics")
+        try await waitFor("Nexus mined on through the crash", seconds: 120) {
+            (await nexusWeighedHeight() ?? 0) >= nexusAtCrash + 3
+        }
+        _ = try await runCtl(["mine", "stop"], root: host.root)
+        try await waitForStableHeight(host.nexusRPC)
+
+        // Market returns with nothing but its own store: the owed block is
+        // admitted from the durable edge, its committer's run is asked for,
+        // and the outage work is credited. Counters restart with the process.
+        _ = try await runCtl(["up"], root: host.root)
+        try await waitFor("Market back", seconds: 60) { await active(marketRPC) }
+        try await waitFor("Market credited the outage work after the restart", seconds: 90) {
+            (await metric(marketRPC, applied) ?? 0) >= 1
+        }
+        let conflictsValue = await metric(marketRPC, "lattice_parent_run_reports_refused_total", label: "reason=\"locationConflict\"")
+        let conflicts = try XCTUnwrap(conflictsValue)
+        XCTAssertEqual(conflicts, 0)
     }
 
     /// Stop one chain's node the way `lattice down` would (SIGTERM, then

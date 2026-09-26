@@ -2507,6 +2507,63 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertEqual(attemptCount, 2)
     }
 
+    /// A request relayed from the parent, after one of this chain's
+    /// candidates was handed off: the handed-off candidate's child is sent
+    /// down as a handoff and never also as a reservation — handoffs dominate,
+    /// the sets are disjoint, and every later request is still accepted.
+    /// Before, both derivations included the handed-off candidate's children,
+    /// so the first request after a handoff overlapped, was refused, and the
+    /// parent never asked this chain for a candidate again.
+    func testRelayedReservationsExcludeHandedOffChildren() async throws {
+        // The middle chain's identity is irrelevant to the reservation rule;
+        // a Nexus process is the cheapest chain with a tip to build on.
+        let middleProcess = try await nexusProcess()
+        let leafPeer = try PeerKey(rawRepresentation: Data(repeating: 7, count: 32))
+        let leafCandidate = try HeaderImpl<PublicKey>(node: PublicKey(key: "leaf-candidate")).rawCID
+        let previous = try await middleProcess.canonicalTipBlock()
+        var candidates: [String] = []
+        for nonce in UInt64(1)...2 {
+            let block = try await BlockBuilder.buildBlock(
+                previous: previous, timestamp: previous.timestamp + Int64(nonce),
+                target: .max, nonce: nonce, fetcher: middleProcess
+            )
+            let header = try BlockHeader(node: block)
+            try await middleProcess.storeContextualCandidate(
+                header, fetcher: middleProcess,
+                children: [ChildCandidateReservationReference(peerKey: leafPeer, candidateCID: leafCandidate)],
+                capacity: 16
+            )
+            candidates.append(header.rawCID)
+        }
+        let updates = ReservationUpdateRecorder()
+        let service = makeService(
+            process: middleProcess,
+            childCandidateReservationReconciler: { update in
+                await updates.record(update)
+                return Set(update.reservations).isDisjoint(with: Set(update.handoffs))
+            }
+        )
+        let handedOff = await service.replaceIssuedCandidateReservations(
+            NetworkCandidateReservationUpdate(candidateCIDs: [candidates[0]], handoffCIDs: [candidates[1]])
+        )
+        XCTAssertTrue(handedOff)
+        // Every later request, with the handoff durable: still disjoint, still accepted.
+        let later = await service.replaceIssuedCandidateReservations(
+            NetworkCandidateReservationUpdate(candidateCIDs: [candidates[0]], handoffCIDs: [])
+        )
+        XCTAssertTrue(later, "a request after a handoff is accepted")
+        let empty = await service.replaceIssuedCandidateReservations(
+            NetworkCandidateReservationUpdate(candidateCIDs: [], handoffCIDs: [])
+        )
+        XCTAssertTrue(empty, "an empty request after a handoff is accepted")
+        let recorded = await updates.snapshot()
+        XCTAssertEqual(recorded.count, 3)
+        for update in recorded {
+            XCTAssertEqual(update.handoffs.map(\.candidateCID), [leafCandidate], "the handed-off child is a handoff")
+            XCTAssertTrue(update.reservations.isEmpty, "never also a reservation")
+        }
+    }
+
     func testReservationSnapshotRecursesThroughThreeChainLevels()
         async throws
     {
@@ -4549,4 +4606,10 @@ private extension Block {
             nonce: nonce
         )
     }
+}
+
+private actor ReservationUpdateRecorder {
+    private var updates: [ChildCandidateReservationUpdate] = []
+    func record(_ update: ChildCandidateReservationUpdate) { updates.append(update) }
+    func snapshot() -> [ChildCandidateReservationUpdate] { updates }
 }
