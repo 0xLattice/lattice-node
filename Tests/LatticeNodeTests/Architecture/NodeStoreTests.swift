@@ -1217,38 +1217,6 @@ final class NodeStoreTests: XCTestCase {
         XCTAssertEqual(betaSummaries.first?.rootCID, carrierHeader.rawCID)
     }
 
-    /// A parent reserves, or hands off, the candidate it just carried. If
-    /// this chain has already ACCEPTED that block — a weighed admission lands
-    /// before the parent's request — the block itself satisfies the request:
-    /// accepted, not refused, nothing retained or marked. A candidate this
-    /// chain neither holds nor accepted is still refused.
-    func testAcceptedBlockSatisfiesAReservationForIt() async throws {
-        let store = try makeStore(chainPath: ["Nexus", "Child"])
-        let accepted = testCID("accepted-candidate")
-        let unknown = testCID("unknown-candidate")
-        try await store.stage(
-            blockBatch(postStateCID: "accepted-state", blockHash: accepted),
-            volumeRoots: []
-        )
-        let children = try await store.contextualCandidateChildren(candidateCIDs: [accepted])
-        XCTAssertEqual(children, [], "an accepted block's children are reconciled by its admission")
-        let reserved = try await store.replaceIssuedContextualCandidates(
-            [accepted], handoffs: [], capacity: 4
-        )
-        XCTAssertTrue(reserved, "reserved by acceptance")
-        let handedOff = try await store.replaceIssuedContextualCandidates(
-            [], handoffs: [accepted], capacity: 4
-        )
-        XCTAssertTrue(handedOff, "handed off by acceptance")
-        let rows = try await store.issuedContextualCandidateCIDs()
-        XCTAssertTrue(rows.isEmpty, "nothing retained or marked for it")
-        let refusedChildren = try await store.contextualCandidateChildren(candidateCIDs: [accepted, unknown])
-        XCTAssertNil(refusedChildren, "a candidate neither held nor accepted is refused")
-        let refused = try await store.replaceIssuedContextualCandidates(
-            [unknown], handoffs: [], capacity: 4
-        )
-        XCTAssertFalse(refused)
-    }
 
     func testIssuedCarrierEvidencePersistsProofAndLinkTogether() async throws {
         let path = temporaryDirectory().appendingPathComponent("state.db")
@@ -2265,78 +2233,13 @@ final class NodeStoreTests: XCTestCase {
         XCTAssertNil(retainedShared)
     }
 
-    func testContextualOffersCannotEvictIssuedReservations() async throws {
-        let directory = temporaryDirectory()
-        let broker = try DiskBroker(
-            path: directory.appendingPathComponent("volumes.db").path
-        )
-        let store = try makeStore(
-            path: directory.appendingPathComponent("state.db"),
-            broker: broker
-        )
-        let volumes = try ["issued", "old-offer", "new-offer"].map {
-            try VolumeImpl<PublicKey>(node: PublicKey(key: $0))
-        }
-        for volume in volumes {
-            try await volume.store(storer: broker)
-        }
-        let issued = volumes[0].rawCID
-        let oldOffer = volumes[1].rawCID
-        let newOffer = volumes[2].rawCID
-        let child = ChildCandidateReservationReference(
-            peerKey: try PeerKey(
-                rawRepresentation: Data(repeating: 0xaa, count: PeerKey.byteCount)
-            ),
-            candidateCID: oldOffer
-        )
-        try await store.persistContextualCandidateRoots(
-            candidateCID: issued,
-            roots: [issued],
-            children: [child],
-            capacity: 1
-        )
-        let firstReplacement = try await store.replaceIssuedContextualCandidates(
-            [issued],
-            capacity: 1
-        )
-        XCTAssertTrue(firstReplacement)
-        try await store.persistContextualCandidateRoots(
-            candidateCID: oldOffer,
-            roots: [oldOffer],
-            capacity: 1
-        )
-        try await store.persistContextualCandidateRoots(
-            candidateCID: newOffer,
-            roots: [newOffer],
-            capacity: 1
-        )
-        let retainedRoots = try await store.contextualCandidateVolumeRoots()
-        XCTAssertEqual(Set(retainedRoots), Set([issued, newOffer]))
-        let retainedChildren = try await store.contextualCandidateChildren(
-            candidateCIDs: [issued]
-        )
-        XCTAssertEqual(retainedChildren, [child])
-        _ = try await broker.evictUnpinned(graceSeconds: 0)
-        let retainedIssued = await broker.fetchVolumeLocal(root: issued)
-        let evictedOldOffer = await broker.fetchVolumeLocal(root: oldOffer)
-        let retainedNewOffer = await broker.fetchVolumeLocal(root: newOffer)
-        XCTAssertNotNil(retainedIssued)
-        XCTAssertNil(evictedOldOffer)
-        XCTAssertNotNil(retainedNewOffer)
 
-        let secondReplacement = try await store.replaceIssuedContextualCandidates(
-            [newOffer],
-            capacity: 1
-        )
-        XCTAssertTrue(secondReplacement)
-        _ = try await broker.evictUnpinned(graceSeconds: 0)
-        let releasedIssued = await broker.fetchVolumeLocal(root: issued)
-        let promotedOffer = await broker.fetchVolumeLocal(root: newOffer)
-        XCTAssertNil(releasedIssued)
-        XCTAssertNotNil(promotedOffer)
-    }
-
-    func testParentEvidenceHandoffSurvivesReleaseUntilAdmissionOwnsRoots()
+    /// An offer this chain built for its parent is kept by its own budget;
+    /// once the parent's evidence names it carried (the handoff mark the
+    /// inbox retention sets), no wave of newer offers evicts it — its body
+    /// and post-state stay pinned until the carried block's admission owns
+    /// those roots, and only then are they released.
+    func testHandedOffOfferSurvivesNewerOffersUntilAdmissionOwnsRoots()
         async throws
     {
         let directory = temporaryDirectory()
@@ -2353,45 +2256,33 @@ final class NodeStoreTests: XCTestCase {
         let shared = try VolumeImpl<PublicKey>(
             node: PublicKey(key: "handoff-shared")
         )
-        let storer = broker
-        try await candidate.store(storer: storer)
-        try await shared.store(storer: storer)
-        let descendant = ChildCandidateReservationReference(
-            peerKey: try PeerKey(
-                rawRepresentation: Data(
-                    repeating: 0xbb,
-                    count: PeerKey.byteCount
-                )
-            ),
-            candidateCID: shared.rawCID
-        )
+        try await candidate.store(storer: broker)
+        try await shared.store(storer: broker)
         try await store.persistContextualCandidateRoots(
             candidateCID: candidate.rawCID,
             roots: [candidate.rawCID, shared.rawCID],
-            children: [descendant],
-            capacity: 16
+            capacity: 2
         )
-        let issuedReplacement = try await store.replaceIssuedContextualCandidates(
-            [candidate.rawCID],
-            capacity: 16
-        )
-        XCTAssertTrue(issuedReplacement)
-        let beganHandoff = try await store.beginContextualCandidateHandoff(
+        let marked = try await store.markContextualCandidateHandoff(
             candidateCID: candidate.rawCID
         )
-        XCTAssertTrue(beganHandoff)
+        XCTAssertTrue(marked)
 
-        let releasedReservation = try await store
-            .replaceIssuedContextualCandidates(
-            [],
-            capacity: 16
-        )
-        XCTAssertTrue(releasedReservation)
-        let issued = try await store.issuedContextualCandidateCIDs()
-        XCTAssertTrue(issued.isEmpty)
-        let retainedDescendants = try await store
-            .contextualCandidateChildren(candidateCIDs: [])
-        XCTAssertEqual(retainedDescendants, [descendant])
+        // Newer offers beyond the budget evict offers, never the handoff.
+        for index in 0..<3 {
+            let newer = try VolumeImpl<PublicKey>(
+                node: PublicKey(key: "newer-offer-\(index)")
+            )
+            try await newer.store(storer: broker)
+            try await store.persistContextualCandidateRoots(
+                candidateCID: newer.rawCID,
+                roots: [newer.rawCID],
+                capacity: 2
+            )
+        }
+        let retained = try await store.contextualCandidateVolumeRoots()
+        XCTAssertTrue(retained.contains(candidate.rawCID), "the handoff stays")
+        XCTAssertTrue(retained.contains(shared.rawCID))
         _ = try await broker.evictUnpinned(graceSeconds: 0)
         let retainedCandidate = await broker.fetchVolumeLocal(
             root: candidate.rawCID
@@ -2412,9 +2303,6 @@ final class NodeStoreTests: XCTestCase {
             candidateCID: candidate.rawCID
         )
         XCTAssertTrue(removedAfterAdmission)
-        let releasedDescendants = try await store
-            .currentContextualCandidateChildren()
-        XCTAssertTrue(releasedDescendants.isEmpty)
         _ = try await broker.evictUnpinned(graceSeconds: 0)
         let releasedCandidate = await broker.fetchVolumeLocal(
             root: candidate.rawCID
@@ -2424,13 +2312,11 @@ final class NodeStoreTests: XCTestCase {
         XCTAssertNil(releasedShared)
     }
 
-    /// A handed-off candidate's children are relayed down while the handoff
-    /// is in flight and not once the candidate is an accepted block — even
-    /// though the row outlives acceptance (a weighed admission owns the
-    /// boundary, so the row keeps pinning the body). Relayed by row alone,
-    /// the set grows past the request's per-peer cap and every reservation
-    /// after that is refused for good.
-    func testCompletedHandoffStopsRelayingItsChildren() async throws {
+    /// Offers are this chain's own retention: the budget keeps the newest
+    /// and drops the oldest whole — row and pinned roots together — so a
+    /// child that rebuilds often cannot pin without bound, and an offer the
+    /// parent never carried costs nothing for long.
+    func testOfferBudgetEvictsTheOldestOfferWhole() async throws {
         let directory = temporaryDirectory()
         let broker = try DiskBroker(
             path: directory.appendingPathComponent("volumes.db").path
@@ -2439,111 +2325,37 @@ final class NodeStoreTests: XCTestCase {
             path: directory.appendingPathComponent("state.db"),
             broker: broker
         )
-        let candidate = try VolumeImpl<PublicKey>(
-            node: PublicKey(key: "completed-handoff-candidate")
-        )
-        try await candidate.store(storer: broker)
-        let grandchild = try VolumeImpl<PublicKey>(
-            node: PublicKey(key: "completed-handoff-grandchild")
-        )
-        let descendant = ChildCandidateReservationReference(
-            peerKey: try PeerKey(
-                rawRepresentation: Data(
-                    repeating: 0xbc,
-                    count: PeerKey.byteCount
-                )
-            ),
-            candidateCID: grandchild.rawCID
-        )
-        try await store.persistContextualCandidateRoots(
-            candidateCID: candidate.rawCID,
-            roots: [candidate.rawCID],
-            children: [descendant],
-            capacity: 16
-        )
-        let issued = try await store.replaceIssuedContextualCandidates(
-            [candidate.rawCID], capacity: 16
-        )
-        XCTAssertTrue(issued)
-        let began = try await store.beginContextualCandidateHandoff(
-            candidateCID: candidate.rawCID
-        )
-        XCTAssertTrue(began)
-        let inFlight = try await store.contextualCandidateChildren(candidateCIDs: [])
-        XCTAssertEqual(inFlight, [descendant], "in flight: relayed")
-
-        // Accepted weighed: the batch owns no body, so the row (and its pin)
-        // survives — and the handoff is complete all the same.
-        try await store.stage(
-            blockBatch(postStateCID: "completed-handoff-state", blockHash: candidate.rawCID),
-            volumeRoots: []
-        )
-        let removed = try await store.removeContextualCandidateIfAdmitted(
-            candidateCID: candidate.rawCID
-        )
-        XCTAssertFalse(removed, "the weighed batch does not own the body: the row stays")
-        let afterAcceptance = try await store.contextualCandidateChildren(candidateCIDs: [])
-        XCTAssertEqual(afterAcceptance, [], "accepted: the handoff is complete, nothing to relay")
-        let current = try await store.currentContextualCandidateChildren()
-        XCTAssertEqual(current, [])
+        var offers: [VolumeImpl<PublicKey>] = []
+        for index in 0..<3 {
+            let offer = try VolumeImpl<PublicKey>(
+                node: PublicKey(key: "offer-\(index)")
+            )
+            try await offer.store(storer: broker)
+            try await store.persistContextualCandidateRoots(
+                candidateCID: offer.rawCID,
+                roots: [offer.rawCID],
+                capacity: 2
+            )
+            offers.append(offer)
+        }
+        let retained = try await store.contextualCandidateVolumeRoots()
+        XCTAssertEqual(Set(retained), Set([offers[1].rawCID, offers[2].rawCID]))
         _ = try await broker.evictUnpinned(graceSeconds: 0)
-        let stillPinned = await broker.fetchVolumeLocal(root: candidate.rawCID)
-        XCTAssertNotNil(stillPinned, "the row still pins the body for the validate walk")
-    }
-
-    func testHandoffClearsIssuedAndSnapshotCannotDemoteHandoff()
-        async throws
-    {
-        let directory = temporaryDirectory()
-        let broker = try DiskBroker(
-            path: directory.appendingPathComponent("volumes.db").path
-        )
-        let store = try makeStore(
-            path: directory.appendingPathComponent("state.db"),
-            broker: broker
-        )
-        let candidate = try VolumeImpl<PublicKey>(
-            node: PublicKey(key: "exclusive-candidate")
-        )
-        try await candidate.store(storer: broker)
-        try await store.persistContextualCandidateRoots(
-            candidateCID: candidate.rawCID,
-            roots: [candidate.rawCID],
-            capacity: 16
-        )
-        let issuedReplacement = try await store
-            .replaceIssuedContextualCandidates(
-            [candidate.rawCID],
-            capacity: 16
-        )
-        XCTAssertTrue(issuedReplacement)
-        let issuedBeforeHandoff = try await store
-            .issuedContextualCandidateCIDs()
-        XCTAssertEqual(issuedBeforeHandoff, [candidate.rawCID])
-
-        // Handoff ownership replaces the reservation rather than stacking on
-        // top of it: issued and handoff are mutually exclusive.
-        let beganHandoff = try await store.beginContextualCandidateHandoff(
-            candidateCID: candidate.rawCID
-        )
-        XCTAssertTrue(beganHandoff)
-        let issuedAfterHandoff = try await store
-            .issuedContextualCandidateCIDs()
-        XCTAssertTrue(issuedAfterHandoff.isEmpty)
-
-        // A later parent snapshot cannot demote durable handoff ownership
-        // back to a plain reservation.
-        let reissueAttempt = try await store
-            .replaceIssuedContextualCandidates(
-            [candidate.rawCID],
-            capacity: 16
-        )
-        XCTAssertTrue(reissueAttempt)
-        let issuedAfterReissue = try await store
-            .issuedContextualCandidateCIDs()
-        XCTAssertTrue(issuedAfterReissue.isEmpty)
+        let evicted = await broker.fetchVolumeLocal(root: offers[0].rawCID)
+        XCTAssertNil(evicted, "the oldest offer's body is released with its row")
         try await store.auditNormalizedIndexes()
+        // Re-offering the same candidate is a touch, not a second row.
+        try await offers[2].store(storer: broker)
+        try await store.persistContextualCandidateRoots(
+            candidateCID: offers[2].rawCID,
+            roots: [offers[2].rawCID],
+            capacity: 2
+        )
+        let afterTouch = try await store.contextualCandidateVolumeRoots()
+        XCTAssertEqual(Set(afterTouch), Set([offers[1].rawCID, offers[2].rawCID]))
     }
+
+
 
     func testHandoffBudgetEvictsOldestAndEvictedCandidateCanReturn()
         async throws
@@ -2571,10 +2383,11 @@ final class NodeStoreTests: XCTestCase {
             candidates.append(candidate)
         }
         for candidate in candidates {
-            let began = try await store.beginContextualCandidateHandoff(
+            let began = try await store.markContextualCandidateHandoff(
                 candidateCID: candidate.rawCID
             )
             XCTAssertTrue(began)
+            try await store.enforceHandoffCandidateBudget()
         }
 
         // The budget keeps the two newest handoffs and drops the oldest
@@ -2601,15 +2414,102 @@ final class NodeStoreTests: XCTestCase {
             roots: [returning.rawCID],
             capacity: 16
         )
-        let readmitted = try await store.beginContextualCandidateHandoff(
+        let readmitted = try await store.markContextualCandidateHandoff(
             candidateCID: returning.rawCID
         )
         XCTAssertTrue(readmitted)
+        try await store.enforceHandoffCandidateBudget()
         let afterReturn = try await store.contextualCandidateVolumeRoots()
         XCTAssertEqual(
             Set(afterReturn),
             Set([candidates[2].rawCID, returning.rawCID])
         )
+        try await store.auditNormalizedIndexes()
+    }
+
+    /// The child's carry gate asks for handoffs the parent's evidence still
+    /// holds in the inbox: a handoff mark alone, with no inbox entry (the
+    /// admission decided, or the mark predates a wipe of the inbox), is
+    /// not one, so the gate cannot latch on it.
+    func testPendingHandoffsAreThoseStillInTheInbox() async throws {
+        let directory = temporaryDirectory()
+        let broker = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let store = try makeStore(
+            path: directory.appendingPathComponent("state.db"),
+            broker: broker,
+            handoffCandidateCapacity: 2
+        )
+        let candidate = try VolumeImpl<PublicKey>(
+            node: PublicKey(key: "pending-handoff-candidate")
+        )
+        try await candidate.store(storer: broker)
+        try await store.persistContextualCandidateRoots(
+            candidateCID: candidate.rawCID,
+            roots: [candidate.rawCID],
+            capacity: 16
+        )
+        let marked = try await store.markContextualCandidateHandoff(
+            candidateCID: candidate.rawCID
+        )
+        XCTAssertTrue(marked)
+        let pending = try await store.pendingHandoffChildCIDs()
+        XCTAssertEqual(pending, [], "a handoff with no inbox entry is decided, not pending")
+    }
+
+    /// The handoff budget runs on the offer cadence: storing an offer sheds
+    /// the oldest handoff beyond capacity, with no explicit call, so a run
+    /// that never restarts still keeps handoffs bounded.
+    func testStoringAnOfferEnforcesTheHandoffBudget() async throws {
+        let directory = temporaryDirectory()
+        let broker = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let store = try makeStore(
+            path: directory.appendingPathComponent("state.db"),
+            broker: broker,
+            handoffCandidateCapacity: 2
+        )
+        var handoffs: [VolumeImpl<PublicKey>] = []
+        for index in 0..<3 {
+            let candidate = try VolumeImpl<PublicKey>(
+                node: PublicKey(key: "offer-budget-handoff-\(index)")
+            )
+            try await candidate.store(storer: broker)
+            try await store.persistContextualCandidateRoots(
+                candidateCID: candidate.rawCID,
+                roots: [candidate.rawCID],
+                capacity: 16
+            )
+            let began = try await store.markContextualCandidateHandoff(
+                candidateCID: candidate.rawCID
+            )
+            XCTAssertTrue(began)
+            handoffs.append(candidate)
+        }
+        // Three handoffs stand over a budget of two until the next offer.
+        let beforeOffer = try await store.contextualCandidateVolumeRoots()
+        XCTAssertEqual(Set(beforeOffer), Set(handoffs.map(\.rawCID)))
+
+        let offer = try VolumeImpl<PublicKey>(
+            node: PublicKey(key: "offer-budget-offer")
+        )
+        try await offer.store(storer: broker)
+        try await store.persistContextualCandidateRoots(
+            candidateCID: offer.rawCID,
+            roots: [offer.rawCID],
+            capacity: 16
+        )
+        let afterOffer = try await store.contextualCandidateVolumeRoots()
+        XCTAssertEqual(
+            Set(afterOffer),
+            Set([handoffs[1].rawCID, handoffs[2].rawCID, offer.rawCID]),
+            "the oldest handoff is shed by the offer"
+        )
+        _ = try await broker.evictUnpinned(graceSeconds: 0)
+        let evicted = await broker.fetchVolumeLocal(root: handoffs[0].rawCID)
+        XCTAssertNil(evicted)
         try await store.auditNormalizedIndexes()
     }
 

@@ -79,7 +79,8 @@ final class MiningWorkerContractTests: XCTestCase {
                 searchWitness: nil,
                 thresholds: [.max]
             ),
-            maximumLifetimeMilliseconds: 30_000
+            maximumLifetimeMilliseconds: 30_000,
+            templateDigest: "digest"
         )
         let decoded = try JSONDecoder().decode(
             TemplateResponse.self,

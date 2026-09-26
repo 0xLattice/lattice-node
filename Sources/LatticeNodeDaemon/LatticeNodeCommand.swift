@@ -154,14 +154,19 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                 guard let network else { return [] }
                 return await network.directChildCandidates(context)
             },
-            childCandidateReservationReconciler: { [weak network] update in
-                guard let network else {
-                    return update.reservations.isEmpty
-                        && update.handoffs.isEmpty
-                }
-                return await network.reconcileChildCandidateReservations(
-                    update
+            chainStateChangePublisher: { [weak network] in
+                await network?.chainStateChanged()
+            },
+            descendantPlanPublisher: { [weak network] rewards, minimumWork in
+                await network?.updateDescendantPlan(
+                    rewards: rewards,
+                    minimumWork: minimumWork
                 )
+            },
+            childCandidateDigestProvider: { [weak network] parentStateCID in
+                await network?.childCandidateDigestInput(
+                    parentStateCID: parentStateCID
+                ) ?? []
             },
             childProofPublisher: { [weak network] publication in
                 guard let network else { throw CancellationError() }
@@ -215,12 +220,6 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                 return try await service.miningCandidate(
                     for: context,
                     parentContentSource: parentContentSource
-                )
-            },
-            candidateReservations: { [weak service] update in
-                guard let service else { return false }
-                return await service.replaceIssuedCandidateReservations(
-                    update
                 )
             },
             admission: { [weak service] admission in

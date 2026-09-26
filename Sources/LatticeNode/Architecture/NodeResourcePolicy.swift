@@ -15,6 +15,11 @@ public struct NodeResourcePolicy: Sendable, Equatable {
     /// consensus commitment: an evicted candidate whose branch returns is
     /// re-acquired through ordinary verified acquisition. Oldest first.
     public let maximumRetainedHandoffCandidates: Int
+    /// Candidates this chain built for its parent and still keeps — body,
+    /// transactions, post-state — so a parent block that carries one can be
+    /// admitted from what is held here. A local budget, never a parent's
+    /// reservation; the oldest offer goes first.
+    public let maximumRetainedCandidateOffers: Int
     /// How many recent accepted carriers the late-child evidence backfill walks
     /// when a child connects, self-issuing that child's securing proofs rather
     /// than relying on a peer to serve them. Not a limit on validity or
@@ -50,6 +55,7 @@ public struct NodeResourcePolicy: Sendable, Equatable {
         maximumAcquisitionMembers: Int = Int(UInt16.max),
         maximumAcquisitionStorageBytes: Int = 64 * 1_024 * 1_024,
         maximumRetainedHandoffCandidates: Int = 1_024,
+        maximumRetainedCandidateOffers: Int = 64,
         childEvidenceBackfillCarrierWindow: Int = 256,
         maximumRetainedOffChainValidatedBlocks: Int = 1_024,
         offChainValidatedRetentionDepth: Int = 256
@@ -63,6 +69,7 @@ public struct NodeResourcePolicy: Sendable, Equatable {
                 && maximumAcquisitionMembers > 0
                 && maximumAcquisitionStorageBytes > 0
                 && maximumRetainedHandoffCandidates > 0
+                && maximumRetainedCandidateOffers > 0
                 && childEvidenceBackfillCarrierWindow > 0
                 && maximumRetainedOffChainValidatedBlocks >= 0
                 && offChainValidatedRetentionDepth >= 0
@@ -75,6 +82,7 @@ public struct NodeResourcePolicy: Sendable, Equatable {
         self.maximumAcquisitionMembers = maximumAcquisitionMembers
         self.maximumAcquisitionStorageBytes = maximumAcquisitionStorageBytes
         self.maximumRetainedHandoffCandidates = maximumRetainedHandoffCandidates
+        self.maximumRetainedCandidateOffers = maximumRetainedCandidateOffers
         self.childEvidenceBackfillCarrierWindow = childEvidenceBackfillCarrierWindow
         self.maximumRetainedOffChainValidatedBlocks =
             maximumRetainedOffChainValidatedBlocks

@@ -4,6 +4,38 @@ import XCTest
 @testable import LatticeNode
 
 final class CandidateAcquirerTests: XCTestCase {
+    /// A candidate ready for, or in, its admission is awaiting admission;
+    /// one parked on evidence, or unknown, is not. The child's offer gate
+    /// asks this for its own carried candidates: while one is in flight the
+    /// chain builds nothing, and a park lifts the deferral.
+    func testAwaitingAdmissionIsReadyOrActiveNeverParked() throws {
+        let blockCID = "awaiting-admission"
+        let rootCID = "awaiting-root"
+        var acquirer = CandidateAcquirer()
+        XCTAssertFalse(acquirer.isAwaitingAdmission(blockCID))
+        XCTAssertTrue(acquirer.observe(.init(
+            blockCID: blockCID,
+            package: nil,
+            recoveryRootCID: rootCID
+        )).accepted)
+        XCTAssertTrue(acquirer.isAwaitingAdmission(blockCID), "ready")
+        let ticket = try XCTUnwrap(acquirer.next())
+        XCTAssertTrue(acquirer.isAwaitingAdmission(blockCID), "active")
+        XCTAssertTrue(acquirer.complete(
+            ticket.ticket,
+            resolution: .wait(.evidence)
+        ))
+        XCTAssertFalse(acquirer.isAwaitingAdmission(blockCID), "parked")
+        acquirer.retryExternalDependency(blockCID: blockCID, rootCID: rootCID)
+        XCTAssertTrue(acquirer.isAwaitingAdmission(blockCID), "ready again")
+        let again = try XCTUnwrap(acquirer.next())
+        XCTAssertTrue(acquirer.complete(
+            again.ticket,
+            resolution: .predecessor("awaiting-predecessor")
+        ))
+        XCTAssertFalse(acquirer.isAwaitingAdmission(blockCID), "parked on a predecessor")
+    }
+
     func testParentFactTimeoutRetriesExactUnchangedEvidence() throws {
         let blockCID = "parent-fact-timeout"
         let rootCID = "parent-fact-root"

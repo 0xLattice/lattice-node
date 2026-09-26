@@ -1964,6 +1964,40 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertTrue(legacyOptIn.minimumWork.isEmpty)
     }
 
+    /// The template digest names every input of a template: the validated
+    /// tip, the mempool, and the child candidates held. Status serves the
+    /// same digest a template carries, so a miner comparing the two learns
+    /// its work is stale for a change at any level — a child's fresh
+    /// candidate as much as this chain's own tip.
+    func testTemplateDigestTracksTipMempoolAndChildCandidates() async throws {
+        let process = try await nexusProcess()
+        let candidates = DigestInputs()
+        let service = makeService(
+            process: process,
+            childCandidateDigestProvider: { _ in await candidates.lines() }
+        )
+        let first = try await service.miningTemplate(MiningTemplateRequest())
+        let firstStatus = await service.status().templateDigest
+        XCTAssertEqual(first.templateDigest, firstStatus, "status serves what the template carries")
+
+        // A child candidate arriving changes the digest without any tip move.
+        await candidates.set(["Payments:bafyreicandidate"])
+        let withChild = try await service.miningTemplate(MiningTemplateRequest())
+        XCTAssertNotEqual(withChild.templateDigest, first.templateDigest)
+        let withChildStatus = await service.status().templateDigest
+        XCTAssertEqual(withChild.templateDigest, withChildStatus)
+
+        // The tip moving changes it too.
+        let submitted = try await service.submitWork(SubmitWorkRequest(
+            workID: withChild.workID,
+            nonce: 0
+        ))
+        XCTAssertEqual(submitted.disposition, .canonicalized)
+        let afterBlock = await service.status().templateDigest
+        XCTAssertNotNil(afterBlock)
+        XCTAssertNotEqual(afterBlock, withChild.templateDigest)
+    }
+
     func testAuthenticatedProviderSuppliesOrdinaryChildCandidate() async throws {
         let process = try await nexusProcess()
         let parent = try await process.canonicalTipBlock()
@@ -2375,7 +2409,11 @@ final class ChainServiceTests: XCTestCase {
         )
     }
 
-    func testAbandonedParentCarriersDoNotExhaustChildCandidates() async throws {
+    /// Many carriers on one parent tip share one parent state, so they
+    /// share one candidate: the child rebuilds only when an input of the
+    /// candidate changed, and a carrier's timestamp is not one. Twenty
+    /// requests cost one build and hold one candidate.
+    func testCarriersOnOneParentTipShareOneChildCandidate() async throws {
         let fixture = try await activeChildService(spec: NexusGenesis.spec)
         var candidateCIDs: Set<String> = []
 
@@ -2396,313 +2434,13 @@ final class ChainServiceTests: XCTestCase {
             candidateCIDs.insert(try BlockHeader(node: candidate.block).rawCID)
         }
 
-        XCTAssertEqual(candidateCIDs.count, 20)
+        XCTAssertEqual(candidateCIDs.count, 1, "one candidate for one parent state")
     }
 
-    func testTemplateIsNotExposedAndLostReservationAckRollsBack() async throws {
-        let process = try await nexusProcess()
-        let peer = try PeerKey(
-            rawRepresentation: Data(repeating: 7, count: PeerKey.byteCount)
-        )
-        let recorder = ReservationRecorder(accept: false)
-        let service = makeService(
-            process: process,
-            childCandidateProvider: { context in
-                let genesis = try await BlockBuilder.buildChildGenesis(
-                    spec: NexusGenesis.spec,
-                    parentState: context.parentCarrier.prevState,
-                    timestamp: context.parentCarrier.timestamp - 1,
-                    target: .max,
-                    fetcher: process
-                )
-                let child = try await BlockBuilder.buildBlock(
-                    previous: genesis,
-                    parentChainBlock: context.parentCarrier,
-                    timestamp: context.parentCarrier.timestamp,
-                    target: .max,
-                    fetcher: process
-                )
-                return [DirectChildCandidate(
-                    directory: "Child",
-                    block: child,
-                    advertiserPeerKey: peer
-                )]
-            },
-            childCandidateReservationReconciler: { update in
-                await recorder.reconcile(update)
-            }
-        )
 
-        await XCTAssertThrowsErrorAsync(
-            try await service.miningTemplate(MiningTemplateRequest())
-        ) { error in
-            XCTAssertEqual(
-                error as? ChainServiceError,
-                .childCandidateReservationFailed
-            )
-        }
-        let snapshots = await recorder.snapshots()
-        XCTAssertEqual(snapshots.count, 4)
-        XCTAssertEqual(snapshots.first?.count, 1)
-        XCTAssertEqual(snapshots[1], [])
-        XCTAssertEqual(snapshots[2].count, 1)
-        XCTAssertEqual(snapshots[3], [])
-        let childStateAfterLostAck = await recorder.current()
-        XCTAssertTrue(childStateAfterLostAck.isEmpty)
-    }
 
-    func testTemplateRebuildOmitsReservationFailureButKeepsHealthySibling()
-        async throws
-    {
-        let process = try await nexusProcess()
-        let failedPeer = try PeerKey(
-            rawRepresentation: Data(repeating: 0x61, count: PeerKey.byteCount)
-        )
-        let healthyPeer = try PeerKey(
-            rawRepresentation: Data(repeating: 0x62, count: PeerKey.byteCount)
-        )
-        let attempts = AttemptCounter()
-        let service = makeService(
-            process: process,
-            childCandidateProvider: { context in
-                let attempt = await attempts.next()
-                let directories = attempt == 1
-                    ? [("Failed", failedPeer), ("Healthy", healthyPeer)]
-                    : [("Healthy", healthyPeer)]
-                var candidates: [DirectChildCandidate] = []
-                for (directory, peer) in directories {
-                    let genesis = try await BlockBuilder.buildChildGenesis(
-                        spec: NexusGenesis.spec,
-                        parentState: context.parentCarrier.prevState,
-                        timestamp: context.parentCarrier.timestamp - 1,
-                        target: .max,
-                        fetcher: process
-                    )
-                    let child = try await BlockBuilder.buildBlock(
-                        previous: genesis,
-                        parentChainBlock: context.parentCarrier,
-                        timestamp: context.parentCarrier.timestamp,
-                        target: .max,
-                        fetcher: process
-                    )
-                    candidates.append(DirectChildCandidate(
-                        directory: directory,
-                        block: child,
-                        advertiserPeerKey: peer
-                    ))
-                }
-                return candidates
-            },
-            childCandidateReservationReconciler: { update in
-                !update.reservations.contains { $0.peerKey == failedPeer }
-            }
-        )
 
-        let template = try await service.miningTemplate(
-            MiningTemplateRequest()
-        )
-        let children = try XCTUnwrap(template.block.children.node)
-        XCTAssertEqual(Set(try children.allKeysAndValues().keys), ["Healthy"])
-        let attemptCount = await attempts.count()
-        XCTAssertEqual(attemptCount, 2)
-    }
 
-    /// A request relayed from the parent, after one of this chain's
-    /// candidates was handed off: the handed-off candidate's child is sent
-    /// down as a handoff and never also as a reservation — handoffs dominate,
-    /// the sets are disjoint, and every later request is still accepted.
-    /// Before, both derivations included the handed-off candidate's children,
-    /// so the first request after a handoff overlapped, was refused, and the
-    /// parent never asked this chain for a candidate again.
-    func testRelayedReservationsExcludeHandedOffChildren() async throws {
-        // The middle chain's identity is irrelevant to the reservation rule;
-        // a Nexus process is the cheapest chain with a tip to build on.
-        let middleProcess = try await nexusProcess()
-        let leafPeer = try PeerKey(rawRepresentation: Data(repeating: 7, count: 32))
-        let leafCandidate = try HeaderImpl<PublicKey>(node: PublicKey(key: "leaf-candidate")).rawCID
-        let previous = try await middleProcess.canonicalTipBlock()
-        var candidates: [String] = []
-        for nonce in UInt64(1)...2 {
-            let block = try await BlockBuilder.buildBlock(
-                previous: previous, timestamp: previous.timestamp + Int64(nonce),
-                target: .max, nonce: nonce, fetcher: middleProcess
-            )
-            let header = try BlockHeader(node: block)
-            try await middleProcess.storeContextualCandidate(
-                header, fetcher: middleProcess,
-                children: [ChildCandidateReservationReference(peerKey: leafPeer, candidateCID: leafCandidate)],
-                capacity: 16
-            )
-            candidates.append(header.rawCID)
-        }
-        let updates = ReservationUpdateRecorder()
-        let service = makeService(
-            process: middleProcess,
-            childCandidateReservationReconciler: { update in
-                await updates.record(update)
-                return Set(update.reservations).isDisjoint(with: Set(update.handoffs))
-            }
-        )
-        let handedOff = await service.replaceIssuedCandidateReservations(
-            NetworkCandidateReservationUpdate(candidateCIDs: [candidates[0]], handoffCIDs: [candidates[1]])
-        )
-        XCTAssertTrue(handedOff)
-        // Every later request, with the handoff durable: still disjoint, still accepted.
-        let later = await service.replaceIssuedCandidateReservations(
-            NetworkCandidateReservationUpdate(candidateCIDs: [candidates[0]], handoffCIDs: [])
-        )
-        XCTAssertTrue(later, "a request after a handoff is accepted")
-        let empty = await service.replaceIssuedCandidateReservations(
-            NetworkCandidateReservationUpdate(candidateCIDs: [], handoffCIDs: [])
-        )
-        XCTAssertTrue(empty, "an empty request after a handoff is accepted")
-        let recorded = await updates.snapshot()
-        XCTAssertEqual(recorded.count, 3)
-        for update in recorded {
-            XCTAssertEqual(update.handoffs.map(\.candidateCID), [leafCandidate], "the handed-off child is a handoff")
-            XCTAssertTrue(update.reservations.isEmpty, "never also a reservation")
-        }
-    }
-
-    func testReservationSnapshotRecursesThroughThreeChainLevels()
-        async throws
-    {
-        let middleProcess = try await nexusProcess()
-        let leafProcess = try await nexusProcess()
-        let leafPeer = try PeerKey(
-            rawRepresentation: Data(repeating: 0x71, count: PeerKey.byteCount)
-        )
-
-        let leafPrevious = try await leafProcess.canonicalTipBlock()
-        let leafBlock = try await BlockBuilder.buildBlock(
-            previous: leafPrevious,
-            timestamp: leafPrevious.timestamp + 1,
-            target: .max,
-            nonce: 1,
-            fetcher: leafProcess
-        )
-        let leafHeader = try BlockHeader(node: leafBlock)
-        try await leafProcess.storeContextualCandidate(
-            leafHeader,
-            fetcher: leafProcess,
-            capacity: 16
-        )
-
-        let middlePrevious = try await middleProcess.canonicalTipBlock()
-        let middleBlock = try await BlockBuilder.buildBlock(
-            previous: middlePrevious,
-            timestamp: middlePrevious.timestamp + 1,
-            target: .max,
-            nonce: 2,
-            fetcher: middleProcess
-        )
-        let middleHeader = try BlockHeader(node: middleBlock)
-        try await middleProcess.storeContextualCandidate(
-            middleHeader,
-            fetcher: middleProcess,
-            children: [ChildCandidateReservationReference(
-                peerKey: leafPeer,
-                candidateCID: leafHeader.rawCID
-            )],
-            capacity: 16
-        )
-
-        let leafService = makeService(process: leafProcess)
-        let middleService = makeService(
-            process: middleProcess,
-            childCandidateReservationReconciler: { update in
-                guard update.reservations.allSatisfy({
-                    $0.peerKey == leafPeer
-                }) else {
-                    return false
-                }
-                return await leafService.replaceIssuedCandidateReservations(
-                    NetworkCandidateReservationUpdate(
-                        candidateCIDs:
-                            update.reservations.map(\.candidateCID),
-                        handoffCIDs: update.handoffs.map(\.candidateCID)
-                    )
-                )
-            }
-        )
-        let reserved = await middleService.replaceIssuedCandidateReservations(
-            NetworkCandidateReservationUpdate(
-                candidateCIDs: [middleHeader.rawCID],
-                handoffCIDs: []
-            )
-        )
-        XCTAssertTrue(reserved)
-
-        let middleStore = try testNodeStore(
-            databasePath: middleProcess.configuration.storagePath
-                .appendingPathComponent("state.db"),
-            nexusGenesisCID: middleProcess.configuration.nexusGenesisCID,
-            chainPath: middleProcess.configuration.chainPath,
-            issuingAuthorityKey: middleProcess.configuration.processPublicKey
-        )
-        let leafStore = try testNodeStore(
-            databasePath: leafProcess.configuration.storagePath
-                .appendingPathComponent("state.db"),
-            nexusGenesisCID: leafProcess.configuration.nexusGenesisCID,
-            chainPath: leafProcess.configuration.chainPath,
-            issuingAuthorityKey: leafProcess.configuration.processPublicKey
-        )
-        let middleIssued = try await middleStore
-            .issuedContextualCandidateCIDs()
-        let leafIssued = try await leafStore.issuedContextualCandidateCIDs()
-        XCTAssertEqual(middleIssued, [middleHeader.rawCID])
-        XCTAssertEqual(leafIssued, [leafHeader.rawCID])
-
-        let released = await middleService.replaceIssuedCandidateReservations(
-            NetworkCandidateReservationUpdate(
-                candidateCIDs: [],
-                handoffCIDs: []
-            )
-        )
-        XCTAssertTrue(released)
-        for _ in 0..<100 {
-            if try await middleStore.issuedContextualCandidateCIDs().isEmpty,
-               try await leafStore.issuedContextualCandidateCIDs().isEmpty {
-                break
-            }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        let middleReleased = try await middleStore
-            .issuedContextualCandidateCIDs()
-        let leafReleased = try await leafStore.issuedContextualCandidateCIDs()
-        XCTAssertTrue(middleReleased.isEmpty)
-        XCTAssertTrue(leafReleased.isEmpty)
-    }
-
-    func testCommittedHandoffIsExcludedFromEveryOutstandingReservation()
-        async throws
-    {
-        let process = try await nexusProcess()
-        let block = try await process.canonicalTipBlock()
-        let peer = try PeerKey(
-            rawRepresentation: Data(
-                repeating: 0x72,
-                count: PeerKey.byteCount
-            )
-        )
-        let candidate = DirectChildCandidate(
-            directory: "Child",
-            block: block,
-            advertiserPeerKey: peer
-        )
-        let handoff = ChildCandidateReservationReference(
-            peerKey: peer,
-            candidateCID: try BlockHeader(node: block).rawCID
-        )
-
-        let ownership = try ChildCandidateOwnership(
-            candidates: [candidate, candidate],
-            handoffs: [handoff]
-        )
-
-        XCTAssertTrue(ownership.reservations.isEmpty)
-        XCTAssertEqual(ownership.handoffs, [handoff])
-    }
 
     // MARK: - Bulk-sync common-ancestor negotiation (Stage 1)
 
@@ -4127,10 +3865,9 @@ final class ChainServiceTests: XCTestCase {
     private func makeService(
         process: ChainProcess,
         childCandidateProvider: @escaping ChildCandidateProvider = { _ in [] },
-        childCandidateReservationReconciler:
-            @escaping ChildCandidateReservationReconciler = {
-                $0.reservations.isEmpty && $0.handoffs.isEmpty
-            },
+        chainStateChangePublisher: @escaping ChainStateChangePublisher = {},
+        childCandidateDigestProvider:
+            @escaping ChildCandidateDigestProvider = { _ in [] },
         childProofPublisher: @escaping ChildProofPublisher = { _ in },
         acceptedBlockPublisher: @escaping AcceptedBlockPublisher = { _ in },
         acceptedTransactionPublisher:
@@ -4142,8 +3879,8 @@ final class ChainServiceTests: XCTestCase {
         ChainService(
             process: process,
             childCandidateProvider: childCandidateProvider,
-            childCandidateReservationReconciler:
-                childCandidateReservationReconciler,
+            chainStateChangePublisher: chainStateChangePublisher,
+            childCandidateDigestProvider: childCandidateDigestProvider,
             childProofPublisher: childProofPublisher,
             acceptedBlockPublisher: acceptedBlockPublisher,
             acceptedTransactionPublisher: acceptedTransactionPublisher,
@@ -4298,27 +4035,6 @@ private actor MinedChildCandidates {
     func last() -> Block? { blocks.last }
 }
 
-private actor ReservationRecorder {
-    private let accept: Bool
-    private var values: [[ChildCandidateReservationReference]] = []
-    private var currentValue: Set<ChildCandidateReservationReference> = []
-
-    init(accept: Bool) {
-        self.accept = accept
-    }
-
-    func reconcile(
-        _ update: ChildCandidateReservationUpdate
-    ) -> Bool {
-        let references = update.reservations
-        values.append(references)
-        currentValue = Set(references)
-        return (references.isEmpty && update.handoffs.isEmpty) || accept
-    }
-
-    func snapshots() -> [[ChildCandidateReservationReference]] { values }
-    func current() -> Set<ChildCandidateReservationReference> { currentValue }
-}
 
 private actor AttemptCounter {
     private var value = 0
@@ -4608,8 +4324,9 @@ private extension Block {
     }
 }
 
-private actor ReservationUpdateRecorder {
-    private var updates: [ChildCandidateReservationUpdate] = []
-    func record(_ update: ChildCandidateReservationUpdate) { updates.append(update) }
-    func snapshot() -> [ChildCandidateReservationUpdate] { updates }
+
+private actor DigestInputs {
+    private var value: [String] = []
+    func set(_ lines: [String]) { value = lines }
+    func lines() -> [String] { value }
 }
