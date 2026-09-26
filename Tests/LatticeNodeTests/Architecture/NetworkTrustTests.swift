@@ -3325,9 +3325,13 @@ final class NetworkTrustTests: XCTestCase {
         )
         let roots = NetworkEventRecorder()
         let unavailable = NetworkEventRecorder()
+        let eager = NetworkEventRecorder()
         let firstAdmissionGate = CandidateBuildGate()
         let handlers = NodeNetworkHandlers(
             admission: { admission in
+                if !admission.weighed {
+                    await eager.append(admission.header.rawCID)
+                }
                 guard let rootCID = admission.authenticatedChildPackage?
                     .package.proof.rootCID else {
                     await unavailable.append(admission.header.rawCID)
@@ -3535,6 +3539,11 @@ final class NetworkTrustTests: XCTestCase {
             )
             XCTAssertEqual(admittedRoots.count, 2)
             XCTAssertEqual(Set(admittedRoots), Set(proofs.map(\.rootCID)))
+            let eagerAdmissions = await eager.snapshot()
+            XCTAssertTrue(
+                eagerAdmissions.isEmpty,
+                "a portable attachment is a network block: weighed, \(eagerAdmissions)"
+            )
         } catch {
             await firstAdmissionGate.releaseAll()
             await replacement.stop()

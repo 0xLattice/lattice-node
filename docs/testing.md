@@ -119,15 +119,24 @@ cross-component invariants:
   invariants), and admitting a block a parent block carried asks the parent
   for that committer's run, so a push made before the block was held here,
   or one missed while away, never waits for the next parent block; a
-  parent-carried block is admitted weighed on its proof, and until an
+  parent-carried block is admitted weighed on its proof, its relay link
+  issued at once (a node stopped before the walk validated the block must
+  come back: child-proof recovery composes from that evidence and requires
+  the link), and until an
   admission decides it its evidence stays in the parent-evidence inbox — a
   deferral persists nothing, the entry survives a restart and the block is
   accepted once the rule is met; a carrier refused for good is relayed and
-  consumed and never re-admitted; a restarted child admits the block from
-  its inbox alone, weighed, with content served by the parent
+  consumed and never re-admitted; a refusal with no carrier link to relay is
+  consumed all the same, and decided is exactly the set the acquirer never
+  retries; a restarted child admits the block from its inbox alone,
+  weighed, with content served by the parent; a portable attachment from
+  the overlay seeds a weighed admission too
   (`testDeferredCarriedBlockKeepsItsEvidenceInTheInboxAcrossRestart`,
   `testCarrierRefusedForGoodIsDecidedAndConsumed`,
-  `testRestartedChildAdmitsTheParentCarriedBlockFromItsInboxWeighed`); a run
+  `testDecidedRefusalWithoutACarrierLinkIsConsumed`,
+  `testDecidedIsExactlyWhatTheAcquirerNeverRetries`,
+  `testRestartedChildAdmitsTheParentCarriedBlockFromItsInboxWeighed`,
+  `testPortableAttachmentsKeepDistinctRootsForTheSameChildWhileAdmissionIsBlocked`); a run
   flows through every level — what Nexus attributes to the middle chain's
   committing block reaches the grandchild, and the middle chain's service
   pushes the run that credit changed to its own children without waiting

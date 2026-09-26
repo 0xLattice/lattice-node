@@ -2412,6 +2412,25 @@ actor NodeStore {
         """)
     }
 
+    /// Drop the inbox entries for one (block, root) an admission decided
+    /// without persisting relay evidence; the persist and stage paths consume
+    /// theirs by attachment. Nothing else removes an entry.
+    func consumeParentEvidence(childCID: String, rootCID: String) async throws {
+        let present = try database.query(
+            "SELECT 1 FROM parent_evidence_inbox WHERE child_cid = ?1 AND root_cid = ?2 LIMIT 1",
+            params: [.text(childCID), .text(rootCID)]
+        )
+        guard !present.isEmpty else { return }
+        try database.execute(
+            "DELETE FROM parent_evidence_inbox WHERE child_cid = ?1 AND root_cid = ?2",
+            params: [.text(childCID), .text(rootCID)]
+        )
+        try? await recoveryVolumeBroker.advanceRetainedRoots(
+            scope: parentEvidenceInboxRetentionScope,
+            roots: parentEvidenceInboxRoots()
+        )
+    }
+
     func parentEvidenceInboxHasCapacity() throws -> Bool {
         let count = try database.query(
             "SELECT COUNT(*) AS count FROM parent_evidence_inbox"

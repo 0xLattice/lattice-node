@@ -3451,11 +3451,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // peer misbehavior: the recovery succeeded, so never let callers
             // recycle the session over it. The rejection already requested
             // inventory recovery, which re-derives the item later.
+            // A portable attachment carries the same verified proof the
+            // parent serves: a network block, weighed.
             _ = enqueueCandidate(CandidateSeed(
                 blockCID: evidence.edge.childCID,
                 package: AuthenticatedChildPackage(
                     package: ChildValidationPackage(proof: evidence.proof)
-                )
+                ),
+                weighed: true
             ))
             return true
         }
@@ -3527,7 +3530,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // congestion; only verification failures return false (and recycle).
         _ = enqueueCandidate(CandidateSeed(
             blockCID: edge.childCID,
-            package: gated
+            package: gated,
+            weighed: true
         ))
         return true
     }

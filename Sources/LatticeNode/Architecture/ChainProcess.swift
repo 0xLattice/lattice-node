@@ -871,21 +871,22 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     }
 
     /// Whether an admission decided the block: accepted (made durable by
-    /// `stage`), a duplicate of one, or refused on a verdict about its own
-    /// bytes — the grind that carried it missed this chain's target (a
+    /// `stage`), a duplicate of one, or refused for a reason no retry would
+    /// change — the grind that carried it missed this chain's target (a
     /// carrier for deeper chains only, which merged mining produces every
-    /// round it clears only a deeper target), or the block violates the
-    /// protocol. Any other refusal is a deferral: evidence not yet held, a
-    /// rule not yet satisfied, a provider's or this node's own failure. A
-    /// deferral persists nothing; the block's evidence stays in the
+    /// round it clears only a deeper target), the block or its evidence is
+    /// invalid, or this node could not verify it. Decided is exactly the set
+    /// the candidate acquirer never retries, by the same predicate: what it
+    /// would retry (evidence not yet held, a rule not yet met) is a deferral.
+    /// A deferral persists nothing; the block's evidence stays in the
     /// parent-evidence inbox and is replayed on restart, so no stop or crash
-    /// between a deferral and its retry can lose a parent-carried block.
+    /// between a deferral and its retry can lose a parent-carried block. A
+    /// decision consumes the entry, relay or no relay: an entry no retry is
+    /// coming for would be re-admitted at every start and, at capacity,
+    /// refuse every later parent-carried block.
     static func isDecided(_ result: ChainLocalBlockResult) -> Bool {
-        switch result {
-        case .accepted, .carrier, .duplicate: true
-        case .rejected(.protocolInvalid, _, _): true
-        case .rejected: false
-        }
+        let decision = NodeAdmissionDecision(result)
+        return !(decision.shouldRetryWhenEvidenceChanges || decision.shouldRetryLater)
     }
 
     func recoveredAuthenticatedChildPackage(
@@ -1157,7 +1158,24 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         // Only for a DECIDED block: persisting the relay consumes the block's
         // parent-evidence inbox entry, the one durable record that it is still
         // to be admitted, so a deferral persists nothing and keeps that entry.
-        if (!admissionStaged || result.sameChainPredecessor != nil),
+        //
+        // A WEIGHED acceptance stages its incoming carrier evidence but defers
+        // issuance to validation, so `stage` wrote no carrier link for it.
+        // The relay link goes here all the same: child-proof recovery composes
+        // this block's outgoing proofs from that incoming evidence and
+        // requires the link beside it — at boot, where a missing link is a
+        // dead node — and deeper chains are owed the relay whether or not this
+        // chain has executed the block, exactly as for a carrier it refused.
+        let relayUnissued: Bool
+        if admissionStaged, result.sameChainPredecessor == nil,
+           let link = result.parentCarrierLink {
+            relayUnissued = try await store.issuedParentCarrierLink(
+                carrierCID: blockHeader.rawCID, rootCID: link.rootCID
+            ) == nil
+        } else {
+            relayUnissued = false
+        }
+        if (!admissionStaged || result.sameChainPredecessor != nil || relayUnissued),
            Self.isDecided(result),
            let link = result.parentCarrierLink {
             try await store.persistIssuedHierarchyArtifacts(
@@ -1175,6 +1193,16 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     parentGenesisLinks: directParentGenesisLinks
                 ),
                 pendingChildProofCapacity: Self.preparedChildProofCapacity
+            )
+        }
+        // Decided with nothing persisted above — refused before a carrier
+        // link was derived (the block or its proof), or a duplicate whose
+        // promotion staged nothing — still consumes the inbox entry: no retry
+        // is coming for it.
+        if Self.isDecided(result), let authenticatedPackage {
+            try await store.consumeParentEvidence(
+                childCID: blockHeader.rawCID,
+                rootCID: authenticatedPackage.package.proof.rootCID
             )
         }
         var receipt: CanonicalCommitReceipt?

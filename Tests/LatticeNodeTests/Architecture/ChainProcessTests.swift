@@ -857,6 +857,23 @@ final class ChainProcessTests: XCTestCase {
             for: carriedHeader.rawCID, rootCID: proof.rootCID
         )
         XCTAssertNotNil(relayAfterAcceptance, "decided: relayed")
+        // Weighed, so not executed and nothing issued for its own children —
+        // but the relay link is beside the incoming evidence: child-proof
+        // recovery composes from that evidence and requires the link, at boot
+        // (a node that stopped before the walk validated the block must come
+        // back), and deeper chains are owed the relay regardless of execution.
+        let relayLink = try await process!.issuedParentCarrierLink(
+            carrierCID: carriedHeader.rawCID, rootCID: proof.rootCID
+        )
+        XCTAssertNotNil(relayLink, "a weighed acceptance issues its relay link")
+        let tiers = await process!.metricsTipHeights()
+        XCTAssertEqual(tiers.validated, 0, "still weighed, not executed")
+        process = nil
+        process = try await ChainProcess.open(configuration: fixture.configuration)
+        let relayLinkAfterReopen = try await process!.issuedParentCarrierLink(
+            carrierCID: carriedHeader.rawCID, rootCID: proof.rootCID
+        )
+        XCTAssertNotNil(relayLinkAfterReopen)
     }
 
     /// The other half of what merged mining produces: a carrier whose grind
@@ -916,12 +933,94 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertTrue(inboxAfterRestart.isEmpty, "not re-admitted on restart")
     }
 
+    /// A refusal no retry would change that yields no carrier link — here a
+    /// parentless block the parent carried, which no chain admits as a
+    /// network block — has nothing to relay, yet it is decided: its inbox
+    /// entry is consumed. Left there, it would be re-admitted at every start
+    /// and, at capacity, refuse every later parent-carried block for good.
+    func testDecidedRefusalWithoutACarrierLinkIsConsumed() async throws {
+        let fixture = try await childBootstrapFixture()
+        let parentSource = fixture.source
+        var process: ChainProcess? = try await ChainProcess.open(configuration: fixture.configuration)
+        let bootstrapped = try await process!.activateSeededChildGenesis(
+            seed: fixture.seed, confirmParentRecordedGenesis: { _ in true }
+        )
+        XCTAssertTrue(bootstrapped)
+        let rival = try await BlockBuilder.buildChildGenesis(
+            spec: NexusGenesis.spec, parentState: LatticeState.emptyHeader,
+            timestamp: 5, target: UInt256.max, fetcher: parentSource
+        )
+        let rivalHeader = try BlockHeader(node: rival)
+        XCTAssertNotEqual(rivalHeader.rawCID, fixture.childHeader.rawCID)
+        try await rivalHeader.storeBlock(fetcher: parentSource, storer: parentSource)
+        try await rivalHeader.storeBlock(fetcher: parentSource, storer: process!)
+        let parentCarrier = try await BlockBuilder.buildGenesis(
+            spec: NexusGenesis.spec, children: ["Payments": rival],
+            timestamp: 6, target: UInt256.max, fetcher: parentSource
+        )
+        let proof = try await ChildBlockProof.generate(
+            rootHeader: try BlockHeader(node: parentCarrier), childDirectory: "Payments",
+            fetcher: parentSource
+        )
+        let package = AuthenticatedChildPackage(package: ChildValidationPackage(proof: proof))
+        let attachment = try ChildEvidenceVolume(
+            envelopeBytes: try ChildValidationPackageEnvelope(package.package).encode(),
+            childCID: rivalHeader.rawCID
+        )
+        try await process!.retainParentEvidence(
+            sourceID: UUID().uuidString, ordinal: 1, attachment: attachment,
+            package: package, advanceScan: true
+        )
+        let refused = try await process!.admit(
+            rivalHeader, authenticatedChildPackage: package,
+            remoteSource: parentSource, mode: .weighed
+        )
+        XCTAssertEqual(refused.decision, .invalid)
+        XCTAssertNil(refused.parentCarrierLink, "refused before a carrier link exists")
+        let inbox = try await process!.parentEvidenceInbox()
+        XCTAssertTrue(inbox.isEmpty, "decided: consumed, with nothing to relay")
+        let relay = try await process!.recoveredAuthenticatedChildPackage(
+            for: rivalHeader.rawCID, rootCID: proof.rootCID
+        )
+        XCTAssertNil(relay)
+        process = nil
+        process = try await ChainProcess.open(configuration: fixture.configuration)
+        let inboxAfterRestart = try await process!.parentEvidenceInbox()
+        XCTAssertTrue(inboxAfterRestart.isEmpty, "not re-admitted on restart")
+    }
+
+    /// Decided is exactly the set the candidate acquirer never retries: an
+    /// inbox entry goes when, and only when, no retry is coming for it. A
+    /// refusal that is final for this node but kept — a malformed proof, a
+    /// local failure — would sit in the inbox until capacity closed it.
+    func testDecidedIsExactlyWhatTheAcquirerNeverRetries() {
+        let verdicts: [(failure: ChainAdmissionFailure, decided: Bool)] = [
+            (.unavailableEvidence, false),
+            (.crossChainEvidenceRequired(.childProof(chainPath: ["Nexus", "Payments"], childCID: "b")), false),
+            (.notYetAdmissible, false),
+            (.providerMalformedEvidence, true),
+            (.protocolInvalid, true),
+            (.localVerificationFailure, true),
+            (.revisionExhausted, true),
+            (.notAcceptedAtCurrentChain, true),
+        ]
+        for verdict in verdicts {
+            let result = ChainLocalBlockResult.rejected(verdict.failure)
+            XCTAssertEqual(ChainProcess.isDecided(result), verdict.decided, "\(verdict.failure)")
+            let decision = NodeAdmissionDecision(result)
+            let retried = decision.shouldRetryWhenEvidenceChanges || decision.shouldRetryLater
+            XCTAssertEqual(retried, !verdict.decided, "the acquirer retries exactly the undecided: \(verdict.failure)")
+        }
+        let link = ParentCarrierLink(parentPath: ["Nexus"], carrierCID: "c", rootCID: "r")
+        XCTAssertTrue(ChainProcess.isDecided(.carrier(link, sameChainPredecessor: nil)))
+    }
+
     /// Out-of-order arrival: the parent carried B1 then B2 (B2 on B1), and
-    /// B2's evidence reaches this chain first. Whatever the first admission
-    /// makes of B2 — a side block awaiting its predecessor, or a deferral
-    /// kept in the inbox — once B1 arrives both are accepted and B1's
-    /// subtree weight counts B2, which committed to it: the work of blocks
-    /// built on top of a late block is never lost to the order they came in.
+    /// B2's evidence reaches this chain first. B2 is accepted as a side block
+    /// awaiting its predecessor (its header links to B1 through the parent's
+    /// content); once B1 arrives both are connected and B1's subtree weight
+    /// counts B2, which committed to it: the work of blocks built on top of a
+    /// late block is never lost to the order they came in.
     func testOutOfOrderCarriedBlocksWeighTheirDescendants() async throws {
         let fixture = try await childBootstrapFixture()
         let parentSource = fixture.source
@@ -965,32 +1064,20 @@ final class ChainProcessTests: XCTestCase {
         let firstPackage = try await evidence(for: first, header: firstHeader, timestamp: 3, ordinal: 1)
         let secondPackage = try await evidence(for: second, header: secondHeader, timestamp: 4, ordinal: 2)
 
-        // B2 first. Its predecessor is not held: either a side block awaiting
-        // it, or a deferral — in both cases the requirement names B1, and in
-        // neither is the evidence lost.
+        // B2 first: a side block whose requirement names B1, the predecessor
+        // this chain does not hold yet.
         let early = try await process.admit(
             secondHeader, authenticatedChildPackage: secondPackage,
             remoteSource: parentSource, mode: .weighed
         )
+        XCTAssertTrue(early.decision.isAccepted, "a side block awaiting B1, got \(early.decision)")
         XCTAssertEqual(early.sameChainPredecessor?.predecessorCID, firstHeader.rawCID)
-        if !early.decision.isAccepted {
-            let inbox = try await process.parentEvidenceInbox()
-            XCTAssertTrue(inbox.contains { $0.ordinal == 2 }, "a deferred B2 stays in the inbox")
-        }
-        // B1 arrives: accepted, and B2 with it (grafted, or re-admitted from
-        // the inbox as the acquirer would on the predecessor's arrival).
+        // B1 arrives: accepted, and B2 connects behind it.
         let late = try await process.admit(
             firstHeader, authenticatedChildPackage: firstPackage,
             remoteSource: parentSource, mode: .weighed
         )
         XCTAssertTrue(late.decision.isAccepted, "\(late.decision)")
-        if !early.decision.isAccepted {
-            let retry = try await process.admit(
-                secondHeader, authenticatedChildPackage: secondPackage,
-                remoteSource: parentSource, mode: .weighed
-            )
-            XCTAssertTrue(retry.decision.isAccepted, "\(retry.decision)")
-        }
         let firstWeightValue = await process.subtreeWeight(of: firstHeader.rawCID)
         let secondWeightValue = await process.subtreeWeight(of: secondHeader.rawCID)
         let firstWeight = try XCTUnwrap(firstWeightValue)
