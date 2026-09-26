@@ -583,6 +583,11 @@ public actor ChainService {
     // every other operation for the length of a deep catch-up.
     private var validateWalkWorker: Task<Void, Never>?
     private var validateWalkDirty = false
+    /// The last walk pass stopped short of the canonical tip on something it
+    /// cannot step past by itself (a missing body or fact, an invalidity, a
+    /// block it will not re-execute). While a walk is merely behind and able
+    /// to step, no candidate is built; a parked one withholds none.
+    private var validateWalkParked = false
     // Network body acquisition for the validate walk (see ValidateBodyAdmission).
     // When present the walk pulls a weighed block's deferred body over the network;
     // when the body is temporarily unavailable the walk parks and a single delayed
@@ -1546,6 +1551,20 @@ public actor ChainService {
             SyncTrace.log("child candidate deferred: validate walk stepping")
             throw ChainServiceError.validateWalkInProgress
         }
+        // Behind but not parked: this chain's last candidate landed and
+        // awaits validation. Another at the same height would only fork it
+        // — one sibling per parent block, and the validated tip crawls under
+        // the reorgs — so the walk is armed here if nothing armed it, and
+        // its stop reports the change that builds the next candidate.
+        if !validateWalkParked {
+            let validated = await process.deepestValidatedMainChainTip()?.height
+            if let target = await process.canonicalTipHeight(),
+               (validated.map { Int64($0) } ?? -1) < Int64(target) {
+                SyncTrace.log("child candidate deferred: validated \(validated.map(String.init) ?? "none") behind weighed \(target)")
+                reserveValidateWalkWorker()
+                throw ChainServiceError.validateWalkInProgress
+            }
+        }
         do {
             let candidate = try await miningCandidate(
                 parentCarrier: context.parentCarrier,
@@ -1998,10 +2017,12 @@ public actor ChainService {
     }
 
     private func drainValidateWalk() async {
+        var caughtUp = false
         while validateWalkDirty {
             validateWalkDirty = false
-            await runValidateWalkPass()
+            caughtUp = await runValidateWalkPass()
         }
+        validateWalkParked = !caughtUp
         validateWalkWorker = nil
         // The walk stopped, caught up or parked: a candidate deferred while
         // it stepped builds now.
@@ -2040,7 +2061,9 @@ public actor ChainService {
     /// FORWARD (+1), never tip-first — a `.validate` on a block whose parent is
     /// not validated cannot form a valid pre-state. Tip and target are re-read
     /// every iteration so a mid-walk reorg or exclusion re-projection re-targets.
-    func runValidateWalkPass() async {
+    /// Returns whether the pass reached the canonical tip; `false` is a park.
+    @discardableResult
+    func runValidateWalkPass() async -> Bool {
         // Height of the last admit that returned a non-parking decision. If the
         // durable validated height does not advance past it on the next read,
         // park (return) instead of hot-spinning — defence against any future
@@ -2048,12 +2071,12 @@ public actor ChainService {
         var lastAdmittedHeight: UInt64?
         while true {
             let validated = await process.deepestValidatedMainChainTip()
-            guard let target = await process.canonicalTipHeight() else { return }
+            guard let target = await process.canonicalTipHeight() else { return true }
             let validatedHeight = validated.map { Int64($0.height) } ?? -1
             if let lastAdmittedHeight, validatedHeight < Int64(lastAdmittedHeight) {
-                return
+                return false
             }
-            if validatedHeight >= Int64(target) { return }
+            if validatedHeight >= Int64(target) { return true }
             let nextHeight = UInt64(validatedHeight + 1)
             // FORWARD-apply on the CURRENT main chain. A weighed admit stored only
             // this block's boundary, so its body (tier-3) is NOT local: pull it over
@@ -2062,7 +2085,7 @@ public actor ChainService {
             // body is fetched. With no source wired (empty-block unit contexts whose
             // boundary already is the whole block), admit broker-only as before.
             guard let next = await process.mainChainBlockCID(atHeight: nextHeight)
-            else { return }
+            else { return false }
             #if DEBUG
             onValidateWalkStep?(nextHeight)
             #endif
@@ -2117,7 +2140,7 @@ public actor ChainService {
                     "validate walk h=\(nextHeight) store error: \(error)"
                 )
                 scheduleValidateWalkRetry()
-                return
+                return false
             }
             SyncTrace.log(
                 "validate walk h=\(nextHeight) decision=\(outcome.decision)"
@@ -2145,7 +2168,7 @@ public actor ChainService {
                 // the walk polls until it is present. A later canonical commit also
                 // re-arms the walk.
                 scheduleValidateWalkRetry()
-                return
+                return false
             case .temporarilyInvalid:
                 // A parked verdict: a not-yet-admissible timestamp, or a root
                 // exclusion with no other executed root to stand on (§9.9).
@@ -2158,12 +2181,12 @@ public actor ChainService {
                 // guessing. Counted where the operator can see it.
                 validateWalkParkedCount += 1
                 scheduleValidateWalkRetry()
-                return
+                return false
             case .invalid, .localFailure, .carrier:
                 // Ordering / non-availability park: keep acting on the last
                 // validated tip. A later commit re-arms the walk; no self-retry
                 // (retrying an invalidity with no new fact would hot-loop).
-                return
+                return false
             }
         }
     }

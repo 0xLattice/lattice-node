@@ -206,6 +206,23 @@ struct NodeNetworkPlaneConfigurations {
                 listenPort: configuration.factListenPort,
                 bootstrapPeers: configuration.parentEndpoint.map { [$0.ivy] } ?? [],
                 inboundAdmissionBypassPeerKeys: parentAdmissionBypass,
+                // Tally's per-peer request budget is one bucket per peer,
+                // spent by this node's sends and the peer's inbound alike.
+                // At merged-mining block rates a parent legitimately sends a
+                // child a context, an evidence hint, run-report answers and
+                // the content its candidate build fetches, every block; on
+                // the overlay default the parent's own bucket refused those
+                // sends and its children's chains crawled (traced: 427
+                // Nexus blocks, Market at 11). The plane admits any peer
+                // whose hello proves a path, so this also raises what such
+                // a peer may send before the budget refuses it; what a
+                // message may cost is bounded where it is handled (a
+                // candidate is decoded only from a wired-in child with a
+                // context, once per CID, within this chain's block size).
+                tallyConfig: TallyConfig(
+                    perPeerRequestCapacity: 4_000,
+                    perPeerRequestRefillPerSecond: 1_000
+                ),
                 maxConnections: IvyConfig.defaultMaxConnections,
                 reservedOutboundConnectionSlots: configuration.parentEndpoint == nil ? 0 : 1,
                 maxConnectionsPerNetgroup: IvyConfig.defaultMaxConnections,
@@ -384,6 +401,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// session. Counts are session-scoped so reconnect cannot inherit a fence.
     private var childEvidenceIndexCompleteSessions: Set<ChildEvidenceSession> = []
     private var childEvidencePublicationFailedSessions: Set<ChildEvidenceSession> = []
+    /// The latest evidence hint this node's own send budget refused, per
+    /// child peer, re-sent on the next push run. A hint carries one index
+    /// entry; the admission it triggers scans the index from the child's
+    /// cursor, so the newest re-sent hint also recovers older refused ones.
+    private var refusedChildEvidenceHints: [PeerKey: Data] = [:]
     private var childEvidencePublicationsInFlight:
         [ChildEvidenceSession: Int] = [:]
     private var overlayHelloDeadlines: [PeerKey: HelloDeadline] = [:]
@@ -493,6 +515,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let candidate: DirectChildCandidate
     }
     private var childCandidateOffers: [PeerKey: CachedChildCandidate] = [:]
+    /// Per directory, the child-chain parent of the last child block this
+    /// chain carried. A candidate on that same parent is a sibling of a
+    /// block that already weighs at the child: carrying it would only
+    /// reorg the child's tip to the heavier carrier, and a child could
+    /// never get ahead of its own forks. Not carried; the child builds on
+    /// the carried block once it admits it.
+    private var carriedChildParents: [String: String] = [:]
     /// The parent's context as last received (this chain being the child),
     /// bound to the session it came on: a new session restarts sequences.
     private struct ReceivedParentTipContext {
@@ -894,8 +923,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         portableEvidenceWork.removeAll()
         parentEvidence.reset()
         childCandidateOffers.removeAll()
+        carriedChildParents.removeAll()
         parentTipContext = nil
         pushedParentTipSequence.removeAll()
+        refusedChildEvidenceHints.removeAll()
         parentTipPushTask?.cancel()
         parentTipPushTask = nil
         parentTipPushDirty = false
@@ -1292,7 +1323,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard case .child(let path) = role, let directory = path.last,
                   childEvidenceReadyPeers.contains(key),
                   let offer = childCandidateOffers[key],
-                  offer.candidate.block.parentState.rawCID == parentStateCID
+                  offer.candidate.block.parentState.rawCID == parentStateCID,
+                  offer.candidate.block.parent?.rawCID
+                    != carriedChildParents[directory]
             else { continue }
             byDirectory[directory, default: []].append(offer.childCID)
         }
@@ -1317,16 +1350,23 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         var candidates: [(Int, DirectChildCandidate)] = []
         var stale = 0
-        for (rank, key, _) in children {
+        var siblings = 0
+        for (rank, key, path) in children {
             guard let offer = childCandidateOffers[key] else { continue }
             guard offer.candidate.block.parentState.rawCID == wantedParentState
             else {
                 stale += 1
                 continue
             }
+            if let directory = path.last,
+               offer.candidate.block.parent?.rawCID
+                == carriedChildParents[directory] {
+                siblings += 1
+                continue
+            }
             candidates.append((rank, offer.candidate))
         }
-        SyncTrace.log("child candidates: \(candidates.count) held of \(children.count) ready child peers (stale=\(stale)) excluded=\(context.excludedDirectories.sorted())")
+        SyncTrace.log("child candidates: \(candidates.count) held of \(children.count) ready child peers (stale=\(stale) siblings=\(siblings)) excluded=\(context.excludedDirectories.sorted())")
         // A path claim is not authority. Several authenticated claimants may
         // serve one directory; rotate priority so a grindable lexicographic
         // key cannot own a slot.
@@ -1382,9 +1422,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
 
     /// Pushes the latest context to every ready child. Coalescing, like the
     /// child's offer task: a burst of blocks marks it dirty once and the task
-    /// pushes the context that stands when it runs, so a parent mining many
-    /// blocks a second sends a child a few contexts a second, not one per
-    /// block, and never floods the session its evidence rides on.
+    /// pushes the context that stands when it runs. No pause between runs:
+    /// a child's candidate is stale the moment this chain's tip moves, so
+    /// every delay here is a round in which the child is not carried.
     private func scheduleParentTipPush(
         generation: UInt64,
         process: ChainProcess
@@ -1409,6 +1449,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
         while parentTipPushDirty, !Task.isCancelled,
               isCurrentRuntime(generation: generation, process: process) {
             parentTipPushDirty = false
+            await resendRefusedChildEvidenceHints(
+                generation: generation, process: process
+            )
             await refreshParentTipContext(process: process, generation: generation)
             guard !Task.isCancelled,
                   isCurrentRuntime(generation: generation, process: process),
@@ -1420,8 +1463,26 @@ public actor NodeNetworkRuntime: IvyDelegate {
                       let peer = hierarchySessions[key] else { continue }
                 await pushParentTipContext(context, to: peer, childPath: childPath)
             }
-            if parentTipPushDirty {
-                try? await Task.sleep(for: Self.parentTipPushDebounce)
+        }
+    }
+
+    private func resendRefusedChildEvidenceHints(
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        for (key, payload) in refusedChildEvidenceHints {
+            guard isCurrentRuntime(generation: generation, process: process),
+                  let peer = hierarchySessions[key],
+                  childEvidenceReadyPeers.contains(key) else { continue }
+            let sent = await hierarchy.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.childEvidenceAvailable,
+                payload: payload
+            )
+            if case .enqueued = sent,
+               refusedChildEvidenceHints[key] == payload {
+                refusedChildEvidenceHints.removeValue(forKey: key)
+                SyncTrace.log("child evidence announcement re-sent to \(key.hex.prefix(12))")
             }
         }
     }
@@ -1479,7 +1540,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
 
     /// Rebuild this chain's candidate for its parent and push it. Coalescing:
-    /// a change during a build marks the task dirty and it runs once more.
+    /// a change during a build marks the task dirty and it runs once more,
+    /// with the inputs that stand then, and no pause: a candidate the parent
+    /// already left behind is not carried, so the rebuild is the only way
+    /// into the next carrier.
     private func scheduleCandidateOffer(
         generation: UInt64,
         process: ChainProcess
@@ -1496,12 +1560,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
     }
 
-    private static let candidateOfferDebounce: Duration = .milliseconds(250)
-    /// A parent mining several blocks a second pushes its children a context
-    /// a couple of times a second at most; the latest always wins, and the
-    /// session carries evidence and runs on the same send budget.
-    private static let parentTipPushDebounce: Duration = .milliseconds(500)
-
     private func runCandidateOffers(
         generation: UInt64,
         process: ChainProcess
@@ -1511,9 +1569,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
               isCurrentRuntime(generation: generation, process: process) {
             candidateOfferDirty = false
             await offerCandidate(generation: generation, process: process)
-            if candidateOfferDirty {
-                try? await Task.sleep(for: Self.candidateOfferDebounce)
-            }
         }
     }
 
@@ -1848,6 +1903,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 childPath: childPath,
                 childCID: childCID,
                 rootCID: proof.rootCID,
+                proof: proof,
                 generation: generation,
                 process: process
             )
@@ -1864,11 +1920,25 @@ public actor NodeNetworkRuntime: IvyDelegate {
         childPath: [String],
         childCID: String,
         rootCID: String,
+        proof: ChildBlockProof,
         generation: UInt64,
         process: ChainProcess
     ) async -> Bool {
         guard isCurrentRuntime(generation: generation, process: process) else {
             return false
+        }
+        // Whatever route issued this evidence, this chain carried the child
+        // block it names: its siblings are not carried again. The proof
+        // carries the child block (a child block is its own volume, not
+        // this chain's content).
+        if let directory = childPath.last,
+           let data = proof.entries.first(where: { $0.cid == childCID })?.data,
+           let carried = _contentBoundBlock(cid: childCID, data: data),
+           let childParent = carried.parent?.rawCID {
+            carriedChildParents[directory] = childParent
+            SyncTrace.log("carried child \(childCID.prefix(12)) for \(directory): siblings on \(childParent.prefix(12)) not carried again")
+        } else {
+            SyncTrace.log("carried child \(childCID.prefix(12)) in \(rootCID.prefix(12)): child block not in the proof (\(proof.entries.count) entries)")
         }
         let bootstrappingPeers = hierarchyPeers.compactMap {
             key, role -> AuthenticatedPeer? in
@@ -1943,6 +2013,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
             let bootstrapping = !childEvidenceReadyPeers.contains(peer.key)
             switch result {
             case .enqueued:
+                // A newer hint delivered supersedes an older one refused:
+                // the scan its admission triggers serves the older entry.
+                refusedChildEvidenceHints.removeValue(forKey: peer.key)
                 if bootstrapping {
                     finishChildEvidencePublication(
                         to: peer,
@@ -1960,11 +2033,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 await hierarchy.recycleSession(ifCurrent: peer)
             case .backpressured, .locallyRejected:
                 // This node's own send budget refused, not the child: the
-                // announcement is a hint over a durable index the child
-                // scans, so a dropped one costs a scan, never the session.
-                // Recycling here made every busy round a reconnect, and a
-                // child bootstrapping through it never became ready.
-                SyncTrace.log("child evidence announcement to \(childPath.joined(separator: "/")) not enqueued: \(result); the child's index scan re-serves it")
+                // announcement is a hint over a durable index, so a refusal
+                // costs a retry, never the session. Recycling here made
+                // every busy round a reconnect, and a child bootstrapping
+                // through it never became ready. The hint is re-sent on the
+                // next push run; a child scans the index only on a hello or
+                // an admission, so a refused hint left alone strands the
+                // entry until the next delivered one.
+                SyncTrace.log("child evidence announcement to \(childPath.joined(separator: "/")) not enqueued: \(result); re-sent on the next push run")
+                refusedChildEvidenceHints[peer.key] = payload
                 if bootstrapping {
                     finishChildEvidencePublication(
                         to: peer,
@@ -2058,6 +2135,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                             childPath: configuration.chainPath + [proof.directory],
                             childCID: proof.childCID,
                             rootCID: proof.proof.rootCID,
+                            proof: proof.proof,
                             generation: generation,
                             process: process
                         )
@@ -2262,6 +2340,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         cancelChildEvidenceReadyWaiters(for: key)
         childCandidateOffers.removeValue(forKey: key)
         pushedParentTipSequence.removeValue(forKey: key)
+        refusedChildEvidenceHints.removeValue(forKey: key)
         Self.pruneChildPeerRotations(
             &childPeerRotation,
             activeRoles: Array(hierarchyPeers.values)
@@ -3720,6 +3799,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 // a visit budget nor a rate limit.
                 found = await process.hasProducedParentState(toStateCID)
             }
+            SyncTrace.log("parent fact \(request.requestID) from \(childPath.joined(separator: "/")) found=\(found)")
             guard found else { return }
             _ = await hierarchy.sendMessage(
                 to: peer,
@@ -3754,6 +3834,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             pendingParentChainFacts.removeValue(
                 forKey: response.requestID
             )
+            SyncTrace.log("parent fact \(response.requestID) answered for \(pending.blockCID.prefix(12))")
             await acceptParentChainFact(
                 pending: pending,
                 generation: generation,
@@ -3811,7 +3892,19 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard let report = try? ParentRunReportMessage.decoded(message.payload),
                   let handler = handlers?.parentRunReport else { return }
             SyncTrace.log("run-report received committer=\(report.report.blockHash.prefix(16)) run=\(report.report.runWork) own=\(report.report.ownWork)")
-            try? await handler(report.report)
+            // Applied under the process gate, which an admission may hold
+            // while it waits for a fact from this very session. Awaited here
+            // it would hold the session's delivery, and the fact behind it,
+            // until that wait timed out (traced: 15 s silences on every run
+            // report). Detached instead; reports are monotone, so order is
+            // immaterial.
+            Task { [weak self] in
+                guard let self,
+                      await self.isCurrentRuntime(
+                        generation: generation, process: process
+                      ) else { return }
+                try? await handler(report.report)
+            }
 
         case (NodeNetworkTopic.childGenesisAnchorRequest,
               .child(let childPath)):
@@ -4975,6 +5068,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // for it, and only when it was the sole remote supplier: parent evidence
         // authenticates only parent facts and never vouches for the child
         // transition. "Blame" is a per-root routing suppression, never a ban.
+        SyncTrace.log("admit \(candidate.blockCID.prefix(12)) weighed=\(candidate.weighed) decision=\(outcome.decision)")
         if outcome.decision == .invalid {
             if attempt.attribution.allResponsesComplete,
                let supplierKey = attempt.attribution.soleRemoteSupplierPublicKey,
@@ -6367,11 +6461,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 generation: generation
             )
         }
-        _ = await hierarchy.sendMessage(
+        let sent = await hierarchy.sendMessage(
             to: parent,
             topic: NodeNetworkTopic.parentChainFactRequest,
             payload: payload
         )
+        SyncTrace.log("parent fact \(request.requestID) requested for \(blockCID.prefix(12)) walk=\(continuation != nil) sent=\(sent)")
         guard isCurrentRuntime(
             generation: generation,
             process: process
@@ -6454,6 +6549,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
               let pending = pendingParentChainFacts.removeValue(
                 forKey: requestID
               ) else { return }
+        SyncTrace.log("parent fact \(requestID) timed out for \(pending.blockCID.prefix(12)) walk=\(pending.continuation != nil)")
         if let continuation = pending.continuation {
             continuation.resume(returning: nil)
             return

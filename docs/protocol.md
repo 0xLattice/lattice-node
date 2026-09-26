@@ -232,10 +232,14 @@ carry a sequence that is monotonic per session; a lower one is dropped. The
 parent holds the latest candidate per child peer — a candidate it already
 holds is ignored whatever sequence it wears, and one larger than a whole
 carrier is never held — and a template carries every held candidate built on
-its current tip's post-state; nothing is requested at template time and no
-child can stall parent consensus. A child builds no candidate while its
-validate walk is stepping and offers when the walk stops, caught up or
-parked, on the tip it reached. Candidates are
+its current tip's post-state, except a sibling of a child block this chain
+already carried (a candidate on the same child parent): that block already
+weighs at the child, and a sibling would only reorg the child's tip to the
+heavier carrier. Nothing is requested at template time and no child can
+stall parent consensus. A child builds no candidate while its
+validate walk is stepping or while its last candidate awaits validation (a
+second at the same height would only fork it), and offers when the walk
+stops, caught up or parked, on the tip it reached. Candidates are
 offers, not miner-work durability: the child keeps a candidate's content by
 its own bounded budget, oldest offer first, until the carried block's
 admission owns the roots or the budget sheds it, and a candidate named in the
