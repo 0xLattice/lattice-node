@@ -2427,6 +2427,37 @@ final class NodeStoreTests: XCTestCase {
         try await store.auditNormalizedIndexes()
     }
 
+    /// The child's carry gate asks for handoffs the parent's evidence still
+    /// holds in the inbox: a handoff mark alone, with no inbox entry (the
+    /// admission decided, or the mark predates a wipe of the inbox), is
+    /// not one, so the gate cannot latch on it.
+    func testPendingHandoffsAreThoseStillInTheInbox() async throws {
+        let directory = temporaryDirectory()
+        let broker = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let store = try makeStore(
+            path: directory.appendingPathComponent("state.db"),
+            broker: broker,
+            handoffCandidateCapacity: 2
+        )
+        let candidate = try VolumeImpl<PublicKey>(
+            node: PublicKey(key: "pending-handoff-candidate")
+        )
+        try await candidate.store(storer: broker)
+        try await store.persistContextualCandidateRoots(
+            candidateCID: candidate.rawCID,
+            roots: [candidate.rawCID],
+            capacity: 16
+        )
+        let marked = try await store.markContextualCandidateHandoff(
+            candidateCID: candidate.rawCID
+        )
+        XCTAssertTrue(marked)
+        let pending = try await store.pendingHandoffChildCIDs()
+        XCTAssertEqual(pending, [], "a handoff with no inbox entry is decided, not pending")
+    }
+
     /// The handoff budget runs on the offer cadence: storing an offer sheds
     /// the oldest handoff beyond capacity, with no explicit call, so a run
     /// that never restarts still keeps handoffs bounded.

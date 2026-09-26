@@ -5917,13 +5917,15 @@ final class NetworkTrustTests: XCTestCase {
             )
             // The recovered side carrier's route is released by the same
             // publication the hint rode on; that finishes on its own clock.
+            // A concurrent current-tip retry may retain its own route; this
+            // recovery answers only for the side carrier it completed.
             var pending = try await fixture.process.pendingChildProofCarrierCIDs()
-            for _ in 0..<1_000 where !pending.isEmpty {
+            for _ in 0..<1_000 where pending.contains(fixture.carrierCID) {
                 try await Task.sleep(for: .milliseconds(10))
                 pending = try await fixture.process.pendingChildProofCarrierCIDs()
             }
             let status = await fixture.process.status()
-            XCTAssertTrue(pending.isEmpty, "\(pending)")
+            XCTAssertFalse(pending.contains(fixture.carrierCID), "\(pending)")
             XCTAssertEqual(status.tipCID, fixture.canonicalTipCID)
         } catch {
             await provider?.stop()
@@ -6332,9 +6334,10 @@ final class NetworkTrustTests: XCTestCase {
 
             // The rule is about ignorance, not the parent block: the same
             // candidate offered again on a fresh session, before the child
-            // has admitted anything, is carried, since a new session's
-            // offers are informed by its hello. Otherwise one carry could
-            // halt a directory for good.
+            // has admitted anything, is carried. (Here the parent saw the
+            // disconnect and cleared its marks; the replacement-session
+            // window, where the marks survive and only their session
+            // scoping saves the child, has no unit fixture and is said so.)
             await fixture.childRuntime.stop()
             try await fixture.childRuntime.start(
                 process: fixture.childProcess,

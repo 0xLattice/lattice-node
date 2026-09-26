@@ -2783,13 +2783,6 @@ actor NodeStore {
         }
     }
 
-    /// Enforces the local storage budget on handed-off candidates. Losing a
-    /// fork is a cache-eviction event, not a consensus event: a handoff is
-    /// re-derivable ownership, so the oldest handoffs beyond the budget are
-    /// dropped whole — row, descendants, and pins together — and a branch
-    /// that returns re-enters through ordinary verified acquisition. Newest
-    /// handoffs survive, so a live reservation-to-admission window keeps its
-    /// pinned roots.
     /// The candidates this chain built that the parent's evidence names as
     /// carried and still holds in the inbox: no admission has decided them.
     func pendingHandoffChildCIDs() throws -> [String] {
@@ -2798,6 +2791,13 @@ actor NodeStore {
         ).compactMap { $0["candidate_cid"]?.textValue }
     }
 
+    /// Enforces the local storage budget on handed-off candidates. Losing a
+    /// fork is a cache-eviction event, not a consensus event: a handoff is
+    /// re-derivable ownership, so the oldest handoffs beyond the budget are
+    /// dropped whole — row, descendants, and pins together — and a branch
+    /// that returns re-enters through ordinary verified acquisition. Newest
+    /// handoffs survive, so a live reservation-to-admission window keeps its
+    /// pinned roots.
     func enforceHandoffCandidateBudget() async throws {
         await acquirePreparedMutation()
         defer { releasePreparedMutation() }

@@ -555,6 +555,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private var candidateOfferTask: Task<Void, Never>?
     private var candidateOfferDirty = false
     private var nextCandidateOfferSequence: UInt64 = 0
+    /// Set when the offer gate deferred behind an own carried candidate's
+    /// admission; the admission drain then re-arms the offer.
+    private var candidateOfferDeferredByAdmission = false
     private var lastOfferedCandidateCID: String?
     private var childPeerRotation: [String: Int] = [:]
     private var childPathRotation = 0
@@ -957,6 +960,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
         candidateOfferTask = nil
         candidateOfferDirty = false
         lastOfferedCandidateCID = nil
+        // Sequences are per session, and a restart is a new session.
+        nextCandidateOfferSequence = 0
+        candidateOfferDeferredByAdmission = false
         childPeerRotation.removeAll()
         childPathRotation = 0
         childProofPathRotation = 0
@@ -1655,6 +1661,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // drain re-arms the offer either way.
         if let pending = try? await process.pendingHandoffChildCIDs(),
            pending.contains(where: { candidateAcquirer.isAwaitingAdmission($0) }) {
+            candidateOfferDeferredByAdmission = true
             SyncTrace.log("candidate offer deferred: own carried candidate awaiting admission")
             return
         }
@@ -4848,10 +4855,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 process: process
             ) else { return }
             serviceCandidateAcquirer()
-            // An offer deferred behind this admission is owed a look
-            // whatever the admission decided: an acceptance reports a state
-            // change, a park reports nothing.
-            scheduleCandidateOffer(generation: generation, process: process)
+            // An offer deferred behind an admission is owed a look whatever
+            // that admission decided: an acceptance reports a state change,
+            // a park reports nothing. Only then; an admission a peer drove
+            // (a duplicate, an invalid block) is not a reason to build.
+            if candidateOfferDeferredByAdmission {
+                candidateOfferDeferredByAdmission = false
+                scheduleCandidateOffer(generation: generation, process: process)
+            }
             await advanceRangeSync(generation: generation, process: process)
         }
     }
