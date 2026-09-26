@@ -857,11 +857,11 @@ final class ChainProcessTests: XCTestCase {
             for: carriedHeader.rawCID, rootCID: proof.rootCID
         )
         XCTAssertNotNil(relayAfterAcceptance, "decided: relayed")
-        // Weighed, so not executed and nothing issued for its own children —
-        // but the relay link is beside the incoming evidence: child-proof
-        // recovery composes from that evidence and requires the link, at boot
-        // (a node that stopped before the walk validated the block must come
-        // back), and deeper chains are owed the relay regardless of execution.
+        // Weighed, so not executed and no genesis fact issued for its own
+        // children — but the relay link is beside the incoming evidence:
+        // child-proof recovery composes from that evidence and reads the link
+        // beside it (a link it does not find is skipped, never fatal), and
+        // deeper chains are owed the relay regardless of execution.
         let relayLink = try await process!.issuedParentCarrierLink(
             carrierCID: carriedHeader.rawCID, rootCID: proof.rootCID
         )

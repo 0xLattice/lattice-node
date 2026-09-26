@@ -2916,6 +2916,11 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 carrierCID: carrierCID,
                 rootCID: proof.rootCID
             ) != nil else {
+                SyncTrace.log(
+                    "child proof deferred: no relay link yet carrier="
+                        + carrierCID.prefix(12) + " root=" + proof.rootCID.prefix(12)
+                        + " directory=" + prepared.directory
+                )
                 continue
             }
             if try await store.issuedChildEvidence(
