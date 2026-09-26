@@ -229,9 +229,13 @@ whenever it changes — its validated tip block and the miner's reward plan and
 minimum work for the child's subtree — and the child pushes back its current
 candidate for that tip whenever one of its inputs changes. Both messages
 carry a sequence that is monotonic per session; a lower one is dropped. The
-parent holds the latest candidate per child peer and a template carries every
-held candidate built on its current tip's post-state; nothing is requested
-at template time and no child can stall parent consensus. Candidates are
+parent holds the latest candidate per child peer — a candidate it already
+holds is ignored whatever sequence it wears, and one larger than a whole
+carrier is never held — and a template carries every held candidate built on
+its current tip's post-state; nothing is requested at template time and no
+child can stall parent consensus. A child builds no candidate while its
+validate walk is stepping and offers when the walk stops, caught up or
+parked, on the tip it reached. Candidates are
 offers, not miner-work durability: the child keeps a candidate's content by
 its own bounded budget, oldest offer first, until the carried block's
 admission owns the roots or the budget sheds it, and a candidate named in the

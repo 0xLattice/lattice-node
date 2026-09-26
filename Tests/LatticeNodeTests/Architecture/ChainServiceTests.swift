@@ -1974,7 +1974,7 @@ final class ChainServiceTests: XCTestCase {
         let candidates = DigestInputs()
         let service = makeService(
             process: process,
-            childCandidateDigestProvider: { await candidates.lines() }
+            childCandidateDigestProvider: { _ in await candidates.lines() }
         )
         let first = try await service.miningTemplate(MiningTemplateRequest())
         let firstStatus = await service.status().templateDigest
@@ -3863,7 +3863,7 @@ final class ChainServiceTests: XCTestCase {
         childCandidateProvider: @escaping ChildCandidateProvider = { _ in [] },
         chainStateChangePublisher: @escaping ChainStateChangePublisher = {},
         childCandidateDigestProvider:
-            @escaping ChildCandidateDigestProvider = { [] },
+            @escaping ChildCandidateDigestProvider = { _ in [] },
         childProofPublisher: @escaping ChildProofPublisher = { _ in },
         acceptedBlockPublisher: @escaping AcceptedBlockPublisher = { _ in },
         acceptedTransactionPublisher:

@@ -2611,6 +2611,9 @@ actor NodeStore {
                 (root: $0, owner: contextualCandidateOwner, count: 1)
             }
         )
+        // Handoffs are exempt from the offer budget above, so their own
+        // budget runs on the same cadence: every offer this chain stores.
+        try await evictExcessHandoffCandidates()
     }
 
     /// Refreshes availability without walking or rewriting an immutable

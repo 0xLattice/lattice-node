@@ -250,9 +250,11 @@ public typealias DescendantPlanPublisher = @Sendable (
     _ rewards: [MiningReward],
     _ minimumWork: [MiningMinimumWork]
 ) async -> Void
-/// The child candidates a template can carry, as `directory:cid` lines: one
-/// input of the template digest.
-public typealias ChildCandidateDigestProvider = @Sendable () async -> [String]
+/// The child candidates a template built on the given parent state can
+/// carry, as `directory:cid` lines: one input of the template digest.
+public typealias ChildCandidateDigestProvider = @Sendable (
+    _ parentStateCID: String
+) async -> [String]
 public typealias ChildProofPublisher = @Sendable (
     DirectChildProofPublication
 ) async throws -> Void
@@ -506,7 +508,7 @@ public enum ChainServiceError: Error, Equatable, Sendable {
     case noDeploymentAvailable
     case mempoolUnavailable
     case parentUnavailable
-    case childCandidateReservationFailed
+    case validateWalkInProgress
 }
 
 /// Transport-independent operations for one path. A future HTTP layer only
@@ -615,7 +617,7 @@ public actor ChainService {
         childCandidateProvider: @escaping ChildCandidateProvider,
         chainStateChangePublisher: @escaping ChainStateChangePublisher = {},
         descendantPlanPublisher: @escaping DescendantPlanPublisher = { _, _ in },
-        childCandidateDigestProvider: @escaping ChildCandidateDigestProvider = { [] },
+        childCandidateDigestProvider: @escaping ChildCandidateDigestProvider = { _ in [] },
         childProofPublisher: @escaping ChildProofPublisher,
         parentRunReportPublisher: @escaping ParentRunReportPublisher = { _ in },
         parentRunReportRequester: @escaping ParentRunReportRequester = { _ in },
@@ -1470,6 +1472,11 @@ public actor ChainService {
         guard process.configuration.address.isNexus else {
             throw ChainServiceError.parentCarrierRequired
         }
+        // Children build their next candidates against this miner's plan for
+        // them. Read before the build, so a refused plan refuses the request
+        // and never leaves an issued template behind.
+        let rewardPlan = try await validatedRewardPlan(request.rewards)
+        let minimumWorkPlan = try validatedMinimumWorkPlan(request.minimumWork)
         let assembled = try await buildMiningTemplate(
             rewards: request.rewards,
             minimumWork: request.minimumWork,
@@ -1482,10 +1489,7 @@ public actor ChainService {
             throw MiningTemplateError.expired
         }
         let digest = await templateDigestLocked()
-        // Children build their next candidates against this miner's plan for
-        // them; pushed after the template so the miner never waits on it.
-        let rewardPlan = try await validatedRewardPlan(request.rewards)
-        let minimumWorkPlan = try validatedMinimumWorkPlan(request.minimumWork)
+        // Pushed after the template so the miner never waits on it.
         let descendantRewards = rewardPlan.descendants
         let descendantMinimumWork = minimumWorkPlan.descendants
         Task { [descendantPlanPublisher] in
@@ -1499,18 +1503,23 @@ public actor ChainService {
     }
 
     /// One string that changes whenever a template built now would differ
-    /// from one built a moment ago: the validated tip, the mempool, and the
-    /// child candidates held. The template carries it and status serves it,
-    /// so a miner comparing the two learns its work is stale at any level of
-    /// the hierarchy, not only when this chain's tip moves.
+    /// from one built a moment ago: the validated tip, the transactions a
+    /// template selects from (an unavailable entry is never selected), and
+    /// the child candidates built on the tip's post-state. The template
+    /// carries it and status serves it, so a miner comparing the two learns
+    /// its work is stale at any level of the hierarchy, not only when this
+    /// chain's tip moves.
     private func templateDigestLocked() async -> String {
         var lines: [String] = []
-        let tip = (try? await process.validatedTipBlock())
-            .flatMap { try? BlockHeader(node: $0).rawCID }
-        lines.append("tip:\(tip ?? "")")
-        lines.append("mempool:" + (await pool.snapshot().map(\.cid).sorted()
-            .joined(separator: ",")))
-        lines += await childCandidateDigestProvider()
+        let tip = try? await process.validatedTipBlock()
+        let tipCID = tip.flatMap { try? BlockHeader(node: $0).rawCID }
+        lines.append("tip:\(tipCID ?? "")")
+        lines.append("mempool:" + (await pool.snapshot()
+            .filter { $0.disposition != .unavailable }
+            .map(\.cid).sorted().joined(separator: ",")))
+        if let tip {
+            lines += await childCandidateDigestProvider(tip.postState.rawCID)
+        }
         let digest = SHA256.hash(data: Data(lines.joined(separator: "\n").utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
@@ -1526,6 +1535,17 @@ public actor ChainService {
         for context: ChildCandidateRequestContext,
         parentContentSource: any ContentSource
     ) async throws -> DirectChildCandidate {
+        // A candidate builds on the validated tip. While the validate walk is
+        // stepping, that tip is about to move and the build is the very work
+        // that starves the walk, so none is built. The walk reports a state
+        // change after every step and once more when it stops — caught up
+        // or parked — and the offer follows; a parked walk never withholds
+        // one, since building on the validated tip is how a chain outweighs
+        // a branch it cannot validate.
+        guard validateWalkWorker == nil else {
+            SyncTrace.log("child candidate deferred: validate walk stepping")
+            throw ChainServiceError.validateWalkInProgress
+        }
         do {
             let candidate = try await miningCandidate(
                 parentCarrier: context.parentCarrier,
@@ -1983,6 +2003,9 @@ public actor ChainService {
             await runValidateWalkPass()
         }
         validateWalkWorker = nil
+        // The walk stopped, caught up or parked: a candidate deferred while
+        // it stepped builds now.
+        publishChainStateChange()
     }
 
     /// Arm one delayed re-drive of the validate walk after it parks on a network

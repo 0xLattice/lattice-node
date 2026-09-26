@@ -163,8 +163,10 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                     minimumWork: minimumWork
                 )
             },
-            childCandidateDigestProvider: { [weak network] in
-                await network?.childCandidateDigestInput() ?? []
+            childCandidateDigestProvider: { [weak network] parentStateCID in
+                await network?.childCandidateDigestInput(
+                    parentStateCID: parentStateCID
+                ) ?? []
             },
             childProofPublisher: { [weak network] publication in
                 guard let network else { throw CancellationError() }

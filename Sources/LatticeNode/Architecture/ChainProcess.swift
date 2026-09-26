@@ -2248,7 +2248,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         // The handoff budget is deliberately NOT enforced here: evidence
         // retention is the critical path for child admission, and evidence
         // only arrives while the parent is mining — the same cadence on
-        // which reservation snapshots already enforce the budget.
+        // which this chain's stored offers already enforce the budget.
     }
 
     public func status() async -> ChainProcessStatus {

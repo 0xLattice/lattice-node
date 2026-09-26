@@ -82,6 +82,23 @@ final class MinerLoopLogicTests: XCTestCase {
             ))
         )
         XCTAssertEqual(decoded.staleToken, "d1")
+        // An empty digest is no digest: the coordinator's status probe treats
+        // it the same way, so the two never disagree into a refetch loop.
+        let emptyDigest = try JSONDecoder().decode(
+            TemplateResponse.self,
+            from: JSONEncoder().encode(WireTemplate(
+                workID: "candidate",
+                block: block,
+                searchTarget: UInt256(255),
+                chainPath: ["Nexus"],
+                expiresInMilliseconds: 30_000,
+                templateDigest: ""
+            ))
+        )
+        XCTAssertEqual(
+            emptyDigest.staleToken,
+            block.parent?.rawCID ?? "candidate"
+        )
     }
 
     func testParseMinimumWorkAcceptsPowersOfTwoAndDecimals() {

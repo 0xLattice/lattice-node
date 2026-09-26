@@ -2427,6 +2427,61 @@ final class NodeStoreTests: XCTestCase {
         try await store.auditNormalizedIndexes()
     }
 
+    /// The handoff budget runs on the offer cadence: storing an offer sheds
+    /// the oldest handoff beyond capacity, with no explicit call, so a run
+    /// that never restarts still keeps handoffs bounded.
+    func testStoringAnOfferEnforcesTheHandoffBudget() async throws {
+        let directory = temporaryDirectory()
+        let broker = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let store = try makeStore(
+            path: directory.appendingPathComponent("state.db"),
+            broker: broker,
+            handoffCandidateCapacity: 2
+        )
+        var handoffs: [VolumeImpl<PublicKey>] = []
+        for index in 0..<3 {
+            let candidate = try VolumeImpl<PublicKey>(
+                node: PublicKey(key: "offer-budget-handoff-\(index)")
+            )
+            try await candidate.store(storer: broker)
+            try await store.persistContextualCandidateRoots(
+                candidateCID: candidate.rawCID,
+                roots: [candidate.rawCID],
+                capacity: 16
+            )
+            let began = try await store.markContextualCandidateHandoff(
+                candidateCID: candidate.rawCID
+            )
+            XCTAssertTrue(began)
+            handoffs.append(candidate)
+        }
+        // Three handoffs stand over a budget of two until the next offer.
+        let beforeOffer = try await store.contextualCandidateVolumeRoots()
+        XCTAssertEqual(Set(beforeOffer), Set(handoffs.map(\.rawCID)))
+
+        let offer = try VolumeImpl<PublicKey>(
+            node: PublicKey(key: "offer-budget-offer")
+        )
+        try await offer.store(storer: broker)
+        try await store.persistContextualCandidateRoots(
+            candidateCID: offer.rawCID,
+            roots: [offer.rawCID],
+            capacity: 16
+        )
+        let afterOffer = try await store.contextualCandidateVolumeRoots()
+        XCTAssertEqual(
+            Set(afterOffer),
+            Set([handoffs[1].rawCID, handoffs[2].rawCID, offer.rawCID]),
+            "the oldest handoff is shed by the offer"
+        )
+        _ = try await broker.evictUnpinned(graceSeconds: 0)
+        let evicted = await broker.fetchVolumeLocal(root: handoffs[0].rawCID)
+        XCTAssertNil(evicted)
+        try await store.auditNormalizedIndexes()
+    }
+
     func testParentEvidenceScanAndInboxSurviveCrashUntilAdmissionOwnsVolume()
         async throws
     {

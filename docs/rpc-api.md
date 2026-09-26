@@ -56,10 +56,11 @@ Both routes return the same chain-process status:
 ```
 
 `templateDigest` names every input of a mining template on this chain — the
-validated tip, the mempool, and the child candidates held — and is the same
-value the template response carries, so a miner comparing the two learns its
-work is stale for a change at any level of the hierarchy. Absent before the
-chain has a validated tip.
+validated tip, the transactions a template selects from, and the child
+candidates built on that tip — and is the same value the template response
+carries, so a miner comparing the two learns its work is stale for a change
+at any level of the hierarchy. `/v1/status` serves it; `/health`, the
+non-mutating public read, omits it. Absent before the chain has a tip.
 
 A child reports `phase: "awaitingGenesis"`, with null tip and height, until its
 authenticated immediate parent confirms the recorded genesis CID and the child

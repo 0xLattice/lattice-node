@@ -206,17 +206,6 @@ struct NodeNetworkPlaneConfigurations {
                 listenPort: configuration.factListenPort,
                 bootstrapPeers: configuration.parentEndpoint.map { [$0.ivy] } ?? [],
                 inboundAdmissionBypassPeerKeys: parentAdmissionBypass,
-                // The private plane speaks only to configured parent and
-                // child processes. Tally's per-peer request budget is a
-                // stranger's; at merged-mining block rates a parent legitimately
-                // sends its child an evidence announcement, a run report and a
-                // template context per block and answers every run it asks
-                // for, and a refused send here is this node throttling its own
-                // tree. Give the edge room; the peer count is the topology.
-                tallyConfig: TallyConfig(
-                    perPeerRequestCapacity: 4_000,
-                    perPeerRequestRefillPerSecond: 1_000
-                ),
                 maxConnections: IvyConfig.defaultMaxConnections,
                 reservedOutboundConnectionSlots: configuration.parentEndpoint == nil ? 0 : 1,
                 maxConnectionsPerNetgroup: IvyConfig.defaultMaxConnections,
@@ -243,84 +232,6 @@ struct NodeNetworkPlaneConfigurations {
         try hierarchy.validate()
         self.overlay = overlay
         self.hierarchy = hierarchy
-    }
-}
-
-actor ProvisionalVolumeRegistry {
-    private struct Key: Hashable {
-        let generation: UInt64
-        let cid: String
-    }
-
-    private let broker: any VolumeBroker
-    private var leases: [Key: Int] = [:]
-    private var epoch: UInt64 = 0
-
-    init(
-        broker: any VolumeBroker = MemoryBroker(evictUnpinnedGrace: .zero)
-    ) {
-        self.broker = broker
-    }
-
-    func retain(_ volume: SerializedVolume, generation: UInt64) async -> Bool {
-        let key = Key(generation: generation, cid: volume.root)
-        let operationEpoch = epoch
-        do {
-            try await broker.store(volume: volume)
-            guard epoch == operationEpoch else {
-                _ = try? await broker.evictUnpinned()
-                return false
-            }
-            try await broker.pin(
-                root: volume.root,
-                owner: Self.owner(generation)
-            )
-        } catch {
-            return false
-        }
-        guard epoch == operationEpoch else {
-            try? await broker.unpin(
-                root: volume.root,
-                owner: Self.owner(generation)
-            )
-            _ = try? await broker.evictUnpinned()
-            return false
-        }
-        leases[key, default: 0] += 1
-        return true
-    }
-
-    func release(_ cid: String, generation: UInt64) async {
-        let key = Key(generation: generation, cid: cid)
-        guard let count = leases[key] else { return }
-        leases[key] = count == 1 ? nil : count - 1
-        try? await broker.unpin(root: cid, owner: Self.owner(generation))
-        if count == 1 { _ = try? await broker.evictUnpinned() }
-    }
-
-    func volume(_ cid: String, generation: UInt64) async -> SerializedVolume? {
-        guard leases[Key(generation: generation, cid: cid)] != nil else {
-            return nil
-        }
-        return await broker.fetchVolumeLocal(root: cid)
-    }
-
-    func removeAll() async {
-        epoch &+= 1
-        let retained = leases
-        leases.removeAll()
-        for (key, count) in retained {
-            try? await broker.unpin(
-                root: key.cid,
-                owner: Self.owner(key.generation),
-                count: count
-            )
-        }
-        _ = try? await broker.evictUnpinned()
-    }
-
-    private static func owner(_ generation: UInt64) -> String {
-        "runtime-provisional:\(generation)"
     }
 }
 
@@ -437,7 +348,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private static let futureCandidateRetryInterval: Duration = .seconds(1)
     private static let maximumPendingRequests = 1_024
     private static let maximumDirectChildren = 64
-    private static let maximumConcurrentChildBuilds = 8
     private static let maximumConcurrentParentStateQueries = 64
     private static let maximumPeersPerChildPath = 4
     private static let maximumReconnectEvidenceAnnouncements = 64
@@ -466,7 +376,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private var overlayPeers: [PeerKey: AuthenticatedPeer] = [:]
     private var hierarchyPeers: [PeerKey: HierarchyPeer] = [:]
     private var hierarchySessions: [PeerKey: AuthenticatedPeer] = [:]
-    private let provisionalRoots = ProvisionalVolumeRegistry()
     private var childEvidenceReadyPeers: Set<PeerKey> = []
     private var childEvidenceReadyWaiters:
         [PeerKey: [ChildEvidenceReadyWaiter]] = [:]
@@ -560,11 +469,18 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let sequence: UInt64
         let tipCID: String
         let tipData: Data
+        /// This chain's block size limit at the tip: a child candidate
+        /// larger than a whole carrier can never be carried, so one is not
+        /// held.
+        let maxChildBlockBytes: Int
         let rewards: [MiningReward]
         let minimumWork: [MiningMinimumWork]
     }
     private var parentTipContext: ParentTipContext?
     private var nextParentTipSequence: UInt64 = 0
+    /// The context sequence each ready child was last sent, so the push
+    /// task sends a child only what it lacks.
+    private var pushedParentTipSequence: [PeerKey: UInt64] = [:]
     private var parentTipPushTask: Task<Void, Never>?
     private var parentTipPushDirty = false
     private var descendantRewards: [MiningReward] = []
@@ -573,7 +489,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// template reads it; nothing is requested at template time.
     private struct CachedChildCandidate {
         let sequence: UInt64
-        let parentTipCID: String
+        let childCID: String
         let candidate: DirectChildCandidate
     }
     private var childCandidateOffers: [PeerKey: CachedChildCandidate] = [:]
@@ -764,9 +680,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 process: process,
                 authorizes: { [weak self] peer in
                     await self?.canServeHierarchyContent(to: peer) == true
-                },
-                transientRootVolume: { [weak self] rootCID in
-                    await self?.provisionalVolume(forRoot: rootCID)
                 }
             )
         )
@@ -909,7 +822,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
             pending.timeout.cancel()
             pending.continuation.resume(returning: [])
         }
-        await provisionalRoots.removeAll()
         childEvidenceReadyPeers.removeAll()
         childEvidenceIndexCompleteSessions.removeAll()
         childEvidencePublicationFailedSessions.removeAll()
@@ -983,6 +895,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         parentEvidence.reset()
         childCandidateOffers.removeAll()
         parentTipContext = nil
+        pushedParentTipSequence.removeAll()
         parentTipPushTask?.cancel()
         parentTipPushTask = nil
         parentTipPushDirty = false
@@ -1353,36 +1266,35 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard isRunning, let process else { return }
         descendantRewards = rewards
         descendantMinimumWork = minimumWork
-        await refreshParentTipContext(
-            process: process,
-            generation: runtimeGeneration
-        )
+        scheduleParentTipPush(generation: runtimeGeneration, process: process)
     }
 
     /// Something a template or a child candidate is a function of changed
     /// here: the validated tip, the mempool, a credit. As a parent, re-push
     /// the context to children if it differs; as a child, rebuild and push
-    /// our candidate.
+    /// our candidate. Both are coalescing tasks: this call costs a flag, and
+    /// the tip is re-read once per task run, not once per event.
     public func chainStateChanged() async {
         guard isRunning, let process else { return }
         let generation = runtimeGeneration
-        await refreshParentTipContext(process: process, generation: generation)
+        scheduleParentTipPush(generation: generation, process: process)
         scheduleCandidateOffer(generation: generation, process: process)
     }
 
-    /// The candidates this chain's template can carry, one line per directory
-    /// as `directory:candidateCID` (several peers, several CIDs), sorted — an
-    /// input to the template digest a miner compares to learn its work is
-    /// stale.
-    public func childCandidateDigestInput() -> [String] {
+    /// The candidates a template built on the given parent state can carry,
+    /// one line per directory as `directory:candidateCID` (several peers,
+    /// several CIDs), sorted — an input to the template digest a miner
+    /// compares to learn its work is stale. A held candidate for another
+    /// parent state is not carried, so it is not an input.
+    public func childCandidateDigestInput(parentStateCID: String) -> [String] {
         var byDirectory: [String: [String]] = [:]
         for (key, role) in hierarchyPeers {
             guard case .child(let path) = role, let directory = path.last,
                   childEvidenceReadyPeers.contains(key),
                   let offer = childCandidateOffers[key],
-                  let cid = try? BlockHeader(node: offer.candidate.block).rawCID
+                  offer.candidate.block.parentState.rawCID == parentStateCID
             else { continue }
-            byDirectory[directory, default: []].append(cid)
+            byDirectory[directory, default: []].append(offer.childCID)
         }
         return byDirectory.keys.sorted().map {
             "\($0):\(byDirectory[$0]!.sorted().joined(separator: ","))"
@@ -1426,8 +1338,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
 
     /// Re-reads this chain's validated tip and, if the context children build
-    /// against changed (tip, rewards, minimum work), pushes it to every ready
-    /// child. Cheap when nothing changed.
+    /// against changed (tip, rewards, minimum work), mints the next one for
+    /// the push task to send. Only the push task calls this, so two reads
+    /// never race to label an older tip with the newer sequence.
     private func refreshParentTipContext(
         process: ChainProcess,
         generation: UInt64
@@ -1443,6 +1356,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard let tip = try? await process.validatedTipBlock(),
               let tipCID = try? BlockHeader(node: tip).rawCID,
               let tipData = tip.toData(),
+              let spec = try? await tip.spec.resolve(fetcher: process).node,
               isCurrentRuntime(generation: generation, process: process)
         else { return }
         let rewards = descendantRewards
@@ -1458,12 +1372,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
             sequence: nextParentTipSequence,
             tipCID: tipCID,
             tipData: tipData,
+            maxChildBlockBytes: spec.maxBlockSize,
             rewards: rewards,
             minimumWork: minimumWork
         )
         parentTipContext = context
         SyncTrace.log("parent tip context \(context.sequence): h=\(tip.height) tip=\(tipCID.prefix(12))")
-        scheduleParentTipPush(generation: generation, process: process)
     }
 
     /// Pushes the latest context to every ready child. Coalescing, like the
@@ -1489,14 +1403,20 @@ public actor NodeNetworkRuntime: IvyDelegate {
         generation: UInt64,
         process: ChainProcess
     ) async {
-        defer { parentTipPushTask = nil }
+        // A run cancelled by a stop that a restart followed must not clear
+        // the restart's handle.
+        defer { if runtimeGeneration == generation { parentTipPushTask = nil } }
         while parentTipPushDirty, !Task.isCancelled,
               isCurrentRuntime(generation: generation, process: process) {
             parentTipPushDirty = false
-            guard let context = parentTipContext else { return }
+            await refreshParentTipContext(process: process, generation: generation)
+            guard !Task.isCancelled,
+                  isCurrentRuntime(generation: generation, process: process),
+                  let context = parentTipContext else { return }
             for (key, role) in hierarchyPeers {
                 guard case .child(let childPath) = role,
                       childEvidenceReadyPeers.contains(key),
+                      pushedParentTipSequence[key] != context.sequence,
                       let peer = hierarchySessions[key] else { continue }
                 await pushParentTipContext(context, to: peer, childPath: childPath)
             }
@@ -1551,7 +1471,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
             topic: NodeNetworkTopic.parentTipAvailable,
             payload: payload
         )
-        if case .enqueued = sent {} else {
+        if case .enqueued = sent {
+            pushedParentTipSequence[peer.key] = context.sequence
+        } else {
             SyncTrace.log("parent tip push to \(childPath.joined(separator: "/")) not sent: \(sent)")
         }
     }
@@ -1584,7 +1506,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         generation: UInt64,
         process: ChainProcess
     ) async {
-        defer { candidateOfferTask = nil }
+        defer { if runtimeGeneration == generation { candidateOfferTask = nil } }
         while candidateOfferDirty, !Task.isCancelled,
               isCurrentRuntime(generation: generation, process: process) {
             candidateOfferDirty = false
@@ -1602,16 +1524,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // Nothing to offer before this chain's genesis is active; the next
         // state change (activation commits) offers.
         guard await process.status().phase == .active else { return }
-        // A candidate builds on the VALIDATED tip. While the validate walk
-        // is behind the weighed tip, a candidate would be a side block on a
-        // tip this chain has already left — wasted work at the parent, and
-        // here the very work that starves the walk. Offer when it catches
-        // up; every walk step reports a state change.
-        let tips = await process.metricsTipHeights()
-        if let weighed = tips.weighed, (tips.validated ?? 0) < weighed {
-            SyncTrace.log("candidate offer deferred: validated \(tips.validated ?? 0) behind weighed \(weighed)")
-            return
-        }
         guard let context = receivedParentTip,
               hierarchySessions[context.peer.key]?.sessionID
                 == context.peer.sessionID,
@@ -1663,7 +1575,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard let payload = try? ChildCandidateAvailableMessage(
             sequence: nextCandidateOfferSequence,
             childPath: configuration.chainPath,
-            parentTipCID: context.tipCID,
             childCID: childCID,
             blockData: blockData,
             searchWitness: candidate.searchWitness
@@ -1901,12 +1812,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         runtimeGeneration != 0
             && hierarchyPeers[peer.key] != nil
             && hierarchySessions[peer.key]?.sessionID == peer.sessionID
-    }
-
-    private func provisionalVolume(
-        forRoot cid: String
-    ) async -> SerializedVolume? {
-        await provisionalRoots.volume(cid, generation: runtimeGeneration)
     }
 
     /// Publishes an already-promoted absolute proof prepared durably by the
@@ -2356,6 +2261,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         childEvidenceReadyPeers.remove(key)
         cancelChildEvidenceReadyWaiters(for: key)
         childCandidateOffers.removeValue(forKey: key)
+        pushedParentTipSequence.removeValue(forKey: key)
         Self.pruneChildPeerRotations(
             &childPeerRotation,
             activeRoles: Array(hierarchyPeers.values)
@@ -4078,15 +3984,38 @@ public actor NodeNetworkRuntime: IvyDelegate {
             scheduleCandidateOffer(generation: generation, process: process)
 
         case (NodeNetworkTopic.childCandidateAvailable, .child(let childPath)):
+            // Only a child this chain has wired in, and only once there is a
+            // context to build against: a legitimate child pushes for a
+            // context it received. Nothing is decoded for anyone else.
+            guard childEvidenceReadyPeers.contains(peer.key),
+                  let parentContext = parentTipContext else {
+                SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: not ready or no context")
+                return
+            }
             guard let offer = try? ChildCandidateAvailableMessage.decoded(
                     message.payload
                   ), offer.childPath == childPath,
-                  let directory = childPath.last,
-                  let block = _contentBoundBlock(
+                  let directory = childPath.last else {
+                SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: undecodable")
+                return
+            }
+            // Larger than a whole carrier is never carried, so never held.
+            guard offer.blockData.count <= parentContext.maxChildBlockBytes else {
+                SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: \(offer.blockData.count) bytes exceeds a carrier")
+                return
+            }
+            // The same candidate again says nothing new: no decode, no
+            // rebuild, whatever sequence it wears.
+            if let cached = childCandidateOffers[peer.key],
+               cached.childCID == offer.childCID {
+                SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: already held")
+                return
+            }
+            guard let block = _contentBoundBlock(
                     cid: offer.childCID,
                     data: offer.blockData
                   ) else {
-                SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: undecodable or unbound")
+                SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: unbound")
                 return
             }
             let candidate = DirectChildCandidate(
@@ -4110,10 +4039,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             }
             childCandidateOffers[peer.key] = CachedChildCandidate(
                 sequence: offer.sequence,
-                parentTipCID: offer.parentTipCID,
+                childCID: offer.childCID,
                 candidate: candidate
             )
-            SyncTrace.log("child candidate cached from \(childPath.joined(separator: "/")): h=\(block.height) for tip=\(offer.parentTipCID.prefix(12)) seq=\(offer.sequence)")
+            SyncTrace.log("child candidate cached from \(childPath.joined(separator: "/")): h=\(block.height) parentState=\(block.parentState.rawCID.prefix(12)) seq=\(offer.sequence)")
             // This chain's own candidate now carries a fresher child: rebuild
             // it for our parent, if we have one.
             scheduleCandidateOffer(generation: generation, process: process)
@@ -4228,18 +4157,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 await handlers?.runReportServing?(directory)
             }
             // A child wired in builds against this chain's current context:
-            // push it now rather than waiting for the next change. A refresh
-            // that minted a new context already pushed it to every ready
-            // child, this one included; only an unchanged one is pushed here.
-            let sequenceBefore = parentTipContext?.sequence
-            await refreshParentTipContext(process: process, generation: generation)
-            guard isCurrentRuntime(generation: generation, process: process),
-                  hierarchySessions[peer.key]?.sessionID == peer.sessionID else {
-                return
-            }
-            if let context = parentTipContext, context.sequence == sequenceBefore {
-                await pushParentTipContext(context, to: peer, childPath: childPath)
-            }
+            // the push task sends it to every ready child that lacks it.
+            scheduleParentTipPush(generation: generation, process: process)
             scheduleChildProofRecovery(
                 generation: generation,
                 process: process

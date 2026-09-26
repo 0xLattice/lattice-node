@@ -934,8 +934,9 @@ struct ChildCandidateAvailableMessage: Sendable {
     /// Monotonic per child session; a lower one is stale and ignored.
     let sequence: UInt64
     let childPath: [String]
-    /// The parent tip the candidate was built for.
-    let parentTipCID: String
+    /// The candidate binds its parent tip itself: its `parentState` is that
+    /// tip's post-state, which is what the parent checks. Nothing else on
+    /// the wire names the tip.
     let childCID: String
     let blockData: Data
     let searchWitness: ChildSchedulingWitness?
@@ -943,14 +944,12 @@ struct ChildCandidateAvailableMessage: Sendable {
     init(
         sequence: UInt64,
         childPath: [String],
-        parentTipCID: String,
         childCID: String,
         blockData: Data,
         searchWitness: ChildSchedulingWitness?
     ) {
         self.sequence = sequence
         self.childPath = childPath
-        self.parentTipCID = parentTipCID
         self.childCID = childCID
         self.blockData = blockData
         self.searchWitness = searchWitness
@@ -960,19 +959,18 @@ struct ChildCandidateAvailableMessage: Sendable {
         guard sequence != 0,
               _isAbsoluteChainPath(childPath), childPath.count > 1,
               childPath.count <= Int(UInt16.max),
-              _isBoundedWireAtom(parentTipCID), _isBoundedWireAtom(childCID),
+              _isBoundedWireAtom(childCID),
               blockData.count <= Int(UInt32.max),
               _contentBoundBlock(cid: childCID, data: blockData) != nil else {
             throw NodeNetworkWireError.malformed
         }
         let pathBytes = childPath.map { Data($0.utf8) }
-        let parentBytes = Data(parentTipCID.utf8)
         let childBytes = Data(childCID.utf8)
         let witnesses = try Self.encodedWitnesses(
             search: searchWitness
         )
         var size = 8 + 2 + pathBytes.reduce(0) { $0 + 2 + $1.count }
-        size += 2 + parentBytes.count + 2 + childBytes.count
+        size += 2 + childBytes.count
         size += 4 + blockData.count
         size += 1 + witnesses.reduce(0) {
             $0 + 9 + $1.proof.count + $1.terminal.count
@@ -987,8 +985,6 @@ struct ChildCandidateAvailableMessage: Sendable {
             data.appendUInt16(UInt16(component.count))
             data.append(component)
         }
-        data.appendUInt16(UInt16(parentBytes.count))
-        data.append(parentBytes)
         data.appendUInt16(UInt16(childBytes.count))
         data.append(childBytes)
         data.appendUInt32(UInt32(blockData.count))
@@ -1011,7 +1007,6 @@ struct ChildCandidateAvailableMessage: Sendable {
         var position = data.startIndex
         guard let sequence = data.readUInt64(at: &position), sequence != 0,
               let childPath = data.readChainPath(at: &position),
-              let parentTipCID = data.readString(at: &position),
               let childCID = data.readString(at: &position) else {
             throw NodeNetworkWireError.malformed
         }
@@ -1029,7 +1024,6 @@ struct ChildCandidateAvailableMessage: Sendable {
         let message = Self(
             sequence: sequence,
             childPath: childPath,
-            parentTipCID: parentTipCID,
             childCID: childCID,
             blockData: blockData,
             searchWitness: searchWitness

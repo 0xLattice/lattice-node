@@ -88,10 +88,12 @@ public struct TemplateResponse: Decodable, Sendable, Equatable {
         // would differ — a child's candidate as much as this chain's tip —
         // and the status route serves the same digest. A node predating it
         // exposes only the tip, so that stays the fallback.
-        staleToken = try container.decodeIfPresent(
+        let digest = try container.decodeIfPresent(
             String.self,
             forKey: .templateDigest
-        ) ?? block.parent?.rawCID ?? workID
+        )
+        staleToken = digest.flatMap { $0.isEmpty ? nil : $0 }
+            ?? block.parent?.rawCID ?? workID
     }
 }
 

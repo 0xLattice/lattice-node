@@ -1296,6 +1296,23 @@ private struct NetworkHierarchyBranch {
     let leafHeader: BlockHeader
 }
 
+/// Holds a validate-walk step until opened.
+private actor WalkGate {
+    private var opened = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    var isHeld: Bool { !waiters.isEmpty }
+    func wait() async {
+        if opened { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+    func open() {
+        opened = true
+        let resumed = waiters
+        waiters.removeAll()
+        for waiter in resumed { waiter.resume() }
+    }
+}
+
 private struct ProvisionalRootFixture {
     let childConfiguration: NodeConfiguration
     let parentRuntime: NodeNetworkRuntime
@@ -2744,7 +2761,6 @@ final class NetworkTrustTests: XCTestCase {
         let response = ChildCandidateAvailableMessage(
             sequence: 11,
             childPath: ["Nexus", "Payments"],
-            parentTipCID: parentCID,
             childCID: parentCID,
             blockData: parentData,
             searchWitness: nil
@@ -2752,14 +2768,13 @@ final class NetworkTrustTests: XCTestCase {
         let decodedResponse = try ChildCandidateAvailableMessage.decoded(
             response.encoded()
         )
-        XCTAssertEqual(decodedResponse.parentTipCID, parentCID)
+        XCTAssertEqual(decodedResponse.childCID, parentCID)
         XCTAssertNil(decodedResponse.searchWitness)
 
         var forgedTarget = try response.encoded()
         let targetOffset = 8 + 2
             + (2 + "Nexus".utf8.count)
             + (2 + "Payments".utf8.count)
-            + 2 + parentCID.utf8.count
             + 2 + parentCID.utf8.count
         forgedTarget.insert(
             contentsOf: Data(repeating: 0x66, count: 64),
@@ -2789,7 +2804,6 @@ final class NetworkTrustTests: XCTestCase {
             ChildCandidateAvailableMessage(
                 sequence: 19,
                 childPath: ["Nexus", "Payments"],
-                parentTipCID: childCID,
                 childCID: childCID,
                 blockData: data,
                 searchWitness: nil
@@ -5898,50 +5912,6 @@ final class NetworkTrustTests: XCTestCase {
         await fixture.runtime.stop()
     }
 
-    func testProvisionalVolumeRegistryRetainsUntilLastLease() async throws {
-        let volume = try await transactionVolume(
-            unsignedTransaction(path: [])
-        )
-        let registry = ProvisionalVolumeRegistry()
-
-        let firstLease = await registry.retain(volume, generation: 7)
-        let secondLease = await registry.retain(volume, generation: 7)
-        XCTAssertTrue(firstLease)
-        XCTAssertTrue(secondLease)
-        await registry.release(volume.root, generation: 7)
-        let retained = await registry.volume(volume.root, generation: 7)
-        XCTAssertNotNil(retained)
-
-        await registry.release(volume.root, generation: 7)
-        let released = await registry.volume(volume.root, generation: 7)
-        XCTAssertNil(released)
-
-        let nextGeneration = await registry.retain(volume, generation: 8)
-        XCTAssertTrue(nextGeneration)
-        let stale = await registry.volume(volume.root, generation: 7)
-        let current = await registry.volume(volume.root, generation: 8)
-        XCTAssertNil(stale)
-        XCTAssertNotNil(current)
-    }
-
-    func testProvisionalVolumeRegistryRejectsRetainRacingReset() async throws {
-        let volume = try await transactionVolume(unsignedTransaction(path: []))
-        let broker = BlockingProvisionalBroker()
-        let registry = ProvisionalVolumeRegistry(broker: broker)
-        let retain = Task { await registry.retain(volume, generation: 7) }
-
-        await broker.waitUntilStoreStarts()
-        await registry.removeAll()
-        await broker.releaseStore()
-
-        let retained = await retain.value
-        let registered = await registry.volume(volume.root, generation: 7)
-        let stored = await broker.hasVolume(root: volume.root)
-        XCTAssertFalse(retained)
-        XCTAssertNil(registered)
-        XCTAssertFalse(stored)
-    }
-
     /// A child never asks for a parent template. The parent pushes its
     /// context (its validated tip) when the child wires in; the child builds
     /// its candidate against the tip's post-state, reading the tip from the
@@ -6032,7 +6002,9 @@ final class NetworkTrustTests: XCTestCase {
             XCTAssertEqual(again.count, 1)
             let buildsAfterSecond = await builds.snapshot().count
             XCTAssertEqual(buildsAfterSecond, 1)
-            let digestInput = await fixture.parentRuntime.childCandidateDigestInput()
+            let digestInput = await fixture.parentRuntime.childCandidateDigestInput(
+                parentStateCID: fixture.context.parentCarrier.prevState.rawCID
+            )
             let candidateCID = try BlockHeader(node: fixture.candidate.block).rawCID
             XCTAssertEqual(digestInput, ["Payments:\(candidateCID)"])
         } catch {
@@ -6239,11 +6211,11 @@ final class NetworkTrustTests: XCTestCase {
         await fixture.parentRuntime.stop()
     }
 
-    /// A candidate builds on the validated tip. While the child's validate
-    /// walk is behind its weighed tip, an offer would be a side block on a
-    /// tip the chain has already left, so none is made; the offer comes when
-    /// the walk catches up, since every walk step reports a state change.
-    func testChildOffersNoCandidateWhileItsValidateWalkIsBehind() async throws {
+    /// A weighed block ahead of the validated tip with no walk stepping —
+    /// parked on a fact it cannot get, or never armed — does not withhold
+    /// the child's candidate: the child builds on its validated tip, since
+    /// that is how a chain outweighs a branch it cannot validate.
+    func testAParkedValidateWalkDoesNotWithholdTheChildsCandidate() async throws {
         let fixture = try await provisionalRootFixture(keyByte: 0x9c)
         let childService = networkService(
             process: fixture.childProcess,
@@ -6259,8 +6231,119 @@ final class NetworkTrustTests: XCTestCase {
             },
             admission: { _ in throw CancellationError() }
         )
-        // The child holds a block it has weighed but not executed: its
-        // weighed tip is ahead of its validated tip.
+        let weighedOnly = try await weighedOnlyChildBlock(fixture)
+        let tips = await fixture.childProcess.metricsTipHeights()
+        XCTAssertEqual(tips.weighed, 1)
+        XCTAssertEqual(tips.validated, 0)
+
+        do {
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess,
+                handlers: inertNetworkHandlers()
+            )
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess,
+                handlers: childHandlers
+            )
+            var held: [DirectChildCandidate] = []
+            for _ in 0..<250 {
+                held = await fixture.parentRuntime.directChildCandidates(fixture.context)
+                if !held.isEmpty { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            XCTAssertEqual(held.count, 1, "offered with the walk parked")
+            XCTAssertEqual(held.first?.block.height, 1, "built on the validated tip")
+            XCTAssertNotEqual(
+                held.first.map { try? BlockHeader(node: $0.block).rawCID },
+                weighedOnly.header.rawCID
+            )
+        } catch {
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+            throw error
+        }
+        await fixture.childRuntime.stop()
+        await fixture.parentRuntime.stop()
+    }
+
+    /// While the validate walk is stepping, a candidate is not built (the
+    /// tip is about to move and the build is what starves the walk); when
+    /// the walk stops, the service reports a state change so the deferred
+    /// candidate is offered, built on the tip the walk reached.
+    func testChildCandidateWaitsWhileTheValidateWalkSteps() async throws {
+        let fixture = try await provisionalRootFixture(keyByte: 0x9d)
+        let weighedOnly = try await weighedOnlyChildBlock(fixture)
+        let gate = WalkGate()
+        let changes = NetworkEventRecorder()
+        let parentProcess = fixture.parentProcess
+        let package = weighedOnly.package
+        let childService = ChainService(
+            process: fixture.childProcess,
+            childCandidateProvider: { _ in [] },
+            chainStateChangePublisher: { await changes.append("change") },
+            childProofPublisher: { _ in },
+            acceptedBlockPublisher: { _ in },
+            validateBodySource: { _, admit in
+                await gate.wait()
+                return try await admit(parentProcess)
+            },
+            validateEvidenceSource: { _, _ in package }
+        )
+        // Service start arms the walk when the validated tier is behind;
+        // its first step holds at the gate.
+        try await childService.restoreLocalTransactions()
+        for _ in 0..<250 {
+            if await gate.isHeld { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let stepping = await gate.isHeld
+        XCTAssertTrue(stepping, "the walk is mid-step")
+
+        var deferred: Error?
+        do {
+            _ = try await childService.miningCandidate(
+                for: fixture.context,
+                parentContentSource: parentProcess
+            )
+        } catch {
+            deferred = error
+        }
+        guard case .validateWalkInProgress? = deferred as? ChainServiceError else {
+            return XCTFail("expected the candidate deferred, got \(String(describing: deferred))")
+        }
+        let changesBeforeRelease = await changes.snapshot().count
+
+        await gate.open()
+        var built: DirectChildCandidate?
+        for _ in 0..<250 {
+            built = try? await childService.miningCandidate(
+                for: fixture.context,
+                parentContentSource: parentProcess
+            )
+            if built != nil { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(built?.block.height, 2, "built on the tip the walk reached")
+        let validated = await fixture.childProcess.metricsTipHeights().validated
+        XCTAssertEqual(validated, 1)
+        // One report for the step, one more for the walk stopping: the
+        // second is what turns the deferral into an offer.
+        var changesAfter = 0
+        for _ in 0..<100 {
+            changesAfter = await changes.snapshot().count
+            if changesAfter - changesBeforeRelease >= 2 { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertGreaterThanOrEqual(changesAfter - changesBeforeRelease, 2)
+    }
+
+    /// A child block the fixture child has weighed but not executed: its
+    /// weighed tip is ahead of its validated tip. The fixture's child genesis
+    /// is self-contained (empty parent state), so the block's package carries
+    /// the continuity fact the runtime would otherwise fetch.
+    private func weighedOnlyChildBlock(
+        _ fixture: ProvisionalRootFixture
+    ) async throws -> (header: BlockHeader, package: AuthenticatedChildPackage) {
         let childGenesis = try await fixture.childProcess.validatedTipBlock()
         let weighedOnly = try await BlockBuilder.buildBlock(
             previous: childGenesis,
@@ -6293,9 +6376,6 @@ final class NetworkTrustTests: XCTestCase {
             childDirectory: "Payments",
             fetcher: fixture.parentProcess
         )
-        // The fixture's child genesis is self-contained (empty parent
-        // state), so the first block committing a real parent state needs
-        // the continuity fact the runtime would otherwise fetch.
         let package = AuthenticatedChildPackage(
             package: ChildValidationPackage(
                 proof: proof,
@@ -6313,55 +6393,7 @@ final class NetworkTrustTests: XCTestCase {
             mode: .weighed
         )
         XCTAssertTrue(weighed.decision.isAccepted, "\(weighed.decision)")
-        let tips = await fixture.childProcess.metricsTipHeights()
-        XCTAssertEqual(tips.weighed, 1)
-        XCTAssertEqual(tips.validated, 0)
-
-        do {
-            try await fixture.parentRuntime.start(
-                process: fixture.parentProcess,
-                handlers: inertNetworkHandlers()
-            )
-            try await fixture.childRuntime.start(
-                process: fixture.childProcess,
-                handlers: childHandlers
-            )
-            for _ in 0..<250 {
-                if await childService.status().phase == .active { break }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            // No offer while behind: the parent holds nothing for its tip.
-            try await Task.sleep(for: .seconds(2))
-            let whileBehind = await fixture.parentRuntime.directChildCandidates(
-                fixture.context
-            )
-            XCTAssertTrue(whileBehind.isEmpty, "no candidate while the walk is behind")
-
-            // The walk catches up (validate the weighed block); the child
-            // offers on that state change.
-            let validated = try await fixture.childProcess.admit(
-                weighedHeader,
-                authenticatedChildPackage: package,
-                remoteSource: fixture.parentProcess,
-                mode: .validate
-            )
-            XCTAssertTrue(validated.decision.isAccepted, "\(validated.decision)")
-            await fixture.childRuntime.chainStateChanged()
-            var held: [DirectChildCandidate] = []
-            for _ in 0..<250 {
-                held = await fixture.parentRuntime.directChildCandidates(fixture.context)
-                if !held.isEmpty { break }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            XCTAssertEqual(held.count, 1, "offered once caught up")
-            XCTAssertEqual(held.first?.block.height, 2, "built on the validated tip")
-        } catch {
-            await fixture.childRuntime.stop()
-            await fixture.parentRuntime.stop()
-            throw error
-        }
-        await fixture.childRuntime.stop()
-        await fixture.parentRuntime.stop()
+        return (weighedHeader, package)
     }
 
     func testRealNetworkRuntimeRestartsBothPlanesWithAtomicHandlers() async throws {
