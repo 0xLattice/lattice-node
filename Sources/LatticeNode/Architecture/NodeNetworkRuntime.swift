@@ -1468,7 +1468,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             )
             guard desired[reference.peerKey]!.count
                     <= ChildCandidateReservationRequestMessage.maximumCandidateCIDs
-            else { return false }
+            else {
+                SyncTrace.log("reconcile refused: child \(reference.peerKey.hex.prefix(8)) reservations over the per-peer cap")
+                return false
+            }
         }
         var handoffs: [PeerKey: Set<String>] = [:]
         for reference in Set(update.handoffs) {
@@ -1480,7 +1483,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     <= ChildCandidateReservationRequestMessage.maximumCandidateCIDs,
                   desired[reference.peerKey]?.contains(reference.candidateCID)
                     != true
-            else { return false }
+            else {
+                SyncTrace.log("reconcile refused: child \(reference.peerKey.hex.prefix(8)) reservations=\(desired[reference.peerKey]?.count ?? 0) handoffs=\(handoffs[reference.peerKey]!.count) over the per-peer cap or overlapping")
+                return false
+            }
         }
         let currentPeers = Set(desiredCandidateReservations.keys)
             .union(desired.keys).union(handoffs.keys)

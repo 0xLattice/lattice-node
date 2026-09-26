@@ -2754,7 +2754,7 @@ actor NodeStore {
         // relaying by row alone grows without bound and past the request's
         // per-peer cap, after which every new reservation is refused.
         effectiveCandidateCIDs.formUnion(try database.query(
-            "SELECT candidate_cid FROM contextual_candidates WHERE handoff = 1 AND candidate_cid NOT IN (SELECT block_cid FROM accepted_blocks)"
+            "SELECT candidate_cid FROM contextual_candidates WHERE handoff = 1 AND NOT EXISTS (SELECT 1 FROM accepted_blocks WHERE accepted_blocks.block_cid = contextual_candidates.candidate_cid)"
         ).compactMap { $0["candidate_cid"]?.textValue })
         var children: [ChildCandidateReservationReference] = []
         for candidateCID in effectiveCandidateCIDs.sorted() {
