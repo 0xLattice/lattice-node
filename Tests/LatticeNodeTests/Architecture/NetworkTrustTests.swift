@@ -6349,6 +6349,124 @@ final class NetworkTrustTests: XCTestCase {
         await fixture.parentRuntime.stop()
     }
 
+    /// A reservation the child never acknowledges in time — the answer lost
+    /// on the wire, or late — is refused at the parent and marks the child
+    /// dirty, so it is not asked for a candidate. The mark must clear on its
+    /// own: the next reconcile visits the dirty child even though nothing
+    /// is desired of it, flushes the empty set, and the child is asked
+    /// again. Left unvisited, a child whose one reservation timed out would
+    /// never be carried again (seen in CI at the coordinator's block rate).
+    func testRefusedReservationLeavesTheChildAskableAgain() async throws {
+        let fixture = try await provisionalRootFixture(keyByte: 0x93)
+        let childService = networkService(
+            process: fixture.childProcess,
+            runtime: fixture.childRuntime
+        )
+        let reservationGate = CandidateReservationAckGate {
+            [weak childService] update in
+            guard let childService else { return false }
+            return await childService.replaceIssuedCandidateReservations(
+                update
+            )
+        }
+        await reservationGate.holdNext([])
+        let parentService = ChainService(
+            process: fixture.parentProcess,
+            childCandidateProvider: { [weak runtime = fixture.parentRuntime] context in
+                guard let runtime else { return [] }
+                return await runtime.directChildCandidates(context)
+            },
+            childCandidateReservationReconciler: {
+                [weak runtime = fixture.parentRuntime] update in
+                guard let runtime else {
+                    return update.reservations.isEmpty
+                        && update.handoffs.isEmpty
+                }
+                return await runtime.reconcileChildCandidateReservations(
+                    update
+                )
+            },
+            childProofPublisher: {
+                [weak runtime = fixture.parentRuntime] publication in
+                guard let runtime else { return }
+                _ = try await runtime.publishChildProof(
+                    publication.proof,
+                    childDirectory: publication.directory,
+                    childCID: publication.childCID
+                )
+            },
+            acceptedBlockPublisher: { _ in }
+        )
+        let childHandlers = NodeNetworkHandlers(
+            childCandidateBuilder: { [weak childService] context, parentSource in
+                guard let childService else { return nil }
+                return try await childService.miningCandidate(
+                    for: context,
+                    parentContentSource: parentSource
+                )
+            },
+            candidateReservations: { [weak reservationGate] update in
+                guard let reservationGate else { return false }
+                return await reservationGate.handle(update)
+            },
+            admission: { _ in throw CancellationError() }
+        )
+
+        do {
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess,
+                handlers: inertNetworkHandlers()
+            )
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess,
+                handlers: childHandlers
+            )
+            for _ in 0..<250 {
+                if await childService.status().phase == .active { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            for _ in 0..<250 {
+                if await reservationGate.snapshot().contains([]) { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            await reservationGate.release()
+            try await waitForChildCandidate(fixture)
+
+            // The child holds its ack for the candidate's reservation past
+            // the parent's request timeout: the template is built without
+            // the child, and the child is dirty — not asked.
+            await reservationGate.holdNextNonempty()
+            let refused = try await parentService.miningTemplate(
+                MiningTemplateRequest()
+            )
+            XCTAssertEqual(refused.block.children.node?.count ?? 0, 0, "refused: built without the child")
+            let askedWhileDirty = await fixture.parentRuntime
+                .directChildCandidates(fixture.context)
+            XCTAssertTrue(askedWhileDirty.isEmpty, "dirty: not asked")
+            // The late ack lands with nothing pending for it.
+            await reservationGate.release()
+
+            // Templates keep coming; the child is asked again.
+            var askedAgain = false
+            for _ in 0..<200 {
+                _ = try await parentService.miningTemplate(MiningTemplateRequest())
+                if await fixture.parentRuntime
+                    .directChildCandidates(fixture.context).count == 1 {
+                    askedAgain = true
+                    break
+                }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            XCTAssertTrue(askedAgain, "a refused reservation must not leave the child unasked for good")
+        } catch {
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+            throw error
+        }
+        await fixture.childRuntime.stop()
+        await fixture.parentRuntime.stop()
+    }
+
     func testParentTemplateWaitsForDurableChildCandidateReservationAck()
         async throws
     {

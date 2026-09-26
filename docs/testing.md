@@ -136,7 +136,10 @@ cross-component invariants:
   `testDecidedRefusalWithoutACarrierLinkIsConsumed`,
   `testDecidedIsExactlyWhatTheAcquirerNeverRetries`,
   `testRestartedChildAdmitsTheParentCarriedBlockFromItsInboxWeighed`,
-  `testPortableAttachmentsKeepDistinctRootsForTheSameChildWhileAdmissionIsBlocked`); a run
+  `testPortableAttachmentsKeepDistinctRootsForTheSameChildWhileAdmissionIsBlocked`);
+  a child whose reservation was refused or timed out is asked again — the
+  next reconcile visits every dirty child, whether or not anything is
+  desired of it (`testRefusedReservationLeavesTheChildAskableAgain`); a run
   flows through every level — what Nexus attributes to the middle chain's
   committing block reaches the grandchild, and the middle chain's service
   pushes the run that credit changed to its own children without waiting

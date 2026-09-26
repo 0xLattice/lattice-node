@@ -1500,8 +1500,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard isRunning, let process else {
             return update.reservations.isEmpty && update.handoffs.isEmpty
         }
+        // Every dirty peer is in the working set, whether or not anything
+        // is desired of it: a child whose last reservation was refused or
+        // timed out has no desired entry and is asked for nothing (it is
+        // dirty), so without this it would never be visited again, never
+        // flushed, and never asked — dirty for good.
         let peers = Set(desiredCandidateReservations.keys)
             .union(desired.keys).union(handoffs.keys)
+            .union(dirtyCandidateReservationPeers)
             .sorted()
         let changedPeers = peers.filter { peerKey in
             let next = desired[peerKey] ?? []
@@ -1833,11 +1839,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 childPath: request.childPath,
                 accepted: accepted
               ).encoded() else { return }
-        _ = await hierarchy.sendMessage(
+        let sent = await hierarchy.sendMessage(
             to: peer,
             topic: NodeNetworkTopic.childCandidateReservationResponse,
             payload: payload
         )
+        if case .enqueued = sent {} else {
+            SyncTrace.log("reservation answer \(request.requestID) not sent: \(sent)")
+        }
     }
 
     private func cancelParentEvidence(for key: PeerKey) {
