@@ -98,7 +98,7 @@ The planes are deliberately separate:
    absolute chain path. It carries block and transaction
    Volume inventories plus content-addressed retrieval.
 2. The private hierarchy plane has no relay role. It carries direct-child
-   candidate requests, parent-issued proofs, genesis links, and exact
+   candidate pushes, parent-issued proofs, genesis links, and exact
    parent-state continuity answers. A configured parent key gates parent facts;
    a claimed path alone grants no authority. Exact-CID exchange is explicitly
    enabled on this plane, but only a connection that completed its own
@@ -110,43 +110,41 @@ and the receiver independently checks CIDs and Lattice evidence. A replacement
 connection must send a fresh hello even when it authenticates with the same
 key.
 
-While a parent requests contextual child candidates, it leases the nonce-zero
-provisional carrier as an ephemeral CAS root. Only a request rooted at that
-exact CID can receive it; durable descendants in the same selection still come
-from the process store. The lease is reference-counted across overlapping
-requests, fenced by runtime generation, and discarded after the bounded round.
-The provisional carrier is never written to durable consensus content.
+A parent never requests a child candidate and never waits on a child to
+serve a template. The parent pushes its template context to each
+authenticated direct child whenever it changes: its validated tip block and
+the miner's reward plan and minimum work for the child's subtree (`parent
+tip available`). The child builds its candidate against the tip's post-state
+— the only thing a candidate takes from a carrier — reading the tip's content
+from the parent's own session, and pushes the candidate up whenever any of
+its inputs changed: that context, its own validated tip, its mempool, a
+grandchild's push (`child candidate available`). Pushes carry a per-session
+sequence; a lower one is a reordered stale push and is dropped. The parent
+keeps only the latest candidate per child peer, and a template takes every
+held candidate whose parent state is the current tip's post-state. A child
+that has not pushed yet, or whose candidate is for an older tip, is simply
+not carried that round; nothing is asked and nothing is awaited.
 
-A parent may request candidates only from authenticated direct children. Slow
-or absent children are omitted within a bounded deadline, so one child cannot
-stall Nexus template creation.
+A candidate's content is retained by the chain that built it, as its own
+budgeted policy (`maximumRetainedCandidateOffers`, oldest offer first), never
+by a parent's reservation: the parent commits the candidate's block node it
+holds, and the carried block's admission at the child later owns the roots
+the offer pinned. Once the parent's evidence names a candidate carried, its
+row is a handoff and no wave of newer offers evicts it. An offer the parent
+never carried costs nothing for long; an offer evicted before its block
+landed is a lost fork, the cache-eviction outcome the design already takes.
+Every hierarchy level applies the same rule; nothing is relayed down.
 
-Before replying, a child stores the candidate's complete block and transaction
-Volumes as a bounded speculative offer. The parent does not expose miner work
-until it sends that exact child an authenticated snapshot of every candidate
-referenced by its live template book and receives a durable acknowledgement.
-The child recursively reserves its own descendants, atomically replaces its
-issued set, and then releases every unselected offer. Additions require the
-durable acknowledgement; removals run in order without making parent progress
-wait on a child. When a parent commits a candidate, its next authenticated
-reservation update atomically moves that CID into durable admission-handoff
-ownership before releasing the speculative reservation. The same update
-recursively hands off committed descendants. Parent-proof delivery and recovery
-remain independent, so neither a delayed announcement nor garbage collection
-can lose committed content. Offer churn can evict only offers; it cannot evict
-issued or handoff candidates. Lost acknowledgements can therefore over-retain,
-never under-retain, and the next exact snapshot reconciles the set.
-Every hierarchy level applies the same rule. A reconnecting child is omitted
-from candidate selection until the final page of its durable evidence index is
-ordered into that session. The index resumes from a durable
-`(source, ordinal)` cursor against one fixed cut; a changed parent store source
-restarts at zero. Validated attachments enter a durable,
-VolumeBroker-retained inbox before the cursor advances and leave it only after
-admission owns the same Volume. Evidence published while the index is in flight is
-queued after its final page and before the child's exact reservation replay, so
-neither a page race nor a slow child can stall or under-retain issued evidence.
-Child timestamps derive from the immutable parent carrier, so an unchanged
-request is CID-stable and refreshes one offer instead of consuming another.
+A miner learns its work is stale from one template digest, served by the
+template and by the status route alike: the validated tip, the mempool, and
+the child candidates held, so a fresh candidate at any level refreshes the
+miner's work within one status probe. A reconnecting child is omitted from
+templates until the final page of its durable evidence index is ordered into
+that session, and is pushed the current context as soon as it is. The index
+resumes from a durable `(source, ordinal)` cursor against one fixed cut; a
+changed parent store source restarts at zero. Validated attachments enter a
+durable, VolumeBroker-retained inbox before the cursor advances and leave it
+only after an admission decides the block.
 
 ## Child genesis flow
 

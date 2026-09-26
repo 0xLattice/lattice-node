@@ -64,20 +64,6 @@ public typealias NetworkTransactionHandler = @Sendable (
 ) async throws -> Bool
 
 public typealias TransactionInventoryProvider = @Sendable () async -> [String]
-public struct NetworkCandidateReservationUpdate: Sendable {
-    public let candidateCIDs: [String]
-    public let handoffCIDs: [String]
-
-    public init(candidateCIDs: [String], handoffCIDs: [String]) {
-        self.candidateCIDs = candidateCIDs
-        self.handoffCIDs = handoffCIDs
-    }
-}
-
-public typealias NetworkCandidateReservationHandler = @Sendable (
-    _ update: NetworkCandidateReservationUpdate
-) async -> Bool
-
 /// A run report from the configured parent, to be credited at the child block
 /// it names (§9.10). The service derives the credit under its own lease.
 public typealias NetworkParentRunReportHandler = @Sendable (
@@ -96,7 +82,6 @@ public typealias NetworkRecentCommitterProvider = @Sendable () async -> [String]
 /// wired or changing behavior beneath authenticated sessions.
 public struct NodeNetworkHandlers: Sendable {
     public let childCandidateBuilder: ContextualChildCandidateBuilder?
-    public let candidateReservations: NetworkCandidateReservationHandler?
     public let admission: NetworkAdmissionHandler
     public let transaction: NetworkTransactionHandler?
     public let transactionInventory: TransactionInventoryProvider?
@@ -106,7 +91,6 @@ public struct NodeNetworkHandlers: Sendable {
 
     public init(
         childCandidateBuilder: ContextualChildCandidateBuilder? = nil,
-        candidateReservations: NetworkCandidateReservationHandler? = nil,
         admission: @escaping NetworkAdmissionHandler,
         transaction: NetworkTransactionHandler? = nil,
         transactionInventory: TransactionInventoryProvider? = nil,
@@ -115,7 +99,6 @@ public struct NodeNetworkHandlers: Sendable {
         recentCommitters: NetworkRecentCommitterProvider? = nil
     ) {
         self.childCandidateBuilder = childCandidateBuilder
-        self.candidateReservations = candidateReservations
         self.admission = admission
         self.transaction = transaction
         self.transactionInventory = transactionInventory
@@ -410,19 +393,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let task: Task<Void, Never>
     }
 
-    private struct PendingChildCandidateRequest {
-        let peerKey: PeerKey
-        let childPath: [String]
-        let parentCID: String
-        let continuation: CheckedContinuation<DirectChildCandidate?, Never>
-    }
-
-    private struct ChildCandidateBuild {
-        let peerKey: PeerKey
-        let token: UInt64
-        let task: Task<Void, Never>
-    }
-
     private struct ChildEvidenceReadyWaiter {
         let sessionID: Data
         let continuation: CheckedContinuation<Bool, Never>
@@ -431,23 +401,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private struct ChildEvidenceSession: Hashable {
         let peerKey: PeerKey
         let sessionID: Data
-    }
-
-    private struct PendingCandidateReservation {
-        let peer: AuthenticatedPeer
-        let childPath: [String]
-        let continuation: CheckedContinuation<Bool, Never>
-    }
-
-    private struct CandidateReservationAttempt: Sendable {
-        let peerKey: PeerKey
-        let target: Set<String>
-        let accepted: Bool
-    }
-
-    private struct CandidateReservationRemovalFlush {
-        let token: UInt64
-        let task: Task<Void, Never>
     }
 
     private struct PortableEvidenceWork: Sendable {
@@ -462,7 +415,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         case hierarchy
     }
 
-    private static let maximumPendingRequests = 1_024
     /// Each suspended hierarchy stage is capped.
     private static let maximumEvidenceCandidates = 64
     private static let maximumCandidateWaitTicks = 64
@@ -472,6 +424,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// block; this caps the fan-out to a small constant.
     private static let maximumExactContentSources = 8
     private static let futureCandidateRetryInterval: Duration = .seconds(1)
+    private static let maximumPendingRequests = 1_024
     private static let maximumDirectChildren = 64
     private static let maximumConcurrentChildBuilds = 8
     private static let maximumConcurrentParentStateQueries = 64
@@ -480,7 +433,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private static let maximumReconnectCarrierRoots = 64
     private static let maximumConcurrentTransactionVolumes = 64
     private static let maximumTransactionInventoryRootsPerSync = 1_024
-    private static let childCandidateFinalizeReserveMilliseconds: UInt64 = 100
 
     public nonisolated let remoteContentSource: IvyRootContentSource
     public nonisolated let hierarchyContentSource: IvyRootContentSource
@@ -590,18 +542,45 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// session. Transport effects remain in this actor.
     private var parentEvidence = ParentEvidenceFlow()
     private var handlers: NodeNetworkHandlers?
-    private var pendingChildCandidates: [UInt64: PendingChildCandidateRequest] = [:]
-    private var childCandidateBuilds: [UInt64: ChildCandidateBuild] = [:]
-    private var pendingCandidateReservations:
-        [UInt64: PendingCandidateReservation] = [:]
-    private var desiredCandidateReservations: [PeerKey: Set<String>] = [:]
-    private var dirtyCandidateReservationPeers: Set<PeerKey> = []
-    private var candidateReservationReconciliationInFlight = false
-    private var candidateReservationRemovalFlushes:
-        [PeerKey: CandidateReservationRemovalFlush] = [:]
-    private var nextCandidateReservationRemovalFlushToken: UInt64 = 0
-    private var candidateReservationReconciliationWaiters:
-        [CheckedContinuation<Void, Never>] = []
+    /// The template context this chain last pushed to its children: its
+    /// validated tip and the miner's plan for the subtree. Re-pushed whenever
+    /// any of it changes; a child builds its candidate against it.
+    private struct ParentTipContext {
+        let sequence: UInt64
+        let tipCID: String
+        let tipData: Data
+        let rewards: [MiningReward]
+        let minimumWork: [MiningMinimumWork]
+    }
+    private var parentTipContext: ParentTipContext?
+    private var nextParentTipSequence: UInt64 = 0
+    private var descendantRewards: [MiningReward] = []
+    private var descendantMinimumWork: [MiningMinimumWork] = []
+    /// The latest candidate each child peer pushed for this chain's tip. A
+    /// template reads it; nothing is requested at template time.
+    private struct CachedChildCandidate {
+        let sequence: UInt64
+        let parentTipCID: String
+        let candidate: DirectChildCandidate
+    }
+    private var childCandidateOffers: [PeerKey: CachedChildCandidate] = [:]
+    /// The parent's context as last received (this chain being the child),
+    /// bound to the session it came on: a new session restarts sequences.
+    private struct ReceivedParentTipContext {
+        let sequence: UInt64
+        let peer: AuthenticatedPeer
+        let tipCID: String
+        let tip: Block
+        let rewards: [MiningReward]
+        let minimumWork: [MiningMinimumWork]
+    }
+    private var receivedParentTip: ReceivedParentTipContext?
+    /// One coalescing offer task: an input change while a build runs marks it
+    /// dirty and the task runs again; nothing is queued.
+    private var candidateOfferTask: Task<Void, Never>?
+    private var candidateOfferDirty = false
+    private var nextCandidateOfferSequence: UInt64 = 0
+    private var lastOfferedCandidateCID: String?
     private var childPeerRotation: [String: Int] = [:]
     private var childPathRotation = 0
     private var childProofPathRotation = 0
@@ -612,7 +591,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private var backfilledChildDirectories: Set<String> = []
     private var nextRequestID: UInt64 = 0
     private var nextHelloDeadlineToken: UInt64 = 0
-    private var nextChildCandidateBuildToken: UInt64 = 0
 
     /// Callback work may outlive a stop/start boundary. Keep its captured
     /// process tied to the generation that began it, rather than letting an
@@ -990,22 +968,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
         portableEvidenceOrder.removeAll()
         portableEvidenceWork.removeAll()
         parentEvidence.reset()
-        let pendingChildCandidates = Array(self.pendingChildCandidates.values)
-        self.pendingChildCandidates.removeAll()
-        for pending in pendingChildCandidates {
-            pending.continuation.resume(returning: nil)
-        }
-        for build in childCandidateBuilds.values { build.task.cancel() }
-        childCandidateBuilds.removeAll()
-        let pendingReservations = Array(pendingCandidateReservations.values)
-        pendingCandidateReservations.removeAll()
-        for pending in pendingReservations {
-            pending.continuation.resume(returning: false)
-        }
-        for flush in candidateReservationRemovalFlushes.values {
-            flush.task.cancel()
-        }
-        candidateReservationRemovalFlushes.removeAll()
+        childCandidateOffers.removeAll()
+        parentTipContext = nil
+        descendantRewards = []
+        descendantMinimumWork = []
+        receivedParentTip = nil
+        candidateOfferTask?.cancel()
+        candidateOfferTask = nil
+        candidateOfferDirty = false
+        lastOfferedCandidateCID = nil
         childPeerRotation.removeAll()
         childPathRotation = 0
         childProofPathRotation = 0
@@ -1356,6 +1327,328 @@ public actor NodeNetworkRuntime: IvyDelegate {
         )
     }
 
+    /// The miner's plan for this chain's descendants, as last supplied with a
+    /// template request. Children build their candidates against it, so a
+    /// change is pushed to them like a tip change.
+    public func updateDescendantPlan(
+        rewards: [MiningReward],
+        minimumWork: [MiningMinimumWork]
+    ) async {
+        guard isRunning, let process else { return }
+        descendantRewards = rewards
+        descendantMinimumWork = minimumWork
+        await refreshParentTipContext(
+            process: process,
+            generation: runtimeGeneration
+        )
+    }
+
+    /// Something a template or a child candidate is a function of changed
+    /// here: the validated tip, the mempool, a credit. As a parent, re-push
+    /// the context to children if it differs; as a child, rebuild and push
+    /// our candidate.
+    public func chainStateChanged() async {
+        guard isRunning, let process else { return }
+        let generation = runtimeGeneration
+        await refreshParentTipContext(process: process, generation: generation)
+        scheduleCandidateOffer(generation: generation, process: process)
+    }
+
+    /// The candidates this chain's template can carry, one line per directory
+    /// as `directory:candidateCID` (several peers, several CIDs), sorted — an
+    /// input to the template digest a miner compares to learn its work is
+    /// stale.
+    public func childCandidateDigestInput() -> [String] {
+        var byDirectory: [String: [String]] = [:]
+        for (key, role) in hierarchyPeers {
+            guard case .child(let path) = role, let directory = path.last,
+                  childEvidenceReadyPeers.contains(key),
+                  let offer = childCandidateOffers[key],
+                  let cid = try? BlockHeader(node: offer.candidate.block).rawCID
+            else { continue }
+            byDirectory[directory, default: []].append(cid)
+        }
+        return byDirectory.keys.sorted().map {
+            "\($0):\(byDirectory[$0]!.sorted().joined(separator: ","))"
+        }
+    }
+
+    /// The child candidates held for one exact provisional carrier: each
+    /// ready child peer's latest pushed candidate, if it was built for this
+    /// chain's current tip (its `parentState` is the carrier's `prevState`).
+    /// Nothing is requested here; a child that has not pushed yet, or whose
+    /// candidate is for an older tip, is simply not carried this round.
+    public func directChildCandidates(
+        _ context: ChildCandidateRequestContext
+    ) async -> [DirectChildCandidate] {
+        guard isRunning, process != nil else { return [] }
+        let wantedParentState = context.parentCarrier.prevState.rawCID
+        let children = selectedChildPeers().filter {
+            guard let directory = $0.2.last else { return false }
+            return !context.excludedDirectories.contains(directory)
+        }
+        var candidates: [(Int, DirectChildCandidate)] = []
+        var stale = 0
+        for (rank, key, _) in children {
+            guard let offer = childCandidateOffers[key] else { continue }
+            guard offer.candidate.block.parentState.rawCID == wantedParentState
+            else {
+                stale += 1
+                continue
+            }
+            candidates.append((rank, offer.candidate))
+        }
+        SyncTrace.log("child candidates: \(candidates.count) held of \(children.count) ready child peers (stale=\(stale)) excluded=\(context.excludedDirectories.sorted())")
+        // A path claim is not authority. Several authenticated claimants may
+        // serve one directory; rotate priority so a grindable lexicographic
+        // key cannot own a slot.
+        var selectedDirectories: Set<String> = []
+        let selected = candidates.sorted { $0.0 < $1.0 }.compactMap {
+            selectedDirectories.insert($0.1.directory).inserted ? $0.1 : nil
+        }
+        return selected.sorted { $0.directory < $1.directory }
+    }
+
+    /// Re-reads this chain's validated tip and, if the context children build
+    /// against changed (tip, rewards, minimum work), pushes it to every ready
+    /// child. Cheap when nothing changed.
+    private func refreshParentTipContext(
+        process: ChainProcess,
+        generation: UInt64
+    ) async {
+        guard isCurrentRuntime(generation: generation, process: process) else {
+            return
+        }
+        let hasChildren = hierarchyPeers.values.contains {
+            if case .child = $0 { return true }
+            return false
+        }
+        guard hasChildren || parentTipContext != nil else { return }
+        guard let tip = try? await process.validatedTipBlock(),
+              let tipCID = try? BlockHeader(node: tip).rawCID,
+              let tipData = tip.toData(),
+              isCurrentRuntime(generation: generation, process: process)
+        else { return }
+        let rewards = descendantRewards
+        let minimumWork = descendantMinimumWork
+        if let current = parentTipContext,
+           current.tipCID == tipCID,
+           Self.sameRewardPlan(current.rewards, rewards),
+           current.minimumWork == minimumWork {
+            return
+        }
+        nextParentTipSequence &+= 1
+        let context = ParentTipContext(
+            sequence: nextParentTipSequence,
+            tipCID: tipCID,
+            tipData: tipData,
+            rewards: rewards,
+            minimumWork: minimumWork
+        )
+        parentTipContext = context
+        SyncTrace.log("parent tip context \(context.sequence): h=\(tip.height) tip=\(tipCID.prefix(12))")
+        for (key, role) in hierarchyPeers {
+            guard case .child(let childPath) = role,
+                  childEvidenceReadyPeers.contains(key),
+                  let peer = hierarchySessions[key] else { continue }
+            await pushParentTipContext(context, to: peer, childPath: childPath)
+        }
+    }
+
+    private static func sameRewardPlan(
+        _ lhs: [MiningReward], _ rhs: [MiningReward]
+    ) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        for (a, b) in zip(lhs, rhs) {
+            guard a.chainPath == b.chainPath,
+                  a.transaction.body.rawCID == b.transaction.body.rawCID,
+                  a.transaction.signatures == b.transaction.signatures
+            else { return false }
+        }
+        return true
+    }
+
+    private func pushParentTipContext(
+        _ context: ParentTipContext,
+        to peer: AuthenticatedPeer,
+        childPath: [String]
+    ) async {
+        guard let process else { return }
+        let rewards = context.rewards.filter {
+            $0.chainPath.count >= childPath.count
+                && Array($0.chainPath.prefix(childPath.count)) == childPath
+        }
+        let minimumWork = context.minimumWork.filter {
+            $0.chainPath.count >= childPath.count
+                && Array($0.chainPath.prefix(childPath.count)) == childPath
+        }
+        guard let resolvedRewards = await resolvedMiningRewards(
+            rewards, process: process, generation: runtimeGeneration
+        ), let payload = try? ParentTipContextMessage(
+            sequence: context.sequence,
+            childPath: childPath,
+            tipCID: context.tipCID,
+            tipData: context.tipData,
+            rewards: resolvedRewards,
+            minimumWork: minimumWork
+        ).encoded() else {
+            SyncTrace.log("parent tip push to \(childPath.joined(separator: "/")) not built")
+            return
+        }
+        let sent = await hierarchy.sendMessage(
+            to: peer,
+            topic: NodeNetworkTopic.parentTipAvailable,
+            payload: payload
+        )
+        if case .enqueued = sent {} else {
+            SyncTrace.log("parent tip push to \(childPath.joined(separator: "/")) not sent: \(sent)")
+        }
+    }
+
+    /// Rebuild this chain's candidate for its parent and push it. Coalescing:
+    /// a change during a build marks the task dirty and it runs once more.
+    private func scheduleCandidateOffer(
+        generation: UInt64,
+        process: ChainProcess
+    ) {
+        guard receivedParentTip != nil,
+              handlers?.childCandidateBuilder != nil else { return }
+        candidateOfferDirty = true
+        guard candidateOfferTask == nil else { return }
+        candidateOfferTask = Task { [weak self] in
+            await self?.runCandidateOffers(
+                generation: generation,
+                process: process
+            )
+        }
+    }
+
+    private static let candidateOfferDebounce: Duration = .milliseconds(250)
+
+    private func runCandidateOffers(
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        defer { candidateOfferTask = nil }
+        while candidateOfferDirty, !Task.isCancelled,
+              isCurrentRuntime(generation: generation, process: process) {
+            candidateOfferDirty = false
+            await offerCandidate(generation: generation, process: process)
+            if candidateOfferDirty {
+                try? await Task.sleep(for: Self.candidateOfferDebounce)
+            }
+        }
+    }
+
+    private func offerCandidate(
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        guard let context = receivedParentTip,
+              hierarchySessions[context.peer.key]?.sessionID
+                == context.peer.sessionID,
+              hierarchyPeers[context.peer.key] == .parent,
+              let builder = handlers?.childCandidateBuilder,
+              let carrier = Self.provisionalCarrier(
+                on: context.tip,
+                tipCID: context.tipCID
+              ) else { return }
+        let parentSource = IvyRootContentSource(
+            ivy: hierarchy,
+            peer: context.peer,
+            policy: configuration.resourcePolicy
+        )
+        let deadline = ContinuousClock.now
+            + planeConfigurations.hierarchy.requestTimeout
+        let built: DirectChildCandidate?
+        do {
+            built = try await parentSource.withRoot(
+                context.tipCID,
+                operation: { session in
+                    try await ChildCandidateBudget.$deadline.withValue(deadline) {
+                        try await builder(
+                            ChildCandidateRequestContext(
+                                parentCarrier: carrier,
+                                rewards: context.rewards,
+                                minimumWork: context.minimumWork
+                            ),
+                            session
+                        )
+                    }
+                }
+            )
+        } catch {
+            SyncTrace.log("candidate offer build failed: \(error)")
+            return
+        }
+        guard let candidate = built,
+              isCurrentRuntime(generation: generation, process: process),
+              hierarchySessions[context.peer.key]?.sessionID
+                == context.peer.sessionID,
+              candidate.directory == configuration.address.directory,
+              let blockData = candidate.block.toData(),
+              let childCID = try? BlockHeader(node: candidate.block).rawCID
+        else { return }
+        // The same candidate again says nothing new to the parent.
+        if childCID == lastOfferedCandidateCID { return }
+        nextCandidateOfferSequence &+= 1
+        guard let payload = try? ChildCandidateAvailableMessage(
+            sequence: nextCandidateOfferSequence,
+            childPath: configuration.chainPath,
+            parentTipCID: context.tipCID,
+            childCID: childCID,
+            blockData: blockData,
+            searchWitness: candidate.searchWitness
+        ).encoded() else { return }
+        let sent = await hierarchy.sendMessage(
+            to: context.peer,
+            topic: NodeNetworkTopic.childCandidateAvailable,
+            payload: payload
+        )
+        if case .enqueued = sent {
+            lastOfferedCandidateCID = childCID
+            SyncTrace.log("candidate offered \(nextCandidateOfferSequence): h=\(candidate.block.height) for tip=\(context.tipCID.prefix(12))")
+        } else {
+            // Not sent: the next change rebuilds and tries again; the
+            // last-offered mark is untouched so the retry is not deduplicated.
+            SyncTrace.log("candidate offer not sent: \(sent)")
+        }
+    }
+
+    /// The carrier a child builds against without a parent template: a block
+    /// on the parent's tip whose `prevState` is the tip's post-state — the
+    /// one field the builder takes from a carrier — stamped now. Every real
+    /// carrier the parent later mines on that tip has the same `prevState`,
+    /// so the candidate fits any of them.
+    private static func provisionalCarrier(
+        on tip: Block,
+        tipCID: String
+    ) -> Block? {
+        guard let emptyTransactions = try? HeaderImpl<
+                  MerkleDictionaryImpl<VolumeImpl<Transaction>>
+              >(node: MerkleDictionaryImpl<VolumeImpl<Transaction>>()),
+              let emptyChildren = try? HeaderImpl<
+                  MerkleDictionaryImpl<VolumeImpl<Block>>
+              >(node: MerkleDictionaryImpl<VolumeImpl<Block>>()),
+              tip.height < UInt64.max else { return nil }
+        let now = Int64(Date().timeIntervalSince1970 * 1_000)
+        return Block(
+            version: tip.version,
+            parent: VolumeImpl<Block>(rawCID: tipCID),
+            transactions: emptyTransactions,
+            target: tip.nextTarget,
+            nextTarget: tip.nextTarget,
+            spec: tip.spec,
+            parentState: tip.parentState,
+            prevState: tip.postState.removingNode(),
+            postState: tip.postState.removingNode(),
+            children: emptyChildren,
+            height: tip.height + 1,
+            timestamp: max(now, tip.timestamp + 1),
+            nonce: 0
+        )
+    }
+
     /// Announces an already admitted complete transaction Volume to same-chain
     /// overlay peers. The process content source serves the Volume itself.
     public func publishTransaction(_ volumeRootCID: String) async throws {
@@ -1376,342 +1669,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 payload: payload
             )
         }
-    }
-
-    /// Requests contextual templates from authenticated immediate children for
-    /// one exact provisional carrier. Missing or slow children are omitted.
-    public func directChildCandidates(
-        _ context: ChildCandidateRequestContext
-    ) async -> [DirectChildCandidate] {
-        guard isRunning,
-            let process,
-              let parentData = context.parentCarrier.toData(),
-              let parentCID = try? BlockHeader(node: context.parentCarrier).rawCID,
-            let deadline = childCandidateRequestDeadline()
-        else {
-            return []
-        }
-        let parentBoundary = try? VolumeImpl<Block>(node: context.parentCarrier)
-        let provisionalBroker = MemoryBroker()
-        try? await parentBoundary?.store(storer: provisionalBroker)
-        guard let parentVolume = await provisionalBroker.fetchVolumeLocal(
-            root: parentCID
-        ), (try? parentVolume.validate()) != nil else { return [] }
-        let generation = runtimeGeneration
-        guard await provisionalRoots.retain(
-            parentVolume,
-            generation: generation
-        ) else { return [] }
-        let children = selectedChildPeers().filter {
-            guard let directory = $0.2.last else { return false }
-            return !context.excludedDirectories.contains(directory)
-        }
-        SyncTrace.log("child candidates: asking \(children.map { $0.2.joined(separator: "/") }) of \(hierarchyPeers.count) hierarchy peers; ready=\(childEvidenceReadyPeers.count) dirty=\(dirtyCandidateReservationPeers.count) excluded=\(context.excludedDirectories.sorted())")
-
-        var candidates: [(Int, DirectChildCandidate)] = []
-        await withTaskGroup(of: (Int, DirectChildCandidate?).self) { group in
-            for (rank, key, path) in children {
-                let rewards = context.rewards.filter {
-                    $0.chainPath.count >= path.count
-                        && Array($0.chainPath.prefix(path.count)) == path
-                }
-                let minimumWork = context.minimumWork.filter {
-                    $0.chainPath.count >= path.count
-                        && Array($0.chainPath.prefix(path.count)) == path
-                }
-                group.addTask {
-                    let candidate = await self.requestChildCandidate(
-                        from: key,
-                        childPath: path,
-                        parentCID: parentCID,
-                        parentData: parentData,
-                        rewards: rewards,
-                        minimumWork: minimumWork,
-                        deadline: deadline,
-                        generation: generation,
-                        process: process
-                    )
-                    return (rank, candidate)
-                }
-            }
-            for await (rank, candidate) in group {
-                if let candidate { candidates.append((rank, candidate)) }
-            }
-        }
-        await provisionalRoots.release(parentCID, generation: generation)
-        guard isCurrentRuntime(generation: generation, process: process) else {
-            return []
-        }
-
-        // A path claim is not authority. Query several authenticated claimants
-        // and rotate priority so a grindable lexicographic key cannot own a slot.
-        var selectedDirectories: Set<String> = []
-        let selected = candidates.sorted { $0.0 < $1.0 }.compactMap {
-            selectedDirectories.insert($0.1.directory).inserted ? $0.1 : nil
-        }
-        return selected.sorted { $0.directory < $1.directory }
-    }
-
-    /// Replaces the complete bounded candidate reservation set at every exact
-    /// direct-child process. Additions require a durable authenticated ack;
-    /// disconnected removals are retried on the next session.
-    public func reconcileChildCandidateReservations(
-        _ update: ChildCandidateReservationUpdate
-    ) async -> Bool {
-        guard isRunning else {
-            return update.reservations.isEmpty && update.handoffs.isEmpty
-        }
-        var desired: [PeerKey: Set<String>] = [:]
-        for reference in Set(update.reservations) {
-            desired[reference.peerKey, default: []].insert(
-                reference.candidateCID
-            )
-            guard desired[reference.peerKey]!.count
-                    <= ChildCandidateReservationRequestMessage.maximumCandidateCIDs
-            else {
-                SyncTrace.log("reconcile refused: child \(reference.peerKey.hex.prefix(8)) reservations over the per-peer cap")
-                return false
-            }
-        }
-        var handoffs: [PeerKey: Set<String>] = [:]
-        for reference in Set(update.handoffs) {
-            handoffs[reference.peerKey, default: []].insert(
-                reference.candidateCID
-            )
-            guard (desired[reference.peerKey]?.count ?? 0)
-                    + handoffs[reference.peerKey]!.count
-                    <= ChildCandidateReservationRequestMessage.maximumCandidateCIDs,
-                  desired[reference.peerKey]?.contains(reference.candidateCID)
-                    != true
-            else {
-                SyncTrace.log("reconcile refused: child \(reference.peerKey.hex.prefix(8)) reservations=\(desired[reference.peerKey]?.count ?? 0) handoffs=\(handoffs[reference.peerKey]!.count) over the per-peer cap or overlapping")
-                return false
-            }
-        }
-        let currentPeers = Set(desiredCandidateReservations.keys)
-            .union(desired.keys).union(handoffs.keys)
-        let alreadyTargeted = currentPeers.allSatisfy {
-            (desired[$0] ?? []) == (desiredCandidateReservations[$0] ?? [])
-        }
-        if !candidateReservationReconciliationInFlight,
-           alreadyTargeted,
-           handoffs.isEmpty,
-           dirtyCandidateReservationPeers.allSatisfy({
-               candidateReservationRemovalFlushes[$0] != nil
-           }) {
-            return true
-        }
-        await acquireCandidateReservationReconciliation()
-        defer { releaseCandidateReservationReconciliation() }
-        guard isRunning, let process else {
-            return update.reservations.isEmpty && update.handoffs.isEmpty
-        }
-        // Every dirty peer is in the working set, whether or not anything
-        // is desired of it: a child whose last reservation was refused or
-        // timed out has no desired entry and is asked for nothing (it is
-        // dirty), so without this it would never be visited again, never
-        // flushed, and never asked — dirty for good.
-        // A peer that left mid-exchange is nobody's to reconcile: its
-        // refusal, landing after its session was cleared, must not keep a
-        // mark that no session will ever clear.
-        for peerKey in dirtyCandidateReservationPeers
-        where hierarchyPeers[peerKey] == nil {
-            dirtyCandidateReservationPeers.remove(peerKey)
-            desiredCandidateReservations.removeValue(forKey: peerKey)
-        }
-        let peers = Set(desiredCandidateReservations.keys)
-            .union(desired.keys).union(handoffs.keys)
-            .union(dirtyCandidateReservationPeers)
-            .sorted()
-        let changedPeers = peers.filter { peerKey in
-            let next = desired[peerKey] ?? []
-            let previous = desiredCandidateReservations[peerKey] ?? []
-            return next != previous
-                || !(handoffs[peerKey] ?? []).isEmpty
-                || dirtyCandidateReservationPeers.contains(peerKey)
-        }
-        let removalTargets = Dictionary(uniqueKeysWithValues:
-            changedPeers.compactMap { peerKey in
-                let next = desired[peerKey] ?? []
-                let previous = desiredCandidateReservations[peerKey] ?? []
-                return next.subtracting(previous).isEmpty
-                    ? (peerKey, next)
-                    : nil
-            }
-        )
-        for (peerKey, target) in removalTargets {
-            desiredCandidateReservations[peerKey] = target
-            dirtyCandidateReservationPeers.insert(peerKey)
-        }
-        var requests: [(
-            peerKey: PeerKey,
-            target: Set<String>,
-            handoffs: Set<String>,
-            childPath: [String],
-            peer: AuthenticatedPeer
-        )] = []
-        var rejected = false
-        let generation = runtimeGeneration
-        for peerKey in peers {
-            guard removalTargets[peerKey] == nil else { continue }
-            let next = desired[peerKey] ?? []
-            let previous = desiredCandidateReservations[peerKey] ?? []
-            let changed = next != previous
-                || dirtyCandidateReservationPeers.contains(peerKey)
-            guard changed else { continue }
-            if let removal = candidateReservationRemovalFlushes[peerKey] {
-                await removal.task.value
-                guard isCurrentRuntime(
-                    generation: generation,
-                    process: process
-                ) else {
-                    return update.reservations.isEmpty
-                        && update.handoffs.isEmpty
-                }
-            }
-            guard case .child(let childPath)? = hierarchyPeers[peerKey],
-                  let peer = hierarchySessions[peerKey],
-                  childEvidenceReadyPeers.contains(peerKey) else {
-                if !next.subtracting(previous).isEmpty {
-                    SyncTrace.log("reconcile refused: child peer \(peerKey.hex.prefix(8)) absent or not ready; additions=\(next.subtracting(previous).count)")
-                    dirtyCandidateReservationPeers.insert(peerKey)
-                    rejected = true
-                    continue
-                }
-                desiredCandidateReservations[peerKey] = next
-                dirtyCandidateReservationPeers.insert(peerKey)
-                continue
-            }
-            requests.append((
-                peerKey,
-                next,
-                handoffs[peerKey] ?? [],
-                childPath,
-                peer
-            ))
-        }
-        await withTaskGroup(of: CandidateReservationAttempt.self) { group in
-            for request in requests {
-                group.addTask {
-                    CandidateReservationAttempt(
-                        peerKey: request.peerKey,
-                        target: request.target,
-                        accepted: await self.requestCandidateReservation(
-                            candidateCIDs: request.target.sorted(),
-                            handoffCIDs: request.handoffs.sorted(),
-                            childPath: request.childPath,
-                            peer: request.peer,
-                            generation: generation,
-                            process: process
-                        )
-                    )
-                }
-            }
-            for await attempt in group {
-                if attempt.accepted {
-                    desiredCandidateReservations[attempt.peerKey] = attempt.target
-                    dirtyCandidateReservationPeers.remove(attempt.peerKey)
-                } else {
-                    SyncTrace.log("reconcile refused: child \(attempt.peerKey.hex.prefix(8)) rejected \(attempt.target.count) reservations")
-                    if hierarchyPeers[attempt.peerKey] != nil {
-                        dirtyCandidateReservationPeers.insert(attempt.peerKey)
-                    }
-                    rejected = true
-                }
-            }
-        }
-        for (peerKey, target) in removalTargets {
-            scheduleCandidateReservationRemoval(
-                peerKey: peerKey,
-                target: target,
-                handoffs: handoffs[peerKey] ?? [],
-                generation: generation,
-                process: process
-            )
-        }
-        return !rejected
-    }
-
-    private func scheduleCandidateReservationRemoval(
-        peerKey: PeerKey,
-        target: Set<String>,
-        handoffs: Set<String>,
-        generation: UInt64,
-        process: ChainProcess
-    ) {
-        let previous = candidateReservationRemovalFlushes[peerKey]?.task
-        nextCandidateReservationRemovalFlushToken &+= 1
-        let token = nextCandidateReservationRemovalFlushToken
-        let task = Task { [weak self] in
-            await previous?.value
-            await self?.flushCandidateReservationRemoval(
-                peerKey: peerKey,
-                target: target,
-                handoffs: handoffs,
-                token: token,
-                generation: generation,
-                process: process
-            )
-        }
-        candidateReservationRemovalFlushes[peerKey] =
-            CandidateReservationRemovalFlush(token: token, task: task)
-    }
-
-    private func flushCandidateReservationRemoval(
-        peerKey: PeerKey,
-        target: Set<String>,
-        handoffs: Set<String>,
-        token: UInt64,
-        generation: UInt64,
-        process: ChainProcess
-    ) async {
-        defer {
-            if candidateReservationRemovalFlushes[peerKey]?.token == token {
-                candidateReservationRemovalFlushes.removeValue(forKey: peerKey)
-            }
-        }
-        guard isCurrentRuntime(generation: generation, process: process) else {
-            return
-        }
-        // Flush every transition in order, even if a newer target arrived
-        // before this task started. A committed handoff belongs to this exact
-        // release and must never be collapsed away; the queued newer update
-        // will replace this target afterward.
-        guard case .child(let childPath)? = hierarchyPeers[peerKey],
-              let peer = hierarchySessions[peerKey],
-              childEvidenceReadyPeers.contains(peerKey) else {
-            SyncTrace.log("reservation flush skipped: child \(peerKey.hex.prefix(8)) absent or not ready")
-            return
-        }
-        let accepted = await requestCandidateReservation(
-            candidateCIDs: target.sorted(),
-            handoffCIDs: handoffs.sorted(),
-            childPath: childPath,
-            peer: peer,
-            generation: generation,
-            process: process
-        )
-        if accepted, desiredCandidateReservations[peerKey] == target {
-            dirtyCandidateReservationPeers.remove(peerKey)
-        }
-    }
-
-    private func acquireCandidateReservationReconciliation() async {
-        guard candidateReservationReconciliationInFlight else {
-            candidateReservationReconciliationInFlight = true
-            return
-        }
-        await withCheckedContinuation {
-            candidateReservationReconciliationWaiters.append($0)
-        }
-    }
-
-    private func releaseCandidateReservationReconciliation() {
-        guard !candidateReservationReconciliationWaiters.isEmpty else {
-            candidateReservationReconciliationInFlight = false
-            return
-        }
-        candidateReservationReconciliationWaiters.removeFirst().resume()
     }
 
     private func parentEvidenceSession(
@@ -1817,53 +1774,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
     }
 
-    private func respondToCandidateReservation(
-        _ request: ChildCandidateReservationRequestMessage,
-        from peer: AuthenticatedPeer,
-        session: ParentEvidenceSession,
-        after evidenceTail: Task<ParentEvidenceResult, Never>?,
-        generation: UInt64,
-        process: ChainProcess
-    ) async {
-        defer { parentEvidence.finishReservation(for: session) }
-        let evidenceResult = await evidenceTail?.value ?? .handled
-        guard evidenceResult != .failed,
-              isCurrentRuntime(generation: generation, process: process),
-              parentEvidenceSession(for: peer) == session,
-              !parentEvidence.isFailed(session) else {
-            await hierarchy.recycleSession(ifCurrent: peer)
-            return
-        }
-        let accepted = if parentEvidence.allowsReservation(
-            for: session,
-            after: evidenceResult
-        ) {
-            await handlers?.candidateReservations?(
-                NetworkCandidateReservationUpdate(
-                    candidateCIDs: request.candidateCIDs,
-                    handoffCIDs: request.handoffCIDs
-                )
-            ) ?? false
-        } else {
-            false
-        }
-        SyncTrace.log("reservation answer: accepted=\(accepted) evidence=\(evidenceResult) allows=\(parentEvidence.allowsReservation(for: session, after: evidenceResult)) candidates=\(request.candidateCIDs.count) handoffs=\(request.handoffCIDs.count)")
-        guard isCurrentRuntime(generation: generation, process: process),
-              parentEvidenceSession(for: peer) == session,
-              let payload = try? ChildCandidateReservationResponseMessage(
-                requestID: request.requestID,
-                childPath: request.childPath,
-                accepted: accepted
-              ).encoded() else { return }
-        let sent = await hierarchy.sendMessage(
-            to: peer,
-            topic: NodeNetworkTopic.childCandidateReservationResponse,
-            payload: payload
-        )
-        if case .enqueued = sent {} else {
-            SyncTrace.log("reservation answer \(request.requestID) not sent: \(sent)")
-        }
-    }
 
     private func cancelParentEvidence(for key: PeerKey) {
         parentEvidence.cancel(peerID: key.hex)
@@ -2362,10 +2272,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         childDeclaredReadURLs.removeValue(forKey: key)
         childEvidenceReadyPeers.remove(key)
         cancelChildEvidenceReadyWaiters(for: key)
-        dirtyCandidateReservationPeers.remove(key)
-        if desiredCandidateReservations[key]?.isEmpty == true {
-            desiredCandidateReservations.removeValue(forKey: key)
-        }
+        childCandidateOffers.removeValue(forKey: key)
         Self.pruneChildPeerRotations(
             &childPeerRotation,
             activeRoles: Array(hierarchyPeers.values)
@@ -2392,15 +2299,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 requeue: true
             )
         }
-        cancelChildCandidateWork(for: key)
-        let reservations = pendingCandidateReservations.filter {
-            $0.value.peer.key == key
-        }
-        pendingCandidateReservations = pendingCandidateReservations.filter {
-            $0.value.peer.key != key
-        }
-        for reservation in reservations.values {
-            reservation.continuation.resume(returning: false)
+        if receivedParentTip?.peer.key == key {
+            receivedParentTip = nil
+            lastOfferedCandidateCID = nil
         }
         return removedRole
     }
@@ -4063,102 +3964,76 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 process: process
             )
 
-        case (NodeNetworkTopic.childCandidateRequest, .parent):
-            guard
-                let request = try? ChildCandidateRequestMessage.decoded(
+        case (NodeNetworkTopic.parentTipAvailable, .parent):
+            guard let context = try? ParentTipContextMessage.decoded(
                     message.payload
-                  ), request.childPath == configuration.chainPath,
-                  let parent = _contentBoundBlock(
-                    cid: request.parentCID,
-                    data: request.parentData
-                )
-            else { return }
-            startChildCandidateBuild(
-                request,
-                parent: parent,
+                  ), context.childPath == configuration.chainPath,
+                  let tip = _contentBoundBlock(
+                    cid: context.tipCID,
+                    data: context.tipData
+                  ) else {
+                SyncTrace.log("parent tip dropped: undecodable or unbound")
+                return
+            }
+            // Sequences are per session: a lower one on the same session is
+            // a reordered stale push; a new session starts over.
+            if let current = receivedParentTip,
+               current.peer.sessionID == peer.sessionID,
+               context.sequence <= current.sequence {
+                SyncTrace.log("parent tip dropped: stale sequence \(context.sequence) <= \(current.sequence)")
+                return
+            }
+            receivedParentTip = ReceivedParentTipContext(
+                sequence: context.sequence,
                 peer: peer,
-                generation: generation,
-                process: process
+                tipCID: context.tipCID,
+                tip: tip,
+                rewards: context.rewards,
+                minimumWork: context.minimumWork
             )
+            SyncTrace.log("parent tip \(context.sequence): h=\(tip.height) tip=\(context.tipCID.prefix(12)) rewards=\(context.rewards.count)")
+            scheduleCandidateOffer(generation: generation, process: process)
 
-        case (NodeNetworkTopic.childCandidateResponse, .child(let childPath)):
-            guard
-                let response = try? ChildCandidateResponseMessage.decoded(
+        case (NodeNetworkTopic.childCandidateAvailable, .child(let childPath)):
+            guard let offer = try? ChildCandidateAvailableMessage.decoded(
                     message.payload
-                  ), let pending = pendingChildCandidates[response.requestID],
-                  pending.peerKey == peer.key,
-                  pending.childPath == childPath,
-                  response.childPath == childPath,
-                  pending.parentCID == response.parentCID,
+                  ), offer.childPath == childPath,
                   let directory = childPath.last,
                   let block = _contentBoundBlock(
-                    cid: response.childCID,
-                    data: response.blockData
-                )
-            else { return }
+                    cid: offer.childCID,
+                    data: offer.blockData
+                  ) else {
+                SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: undecodable or unbound")
+                return
+            }
             let candidate = DirectChildCandidate(
                 directory: directory,
                 block: block,
-                searchWitness: response.searchWitness,
+                searchWitness: offer.searchWitness,
                 advertiserPeerKey: peer.key
             )
             guard await schedulingTargets(for: candidate) != nil else {
+                SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: no scheduling target")
                 return
             }
-            pendingChildCandidates.removeValue(forKey: response.requestID)
-            pending.continuation.resume(returning: candidate)
-
-        case (NodeNetworkTopic.childCandidateReservationRequest, .parent):
-            guard let request = try?
-                    ChildCandidateReservationRequestMessage.decoded(
-                        message.payload
-                    ),
-                  request.childPath == configuration.chainPath else { return }
-            guard let session = parentEvidenceSession(for: peer),
-                  let reservation = parentEvidence.beginReservation(
-                    for: session
-                  )
-            else {
-                await hierarchy.recycleSession(ifCurrent: peer)
+            guard isCurrentRuntime(generation: generation, process: process),
+                  hierarchySessions[peer.key]?.sessionID == peer.sessionID else {
                 return
             }
-            Task { [weak self] in
-                await self?.respondToCandidateReservation(
-                    request,
-                    from: peer,
-                    session: session,
-                    after: reservation.evidenceTail,
-                    generation: generation,
-                    process: process
-                )
-            }
-
-        case (NodeNetworkTopic.childCandidateReservationResponse,
-              .child(let childPath)):
-            guard let response = try?
-                    ChildCandidateReservationResponseMessage.decoded(
-                        message.payload
-                    ) else {
-                SyncTrace.log("reservation response from \(childPath.joined(separator: "/")) dropped: undecodable")
+            if let cached = childCandidateOffers[peer.key],
+               offer.sequence <= cached.sequence {
+                SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: stale sequence")
                 return
             }
-            guard let pending = pendingCandidateReservations[
-                    response.requestID
-                  ],
-                  pending.peer.key == peer.key,
-                  pending.peer.sessionID == peer.sessionID,
-                  pending.childPath == childPath,
-                  response.childPath == childPath else {
-                let pending = pendingCandidateReservations[response.requestID]
-                SyncTrace.log("reservation response from \(childPath.joined(separator: "/")) dropped: request \(response.requestID) pending=\(pending != nil) sameSession=\(pending?.peer.sessionID == peer.sessionID) path=\(response.childPath == childPath)")
-                return
-            }
-            SyncTrace.log("reservation response from \(childPath.joined(separator: "/")): accepted=\(response.accepted)")
-            finishCandidateReservation(
-                response.requestID,
-                accepted: response.accepted,
-                generation: generation
+            childCandidateOffers[peer.key] = CachedChildCandidate(
+                sequence: offer.sequence,
+                parentTipCID: offer.parentTipCID,
+                candidate: candidate
             )
+            SyncTrace.log("child candidate cached from \(childPath.joined(separator: "/")): h=\(block.height) for tip=\(offer.parentTipCID.prefix(12)) seq=\(offer.sequence)")
+            // This chain's own candidate now carries a fresher child: rebuild
+            // it for our parent, if we have one.
+            scheduleCandidateOffer(generation: generation, process: process)
 
         default:
             break
@@ -4208,7 +4083,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         hierarchyPeers[peer.key] = role
         hierarchySessions[peer.key] = peer
         if case .child = role {
-            dirtyCandidateReservationPeers.insert(peer.key)
             // Tolerant ingest of the child's self-declared read URL: invalid
             // or absent just isn't carried (never a session cost).
             if let url = normalizedPublicReadURL(remote.publicReadURL) {
@@ -4270,28 +4144,18 @@ public actor NodeNetworkRuntime: IvyDelegate {
             if let directory = childPath.last {
                 await handlers?.runReportServing?(directory)
             }
-            await acquireCandidateReservationReconciliation()
-            defer { releaseCandidateReservationReconciliation() }
-            if let removal = candidateReservationRemovalFlushes[peer.key] {
-                await removal.task.value
-            }
-            guard
-                  isCurrentRuntime(generation: generation, process: process),
+            // A child wired in builds against this chain's current context:
+            // push it now rather than waiting for the next change. A refresh
+            // that minted a new context already pushed it to every ready
+            // child, this one included; only an unchanged one is pushed here.
+            let sequenceBefore = parentTipContext?.sequence
+            await refreshParentTipContext(process: process, generation: generation)
+            guard isCurrentRuntime(generation: generation, process: process),
                   hierarchySessions[peer.key]?.sessionID == peer.sessionID else {
                 return
             }
-            let accepted = await requestCandidateReservation(
-                candidateCIDs: (desiredCandidateReservations[peer.key] ?? [])
-                    .sorted(),
-                childPath: childPath,
-                peer: peer,
-                generation: generation,
-                process: process
-            )
-            if accepted {
-                dirtyCandidateReservationPeers.remove(peer.key)
-            } else {
-                dirtyCandidateReservationPeers.insert(peer.key)
+            if let context = parentTipContext, context.sequence == sequenceBefore {
+                await pushParentTipContext(context, to: peer, childPath: childPath)
             }
             scheduleChildProofRecovery(
                 generation: generation,
@@ -6712,174 +6576,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         )
     }
 
-    private func requestChildCandidate(
-        from peerKey: PeerKey,
-        childPath: [String],
-        parentCID: String,
-        parentData: Data,
-        rewards: [MiningReward],
-        minimumWork: [MiningMinimumWork],
-        deadline: ContinuousClock.Instant,
-        generation: UInt64,
-        process: ChainProcess
-    ) async -> DirectChildCandidate? {
-        guard isRunning,
-            isCurrentRuntime(generation: generation, process: process),
-            pendingChildCandidates.count < Self.maximumDirectChildren
-        else {
-            return nil
-        }
-        guard
-            let rewards = await resolvedMiningRewards(
-            rewards,
-                process: process,
-                generation: generation
-            )
-        else { return nil }
-        guard isCurrentRuntime(generation: generation, process: process) else {
-            return nil
-        }
-        let remaining = Self.milliseconds(
-            ContinuousClock.now.duration(to: deadline)
-        )
-        guard
-            let remoteBudget = Self.remoteChildCandidateBudget(
-            parentWaitMilliseconds: remaining
-            )
-        else { return nil }
-        // The receiver starts its monotonic deadline after transit. Give it a
-        // strictly smaller budget so serialization and the response have room
-        // before our local continuation times out.
-        let request = ChildCandidateRequestMessage(
-            requestID: makeRequestID(),
-            budgetMilliseconds: remoteBudget,
-            childPath: childPath,
-            parentCID: parentCID,
-            parentData: parentData,
-            rewards: rewards,
-            minimumWork: minimumWork
-        )
-        guard let payload = try? request.encoded() else { return nil }
-        return await withCheckedContinuation { continuation in
-            guard isCurrentRuntime(generation: generation, process: process) else {
-                continuation.resume(returning: nil)
-                return
-            }
-            pendingChildCandidates[request.requestID] = PendingChildCandidateRequest(
-                peerKey: peerKey,
-                childPath: childPath,
-                parentCID: parentCID,
-                continuation: continuation
-            )
-            scheduleChildCandidateTimeout(
-                request.requestID,
-                after: .milliseconds(Int64(remaining)),
-                generation: generation
-            )
-            Task { [weak self] in
-                await self?.sendChildCandidateRequest(
-                    requestID: request.requestID,
-                    peerKey: peerKey,
-                    payload: payload,
-                    generation: generation,
-                    process: process
-                )
-            }
-        }
-    }
-
-    private func requestCandidateReservation(
-        candidateCIDs: [String],
-        handoffCIDs: [String] = [],
-        childPath: [String],
-        peer: AuthenticatedPeer,
-        generation: UInt64,
-        process: ChainProcess
-    ) async -> Bool {
-        guard isCurrentRuntime(generation: generation, process: process),
-              hierarchySessions[peer.key]?.sessionID == peer.sessionID,
-              pendingCandidateReservations.count < Self.maximumPendingRequests
-        else {
-            SyncTrace.log("reservation request not sent to \(childPath.joined(separator: "/")): current=\(isCurrentRuntime(generation: generation, process: process)) session=\(hierarchySessions[peer.key]?.sessionID == peer.sessionID) pending=\(pendingCandidateReservations.count)")
-            return false
-        }
-        let request = ChildCandidateReservationRequestMessage(
-            requestID: makeRequestID(),
-            childPath: childPath,
-            candidateCIDs: candidateCIDs,
-            handoffCIDs: handoffCIDs
-        )
-        guard let payload = try? request.encoded() else { return false }
-        let accepted = await withCheckedContinuation { continuation in
-            pendingCandidateReservations[request.requestID] =
-                PendingCandidateReservation(
-                    peer: peer,
-                    childPath: childPath,
-                    continuation: continuation
-                )
-            scheduleCandidateReservationTimeout(
-                request.requestID,
-                generation: generation
-            )
-            Task { [weak self] in
-                guard let self else { return }
-                let result = await self.hierarchy.sendMessage(
-                    to: peer,
-                    topic: NodeNetworkTopic.childCandidateReservationRequest,
-                    payload: payload
-                )
-                guard case .enqueued = result else {
-                    SyncTrace.log("reservation request send failed to \(childPath.joined(separator: "/")): \(result)")
-                    await self.finishCandidateReservation(
-                        request.requestID,
-                        accepted: false,
-                        generation: generation
-                    )
-                    return
-                }
-            }
-        }
-        return accepted
-            && isCurrentRuntime(generation: generation, process: process)
-            && hierarchySessions[peer.key]?.sessionID == peer.sessionID
-            && hierarchyPeers[peer.key] == .child(childPath)
-    }
-
-    private func scheduleCandidateReservationTimeout(
-        _ requestID: UInt64,
-        generation: UInt64
-    ) {
-        let timeout = planeConfigurations.hierarchy.requestTimeout
-        Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: Self.nanoseconds(timeout))
-            } catch {
-                return
-            }
-            guard let self else { return }
-            if await self.pendingCandidateReservations[requestID] != nil {
-                SyncTrace.log("reservation request \(requestID) timed out")
-            }
-            await self.finishCandidateReservation(
-                requestID,
-                accepted: false,
-                generation: generation
-            )
-        }
-    }
-
-    private func finishCandidateReservation(
-        _ requestID: UInt64,
-        accepted: Bool,
-        generation: UInt64
-    ) {
-        guard isCurrentGeneration(generation),
-              let pending = pendingCandidateReservations.removeValue(
-                forKey: requestID
-              ) else { return }
-        pending.continuation.resume(returning: accepted)
-    }
-
     private func resolvedMiningRewards(
         _ rewards: [MiningReward],
         process: ChainProcess,
@@ -6920,8 +6616,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         var peers: [String: [PeerKey]] = [:]
         for (key, role) in hierarchyPeers {
             guard case .child(let path) = role,
-                  childEvidenceReadyPeers.contains(key),
-                  !dirtyCandidateReservationPeers.contains(key) else {
+                  childEvidenceReadyPeers.contains(key) else {
                 continue
             }
             let pathKey = path.joined(separator: "/")
@@ -7088,253 +6783,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
     }
 
-    private func sendChildCandidateRequest(
-        requestID: UInt64,
-        peerKey: PeerKey,
-        payload: Data,
-        generation: UInt64,
-        process: ChainProcess
-    ) async {
-        guard isCurrentRuntime(generation: generation, process: process) else {
-            return
-        }
-        guard pendingChildCandidates[requestID] != nil,
-              case .child? = hierarchyPeers[peerKey],
-              let peer = hierarchySessions[peerKey]
-        else {
-            finishChildCandidateRequest(requestID, with: nil)
-            return
-        }
-        let result = await hierarchy.sendMessage(
-            to: peer,
-            topic: NodeNetworkTopic.childCandidateRequest,
-            payload: payload
-        )
-        guard isCurrentRuntime(generation: generation, process: process) else {
-            return
-        }
-        guard case .enqueued = result else {
-            finishChildCandidateRequest(requestID, with: nil)
-            return
-        }
-    }
-
-    private func startChildCandidateBuild(
-        _ request: ChildCandidateRequestMessage,
-        parent: Block,
-        peer: AuthenticatedPeer,
-        generation: UInt64,
-        process: ChainProcess
-    ) {
-        guard isCurrentRuntime(generation: generation, process: process),
-            childCandidateBuilds[request.requestID] == nil,
-              childCandidateBuilds.count < Self.maximumConcurrentChildBuilds,
-            let builder = handlers?.childCandidateBuilder
-        else { return }
-        let budget = min(
-            UInt64(request.budgetMilliseconds),
-            Self.milliseconds(planeConfigurations.hierarchy.requestTimeout)
-        )
-        guard budget > 0 else { return }
-        let deadline = ContinuousClock.now + .milliseconds(Int64(budget))
-        nextChildCandidateBuildToken &+= 1
-        let token = nextChildCandidateBuildToken
-        let task = Task { [weak self] in
-            guard let self else { return }
-            await self.buildChildCandidate(
-                request,
-                parent: parent,
-                peer: peer,
-                deadline: deadline,
-                builder: builder,
-                token: token,
-                generation: generation,
-                process: process
-            )
-        }
-        childCandidateBuilds[request.requestID] = ChildCandidateBuild(
-            peerKey: peer.key,
-            token: token,
-            task: task
-        )
-        scheduleChildCandidateBuildTimeout(
-            request.requestID,
-            after: .milliseconds(Int64(budget)),
-            token: token,
-            generation: generation
-        )
-    }
-
-    private func buildChildCandidate(
-        _ request: ChildCandidateRequestMessage,
-        parent: Block,
-        peer: AuthenticatedPeer,
-        deadline: ContinuousClock.Instant,
-        builder: ContextualChildCandidateBuilder,
-        token: UInt64,
-        generation: UInt64,
-        process: ChainProcess
-    ) async {
-        guard isCurrentRuntime(generation: generation, process: process),
-            childCandidateBuilds[request.requestID]?.token == token
-        else {
-            return
-        }
-        defer {
-            if isCurrentRuntime(generation: generation, process: process),
-                childCandidateBuilds[request.requestID]?.token == token
-            {
-                childCandidateBuilds.removeValue(forKey: request.requestID)
-            }
-        }
-        let parentSource = IvyRootContentSource(
-            ivy: hierarchy,
-            peer: peer,
-            policy: configuration.resourcePolicy
-        )
-        guard let candidate = try? await parentSource.withRoot(
-            request.parentCID,
-            operation: { session in
-                try await ChildCandidateBudget.$deadline.withValue(deadline) {
-                    try await builder(
-                        ChildCandidateRequestContext(
-                            parentCarrier: parent,
-                            rewards: request.rewards,
-                            minimumWork: request.minimumWork
-                        ),
-                        session
-                    )
-                }
-            }
-        ) else { return }
-        guard isCurrentRuntime(generation: generation, process: process),
-            childCandidateBuilds[request.requestID]?.token == token,
-              !Task.isCancelled,
-              hierarchySessions[peer.key]?.sessionID == peer.sessionID,
-              hierarchyPeers[peer.key] == .parent,
-              candidate.directory == configuration.address.directory,
-              let blockData = candidate.block.toData(),
-              let childCID = try? BlockHeader(node: candidate.block).rawCID
-        else { return }
-        guard let payload = try? ChildCandidateResponseMessage(
-                requestID: request.requestID,
-                childPath: configuration.chainPath,
-                parentCID: request.parentCID,
-                childCID: childCID,
-                blockData: blockData,
-                searchWitness: candidate.searchWitness
-            ).encoded() else { return }
-        _ = await hierarchy.sendMessage(
-            to: peer,
-            topic: NodeNetworkTopic.childCandidateResponse,
-            payload: payload
-        )
-        guard isCurrentRuntime(generation: generation, process: process),
-            childCandidateBuilds[request.requestID]?.token == token
-        else {
-            return
-        }
-    }
-
-    private func scheduleChildCandidateTimeout(
-        _ requestID: UInt64,
-        after timeout: Duration,
-        generation: UInt64
-    ) {
-        let timeoutNanoseconds = Self.nanoseconds(timeout)
-        Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: timeoutNanoseconds)
-            } catch {
-                return
-            }
-            await self?.childCandidateRequestTimedOut(
-                requestID,
-                generation: generation
-            )
-        }
-    }
-
-    private func scheduleChildCandidateBuildTimeout(
-        _ requestID: UInt64,
-        after timeout: Duration,
-        token: UInt64,
-        generation: UInt64
-    ) {
-        let timeoutNanoseconds = Self.nanoseconds(timeout)
-        Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: timeoutNanoseconds)
-            } catch {
-                return
-            }
-            await self?.cancelChildCandidateBuild(
-                requestID,
-                token: token,
-                generation: generation
-            )
-        }
-    }
-
-    private func childCandidateRequestTimedOut(
-        _ requestID: UInt64,
-        generation: UInt64
-    ) {
-        guard isCurrentGeneration(generation) else { return }
-        finishChildCandidateRequest(requestID, with: nil)
-    }
-
-    private func cancelChildCandidateBuild(
-        _ requestID: UInt64,
-        token: UInt64,
-        generation: UInt64
-    ) {
-        guard isCurrentGeneration(generation),
-            childCandidateBuilds[requestID]?.token == token
-        else { return }
-        childCandidateBuilds.removeValue(forKey: requestID)?.task.cancel()
-    }
-
-    private func finishChildCandidateRequest(
-        _ requestID: UInt64,
-        with candidate: DirectChildCandidate?
-    ) {
-        pendingChildCandidates.removeValue(
-            forKey: requestID
-        )?.continuation.resume(returning: candidate)
-    }
-
-    private func cancelChildCandidateWork(for peerKey: PeerKey) {
-        let pendingIDs = pendingChildCandidates.compactMap { requestID, pending in
-            pending.peerKey == peerKey ? requestID : nil
-        }
-        for requestID in pendingIDs {
-            finishChildCandidateRequest(requestID, with: nil)
-        }
-        let buildIDs = childCandidateBuilds.compactMap { requestID, build in
-            build.peerKey == peerKey ? requestID : nil
-        }
-        for requestID in buildIDs {
-            childCandidateBuilds.removeValue(forKey: requestID)?.task.cancel()
-        }
-    }
-
-    private func childCandidateRequestDeadline() -> ContinuousClock.Instant? {
-        let now = ContinuousClock.now
-        let overallDeadline =
-            ChildCandidateBudget.deadline
-            ?? now + planeConfigurations.hierarchy.requestTimeout
-        let remaining = Self.milliseconds(now.duration(to: overallDeadline))
-        guard remaining > Self.childCandidateFinalizeReserveMilliseconds else {
-            return nil
-        }
-        return now
-            + .milliseconds(
-                Int64(
-            remaining - Self.childCandidateFinalizeReserveMilliseconds
-        ))
-    }
-
     private static func milliseconds(_ duration: Duration) -> UInt64 {
         let components = duration.components
         guard components.seconds >= 0, components.attoseconds >= 0 else { return 0 }
@@ -7359,19 +6807,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         return additionOverflow ? UInt64.max : total
     }
 
-    static func remoteChildCandidateBudget(
-        parentWaitMilliseconds: UInt64
-    ) -> UInt32? {
-        guard parentWaitMilliseconds > 1 else { return nil }
-        let budget =
-            parentWaitMilliseconds
-            - max(1, parentWaitMilliseconds / 4)
-        return UInt32(
-            min(
-            budget,
-            UInt64(ChildCandidateRequestMessage.maximumBudgetMilliseconds)
-        ))
-    }
 
     static func rotatedPeerIndices(
         peerCount: Int,

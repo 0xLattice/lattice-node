@@ -668,10 +668,14 @@ public final class HTTPMiningCoordinatorNodeClient: MiningCoordinatorNodeClient 
 
         struct StatusResponse: Decodable {
             let tipCID: String?
+            let templateDigest: String?
         }
         guard let decoded = try? JSONDecoder().decode(StatusResponse.self, from: data) else {
             throw MiningCoordinatorNodeClientError.invalidSubmissionResponse(statusCode: http.statusCode)
         }
+        // The digest covers every input of a template (tip, mempool, child
+        // candidates); a node predating it serves only the tip.
+        if let digest = decoded.templateDigest, !digest.isEmpty { return digest }
         guard let tip = decoded.tipCID, !tip.isEmpty else { return nil }
         return tip
     }

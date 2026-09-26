@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 import Ivy
 import Lattice
@@ -140,11 +141,16 @@ public struct MiningTemplateResponse: Codable, Sendable {
     public let targets: [UInt256]
     public let chainPath: [String]
     public let expiresInMilliseconds: UInt64
+    /// See `ChainService.templateDigestLocked`. A miner compares it with the
+    /// status route's to learn its work is stale.
+    public let templateDigest: String
 
     init(
         template: MiningTemplate,
-        maximumLifetimeMilliseconds: UInt64
+        maximumLifetimeMilliseconds: UInt64,
+        templateDigest: String
     ) {
+        self.templateDigest = templateDigest
         workID = template.workID
         block = template.block
         searchTarget = template.searchTarget
@@ -234,9 +240,19 @@ public typealias ChildCandidateProvider = @Sendable (
     ChildCandidateRequestContext
 ) async throws
     -> [DirectChildCandidate]
-public typealias ChildCandidateReservationReconciler = @Sendable (
-    ChildCandidateReservationUpdate
-) async -> Bool
+/// Something a template or a child candidate is a function of changed on
+/// this chain: the validated tip, the mempool, a credit. The runtime re-pushes
+/// the parent context to children and rebuilds this chain's own candidate.
+public typealias ChainStateChangePublisher = @Sendable () async -> Void
+/// The miner's reward plan and minimum work for this chain's descendants, as
+/// supplied with a template request; pushed to children with the tip.
+public typealias DescendantPlanPublisher = @Sendable (
+    _ rewards: [MiningReward],
+    _ minimumWork: [MiningMinimumWork]
+) async -> Void
+/// The child candidates a template can carry, as `directory:cid` lines: one
+/// input of the template digest.
+public typealias ChildCandidateDigestProvider = @Sendable () async -> [String]
 public typealias ChildProofPublisher = @Sendable (
     DirectChildProofPublication
 ) async throws -> Void
@@ -283,6 +299,9 @@ public struct ChainServiceStatusResponse: Codable, Sendable, Equatable {
     public let revision: UInt64?
     public let mempoolCount: Int
     public let mempoolBytes: Int
+    /// See `ChainService.templateDigestLocked`; nil before the node serves
+    /// templates (no validated tip).
+    public let templateDigest: String?
 }
 
 /// One accepted block's header/summary: enough to build a recent-blocks index
@@ -539,8 +558,9 @@ public actor ChainService {
     private let pool: TransactionPool
     private let templates: MiningTemplateBook
     private let childCandidateProvider: ChildCandidateProvider
-    private let childCandidateReservationReconciler:
-        ChildCandidateReservationReconciler
+    private let chainStateChangePublisher: ChainStateChangePublisher
+    private let descendantPlanPublisher: DescendantPlanPublisher
+    private let childCandidateDigestProvider: ChildCandidateDigestProvider
     private let childProofPublisher: ChildProofPublisher
     private let parentRunReportPublisher: ParentRunReportPublisher
     private let parentRunReportRequester: ParentRunReportRequester
@@ -593,10 +613,9 @@ public actor ChainService {
     public init(
         process: ChainProcess,
         childCandidateProvider: @escaping ChildCandidateProvider,
-        childCandidateReservationReconciler:
-            @escaping ChildCandidateReservationReconciler = {
-                $0.reservations.isEmpty && $0.handoffs.isEmpty
-            },
+        chainStateChangePublisher: @escaping ChainStateChangePublisher = {},
+        descendantPlanPublisher: @escaping DescendantPlanPublisher = { _, _ in },
+        childCandidateDigestProvider: @escaping ChildCandidateDigestProvider = { [] },
         childProofPublisher: @escaping ChildProofPublisher,
         parentRunReportPublisher: @escaping ParentRunReportPublisher = { _ in },
         parentRunReportRequester: @escaping ParentRunReportRequester = { _ in },
@@ -618,8 +637,9 @@ public actor ChainService {
         self.validateWalkRetryInterval = validateWalkRetryInterval
         self.process = process
         self.childCandidateProvider = childCandidateProvider
-        self.childCandidateReservationReconciler =
-            childCandidateReservationReconciler
+        self.chainStateChangePublisher = chainStateChangePublisher
+        self.descendantPlanPublisher = descendantPlanPublisher
+        self.childCandidateDigestProvider = childCandidateDigestProvider
         self.childProofPublisher = childProofPublisher
         self.parentRunReportPublisher = parentRunReportPublisher
         self.parentRunReportRequester = parentRunReportRequester
@@ -686,7 +706,10 @@ public actor ChainService {
             height: status.height,
             revision: status.revision,
             mempoolCount: mempoolAvailable ? await pool.count : 0,
-            mempoolBytes: mempoolAvailable ? await pool.byteCount : 0
+            mempoolBytes: mempoolAvailable ? await pool.byteCount : 0,
+            templateDigest: status.tipCID == nil
+                ? nil
+                : await templateDigestLocked()
         )
     }
 
@@ -706,7 +729,8 @@ public actor ChainService {
             height: status.height,
             revision: status.revision,
             mempoolCount: await pool.count,
-            mempoolBytes: await pool.byteCount
+            mempoolBytes: await pool.byteCount,
+            templateDigest: nil
         )
     }
 
@@ -1211,6 +1235,7 @@ public actor ChainService {
             persistLocal: true
         )
         scheduleTransactionPublication(admission.cid)
+        if admission.inserted { publishChainStateChange() }
         return SubmitTransactionResponse(
             transactionCID: admission.cid,
             mempoolCount: await pool.count,
@@ -1226,10 +1251,12 @@ public actor ChainService {
     ) async throws -> Bool {
         await acquireOperation()
         defer { releaseOperation() }
-        return try await admitTransactionLocked(
+        let inserted = try await admitTransactionLocked(
             transaction,
             persistLocal: false
         ).inserted
+        if inserted { publishChainStateChange() }
+        return inserted
     }
 
     public func transactionInventoryRoots() async -> [String] {
@@ -1250,6 +1277,7 @@ public actor ChainService {
         defer { releaseOperation() }
         await reserveValidateWalkIfBehind()
         try await restoreLocalTransactionsLocked()
+        publishChainStateChange()
     }
 
     private func restoreLocalTransactionsLocked() async throws {
@@ -1442,132 +1470,54 @@ public actor ChainService {
         guard process.configuration.address.isNexus else {
             throw ChainServiceError.parentCarrierRequired
         }
-        // A child candidate is optional until its exact process durably acks
-        // the reservation. One rebuild lets the runtime omit every peer that
-        // failed the bounded ack round while preserving healthy siblings.
-        for attempt in 0...1 {
-            let assembled: MiningTemplate
-            do {
-                assembled = try await buildMiningTemplate(
-                    rewards: request.rewards,
-                    minimumWork: request.minimumWork,
-                    parentCarrier: nil
-                )
-            } catch {
-                _ = await reconcileCurrentCandidateReservations()
-                throw error
-            }
-            let issuance = await templates.issueTrackingInsertion(assembled)
-            if await reconcileCurrentCandidateReservations() {
-                let template = issuance.template
-                guard template.remainingLifetimeMilliseconds > 0 else {
-                    await templates.discard(workID: template.workID)
-                    _ = await reconcileCurrentCandidateReservations()
-                    throw MiningTemplateError.expired
-                }
-                return MiningTemplateResponse(
-                    template: template,
-                    maximumLifetimeMilliseconds: Self.templateLifetimeMilliseconds
-                )
-            }
-            if issuance.inserted {
-                await templates.discard(workID: issuance.template.workID)
-            }
-            _ = await reconcileCurrentCandidateReservations()
-            if attempt == 1 {
-                throw ChainServiceError.childCandidateReservationFailed
-            }
+        let assembled = try await buildMiningTemplate(
+            rewards: request.rewards,
+            minimumWork: request.minimumWork,
+            parentCarrier: nil
+        )
+        let issuance = await templates.issueTrackingInsertion(assembled)
+        let template = issuance.template
+        guard template.remainingLifetimeMilliseconds > 0 else {
+            await templates.discard(workID: template.workID)
+            throw MiningTemplateError.expired
         }
-        throw ChainServiceError.childCandidateReservationFailed
-    }
-
-    /// Applies one exact parent-issued snapshot only after recursively making
-    /// every committed direct-child candidate durable at its exact process.
-    public func replaceIssuedCandidateReservations(
-        _ update: NetworkCandidateReservationUpdate
-    ) async -> Bool {
-        await acquireOperation()
-        defer { releaseOperation() }
-        let desired = Set(update.candidateCIDs)
-        let handoffs = Set(update.handoffCIDs)
-        guard desired.count == update.candidateCIDs.count,
-              handoffs.count == update.handoffCIDs.count,
-              desired.count + handoffs.count <= Self.templateCapacity,
-              desired.isDisjoint(with: handoffs) else {
-            SyncTrace.log("reservation refused: malformed set")
-            return false
+        let digest = await templateDigestLocked()
+        // Children build their next candidates against this miner's plan for
+        // them; pushed after the template so the miner never waits on it.
+        let rewardPlan = try await validatedRewardPlan(request.rewards)
+        let minimumWorkPlan = try validatedMinimumWorkPlan(request.minimumWork)
+        let descendantRewards = rewardPlan.descendants
+        let descendantMinimumWork = minimumWorkPlan.descendants
+        Task { [descendantPlanPublisher] in
+            await descendantPlanPublisher(descendantRewards, descendantMinimumWork)
         }
-        guard let reservedChildren = try? await process
-                .contextualCandidateChildren(candidateCIDs: desired) else {
-            SyncTrace.log("reservation refused: unknown reserved candidate")
-            return false
-        }
-        guard let handoffChildren = try? await process
-                .contextualCandidateChildren(candidateCIDs: handoffs) else {
-            SyncTrace.log("reservation refused: unknown handoff candidate")
-            return false
-        }
-        // Handoffs dominate: a child candidate already handed off to its
-        // chain is never demoted back to a reservation, so the two sets sent
-        // down are disjoint — the rule `ChildCandidateOwnership` applies to
-        // this chain's own template, applied to a request relayed from above.
-        // Both derivations include every durably handed-off candidate's
-        // children, so without this every request after a handoff would
-        // overlap and be refused, and the parent would stop asking.
-        let handoffSet = Set(handoffChildren)
-        let reservations = reservedChildren.filter { !handoffSet.contains($0) }
-        guard await childCandidateReservationReconciler(
-            ChildCandidateReservationUpdate(
-                reservations: sortedReservationReferences(reservations),
-                handoffs: sortedReservationReferences(handoffChildren)
-            )
-        ) else {
-            SyncTrace.log("reservation refused: downward reconciliation reservations=\(reservations.count) handoffs=\(handoffChildren.count)")
-            return false
-        }
-        let replaced = (try? await process.replaceIssuedContextualCandidates(
-            desired,
-            handoffs: handoffs,
-            capacity: Self.templateCapacity
-        )) == true
-        if !replaced { SyncTrace.log("reservation refused: store replacement") }
-        return replaced
-    }
-
-    private func reconcileCurrentCandidateReservations(
-        handoffs: [ChildCandidateReservationReference] = []
-    ) async -> Bool {
-        let candidates = await templates.activeChildCandidates()
-        let ownership: ChildCandidateOwnership
-        do {
-            ownership = try ChildCandidateOwnership(
-                candidates: candidates,
-                handoffs: handoffs
-            )
-        } catch {
-            return false
-        }
-        return await childCandidateReservationReconciler(ownership.update)
-    }
-
-    private func reconcileRetainedCandidateDescendants() async {
-        guard let references = try? await process
-            .currentContextualCandidateChildren() else { return }
-        _ = await childCandidateReservationReconciler(
-            ChildCandidateReservationUpdate(
-                reservations: sortedReservationReferences(references)
-            )
+        return MiningTemplateResponse(
+            template: template,
+            maximumLifetimeMilliseconds: Self.templateLifetimeMilliseconds,
+            templateDigest: digest
         )
     }
 
-    private func sortedReservationReferences(
-        _ references: [ChildCandidateReservationReference]
-    ) -> [ChildCandidateReservationReference] {
-        Array(Set(references)).sorted {
-            ($0.peerKey.description, $0.candidateCID)
-                < ($1.peerKey.description, $1.candidateCID)
-        }
+    /// One string that changes whenever a template built now would differ
+    /// from one built a moment ago: the validated tip, the mempool, and the
+    /// child candidates held. The template carries it and status serves it,
+    /// so a miner comparing the two learns its work is stale at any level of
+    /// the hierarchy, not only when this chain's tip moves.
+    private func templateDigestLocked() async -> String {
+        var lines: [String] = []
+        let tip = (try? await process.validatedTipBlock())
+            .flatMap { try? BlockHeader(node: $0).rawCID }
+        lines.append("tip:\(tip ?? "")")
+        lines.append("mempool:" + (await pool.snapshot().map(\.cid).sorted()
+            .joined(separator: ",")))
+        lines += await childCandidateDigestProvider()
+        let digest = SHA256.hash(data: Data(lines.joined(separator: "\n").utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
+
+
+
+
 
     /// A child candidate for one parent request, built from every field of the
     /// request context, so a caller relaying the hierarchy plane cannot drop
@@ -1619,19 +1569,16 @@ public actor ChainService {
             fetcher: fetcher
         )
         let candidateHeader = try BlockHeader(node: template.block)
-        let childReservations = try template.childCandidates.compactMap {
-            candidate -> ChildCandidateReservationReference? in
-            guard let peerKey = candidate.advertiserPeerKey else { return nil }
-            return ChildCandidateReservationReference(
-                peerKey: peerKey,
-                candidateCID: try BlockHeader(node: candidate.block).rawCID
-            )
-        }
+        // Keep what this candidate needs — its body, transactions, post-state
+        // — for as long as the parent may still mine it: retention is this
+        // chain's own budget, never a parent's reservation. The carried
+        // block's admission owns these roots later; a candidate never
+        // carried is evicted by the offer budget.
         try await process.storeContextualCandidate(
             candidateHeader,
             fetcher: fetcher,
-            children: Array(Set(childReservations)),
-            capacity: Self.templateCapacity
+            capacity: process.configuration.resourcePolicy
+                .maximumRetainedCandidateOffers
         )
         _ = try await process.prepareChildProofs(
             for: template.block,
@@ -1888,26 +1835,10 @@ public actor ChainService {
                 await enqueueCanonicalCommit(commit)
             }
         )
-        let candidateHandoffs: [ChildCandidateReservationReference]
-        if outcome.decision.isAccepted {
-            let committedCIDs = Set(preparedChildProofs.map(\.childCID))
-            candidateHandoffs = try submission.children.compactMap { child in
-                guard let peerKey = child.advertiserPeerKey else { return nil }
-                let childCID = try BlockHeader(node: child.block).rawCID
-                guard committedCIDs.contains(childCID) else { return nil }
-                return ChildCandidateReservationReference(
-                    peerKey: peerKey,
-                    candidateCID: childCID
-                )
-            }
-        } else {
-            candidateHandoffs = []
-        }
         let effects = await applyAdmissionEffects(
             block: candidate,
             header: header,
-            outcome: outcome,
-            candidateHandoffs: candidateHandoffs
+            outcome: outcome
         )
         // A carrier cleared only child targets: the same work stays open so the
         // miner can keep searching it toward the harder targets it has not
@@ -2180,6 +2111,9 @@ public actor ChainService {
                 // validation (no-op when it anchors no child), exactly as the
                 // eager admission path publishes them.
                 await publishCarrierChildProofs(header: header, outcome: outcome)
+                // The validated tip moved: templates and child candidates
+                // build on it.
+                publishChainStateChange()
                 continue
             case .unavailable:
                 // Availability gap: the body is not yet fetchable. Park at the last
@@ -2293,6 +2227,7 @@ public actor ChainService {
     private func reconcileCanonicalCommitOrResetLocked(
         _ commit: ChainCommit
     ) async {
+        defer { publishChainStateChange() }
         do {
             try await reconcileCanonicalCommitLocked(commit)
         } catch {
@@ -2308,8 +2243,7 @@ public actor ChainService {
     private func applyAdmissionEffects(
         block: Block,
         header: BlockHeader,
-        outcome: NodeAdmissionOutcome,
-        candidateHandoffs: [ChildCandidateReservationReference]? = nil
+        outcome: NodeAdmissionOutcome
     ) async -> AdmissionEffects {
         // Visibility of accepted work is independent from optional child
         // materialization. A missing child payload must not suppress the
@@ -2352,8 +2286,7 @@ public actor ChainService {
 
         await publishCarrierChildProofs(
             header: header,
-            outcome: outcome,
-            candidateHandoffs: candidateHandoffs
+            outcome: outcome
         )
         // §9.10: push the runs this admission changed (see `pushChangedRuns`),
         // and — this chain being the child — ask the parent for the run of
@@ -2369,10 +2302,8 @@ public actor ChainService {
                 await parentRunReportRequester(committers)
             }
         }
-        if outcome.decision.isAccepted, candidateHandoffs == nil {
-            Task { [weak self] in
-                await self?.reconcileRetainedCandidateDescendants()
-            }
+        if outcome.decision.isAccepted {
+            publishChainStateChange()
         }
         return AdmissionEffects(
             parentGenesisLinks: genesisLinks.sorted {
@@ -2383,32 +2314,14 @@ public actor ChainService {
 
     private func publishCarrierChildProofs(
         header: BlockHeader,
-        outcome: NodeAdmissionOutcome,
-        candidateHandoffs: [ChildCandidateReservationReference]? = nil
+        outcome: NodeAdmissionOutcome
     ) async {
-        guard let link = outcome.parentCarrierLink else {
-            if let candidateHandoffs {
-                Task { [weak self] in
-                    _ = await self?.reconcileCurrentCandidateReservations(
-                        handoffs: candidateHandoffs
-                    )
-                }
-            }
-            return
-        }
+        guard let link = outcome.parentCarrierLink else { return }
         // Admission and the miner response depend only on the durable proof,
         // never on child availability. Delivery is an asynchronous hint; the
         // retained route remains pullable and retryable after failure/restart.
-        // The following reservation update carries the committed candidate as
-        // a handoff, so the child retains it atomically before releasing its
-        // speculative reservation. Proof acquisition remains independent.
         Task { [weak self] in
             guard let self else { return }
-            if let candidateHandoffs {
-                _ = await self.reconcileCurrentCandidateReservations(
-                    handoffs: candidateHandoffs
-                )
-            }
             await self.deliverCarrierChildProofs(
                 carrierCID: header.rawCID,
                 rootCID: link.rootCID
@@ -2522,7 +2435,13 @@ public actor ChainService {
 
     private func invalidateTemplatesLocked() async {
         await templates.invalidateAll()
-        _ = await reconcileCurrentCandidateReservations()
+    }
+
+    /// Fire-and-forget: never hold the service lease across the network.
+    private func publishChainStateChange() {
+        Task { [chainStateChangePublisher] in
+            await chainStateChangePublisher()
+        }
     }
 
     private nonisolated static func poolDisposition(

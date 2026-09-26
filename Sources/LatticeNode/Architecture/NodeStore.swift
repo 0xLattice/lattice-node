@@ -46,29 +46,6 @@ struct StagedAdmission: Sendable, Equatable {
     let volumeRoots: [String]
 }
 
-public struct ChildCandidateReservationReference: Hashable, Sendable {
-    public let peerKey: PeerKey
-    public let candidateCID: String
-
-    public init(peerKey: PeerKey, candidateCID: String) {
-        self.peerKey = peerKey
-        self.candidateCID = candidateCID
-    }
-}
-
-public struct ChildCandidateReservationUpdate: Sendable {
-    public let reservations: [ChildCandidateReservationReference]
-    public let handoffs: [ChildCandidateReservationReference]
-
-    public init(
-        reservations: [ChildCandidateReservationReference],
-        handoffs: [ChildCandidateReservationReference] = []
-    ) {
-        self.reservations = reservations
-        self.handoffs = handoffs
-    }
-}
-
 struct LocalMempoolTransactionRecord: Sendable, Equatable {
     let transactionCID: String
     let addedAt: Int64
@@ -2530,20 +2507,12 @@ actor NodeStore {
     func persistContextualCandidateRoots(
         candidateCID: String,
         roots: [String],
-        children: [ChildCandidateReservationReference] = [],
         capacity: Int
     ) async throws {
         let canonicalRoots = Array(Set(roots)).sorted()
-        let canonicalChildren = Array(Set(children)).sorted {
-            ($0.peerKey.description, $0.candidateCID)
-                < ($1.peerKey.description, $1.candidateCID)
-        }
         guard CIDIdentity.isCanonical(candidateCID),
               canonicalRoots.contains(candidateCID),
               canonicalRoots.allSatisfy(CIDIdentity.isCanonical),
-              canonicalChildren.allSatisfy({
-                  CIDIdentity.isCanonical($0.candidateCID)
-              }),
               capacity > 0 else {
             throw NodeStoreError.invalidConfiguration(
                 "contextual candidate retention is malformed"
@@ -2569,14 +2538,6 @@ actor NodeStore {
             guard existing.isEmpty || existing == canonicalRoots else {
                 throw NodeStoreError.corrupt(
                     "contextual candidate roots changed"
-                )
-            }
-            let existingChildren = try contextualCandidateChildrenLocked(
-                candidateCID
-            )
-            guard existingChildren == canonicalChildren else {
-                throw NodeStoreError.corrupt(
-                    "contextual candidate children changed"
                 )
             }
             try touchContextualCandidateOfferLocked(candidateCID)
@@ -2636,15 +2597,6 @@ actor NodeStore {
                         params: [.text(candidateCID), .text(root)]
                     )
                 }
-                for child in canonicalChildren {
-                    try database.execute(
-                        "INSERT INTO contextual_candidate_children (candidate_cid, child_peer_key, child_cid) VALUES (?1, ?2, ?3)",
-                        params: [
-                            .text(candidateCID), .text(child.peerKey.description),
-                            .text(child.candidateCID),
-                        ]
-                    )
-                }
             }
         } catch {
             try? await recoveryVolumeBroker.unpinBatch(
@@ -2664,8 +2616,7 @@ actor NodeStore {
     /// Refreshes availability without walking or rewriting an immutable
     /// candidate Volume that this node already owns.
     func touchContextualCandidate(
-        candidateCID: String,
-        children: [ChildCandidateReservationReference] = []
+        candidateCID: String
     ) async throws -> Bool {
         guard CIDIdentity.isCanonical(candidateCID) else {
             throw NodeStoreError.invalidConfiguration(
@@ -2679,16 +2630,6 @@ actor NodeStore {
             params: [.text(candidateCID)]
         ).isEmpty
         guard exists else { return false }
-        let canonicalChildren = Array(Set(children)).sorted {
-            ($0.peerKey.description, $0.candidateCID)
-                < ($1.peerKey.description, $1.candidateCID)
-        }
-        guard try contextualCandidateChildrenLocked(candidateCID)
-            == canonicalChildren else {
-            throw NodeStoreError.corrupt(
-                "contextual candidate children changed"
-            )
-        }
         try touchContextualCandidateOfferLocked(candidateCID)
         return true
     }
@@ -2724,97 +2665,9 @@ actor NodeStore {
         }
     }
 
-    func contextualCandidateChildren(
-        candidateCIDs: Set<String>
-    ) throws -> [ChildCandidateReservationReference]? {
-        guard candidateCIDs.allSatisfy(CIDIdentity.isCanonical) else {
-            throw NodeStoreError.invalidConfiguration(
-                "contextual candidate reservation is malformed"
-            )
-        }
-        // A reservation for a candidate this chain has ACCEPTED is satisfied
-        // by the accepted block itself — durable under its admission batch,
-        // better held than any candidate — and its children are reconciled by
-        // that admission, not by this request. A weighed admission lands
-        // before the parent's reservation for the candidate it just carried,
-        // so the candidate row is already gone; refusing here would leave
-        // the parent never asking this chain for a candidate again.
-        var effectiveCandidateCIDs = try candidateCIDs.filter { !(try hasAcceptedBlock($0)) }
-        for candidateCID in effectiveCandidateCIDs.sorted() {
-            guard try !database.query(
-                "SELECT 1 FROM contextual_candidates WHERE candidate_cid = ?1",
-                params: [.text(candidateCID)]
-            ).isEmpty else { return nil }
-        }
-        // Every handoff still in flight relays its children too — until the
-        // handed-off candidate is an ACCEPTED block, when the handoff is
-        // complete: the block is durable here and its children hold theirs
-        // through the proofs it issues. A handoff row outlives acceptance
-        // (a weighed admission owns the boundary, not the body it pins), so
-        // relaying by row alone grows without bound and past the request's
-        // per-peer cap, after which every new reservation is refused.
-        effectiveCandidateCIDs.formUnion(try database.query(
-            "SELECT candidate_cid FROM contextual_candidates WHERE handoff = 1 AND NOT EXISTS (SELECT 1 FROM accepted_blocks WHERE accepted_blocks.block_cid = contextual_candidates.candidate_cid)"
-        ).compactMap { $0["candidate_cid"]?.textValue })
-        var children: [ChildCandidateReservationReference] = []
-        for candidateCID in effectiveCandidateCIDs.sorted() {
-            children += try contextualCandidateChildrenLocked(candidateCID)
-        }
-        return children
-    }
 
-    func currentContextualCandidateChildren()
-        throws -> [ChildCandidateReservationReference]
-    {
-        let candidateCIDs = Set(try database.query(
-            "SELECT candidate_cid FROM contextual_candidates WHERE issued = 1 OR handoff = 1"
-        ).compactMap { $0["candidate_cid"]?.textValue })
-        return try contextualCandidateChildren(candidateCIDs: candidateCIDs)
-            ?? []
-    }
 
-    private func contextualCandidateChildrenLocked(
-        _ candidateCID: String
-    ) throws -> [ChildCandidateReservationReference] {
-        try database.query(
-            "SELECT child_peer_key, child_cid FROM contextual_candidate_children WHERE candidate_cid = ?1 ORDER BY child_peer_key, child_cid",
-            params: [.text(candidateCID)]
-        ).map { row in
-            guard let rawPeerKey = row["child_peer_key"]?.textValue,
-                  let peerKey = try? PeerKey(rawPeerKey),
-                  let childCID = row["child_cid"]?.textValue,
-                  CIDIdentity.isCanonical(childCID) else {
-                throw NodeStoreError.corrupt(
-                    "contextual candidate child index is malformed"
-                )
-            }
-            return ChildCandidateReservationReference(
-                peerKey: peerKey,
-                candidateCID: childCID
-            )
-        }
-    }
 
-    /// Transfers a candidate from parent-work reservation into the durable
-    /// child-side admission handoff before the parent may release it.
-    func beginContextualCandidateHandoff(
-        candidateCID: String
-    ) async throws -> Bool {
-        guard CIDIdentity.isCanonical(candidateCID) else {
-            throw NodeStoreError.invalidConfiguration(
-                "contextual candidate CID is malformed"
-            )
-        }
-        await acquirePreparedMutation()
-        defer { releasePreparedMutation() }
-        let began = try markContextualCandidateHandoff(
-            candidateCID: candidateCID
-        )
-        if began {
-            try await evictExcessHandoffCandidates()
-        }
-        return began
-    }
 
     /// Removes one candidate's row, descendants, and root references in the
     /// caller's transaction and returns the roots to unpin afterwards. The
@@ -2842,7 +2695,7 @@ actor NodeStore {
         return roots
     }
 
-    private func markContextualCandidateHandoff(
+    func markContextualCandidateHandoff(
         candidateCID: String
     ) throws -> Bool {
         guard try !database.query(
@@ -2856,90 +2709,7 @@ actor NodeStore {
         return true
     }
 
-    func replaceIssuedContextualCandidates(
-        _ requestedDesired: Set<String>,
-        handoffs requestedHandoffs: Set<String> = [],
-        capacity: Int
-    ) async throws -> Bool {
-        guard capacity > 0,
-              requestedDesired.count + requestedHandoffs.count <= capacity,
-              requestedDesired.isDisjoint(with: requestedHandoffs),
-              requestedDesired.union(requestedHandoffs).allSatisfy(CIDIdentity.isCanonical) else {
-            throw NodeStoreError.invalidConfiguration(
-                "issued contextual candidate set is malformed"
-            )
-        }
-        await acquirePreparedMutation()
-        defer { releasePreparedMutation() }
-        // An accepted block satisfies a reservation or handoff for it (see
-        // `contextualCandidateChildren`): nothing to retain, nothing to mark.
-        let desired = try requestedDesired.filter { !(try hasAcceptedBlock($0)) }
-        let handoffs = try requestedHandoffs.filter { !(try hasAcceptedBlock($0)) }
-        for candidateCID in desired {
-            guard try !database.query(
-                "SELECT 1 FROM contextual_candidates WHERE candidate_cid = ?1",
-                params: [.text(candidateCID)]
-            ).isEmpty else { return false }
-        }
-        for candidateCID in handoffs {
-            guard try !database.query(
-                "SELECT 1 FROM contextual_candidates AS candidate WHERE candidate.candidate_cid = ?1 AND EXISTS (SELECT 1 FROM contextual_candidate_roots AS roots WHERE roots.candidate_cid = candidate.candidate_cid)",
-                params: [.text(candidateCID)]
-            ).isEmpty else { return false }
-        }
-        var releasedRoots: [String] = []
-        try database.transaction {
-            for candidateCID in handoffs {
-                _ = try markContextualCandidateHandoff(
-                    candidateCID: candidateCID
-                )
-            }
-            let candidates = try database.query(
-                "SELECT candidate_cid, handoff FROM contextual_candidates ORDER BY candidate_cid"
-            )
-            for candidate in candidates {
-                guard let candidateCID = candidate["candidate_cid"]?.textValue,
-                      let handoff = candidate["handoff"]?.intValue else {
-                    throw NodeStoreError.corrupt(
-                        "contextual candidate state is malformed"
-                    )
-                }
-                guard !desired.contains(candidateCID) else { continue }
-                if handoff == 1 {
-                    try database.execute(
-                        "UPDATE contextual_candidates SET issued = 0, offer_seq = NULL WHERE candidate_cid = ?1",
-                        params: [.text(candidateCID)]
-                    )
-                    continue
-                }
-                releasedRoots += try deleteContextualCandidateRows(
-                    candidateCID: candidateCID
-                )
-            }
-            // Durable handoff ownership outlives any later snapshot: a
-            // handed-off candidate is never demoted back to a reservation,
-            // so issued and handoff stay mutually exclusive.
-            for candidateCID in desired {
-                try database.execute(
-                    "UPDATE contextual_candidates SET issued = 1, offer_seq = NULL WHERE candidate_cid = ?1 AND handoff = 0",
-                    params: [.text(candidateCID)]
-                )
-            }
-        }
-        try? await recoveryVolumeBroker.unpinBatch(
-            items: releasedRoots.map {
-                (root: $0, owner: contextualCandidateOwner, count: 1)
-            }
-        )
-        try await evictExcessHandoffCandidates()
-        return true
-    }
 
-    func issuedContextualCandidateCIDs() throws -> Set<String> {
-        Set(try database.query(
-            "SELECT candidate_cid FROM contextual_candidates WHERE issued = 1 ORDER BY candidate_cid"
-        ).compactMap { $0["candidate_cid"]?.textValue })
-    }
 
     /// Removes a candidate reference only when its immutable admission batch
     /// already owns every root. Cache age and parent RPC state are deliberately
@@ -3908,6 +3678,9 @@ actor NodeStore {
             ) WITHOUT ROWID
             """)
         try database.execute("""
+            -- Unused since candidates are pushed and retained locally (no
+            -- relayed reservations); kept until the next schema epoch so an
+            -- existing store opens unchanged.
             CREATE TABLE IF NOT EXISTS contextual_candidate_children (
                 candidate_cid TEXT NOT NULL,
                 child_peer_key TEXT NOT NULL,

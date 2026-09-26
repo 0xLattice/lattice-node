@@ -34,12 +34,13 @@ enum NodeNetworkTopic {
     static let childEvidenceAvailable = "lattice.hierarchy.evidence.available.v4"
     static let childEvidenceIndexRequest = "lattice.hierarchy.evidence.index.request.v4"
     static let childEvidenceIndexResponse = "lattice.hierarchy.evidence.index.response.v4"
-    static let childCandidateRequest = "lattice.hierarchy.child-candidate.request.v1"
-    static let childCandidateResponse = "lattice.hierarchy.child-candidate.response.v1"
-    static let childCandidateReservationRequest =
-        "lattice.hierarchy.child-candidate.reservation.request.v1"
-    static let childCandidateReservationResponse =
-        "lattice.hierarchy.child-candidate.reservation.response.v1"
+    /// Parent → child: the parent's current template context (its validated
+    /// tip and the miner's reward plan for the child's subtree). Pushed on
+    /// every change; the child builds its candidate against it.
+    static let parentTipAvailable = "lattice.hierarchy.parent-tip.available.v1"
+    /// Child → parent: the child's current candidate for the parent's tip.
+    /// Pushed on every change of its inputs; the parent caches the latest.
+    static let childCandidateAvailable = "lattice.hierarchy.child-candidate.available.v1"
     // v2: the ANSWER changed meaning, not just the request shape. A v1 parent
     // attested any CONNECTED state, including one only weighed — a declared
     // post-state it never executed. A v2 parent attests only what it EXECUTED.
@@ -86,8 +87,7 @@ enum NodeNetworkTopic {
              readEndpointRequest, readEndpointResponse: .overlay
         case hierarchyHello, childEvidenceAvailable,
              childEvidenceIndexRequest, childEvidenceIndexResponse,
-             childCandidateRequest, childCandidateResponse,
-             childCandidateReservationRequest, childCandidateReservationResponse,
+             parentTipAvailable, childCandidateAvailable,
              parentChainFactRequest, parentChainFactResponse,
              childGenesisAnchorRequest, childGenesisAnchorResponse,
              parentRunReport, parentRunReportRequest: .hierarchy
@@ -751,102 +751,51 @@ struct ChildEvidenceIndexResponseMessage: NodeJSONMessage, Equatable, Sendable {
     }
 }
 
-struct ChildCandidateReservationRequestMessage:
-    NodeJSONMessage, Equatable, Sendable {
-    static let maximumCandidateCIDs = 16
-
-    let requestID: UInt64
-    let childPath: [String]
-    let candidateCIDs: [String]
-    let handoffCIDs: [String]
-
-    init(
-        requestID: UInt64,
-        childPath: [String],
-        candidateCIDs: [String],
-        handoffCIDs: [String] = []
-    ) {
-        self.requestID = requestID
-        self.childPath = childPath
-        self.candidateCIDs = candidateCIDs
-        self.handoffCIDs = handoffCIDs
-    }
-
-    func validate() throws {
-        guard requestID != 0,
-              _isAbsoluteChainPath(childPath), childPath.count > 1,
-              candidateCIDs.count + handoffCIDs.count
-                <= Self.maximumCandidateCIDs,
-              candidateCIDs == Array(Set(candidateCIDs)).sorted(),
-              handoffCIDs == Array(Set(handoffCIDs)).sorted(),
-              Set(candidateCIDs).isDisjoint(with: handoffCIDs),
-              candidateCIDs.allSatisfy(_isCanonicalWireCID),
-              handoffCIDs.allSatisfy(_isCanonicalWireCID) else {
-            throw NodeNetworkWireError.malformed
-        }
-    }
-}
-
-struct ChildCandidateReservationResponseMessage:
-    NodeJSONMessage, Equatable, Sendable {
-    let requestID: UInt64
-    let childPath: [String]
-    let accepted: Bool
-
-    func validate() throws {
-        guard requestID != 0,
-              _isAbsoluteChainPath(childPath), childPath.count > 1 else {
-            throw NodeNetworkWireError.malformed
-        }
-    }
-}
-
-/// One provisional parent carrier context sent only to its immediate child.
-struct ChildCandidateRequestMessage: Sendable {
-    static let maximumBudgetMilliseconds: UInt32 = 60_000
+/// The parent's template context, pushed to its immediate child whenever it
+/// changes: the parent's validated tip block and the miner's reward plan and
+/// minimum work for the child's subtree. A child candidate is a function of
+/// this context and the child's own state, never of one parent template.
+struct ParentTipContextMessage: Sendable {
     static let maximumRewardBytes = ChainServiceLimits.maximumPayloadBytes
     static let maximumEncodedBytes = _maximumNodeMessageSize
 
-    let requestID: UInt64
-    let budgetMilliseconds: UInt32
+    /// Monotonic per parent session; a lower one is stale and ignored.
+    let sequence: UInt64
     let childPath: [String]
-    let parentCID: String
-    let parentData: Data
+    let tipCID: String
+    let tipData: Data
     let rewards: [MiningReward]
     /// Encoded after the parent block only when non-empty, so a request
     /// without minimum work keeps its exact prior layout.
     let minimumWork: [MiningMinimumWork]
 
     init(
-        requestID: UInt64,
-        budgetMilliseconds: UInt32,
+        sequence: UInt64,
         childPath: [String],
-        parentCID: String,
-        parentData: Data,
+        tipCID: String,
+        tipData: Data,
         rewards: [MiningReward],
         minimumWork: [MiningMinimumWork] = []
     ) {
-        self.requestID = requestID
-        self.budgetMilliseconds = budgetMilliseconds
+        self.sequence = sequence
         self.childPath = childPath
-        self.parentCID = parentCID
-        self.parentData = parentData
+        self.tipCID = tipCID
+        self.tipData = tipData
         self.rewards = rewards
         self.minimumWork = minimumWork
     }
 
     func encoded() throws -> Data {
-        guard requestID != 0,
-              (1...Self.maximumBudgetMilliseconds).contains(budgetMilliseconds),
+        guard sequence != 0,
               _isAbsoluteChainPath(childPath), childPath.count > 1,
               childPath.count <= Int(UInt16.max),
-              _isBoundedWireAtom(parentCID),
-              parentData.count <= Int(UInt32.max),
-              _contentBoundBlock(cid: parentCID, data: parentData) != nil else {
+              _isBoundedWireAtom(tipCID),
+              tipData.count <= Int(UInt32.max),
+              _contentBoundBlock(cid: tipCID, data: tipData) != nil else {
             throw NodeNetworkWireError.malformed
         }
         let pathBytes = childPath.map { Data($0.utf8) }
-        let parentBytes = Data(parentCID.utf8)
+        let tipBytes = Data(tipCID.utf8)
         let rewardBytes = try _encodeMiningRewards(
             rewards,
             under: childPath
@@ -860,27 +809,26 @@ struct ChildCandidateRequestMessage: Sendable {
               minimumWorkBytes.count <= Int(UInt32.max) else {
             throw NodeNetworkWireError.malformed
         }
-        let size = 12 + 2 + pathBytes.reduce(0) { $0 + 2 + $1.count }
-            + 2 + parentBytes.count + 4 + rewardBytes.count
-            + 4 + parentData.count
+        let size = 8 + 2 + pathBytes.reduce(0) { $0 + 2 + $1.count }
+            + 2 + tipBytes.count + 4 + rewardBytes.count
+            + 4 + tipData.count
             + (minimumWorkBytes.isEmpty ? 0 : 4 + minimumWorkBytes.count)
         guard size <= Self.maximumEncodedBytes else {
             throw NodeNetworkWireError.oversized
         }
         var data = Data(capacity: size)
-        data.appendUInt64(requestID)
-        data.appendUInt32(budgetMilliseconds)
+        data.appendUInt64(sequence)
         data.appendUInt16(UInt16(pathBytes.count))
         for component in pathBytes {
             data.appendUInt16(UInt16(component.count))
             data.append(component)
         }
-        data.appendUInt16(UInt16(parentBytes.count))
-        data.append(parentBytes)
+        data.appendUInt16(UInt16(tipBytes.count))
+        data.append(tipBytes)
         data.appendUInt32(UInt32(rewardBytes.count))
         data.append(rewardBytes)
-        data.appendUInt32(UInt32(parentData.count))
-        data.append(parentData)
+        data.appendUInt32(UInt32(tipData.count))
+        data.append(tipData)
         if !minimumWorkBytes.isEmpty {
             data.appendUInt32(UInt32(minimumWorkBytes.count))
             data.append(minimumWorkBytes)
@@ -893,8 +841,7 @@ struct ChildCandidateRequestMessage: Sendable {
             throw NodeNetworkWireError.oversized
         }
         var position = data.startIndex
-        guard let requestID = data.readUInt64(at: &position), requestID != 0,
-              let budgetMilliseconds = data.readUInt32(at: &position),
+        guard let sequence = data.readUInt64(at: &position), sequence != 0,
               let pathCount = data.readUInt16(at: &position), pathCount > 1 else {
             throw NodeNetworkWireError.malformed
         }
@@ -915,18 +862,18 @@ struct ChildCandidateRequestMessage: Sendable {
             childPath.append(component)
             position = end
         }
-        guard let parentLength = data.readUInt16(at: &position), parentLength > 0,
-              data.distance(from: position, to: data.endIndex) >= Int(parentLength) else {
+        guard let tipLength = data.readUInt16(at: &position), tipLength > 0,
+              data.distance(from: position, to: data.endIndex) >= Int(tipLength) else {
             throw NodeNetworkWireError.malformed
         }
-        let parentEnd = data.index(position, offsetBy: Int(parentLength))
-        guard let parentCID = String(
-            data: data[position..<parentEnd],
+        let tipEnd = data.index(position, offsetBy: Int(tipLength))
+        guard let tipCID = String(
+            data: data[position..<tipEnd],
             encoding: .utf8
         ) else {
             throw NodeNetworkWireError.malformed
         }
-        position = parentEnd
+        position = tipEnd
         guard let rewardLength = data.readUInt32(at: &position),
               rewardLength <= Self.maximumRewardBytes,
               data.distance(from: position, to: data.endIndex)
@@ -946,7 +893,7 @@ struct ChildCandidateRequestMessage: Sendable {
             throw NodeNetworkWireError.malformed
         }
         let blockEnd = data.index(position, offsetBy: Int(blockLength))
-        let parentData = Data(data[position..<blockEnd])
+        let tipData = Data(data[position..<blockEnd])
         position = blockEnd
         var minimumWork: [MiningMinimumWork] = []
         if position < data.endIndex {
@@ -966,11 +913,10 @@ struct ChildCandidateRequestMessage: Sendable {
             position = entriesEnd
         }
         let message = Self(
-            requestID: requestID,
-            budgetMilliseconds: budgetMilliseconds,
+            sequence: sequence,
             childPath: childPath,
-            parentCID: parentCID,
-            parentData: parentData,
+            tipCID: tipCID,
+            tipData: tipData,
             rewards: rewards,
             minimumWork: minimumWork
         )
@@ -981,43 +927,46 @@ struct ChildCandidateRequestMessage: Sendable {
     }
 }
 
-/// A contextual unmined child template returned to the exact requesting parent.
-/// It is ephemeral mining input, never parent-owned child-chain state.
-struct ChildCandidateResponseMessage: Sendable {
-    let requestID: UInt64
+/// The child's current candidate for its parent's tip, pushed to the parent
+/// whenever one of its inputs changed. Ephemeral mining input, never
+/// parent-owned child-chain state; the parent keeps only the latest.
+struct ChildCandidateAvailableMessage: Sendable {
+    /// Monotonic per child session; a lower one is stale and ignored.
+    let sequence: UInt64
     let childPath: [String]
-    let parentCID: String
+    /// The parent tip the candidate was built for.
+    let parentTipCID: String
     let childCID: String
     let blockData: Data
     let searchWitness: ChildSchedulingWitness?
 
     init(
-        requestID: UInt64,
+        sequence: UInt64,
         childPath: [String],
-        parentCID: String,
+        parentTipCID: String,
         childCID: String,
         blockData: Data,
         searchWitness: ChildSchedulingWitness?
     ) {
-        self.requestID = requestID
+        self.sequence = sequence
         self.childPath = childPath
-        self.parentCID = parentCID
+        self.parentTipCID = parentTipCID
         self.childCID = childCID
         self.blockData = blockData
         self.searchWitness = searchWitness
     }
 
     func encoded() throws -> Data {
-        guard requestID != 0,
+        guard sequence != 0,
               _isAbsoluteChainPath(childPath), childPath.count > 1,
               childPath.count <= Int(UInt16.max),
-              _isBoundedWireAtom(parentCID), _isBoundedWireAtom(childCID),
+              _isBoundedWireAtom(parentTipCID), _isBoundedWireAtom(childCID),
               blockData.count <= Int(UInt32.max),
               _contentBoundBlock(cid: childCID, data: blockData) != nil else {
             throw NodeNetworkWireError.malformed
         }
         let pathBytes = childPath.map { Data($0.utf8) }
-        let parentBytes = Data(parentCID.utf8)
+        let parentBytes = Data(parentTipCID.utf8)
         let childBytes = Data(childCID.utf8)
         let witnesses = try Self.encodedWitnesses(
             search: searchWitness
@@ -1032,7 +981,7 @@ struct ChildCandidateResponseMessage: Sendable {
             throw NodeNetworkWireError.oversized
         }
         var data = Data(capacity: size)
-        data.appendUInt64(requestID)
+        data.appendUInt64(sequence)
         data.appendUInt16(UInt16(pathBytes.count))
         for component in pathBytes {
             data.appendUInt16(UInt16(component.count))
@@ -1060,9 +1009,9 @@ struct ChildCandidateResponseMessage: Sendable {
             throw NodeNetworkWireError.oversized
         }
         var position = data.startIndex
-        guard let requestID = data.readUInt64(at: &position), requestID != 0,
+        guard let sequence = data.readUInt64(at: &position), sequence != 0,
               let childPath = data.readChainPath(at: &position),
-              let parentCID = data.readString(at: &position),
+              let parentTipCID = data.readString(at: &position),
               let childCID = data.readString(at: &position) else {
             throw NodeNetworkWireError.malformed
         }
@@ -1078,9 +1027,9 @@ struct ChildCandidateResponseMessage: Sendable {
             throw NodeNetworkWireError.malformed
         }
         let message = Self(
-            requestID: requestID,
+            sequence: sequence,
             childPath: childPath,
-            parentCID: parentCID,
+            parentTipCID: parentTipCID,
             childCID: childCID,
             blockData: blockData,
             searchWitness: searchWitness
@@ -1174,7 +1123,7 @@ private func _encodeMiningRewards(
         }
     }
     let data = try _canonicalJSONEncode(rewards)
-    guard data.count <= ChildCandidateRequestMessage.maximumRewardBytes else {
+    guard data.count <= ParentTipContextMessage.maximumRewardBytes else {
         throw NodeNetworkWireError.oversized
     }
     return data
@@ -1184,7 +1133,7 @@ private func _decodeMiningRewards(
     _ data: Data,
     under childPath: [String]
 ) throws -> [MiningReward] {
-    guard data.count <= ChildCandidateRequestMessage.maximumRewardBytes else {
+    guard data.count <= ParentTipContextMessage.maximumRewardBytes else {
         throw NodeNetworkWireError.oversized
     }
     guard let rewards = try? JSONDecoder().decode(
@@ -1218,7 +1167,7 @@ private func _encodeMiningMinimumWork(
         }
     }
     let data = try _canonicalJSONEncode(entries)
-    guard data.count <= ChildCandidateRequestMessage.maximumRewardBytes else {
+    guard data.count <= ParentTipContextMessage.maximumRewardBytes else {
         throw NodeNetworkWireError.oversized
     }
     return data
@@ -1228,7 +1177,7 @@ private func _decodeMiningMinimumWork(
     _ data: Data,
     under childPath: [String]
 ) throws -> [MiningMinimumWork] {
-    guard data.count <= ChildCandidateRequestMessage.maximumRewardBytes else {
+    guard data.count <= ParentTipContextMessage.maximumRewardBytes else {
         throw NodeNetworkWireError.oversized
     }
     guard let entries = try? JSONDecoder().decode(

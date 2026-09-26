@@ -96,13 +96,24 @@ cross-component invariants:
 - nothing flows upstream: child topology and derived weight stay in the child
   process and are never returned to a parent; a parent maintains run state only
   for the directories it hosts (spec §9.10) and serves it downstream;
-- a child restarted after acknowledging a contextual candidate reservation
-  still serves that exact candidate from durable Volumes; more than one
-  offer window of abandoned parent carriers cannot evict an issued candidate,
-  and a later exact snapshot releases obsolete offers and reservations;
-- parent admission hands each committed child CID off in the authenticated
-  reservation update before release, so asynchronous proof delivery and
-  garbage collection cannot race away the candidate;
+- a child pushes its candidate for the parent's pushed tip and the parent
+  holds it with no request and no rebuild on later templates; the parent
+  pushes a miner's minimum work for the child's subtree and only that, and
+  an unchanged plan pushes nothing; a parent tip that changes state drops
+  the stale candidate until the child rebuilds on the new tip and pushes
+  again (`testChildPushesACandidateForThePushedParentTipAndTheParentHoldsIt`,
+  `testParentPushesDescendantMinimumWorkAndTheChildBuildsWithIt`,
+  `testParentTipChangeDropsTheStaleCandidateUntilTheChildRepushes`);
+- an offer this chain built is kept by its own budget, oldest first, and a
+  candidate the parent's evidence names carried survives every newer offer
+  until the carried block's admission owns its roots
+  (`testHandedOffOfferSurvivesNewerOffersUntilAdmissionOwnsRoots`,
+  `testOfferBudgetEvictsTheOldestOfferWhole`);
+- the template digest changes with the tip, the mempool and the child
+  candidates held, and status serves what the template carries, so a miner
+  refreshes its work for a change at any level
+  (`testTemplateDigestTracksTipMempoolAndChildCandidates`,
+  `testTemplateDigestIsTheStaleTokenWhenPresent`);
 - successor attachments received before child genesis wait on their exact
   same-chain predecessor instead of being misclassified as malformed genesis;
 - a suspended authenticated direct child cannot block a healthy sibling's
@@ -136,13 +147,7 @@ cross-component invariants:
   `testDecidedRefusalWithoutACarrierLinkIsConsumed`,
   `testDecidedIsExactlyWhatTheAcquirerNeverRetries`,
   `testRestartedChildAdmitsTheParentCarriedBlockFromItsInboxWeighed`,
-  `testPortableAttachmentsKeepDistinctRootsForTheSameChildWhileAdmissionIsBlocked`);
-  a child whose reservation was refused or timed out is asked again — the
-  next reconcile visits every dirty child, whether or not anything is
-  desired of it (`testRefusedReservationLeavesTheChildAskableAgain`); a
-  handed-off candidate's children are relayed down only while the handoff
-  is in flight, not once the candidate is an accepted block
-  (`testCompletedHandoffStopsRelayingItsChildren`); a run
+  `testPortableAttachmentsKeepDistinctRootsForTheSameChildWhileAdmissionIsBlocked`); a run
   flows through every level — what Nexus attributes to the middle chain's
   committing block reaches the grandchild, and the middle chain's service
   pushes the run that credit changed to its own children without waiting

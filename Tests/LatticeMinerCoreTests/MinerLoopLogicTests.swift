@@ -52,6 +52,38 @@ final class MinerLoopLogicTests: XCTestCase {
         XCTAssertEqual(Data(hex: decoded.blockHex), block.toData())
     }
 
+    /// The node's template digest, when served, is the stale token: it moves
+    /// when any input of the template does — a child's candidate as much as
+    /// this chain's tip — and the status route serves the same digest.
+    func testTemplateDigestIsTheStaleTokenWhenPresent() async throws {
+        let block = try await BlockBuilder.buildGenesis(
+            spec: testSpec(),
+            timestamp: 1,
+            target: UInt256.max,
+            fetcher: InMemoryContentSource([:])
+        )
+        struct WireTemplate: Encodable {
+            let workID: String
+            let block: Block
+            let searchTarget: UInt256
+            let chainPath: [String]
+            let expiresInMilliseconds: UInt64
+            let templateDigest: String
+        }
+        let decoded = try JSONDecoder().decode(
+            TemplateResponse.self,
+            from: JSONEncoder().encode(WireTemplate(
+                workID: "candidate",
+                block: block,
+                searchTarget: UInt256(255),
+                chainPath: ["Nexus"],
+                expiresInMilliseconds: 30_000,
+                templateDigest: "d1"
+            ))
+        )
+        XCTAssertEqual(decoded.staleToken, "d1")
+    }
+
     func testParseMinimumWorkAcceptsPowersOfTwoAndDecimals() {
         XCTAssertEqual(MinerLoopLogic.parseMinimumWork("2^32"), UInt256(1) << 32)
         XCTAssertEqual(MinerLoopLogic.parseMinimumWork("2^0"), UInt256(1))

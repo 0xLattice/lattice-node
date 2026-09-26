@@ -224,26 +224,21 @@ that made the claim. Each connection must complete a compatible hello before it
 may request a Volume, including a same-key replacement connection. Entry CIDs,
 bounded framing, and atomic publication are transport/storage details; node
 protocol messages never request arbitrary CID selections.
-During a candidate round, the parent may serve the ephemeral provisional
-carrier only as that request's root and only for the lifetime of the round.
-
-Candidate replies are offers, not miner-work durability. After staging a
-template, the parent sends each exact child advertiser the complete sorted set
-of candidate CIDs referenced by all remaining live templates. The child first
-applies the same replacement recursively to its direct children, then commits
-its local issued set and acknowledges. The parent returns the new work only
-after every required acknowledgement. The set is bounded by the 16-entry
-template book; an empty set releases all offers and issued reservations.
-Requests and acknowledgements are accepted only on the authenticated direct
-parent/child session for the exact child path. Removal delivery is serialized
-but asynchronous because over-retention is safe and a child must never stall
-parent consensus. A removal may name committed candidates as handoffs; the
-child atomically installs their durable admission-handoff ownership before
-replacing the issued set, and applies the same transition recursively to
-committed descendants. Parent-proof acquisition is a separate retryable path.
-Expired idle work may remain over-retained until the next template, submission,
-invalidation, or reconnect boundary; this is bounded and never makes expired
-work valid.
+A parent pushes its template context to each authenticated direct child
+whenever it changes — its validated tip block and the miner's reward plan and
+minimum work for the child's subtree — and the child pushes back its current
+candidate for that tip whenever one of its inputs changes. Both messages
+carry a sequence that is monotonic per session; a lower one is dropped. The
+parent holds the latest candidate per child peer and a template carries every
+held candidate built on its current tip's post-state; nothing is requested
+at template time and no child can stall parent consensus. Candidates are
+offers, not miner-work durability: the child keeps a candidate's content by
+its own bounded budget, oldest offer first, until the carried block's
+admission owns the roots or the budget sheds it, and a candidate named in the
+parent's evidence is a handoff the budget never sheds. Parent-proof
+acquisition is a separate retryable path. Pushes and candidates are accepted
+only on the authenticated direct parent/child session for the exact child
+path.
 
 Each candidate-root content session uses the node's `NodeResourcePolicy` for
 archive bytes, Volume count, and member count. `ChainSpec.maxBlockSize` remains

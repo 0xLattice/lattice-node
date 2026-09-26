@@ -178,7 +178,8 @@ final class MiningTemplateBookTests: XCTestCase {
         XCTAssertEqual(flat.targets, [UInt256.max, middleTarget, UInt256(4)])
         let response = MiningTemplateResponse(
             template: flat,
-            maximumLifetimeMilliseconds: 30_000
+            maximumLifetimeMilliseconds: 30_000,
+            templateDigest: "digest"
         )
         XCTAssertEqual(response.targets, flat.targets)
 
@@ -945,7 +946,8 @@ final class MiningTemplateBookTests: XCTestCase {
         ))
         let response = MiningTemplateResponse(
             template: reused,
-            maximumLifetimeMilliseconds: 30_000
+            maximumLifetimeMilliseconds: 30_000,
+            templateDigest: "digest"
         )
         XCTAssertLessThanOrEqual(response.expiresInMilliseconds, 250)
 

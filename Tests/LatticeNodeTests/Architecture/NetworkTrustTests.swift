@@ -30,6 +30,7 @@ private actor MinimumWorkRecorder {
     }
 
     func last() -> [MiningMinimumWork]? { values.last }
+    func count() -> Int { values.count }
 }
 
 private func inertNetworkHandlers() -> NodeNetworkHandlers {
@@ -1213,69 +1214,6 @@ private final class BlockingProvisionalBroker: VolumeBroker {
     }
 }
 
-private actor CandidateReservationAckGate {
-    private let apply: @Sendable (NetworkCandidateReservationUpdate) async -> Bool
-    private var snapshots: [[String]] = []
-    private var handoffSnapshots: [[String]] = []
-    private var rejections: [[String]] = []
-    private var holdAnyNonempty = true
-    private var heldCandidateCIDs: Set<String>?
-    private var blocking = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    init(
-        apply: @escaping @Sendable (
-            NetworkCandidateReservationUpdate
-        ) async -> Bool
-    ) {
-        self.apply = apply
-    }
-
-    func handle(_ update: NetworkCandidateReservationUpdate) async -> Bool {
-        let candidateCIDs = update.candidateCIDs
-        snapshots.append(candidateCIDs)
-        handoffSnapshots.append(update.handoffCIDs)
-        let shouldBlock = !blocking && (
-            holdAnyNonempty && !candidateCIDs.isEmpty
-                || heldCandidateCIDs == Set(candidateCIDs)
-        )
-        if shouldBlock {
-            blocking = true
-            await withCheckedContinuation { waiters.append($0) }
-        }
-        let result = await apply(update)
-        if !result {
-            rejections.append(candidateCIDs)
-        }
-        return result
-    }
-
-    func snapshot() -> [[String]] { snapshots }
-    func handoffSnapshot() -> [[String]] { handoffSnapshots }
-    func rejectionSnapshot() -> [[String]] { rejections }
-
-    func holdNext(_ candidateCIDs: Set<String>) {
-        precondition(waiters.isEmpty)
-        holdAnyNonempty = false
-        heldCandidateCIDs = candidateCIDs
-        blocking = false
-    }
-
-    func holdNextNonempty() {
-        precondition(waiters.isEmpty)
-        holdAnyNonempty = true
-        heldCandidateCIDs = nil
-        blocking = false
-    }
-
-    func release() {
-        holdAnyNonempty = false
-        heldCandidateCIDs = nil
-        let current = waiters
-        waiters.removeAll()
-        for waiter in current { waiter.resume() }
-    }
-}
 
 private actor IssuedCandidateSet {
     private var candidateCIDs: Set<String> = []
@@ -2786,36 +2724,35 @@ final class NetworkTrustTests: XCTestCase {
                 path: ["Nexus", "Payments", "Receipts"]
             )
         )
-        let request = ChildCandidateRequestMessage(
-            requestID: 11,
-            budgetMilliseconds: 750,
+        let request = ParentTipContextMessage(
+            sequence: 11,
             childPath: ["Nexus", "Payments"],
-            parentCID: parentCID,
-            parentData: parentData,
+            tipCID: parentCID,
+            tipData: parentData,
             rewards: [childReward, descendantReward]
         )
-        let decodedRequest = try ChildCandidateRequestMessage.decoded(
+        let decodedRequest = try ParentTipContextMessage.decoded(
             request.encoded()
         )
-        XCTAssertEqual(decodedRequest.budgetMilliseconds, 750)
+        XCTAssertEqual(decodedRequest.sequence, 11)
         XCTAssertEqual(decodedRequest.rewards.map(\.chainPath), [
             ["Nexus", "Payments"],
             ["Nexus", "Payments", "Receipts"],
         ])
         XCTAssertNotNil(decodedRequest.rewards[0].transaction.body.node)
 
-        let response = ChildCandidateResponseMessage(
-            requestID: 11,
+        let response = ChildCandidateAvailableMessage(
+            sequence: 11,
             childPath: ["Nexus", "Payments"],
-            parentCID: parentCID,
+            parentTipCID: parentCID,
             childCID: parentCID,
             blockData: parentData,
             searchWitness: nil
         )
-        let decodedResponse = try ChildCandidateResponseMessage.decoded(
+        let decodedResponse = try ChildCandidateAvailableMessage.decoded(
             response.encoded()
         )
-        XCTAssertEqual(decodedResponse.parentCID, parentCID)
+        XCTAssertEqual(decodedResponse.parentTipCID, parentCID)
         XCTAssertNil(decodedResponse.searchWitness)
 
         var forgedTarget = try response.encoded()
@@ -2829,15 +2766,14 @@ final class NetworkTrustTests: XCTestCase {
             at: targetOffset
         )
         XCTAssertThrowsError(
-            try ChildCandidateResponseMessage.decoded(forgedTarget)
+            try ChildCandidateAvailableMessage.decoded(forgedTarget)
         )
 
-        XCTAssertThrowsError(try ChildCandidateRequestMessage(
-            requestID: 12,
-            budgetMilliseconds: 750,
+        XCTAssertThrowsError(try ParentTipContextMessage(
+            sequence: 12,
             childPath: ["Nexus", "Payments"],
-            parentCID: parentCID,
-            parentData: parentData,
+            tipCID: parentCID,
+            tipData: parentData,
             rewards: [MiningReward(
                 chainPath: ["Nexus", "Other"],
                 transaction: try unsignedTransaction(path: ["Nexus", "Other"])
@@ -2849,11 +2785,11 @@ final class NetworkTrustTests: XCTestCase {
         let block = try await canonicalNetworkBlock()
         let childCID = try BlockHeader(node: block).rawCID
         let blockData = try XCTUnwrap(block.toData())
-        func candidate(_ data: Data) -> ChildCandidateResponseMessage {
-            ChildCandidateResponseMessage(
-                requestID: 19,
+        func candidate(_ data: Data) -> ChildCandidateAvailableMessage {
+            ChildCandidateAvailableMessage(
+                sequence: 19,
                 childPath: ["Nexus", "Payments"],
-                parentCID: childCID,
+                parentTipCID: childCID,
                 childCID: childCID,
                 blockData: data,
                 searchWitness: nil
@@ -2885,13 +2821,12 @@ final class NetworkTrustTests: XCTestCase {
         let parentData = try XCTUnwrap(parent.toData())
         func request(
             _ minimumWork: [MiningMinimumWork]
-        ) -> ChildCandidateRequestMessage {
-            ChildCandidateRequestMessage(
-                requestID: 21,
-                budgetMilliseconds: 750,
+        ) -> ParentTipContextMessage {
+            ParentTipContextMessage(
+                sequence: 21,
                 childPath: ["Nexus", "Payments"],
-                parentCID: parentCID,
-                parentData: parentData,
+                tipCID: parentCID,
+                tipData: parentData,
                 rewards: [],
                 minimumWork: minimumWork
             )
@@ -2900,7 +2835,7 @@ final class NetworkTrustTests: XCTestCase {
         let legacy = try request([]).encoded()
         XCTAssertEqual(legacy.suffix(parentData.count), parentData)
         XCTAssertTrue(
-            try ChildCandidateRequestMessage.decoded(legacy).minimumWork.isEmpty
+            try ParentTipContextMessage.decoded(legacy).minimumWork.isEmpty
         )
 
         let entries = [
@@ -2916,7 +2851,7 @@ final class NetworkTrustTests: XCTestCase {
         let encoded = try request(entries).encoded()
         XCTAssertGreaterThan(encoded.count, legacy.count)
         XCTAssertEqual(
-            try ChildCandidateRequestMessage.decoded(encoded).minimumWork,
+            try ParentTipContextMessage.decoded(encoded).minimumWork,
             entries
         )
 
@@ -2943,45 +2878,44 @@ final class NetworkTrustTests: XCTestCase {
             )
         }).encoded())
         XCTAssertThrowsError(
-            try ChildCandidateRequestMessage.decoded(encoded + Data([0]))
+            try ParentTipContextMessage.decoded(encoded + Data([0]))
         )
 
         // The operator's opt-in to commit the minimum-work target is one
         // The wire carries a search plan and nothing more: there is no
         // trailing commit byte, so a filter cannot travel as a commitment.
         XCTAssertEqual(
-            try ChildCandidateRequestMessage.decoded(encoded).minimumWork,
+            try ParentTipContextMessage.decoded(encoded).minimumWork,
             entries
         )
         XCTAssertThrowsError(
-            try ChildCandidateRequestMessage.decoded(encoded + Data([1])),
+            try ParentTipContextMessage.decoded(encoded + Data([1])),
             "a trailing byte is not part of this message"
         )
         XCTAssertEqual(
-            try ChildCandidateRequestMessage(
-                requestID: 21,
-                budgetMilliseconds: 750,
+            try ParentTipContextMessage(
+                sequence: 21,
                 childPath: ["Nexus", "Payments"],
-                parentCID: parentCID,
-                parentData: parentData,
+                tipCID: parentCID,
+                tipData: parentData,
                 rewards: []
             ).encoded(),
             legacy
         )
         XCTAssertThrowsError(
-            try ChildCandidateRequestMessage.decoded(legacy + Data([1]))
+            try ParentTipContextMessage.decoded(legacy + Data([1]))
         )
         var emptyTrailer = legacy
         emptyTrailer.append(contentsOf: [2, 0, 0, 0])
         emptyTrailer.append(Data("[]".utf8))
         XCTAssertThrowsError(
-            try ChildCandidateRequestMessage.decoded(emptyTrailer)
+            try ParentTipContextMessage.decoded(emptyTrailer)
         )
     }
 
     func testCandidateRequestEnforcesHierarchyRewardAndFrameBounds() async throws {
         XCTAssertEqual(
-            ChildCandidateRequestMessage.maximumRewardBytes,
+            ParentTipContextMessage.maximumRewardBytes,
             ChainServiceLimits.maximumPayloadBytes
         )
         let parent = try await canonicalNetworkBlock()
@@ -2991,25 +2925,24 @@ final class NetworkTrustTests: XCTestCase {
             repeating: String(repeating: "x", count: 64),
             count: 256
         )
-        let valid = try ChildCandidateRequestMessage(
-            requestID: 15,
-            budgetMilliseconds: 750,
+        let valid = try ParentTipContextMessage(
+            sequence: 15,
             childPath: maximumDepthPath,
-            parentCID: parentCID,
-            parentData: parentData,
+            tipCID: parentCID,
+            tipData: parentData,
             rewards: []
         ).encoded()
         XCTAssertLessThan(
             valid.count,
-            ChildCandidateRequestMessage.maximumEncodedBytes
+            ParentTipContextMessage.maximumEncodedBytes
         )
 
         // The reward list has no invented count cap; it is bounded structurally by
         // the wire capacity (UInt16 count prefix) and the reward-byte cap. The
         // total message is still bounded by the frame size below.
-        XCTAssertThrowsError(try ChildCandidateRequestMessage.decoded(Data(
+        XCTAssertThrowsError(try ParentTipContextMessage.decoded(Data(
             repeating: 0,
-            count: ChildCandidateRequestMessage.maximumEncodedBytes + 1
+            count: ParentTipContextMessage.maximumEncodedBytes + 1
         ))) { error in
             XCTAssertEqual(error as? NodeNetworkWireError, .oversized)
         }
@@ -3094,31 +3027,6 @@ final class NetworkTrustTests: XCTestCase {
         XCTAssertEqual(rotations, ["Nexus/active": 3])
     }
 
-    func testCandidateBudgetsShrinkAndPeerPriorityRotates() {
-        let childBudget = NodeNetworkRuntime.remoteChildCandidateBudget(
-            parentWaitMilliseconds: 1_000
-        )
-        let grandchildBudget = childBudget.flatMap {
-            NodeNetworkRuntime.remoteChildCandidateBudget(
-                parentWaitMilliseconds: UInt64($0)
-            )
-        }
-        XCTAssertEqual(childBudget, 750)
-        XCTAssertEqual(grandchildBudget, 563)
-
-        let first = NodeNetworkRuntime.rotatedPeerIndices(
-            peerCount: 3,
-            start: 0,
-            limit: 2
-        )
-        let second = NodeNetworkRuntime.rotatedPeerIndices(
-            peerCount: 3,
-            start: first.next,
-            limit: 2
-        )
-        XCTAssertEqual(first.indices, [0, 1])
-        XCTAssertEqual(second.indices, [1, 2])
-    }
 
     func testEvidenceAvailabilityCarriesOneCompleteVolumeRoot() async throws {
         let process = try await canonicalNetworkProcess()
@@ -6029,25 +5937,36 @@ final class NetworkTrustTests: XCTestCase {
         XCTAssertFalse(stored)
     }
 
-    func testContextualCandidateReadsOnlyExactRequestingParentSession()
+    /// A child never asks for a parent template. The parent pushes its
+    /// context (its validated tip) when the child wires in; the child builds
+    /// its candidate against the tip's post-state, reading the tip from the
+    /// parent's own session and nothing from anyone else, and pushes the
+    /// candidate up; the parent's next template finds it already held.
+    func testChildPushesACandidateForThePushedParentTipAndTheParentHoldsIt()
         async throws
     {
         let descendantKey = signingKey(0x91)
         let fixture = try await provisionalRootFixture(keyByte: 0x8f)
+        let parentTip = try await fixture.parentProcess.validatedTipBlock()
+        let parentTipCID = try BlockHeader(node: parentTip).rawCID
+        let builds = NetworkEventRecorder()
         let childHandlers = NodeNetworkHandlers(
             childCandidateBuilder: { context, parentSource in
-                let parentCID = try BlockHeader(
-                    node: context.parentCarrier
-                ).rawCID
-                let fetched = await parentSource.fetch([parentCID])
-                guard fetched[parentCID] == context.parentCarrier.toData() else {
+                // The carrier the child builds against is the parent's tip's
+                // post-state, and the tip itself is fetched from the parent.
+                guard context.parentCarrier.prevState.rawCID
+                    == parentTip.postState.rawCID else {
+                    throw NetworkTestError.failedPhase("carrier on the parent tip")
+                }
+                let fetched = await parentSource.fetch([parentTipCID])
+                guard fetched[parentTipCID] == parentTip.toData() else {
                     throw NetworkTestError.failedPhase(
-                        "exact parent carrier content"
+                        "parent tip content from the parent session"
                     )
                 }
+                await builds.append(parentTipCID)
                 return fixture.candidate
             },
-            candidateReservations: { _ in true },
             admission: { _ in throw CancellationError() }
         )
         let descendantHello = try ChainHello(
@@ -6090,6 +6009,8 @@ final class NetworkTrustTests: XCTestCase {
             }
             await probe.resetVolumeRequests()
 
+            // No template was requested, and the parent asked for nothing:
+            // the candidate is simply held once the child pushed it.
             try await waitForChildCandidate(fixture)
             let candidates = await fixture.parentRuntime.directChildCandidates(
                 fixture.context
@@ -6097,6 +6018,18 @@ final class NetworkTrustTests: XCTestCase {
             let descendantVolumeRequests = await probe.volumeRequestCount()
             XCTAssertEqual(candidates.count, 1)
             XCTAssertEqual(descendantVolumeRequests, 0)
+            let buildsAfterFirst = await builds.snapshot().count
+            XCTAssertEqual(buildsAfterFirst, 1, "built once per context")
+            // Asking again costs no round trip and no rebuild.
+            let again = await fixture.parentRuntime.directChildCandidates(
+                fixture.context
+            )
+            XCTAssertEqual(again.count, 1)
+            let buildsAfterSecond = await builds.snapshot().count
+            XCTAssertEqual(buildsAfterSecond, 1)
+            let digestInput = await fixture.parentRuntime.childCandidateDigestInput()
+            let candidateCID = try BlockHeader(node: fixture.candidate.block).rawCID
+            XCTAssertEqual(digestInput, ["Payments:\(candidateCID)"])
         } catch {
             await descendant.stop()
             await fixture.childRuntime.stop()
@@ -6108,182 +6041,10 @@ final class NetworkTrustTests: XCTestCase {
         await fixture.parentRuntime.stop()
     }
 
-    func testInvalidParentEvidenceCannotPinCandidateOrOvertakeReservation()
-        async throws
-    {
-        let fixture = try await provisionalRootFixture(keyByte: 0x93)
-        let childTip = try await fixture.childProcess.canonicalTipBlock()
-        let candidateBlock = try await BlockBuilder.buildBlock(
-            previous: childTip,
-            timestamp: childTip.timestamp + 1,
-            nonce: 77,
-            fetcher: fixture.childProcess
-        )
-        let candidateHeader = try BlockHeader(node: candidateBlock)
-        let reservations = NetworkEventRecorder()
-        let childHandlers = NodeNetworkHandlers(
-            candidateReservations: { update in
-                await reservations.append("called")
-                return (try? await fixture.childProcess
-                    .replaceIssuedContextualCandidates(
-                        Set(update.candidateCIDs),
-                        handoffs: Set(update.handoffCIDs),
-                        capacity: 16
-                    )) == true
-            },
-            admission: { _ in throw CancellationError() }
-        )
-
-        do {
-            try await fixture.parentRuntime.start(
-                process: fixture.parentProcess,
-                handlers: inertNetworkHandlers()
-            )
-            try await fixture.childRuntime.start(
-                process: fixture.childProcess,
-                handlers: childHandlers
-            )
-
-            for _ in 0..<250 {
-                if !(await reservations.snapshot()).isEmpty { break }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            let reservationBaseline = await reservations.snapshot().count
-            guard reservationBaseline > 0 else {
-                throw NetworkTestError.failedPhase(
-                    "initial reservation reconciliation"
-                )
-            }
-            try await fixture.childProcess.storeContextualCandidate(
-                candidateHeader,
-                fetcher: fixture.childProcess,
-                capacity: 16
-            )
-            let candidateCID = candidateHeader.rawCID
-            let retainedBeforeEvidence = try await fixture.childProcess
-                .contextualCandidateChildren(candidateCIDs: [candidateCID])
-            XCTAssertNotNil(retainedBeforeEvidence)
-
-            let childPeer = PeerID(
-                publicKey: fixture.childConfiguration.processPublicKey
-            )
-            let invalidEvidence = try ChildEvidenceAvailableMessage(
-                childPath: fixture.childConfiguration.chainPath,
-                sourceID: testEvidenceSourceID,
-                ordinal: 1,
-                childCID: candidateCID,
-                rootCID: testCID("invalid-parent-evidence-root"),
-                attachmentCID: testCID(
-                    "invalid-parent-evidence-attachment"
-                )
-            ).encoded()
-            guard case .enqueued =
-                    await fixture.parentRuntime.hierarchy.sendMessage(
-                        to: childPeer,
-                        topic: NodeNetworkTopic.childEvidenceAvailable,
-                        payload: invalidEvidence
-                    ) else {
-                throw NetworkTestError.failedPhase(
-                    "invalid evidence advertisement"
-                )
-            }
-            try await Task.sleep(for: .milliseconds(250))
-            let reservationCount = await reservations.snapshot().count
-            XCTAssertEqual(reservationCount, reservationBaseline)
-            let replaced = try await fixture.childProcess
-                .replaceIssuedContextualCandidates([], capacity: 16)
-            XCTAssertTrue(replaced)
-            let retainedAfterInvalidEvidence = try await fixture.childProcess
-                .contextualCandidateChildren(candidateCIDs: [candidateCID])
-            XCTAssertNil(retainedAfterInvalidEvidence)
-        } catch {
-            await fixture.childRuntime.stop()
-            await fixture.parentRuntime.stop()
-            throw error
-        }
-        await fixture.childRuntime.stop()
-        await fixture.parentRuntime.stop()
-    }
-
-    func testExactParentSessionRunsOnlyOneReservationHandler() async throws {
-        let fixture = try await provisionalRootFixture(keyByte: 0x95)
-        let reservationGate = CandidateReservationAckGate { _ in true }
-        let childHandlers = NodeNetworkHandlers(
-            candidateReservations: { update in
-                await reservationGate.handle(update)
-            },
-            admission: { _ in throw CancellationError() }
-        )
-
-        do {
-            try await fixture.parentRuntime.start(
-                process: fixture.parentProcess,
-                handlers: inertNetworkHandlers()
-            )
-            try await fixture.childRuntime.start(
-                process: fixture.childProcess,
-                handlers: childHandlers
-            )
-            for _ in 0..<250 {
-                if !(await reservationGate.snapshot()).isEmpty { break }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            let baseline = await reservationGate.snapshot().count
-            guard baseline > 0 else {
-                throw NetworkTestError.failedPhase(
-                    "initial reservation reconciliation"
-                )
-            }
-            let childPeer = PeerID(
-                publicKey: fixture.childConfiguration.processPublicKey
-            )
-            let candidateCID = testCID("single-flight-reservation")
-            for requestID in [UInt64(91), UInt64(92)] {
-                let payload = try ChildCandidateReservationRequestMessage(
-                    requestID: requestID,
-                    childPath: fixture.childConfiguration.chainPath,
-                    candidateCIDs: [candidateCID]
-                ).encoded()
-                guard case .enqueued =
-                        await fixture.parentRuntime.hierarchy.sendMessage(
-                            to: childPeer,
-                            topic: NodeNetworkTopic
-                                .childCandidateReservationRequest,
-                            payload: payload
-                        ) else {
-                    throw NetworkTestError.failedPhase(
-                        "reservation request \(requestID)"
-                    )
-                }
-                if requestID == 91 {
-                    for _ in 0..<250 {
-                        if await reservationGate.snapshot().count > baseline {
-                            break
-                        }
-                        try await Task.sleep(for: .milliseconds(20))
-                    }
-                }
-            }
-
-            let snapshots = await reservationGate.snapshot()
-            XCTAssertEqual(
-                snapshots.filter { $0 == [candidateCID] }.count,
-                1
-            )
-        } catch {
-            await reservationGate.release()
-            await fixture.childRuntime.stop()
-            await fixture.parentRuntime.stop()
-            throw error
-        }
-        await reservationGate.release()
-        await fixture.childRuntime.stop()
-        await fixture.parentRuntime.stop()
-    }
-
-    /// The parent forwards a miner's minimum work to the child that builds
-    /// the block, and only the entries at or below that child.
-    func testChildCandidateRequestCarriesDescendantMinimumWork() async throws {
+    /// The parent pushes a miner's minimum work to the child that builds the
+    /// block, and only the entries at or below that child; the same plan
+    /// again pushes nothing, a changed plan pushes once more.
+    func testParentPushesDescendantMinimumWorkAndTheChildBuildsWithIt() async throws {
         let fixture = try await provisionalRootFixture(keyByte: 0x96)
         let received = MinimumWorkRecorder()
         let childHandlers = NodeNetworkHandlers(
@@ -6291,7 +6052,6 @@ final class NetworkTrustTests: XCTestCase {
                 await received.record(context.minimumWork)
                 return fixture.candidate
             },
-            candidateReservations: { _ in true },
             admission: { _ in throw CancellationError() }
         )
         do {
@@ -6304,42 +6064,55 @@ final class NetworkTrustTests: XCTestCase {
                 handlers: childHandlers
             )
             try await waitForChildCandidate(fixture)
+            let initialPlan = await received.last()
+            XCTAssertEqual(initialPlan, [])
 
             let childEntry = MiningMinimumWork(
                 chainPath: ["Nexus", "Payments"],
                 work: UInt256(1) << 8
             )
-            let candidates = await fixture.parentRuntime.directChildCandidates(
-                ChildCandidateRequestContext(
-                    parentCarrier: fixture.context.parentCarrier,
-                    rewards: [],
-                    minimumWork: [
-                        MiningMinimumWork(
-                            chainPath: ["Nexus"],
-                            work: UInt256(1) << 20
-                        ),
-                        childEntry,
-                    ]
-                )
+            await fixture.parentRuntime.updateDescendantPlan(
+                rewards: [],
+                minimumWork: [
+                    MiningMinimumWork(
+                        chainPath: ["Nexus"],
+                        work: UInt256(1) << 20
+                    ),
+                    childEntry,
+                ]
             )
-            XCTAssertEqual(candidates.count, 1)
+            for _ in 0..<250 {
+                if await received.last() == [childEntry] { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
             // The parent's own minimum is the parent's business, not the
             // child's: only the child's entry crosses.
             let forwarded = await received.last()
             XCTAssertEqual(forwarded, [childEntry])
+            let builds = await received.count()
 
-            // Asking twice forwards the same plan both times: there is no
-            // second, stickier form of the request that commits it.
-            let again = await fixture.parentRuntime.directChildCandidates(
+            // The same plan again is not a change: nothing is pushed.
+            await fixture.parentRuntime.updateDescendantPlan(
+                rewards: [],
+                minimumWork: [
+                    MiningMinimumWork(
+                        chainPath: ["Nexus"],
+                        work: UInt256(1) << 20
+                    ),
+                    childEntry,
+                ]
+            )
+            try await Task.sleep(for: .milliseconds(300))
+            let buildsAfterRepeat = await received.count()
+            XCTAssertEqual(buildsAfterRepeat, builds)
+            let candidates = await fixture.parentRuntime.directChildCandidates(
                 ChildCandidateRequestContext(
                     parentCarrier: fixture.context.parentCarrier,
                     rewards: [],
                     minimumWork: [childEntry]
                 )
             )
-            XCTAssertEqual(again.count, 1)
-            let forwardedAgain = await received.last()
-            XCTAssertEqual(forwardedAgain, [childEntry])
+            XCTAssertEqual(candidates.count, 1)
         } catch {
             await fixture.childRuntime.stop()
             await fixture.parentRuntime.stop()
@@ -6349,531 +6122,29 @@ final class NetworkTrustTests: XCTestCase {
         await fixture.parentRuntime.stop()
     }
 
-    /// A reservation the child never acknowledges in time — the answer lost
-    /// on the wire, or late — is refused at the parent and marks the child
-    /// dirty, so it is not asked for a candidate. The mark must clear on its
-    /// own: the next reconcile visits the dirty child even though nothing
-    /// is desired of it, flushes the empty set, and the child is asked
-    /// again. Left unvisited, a child whose one reservation timed out would
-    /// never be carried again (seen in CI at the coordinator's block rate).
-    func testRefusedReservationLeavesTheChildAskableAgain() async throws {
-        let fixture = try await provisionalRootFixture(keyByte: 0x93)
-        let childService = networkService(
-            process: fixture.childProcess,
-            runtime: fixture.childRuntime
-        )
-        let reservationGate = CandidateReservationAckGate {
-            [weak childService] update in
-            guard let childService else { return false }
-            return await childService.replaceIssuedCandidateReservations(
-                update
-            )
-        }
-        await reservationGate.holdNext([])
-        let parentService = ChainService(
-            process: fixture.parentProcess,
-            childCandidateProvider: { [weak runtime = fixture.parentRuntime] context in
-                guard let runtime else { return [] }
-                return await runtime.directChildCandidates(context)
-            },
-            childCandidateReservationReconciler: {
-                [weak runtime = fixture.parentRuntime] update in
-                guard let runtime else {
-                    return update.reservations.isEmpty
-                        && update.handoffs.isEmpty
-                }
-                return await runtime.reconcileChildCandidateReservations(
-                    update
-                )
-            },
-            childProofPublisher: {
-                [weak runtime = fixture.parentRuntime] publication in
-                guard let runtime else { return }
-                _ = try await runtime.publishChildProof(
-                    publication.proof,
-                    childDirectory: publication.directory,
-                    childCID: publication.childCID
-                )
-            },
-            acceptedBlockPublisher: { _ in }
-        )
-        let childHandlers = NodeNetworkHandlers(
-            childCandidateBuilder: { [weak childService] context, parentSource in
-                guard let childService else { return nil }
-                return try await childService.miningCandidate(
-                    for: context,
-                    parentContentSource: parentSource
-                )
-            },
-            candidateReservations: { [weak reservationGate] update in
-                guard let reservationGate else { return false }
-                return await reservationGate.handle(update)
-            },
-            admission: { _ in throw CancellationError() }
-        )
-
-        do {
-            try await fixture.parentRuntime.start(
-                process: fixture.parentProcess,
-                handlers: inertNetworkHandlers()
-            )
-            try await fixture.childRuntime.start(
-                process: fixture.childProcess,
-                handlers: childHandlers
-            )
-            for _ in 0..<250 {
-                if await childService.status().phase == .active { break }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            for _ in 0..<250 {
-                if await reservationGate.snapshot().contains([]) { break }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            await reservationGate.release()
-            try await waitForChildCandidate(fixture)
-
-            // The child holds its ack for the candidate's reservation past
-            // the parent's request timeout: the template is built without
-            // the child, and the child is dirty — not asked.
-            await reservationGate.holdNextNonempty()
-            let refused = try await parentService.miningTemplate(
-                MiningTemplateRequest()
-            )
-            XCTAssertEqual(refused.block.children.node?.count ?? 0, 0, "refused: built without the child")
-            let askedWhileDirty = await fixture.parentRuntime
-                .directChildCandidates(fixture.context)
-            XCTAssertTrue(askedWhileDirty.isEmpty, "dirty: not asked")
-            // The late ack lands with nothing pending for it.
-            await reservationGate.release()
-
-            // Templates keep coming; the child is asked again.
-            var askedAgain = false
-            for _ in 0..<200 {
-                _ = try await parentService.miningTemplate(MiningTemplateRequest())
-                if await fixture.parentRuntime
-                    .directChildCandidates(fixture.context).count == 1 {
-                    askedAgain = true
-                    break
-                }
-                try await Task.sleep(for: .milliseconds(50))
-            }
-            XCTAssertTrue(askedAgain, "a refused reservation must not leave the child unasked for good")
-        } catch {
-            await fixture.childRuntime.stop()
-            await fixture.parentRuntime.stop()
-            throw error
-        }
-        await fixture.childRuntime.stop()
-        await fixture.parentRuntime.stop()
-    }
-
-    func testParentTemplateWaitsForDurableChildCandidateReservationAck()
-        async throws
-    {
-        let fixture = try await provisionalRootFixture(keyByte: 0x92)
-        let childService = networkService(
-            process: fixture.childProcess,
-            runtime: fixture.childRuntime
-        )
-        let reservationGate = CandidateReservationAckGate {
-            [weak childService] update in
-            guard let childService else { return false }
-            return await childService.replaceIssuedCandidateReservations(
-                update
-            )
-        }
-        await reservationGate.holdNext([])
-        let completion = NetworkEventRecorder()
-        let parentService = ChainService(
-            process: fixture.parentProcess,
-            childCandidateProvider: { [weak runtime = fixture.parentRuntime] context in
-                guard let runtime else { return [] }
-                return await runtime.directChildCandidates(context)
-            },
-            childCandidateReservationReconciler: {
-                [weak runtime = fixture.parentRuntime] update in
-                guard let runtime else {
-                    return update.reservations.isEmpty
-                        && update.handoffs.isEmpty
-                }
-                return await runtime.reconcileChildCandidateReservations(
-                    update
-                )
-            },
-            childProofPublisher: {
-                [weak runtime = fixture.parentRuntime] publication in
-                guard let runtime else { return }
-                _ = try await runtime.publishChildProof(
-                    publication.proof,
-                    childDirectory: publication.directory,
-                    childCID: publication.childCID
-                )
-            },
-            acceptedBlockPublisher: { _ in }
-        )
-        let childHandlers = NodeNetworkHandlers(
-            childCandidateBuilder: { [weak childService] context, parentSource in
-                guard let childService else { return nil }
-                return try await childService.miningCandidate(
-                    for: context,
-                    parentContentSource: parentSource
-                )
-            },
-            candidateReservations: { [weak reservationGate] update in
-                guard let reservationGate else { return false }
-                return await reservationGate.handle(update)
-            },
-            admission: { _ in throw CancellationError() }
-        )
-
-        do {
-            try await fixture.parentRuntime.start(
-                process: fixture.parentProcess,
-                handlers: inertNetworkHandlers()
-            )
-            try await fixture.childRuntime.start(
-                process: fixture.childProcess,
-                handlers: childHandlers
-            )
-            for _ in 0..<250 {
-                if await childService.status().phase == .active { break }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            let childPhase = await childService.status().phase
-            XCTAssertEqual(childPhase, .active)
-
-            for _ in 0..<250 {
-                if await reservationGate.snapshot().contains([]) { break }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            let initialSnapshots = await reservationGate.snapshot()
-            XCTAssertTrue(initialSnapshots.contains([]))
-
-            let unavailable = await fixture.parentRuntime
-                .directChildCandidates(fixture.context)
-            XCTAssertTrue(unavailable.isEmpty)
-            let snapshotsWhileInitialAckBlocked =
-                await reservationGate.snapshot()
-            XCTAssertFalse(snapshotsWhileInitialAckBlocked.contains {
-                !$0.isEmpty
-            })
-
-            await reservationGate.release()
-            try await waitForChildCandidate(fixture)
-            await reservationGate.holdNextNonempty()
-
-            let mining = Task {
-                let response = try await parentService.miningTemplate(
-                    MiningTemplateRequest()
-                )
-                await completion.append("returned")
-                return response
-            }
-            for _ in 0..<250 {
-                if await reservationGate.snapshot().contains(where: {
-                    !$0.isEmpty
-                }) {
-                    break
-                }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            let nonempty = await reservationGate.snapshot().filter {
-                !$0.isEmpty
-            }
-            XCTAssertEqual(nonempty.count, 1)
-            let reservation = try XCTUnwrap(nonempty.first)
-            XCTAssertEqual(reservation.count, 1)
-            await Task.yield()
-            let completionBeforeAck = await completion.snapshot()
-            XCTAssertTrue(completionBeforeAck.isEmpty)
-
-            await reservationGate.release()
-            let response = try await mining.value
-            let reservationRejections =
-                await reservationGate.rejectionSnapshot()
-            XCTAssertEqual(reservationRejections, [])
-            let completionAfterAck = await completion.snapshot()
-            XCTAssertEqual(completionAfterAck, ["returned"])
-            let children = try XCTUnwrap(response.block.children.node)
-            let childValues = try children.allKeysAndValues()
-            XCTAssertEqual(children.count, 1)
-            XCTAssertEqual(childValues.keys.sorted(), ["Payments"])
-            let reservationAfterAck = await reservationGate.snapshot().last
-            XCTAssertEqual(reservationAfterAck, reservation)
-            let childCID = try XCTUnwrap(childValues["Payments"]?.rawCID)
-            XCTAssertEqual(reservation, [childCID])
-
-            let retentionScope = [
-                fixture.childConfiguration.nexusGenesisCID,
-                fixture.childConfiguration.address.key,
-            ].joined(separator: ":")
-            let store = try testNodeStore(
-                databasePath: fixture.childConfiguration.storagePath
-                    .appendingPathComponent("state.db"),
-                nexusGenesisCID: fixture.childConfiguration.nexusGenesisCID,
-                chainPath: fixture.childConfiguration.chainPath,
-                contextualCandidateOwner:
-                    retentionScope + ":contextual-candidates"
-            )
-            let issuedCandidateCIDs =
-                try await store.issuedContextualCandidateCIDs()
-            XCTAssertEqual(
-                issuedCandidateCIDs,
-                [childCID]
-            )
-
-            let snapshotsBeforeSubmission =
-                await reservationGate.snapshot().count
-            await reservationGate.holdNext([])
-            let submissionCompletion = NetworkEventRecorder()
-            let submissionTask = Task {
-                let result = try await parentService.submitWork(
-                    SubmitWorkRequest(workID: response.workID, nonce: 0)
-                )
-                await submissionCompletion.append("returned")
-                return result
-            }
-            for _ in 0..<250 {
-                let snapshots = await reservationGate.snapshot()
-                if snapshots.count > snapshotsBeforeSubmission,
-                   snapshots.last?.isEmpty == true {
-                    break
-                }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            for _ in 0..<250 {
-                if await submissionCompletion.snapshot() == ["returned"] {
-                    break
-                }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            let completionWhileReleaseBlocked =
-                await submissionCompletion.snapshot()
-            XCTAssertEqual(
-                completionWhileReleaseBlocked,
-                ["returned"],
-                "a child withholding a release ACK must not stall its parent"
-            )
-            // Mining acknowledges durable parent-side proof construction, not
-            // live delivery. The release update itself must transfer the CID
-            // into durable handoff ownership before discarding the speculative
-            // reservation.
-            for _ in 0..<250 {
-                if try await !store.parentEvidenceInbox().isEmpty {
-                    break
-                }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            let deliveredEvidence = try await store.parentEvidenceInbox()
-            XCTAssertFalse(deliveredEvidence.isEmpty)
-            await reservationGate.release()
-            let submission = try await submissionTask.value
-            XCTAssertTrue(submission.accepted)
-            let snapshotsAfterSubmission =
-                await reservationGate.snapshot()
-            let handoffsAfterSubmission =
-                await reservationGate.handoffSnapshot()
-            XCTAssertGreaterThan(
-                snapshotsAfterSubmission.count,
-                snapshotsBeforeSubmission
-            )
-            XCTAssertEqual(snapshotsAfterSubmission.last, [])
-            XCTAssertTrue(
-                handoffsAfterSubmission.contains([childCID]),
-                "missing committed-candidate handoff: \(handoffsAfterSubmission)"
-            )
-            for _ in 0..<250 {
-                if try await store.issuedContextualCandidateCIDs().isEmpty {
-                    break
-                }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            let releasedCandidateCIDs = try await store
-                .issuedContextualCandidateCIDs()
-            XCTAssertTrue(releasedCandidateCIDs.isEmpty)
-
-            await fixture.childRuntime.stop()
-            await fixture.parentRuntime.stop()
-            let eviction = try DiskBroker(
-                path: fixture.childConfiguration.storagePath
-                    .appendingPathComponent("volumes.db").path,
-                evictUnpinnedGraceSeconds: 0
-            )
-            _ = try await eviction.evictUnpinned()
-            let retainedAfterReleaseAndGC = await eviction.fetchVolumeLocal(
-                root: childCID
-            )
-            XCTAssertNotNil(retainedAfterReleaseAndGC)
-        } catch {
-            await reservationGate.release()
-            await fixture.childRuntime.stop()
-            await fixture.parentRuntime.stop()
-            throw error
-        }
-        await reservationGate.release()
-        await fixture.childRuntime.stop()
-        await fixture.parentRuntime.stop()
-    }
-
-    func testReconnectReservationCannotOverwriteNewerExactSet()
-        async throws
-    {
-        let fixture = try await provisionalRootFixture(keyByte: 0x94)
-        let issued = IssuedCandidateSet()
-        let reservationGate = CandidateReservationAckGate {
-            [weak issued] update in
-            guard let issued else { return false }
-            return await issued.replace(with: update.candidateCIDs)
-        }
-        await reservationGate.release()
-        let childHandlers = NodeNetworkHandlers(
-            candidateReservations: { [weak reservationGate] update in
-                guard let reservationGate else { return false }
-                return await reservationGate.handle(update)
-            },
-            admission: { _ in throw CancellationError() }
-        )
-        let firstCID = testCID("reservation-race-first")
-        let secondCID = testCID("reservation-race-second")
-        let childPeerKey = try PeerKey(
-            fixture.childConfiguration.processPublicKey
-        )
-        let first = ChildCandidateReservationReference(
-            peerKey: childPeerKey,
-            candidateCID: firstCID
-        )
-        let newer = [
-            first,
-            ChildCandidateReservationReference(
-                peerKey: childPeerKey,
-                candidateCID: secondCID
-            ),
-        ]
-
-        do {
-            try await fixture.parentRuntime.start(
-                process: fixture.parentProcess,
-                handlers: inertNetworkHandlers()
-            )
-            try await fixture.childRuntime.start(
-                process: fixture.childProcess,
-                handlers: childHandlers
-            )
-            var initiallyApplied = false
-            for _ in 0..<250 {
-                if await fixture.parentRuntime
-                    .reconcileChildCandidateReservations(
-                        ChildCandidateReservationUpdate(reservations: [first])
-                    ) {
-                    initiallyApplied = true
-                    break
-                }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            XCTAssertTrue(initiallyApplied)
-            let initiallyIssued = await issued.snapshot()
-            XCTAssertEqual(initiallyIssued, [firstCID])
-
-            await fixture.childRuntime.stop()
-            await reservationGate.holdNext([firstCID])
-            let reconnectStart = await reservationGate.snapshot().count
-            try await fixture.childRuntime.start(
-                process: fixture.childProcess,
-                handlers: childHandlers
-            )
-            for _ in 0..<250 {
-                let snapshots = await reservationGate.snapshot()
-                if snapshots.count > reconnectStart,
-                   Set(snapshots.last ?? []) == [firstCID] {
-                    break
-                }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            let heldReconnect = await reservationGate.snapshot()
-            XCTAssertGreaterThan(heldReconnect.count, reconnectStart)
-            XCTAssertEqual(Set(heldReconnect.last ?? []), [firstCID])
-
-            let completion = NetworkEventRecorder()
-            let reconciliation = Task {
-                let accepted = await fixture.parentRuntime
-                    .reconcileChildCandidateReservations(
-                        ChildCandidateReservationUpdate(reservations: newer)
-                    )
-                await completion.append(accepted ? "accepted" : "rejected")
-                return accepted
-            }
-            try await Task.sleep(for: .milliseconds(500))
-            let completionWhileHelloHeld = await completion.snapshot()
-            XCTAssertTrue(completionWhileHelloHeld.isEmpty)
-            let snapshotsWhileHelloHeld =
-                await reservationGate.snapshot()
-            XCTAssertEqual(
-                snapshotsWhileHelloHeld.count,
-                heldReconnect.count
-            )
-
-            await reservationGate.release()
-            let accepted = await reconciliation.value
-            XCTAssertTrue(accepted)
-            let completed = await completion.snapshot()
-            XCTAssertEqual(completed, ["accepted"])
-            let finallyIssued = await issued.snapshot()
-            XCTAssertEqual(
-                finallyIssued,
-                [firstCID, secondCID]
-            )
-            let finalReservationSnapshot =
-                await reservationGate.snapshot().last
-            XCTAssertEqual(
-                Set(finalReservationSnapshot ?? []),
-                [firstCID, secondCID]
-            )
-        } catch {
-            await reservationGate.release()
-            await fixture.childRuntime.stop()
-            await fixture.parentRuntime.stop()
-            throw error
-        }
-        await reservationGate.release()
-        await fixture.childRuntime.stop()
-        await fixture.parentRuntime.stop()
-    }
-
-    func testConcurrentExactReservationReconciliationIsLinearizable()
+    /// When the parent's tip moves, the candidate the child pushed for the
+    /// old tip is not carried (its parent state is stale); the parent pushes
+    /// the new tip, the child rebuilds on it and pushes again, and only then
+    /// is a candidate held for the new tip. A restarted parent session
+    /// starts the child over the same way.
+    func testParentTipChangeDropsTheStaleCandidateUntilTheChildRepushes()
         async throws
     {
         let fixture = try await provisionalRootFixture(keyByte: 0x9a)
-        let applied = IssuedCandidateSet()
-        let reservationGate = CandidateReservationAckGate {
-            [weak applied] update in
-            guard let applied else { return false }
-            return await applied.replace(with: update.candidateCIDs)
-        }
-        await reservationGate.release()
+        let childService = networkService(
+            process: fixture.childProcess,
+            runtime: fixture.childRuntime
+        )
         let childHandlers = NodeNetworkHandlers(
-            candidateReservations: { [weak reservationGate] update in
-                guard let reservationGate else { return false }
-                return await reservationGate.handle(update)
+            childCandidateBuilder: { [weak childService] context, parentSource in
+                guard let childService else { return nil }
+                return try await childService.miningCandidate(
+                    for: context,
+                    parentContentSource: parentSource
+                )
             },
             admission: { _ in throw CancellationError() }
         )
-        let childPeerKey = try PeerKey(
-            fixture.childConfiguration.processPublicKey
-        )
-        let first = ChildCandidateReservationReference(
-            peerKey: childPeerKey,
-            candidateCID: testCID("reservation-linear-first")
-        )
-        let expanded = [
-            first,
-            ChildCandidateReservationReference(
-                peerKey: childPeerKey,
-                candidateCID: testCID(
-                    "reservation-linear-second"
-                )
-            ),
-        ]
-
         do {
             try await fixture.parentRuntime.start(
                 process: fixture.parentProcess,
@@ -6883,236 +6154,82 @@ final class NetworkTrustTests: XCTestCase {
                 process: fixture.childProcess,
                 handlers: childHandlers
             )
-            var initiallyApplied = false
             for _ in 0..<250 {
-                if await fixture.parentRuntime
-                    .reconcileChildCandidateReservations(
-                        ChildCandidateReservationUpdate(reservations: [first])
-                    ) {
-                    initiallyApplied = true
-                    break
-                }
+                if await childService.status().phase == .active { break }
                 try await Task.sleep(for: .milliseconds(20))
             }
-            XCTAssertTrue(initiallyApplied)
+            try await waitForChildCandidate(fixture)
 
-            await reservationGate.holdNext(
-                Set(expanded.map(\.candidateCID))
-            )
-            let expandedTask = Task {
-                await fixture.parentRuntime
-                    .reconcileChildCandidateReservations(
-                        ChildCandidateReservationUpdate(reservations: expanded)
-                    )
-            }
-            for _ in 0..<250 {
-                if Set(await reservationGate.snapshot().last ?? [])
-                    == Set(expanded.map(\.candidateCID)) {
-                    break
-                }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            let heldExpanded = await reservationGate.snapshot().last
-            XCTAssertEqual(
-                Set(heldExpanded ?? []),
-                Set(expanded.map(\.candidateCID))
-            )
-
-            let restored = NetworkEventRecorder()
-            let restoreTask = Task {
-                let accepted = await fixture.parentRuntime
-                    .reconcileChildCandidateReservations(
-                        ChildCandidateReservationUpdate(reservations: [first])
-                    )
-                await restored.append(accepted ? "accepted" : "rejected")
-                return accepted
-            }
-            try await Task.sleep(for: .milliseconds(200))
-            let restoredWhileHeld = await restored.snapshot()
-            XCTAssertTrue(restoredWhileHeld.isEmpty)
-
-            await reservationGate.release()
-            let expandedAccepted = await expandedTask.value
-            let restoreAccepted = await restoreTask.value
-            XCTAssertTrue(expandedAccepted)
-            XCTAssertTrue(restoreAccepted)
-            for _ in 0..<250 {
-                if Set(await reservationGate.snapshot().last ?? [])
-                    == [first.candidateCID],
-                   await applied.snapshot() == [first.candidateCID] {
-                    break
-                }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            let finalReservations = await reservationGate.snapshot().last
-            let finalApplied = await applied.snapshot()
-            let restoreCompletions = await restored.snapshot()
-            XCTAssertEqual(
-                Set(finalReservations ?? []),
-                [first.candidateCID]
-            )
-            XCTAssertEqual(finalApplied, [first.candidateCID])
-            XCTAssertEqual(restoreCompletions, ["accepted"])
-        } catch {
-            await reservationGate.release()
-            await fixture.childRuntime.stop()
-            await fixture.parentRuntime.stop()
-            throw error
-        }
-        await reservationGate.release()
-        await fixture.childRuntime.stop()
-        await fixture.parentRuntime.stop()
-    }
-
-    func testOldSessionReservationAckCannotSatisfyReplacementSession()
-        async throws
-    {
-        let fixture = try await provisionalRootFixture(keyByte: 0x96)
-        let applied = IssuedCandidateSet()
-        let reservationGate = CandidateReservationAckGate {
-            [weak applied] update in
-            guard let applied else { return false }
-            return await applied.replace(with: update.candidateCIDs)
-        }
-        await reservationGate.release()
-        let childHandlers = NodeNetworkHandlers(
-            candidateReservations: { [weak reservationGate] update in
-                guard let reservationGate else { return false }
-                return await reservationGate.handle(update)
-            },
-            admission: { _ in throw CancellationError() }
-        )
-        let childPeerKey = try PeerKey(
-            fixture.childConfiguration.processPublicKey
-        )
-        let first = ChildCandidateReservationReference(
-            peerKey: childPeerKey,
-            candidateCID: testCID("reservation-session-first")
-        )
-        let stale = [
-            first,
-            ChildCandidateReservationReference(
-                peerKey: childPeerKey,
-                candidateCID: testCID("reservation-session-stale")
-            ),
-        ]
-        let replacement = [
-            first,
-            ChildCandidateReservationReference(
-                peerKey: childPeerKey,
-                candidateCID: testCID("reservation-session-replacement")
-            ),
-        ]
-
-        do {
-            try await fixture.parentRuntime.start(
-                process: fixture.parentProcess,
-                handlers: inertNetworkHandlers()
-            )
-            try await fixture.childRuntime.start(
-                process: fixture.childProcess,
-                handlers: childHandlers
-            )
-            var initiallyApplied = false
-            for _ in 0..<250 {
-                if await fixture.parentRuntime
-                    .reconcileChildCandidateReservations(
-                        ChildCandidateReservationUpdate(reservations: [first])
-                    ) {
-                    initiallyApplied = true
-                    break
-                }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            XCTAssertTrue(initiallyApplied)
-
-            await reservationGate.holdNext(
-                Set(stale.map(\.candidateCID))
-            )
-            let staleReconciliation = Task {
-                await fixture.parentRuntime
-                    .reconcileChildCandidateReservations(
-                        ChildCandidateReservationUpdate(reservations: stale)
-                    )
-            }
-            for _ in 0..<250 {
-                if Set(await reservationGate.snapshot().last ?? [])
-                    == Set(stale.map(\.candidateCID)) {
-                    break
-                }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            let heldStaleSnapshot = await reservationGate.snapshot().last
-            XCTAssertEqual(
-                Set(heldStaleSnapshot ?? []),
-                Set(stale.map(\.candidateCID))
-            )
-
-            // Replacing the authenticated child session must fail the suspended
-            // request locally. Releasing its handler later may attempt an old
-            // response, but that response cannot satisfy any replacement-session
-            // reservation.
-            await fixture.childRuntime.stop()
-            let staleAccepted = await staleReconciliation.value
-            XCTAssertFalse(staleAccepted)
-            let replacementStart = await reservationGate.snapshot().count
-            try await fixture.childRuntime.start(
-                process: fixture.childProcess,
-                handlers: childHandlers
-            )
-            for _ in 0..<250 {
-                let snapshots = await reservationGate.snapshot()
-                if snapshots.count > replacementStart,
-                   Set(snapshots.last ?? []) == [first.candidateCID] {
-                    break
-                }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            let reconnectedSnapshot = await reservationGate.snapshot().last
-            XCTAssertEqual(Set(reconnectedSnapshot ?? []), [first.candidateCID])
-
-            let replacementAccepted = await fixture.parentRuntime
-                .reconcileChildCandidateReservations(
-                    ChildCandidateReservationUpdate(reservations: replacement)
-                )
-            XCTAssertTrue(replacementAccepted)
-            let replacementSnapshot = await reservationGate.snapshot().last
-            XCTAssertEqual(
-                Set(replacementSnapshot ?? []),
-                Set(replacement.map(\.candidateCID))
-            )
-
-            await reservationGate.release()
-            for _ in 0..<250 {
-                if await reservationGate.snapshot().count >= replacementStart + 3 {
-                    break
-                }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-
-            let final = replacement + [
-                ChildCandidateReservationReference(
-                    peerKey: childPeerKey,
-                    candidateCID: testCID("reservation-session-final")
+            // The parent's tip moves to a block that CHANGES its state (an
+            // empty block leaves the post-state, and so every candidate
+            // built on it, exactly as valid as before): anchoring another
+            // child genesis.
+            let oldTip = try await fixture.parentProcess.validatedTipBlock()
+            let otherGenesis = try await ChildGenesisBuilder.build(
+                seed: ChildGenesisSeed(
+                    spec: NexusGenesis.spec, premineTo: nil,
+                    timestamp: oldTip.timestamp + 500
                 ),
-            ]
-            let finalAccepted = await fixture.parentRuntime
-                .reconcileChildCandidateReservations(
-                    ChildCandidateReservationUpdate(reservations: final)
-                )
-            XCTAssertTrue(finalAccepted)
-            let finalSnapshot = await reservationGate.snapshot().last
-            XCTAssertEqual(
-                Set(finalSnapshot ?? []),
-                Set(final.map(\.candidateCID))
+                chainPath: ["Nexus", "Other"],
+                fetcher: fixture.parentProcess
             )
+            let otherAnchor = try signedGenesisAnchorTransaction(
+                directory: "Other",
+                childGenesisCID: try BlockHeader(node: otherGenesis).rawCID,
+                chainPath: ["Nexus"]
+            )
+            try await VolumeImpl<Transaction>(node: otherAnchor).storeRecursively(
+                storer: fixture.parentProcess
+            )
+            let next = try await BlockBuilder.buildBlock(
+                previous: oldTip,
+                transactions: [otherAnchor],
+                timestamp: oldTip.timestamp + 1_000,
+                nonce: 3,
+                fetcher: fixture.parentProcess
+            )
+            XCTAssertNotEqual(next.postState.rawCID, oldTip.postState.rawCID)
+            let admitted = try await fixture.parentProcess.admit(
+                try BlockHeader(node: next)
+            )
+            XCTAssertTrue(admitted.decision.isAccepted)
+            await fixture.parentRuntime.chainStateChanged()
+            let newProvisional = try await BlockBuilder.buildBlock(
+                previous: next,
+                timestamp: next.timestamp + 1_000,
+                nonce: 4,
+                fetcher: fixture.parentProcess
+            )
+            let newContext = ChildCandidateRequestContext(
+                parentCarrier: newProvisional,
+                rewards: []
+            )
+            // The child rebuilds on the new tip and pushes; until then the
+            // stale candidate is not carried for the new tip.
+            var heldForNewTip: [DirectChildCandidate] = []
+            for _ in 0..<500 {
+                heldForNewTip = await fixture.parentRuntime.directChildCandidates(
+                    newContext
+                )
+                if !heldForNewTip.isEmpty { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            XCTAssertEqual(heldForNewTip.count, 1, "rebuilt for the new tip")
+            XCTAssertEqual(
+                heldForNewTip.first?.block.parentState.rawCID,
+                next.postState.rawCID
+            )
+            // The old context no longer has a candidate: the child's latest
+            // replaced it.
+            let heldForOldTip = await fixture.parentRuntime.directChildCandidates(
+                fixture.context
+            )
+            XCTAssertTrue(heldForOldTip.isEmpty)
         } catch {
-            await reservationGate.release()
             await fixture.childRuntime.stop()
             await fixture.parentRuntime.stop()
             throw error
         }
-        await reservationGate.release()
         await fixture.childRuntime.stop()
         await fixture.parentRuntime.stop()
     }

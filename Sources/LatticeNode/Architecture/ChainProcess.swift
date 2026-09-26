@@ -1568,7 +1568,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     func storeContextualCandidate(
         _ header: BlockHeader,
         fetcher: any Fetcher,
-        children: [ChildCandidateReservationReference] = [],
         capacity: Int
     ) async throws {
         guard capacity > 0 else {
@@ -1578,8 +1577,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         defer { releaseOperation() }
 
         if try await store.touchContextualCandidate(
-            candidateCID: header.rawCID,
-            children: children
+            candidateCID: header.rawCID
         ) {
             return
         }
@@ -1593,38 +1591,12 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         try await store.persistContextualCandidateRoots(
             candidateCID: header.rawCID,
             roots: roots,
-            children: children,
             capacity: capacity
         )
     }
 
-    func contextualCandidateChildren(
-        candidateCIDs: Set<String>
-    ) async throws -> [ChildCandidateReservationReference]? {
-        try await store.contextualCandidateChildren(
-            candidateCIDs: candidateCIDs
-        )
-    }
 
-    func currentContextualCandidateChildren()
-        async throws -> [ChildCandidateReservationReference]
-    {
-        try await store.currentContextualCandidateChildren()
-    }
 
-    func replaceIssuedContextualCandidates(
-        _ candidateCIDs: Set<String>,
-        handoffs: Set<String> = [],
-        capacity: Int
-    ) async throws -> Bool {
-        try await acquireMutationOperation()
-        defer { releaseOperation() }
-        return try await store.replaceIssuedContextualCandidates(
-            candidateCIDs,
-            handoffs: handoffs,
-            capacity: capacity
-        )
-    }
 
     /// Stores one validated child-intent closure and atomically replaces the
     /// exact live retention set while process eviction is excluded.

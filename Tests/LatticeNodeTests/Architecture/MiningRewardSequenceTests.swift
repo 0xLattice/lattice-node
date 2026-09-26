@@ -73,9 +73,6 @@ final class MiningRewardSequenceTests: XCTestCase {
         let service = ChainService(
             process: process,
             childCandidateProvider: { _ in [] },
-            childCandidateReservationReconciler: {
-                $0.reservations.isEmpty && $0.handoffs.isEmpty
-            },
             childProofPublisher: { _ in },
             acceptedBlockPublisher: { _ in },
             acceptedTransactionPublisher: { _ in }

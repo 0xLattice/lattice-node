@@ -43,17 +43,13 @@ Live publication orders complete Volume storage, merge retention, then the
 SQLite semantic reference. Admission and issued-hierarchy retention grow
 merge-only while live. Prepared proof eviction serializes its store, SQLite
 capacity mutation, and exact retained-set advance through one gate. Contextual
-child offers use a separate durable bounded LRU: new roots are pinned before
-the index changes and offer eviction never touches issued ownership. An exact,
-authenticated parent snapshot recursively reserves descendants and atomically
-replaces the issued set before acknowledgement. Removal acknowledgements never
-gate parent progress. The authenticated removal update names committed
-candidates as handoffs; the child atomically acquires durable handoff ownership
-before releasing their issued ownership, recursively through the hierarchy.
-Proof acquisition is independent. Admission then transfers the roots before
-the handoff is released. Failed or idle cleanup can safely over-retain until an
-exact snapshot or startup rebuild reconciles ownership before garbage
-collection. Canonicity never changes retention or validity; accepted, shared,
+child offers use a separate durable bounded LRU owned by the chain that built
+them: new roots are pinned before the index changes, the oldest offer is
+evicted first, and a candidate the parent's evidence names carried is a
+handoff that offer eviction never touches. No parent reserves anything at a
+child and no acknowledgement gates parent progress. Proof acquisition is
+independent. Admission then transfers the roots before the handoff is
+released; the handoff budget bounds what is kept. Canonicity never changes retention or validity; accepted, shared,
 and independently retained roots remain owned.
 
 ## NODE-MEMPOOL-001 — the mempool is tip-relative, not consensus

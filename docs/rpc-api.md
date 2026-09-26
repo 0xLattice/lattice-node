@@ -50,9 +50,16 @@ Both routes return the same chain-process status:
   "height": 42,
   "revision": 57,
   "mempoolCount": 3,
-  "mempoolBytes": 2048
+  "mempoolBytes": 2048,
+  "templateDigest": "<hex>"
 }
 ```
+
+`templateDigest` names every input of a mining template on this chain — the
+validated tip, the mempool, and the child candidates held — and is the same
+value the template response carries, so a miner comparing the two learns its
+work is stale for a change at any level of the hierarchy. Absent before the
+chain has a validated tip.
 
 A child reports `phase: "awaitingGenesis"`, with null tip and height, until its
 authenticated immediate parent confirms the recorded genesis CID and the child
@@ -130,7 +137,7 @@ chain and for chains merged-mined under it (`work` is a hex `UInt256`; each
 once). The named chain's candidate still commits its scheduled target; its
 search threshold becomes `min(scheduled target, floor(2^256 / work) - 1)` —
 harder than the schedule, never easier — and each descendant entry travels
-with the child candidate request down the hierarchy plane. A child node
+with the parent's pushed template context down the hierarchy plane. A child node
 returns a witness naming the block that sets its search target. Where that
 witness names a filtered descendant, the Nexus re-derives the descendant's
 threshold from it; for every other filtered chain two or more levels down it
@@ -179,6 +186,9 @@ Response fields:
   it is `searchTarget` alone.
 - `chainPath`: always `["Nexus"]` on this route.
 - `expiresInMilliseconds`: template lifetime.
+- `templateDigest`: the digest described under `/v1/status`; the miner's
+  stale token. A node predating it serves none, and the miner falls back to
+  the template's parent CID.
 
 ### `POST /v1/mining/work`
 
