@@ -1159,16 +1159,19 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         // parent-evidence inbox entry, the one durable record that it is still
         // to be admitted, so a deferral persists nothing and keeps that entry.
         //
-        // A WEIGHED acceptance stages its incoming carrier evidence but defers
-        // issuance to validation, so `stage` wrote no carrier link for it.
-        // The relay link goes here all the same: child-proof recovery composes
-        // this block's outgoing proofs from that incoming evidence and
-        // requires the link beside it — at boot, where a missing link is a
-        // dead node — and deeper chains are owed the relay whether or not this
-        // chain has executed the block, exactly as for a carrier it refused.
+        // A WEIGHED acceptance of a parent-carried block stages its incoming
+        // evidence, but Lattice issues no parent-process fact for a block it
+        // has not executed, so `stage` wrote no carrier link for it. The
+        // RELAY of its carriage is another matter: content-verified before
+        // any execution, owed to deeper chains whatever this chain makes of
+        // the block (a carrier it refused gets it too), and what child-proof
+        // recovery composes this block's outgoing proofs from. It goes here,
+        // with no genesis facts (validation issues those), under the same
+        // lease as the stage; the link is Lattice's to mint, so it cannot yet
+        // land in the stage's own write, and recovery tolerates the gap.
         let relayUnissued: Bool
         if admissionStaged, result.sameChainPredecessor == nil,
-           let link = result.parentCarrierLink {
+           carrierEvidence != nil, let link = result.parentCarrierLink {
             relayUnissued = try await store.issuedParentCarrierLink(
                 carrierCID: blockHeader.rawCID, rootCID: link.rootCID
             ) == nil
@@ -2903,11 +2906,17 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 }
                 proof = upstreamProof.composing(hop: prepared.proof)
             }
+            // No relay link for this root: the incoming evidence landed and
+            // the link's own write did not (a stop between the two, or a
+            // store written before the link was persisted at all). Nothing
+            // to compose from yet — the route stays pending, and validation
+            // or a re-delivery issues the link — and never a reason not to
+            // boot.
             guard try await store.issuedParentCarrierLink(
                 carrierCID: carrierCID,
                 rootCID: proof.rootCID
             ) != nil else {
-                throw ChainProcessError.malformedAuthenticatedChildProof
+                continue
             }
             if try await store.issuedChildEvidence(
                 childCID: prepared.childCID,

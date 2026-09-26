@@ -138,11 +138,13 @@ accepted blocks, proof-derived work, and the attributed work-only batches it
 credited from parent run reports. A block its parent carried is a network
 block: admitted weighed on the verified proof — in fork choice with its work
 at once, executed when the chain would step into it — never held back for a
-continuity fact or a rule not yet met. Its carrier link is relayed at once,
-as for a carrier this chain refused (deeper chains are owed the proof of
-carriage whatever this chain makes of the block, and child-proof recovery
-composes from it); the facts it issues for its own children wait for its
-validation. Until an admission DECIDES it
+continuity fact or a rule not yet met. Its carriage is relayed at once,
+with the acceptance, as for a carrier this chain refused: deeper chains are owed the proof of carriage whatever this
+chain makes of the block, and the proofs this chain composes for its own
+children follow from that relay. Only the parent-process facts it issues —
+the genesis links a child's first block anchors to — wait for its
+validation, since a child must not anchor to state this chain has not
+executed. Until an admission DECIDES it
 (accepted, a duplicate, or refused for a reason no retry would change: the
 grind missed this chain's target, the block or its evidence is invalid, the
 node could not verify it), its evidence stays in the parent-evidence inbox,
