@@ -2785,6 +2785,9 @@ actor NodeStore {
 
     /// The candidates this chain built that the parent's evidence names as
     /// carried and still holds in the inbox: no admission has decided them.
+    /// Read ungated: a view torn between the handoff mark and the inbox
+    /// row costs at most one sibling offer or one extra deferral, and the
+    /// next admission or push corrects either.
     func pendingHandoffChildCIDs() throws -> [String] {
         try database.query(
             "SELECT DISTINCT c.candidate_cid FROM contextual_candidates AS c INNER JOIN parent_evidence_inbox AS i ON i.child_cid = c.candidate_cid WHERE c.handoff = 1"

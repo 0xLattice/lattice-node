@@ -230,9 +230,9 @@ minimum work for the child's subtree — and the child pushes back its current
 candidate for that tip whenever one of its inputs changes. Both messages
 carry a sequence that is monotonic per session; a lower one is dropped. The
 parent holds the latest candidate per child peer — a candidate it already
-holds, or an older one on the same session, is dropped from the frame's
-head without decoding the block — and a template carries every held
-candidate built on
+holds on that session, or an older one, is dropped from the frame's head
+without decoding the block — and a template carries every held candidate
+built on
 its current tip's post-state, except a sibling of a child block this chain
 already carried (a candidate on the same child parent) that the child
 offered before this chain told it of the carry, on the session it was told

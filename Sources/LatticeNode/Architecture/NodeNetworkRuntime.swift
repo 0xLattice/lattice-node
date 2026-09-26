@@ -1665,6 +1665,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
             SyncTrace.log("candidate offer deferred: own carried candidate awaiting admission")
             return
         }
+        // The gate is open: a deferral the drain never got to read (its
+        // attempt left the acquirer without an admission) is moot now.
+        candidateOfferDeferredByAdmission = false
         guard let context = receivedParentTip,
               hierarchySessions[context.peer.key]?.sessionID
                 == context.peer.sessionID,
