@@ -218,7 +218,7 @@ struct NodeNetworkPlaneConfigurations {
                 // a peer may send before the budget refuses it; what a
                 // message may cost is bounded where it is handled (a
                 // candidate is decoded only from a wired-in child with a
-                // context, once per CID, within this chain's block size).
+                // context, once per CID, within the plane's frame).
                 tallyConfig: TallyConfig(
                     perPeerRequestCapacity: 4_000,
                     perPeerRequestRefillPerSecond: 1_000
@@ -501,7 +501,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private var nextParentTipSequence: UInt64 = 0
     /// The context sequence each ready child was last sent, so the push
     /// task sends a child only what it lacks.
-    private var pushedParentTipSequence: [PeerKey: UInt64] = [:]
+    private var pushedParentTipSequence: [PeerKey: SessionSequence] = [:]
     private var parentTipPushTask: Task<Void, Never>?
     private var parentTipPushDirty = false
     private var descendantRewards: [MiningReward] = []
@@ -510,29 +510,35 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// template reads it; nothing is requested at template time.
     private struct CachedChildCandidate {
         let sequence: UInt64
+        let sessionID: Data
         let childCID: String
         let candidate: DirectChildCandidate
     }
+    /// A sequence read on one session: a new session restarts sequences,
+    /// so a value from an earlier session says nothing about this one.
+    private struct SessionSequence {
+        let sessionID: Data
+        let sequence: UInt64
+    }
     private var childCandidateOffers: [PeerKey: CachedChildCandidate] = [:]
     /// Per directory, the child-chain parent of the last child block this
-    /// chain carried, and its height. A candidate on that same parent is a
-    /// sibling of a block that already weighs at the child: carried, it
-    /// would only reorg the child's tip to the heavier carrier, and a child
-    /// could never get ahead of its own forks. So a sibling is not carried
-    /// while its sender could not yet know of the carry; a sibling the
-    /// child offers after being told is carried, because then it is the
-    /// child's own choice (its walk parked on the carried block, or it
-    /// excluded it) and refusing it would halt the chain.
-    private struct CarriedChild {
-        let childParent: String
-        let height: UInt64
-    }
-    private var carriedChildParents: [String: CarriedChild] = [:]
-    /// Per child peer, the offer sequence the peer had reached when this
-    /// chain last told it of a carry in its directory (the hint enqueued);
-    /// offers at or below it were made in ignorance of the carry. Cleared
-    /// with the session: a new session's offers are informed by its hello.
-    private var carryInformedSequence: [PeerKey: UInt64] = [:]
+    /// chain carried. A candidate on that same parent is a sibling of a
+    /// block that already weighs at the child: carried, it would only
+    /// reorg the child's tip to the heavier carrier, and a child could
+    /// never get ahead of its own forks. So a sibling is not carried while
+    /// its sender could not yet know of the carry; a sibling the child
+    /// offers after being told is carried, because then it is the child's
+    /// own choice (its walk parked on the carried block, or it excluded
+    /// it) and refusing it would halt the chain. Last write wins: a
+    /// carrier's height is the carried block's own claim, so it cannot
+    /// order this record, and a replayed old proof costs one round.
+    private var carriedChildParents: [String: String] = [:]
+    /// Per child peer, the offer sequence the peer had reached, on the
+    /// session it was reached on, when this chain last told it of a carry
+    /// in its directory (the hint enqueued); offers at or below it on that
+    /// session were made in ignorance of the carry. A new session's offers
+    /// are informed by its hello.
+    private var carryInformedSequence: [PeerKey: SessionSequence] = [:]
     /// The parent's context as last received (this chain being the child),
     /// bound to the session it came on: a new session restarts sequences.
     private struct ReceivedParentTipContext {
@@ -1390,16 +1396,34 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
 
     /// A sibling of the last child block this chain carried for the
-    /// directory, offered before the peer was told of that carry.
+    /// directory, offered before the peer was told of that carry, on the
+    /// session it was told on.
     private func isUninformedSibling(
         _ offer: CachedChildCandidate,
         of key: PeerKey,
         directory: String
     ) -> Bool {
-        guard let carried = carriedChildParents[directory],
-              offer.candidate.block.parent?.rawCID == carried.childParent
+        guard let carriedParent = carriedChildParents[directory],
+              offer.candidate.block.parent?.rawCID == carriedParent,
+              let informed = carryInformedSequence[key],
+              informed.sessionID == offer.sessionID
         else { return false }
-        return offer.sequence <= (carryInformedSequence[key] ?? 0)
+        return offer.sequence <= informed.sequence
+    }
+
+    private func markCarryInformed(_ key: PeerKey, on peer: AuthenticatedPeer) {
+        let offered = childCandidateOffers[key]
+        carryInformedSequence[key] = SessionSequence(
+            sessionID: peer.sessionID,
+            sequence: offered?.sessionID == peer.sessionID ? (offered?.sequence ?? 0) : 0
+        )
+    }
+
+    /// A per-session sequence as it stands for the peer's current session;
+    /// nil when it was read on an earlier session.
+    private func sequence(_ recorded: SessionSequence?, on peer: AuthenticatedPeer) -> UInt64? {
+        guard let recorded, recorded.sessionID == peer.sessionID else { return nil }
+        return recorded.sequence
     }
 
     /// Re-reads this chain's validated tip and, if the context children build
@@ -1493,8 +1517,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
             for (key, role) in hierarchyPeers {
                 guard case .child(let childPath) = role,
                       childEvidenceReadyPeers.contains(key),
-                      pushedParentTipSequence[key] != context.sequence,
-                      let peer = hierarchySessions[key] else { continue }
+                      let peer = hierarchySessions[key],
+                      sequence(pushedParentTipSequence[key], on: peer) != context.sequence
+                else { continue }
                 await pushParentTipContext(context, to: peer, childPath: childPath)
             }
         }
@@ -1516,7 +1541,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             if case .enqueued = sent,
                refusedChildEvidenceHints[key] == payload {
                 refusedChildEvidenceHints.removeValue(forKey: key)
-                carryInformedSequence[key] = childCandidateOffers[key]?.sequence ?? 0
+                // A child that learned of the carry by its own scan and
+                // already answered is marked uninformed here too; the
+                // next input change offers again, so the cost is a round.
+                markCarryInformed(key, on: peer)
                 SyncTrace.log("child evidence announcement re-sent to \(key.hex.prefix(12))")
             }
         }
@@ -1568,7 +1596,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
             payload: payload
         )
         if case .enqueued = sent {
-            pushedParentTipSequence[peer.key] = context.sequence
+            pushedParentTipSequence[peer.key] = SessionSequence(
+                sessionID: peer.sessionID, sequence: context.sequence
+            )
         } else {
             SyncTrace.log("parent tip push to \(childPath.joined(separator: "/")) not sent: \(sent)")
         }
@@ -1614,14 +1644,17 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // Nothing to offer before this chain's genesis is active; the next
         // state change (activation commits) offers.
         guard await process.status().phase == .active else { return }
-        // A candidate this chain built that the parent's evidence has named
-        // as carried (a handoff), now ready for or in its admission: the
-        // carried block is about to be this chain's weighed tip, and a
-        // candidate built now, on the tip before it, would only be its
-        // sibling. Offer once the admission decides (it reports a state
-        // change); a parked admission withholds nothing.
-        if let handoffs = try? await process.handoffCandidateCIDs(),
-           handoffs.contains(where: { candidateAcquirer.isAwaitingAdmission($0) }) {
+        // A candidate this chain built that the parent's evidence names as
+        // carried and still holds in the inbox (undecided), now ready for
+        // or in its admission: the carried block is about to be this
+        // chain's weighed tip, and a candidate built now, on the tip before
+        // it, would only be its sibling. The inbox is written only from the
+        // configured parent's evidence, so no overlay peer can populate
+        // this set; an announcement can at most re-ready an inbox entry's
+        // own attempt. Offer once the admission decides or parks; the
+        // drain re-arms the offer either way.
+        if let pending = try? await process.pendingHandoffChildCIDs(),
+           pending.contains(where: { candidateAcquirer.isAwaitingAdmission($0) }) {
             SyncTrace.log("candidate offer deferred: own carried candidate awaiting admission")
             return
         }
@@ -1980,19 +2013,17 @@ public actor NodeNetworkRuntime: IvyDelegate {
         if let directory = childPath.last,
            let data = proof.entries.first(where: { $0.cid == childCID })?.data,
            let carried = _contentBoundBlock(cid: childCID, data: data),
-           let childParent = carried.parent?.rawCID,
-           carried.height >= (carriedChildParents[directory]?.height ?? 0) {
-            carriedChildParents[directory] = CarriedChild(
-                childParent: childParent, height: carried.height
-            )
+           let childParent = carried.parent?.rawCID {
+            carriedChildParents[directory] = childParent
             // Every ready peer of the directory is about to be told; what
             // it has offered so far was offered in ignorance.
             for (key, role) in hierarchyPeers {
                 guard case .child(let path) = role, path.last == directory,
-                      childEvidenceReadyPeers.contains(key) else { continue }
-                carryInformedSequence[key] = childCandidateOffers[key]?.sequence ?? 0
+                      childEvidenceReadyPeers.contains(key),
+                      let peer = hierarchySessions[key] else { continue }
+                markCarryInformed(key, on: peer)
             }
-            SyncTrace.log("carried child \(childCID.prefix(12)) for \(directory) h=\(carried.height): uninformed siblings on \(childParent.prefix(12)) not carried")
+            SyncTrace.log("carried child \(childCID.prefix(12)) for \(directory): uninformed siblings on \(childParent.prefix(12)) not carried")
         }
         let bootstrappingPeers = hierarchyPeers.compactMap {
             key, role -> AuthenticatedPeer? in
@@ -2070,8 +2101,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 // A newer hint delivered supersedes an older one refused:
                 // the scan its admission triggers serves the older entry.
                 refusedChildEvidenceHints.removeValue(forKey: peer.key)
-                carryInformedSequence[peer.key] =
-                    childCandidateOffers[peer.key]?.sequence ?? 0
+                markCarryInformed(peer.key, on: peer)
                 if bootstrapping {
                     finishChildEvidencePublication(
                         to: peer,
@@ -4154,7 +4184,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: malformed head")
                 return
             }
-            if let cached = childCandidateOffers[peer.key] {
+            // Sequences are per session: a candidate cached from an
+            // earlier session of this peer (a restart Ivy replaced before
+            // the disconnect reached us) neither dedupes nor orders this one.
+            if let cached = childCandidateOffers[peer.key],
+               cached.sessionID == peer.sessionID {
                 if cached.childCID == head.childCID {
                     SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: already held")
                     return
@@ -4192,12 +4226,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 return
             }
             if let cached = childCandidateOffers[peer.key],
+               cached.sessionID == peer.sessionID,
                offer.sequence <= cached.sequence {
                 SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: stale sequence")
                 return
             }
             childCandidateOffers[peer.key] = CachedChildCandidate(
                 sequence: offer.sequence,
+                sessionID: peer.sessionID,
                 childCID: offer.childCID,
                 candidate: candidate
             )
@@ -4812,6 +4848,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 process: process
             ) else { return }
             serviceCandidateAcquirer()
+            // An offer deferred behind this admission is owed a look
+            // whatever the admission decided: an acceptance reports a state
+            // change, a park reports nothing.
+            scheduleCandidateOffer(generation: generation, process: process)
             await advanceRangeSync(generation: generation, process: process)
         }
     }

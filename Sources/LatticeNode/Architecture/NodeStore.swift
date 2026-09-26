@@ -2790,11 +2790,11 @@ actor NodeStore {
     /// that returns re-enters through ordinary verified acquisition. Newest
     /// handoffs survive, so a live reservation-to-admission window keeps its
     /// pinned roots.
-    /// The candidates this chain built that a parent's evidence has named
-    /// as carried and that no admission has yet owned.
-    func handoffCandidateCIDs() throws -> [String] {
+    /// The candidates this chain built that the parent's evidence names as
+    /// carried and still holds in the inbox: no admission has decided them.
+    func pendingHandoffChildCIDs() throws -> [String] {
         try database.query(
-            "SELECT candidate_cid FROM contextual_candidates WHERE handoff = 1 ORDER BY handoff_seq"
+            "SELECT DISTINCT c.candidate_cid FROM contextual_candidates AS c INNER JOIN parent_evidence_inbox AS i ON i.child_cid = c.candidate_cid WHERE c.handoff = 1"
         ).compactMap { $0["candidate_cid"]?.textValue }
     }
 

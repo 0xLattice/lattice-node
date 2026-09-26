@@ -28,6 +28,12 @@ final class CandidateAcquirerTests: XCTestCase {
         XCTAssertFalse(acquirer.isAwaitingAdmission(blockCID), "parked")
         acquirer.retryExternalDependency(blockCID: blockCID, rootCID: rootCID)
         XCTAssertTrue(acquirer.isAwaitingAdmission(blockCID), "ready again")
+        let again = try XCTUnwrap(acquirer.next())
+        XCTAssertTrue(acquirer.complete(
+            again.ticket,
+            resolution: .predecessor("awaiting-predecessor")
+        ))
+        XCTAssertFalse(acquirer.isAwaitingAdmission(blockCID), "parked on a predecessor")
     }
 
     func testParentFactTimeoutRetriesExactUnchangedEvidence() throws {

@@ -5915,9 +5915,15 @@ final class NetworkTrustTests: XCTestCase {
                 resent.first.map { CIDIdentity.isCanonical($0.attachmentCID) } ?? false,
                 "attachment \(resent.first?.attachmentCID ?? "none")"
             )
-            let pending = try await fixture.process.pendingChildProofCarrierCIDs()
+            // The recovered side carrier's route is released by the same
+            // publication the hint rode on; that finishes on its own clock.
+            var pending = try await fixture.process.pendingChildProofCarrierCIDs()
+            for _ in 0..<1_000 where !pending.isEmpty {
+                try await Task.sleep(for: .milliseconds(10))
+                pending = try await fixture.process.pendingChildProofCarrierCIDs()
+            }
             let status = await fixture.process.status()
-            XCTAssertTrue(pending.isEmpty)
+            XCTAssertTrue(pending.isEmpty, "\(pending)")
             XCTAssertEqual(status.tipCID, fixture.canonicalTipCID)
         } catch {
             await provider?.stop()
@@ -6324,6 +6330,24 @@ final class NetworkTrustTests: XCTestCase {
             )
             XCTAssertTrue(digest.isEmpty, "nor is it a template input")
 
+            // The rule is about ignorance, not the parent block: the same
+            // candidate offered again on a fresh session, before the child
+            // has admitted anything, is carried, since a new session's
+            // offers are informed by its hello. Otherwise one carry could
+            // halt a directory for good.
+            await fixture.childRuntime.stop()
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess,
+                handlers: childHandlers
+            )
+            var again: [DirectChildCandidate] = []
+            for _ in 0..<250 {
+                again = await fixture.parentRuntime.directChildCandidates(fixture.context)
+                if !again.isEmpty { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            XCTAssertEqual(again.first?.block.height, 1, "a fresh session's offer on the old parent is carried")
+
             // The child admits and validates its carried block, then builds
             // on it; that candidate is carried.
             let childGenesis = try await fixture.childProcess.validatedTipBlock()
@@ -6365,23 +6389,6 @@ final class NetworkTrustTests: XCTestCase {
             }
             XCTAssertEqual(next.first?.block.height, 2, "built on the carried block")
             XCTAssertEqual(next.first?.block.parent?.rawCID, firstHeader.rawCID)
-
-            // The rule is about ignorance, not the parent block: a child
-            // offering on the carried block's parent after being told
-            // (here, on a fresh session) is carried. Otherwise one carry
-            // could halt a directory for good.
-            await fixture.childRuntime.stop()
-            try await fixture.childRuntime.start(
-                process: fixture.childProcess,
-                handlers: childHandlers
-            )
-            var again: [DirectChildCandidate] = []
-            for _ in 0..<250 {
-                again = await fixture.parentRuntime.directChildCandidates(fixture.context)
-                if !again.isEmpty { break }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            XCTAssertFalse(again.isEmpty, "a new session's offer is carried whatever its parent")
         } catch {
             await fixture.childRuntime.stop()
             await fixture.parentRuntime.stop()
