@@ -702,11 +702,14 @@ final class LatticeCtlE2ETests: XCTestCase {
         }
 
         // 4. The credit is real: the buyer spends it onward to the sink.
+        // Retried like every other submit here: the tip moving under the
+        // preflight refuses a submit outright (`templateContextChanged`),
+        // and at the coordinator's block rate it does so routinely.
         let beforeSpend = await height(stallsRPC)
-        try await runCtl([
-            "tx", "send", "--chain", "Nexus/Market/Stalls",
+        try await submitUntilAccepted("grandchild accepts the spend", host, [
+            "send", "--chain", "Nexus/Market/Stalls",
             "--key", buyer.file.path, "--to", sink.address, "--amount", "40",
-        ], root: host.root)
+        ])
         try await waitFor("dependent spend mined on the grandchild", seconds: 240) {
             let now = await height(stallsRPC)
             let empty = await drained(stallsRPC)
