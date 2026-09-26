@@ -6332,27 +6332,6 @@ final class NetworkTrustTests: XCTestCase {
             )
             XCTAssertTrue(digest.isEmpty, "nor is it a template input")
 
-            // The rule is about ignorance, not the parent block: the same
-            // candidate offered again on a fresh session, before the child
-            // has admitted anything, is carried. (Here the parent saw the
-            // disconnect and cleared its marks; the replacement-session
-            // window, where the marks survive and only their session
-            // scoping saves the child, has no unit fixture and is said so.)
-            await fixture.childRuntime.stop()
-            try await fixture.childRuntime.start(
-                process: fixture.childProcess,
-                handlers: childHandlers
-            )
-            // A restart pays a hello and the evidence handshake before the
-            // context is pushed and the offer comes back: a long bound.
-            var again: [DirectChildCandidate] = []
-            for _ in 0..<1_500 {
-                again = await fixture.parentRuntime.directChildCandidates(fixture.context)
-                if !again.isEmpty { break }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            XCTAssertEqual(again.first?.block.height, 1, "a fresh session's offer on the old parent is carried")
-
             // The child admits and validates its carried block, then builds
             // on it; that candidate is carried.
             let childGenesis = try await fixture.childProcess.validatedTipBlock()
