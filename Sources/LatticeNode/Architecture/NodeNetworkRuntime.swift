@@ -206,6 +206,17 @@ struct NodeNetworkPlaneConfigurations {
                 listenPort: configuration.factListenPort,
                 bootstrapPeers: configuration.parentEndpoint.map { [$0.ivy] } ?? [],
                 inboundAdmissionBypassPeerKeys: parentAdmissionBypass,
+                // The private plane speaks only to configured parent and
+                // child processes. Tally's per-peer request budget is a
+                // stranger's; at merged-mining block rates a parent legitimately
+                // sends its child an evidence announcement, a run report and a
+                // template context per block and answers every run it asks
+                // for, and a refused send here is this node throttling its own
+                // tree. Give the edge room; the peer count is the topology.
+                tallyConfig: TallyConfig(
+                    perPeerRequestCapacity: 4_000,
+                    perPeerRequestRefillPerSecond: 1_000
+                ),
                 maxConnections: IvyConfig.defaultMaxConnections,
                 reservedOutboundConnectionSlots: configuration.parentEndpoint == nil ? 0 : 1,
                 maxConnectionsPerNetgroup: IvyConfig.defaultMaxConnections,
@@ -554,6 +565,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
     private var parentTipContext: ParentTipContext?
     private var nextParentTipSequence: UInt64 = 0
+    private var parentTipPushTask: Task<Void, Never>?
+    private var parentTipPushDirty = false
     private var descendantRewards: [MiningReward] = []
     private var descendantMinimumWork: [MiningMinimumWork] = []
     /// The latest candidate each child peer pushed for this chain's tip. A
@@ -970,6 +983,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
         parentEvidence.reset()
         childCandidateOffers.removeAll()
         parentTipContext = nil
+        parentTipPushTask?.cancel()
+        parentTipPushTask = nil
+        parentTipPushDirty = false
         descendantRewards = []
         descendantMinimumWork = []
         receivedParentTip = nil
@@ -1447,11 +1463,46 @@ public actor NodeNetworkRuntime: IvyDelegate {
         )
         parentTipContext = context
         SyncTrace.log("parent tip context \(context.sequence): h=\(tip.height) tip=\(tipCID.prefix(12))")
-        for (key, role) in hierarchyPeers {
-            guard case .child(let childPath) = role,
-                  childEvidenceReadyPeers.contains(key),
-                  let peer = hierarchySessions[key] else { continue }
-            await pushParentTipContext(context, to: peer, childPath: childPath)
+        scheduleParentTipPush(generation: generation, process: process)
+    }
+
+    /// Pushes the latest context to every ready child. Coalescing, like the
+    /// child's offer task: a burst of blocks marks it dirty once and the task
+    /// pushes the context that stands when it runs, so a parent mining many
+    /// blocks a second sends a child a few contexts a second, not one per
+    /// block, and never floods the session its evidence rides on.
+    private func scheduleParentTipPush(
+        generation: UInt64,
+        process: ChainProcess
+    ) {
+        parentTipPushDirty = true
+        guard parentTipPushTask == nil else { return }
+        parentTipPushTask = Task { [weak self] in
+            await self?.runParentTipPushes(
+                generation: generation,
+                process: process
+            )
+        }
+    }
+
+    private func runParentTipPushes(
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        defer { parentTipPushTask = nil }
+        while parentTipPushDirty, !Task.isCancelled,
+              isCurrentRuntime(generation: generation, process: process) {
+            parentTipPushDirty = false
+            guard let context = parentTipContext else { return }
+            for (key, role) in hierarchyPeers {
+                guard case .child(let childPath) = role,
+                      childEvidenceReadyPeers.contains(key),
+                      let peer = hierarchySessions[key] else { continue }
+                await pushParentTipContext(context, to: peer, childPath: childPath)
+            }
+            if parentTipPushDirty {
+                try? await Task.sleep(for: Self.parentTipPushDebounce)
+            }
         }
     }
 
@@ -1524,6 +1575,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
 
     private static let candidateOfferDebounce: Duration = .milliseconds(250)
+    /// A parent mining several blocks a second pushes its children a context
+    /// a couple of times a second at most; the latest always wins, and the
+    /// session carries evidence and runs on the same send budget.
+    private static let parentTipPushDebounce: Duration = .milliseconds(500)
 
     private func runCandidateOffers(
         generation: UInt64,
@@ -1544,6 +1599,19 @@ public actor NodeNetworkRuntime: IvyDelegate {
         generation: UInt64,
         process: ChainProcess
     ) async {
+        // Nothing to offer before this chain's genesis is active; the next
+        // state change (activation commits) offers.
+        guard await process.status().phase == .active else { return }
+        // A candidate builds on the VALIDATED tip. While the validate walk
+        // is behind the weighed tip, a candidate would be a side block on a
+        // tip this chain has already left — wasted work at the parent, and
+        // here the very work that starves the walk. Offer when it catches
+        // up; every walk step reports a state change.
+        let tips = await process.metricsTipHeights()
+        if let weighed = tips.weighed, (tips.validated ?? 0) < weighed {
+            SyncTrace.log("candidate offer deferred: validated \(tips.validated ?? 0) behind weighed \(weighed)")
+            return
+        }
         guard let context = receivedParentTip,
               hierarchySessions[context.peer.key]?.sessionID
                 == context.peer.sessionID,
@@ -1976,7 +2044,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
                         permitsCleanup: true
                     )
                 }
-            case .notConnected, .backpressured, .locallyRejected:
+            case .notConnected:
+                SyncTrace.log("child evidence announcement to \(childPath.joined(separator: "/")) not enqueued: \(result); recycling the session")
                 if bootstrapping {
                     finishChildEvidencePublication(
                         to: peer,
@@ -1984,6 +2053,19 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     )
                 }
                 await hierarchy.recycleSession(ifCurrent: peer)
+            case .backpressured, .locallyRejected:
+                // This node's own send budget refused, not the child: the
+                // announcement is a hint over a durable index the child
+                // scans, so a dropped one costs a scan, never the session.
+                // Recycling here made every busy round a reconnect, and a
+                // child bootstrapping through it never became ready.
+                SyncTrace.log("child evidence announcement to \(childPath.joined(separator: "/")) not enqueued: \(result); the child's index scan re-serves it")
+                if bootstrapping {
+                    finishChildEvidencePublication(
+                        to: peer,
+                        permitsCleanup: true
+                    )
+                }
             }
         }
         return isCurrentRuntime(generation: generation, process: process)
@@ -2001,6 +2083,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             return
         }
         if !permitsCleanup {
+            SyncTrace.log("child evidence publication to \(peer.key.hex.prefix(8)) failed: session no longer becomes ready")
             childEvidencePublicationFailedSessions.insert(session)
         }
         if count == 1 {
