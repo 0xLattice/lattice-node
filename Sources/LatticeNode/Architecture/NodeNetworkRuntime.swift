@@ -1505,6 +1505,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // timed out has no desired entry and is asked for nothing (it is
         // dirty), so without this it would never be visited again, never
         // flushed, and never asked — dirty for good.
+        // A peer that left mid-exchange is nobody's to reconcile: its
+        // refusal, landing after its session was cleared, must not keep a
+        // mark that no session will ever clear.
+        for peerKey in dirtyCandidateReservationPeers
+        where hierarchyPeers[peerKey] == nil {
+            dirtyCandidateReservationPeers.remove(peerKey)
+            desiredCandidateReservations.removeValue(forKey: peerKey)
+        }
         let peers = Set(desiredCandidateReservations.keys)
             .union(desired.keys).union(handoffs.keys)
             .union(dirtyCandidateReservationPeers)
@@ -1599,7 +1607,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     dirtyCandidateReservationPeers.remove(attempt.peerKey)
                 } else {
                     SyncTrace.log("reconcile refused: child \(attempt.peerKey.hex.prefix(8)) rejected \(attempt.target.count) reservations")
-                    dirtyCandidateReservationPeers.insert(attempt.peerKey)
+                    if hierarchyPeers[attempt.peerKey] != nil {
+                        dirtyCandidateReservationPeers.insert(attempt.peerKey)
+                    }
                     rejected = true
                 }
             }
