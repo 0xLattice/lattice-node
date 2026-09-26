@@ -5814,7 +5814,12 @@ final class NetworkTrustTests: XCTestCase {
         await fixture.runtime.stop()
     }
 
-    func testRejectedEvidenceHintRecyclesSessionAndReconnectIndexRepairs()
+    /// A parent whose own send budget refuses an evidence hint keeps the
+    /// session: the hint names an entry in a durable index the child scans,
+    /// so the refusal costs a scan, never the connection. The child double
+    /// reconnects by hand once the budget is back and its index pull serves
+    /// what the hint would have.
+    func testRejectedEvidenceHintKeepsTheSessionAndTheIndexStillServes()
         async throws {
         let fixture = try await pendingSideCarrierFixture(
             keyByte: 0x6b,
@@ -5847,20 +5852,20 @@ final class NetworkTrustTests: XCTestCase {
                 fixture,
                 keyByte: 0x6d
             )
-            for _ in 0..<300 {
-                if !(await fixture.child.connectedPeers).contains(parentID) {
-                    break
-                }
-                try await Task.sleep(for: .milliseconds(10))
-            }
+            try await Task.sleep(for: .seconds(1))
             let connectedAfterRejection = await fixture.child.connectedPeers
-            XCTAssertFalse(connectedAfterRejection.contains(parentID))
+            XCTAssertTrue(
+                connectedAfterRejection.contains(parentID),
+                "a refused hint is not the session's fault"
+            )
             let rejected = await fixture.recorder.snapshot()
             XCTAssertEqual(rejected.helloSessions.count, 1)
             XCTAssertEqual(rejected.indexEntries, [[]])
             XCTAssertTrue(rejected.available.isEmpty)
 
             hierarchyTally.resetPeer(childID)
+            await fixture.child.stop()
+            try await fixture.child.start()
             try await waitForEvidenceIndexes(fixture, count: 2)
 
             let repaired = await fixture.recorder.snapshot()
@@ -6225,6 +6230,131 @@ final class NetworkTrustTests: XCTestCase {
                 fixture.context
             )
             XCTAssertTrue(heldForOldTip.isEmpty)
+        } catch {
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+            throw error
+        }
+        await fixture.childRuntime.stop()
+        await fixture.parentRuntime.stop()
+    }
+
+    /// A candidate builds on the validated tip. While the child's validate
+    /// walk is behind its weighed tip, an offer would be a side block on a
+    /// tip the chain has already left, so none is made; the offer comes when
+    /// the walk catches up, since every walk step reports a state change.
+    func testChildOffersNoCandidateWhileItsValidateWalkIsBehind() async throws {
+        let fixture = try await provisionalRootFixture(keyByte: 0x9c)
+        let childService = networkService(
+            process: fixture.childProcess,
+            runtime: fixture.childRuntime
+        )
+        let childHandlers = NodeNetworkHandlers(
+            childCandidateBuilder: { [weak childService] context, parentSource in
+                guard let childService else { return nil }
+                return try await childService.miningCandidate(
+                    for: context,
+                    parentContentSource: parentSource
+                )
+            },
+            admission: { _ in throw CancellationError() }
+        )
+        // The child holds a block it has weighed but not executed: its
+        // weighed tip is ahead of its validated tip.
+        let childGenesis = try await fixture.childProcess.validatedTipBlock()
+        let weighedOnly = try await BlockBuilder.buildBlock(
+            previous: childGenesis,
+            parentChainBlock: fixture.context.parentCarrier,
+            timestamp: childGenesis.timestamp + 1_000,
+            target: .max,
+            fetcher: CoalescingFetcher(CompositeContentSource([
+                fixture.childProcess, fixture.parentProcess,
+            ]))
+        )
+        let weighedHeader = try BlockHeader(node: weighedOnly)
+        try await weighedHeader.storeBlock(
+            fetcher: fixture.parentProcess, storer: fixture.childProcess
+        )
+        // The parent carries it (a carrier with no transactions leaves the
+        // parent's post-state, so the fixture context still fits).
+        let parentTip = try await fixture.parentProcess.validatedTipBlock()
+        let carrier = try await BlockBuilder.buildBlock(
+            previous: parentTip,
+            children: ["Payments": weighedOnly],
+            timestamp: parentTip.timestamp + 1_000,
+            nonce: 5,
+            fetcher: fixture.parentProcess
+        )
+        let carrierHeader = try BlockHeader(node: carrier)
+        let carried = try await fixture.parentProcess.admit(carrierHeader)
+        XCTAssertTrue(carried.decision.isAccepted, "\(carried.decision)")
+        let proof = try await ChildBlockProof.generate(
+            rootHeader: carrierHeader,
+            childDirectory: "Payments",
+            fetcher: fixture.parentProcess
+        )
+        // The fixture's child genesis is self-contained (empty parent
+        // state), so the first block committing a real parent state needs
+        // the continuity fact the runtime would otherwise fetch.
+        let package = AuthenticatedChildPackage(
+            package: ChildValidationPackage(
+                proof: proof,
+                parentStateContinuityLink: ParentStateContinuityLink(
+                    parentPath: ["Nexus"],
+                    fromStateCID: childGenesis.parentState.rawCID,
+                    toStateCID: weighedOnly.parentState.rawCID
+                )
+            )
+        )
+        let weighed = try await fixture.childProcess.admit(
+            weighedHeader,
+            authenticatedChildPackage: package,
+            remoteSource: fixture.parentProcess,
+            mode: .weighed
+        )
+        XCTAssertTrue(weighed.decision.isAccepted, "\(weighed.decision)")
+        let tips = await fixture.childProcess.metricsTipHeights()
+        XCTAssertEqual(tips.weighed, 1)
+        XCTAssertEqual(tips.validated, 0)
+
+        do {
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess,
+                handlers: inertNetworkHandlers()
+            )
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess,
+                handlers: childHandlers
+            )
+            for _ in 0..<250 {
+                if await childService.status().phase == .active { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            // No offer while behind: the parent holds nothing for its tip.
+            try await Task.sleep(for: .seconds(2))
+            let whileBehind = await fixture.parentRuntime.directChildCandidates(
+                fixture.context
+            )
+            XCTAssertTrue(whileBehind.isEmpty, "no candidate while the walk is behind")
+
+            // The walk catches up (validate the weighed block); the child
+            // offers on that state change.
+            let validated = try await fixture.childProcess.admit(
+                weighedHeader,
+                authenticatedChildPackage: package,
+                remoteSource: fixture.parentProcess,
+                mode: .validate
+            )
+            XCTAssertTrue(validated.decision.isAccepted, "\(validated.decision)")
+            await fixture.childRuntime.chainStateChanged()
+            var held: [DirectChildCandidate] = []
+            for _ in 0..<250 {
+                held = await fixture.parentRuntime.directChildCandidates(fixture.context)
+                if !held.isEmpty { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            XCTAssertEqual(held.count, 1, "offered once caught up")
+            XCTAssertEqual(held.first?.block.height, 2, "built on the validated tip")
         } catch {
             await fixture.childRuntime.stop()
             await fixture.parentRuntime.stop()
