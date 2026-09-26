@@ -2927,6 +2927,72 @@ final class NetworkTrustTests: XCTestCase {
         )
     }
 
+    /// The carried child rides the context as a tagged trailer after the
+    /// minimum work, only when the tip's branch carried one: the legacy
+    /// bytes are untouched, trailers are ordered and single, and an empty
+    /// or unbounded name is refused.
+    func testCandidateRequestNamesTheCarriedChildOnlyWhenPresent() async throws {
+        let parent = try await canonicalNetworkBlock()
+        let parentCID = try BlockHeader(node: parent).rawCID
+        let parentData = try XCTUnwrap(parent.toData())
+        let minimumWork = [MiningMinimumWork(
+            chainPath: ["Nexus", "Payments"],
+            work: UInt256(1) << 32
+        )]
+        func request(
+            _ carried: String?,
+            minimumWork: [MiningMinimumWork] = []
+        ) -> ParentTipContextMessage {
+            ParentTipContextMessage(
+                sequence: 23,
+                childPath: ["Nexus", "Payments"],
+                tipCID: parentCID,
+                tipData: parentData,
+                rewards: [],
+                minimumWork: minimumWork,
+                carriedChildCID: carried
+            )
+        }
+
+        let legacy = try request(nil).encoded()
+        XCTAssertEqual(legacy.suffix(parentData.count), parentData)
+        XCTAssertNil(try ParentTipContextMessage.decoded(legacy).carriedChildCID)
+
+        let named = try request(parentCID).encoded()
+        XCTAssertEqual(
+            try ParentTipContextMessage.decoded(named).carriedChildCID,
+            parentCID
+        )
+        XCTAssertEqual(
+            named.count,
+            legacy.count + 1 + 2 + parentCID.utf8.count,
+            "one tag, one length, the name"
+        )
+        let both = try request(parentCID, minimumWork: minimumWork).encoded()
+        let decodedBoth = try ParentTipContextMessage.decoded(both)
+        XCTAssertEqual(decodedBoth.minimumWork, minimumWork)
+        XCTAssertEqual(decodedBoth.carriedChildCID, parentCID)
+
+        // Trailers out of order: the carried child before the minimum work.
+        let workOnly = try request(nil, minimumWork: minimumWork).encoded()
+        var reordered = legacy
+        reordered.append(named.suffix(from: legacy.count))
+        reordered.append(workOnly.suffix(from: legacy.count))
+        XCTAssertThrowsError(try ParentTipContextMessage.decoded(reordered))
+        // The same trailer twice.
+        var twice = named
+        twice.append(named.suffix(from: legacy.count))
+        XCTAssertThrowsError(try ParentTipContextMessage.decoded(twice))
+        // An empty name, an unknown tag, a truncated name.
+        XCTAssertThrowsError(try request("").encoded())
+        XCTAssertThrowsError(
+            try ParentTipContextMessage.decoded(legacy + Data([3, 1, 0]))
+        )
+        XCTAssertThrowsError(
+            try ParentTipContextMessage.decoded(named.dropLast())
+        )
+    }
+
     func testCandidateRequestEnforcesHierarchyRewardAndFrameBounds() async throws {
         XCTAssertEqual(
             ParentTipContextMessage.maximumRewardBytes,
@@ -6243,7 +6309,11 @@ final class NetworkTrustTests: XCTestCase {
     /// and every sibling carried meanwhile would only reorg the child's tip
     /// to the heavier carrier, so a child could never get ahead of its own
     /// forks. The next candidate, built on the carried block, is carried.
-    func testACarriedChildBlockAndItsSiblingsAreNotCarriedAgain() async throws {
+    /// The parent's context names the child block its branch carried; the
+    /// child holds its offer until it admits that block, and the parent
+    /// does not carry the named block again. Once the child admits it, the
+    /// candidate it builds on it is carried.
+    func testACarriedChildBlockIsNamedToTheChildAndNotCarriedAgain() async throws {
         let fixture = try await provisionalRootFixture(keyByte: 0x9e)
         let parentService = networkService(
             process: fixture.parentProcess,
@@ -6331,6 +6401,15 @@ final class NetworkTrustTests: XCTestCase {
                 parentStateCID: fixture.context.parentCarrier.prevState.rawCID
             )
             XCTAssertTrue(digest.isEmpty, "nor is it a template input")
+            // The child was told which block was carried, at push latency,
+            // and offers nothing on the tip before it.
+            var named: String?
+            for _ in 0..<250 {
+                named = await fixture.childRuntime.receivedCarriedChildCIDForTesting()
+                if named != nil { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            XCTAssertEqual(named, firstHeader.rawCID, "the context names the carried block")
 
             // The child admits and validates its carried block, then builds
             // on it; that candidate is carried.

@@ -2702,12 +2702,16 @@ final class NodeStoreTests: XCTestCase {
 
         let rebuiltParentSourceID =
             "00000000-0000-4000-8000-000000000002"
-        try await child!.storeParentEvidenceInbox(
+        let replayedAdmitted = try await child!.storeParentEvidenceInbox(
             sourceID: rebuiltParentSourceID,
             ordinal: summary.ordinal,
             attachment: attachment,
             package: package,
             advanceScan: true
+        )
+        XCTAssertTrue(
+            replayedAdmitted,
+            "evidence admitted before is reported so the caller admits nothing again"
         )
         let rebuiltParentCursor =
             try await child!.parentEvidenceScanCursor()
@@ -2725,13 +2729,14 @@ final class NodeStoreTests: XCTestCase {
         )
         XCTAssertTrue(replayedInboxRoots.isEmpty)
 
-        try await child!.storeParentEvidenceInbox(
+        let secondAdmitted = try await child!.storeParentEvidenceInbox(
             sourceID: rebuiltParentSourceID,
             ordinal: advancedScan.throughOrdinal,
             attachment: secondAttachment,
             package: secondPackage,
             advanceScan: true
         )
+        XCTAssertFalse(secondAdmitted, "new evidence is retained for admission")
         let pendingSecondInbox = try await child!.parentEvidenceInbox()
         let retainedSecondInbox = try await childBroker.retainedRoots(
             scope: "parent-evidence-inbox"

@@ -2200,7 +2200,7 @@ actor NodeStore {
         attachment: ChildEvidenceVolume,
         package: AuthenticatedChildPackage,
         advanceScan: Bool
-    ) async throws {
+    ) async throws -> Bool {
         guard UUID(uuidString: sourceID) != nil,
               ordinal > 0,
               let sqlOrdinal = Int64(exactly: ordinal),
@@ -2334,6 +2334,7 @@ actor NodeStore {
                 roots: parentEvidenceInboxRoots()
             )
         }
+        return admittedDuringStore
     }
 
     private func admittedCarrierEvidenceExists(

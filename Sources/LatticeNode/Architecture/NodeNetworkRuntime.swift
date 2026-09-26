@@ -496,6 +496,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let tipData: Data
         let rewards: [MiningReward]
         let minimumWork: [MiningMinimumWork]
+        /// Per child directory, the child block the tip's branch last
+        /// committed into it (the nearest committer's commitment): what a
+        /// child is told it was carried, and what a template does not
+        /// carry again.
+        let carriedChildren: [String: String]
     }
     private var parentTipContext: ParentTipContext?
     private var nextParentTipSequence: UInt64 = 0
@@ -521,24 +526,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let sequence: UInt64
     }
     private var childCandidateOffers: [PeerKey: CachedChildCandidate] = [:]
-    /// Per directory, the child-chain parent of the last child block this
-    /// chain carried. A candidate on that same parent is a sibling of a
-    /// block that already weighs at the child: carried, it would only
-    /// reorg the child's tip to the heavier carrier, and a child could
-    /// never get ahead of its own forks. So a sibling is not carried while
-    /// its sender could not yet know of the carry; a sibling the child
-    /// offers after being told is carried, because then it is the child's
-    /// own choice (its walk parked on the carried block, or it excluded
-    /// it) and refusing it would halt the chain. Last write wins: a
-    /// carrier's height is the carried block's own claim, so it cannot
-    /// order this record, and a replayed old proof costs one round.
-    private var carriedChildParents: [String: String] = [:]
-    /// Per child peer, the offer sequence the peer had reached, on the
-    /// session it was reached on, when this chain last told it of a carry
-    /// in its directory (the hint enqueued); offers at or below it on that
-    /// session were made in ignorance of the carry. A new session's offers
-    /// are informed by its hello.
-    private var carryInformedSequence: [PeerKey: SessionSequence] = [:]
     /// The parent's context as last received (this chain being the child),
     /// bound to the session it came on: a new session restarts sequences.
     private struct ReceivedParentTipContext {
@@ -548,8 +535,18 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let tip: Block
         let rewards: [MiningReward]
         let minimumWork: [MiningMinimumWork]
+        /// The child block the parent's branch last carried for this
+        /// chain, as the parent named it; nil when it named none.
+        let carriedChildCID: String?
     }
     private var receivedParentTip: ReceivedParentTipContext?
+    /// A carried block the parent named whose admission here decided
+    /// against it: the offer hold on it is released, or no offer would
+    /// ever follow. One at a time, like the context that names it.
+    private var rejectedCarriedChildCID: String?
+    /// The carried block an evidence scan was last requested for, so one
+    /// carry costs one request, not one per context push.
+    private var requestedCarriedChildCID: String?
     /// One coalescing offer task: an input change while a build runs marks it
     /// dirty and the task runs again; nothing is queued.
     private var candidateOfferTask: Task<Void, Never>?
@@ -943,8 +940,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         portableEvidenceWork.removeAll()
         parentEvidence.reset()
         childCandidateOffers.removeAll()
-        carriedChildParents.removeAll()
-        carryInformedSequence.removeAll()
         runReportApplyTail?.cancel()
         runReportApplyTail = nil
         parentTipContext = nil
@@ -956,6 +951,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         descendantRewards = []
         descendantMinimumWork = []
         receivedParentTip = nil
+        rejectedCarriedChildCID = nil
+        requestedCarriedChildCID = nil
         candidateOfferTask?.cancel()
         candidateOfferTask = nil
         candidateOfferDirty = false
@@ -1350,7 +1347,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                   childEvidenceReadyPeers.contains(key),
                   let offer = childCandidateOffers[key],
                   offer.candidate.block.parentState.rawCID == parentStateCID,
-                  !isUninformedSibling(offer, of: key, directory: directory)
+                  offer.childCID != parentTipContext?.carriedChildren[directory]
             else { continue }
             byDirectory[directory, default: []].append(offer.childCID)
         }
@@ -1375,7 +1372,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         var candidates: [(Int, DirectChildCandidate)] = []
         var stale = 0
-        var siblings = 0
+        var carried = 0
         for (rank, key, path) in children {
             guard let offer = childCandidateOffers[key] else { continue }
             guard offer.candidate.block.parentState.rawCID == wantedParentState
@@ -1383,14 +1380,18 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 stale += 1
                 continue
             }
+            // The block this chain's branch already carries for the
+            // directory: a children-only carrier leaves the post-state, so
+            // the offer still fits the tip, and carrying it again would
+            // only credit the same block once more.
             if let directory = path.last,
-               isUninformedSibling(offer, of: key, directory: directory) {
-                siblings += 1
+               offer.childCID == parentTipContext?.carriedChildren[directory] {
+                carried += 1
                 continue
             }
             candidates.append((rank, offer.candidate))
         }
-        SyncTrace.log("child candidates: \(candidates.count) held of \(children.count) ready child peers (stale=\(stale) siblings=\(siblings)) excluded=\(context.excludedDirectories.sorted())")
+        SyncTrace.log("child candidates: \(candidates.count) held of \(children.count) ready child peers (stale=\(stale) carried=\(carried)) excluded=\(context.excludedDirectories.sorted())")
         // A path claim is not authority. Several authenticated claimants may
         // serve one directory; rotate priority so a grindable lexicographic
         // key cannot own a slot.
@@ -1399,30 +1400,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
             selectedDirectories.insert($0.1.directory).inserted ? $0.1 : nil
         }
         return selected.sorted { $0.directory < $1.directory }
-    }
-
-    /// A sibling of the last child block this chain carried for the
-    /// directory, offered before the peer was told of that carry, on the
-    /// session it was told on.
-    private func isUninformedSibling(
-        _ offer: CachedChildCandidate,
-        of key: PeerKey,
-        directory: String
-    ) -> Bool {
-        guard let carriedParent = carriedChildParents[directory],
-              offer.candidate.block.parent?.rawCID == carriedParent,
-              let informed = carryInformedSequence[key],
-              informed.sessionID == offer.sessionID
-        else { return false }
-        return offer.sequence <= informed.sequence
-    }
-
-    private func markCarryInformed(_ key: PeerKey, on peer: AuthenticatedPeer) {
-        let offered = childCandidateOffers[key]
-        carryInformedSequence[key] = SessionSequence(
-            sessionID: peer.sessionID,
-            sequence: offered?.sessionID == peer.sessionID ? (offered?.sequence ?? 0) : 0
-        )
     }
 
     /// A per-session sequence as it stands for the peer's current session;
@@ -1472,16 +1449,25 @@ public actor NodeNetworkRuntime: IvyDelegate {
            current.minimumWork == minimumWork {
             return
         }
+        let directories = Set(hierarchyPeers.values.compactMap { role -> String? in
+            guard case .child(let path) = role else { return nil }
+            return path.last
+        })
+        let carriedChildren = await process.carriedChildBlocks(
+            on: tipCID, directories: directories.sorted()
+        )
+        guard isCurrentRuntime(generation: generation, process: process) else { return }
         nextParentTipSequence &+= 1
         let context = ParentTipContext(
             sequence: nextParentTipSequence,
             tipCID: tipCID,
             tipData: tipData,
             rewards: rewards,
-            minimumWork: minimumWork
+            minimumWork: minimumWork,
+            carriedChildren: carriedChildren
         )
         parentTipContext = context
-        SyncTrace.log("parent tip context \(context.sequence): h=\(tip.height) tip=\(tipCID.prefix(12))")
+        SyncTrace.log("parent tip context \(context.sequence): h=\(tip.height) tip=\(tipCID.prefix(12)) carried=\(carriedChildren.keys.sorted())")
     }
 
     /// Pushes the latest context to every ready child. Coalescing, like the
@@ -1547,10 +1533,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
             if case .enqueued = sent,
                refusedChildEvidenceHints[key] == payload {
                 refusedChildEvidenceHints.removeValue(forKey: key)
-                // A child that learned of the carry by its own scan and
-                // already answered is marked uninformed here too; the
-                // next input change offers again, so the cost is a round.
-                markCarryInformed(key, on: peer)
                 SyncTrace.log("child evidence announcement re-sent to \(key.hex.prefix(12))")
             }
         }
@@ -1591,7 +1573,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
             tipCID: context.tipCID,
             tipData: context.tipData,
             rewards: resolvedRewards,
-            minimumWork: minimumWork
+            minimumWork: minimumWork,
+            carriedChildCID: childPath.last.flatMap { context.carriedChildren[$0] }
         ).encoded() else {
             SyncTrace.log("parent tip push to \(childPath.joined(separator: "/")) not built")
             return
@@ -1650,6 +1633,19 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // Nothing to offer before this chain's genesis is active; the next
         // state change (activation commits) offers.
         guard await process.status().phase == .active else { return }
+        // The block the parent's branch carries for this chain, as its
+        // context names it, that this chain has not admitted: a candidate
+        // built now would only be its sibling. Hold until the admission
+        // decides: an acceptance publishes a state change, and a decision
+        // against the block releases the hold (`rejectedCarriedChildCID`),
+        // so no offer waits on a block that will never land.
+        if let carried = receivedParentTip?.carriedChildCID,
+           carried != rejectedCarriedChildCID,
+           !(await process.hasAcceptedBlock(carried)) {
+            candidateOfferDeferredByAdmission = true
+            SyncTrace.log("candidate offer deferred: carried \(carried.prefix(12)) not yet admitted")
+            return
+        }
         // A candidate this chain built that the parent's evidence names as
         // carried and still holds in the inbox (undecided), now ready for
         // or in its admission: the carried block is about to be this
@@ -2016,25 +2012,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard isCurrentRuntime(generation: generation, process: process) else {
             return false
         }
-        // Whatever route issued this evidence, this chain carried the child
-        // block it names: its siblings are not carried again. The proof
-        // carries the child block (a child block is its own volume, not
-        // this chain's content).
-        if let directory = childPath.last,
-           let data = proof.entries.first(where: { $0.cid == childCID })?.data,
-           let carried = _contentBoundBlock(cid: childCID, data: data),
-           let childParent = carried.parent?.rawCID {
-            carriedChildParents[directory] = childParent
-            // Every ready peer of the directory is about to be told; what
-            // it has offered so far was offered in ignorance.
-            for (key, role) in hierarchyPeers {
-                guard case .child(let path) = role, path.last == directory,
-                      childEvidenceReadyPeers.contains(key),
-                      let peer = hierarchySessions[key] else { continue }
-                markCarryInformed(key, on: peer)
-            }
-            SyncTrace.log("carried child \(childCID.prefix(12)) for \(directory): uninformed siblings on \(childParent.prefix(12)) not carried")
-        }
         let bootstrappingPeers = hierarchyPeers.compactMap {
             key, role -> AuthenticatedPeer? in
             guard case .child(let path) = role,
@@ -2111,7 +2088,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 // A newer hint delivered supersedes an older one refused:
                 // the scan its admission triggers serves the older entry.
                 refusedChildEvidenceHints.removeValue(forKey: peer.key)
-                markCarryInformed(peer.key, on: peer)
                 if bootstrapping {
                     finishChildEvidencePublication(
                         to: peer,
@@ -2437,7 +2413,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         childCandidateOffers.removeValue(forKey: key)
         pushedParentTipSequence.removeValue(forKey: key)
         refusedChildEvidenceHints.removeValue(forKey: key)
-        carryInformedSequence.removeValue(forKey: key)
         Self.pruneChildPeerRotations(
             &childPeerRotation,
             activeRoles: Array(hierarchyPeers.values)
@@ -2466,6 +2441,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         if receivedParentTip?.peer.key == key {
             receivedParentTip = nil
+            rejectedCarriedChildCID = nil
+            requestedCarriedChildCID = nil
             lastOfferedCandidateCID = nil
         }
         return removedRole
@@ -3826,8 +3803,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
               hierarchyPeers[peer.key] == .parent else {
             return .failed
         }
+        let alreadyAdmitted: Bool
         do {
-            try await process.retainParentEvidence(
+            alreadyAdmitted = try await process.retainParentEvidence(
                 sourceID: sourceID,
                 ordinal: summary.ordinal,
                 attachment: attachment,
@@ -3838,6 +3816,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
             return .backpressured
         } catch {
             return .failed
+        }
+        // This carrier's evidence was admitted before: re-served by a scan
+        // or a repeated hint, it credits nothing new, and an admission would
+        // only be a duplicate through the one admission worker.
+        if alreadyAdmitted {
+            SyncTrace.log("parent evidence for \(summary.childCID.prefix(12)) already admitted: not re-entered")
+            return .handled
         }
         return await enqueueRetainedParentCandidate(
             // Weighed, like every network-sourced block: the verified proof is
@@ -4170,9 +4155,19 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 tipCID: context.tipCID,
                 tip: tip,
                 rewards: context.rewards,
-                minimumWork: context.minimumWork
+                minimumWork: context.minimumWork,
+                carriedChildCID: context.carriedChildCID
             )
-            SyncTrace.log("parent tip \(context.sequence): h=\(tip.height) tip=\(context.tipCID.prefix(12)) rewards=\(context.rewards.count)")
+            SyncTrace.log("parent tip \(context.sequence): h=\(tip.height) tip=\(context.tipCID.prefix(12)) rewards=\(context.rewards.count) carried=\(context.carriedChildCID?.prefix(12) ?? "none")")
+            // A carried block this chain has not admitted is fetched now,
+            // not on the next hello or admission: the hint naming it may
+            // have been refused, and no admission follows a held offer.
+            if let carried = context.carriedChildCID,
+               carried != requestedCarriedChildCID,
+               !(await process.hasAcceptedBlock(carried)) {
+                requestedCarriedChildCID = carried
+                await requestEvidenceIndex(generation: generation, process: process)
+            }
             scheduleCandidateOffer(generation: generation, process: process)
 
         case (NodeNetworkTopic.childCandidateAvailable, .child(let childPath)):
@@ -4607,6 +4602,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
 
     #if DEBUG
+    func receivedCarriedChildCIDForTesting() -> String? {
+        receivedParentTip?.carriedChildCID
+    }
+
     func refusedChildEvidenceHintCountForTesting() -> Int {
         refusedChildEvidenceHints.count
     }
@@ -5193,6 +5192,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // authenticates only parent facts and never vouches for the child
         // transition. "Blame" is a per-root routing suppression, never a ban.
         SyncTrace.log("admit \(candidate.blockCID.prefix(12)) weighed=\(candidate.weighed) decision=\(outcome.decision)")
+        if candidate.blockCID == receivedParentTip?.carriedChildCID,
+           !outcome.decision.isAccepted,
+           !outcome.decision.shouldRetryWhenEvidenceChanges,
+           !outcome.decision.shouldRetryLater {
+            rejectedCarriedChildCID = candidate.blockCID
+        }
         if outcome.decision == .invalid {
             if attempt.attribution.allResponsesComplete,
                let supplierKey = attempt.attribution.soleRemoteSupplierPublicKey,

@@ -229,25 +229,32 @@ whenever it changes — its validated tip block and the miner's reward plan and
 minimum work for the child's subtree — and the child pushes back its current
 candidate for that tip whenever one of its inputs changes. Both messages
 carry a sequence that is monotonic per session; a lower one is dropped. The
+context also names the child block the tip's branch last committed into the
+child's directory (the nearest committer's commitment, so it follows the
+branch under a reorg): that is how a child learns it was carried, at push
+latency rather than evidence latency. The
 parent holds the latest candidate per child peer — a candidate it already
 holds on that session, or an older one, is dropped from the frame's head
 without decoding the block — and a template carries every held candidate
-built on
-its current tip's post-state, except a sibling of a child block this chain
-already carried (a candidate on the same child parent) that the child
-offered before this chain told it of the carry, on the session it was told
-on: that block already weighs
-at the child, and an uninformed sibling would only reorg the child's tip to
-the heavier carrier. A sibling the child offers after being told is
-carried; it is then the child's own choice. Nothing is requested at
+built on its current tip's post-state, except the block the branch already
+carries for that directory (a children-only carrier leaves the post-state,
+so that offer still fits; carried again it would only be credited once
+more). Nothing is requested at
 template time and no child can stall parent consensus. A child builds no
-candidate while its validate walk is stepping, while its validated tip is
-behind its weighed tip and the walk can still step (the request arms the
-walk), or while a candidate it built that the parent's evidence has named
-and still holds in its inbox is ready for or in its admission; it offers
-when the walk or the admission
-decides, on the tip it reached, and it rebuilds only when an input of the
-candidate changed.
+candidate while the block its parent's context names as carried is not yet
+admitted here (it asks for the parent's evidence index at once; a decision
+against that block releases the hold, so no offer waits on a block that
+will never land), while its validate walk is stepping, while its validated
+tip is behind its weighed tip and the walk can still step (the request arms
+the walk), or while a candidate it built that the parent's evidence has
+named and still holds in its inbox is ready for or in its admission; it
+offers when the walk or the admission decides, on the tip it reached, and
+it rebuilds only when an input of the candidate changed. A candidate built
+before the child knew of a carry would only be a sibling of the carried
+block: carried, it would reorg the child's tip to the heavier carrier, and
+at a fast parent the child could never get ahead of its own forks. Parent
+evidence re-served for a carrier whose admission already credited the block
+(a scan, a repeated hint) is not admitted again.
 Candidates are
 offers, not miner-work durability: the child keeps a candidate's content by
 its own bounded budget, oldest offer first, until the carried block's
