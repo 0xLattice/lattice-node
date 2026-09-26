@@ -168,6 +168,9 @@ jobs:
     env:
       E2E_TIME_SCALE: 3
       E2E_CTL: "1"
+      # Gated node traces; the failure artifacts carry both sides of every
+      # exchange instead of a one-line log.
+      LATTICE_SYNC_TRACE: "1"
     steps:
       - uses: actions/checkout@v4
 

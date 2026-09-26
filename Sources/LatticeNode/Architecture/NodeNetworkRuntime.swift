@@ -1657,7 +1657,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // will replace this target afterward.
         guard case .child(let childPath)? = hierarchyPeers[peerKey],
               let peer = hierarchySessions[peerKey],
-              childEvidenceReadyPeers.contains(peerKey) else { return }
+              childEvidenceReadyPeers.contains(peerKey) else {
+            SyncTrace.log("reservation flush skipped: child \(peerKey.hex.prefix(8)) absent or not ready")
+            return
+        }
         let accepted = await requestCandidateReservation(
             candidateCIDs: target.sorted(),
             handoffCIDs: handoffs.sorted(),
@@ -4110,14 +4113,21 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard let response = try?
                     ChildCandidateReservationResponseMessage.decoded(
                         message.payload
-                    ),
-                  let pending = pendingCandidateReservations[
+                    ) else {
+                SyncTrace.log("reservation response from \(childPath.joined(separator: "/")) dropped: undecodable")
+                return
+            }
+            guard let pending = pendingCandidateReservations[
                     response.requestID
                   ],
                   pending.peer.key == peer.key,
                   pending.peer.sessionID == peer.sessionID,
                   pending.childPath == childPath,
-                  response.childPath == childPath else { return }
+                  response.childPath == childPath else {
+                let pending = pendingCandidateReservations[response.requestID]
+                SyncTrace.log("reservation response from \(childPath.joined(separator: "/")) dropped: request \(response.requestID) pending=\(pending != nil) sameSession=\(pending?.peer.sessionID == peer.sessionID) path=\(response.childPath == childPath)")
+                return
+            }
             SyncTrace.log("reservation response from \(childPath.joined(separator: "/")): accepted=\(response.accepted)")
             finishCandidateReservation(
                 response.requestID,
@@ -6764,7 +6774,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard isCurrentRuntime(generation: generation, process: process),
               hierarchySessions[peer.key]?.sessionID == peer.sessionID,
               pendingCandidateReservations.count < Self.maximumPendingRequests
-        else { return false }
+        else {
+            SyncTrace.log("reservation request not sent to \(childPath.joined(separator: "/")): current=\(isCurrentRuntime(generation: generation, process: process)) session=\(hierarchySessions[peer.key]?.sessionID == peer.sessionID) pending=\(pendingCandidateReservations.count)")
+            return false
+        }
         let request = ChildCandidateReservationRequestMessage(
             requestID: makeRequestID(),
             childPath: childPath,
@@ -6791,6 +6804,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     payload: payload
                 )
                 guard case .enqueued = result else {
+                    SyncTrace.log("reservation request send failed to \(childPath.joined(separator: "/")): \(result)")
                     await self.finishCandidateReservation(
                         request.requestID,
                         accepted: false,
@@ -6817,7 +6831,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
             } catch {
                 return
             }
-            await self?.finishCandidateReservation(
+            guard let self else { return }
+            if await self.pendingCandidateReservations[requestID] != nil {
+                SyncTrace.log("reservation request \(requestID) timed out")
+            }
+            await self.finishCandidateReservation(
                 requestID,
                 accepted: false,
                 generation: generation

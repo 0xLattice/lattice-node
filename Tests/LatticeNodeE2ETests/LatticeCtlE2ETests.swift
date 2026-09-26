@@ -494,11 +494,11 @@ final class LatticeCtlE2ETests: XCTestCase {
 
         // 1. Seller locks 100 on the child, demanding 60 on the parent.
         let heightBeforeDeposit = await childHeight()
-        try await runCtl([
-            "tx", "deposit", "--chain", "Nexus/Market",
+        try await submitUntilAccepted("child accepts the deposit", host, [
+            "deposit", "--chain", "Nexus/Market",
             "--key", seller.file.path,
             "--swap-nonce", "7", "--demand", "60", "--lock", "100",
-        ], root: host.root)
+        ])
         try await waitFor("deposit mined on the child", seconds: 180) {
             let height = await childHeight()
             let drained = await mempoolDrained(childRPC)
@@ -507,11 +507,11 @@ final class LatticeCtlE2ETests: XCTestCase {
 
         // 2. Buyer pays the demanded 60 on the parent with a receipt. The
         // buyer's nonce follows its mined rewards; `tx` reads it from state.
-        try await runCtl([
-            "tx", "receipt", "--chain", "Nexus", "--key", buyer.file.path,
+        try await submitUntilAccepted("parent accepts the receipt", host, [
+            "receipt", "--chain", "Nexus", "--key", buyer.file.path,
             "--swap-nonce", "7", "--demand", "60",
             "--demander", seller.address, "--directory", "Market",
-        ], root: host.root)
+        ])
         try await waitFor("receipt mined on the parent", seconds: 180) {
             await mempoolDrained(host.nexusRPC)
         }
@@ -655,11 +655,11 @@ final class LatticeCtlE2ETests: XCTestCase {
 
         // 1. Seller locks 100 on the grandchild, demanding 60 on Market.
         let beforeDeposit = await height(stallsRPC)
-        try await runCtl([
-            "tx", "deposit", "--chain", "Nexus/Market/Stalls",
+        try await submitUntilAccepted("grandchild accepts the deposit", host, [
+            "deposit", "--chain", "Nexus/Market/Stalls",
             "--key", seller.file.path,
             "--swap-nonce", "9", "--demand", "60", "--lock", "100",
-        ], root: host.root)
+        ])
         try await waitFor("deposit mined on the grandchild", seconds: 240) {
             let now = await height(stallsRPC)
             let empty = await drained(stallsRPC)
