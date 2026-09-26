@@ -1217,6 +1217,39 @@ final class NodeStoreTests: XCTestCase {
         XCTAssertEqual(betaSummaries.first?.rootCID, carrierHeader.rawCID)
     }
 
+    /// A parent reserves, or hands off, the candidate it just carried. If
+    /// this chain has already ACCEPTED that block — a weighed admission lands
+    /// before the parent's request — the block itself satisfies the request:
+    /// accepted, not refused, nothing retained or marked. A candidate this
+    /// chain neither holds nor accepted is still refused.
+    func testAcceptedBlockSatisfiesAReservationForIt() async throws {
+        let store = try makeStore(chainPath: ["Nexus", "Child"])
+        let accepted = testCID("accepted-candidate")
+        let unknown = testCID("unknown-candidate")
+        try await store.stage(
+            blockBatch(postStateCID: "accepted-state", blockHash: accepted),
+            volumeRoots: []
+        )
+        let children = try await store.contextualCandidateChildren(candidateCIDs: [accepted])
+        XCTAssertEqual(children, [], "an accepted block's children are reconciled by its admission")
+        let reserved = try await store.replaceIssuedContextualCandidates(
+            [accepted], handoffs: [], capacity: 4
+        )
+        XCTAssertTrue(reserved, "reserved by acceptance")
+        let handedOff = try await store.replaceIssuedContextualCandidates(
+            [], handoffs: [accepted], capacity: 4
+        )
+        XCTAssertTrue(handedOff, "handed off by acceptance")
+        let rows = try await store.issuedContextualCandidateCIDs()
+        XCTAssertTrue(rows.isEmpty, "nothing retained or marked for it")
+        let refusedChildren = try await store.contextualCandidateChildren(candidateCIDs: [accepted, unknown])
+        XCTAssertNil(refusedChildren, "a candidate neither held nor accepted is refused")
+        let refused = try await store.replaceIssuedContextualCandidates(
+            [unknown], handoffs: [], capacity: 4
+        )
+        XCTAssertFalse(refused)
+    }
+
     func testIssuedCarrierEvidencePersistsProofAndLinkTogether() async throws {
         let path = temporaryDirectory().appendingPathComponent("state.db")
         let store = try makeStore(path: path, chainPath: ["Nexus", "Child"])

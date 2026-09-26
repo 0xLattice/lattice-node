@@ -717,6 +717,9 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         // genesis attachment. That is an ordering dependency, not malformed
         // genesis. Keep the authenticated candidate parked behind its direct
         // predecessor so ordinary same-chain wake-up admits it after bootstrap.
+        // Nothing is persisted for it: its evidence stays in the parent-evidence
+        // inbox, the one durable record of a block still to be admitted, until
+        // the admission that decides it.
         let bootstrapCandidate = try await Self.resolvedCandidate(
             blockHeader,
             fetcher: attemptFetcher
@@ -743,16 +746,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     sameChainPredecessor: nil
                 )
             }
-            let evidence = try await Self.canonicalCarrierEvidence(
-                blockHeader,
-                authenticatedPackage: authenticatedChildPackage,
-                fetcher: attemptFetcher
-            )
-            try await persistHierarchyArtifacts(
-                relayLink,
-                carrierEvidence: evidence,
-                pendingChildProofRoutes: pendingChildProofRoutes
-            )
             return NodeAdmissionOutcome(
                 decision: .unavailable(nil),
                 parentCarrierLink: relayLink,
@@ -875,6 +868,24 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             parentCarrierLink: link,
             sameChainPredecessor: nil
         )
+    }
+
+    /// Whether an admission decided the block: accepted (made durable by
+    /// `stage`), a duplicate of one, or refused on a verdict about its own
+    /// bytes — the grind that carried it missed this chain's target (a
+    /// carrier for deeper chains only, which merged mining produces every
+    /// round it clears only a deeper target), or the block violates the
+    /// protocol. Any other refusal is a deferral: evidence not yet held, a
+    /// rule not yet satisfied, a provider's or this node's own failure. A
+    /// deferral persists nothing; the block's evidence stays in the
+    /// parent-evidence inbox and is replayed on restart, so no stop or crash
+    /// between a deferral and its retry can lose a parent-carried block.
+    static func isDecided(_ result: ChainLocalBlockResult) -> Bool {
+        switch result {
+        case .accepted, .carrier, .duplicate: true
+        case .rejected(.protocolInvalid, _, _): true
+        case .rejected: false
+        }
     }
 
     func recoveredAuthenticatedChildPackage(
@@ -1143,7 +1154,11 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         // its content-verified carrier remains valid relay data for deeper
         // chains. Persist that relay with no genesis facts; a later duplicate
         // retry promotes the exact genesis facts after the predecessor connects.
+        // Only for a DECIDED block: persisting the relay consumes the block's
+        // parent-evidence inbox entry, the one durable record that it is still
+        // to be admitted, so a deferral persists nothing and keeps that entry.
         if (!admissionStaged || result.sameChainPredecessor != nil),
+           Self.isDecided(result),
            let link = result.parentCarrierLink {
             try await store.persistIssuedHierarchyArtifacts(
                 AdmissionHierarchyArtifacts(

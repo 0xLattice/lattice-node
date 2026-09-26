@@ -2713,8 +2713,15 @@ actor NodeStore {
                 "contextual candidate reservation is malformed"
             )
         }
-        var effectiveCandidateCIDs = candidateCIDs
-        for candidateCID in candidateCIDs.sorted() {
+        // A reservation for a candidate this chain has ACCEPTED is satisfied
+        // by the accepted block itself — durable under its admission batch,
+        // better held than any candidate — and its children are reconciled by
+        // that admission, not by this request. A weighed admission lands
+        // before the parent's reservation for the candidate it just carried,
+        // so the candidate row is already gone; refusing here would leave
+        // the parent never asking this chain for a candidate again.
+        var effectiveCandidateCIDs = try candidateCIDs.filter { !(try hasAcceptedBlock($0)) }
+        for candidateCID in effectiveCandidateCIDs.sorted() {
             guard try !database.query(
                 "SELECT 1 FROM contextual_candidates WHERE candidate_cid = ?1",
                 params: [.text(candidateCID)]
@@ -2824,20 +2831,24 @@ actor NodeStore {
     }
 
     func replaceIssuedContextualCandidates(
-        _ desired: Set<String>,
-        handoffs: Set<String> = [],
+        _ requestedDesired: Set<String>,
+        handoffs requestedHandoffs: Set<String> = [],
         capacity: Int
     ) async throws -> Bool {
         guard capacity > 0,
-              desired.count + handoffs.count <= capacity,
-              desired.isDisjoint(with: handoffs),
-              desired.union(handoffs).allSatisfy(CIDIdentity.isCanonical) else {
+              requestedDesired.count + requestedHandoffs.count <= capacity,
+              requestedDesired.isDisjoint(with: requestedHandoffs),
+              requestedDesired.union(requestedHandoffs).allSatisfy(CIDIdentity.isCanonical) else {
             throw NodeStoreError.invalidConfiguration(
                 "issued contextual candidate set is malformed"
             )
         }
         await acquirePreparedMutation()
         defer { releasePreparedMutation() }
+        // An accepted block satisfies a reservation or handoff for it (see
+        // `contextualCandidateChildren`): nothing to retain, nothing to mark.
+        let desired = try requestedDesired.filter { !(try hasAcceptedBlock($0)) }
+        let handoffs = try requestedHandoffs.filter { !(try hasAcceptedBlock($0)) }
         for candidateCID in desired {
             guard try !database.query(
                 "SELECT 1 FROM contextual_candidates WHERE candidate_cid = ?1",

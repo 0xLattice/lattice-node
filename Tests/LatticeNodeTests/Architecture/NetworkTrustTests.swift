@@ -5427,6 +5427,176 @@ final class NetworkTrustTests: XCTestCase {
         await runtime.stop()
     }
 
+    /// The restart the three-node smoke found, through the real acquirer and
+    /// the real merged-mining shape: the parent carried a block that commits
+    /// parent state — admitted eagerly it would first wait on a continuity
+    /// fact the parent had not served, the deferral whose only memory was
+    /// the process. The child died with the evidence in its inbox and nothing
+    /// else. On restart it must admit the block from the inbox alone, WEIGHED
+    /// on the verified proof, with the content served by the parent's session
+    /// — no announcement, no index entry, no push. Seeding the inbox eagerly
+    /// fails this (the admission waits on evidence); so does consuming the
+    /// inbox entry on the deferral.
+    func testRestartedChildAdmitsTheParentCarriedBlockFromItsInboxWeighed() async throws {
+        let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-carried-block-inbox-\(UUID().uuidString)", isDirectory: true
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storage) }
+        let parentKey = signingKey(0x9b)
+        let parentPeerKey = peerKey(parentKey)
+        let parentPort = NetworkTransportTestPorts.allocate()
+        let overlayPort = NetworkTransportTestPorts.allocate()
+        let hierarchyPort = NetworkTransportTestPorts.allocate()
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus", "Payments"],
+            storagePath: storage,
+            privateKeyHex: String(repeating: "9c", count: 32),
+            listenPort: overlayPort,
+            factListenPort: hierarchyPort,
+            rpcPort: NetworkTransportTestPorts.allocate(),
+            parentEndpoint: ParentEndpoint(publicKey: parentPeerKey.hex, host: "127.0.0.1", port: parentPort)
+        )
+        let source = NetworkTestContentStore()
+        try await LatticeState.emptyHeader.storeRecursively(storer: source)
+        let seed = ChildGenesisSeed(spec: NexusGenesis.spec, premineTo: nil, timestamp: 1)
+        let childGenesis = try await ChildGenesisBuilder.build(
+            seed: seed, chainPath: configuration.chainPath, fetcher: source
+        )
+        try await BlockHeader(node: childGenesis).storeBlock(fetcher: source, storer: source)
+        var process: ChainProcess? = try await ChainProcess.open(configuration: configuration)
+        let bootstrapped = try await process!.activateSeededChildGenesis(
+            seed: seed, confirmParentRecordedGenesis: { _ in true }
+        )
+        XCTAssertTrue(bootstrapped)
+        let genesis = try await process!.canonicalTipBlock()
+        // The merged-mining shape, against a real Nexus: the child block
+        // commits the carrier's pre-state (built against a provisional
+        // carrier on the same previous), so its parentState is Nexus's
+        // premined genesis state, not the empty header.
+        let nexusStorage = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-carried-block-nexus-\(UUID().uuidString)", isDirectory: true
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: nexusStorage) }
+        let nexus = try await ChainProcess.open(configuration: try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: nexusStorage,
+            privateKeyHex: String(repeating: "9d", count: 32),
+            listenPort: NetworkTransportTestPorts.allocate(),
+            factListenPort: NetworkTransportTestPorts.allocate(),
+            rpcPort: NetworkTransportTestPorts.allocate()
+        ))
+        let nexusGenesis = try await nexus.canonicalTipBlock()
+        try await BlockHeader(node: childGenesis).storeBlock(fetcher: source, storer: nexus)
+        let provisional = try await BlockBuilder.buildBlock(
+            previous: nexusGenesis, timestamp: 10, nonce: 0, fetcher: nexus
+        )
+        let carried = try await BlockBuilder.buildBlock(
+            previous: genesis, parentChainBlock: provisional, timestamp: 10, fetcher: nexus
+        )
+        let carriedHeader = try BlockHeader(node: carried)
+        XCTAssertNotEqual(carried.parentState.rawCID, LatticeState.emptyHeader.rawCID, "commits parent state")
+        try await carriedHeader.storeBlock(fetcher: nexus, storer: nexus)
+        let carrierCandidate = try await BlockBuilder.buildBlock(
+            previous: nexusGenesis, children: ["Payments": carried],
+            timestamp: 10, nonce: 0, fetcher: nexus
+        )
+        let carrier = try XCTUnwrap(BlockBuilder.mine(
+            block: carrierCandidate, target: min(nexusGenesis.nextTarget, carried.target), maxAttempts: 4_096
+        ))
+        let carrierHeader = try BlockHeader(node: carrier)
+        try await carrierHeader.storeBlock(fetcher: nexus, storer: nexus)
+        let proof = try await ChildBlockProof.generate(
+            rootHeader: carrierHeader, childDirectory: "Payments", fetcher: nexus
+        )
+        // The parent's session serves the block's content; this child does
+        // NOT hold it.
+        try await carriedHeader.storeBlock(fetcher: nexus, storer: source)
+        let package = AuthenticatedChildPackage(package: ChildValidationPackage(proof: proof))
+        let attachment = try ChildEvidenceVolume(
+            envelopeBytes: try ChildValidationPackageEnvelope(package.package).encode(),
+            childCID: carriedHeader.rawCID
+        )
+        // Served by the parent, retained — and the process dies before any
+        // admission attempt.
+        try await process!.retainParentEvidence(
+            sourceID: UUID().uuidString, ordinal: 1, attachment: attachment,
+            package: package, advanceScan: true
+        )
+        process = nil
+
+        let runtime = try NodeNetworkRuntime(
+            configuration: configuration,
+            planeConfigurations: try NodeNetworkPlaneConfigurations(
+                overlay: IvyConfig(
+                    signingKey: configuration.signingKey, listenPort: overlayPort,
+                    stunServers: [], mode: .overlay
+                ),
+                hierarchy: IvyConfig(
+                    signingKey: configuration.signingKey, listenPort: hierarchyPort,
+                    bootstrapPeers: [configuration.parentEndpoint!.ivy],
+                    inboundAdmissionBypassPeerKeys: [parentPeerKey],
+                    requestTimeout: .milliseconds(500), stunServers: [],
+                    maxConnections: IvyConfig.defaultMaxConnections,
+                    maxConnectionsPerNetgroup: IvyConfig.defaultMaxConnections,
+                    relayEnabled: false, privateContentExchangeEnabled: true,
+                    carriers: [], mode: .privateNetwork
+                )
+            )
+        )
+        let recovered = try await ChainProcess.open(configuration: configuration)
+        let admissions = NetworkEventRecorder()
+        let handlers = NodeNetworkHandlers(admission: { [weak recovered] admission in
+            guard let recovered else { throw CancellationError() }
+            let outcome = try await recovered.admit(
+                admission.header,
+                authenticatedChildPackage: admission.authenticatedChildPackage,
+                remoteSource: admission.contentSource,
+                mode: admission.weighed ? .weighed : .eager
+            )
+            await admissions.append(
+                "\(admission.header.rawCID):\(admission.weighed ? "weighed" : "eager"):\(outcome.decision.isAccepted)"
+            )
+            return outcome
+        })
+        let parentRecorder = HierarchyRetryRecorder()
+        let parent = Ivy(config: IvyConfig(
+            signingKey: parentKey, listenPort: parentPort, stunServers: [],
+            privateContentExchangeEnabled: true, mode: .privateNetwork
+        ))
+        let parentDelegate = HierarchyRetryPeer(
+            recorder: parentRecorder,
+            parentHello: try ChainHello(
+                nexusGenesisCID: configuration.nexusGenesisCID, chainPath: ["Nexus"]
+            ).encode(),
+            summary: nil
+        )
+        await parent.installTestDelegate(parentDelegate)
+        await parent.setContentSource(source)
+        do {
+            try await parent.start()
+            try await runtime.start(process: recovered, handlers: handlers)
+            try await waitUntil("the inbox block admitted weighed after restart", attempts: 1_500) {
+                (await admissions.snapshot()).contains("\(carriedHeader.rawCID):weighed:true")
+            }
+            // Weighed: in fork choice with its work (the weighed tip), not yet
+            // executed (the validated tip stays at genesis until the walk
+            // steps into it with the parent's continuity fact).
+            let tips = await recovered.metricsTipHeights()
+            XCTAssertEqual(tips.weighed, 1, "the carried block weighs")
+            XCTAssertEqual(tips.validated, 0, "and is not executed by arriving")
+            let weight = await recovered.subtreeWeight(of: carriedHeader.rawCID)
+            XCTAssertNotNil(weight)
+            let inbox = try await recovered.parentEvidenceInbox()
+            XCTAssertTrue(inbox.isEmpty, "decided: consumed")
+        } catch {
+            await parent.stop()
+            await runtime.stop()
+            throw error
+        }
+        await parent.stop()
+        await runtime.stop()
+    }
+
     func testConfiguredParentReconnectsWhenFirstHierarchyHelloIsWithheld()
         async throws {
         let fixture = try await hierarchyRetryFixture(

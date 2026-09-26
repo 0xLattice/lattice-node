@@ -780,6 +780,228 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertEqual(retainedAfter, retainedBefore)
     }
 
+    /// The loss the three-node smoke found: a parent-carried block whose
+    /// admission was deferred had its relay evidence persisted and its
+    /// parent-evidence inbox entry consumed in the same write, so the durable
+    /// record read "handled" while the retry lived only in memory. Now a
+    /// deferral persists nothing: the inbox entry — the one durable record of
+    /// a block still to be admitted — survives the restart, and the same
+    /// block is accepted once the rule is met. Deferred deterministically:
+    /// the block's clock is ahead of now, the same `notYetAdmissible` class.
+    func testDeferredCarriedBlockKeepsItsEvidenceInTheInboxAcrossRestart() async throws {
+        let fixture = try await childBootstrapFixture()
+        let parentSource = fixture.source
+        var process: ChainProcess? = try await ChainProcess.open(configuration: fixture.configuration)
+        let bootstrapped = try await process!.activateSeededChildGenesis(
+            seed: fixture.seed, confirmParentRecordedGenesis: { _ in true }
+        )
+        XCTAssertTrue(bootstrapped)
+        let genesis = try XCTUnwrap(fixture.childHeader.node)
+        let notYet = Int64(Date().timeIntervalSince1970 * 1_000) + 4_000
+        let carried = try await BlockBuilder.buildBlock(
+            previous: genesis, timestamp: notYet, nonce: 1, fetcher: parentSource
+        )
+        let carriedHeader = try BlockHeader(node: carried)
+        try await carriedHeader.storeBlock(fetcher: parentSource, storer: parentSource)
+        try await carriedHeader.storeBlock(fetcher: parentSource, storer: process!)
+        let parentCarrier = try await BlockBuilder.buildGenesis(
+            spec: NexusGenesis.spec, children: ["Payments": carried],
+            timestamp: 3, target: UInt256.max, fetcher: parentSource
+        )
+        let proof = try await ChildBlockProof.generate(
+            rootHeader: try BlockHeader(node: parentCarrier), childDirectory: "Payments",
+            fetcher: parentSource
+        )
+        let package = AuthenticatedChildPackage(package: ChildValidationPackage(proof: proof))
+        let attachment = try ChildEvidenceVolume(
+            envelopeBytes: try ChildValidationPackageEnvelope(package.package).encode(),
+            childCID: carriedHeader.rawCID
+        )
+        // The parent served it: it is in the inbox, as it would be live.
+        try await process!.retainParentEvidence(
+            sourceID: UUID().uuidString, ordinal: 1, attachment: attachment,
+            package: package, advanceScan: true
+        )
+
+        let deferred = try await process!.admit(
+            carriedHeader, authenticatedChildPackage: package,
+            remoteSource: parentSource, mode: .weighed
+        )
+        guard case .temporarilyInvalid = deferred.decision else {
+            return XCTFail("a block from the future is deferred, got \(deferred.decision)")
+        }
+        let inboxAfterDeferral = try await process!.parentEvidenceInbox()
+        XCTAssertEqual(inboxAfterDeferral.map(\.attachment.rawCID), [attachment.rawCID], "still to be admitted")
+        let relayAfterDeferral = try await process!.recoveredAuthenticatedChildPackage(
+            for: carriedHeader.rawCID, rootCID: proof.rootCID
+        )
+        XCTAssertNil(relayAfterDeferral, "nothing persisted for a deferral")
+
+        // The restart that used to lose it.
+        process = nil
+        process = try await ChainProcess.open(configuration: fixture.configuration)
+        let inboxAfterRestart = try await process!.parentEvidenceInbox()
+        XCTAssertEqual(inboxAfterRestart.map(\.attachment.rawCID), [attachment.rawCID], "the inbox is durable")
+        let replayed = try XCTUnwrap(inboxAfterRestart.first)
+        XCTAssertEqual(replayed.package.package.proof.rootCID, proof.rootCID)
+
+        try await Task.sleep(for: .milliseconds(4_300))
+        let accepted = try await process!.admit(
+            carriedHeader, authenticatedChildPackage: replayed.package,
+            remoteSource: parentSource, mode: .weighed
+        )
+        XCTAssertTrue(accepted.decision.isAccepted, "\(accepted.decision)")
+        let inboxAfterAcceptance = try await process!.parentEvidenceInbox()
+        XCTAssertTrue(inboxAfterAcceptance.isEmpty, "decided: consumed")
+        let relayAfterAcceptance = try await process!.recoveredAuthenticatedChildPackage(
+            for: carriedHeader.rawCID, rootCID: proof.rootCID
+        )
+        XCTAssertNotNil(relayAfterAcceptance, "decided: relayed")
+    }
+
+    /// The other half of what merged mining produces: a carrier whose grind
+    /// cleared a deeper chain's target but not this one's. That is a
+    /// decision about the block's bytes, so its evidence is relayed (deeper
+    /// chains need it) and its inbox entry consumed — on this open and the
+    /// next, so a restart never re-admits every such carrier in history.
+    func testCarrierRefusedForGoodIsDecidedAndConsumed() async throws {
+        let fixture = try await childBootstrapFixture()
+        let parentSource = fixture.source
+        var process: ChainProcess? = try await ChainProcess.open(configuration: fixture.configuration)
+        let bootstrapped = try await process!.activateSeededChildGenesis(
+            seed: fixture.seed, confirmParentRecordedGenesis: { _ in true }
+        )
+        XCTAssertTrue(bootstrapped)
+        let genesis = try XCTUnwrap(fixture.childHeader.node)
+        let carried = try await BlockBuilder.buildBlock(
+            previous: genesis, timestamp: 2, target: UInt256(1) << 8, nonce: 1,
+            fetcher: parentSource
+        )
+        let carriedHeader = try BlockHeader(node: carried)
+        try await carriedHeader.storeBlock(fetcher: parentSource, storer: parentSource)
+        try await carriedHeader.storeBlock(fetcher: parentSource, storer: process!)
+        let parentCarrier = try await BlockBuilder.buildGenesis(
+            spec: NexusGenesis.spec, children: ["Payments": carried],
+            timestamp: 3, target: UInt256.max, fetcher: parentSource
+        )
+        let proof = try await ChildBlockProof.generate(
+            rootHeader: try BlockHeader(node: parentCarrier), childDirectory: "Payments",
+            fetcher: parentSource
+        )
+        let package = AuthenticatedChildPackage(package: ChildValidationPackage(proof: proof))
+        let attachment = try ChildEvidenceVolume(
+            envelopeBytes: try ChildValidationPackageEnvelope(package.package).encode(),
+            childCID: carriedHeader.rawCID
+        )
+        try await process!.retainParentEvidence(
+            sourceID: UUID().uuidString, ordinal: 1, attachment: attachment,
+            package: package, advanceScan: true
+        )
+        let refused = try await process!.admit(
+            carriedHeader, authenticatedChildPackage: package,
+            remoteSource: parentSource, mode: .weighed
+        )
+        guard case .carrier = refused.decision else {
+            return XCTFail("a grind that misses this chain's target is a carrier, got \(refused.decision)")
+        }
+        let inbox = try await process!.parentEvidenceInbox()
+        XCTAssertTrue(inbox.isEmpty, "decided: consumed")
+        let relay = try await process!.recoveredAuthenticatedChildPackage(
+            for: carriedHeader.rawCID, rootCID: proof.rootCID
+        )
+        XCTAssertNotNil(relay, "decided: relayed for deeper chains")
+        process = nil
+        process = try await ChainProcess.open(configuration: fixture.configuration)
+        let inboxAfterRestart = try await process!.parentEvidenceInbox()
+        XCTAssertTrue(inboxAfterRestart.isEmpty, "not re-admitted on restart")
+    }
+
+    /// Out-of-order arrival: the parent carried B1 then B2 (B2 on B1), and
+    /// B2's evidence reaches this chain first. Whatever the first admission
+    /// makes of B2 — a side block awaiting its predecessor, or a deferral
+    /// kept in the inbox — once B1 arrives both are accepted and B1's
+    /// subtree weight counts B2, which committed to it: the work of blocks
+    /// built on top of a late block is never lost to the order they came in.
+    func testOutOfOrderCarriedBlocksWeighTheirDescendants() async throws {
+        let fixture = try await childBootstrapFixture()
+        let parentSource = fixture.source
+        let process = try await ChainProcess.open(configuration: fixture.configuration)
+        let bootstrapped = try await process.activateSeededChildGenesis(
+            seed: fixture.seed, confirmParentRecordedGenesis: { _ in true }
+        )
+        XCTAssertTrue(bootstrapped)
+        let genesis = try XCTUnwrap(fixture.childHeader.node)
+        let first = try await BlockBuilder.buildBlock(
+            previous: genesis, timestamp: 2, nonce: 1, fetcher: parentSource
+        )
+        let firstHeader = try BlockHeader(node: first)
+        try await firstHeader.storeBlock(fetcher: parentSource, storer: parentSource)
+        let second = try await BlockBuilder.buildBlock(
+            previous: first, timestamp: 3, nonce: 2, fetcher: parentSource
+        )
+        let secondHeader = try BlockHeader(node: second)
+        try await secondHeader.storeBlock(fetcher: parentSource, storer: parentSource)
+        func evidence(for block: Block, header: BlockHeader, timestamp: Int64, ordinal: UInt64) async throws
+            -> AuthenticatedChildPackage {
+            let carrier = try await BlockBuilder.buildGenesis(
+                spec: NexusGenesis.spec, children: ["Payments": block],
+                timestamp: timestamp, target: UInt256.max, fetcher: parentSource
+            )
+            let proof = try await ChildBlockProof.generate(
+                rootHeader: try BlockHeader(node: carrier), childDirectory: "Payments",
+                fetcher: parentSource
+            )
+            let package = AuthenticatedChildPackage(package: ChildValidationPackage(proof: proof))
+            try await process.retainParentEvidence(
+                sourceID: "00000000-0000-4000-8000-000000000001", ordinal: ordinal,
+                attachment: try ChildEvidenceVolume(
+                    envelopeBytes: try ChildValidationPackageEnvelope(package.package).encode(),
+                    childCID: header.rawCID
+                ),
+                package: package, advanceScan: true
+            )
+            return package
+        }
+        let firstPackage = try await evidence(for: first, header: firstHeader, timestamp: 3, ordinal: 1)
+        let secondPackage = try await evidence(for: second, header: secondHeader, timestamp: 4, ordinal: 2)
+
+        // B2 first. Its predecessor is not held: either a side block awaiting
+        // it, or a deferral — in both cases the requirement names B1, and in
+        // neither is the evidence lost.
+        let early = try await process.admit(
+            secondHeader, authenticatedChildPackage: secondPackage,
+            remoteSource: parentSource, mode: .weighed
+        )
+        XCTAssertEqual(early.sameChainPredecessor?.predecessorCID, firstHeader.rawCID)
+        if !early.decision.isAccepted {
+            let inbox = try await process.parentEvidenceInbox()
+            XCTAssertTrue(inbox.contains { $0.ordinal == 2 }, "a deferred B2 stays in the inbox")
+        }
+        // B1 arrives: accepted, and B2 with it (grafted, or re-admitted from
+        // the inbox as the acquirer would on the predecessor's arrival).
+        let late = try await process.admit(
+            firstHeader, authenticatedChildPackage: firstPackage,
+            remoteSource: parentSource, mode: .weighed
+        )
+        XCTAssertTrue(late.decision.isAccepted, "\(late.decision)")
+        if !early.decision.isAccepted {
+            let retry = try await process.admit(
+                secondHeader, authenticatedChildPackage: secondPackage,
+                remoteSource: parentSource, mode: .weighed
+            )
+            XCTAssertTrue(retry.decision.isAccepted, "\(retry.decision)")
+        }
+        let firstWeightValue = await process.subtreeWeight(of: firstHeader.rawCID)
+        let secondWeightValue = await process.subtreeWeight(of: secondHeader.rawCID)
+        let firstWeight = try XCTUnwrap(firstWeightValue)
+        let secondWeight = try XCTUnwrap(secondWeightValue)
+        XCTAssertGreaterThan(firstWeight, secondWeight, "B1 weighs its own work plus B2's, which committed to it")
+        let tips = await process.metricsTipHeights()
+        XCTAssertEqual(tips.weighed, 2, "fork choice sees both, in order, whatever order they came")
+        let inbox = try await process.parentEvidenceInbox()
+        XCTAssertTrue(inbox.isEmpty, "both decided: consumed")
+    }
+
     func testSuccessorAttachmentWaitsForChildGenesis() async throws {
         let fixture = try await childBootstrapFixture()
         let parentSource = fixture.source
@@ -838,11 +1060,15 @@ final class ChainProcessTests: XCTestCase {
         )
         XCTAssertEqual(early.parentCarrierLink?.carrierCID, successorHeader.rawCID)
         XCTAssertEqual(early.parentCarrierLink?.rootCID, proof.rootCID)
+        // A deferral decides nothing, so nothing is persisted for it: the
+        // block's evidence stays in the parent-evidence inbox (the one durable
+        // record of a block still to be admitted), never as relay rows that
+        // would read as "handled".
         let retainedRelay = try await process.recoveredAuthenticatedChildPackage(
             for: successorHeader.rawCID,
             rootCID: proof.rootCID
         )
-        XCTAssertEqual(retainedRelay?.package.proof.rootCID, proof.rootCID)
+        XCTAssertNil(retainedRelay, "a deferred block persists no relay evidence")
 
         let bootstrapped = try await process.activateSeededChildGenesis(
             seed: fixture.seed,

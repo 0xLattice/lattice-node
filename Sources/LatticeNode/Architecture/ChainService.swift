@@ -1493,26 +1493,45 @@ public actor ChainService {
         guard desired.count == update.candidateCIDs.count,
               handoffs.count == update.handoffCIDs.count,
               desired.count + handoffs.count <= Self.templateCapacity,
-              desired.isDisjoint(with: handoffs),
-              let reservedChildren = try? await process
-                .contextualCandidateChildren(
-                candidateCIDs: desired
-              ),
-              let handoffChildren = try? await process
-                .contextualCandidateChildren(candidateCIDs: handoffs),
-              await childCandidateReservationReconciler(
-                ChildCandidateReservationUpdate(
-                    reservations: reservedChildren,
-                    handoffs: handoffChildren
-                )
-              ) else {
+              desired.isDisjoint(with: handoffs) else {
+            SyncTrace.log("reservation refused: malformed set")
             return false
         }
-        return (try? await process.replaceIssuedContextualCandidates(
+        guard let reservedChildren = try? await process
+                .contextualCandidateChildren(candidateCIDs: desired) else {
+            SyncTrace.log("reservation refused: unknown reserved candidate")
+            return false
+        }
+        guard let handoffChildren = try? await process
+                .contextualCandidateChildren(candidateCIDs: handoffs) else {
+            SyncTrace.log("reservation refused: unknown handoff candidate")
+            return false
+        }
+        // Handoffs dominate: a child candidate already handed off to its
+        // chain is never demoted back to a reservation, so the two sets sent
+        // down are disjoint — the rule `ChildCandidateOwnership` applies to
+        // this chain's own template, applied to a request relayed from above.
+        // Both derivations include every durably handed-off candidate's
+        // children, so without this every request after a handoff would
+        // overlap and be refused, and the parent would stop asking.
+        let handoffSet = Set(handoffChildren)
+        let reservations = reservedChildren.filter { !handoffSet.contains($0) }
+        guard await childCandidateReservationReconciler(
+            ChildCandidateReservationUpdate(
+                reservations: sortedReservationReferences(reservations),
+                handoffs: sortedReservationReferences(handoffChildren)
+            )
+        ) else {
+            SyncTrace.log("reservation refused: downward reconciliation reservations=\(reservations.count) handoffs=\(handoffChildren.count)")
+            return false
+        }
+        let replaced = (try? await process.replaceIssuedContextualCandidates(
             desired,
             handoffs: handoffs,
             capacity: Self.templateCapacity
         )) == true
+        if !replaced { SyncTrace.log("reservation refused: store replacement") }
+        return replaced
     }
 
     private func reconcileCurrentCandidateReservations(
@@ -1557,12 +1576,19 @@ public actor ChainService {
         for context: ChildCandidateRequestContext,
         parentContentSource: any ContentSource
     ) async throws -> DirectChildCandidate {
-        try await miningCandidate(
-            parentCarrier: context.parentCarrier,
-            parentContentSource: parentContentSource,
-            rewards: context.rewards,
-            minimumWork: context.minimumWork
-        )
+        do {
+            let candidate = try await miningCandidate(
+                parentCarrier: context.parentCarrier,
+                parentContentSource: parentContentSource,
+                rewards: context.rewards,
+                minimumWork: context.minimumWork
+            )
+            SyncTrace.log("child candidate built h=\(candidate.block.height)")
+            return candidate
+        } catch {
+            SyncTrace.log("child candidate build failed: \(error)")
+            throw error
+        }
     }
 
     /// Hierarchy-only child candidate construction. The authenticated parent

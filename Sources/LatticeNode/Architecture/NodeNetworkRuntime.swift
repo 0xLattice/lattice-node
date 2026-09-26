@@ -855,9 +855,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     "durable parent evidence could not be replayed"
                 )
             }
+            // A parent-carried block is a network block: weighed on its
+            // proof, executed when fork choice would step into it.
             candidates.append(CandidateSeed(
                 blockCID: childCID,
-                package: item.package
+                package: item.package,
+                weighed: true
             ))
         }
         return candidates
@@ -1403,6 +1406,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard let directory = $0.2.last else { return false }
             return !context.excludedDirectories.contains(directory)
         }
+        SyncTrace.log("child candidates: asking \(children.map { $0.2.joined(separator: "/") }) of \(hierarchyPeers.count) hierarchy peers; ready=\(childEvidenceReadyPeers.count) dirty=\(dirtyCandidateReservationPeers.count) excluded=\(context.excludedDirectories.sorted())")
 
         var candidates: [(Int, DirectChildCandidate)] = []
         await withTaskGroup(of: (Int, DirectChildCandidate?).self) { group in
@@ -1549,6 +1553,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                   let peer = hierarchySessions[peerKey],
                   childEvidenceReadyPeers.contains(peerKey) else {
                 if !next.subtracting(previous).isEmpty {
+                    SyncTrace.log("reconcile refused: child peer \(peerKey.hex.prefix(8)) absent or not ready; additions=\(next.subtracting(previous).count)")
                     dirtyCandidateReservationPeers.insert(peerKey)
                     rejected = true
                     continue
@@ -1587,6 +1592,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     desiredCandidateReservations[attempt.peerKey] = attempt.target
                     dirtyCandidateReservationPeers.remove(attempt.peerKey)
                 } else {
+                    SyncTrace.log("reconcile refused: child \(attempt.peerKey.hex.prefix(8)) rejected \(attempt.target.count) reservations")
                     dirtyCandidateReservationPeers.insert(attempt.peerKey)
                     rejected = true
                 }
@@ -1816,6 +1822,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         } else {
             false
         }
+        SyncTrace.log("reservation answer: accepted=\(accepted) evidence=\(evidenceResult) allows=\(parentEvidence.allowsReservation(for: session, after: evidenceResult)) candidates=\(request.candidateCIDs.count) handoffs=\(request.handoffCIDs.count)")
         guard isCurrentRuntime(generation: generation, process: process),
               parentEvidenceSession(for: peer) == session,
               let payload = try? ChildCandidateReservationResponseMessage(
@@ -3735,7 +3742,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
             return .failed
         }
         return await enqueueRetainedParentCandidate(
-            CandidateSeed(blockCID: summary.childCID, package: gated),
+            // Weighed, like every network-sourced block: the verified proof is
+            // all the weighed tier needs, so the block enters fork choice with
+            // its work at once and is executed when the chain would step into
+            // it. Admitted eagerly it would first wait on a continuity fact —
+            // a deferral whose only memory was this process.
+            CandidateSeed(blockCID: summary.childCID, package: gated, weighed: true),
             generation: generation,
             process: process
         ) ? .handled : .failed
@@ -4102,6 +4114,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                   pending.peer.sessionID == peer.sessionID,
                   pending.childPath == childPath,
                   response.childPath == childPath else { return }
+            SyncTrace.log("reservation response from \(childPath.joined(separator: "/")): accepted=\(response.accepted)")
             finishCandidateReservation(
                 response.requestID,
                 accepted: response.accepted,
