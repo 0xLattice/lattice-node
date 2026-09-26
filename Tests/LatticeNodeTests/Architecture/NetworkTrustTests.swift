@@ -6343,8 +6343,10 @@ final class NetworkTrustTests: XCTestCase {
                 process: fixture.childProcess,
                 handlers: childHandlers
             )
+            // A restart pays a hello and the evidence handshake before the
+            // context is pushed and the offer comes back: a long bound.
             var again: [DirectChildCandidate] = []
-            for _ in 0..<250 {
+            for _ in 0..<1_500 {
                 again = await fixture.parentRuntime.directChildCandidates(fixture.context)
                 if !again.isEmpty { break }
                 try await Task.sleep(for: .milliseconds(20))
