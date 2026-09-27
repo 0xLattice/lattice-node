@@ -82,12 +82,13 @@ final class ParentChildE2ETests: XCTestCase {
         // Build a Nexus chain past the old retained-candidate cap (64): the
         // previous backward-gather sync could not hold more than 64 disconnected
         // blocks, so it never connected — height stayed 0 — for any chain deeper
-        // than that. Depth stays inside the first difficulty-retarget window
-        // (120) so mining does not become a retarget benchmark, and keeps the
-        // per-run mining cost bounded on slow CI. With a 64-CID forward page this
-        // depth still spans multiple pages, exercising the receiver's page-pump
-        // and the responder's hasMore across pages.
-        let depth: UInt64 = 70
+        // than that. It also spans several 64-CID forward pages, exercising the
+        // receiver's page-pump and the responder's hasMore across pages. Depth
+        // 400 because the #201 regression only shows past the supplier's
+        // per-peer request budget: the announced tip is admitted first, and a
+        // walk of its ancestry deeper than that budget (~200 plus refill)
+        // starts the cascade. At 70 the walk fits and the defect is invisible.
+        let depth: UInt64 = 400
         try source.start()
         _ = try await waitForNexus(source)
         for _ in 0..<depth {
@@ -110,6 +111,19 @@ final class ParentChildE2ETests: XCTestCase {
         ) { $0.phase == .active && $0.tipCID == tipCID }
         XCTAssertEqual(synced.height, depth)
         XCTAssertEqual(synced.tipCID, tipCID)
+        // Acquisition cost is linear in depth: a block admitted in order
+        // asks its supplier for a small constant. Admitting blocks ahead of
+        // their parents walked the missing ancestry per block — quadratic —
+        // which drained the supplier's request budget and paced deep syncs
+        // by the request timeout (#201). A count, not a wall clock, so a
+        // slow runner cannot hide it.
+        let remoteReads = try await joiner.metric(
+            "lattice_candidate_remote_reads_total"
+        )
+        XCTAssertLessThanOrEqual(
+            remoteReads, 4 * depth,
+            "\(remoteReads) supplier reads to acquire \(depth) blocks"
+        )
 
         try await cluster.stopAll()
         passed = true
@@ -2363,6 +2377,25 @@ private final class E2ENode {
 
     var rpcURL: URL {
         baseURL
+    }
+
+    /// One counter or gauge from the loopback `/metrics`, summed over its
+    /// samples. Throws when the scrape fails, so an assertion on the value
+    /// cannot pass against a node that is not answering.
+    func metric(_ name: String) async throws -> UInt64 {
+        var request = URLRequest(url: baseURL.appending(path: "/metrics"))
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = Self.requestTimeout
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw E2EHTTPError(status: 0, body: "metrics scrape failed")
+        }
+        var total: UInt64 = 0
+        for line in String(decoding: data, as: UTF8.self).split(separator: "\n")
+        where line.hasPrefix(name + "{") {
+            total += line.split(separator: " ").last.flatMap { UInt64($0) } ?? 0
+        }
+        return total
     }
 
     private func status() async throws -> ChainServiceStatusResponse {

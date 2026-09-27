@@ -20,6 +20,10 @@ struct NodeMetricsSample: Sendable {
     /// Validate-walk passes parked on a non-verdict (§9.9): a stall the
     /// operator must be able to see, since nothing re-arms it on its own.
     let executionWalkParked: UInt64
+    /// Content reads network block admission sent past local storage to a
+    /// candidate's supplier. A block admitted in order costs a small
+    /// constant; growth with chain depth per block is an acquisition defect.
+    let candidateRemoteReads: UInt64
 
     init(
         chainPath: [String],
@@ -30,7 +34,8 @@ struct NodeMetricsSample: Sendable {
         processStartTime: Date,
         parentReportsApplied: UInt64 = 0,
         parentReportRefusals: [String: UInt64] = [:],
-        executionWalkParked: UInt64 = 0
+        executionWalkParked: UInt64 = 0,
+        candidateRemoteReads: UInt64 = 0
     ) {
         self.chainPath = chainPath
         self.validatedTipHeight = validatedTipHeight
@@ -41,6 +46,7 @@ struct NodeMetricsSample: Sendable {
         self.parentReportsApplied = parentReportsApplied
         self.parentReportRefusals = parentReportRefusals
         self.executionWalkParked = executionWalkParked
+        self.candidateRemoteReads = candidateRemoteReads
     }
 }
 
@@ -89,6 +95,12 @@ func renderNodeMetrics(_ sample: NodeMetricsSample) -> String {
         "lattice_validate_walk_parked_total",
         "Validate-walk passes parked on a non-verdict (a stall nothing re-arms on its own).",
         [(chain, String(sample.executionWalkParked))],
+        type: "counter"
+    )
+    family(
+        "lattice_candidate_remote_reads_total",
+        "Content reads network block admission sent past local storage to a candidate's supplier.",
+        [(chain, String(sample.candidateRemoteReads))],
         type: "counter"
     )
     family(
