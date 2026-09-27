@@ -1,3 +1,4 @@
+import Foundation
 import Ivy
 
 /// Everything one plane holds for one peer key, as one value.
@@ -6,6 +7,8 @@ protocol PeerRecord {
     init()
     /// True when every field is unset; such a record is never stored.
     var isEmpty: Bool { get }
+    /// The session the record is bound to now, if any.
+    var liveSessionID: Data? { get }
 }
 
 /// The per-peer state of one network plane, keyed by `PeerKey`.
@@ -15,6 +18,12 @@ protocol PeerRecord {
 /// keys the separate per-field maps would hold. `remove` is the one place a
 /// disconnect drops a peer; `removeAll` hands every record back so the
 /// caller can cancel tasks and resume waiters it owns.
+///
+/// Only a session's establishment (connect, hello) creates a record, with
+/// `update`. Every other write goes through `update(session:)`, which
+/// touches only the record still bound to that session, or through
+/// `updateExisting`: neither creates one, so work that resumes after its
+/// session ended cannot bring the peer's key back.
 struct PeerSet<Record: PeerRecord> {
     /// Dictionary-backed: iteration is hash order, as the per-field maps
     /// were; nothing sorts it.
@@ -40,6 +49,30 @@ struct PeerSet<Record: PeerRecord> {
             records.removeValue(forKey: key)
         }
         return result
+    }
+
+    /// Mutates the record only while it is bound to `peer`'s session; nil
+    /// (and no record created) otherwise.
+    @discardableResult
+    mutating func update<T>(
+        session peer: AuthenticatedPeer,
+        _ body: (inout Record) throws -> T
+    ) rethrows -> T? {
+        guard records[peer.key]?.liveSessionID == peer.sessionID else {
+            return nil
+        }
+        return try update(peer.key, body)
+    }
+
+    /// Mutates the key's record if it has one; nil (and no record
+    /// created) otherwise.
+    @discardableResult
+    mutating func updateExisting<T>(
+        _ key: PeerKey,
+        _ body: (inout Record) throws -> T
+    ) rethrows -> T? {
+        guard records[key] != nil else { return nil }
+        return try update(key, body)
     }
 
     @discardableResult

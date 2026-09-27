@@ -9,8 +9,8 @@ import XCTest
 ///
 /// Only stored members of a type are checked (locals inside functions may
 /// build such collections). `ParentStateQueryGuard.peers` is allowlisted: it
-/// is one global capacity shared by both planes, released by its holder's
-/// `defer`, not per-peer state of either plane.
+/// is one global capacity shared by both planes, released by the hold its
+/// acquire returned, not per-peer state of either plane.
 ///
 /// Comment lines are skipped. Plain `XCTAssert` only (`XCTContext` is
 /// unavailable on corelibs XCTest).

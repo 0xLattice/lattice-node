@@ -72,7 +72,7 @@ struct RangeSync {
     /// previous sync can never alias a new sync's epoch.
     private var nextProgressEpoch: UInt64 = 0
     /// The re-entry probe armed after a clear.
-    var reentryTask: Task<Void, Never>?
+    var reentryTask = TaskSlot()
 
     mutating func advanceProgressEpoch() -> UInt64 {
         nextProgressEpoch &+= 1

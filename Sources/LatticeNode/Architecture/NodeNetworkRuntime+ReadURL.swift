@@ -20,7 +20,7 @@ extension NodeNetworkRuntime {
         if let inFlight = overlayState.readURLDiscovery.tasks[genesisCID] {
             return await inFlight.task.value
         }
-        let token = makeRequestID()
+        let token = LifetimeToken.next()
         let task = Task { [weak self] in
             await self?.performReadURLDiscovery(genesisCID: genesisCID) ?? []
         }

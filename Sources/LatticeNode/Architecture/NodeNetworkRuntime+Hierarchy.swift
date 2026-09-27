@@ -195,24 +195,31 @@ extension NodeNetworkRuntime {
         generation: UInt64,
         process: ChainProcess
     ) {
+        guard isCurrentRuntime(generation: generation, process: process) else {
+            return
+        }
         hierarchyState.parentTipPushDirty = true
-        guard hierarchyState.parentTipPushTask == nil else { return }
-        hierarchyState.parentTipPushTask = Task { [weak self] in
-            await self?.runParentTipPushes(
-                generation: generation,
-                process: process
-            )
+        hierarchyState.parentTipPushTask.start { token in
+            Task { [weak self] in
+                await self?.runParentTipPushes(
+                    token: token,
+                    generation: generation,
+                    process: process
+                )
+            }
         }
     }
 
     private func runParentTipPushes(
+        token: LifetimeToken,
         generation: UInt64,
         process: ChainProcess
     ) async {
         // A run cancelled by a stop that a restart followed must not clear
         // the restart's handle.
-        defer { if runtimeGeneration == generation { hierarchyState.parentTipPushTask = nil } }
+        defer { hierarchyState.parentTipPushTask.clear(token) }
         while hierarchyState.parentTipPushDirty, !Task.isCancelled,
+              hierarchyState.parentTipPushTask.holds(token),
               isCurrentRuntime(generation: generation, process: process) {
             hierarchyState.parentTipPushDirty = false
             await resendRefusedChildEvidenceHints(
@@ -241,17 +248,39 @@ extension NodeNetworkRuntime {
             guard isCurrentRuntime(generation: generation, process: process),
                   let peer = hierarchyState.hierarchyRecords[key]?.session,
                   isChildEvidenceReady(key) else { continue }
-            let sent = await hierarchy.sendMessage(
-                to: peer,
+            let sent = await sendToHierarchyPeer(
+                peer,
                 topic: NodeNetworkTopic.childEvidenceAvailable,
                 payload: payload
             )
             if case .enqueued = sent,
-               hierarchyState.hierarchyRecords[key]?.refusedHint == payload {
-                hierarchyState.hierarchyRecords.update(key) { $0.refusedHint = nil }
+               hierarchyState.hierarchyRecords.update(session: peer, {
+                   guard $0.refusedHint == payload else { return false }
+                   $0.refusedHint = nil
+                   return true
+               }) == true {
                 SyncTrace.log("child evidence announcement re-sent to \(key.hex.prefix(12))")
             }
         }
+    }
+
+    /// A send to a hierarchy session whose result a per-peer write
+    /// follows. The session may end while the send is suspended, so that
+    /// write goes through `update(session:)`, never `update`.
+    private func sendToHierarchyPeer(
+        _ peer: AuthenticatedPeer,
+        topic: String,
+        payload: Data
+    ) async -> SendMessageResult {
+        let sent = await hierarchy.sendMessage(
+            to: peer,
+            topic: topic,
+            payload: payload
+        )
+        #if DEBUG
+        await hierarchySendReturnedForTesting?(topic, sent)
+        #endif
+        return sent
     }
 
     private static func sameRewardPlan(
@@ -295,13 +324,15 @@ extension NodeNetworkRuntime {
             SyncTrace.log("parent tip push to \(childPath.joined(separator: "/")) not built")
             return
         }
-        let sent = await hierarchy.sendMessage(
-            to: peer,
+        let sent = await sendToHierarchyPeer(
+            peer,
             topic: NodeNetworkTopic.parentTipAvailable,
             payload: payload
         )
         if case .enqueued = sent {
-            hierarchyState.hierarchyRecords.update(peer.key) {
+            // The session may have ended while the send was suspended: the
+            // record, if any, belongs to it only while it is still live.
+            hierarchyState.hierarchyRecords.update(session: peer) {
                 $0.pushedSequence = SessionSequence(
                     sessionID: peer.sessionID, sequence: context.sequence
                 )
@@ -320,25 +351,30 @@ extension NodeNetworkRuntime {
         generation: UInt64,
         process: ChainProcess
     ) {
-        guard hierarchyState.receivedParentTip != nil,
+        guard isCurrentRuntime(generation: generation, process: process),
+              hierarchyState.receivedParentTip != nil,
               chain?.networkCapabilities.contains(.childCandidates) == true
         else { return }
         hierarchyState.candidateOfferDirty = true
-        guard hierarchyState.candidateOfferTask == nil else { return }
-        hierarchyState.candidateOfferTask = Task { [weak self] in
-            await self?.runCandidateOffers(
-                generation: generation,
-                process: process
-            )
+        hierarchyState.candidateOfferTask.start { token in
+            Task { [weak self] in
+                await self?.runCandidateOffers(
+                    token: token,
+                    generation: generation,
+                    process: process
+                )
+            }
         }
     }
 
     private func runCandidateOffers(
+        token: LifetimeToken,
         generation: UInt64,
         process: ChainProcess
     ) async {
-        defer { if runtimeGeneration == generation { hierarchyState.candidateOfferTask = nil } }
+        defer { hierarchyState.candidateOfferTask.clear(token) }
         while hierarchyState.candidateOfferDirty, !Task.isCancelled,
+              hierarchyState.candidateOfferTask.holds(token),
               isCurrentRuntime(generation: generation, process: process) {
             hierarchyState.candidateOfferDirty = false
             await offerCandidate(generation: generation, process: process)
@@ -359,9 +395,13 @@ extension NodeNetworkRuntime {
         // against the block, or a scan round that ends without it, releases
         // the hold (`releasedCarriedChildCID`), so no offer waits on a block
         // that will never land.
-        if let carried = hierarchyState.receivedParentTip?.carriedChildCID,
-           carried != hierarchyState.releasedCarriedChildCID,
-           !(await process.hasAcceptedBlock(carried)) {
+        let held = await heldCarriedBlock(
+            accepted: { await process.hasAcceptedBlock($0) }
+        )
+        guard isCurrentRuntime(generation: generation, process: process) else {
+            return
+        }
+        if let carried = held {
             markOfferDeferred()
             hierarchyState.carriedHoldCount += 1
             SyncTrace.log("candidate offer deferred: carried \(carried.prefix(12)) not yet admitted")
@@ -377,9 +417,11 @@ extension NodeNetworkRuntime {
         // own attempt. Offer once the admission decides or parks; the
         // drain re-arms the offer either way. An open gate also clears a
         // deferral the drain never got to read.
-        guard offerGate(
-            pendingHandoff: (try? await process.store.pendingHandoffChildCIDs()) ?? []
-        ) else {
+        let pendingHandoff = (try? await process.store.pendingHandoffChildCIDs()) ?? []
+        guard isCurrentRuntime(generation: generation, process: process) else {
+            return
+        }
+        guard offerGate(pendingHandoff: pendingHandoff) else {
             SyncTrace.log("candidate offer deferred: own carried candidate awaiting admission")
             return
         }
@@ -444,6 +486,12 @@ extension NodeNetworkRuntime {
             topic: NodeNetworkTopic.childCandidateAvailable,
             payload: payload
         )
+        // The parent session (or the runtime) may have ended while the send
+        // was suspended; its end reset the last-offered mark, which a late
+        // write would re-set against the next session.
+        guard isCurrentRuntime(generation: generation, process: process),
+              hierarchyState.hierarchyRecords[context.peer.key]?.session?.sessionID
+                == context.peer.sessionID else { return }
         if case .enqueued = sent {
             hierarchyState.lastOfferedCandidateCID = childCID
             SyncTrace.log("candidate offered \(hierarchyState.nextCandidateOfferSequence): h=\(candidate.block.height) for tip=\(context.tipCID.prefix(12))")
@@ -452,6 +500,18 @@ extension NodeNetworkRuntime {
             // last-offered mark is untouched so the retry is not deduplicated.
             SyncTrace.log("candidate offer not sent: \(sent)")
         }
+    }
+
+    /// The carried block the offer waits on, if any, decided on the state
+    /// that stands after the acceptance read: a release (an admission that
+    /// decided against the block) or a new context that lands while the
+    /// read is suspended is seen here, not lost until the next admission.
+    func heldCarriedBlock(
+        accepted: (String) async -> Bool
+    ) async -> String? {
+        guard let carried = carriedHoldBlockCID(),
+              !(await accepted(carried)) else { return nil }
+        return carriedHoldBlockCID() == carried ? carried : nil
     }
 
     /// The carrier a child builds against without a parent template: a block
@@ -601,7 +661,7 @@ extension NodeNetworkRuntime {
 
     private func finishParentEvidence(
         session: ParentEvidenceSession,
-        token: UInt64,
+        token: LifetimeToken,
         result: ParentEvidenceResult,
         peer: AuthenticatedPeer,
         generation: UInt64,
@@ -630,28 +690,27 @@ extension NodeNetworkRuntime {
     ) async -> Bool {
         guard !isChildEvidenceReady(peer.key) else { return true }
         return await withCheckedContinuation { continuation in
-            hierarchyState.hierarchyRecords.update(peer.key) {
-                $0.evidence.waiters.append(
-                    ChildEvidenceReadyWaiter(
-                        sessionID: peer.sessionID,
-                        continuation: continuation
-                    )
-                )
+            let waiter = ChildEvidenceReadyWaiter(
+                sessionID: peer.sessionID,
+                continuation: continuation
+            )
+            // A session that already ended has no record to wait in.
+            if hierarchyState.hierarchyRecords.update(session: peer, {
+                $0.evidence.waiters.append(waiter)
+            }) == nil {
+                continuation.resume(returning: false)
             }
         }
     }
 
     private func markChildEvidenceReady(_ peer: AuthenticatedPeer) {
-        guard hierarchyState.hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID else {
-            return
-        }
-        let waiters = hierarchyState.hierarchyRecords.update(peer.key) {
+        let waiters = hierarchyState.hierarchyRecords.update(session: peer) {
             record -> [ChildEvidenceReadyWaiter] in
             record.evidence.ready = true
             let waiters = record.evidence.waiters
             record.evidence.waiters = []
             return waiters
-        }
+        } ?? []
         for waiter in waiters {
             waiter.continuation.resume(
                 returning: waiter.sessionID == peer.sessionID
@@ -660,13 +719,13 @@ extension NodeNetworkRuntime {
     }
 
     private func cancelChildEvidenceReadyWaiters(for peerKey: PeerKey) {
-        let waiters = hierarchyState.hierarchyRecords.update(peerKey) {
+        let waiters = hierarchyState.hierarchyRecords.updateExisting(peerKey) {
             record -> [ChildEvidenceReadyWaiter] in
             record.evidence.clearFences()
             let waiters = record.evidence.waiters
             record.evidence.waiters = []
             return waiters
-        }
+        } ?? []
         for waiter in waiters {
             waiter.continuation.resume(returning: false)
         }
@@ -742,7 +801,7 @@ extension NodeNetworkRuntime {
             return hierarchyState.hierarchyRecords[key]?.session
         }
         for peer in bootstrappingPeers {
-            hierarchyState.hierarchyRecords.update(peer.key) { record in
+            hierarchyState.hierarchyRecords.update(session: peer) { record in
                 let count = record.evidence.publicationsInFlight(
                     for: peer.sessionID
                 ) ?? 0
@@ -800,8 +859,8 @@ extension NodeNetworkRuntime {
                 }
                 continue
             }
-            let result = await hierarchy.sendMessage(
-                to: peer,
+            let result = await sendToHierarchyPeer(
+                peer,
                 topic: NodeNetworkTopic.childEvidenceAvailable,
                 payload: payload
             )
@@ -813,7 +872,7 @@ extension NodeNetworkRuntime {
             case .enqueued:
                 // A newer hint delivered supersedes an older one refused:
                 // the scan its admission triggers serves the older entry.
-                hierarchyState.hierarchyRecords.update(peer.key) { $0.refusedHint = nil }
+                hierarchyState.hierarchyRecords.update(session: peer) { $0.refusedHint = nil }
                 if bootstrapping {
                     finishChildEvidencePublication(
                         to: peer,
@@ -839,7 +898,7 @@ extension NodeNetworkRuntime {
                 // an admission, so a refused hint left alone strands the
                 // entry until the next delivered one.
                 SyncTrace.log("child evidence announcement to \(childPath.joined(separator: "/")) not enqueued: \(result); re-sent on the next push run")
-                hierarchyState.hierarchyRecords.update(peer.key) { $0.refusedHint = payload }
+                hierarchyState.hierarchyRecords.update(session: peer) { $0.refusedHint = payload }
                 if bootstrapping {
                     finishChildEvidencePublication(
                         to: peer,
@@ -862,12 +921,12 @@ extension NodeNetworkRuntime {
         }
         if !permitsCleanup {
             SyncTrace.log("child evidence publication to \(peer.key.hex.prefix(8)) failed: session no longer becomes ready")
-            hierarchyState.hierarchyRecords.update(peer.key) {
+            hierarchyState.hierarchyRecords.update(session: peer) {
                 $0.evidence.markPublicationFailed(for: sessionID)
             }
         }
         if count == 1 {
-            hierarchyState.hierarchyRecords.update(peer.key) {
+            hierarchyState.hierarchyRecords.update(session: peer) {
                 $0.evidence.setPublicationsInFlight(0, for: sessionID)
             }
             if permitsCleanup,
@@ -879,7 +938,7 @@ extension NodeNetworkRuntime {
                 markChildEvidenceReady(peer)
             }
         } else {
-            hierarchyState.hierarchyRecords.update(peer.key) {
+            hierarchyState.hierarchyRecords.update(session: peer) {
                 $0.evidence.setPublicationsInFlight(count - 1, for: sessionID)
             }
         }
@@ -889,13 +948,10 @@ extension NodeNetworkRuntime {
         // Only the live session's fence: this runs after the index serve's
         // suspensions, and a fence for an ended session could never be
         // read again (nor could it mark anything ready).
-        guard hierarchyState.hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID else {
-            return
-        }
         let sessionID = peer.sessionID
-        hierarchyState.hierarchyRecords.update(peer.key) {
+        guard hierarchyState.hierarchyRecords.update(session: peer, {
             $0.evidence.markIndexComplete(for: sessionID)
-        }
+        }) != nil else { return }
         if hierarchyState.hierarchyRecords[peer.key]?.evidence
             .publicationsInFlight(for: sessionID) == nil,
            hierarchyState.hierarchyRecords[peer.key]?.evidence
@@ -1456,10 +1512,10 @@ extension NodeNetworkRuntime {
             guard let request = try?
                     ChildGenesisAnchorRequestMessage.decoded(message.payload),
                   let directory = childPath.last,
-                  parentStateQueryGuard.acquire(peer.key)
+                  let hold = parentStateQueryGuard.acquire(peer.key)
             else { return }
             defer {
-                parentStateQueryGuard.release(peer.key)
+                parentStateQueryGuard.release(hold)
             }
             // Read the CID the parent committed for this child's directory from
             // its own genesisState. Silence (not an error) when unanchored, so
@@ -1701,7 +1757,7 @@ extension NodeNetworkRuntime {
                 SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: stale sequence")
                 return
             }
-            hierarchyState.hierarchyRecords.update(peer.key) {
+            hierarchyState.hierarchyRecords.update(session: peer) {
                 $0.offer = CachedChildCandidate(
                     sequence: offer.sequence,
                     sessionID: peer.sessionID,
@@ -1846,19 +1902,20 @@ extension NodeNetworkRuntime {
         process: ChainProcess
     ) {
         guard isCurrentRuntime(generation: generation, process: process) else { return }
-        if hierarchyState.childProofRecoveryTask != nil {
-            if hierarchyState.childProofRecoveryGeneration == generation {
-                hierarchyState.childProofRecoveryNeedsRefresh = true
-            }
+        // Teardown empties the slot, so a task it holds is this generation's.
+        guard hierarchyState.childProofRecoveryTask.isEmpty else {
+            hierarchyState.childProofRecoveryNeedsRefresh = true
             return
         }
-        hierarchyState.childProofRecoveryGeneration = generation
         hierarchyState.childProofRecoveryNeedsRefresh = false
-        hierarchyState.childProofRecoveryTask = Task { [weak self] in
-            await self?.recoverChildProofs(
-                generation: generation,
-                process: process
-            )
+        hierarchyState.childProofRecoveryTask.start { token in
+            Task { [weak self] in
+                await self?.recoverChildProofs(
+                    token: token,
+                    generation: generation,
+                    process: process
+                )
+            }
         }
     }
 
@@ -1871,9 +1928,21 @@ extension NodeNetworkRuntime {
     }
 
     private func recoverChildProofs(
+        token: LifetimeToken,
         generation: UInt64,
         process: ChainProcess
     ) async {
+        defer {
+            if hierarchyState.childProofRecoveryTask.clear(token) {
+                hierarchyState.childProofRecoveryNeedsRefresh = false
+            }
+        }
+        // This pass still owns the recovery slot and its generation runs.
+        func current() -> Bool {
+            !Task.isCancelled
+                && hierarchyState.childProofRecoveryTask.holds(token)
+                && isCurrentRuntime(generation: generation, process: process)
+        }
         // Late-child backfill: a child that connected AFTER its carriers were
         // admitted — or whose carriers were recovered durably on restart rather
         // than re-admitted — has no pending proof route for those historical
@@ -1893,40 +1962,30 @@ extension NodeNetworkRuntime {
         ).sorted()
         for directory in connectedChildDirectories
         where !hierarchyState.backfilledChildDirectories.contains(directory) {
-            guard !Task.isCancelled,
-                  isCurrentRuntime(generation: generation, process: process) else {
-                break
-            }
+            guard current() else { return }
             await process.backfillChildProofRoutes(directory: directory)
             // Mark only after completion, so an interrupted backfill retries on
-            // the next recovery pass rather than being skipped as done.
+            // the next recovery pass rather than being skipped as done; and
+            // only while this pass is current, or a restart's set would
+            // record a backfill it never ran.
+            guard current() else { return }
             hierarchyState.backfilledChildDirectories.insert(directory)
         }
         repeat {
+            // The refresh flag is read and reset only by the pass that owns
+            // the slot: a stale pass would swallow the current one's.
+            guard current() else { return }
             hierarchyState.childProofRecoveryNeedsRefresh = false
-            guard !Task.isCancelled,
-                  isCurrentRuntime(generation: generation, process: process) else {
-                break
-            }
             await retryRecoveredChildProofs(
                 generation: generation,
                 process: process
             )
-            guard !Task.isCancelled,
-                  isCurrentRuntime(generation: generation, process: process) else {
-                break
-            }
+            guard current() else { return }
             await retryCurrentTipChildProofs(
                 generation: generation,
                 process: process
             )
-        } while hierarchyState.childProofRecoveryNeedsRefresh
-
-        guard hierarchyState.childProofRecoveryGeneration == generation,
-              self.process === process else { return }
-        hierarchyState.childProofRecoveryTask = nil
-        hierarchyState.childProofRecoveryGeneration = nil
-        hierarchyState.childProofRecoveryNeedsRefresh = false
+        } while current() && hierarchyState.childProofRecoveryNeedsRefresh
     }
 
     func scheduleHierarchyHelloDeadline(
@@ -1934,8 +1993,7 @@ extension NodeNetworkRuntime {
         generation: UInt64
     ) {
         removeHierarchyHelloDeadline(for: peer.key)?.task.cancel()
-        nextHelloDeadlineToken &+= 1
-        let token = nextHelloDeadlineToken
+        let token = LifetimeToken.next()
         let task = Timers.deadline(
             after: planeConfigurations.hierarchy.requestTimeout,
             generation: generation
@@ -1972,7 +2030,7 @@ extension NodeNetworkRuntime {
     private func hierarchyHelloTimedOut(
         peer: AuthenticatedPeer,
         generation: UInt64,
-        token: UInt64
+        token: LifetimeToken
     ) async {
         guard isCurrentGeneration(generation),
             isRunning,
@@ -2092,12 +2150,16 @@ extension NodeNetworkRuntime {
         process: ChainProcess
     ) {
         guard !configuration.address.isNexus,
-              hierarchyState.adoptedGenesisTask == nil else { return }
-        hierarchyState.adoptedGenesisTask = Task { [weak self] in
-            await self?.adoptedGenesisBootstrapLoop(
-                generation: generation,
-                process: process
-            )
+              isCurrentRuntime(generation: generation, process: process) else {
+            return
+        }
+        hierarchyState.adoptedGenesisTask.start { _ in
+            Task { [weak self] in
+                await self?.adoptedGenesisBootstrapLoop(
+                    generation: generation,
+                    process: process
+                )
+            }
         }
     }
 
@@ -2607,9 +2669,15 @@ extension NodeNetworkRuntime {
                 ordinal: cursor
             )
         } else {
-            guard let persisted = try? await fence.process
+            let persisted = try? await fence.process
                 .store.parentEvidenceScanCursor()
-            else {
+            // A stop while the cursor was read reset the round flags; a
+            // late write here would take the restart's.
+            guard isCurrentRuntime(
+                generation: fence.generation,
+                process: fence.process
+            ) else { return false }
+            guard let persisted else {
                 hierarchyState.evidenceRoundStarting = false
                 return died(pageRound)
             }

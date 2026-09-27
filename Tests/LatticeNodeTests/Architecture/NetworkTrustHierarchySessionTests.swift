@@ -30,13 +30,13 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         )
         var guardState = ParentStateQueryGuard(capacity: 1)
 
-        XCTAssertTrue(guardState.acquire(first))
-        XCTAssertFalse(guardState.acquire(first))
-        XCTAssertFalse(guardState.acquire(second))
-        XCTAssertEqual(guardState.peers, [first])
+        let held = try XCTUnwrap(guardState.acquire(first))
+        XCTAssertNil(guardState.acquire(first))
+        XCTAssertNil(guardState.acquire(second))
+        XCTAssertEqual(Set(guardState.peers.keys), [first])
 
-        guardState.release(first)
-        XCTAssertTrue(guardState.acquire(second))
+        guardState.release(held)
+        XCTAssertNotNil(guardState.acquire(second))
     }
 
     func testChainHelloPinsProtocolIdentityButNotLocalWorkFloor() throws {

@@ -164,7 +164,7 @@ extension NodeNetworkRuntime {
             var claimed: UInt64?
             if let claim = overlayState.overlayRecords[peer.key]?.announcedTip,
                claim.peer.sessionID == peer.sessionID {
-                overlayState.overlayRecords.update(peer.key) { $0.announcedTip = nil }
+                overlayState.overlayRecords.updateExisting(peer.key) { $0.announcedTip = nil }
                 claimed = claim.height
             }
             clearRangeSync()
@@ -291,7 +291,7 @@ extension NodeNetworkRuntime {
         guard let ancestor = response.commonAncestor else {
             SyncTrace.log("ancestor-range no-overlap peer=\(peer.key.hex.prefix(8))")
             if overlayState.overlayRecords[peer.key]?.announcedTip?.peer.sessionID == peer.sessionID {
-                overlayState.overlayRecords.update(peer.key) { $0.announcedTip = nil }
+                overlayState.overlayRecords.updateExisting(peer.key) { $0.announcedTip = nil }
             }
             clearRangeSync()
             return
@@ -334,7 +334,7 @@ extension NodeNetworkRuntime {
             var claimed: UInt64?
             if let claim = overlayState.overlayRecords[peer.key]?.announcedTip,
                claim.peer.sessionID == peer.sessionID {
-                overlayState.overlayRecords.update(peer.key) { $0.announcedTip = nil }
+                overlayState.overlayRecords.updateExisting(peer.key) { $0.announcedTip = nil }
                 claimed = claim.height
             }
             clearRangeSync()
@@ -440,7 +440,7 @@ extension NodeNetworkRuntime {
             // peer can drive catch-up instead.
             if overlayState.overlayRecords[current.peer.key]?.announcedTip?.peer.sessionID
                 == current.peer.sessionID {
-                overlayState.overlayRecords.update(current.peer.key) { $0.announcedTip = nil }
+                overlayState.overlayRecords.updateExisting(current.peer.key) { $0.announcedTip = nil }
             }
             clearRangeSync()
             return
@@ -503,21 +503,27 @@ extension NodeNetworkRuntime {
     /// still far behind would idle forever. Re-entry is the receiver's own
     /// assessment, probed one request-timeout after each clear.
     private func scheduleRangeSyncReentry() {
-        guard overlayState.rangeSync.reentryTask == nil, !recordedAnnouncedTips.isEmpty else {
+        guard overlayState.rangeSync.reentryTask.isEmpty, !recordedAnnouncedTips.isEmpty else {
             return
         }
         let generation = runtimeGeneration
-        overlayState.rangeSync.reentryTask = Timers.deadline(
-            after: planeConfigurations.overlay.requestTimeout,
-            generation: generation
-        ) { [weak self] generation in
-            await self?.maybeRestartRangeSync(generation: generation)
+        let delay = planeConfigurations.overlay.requestTimeout
+        overlayState.rangeSync.reentryTask.start { token in
+            Timers.deadline(
+                after: delay,
+                generation: generation
+            ) { [weak self] generation in
+                await self?.maybeRestartRangeSync(generation: generation, token: token)
+            }
         }
     }
 
-    private func maybeRestartRangeSync(generation: UInt64) async {
-        overlayState.rangeSync.reentryTask = nil
-        guard isCurrentGeneration(generation), isRunning,
+    /// Only the probe the slot still holds runs: a probe that outlived a
+    /// stop, while the restart armed its own, neither empties the newer
+    /// handle nor probes a second time.
+    func maybeRestartRangeSync(generation: UInt64, token: LifetimeToken) async {
+        guard overlayState.rangeSync.reentryTask.clear(token),
+              isCurrentGeneration(generation), isRunning,
               overlayState.rangeSync.state == nil, let process else { return }
         let ourHeight = await fetchedHeight(process)
         guard isCurrentRuntime(generation: generation, process: process),

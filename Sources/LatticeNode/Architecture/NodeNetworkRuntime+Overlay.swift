@@ -112,7 +112,7 @@ extension NodeNetworkRuntime {
             guard isCurrentRuntime(generation: generation, process: process),
                   expectsOverlayHello(from: peer) else { return }
             removeOverlayHelloDeadline(for: peer.key)?.task.cancel()
-            overlayState.overlayRecords.update(peer.key) { $0.session = .ready(peer) }
+            overlayState.overlayRecords.update(session: peer) { $0.session = .ready(peer) }
             // Advertise the ACQUIRED (canonical, weighed-inclusive) tip: every
             // receiver measures its gap, its range-sync target and its edge
             // against acquired heights, so advertising the validated tip would
@@ -246,9 +246,9 @@ extension NodeNetworkRuntime {
                         sessionLeases.servingReadEndpoints.remove(peer.sessionID)
                     }
                 }
-                if parentStateQueryGuard.acquire(peer.key) {
+                if let hold = parentStateQueryGuard.acquire(peer.key) {
                     defer {
-                        parentStateQueryGuard.release(peer.key)
+                        parentStateQueryGuard.release(hold)
                     }
                     urls = await declaredReadURLs(
                         genesisCID: request.genesisCID,
@@ -310,7 +310,7 @@ extension NodeNetworkRuntime {
                     if announced > known
                         || overlayState.overlayRecords[peer.key]?.announcedTip?.peer.sessionID
                             != peer.sessionID {
-                        overlayState.overlayRecords.update(peer.key) {
+                        overlayState.overlayRecords.update(session: peer) {
                             $0.announcedTip = (announced, peer)
                         }
                     }
@@ -429,7 +429,7 @@ extension NodeNetworkRuntime {
                 return
             }
             pull.requestID = nil
-            overlayState.overlayRecords.update(peer.key) { $0.frontierPull = pull }
+            overlayState.overlayRecords.update(session: peer) { $0.frontierPull = pull }
             SyncTrace.log(
                 "frontier page peer=\(peer.key.hex.prefix(8)) "
                     + "leaves=\(response.blockCIDs.count)"
@@ -1039,20 +1039,25 @@ extension NodeNetworkRuntime {
     }
 
     private func startPortableEvidenceWorker() {
-        guard overlayState.portableEvidenceWorker == nil else { return }
-        overlayState.portableEvidenceWorker = Task { [weak self] in
-            await self?.drainPortableEvidence()
+        overlayState.portableEvidenceWorker.start { token in
+            Task { [weak self] in
+                await self?.drainPortableEvidence(token: token)
+            }
         }
     }
 
-    private func drainPortableEvidence() async {
+    /// Drains while the slot still holds this worker: one stopped by a
+    /// stop, and replaced by the restart's, neither drains the new queue
+    /// nor empties the new worker's handle.
+    func drainPortableEvidence(token: LifetimeToken) async {
         defer {
-            overlayState.portableEvidenceWorker = nil
-            if !sessionLeases.portableEvidenceOrder.isEmpty {
+            if overlayState.portableEvidenceWorker.clear(token),
+               !sessionLeases.portableEvidenceOrder.isEmpty {
                 startPortableEvidenceWorker()
             }
         }
-        while !sessionLeases.portableEvidenceOrder.isEmpty {
+        while overlayState.portableEvidenceWorker.holds(token),
+              !sessionLeases.portableEvidenceOrder.isEmpty {
             let lease = sessionLeases.portableEvidenceOrder.removeFirst()
             guard let work = sessionLeases.portableEvidenceWork.removeValue(forKey: lease)
             else { continue }
@@ -1228,8 +1233,7 @@ extension NodeNetworkRuntime {
         generation: UInt64
     ) {
         removeOverlayHelloDeadline(for: peer.key)?.task.cancel()
-        nextHelloDeadlineToken &+= 1
-        let token = nextHelloDeadlineToken
+        let token = LifetimeToken.next()
         let task = Timers.deadline(
             after: planeConfigurations.overlay.requestTimeout,
             generation: generation
@@ -1240,7 +1244,7 @@ extension NodeNetworkRuntime {
                 token: token
             )
         }
-        overlayState.overlayRecords.update(peer.key) {
+        overlayState.overlayRecords.update(session: peer) {
             $0.helloDeadline = HelloDeadline(
                 token: token,
                 sessionID: peer.sessionID,
@@ -1257,14 +1261,14 @@ extension NodeNetworkRuntime {
     private func overlayHelloTimedOut(
         peer: AuthenticatedPeer,
         generation: UInt64,
-        token: UInt64
+        token: LifetimeToken
     ) async {
         guard isCurrentGeneration(generation), isRunning,
               overlayState.overlayRecords[peer.key]?.helloDeadline?.token == token,
               overlayState.overlayRecords[peer.key]?.helloDeadline?.sessionID == peer.sessionID,
               overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID != peer.sessionID else { return }
         removeOverlayHelloDeadline(for: peer.key)
-        overlayState.overlayRecords.update(peer.key) { record in
+        overlayState.overlayRecords.update(session: peer) { record in
             if case .awaitingHello? = record.session { record.session = nil }
         }
         await overlay.recycleSession(ifCurrent: peer)
@@ -1310,7 +1314,7 @@ extension NodeNetworkRuntime {
             requestID: requestID,
             afterCID: nil
         ).encoded() else { return }
-        overlayState.overlayRecords.update(peer.key) {
+        overlayState.overlayRecords.update(session: peer) {
             $0.frontierPull = FrontierPull(
                 sessionID: peer.sessionID,
                 requestID: requestID
