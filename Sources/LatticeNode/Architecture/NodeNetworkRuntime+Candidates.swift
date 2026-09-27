@@ -52,6 +52,12 @@ extension NodeNetworkRuntime {
         blockFetcher.tracks(blockCID)
     }
 
+    /// Seam: whether an attempt for the block was seeded with the configured
+    /// parent's evidence (in whatever state).
+    func fetcherHasParentAttempt(_ blockCID: String) -> Bool {
+        blockFetcher.hasParentAttempt(blockCID)
+    }
+
     /// Seam: the candidate offer's gate against admission. Deferred while
     /// any of `pendingHandoff` (own candidates the parent names as carried)
     /// is ready for or in its admission: the flag is set and the admission
@@ -89,6 +95,28 @@ extension NodeNetworkRuntime {
         if blockFetcher.hasReadyCandidate {
             startCandidateWorker()
         }
+        reviewCarriedHoldIfParentAttemptLeft()
+    }
+
+    /// Every fetcher change passes here: when the carried block's last
+    /// parent-backed attempt leaves the fetcher (completed, expired, or
+    /// evicted for capacity), the hold is reviewed.
+    private func reviewCarriedHoldIfParentAttemptLeft() {
+        let carried = carriedHoldBlockCID()
+        let backed = carried.flatMap {
+            blockFetcher.hasParentAttempt($0) ? $0 : nil
+        }
+        defer { parentBackedCarriedCID = backed }
+        guard let carried, backed == nil,
+              parentBackedCarriedCID == carried,
+              let process else { return }
+        let generation = runtimeGeneration
+        Task { [weak self] in
+            await self?.reviewCarriedChildHold(
+                endedRound: nil,
+                generation: generation, process: process
+            )
+        }
     }
 
     private func startCandidateWorker() {
@@ -119,6 +147,14 @@ extension NodeNetworkRuntime {
                 process: process
             ) else { return }
             serviceBlockFetcher()
+            // The carried block's attempt completed (parked or left the
+            // fetcher): the hold is reviewed now, not only when a round ends.
+            if candidate.blockCID == carriedHoldBlockCID() {
+                await reviewCarriedChildHold(
+                    endedRound: nil,
+                    generation: generation, process: process
+                )
+            }
             // An offer deferred behind an admission is owed a look whatever
             // that admission decided: an acceptance reports a state change,
             // a park reports nothing. Only then; an admission a peer drove
@@ -454,7 +490,10 @@ extension NodeNetworkRuntime {
         // authenticates only parent facts and never vouches for the child
         // transition. "Blame" is a per-root routing suppression, never a ban.
         SyncTrace.log("admit \(candidate.blockCID.prefix(12)) weighed=\(candidate.weighed) decision=\(outcome.decision)")
-        if !outcome.decision.isAccepted,
+        // Only the parent's evidence decides for the hold: an overlay-seeded
+        // attempt decided against (a forged package, say) says nothing.
+        if candidate.fromParent,
+           !outcome.decision.isAccepted,
            !outcome.decision.shouldRetryWhenEvidenceChanges,
            !outcome.decision.shouldRetryLater {
             releaseCarriedHold(ifCarried: candidate.blockCID)

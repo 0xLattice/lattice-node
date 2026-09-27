@@ -54,6 +54,9 @@ struct BlockFetcher {
         /// fork choice on verified work without executing it. Set for every
         /// network-sourced candidate; eager-wins (see `Seed.weighed`).
         let weighed: Bool
+        /// A package for this attempt came from the configured parent's
+        /// evidence (see `Seed.fromParent`).
+        let fromParent: Bool
     }
 
     struct Seed: Sendable {
@@ -67,13 +70,18 @@ struct BlockFetcher {
         /// self-admit path needs executed now. A predecessor park seeds the
         /// missing ancestor on its descendant's tier.
         let weighed: Bool
+        /// The package is the configured parent's evidence (its scan, its
+        /// push, or its durable inbox), not an overlay peer's. Monotone:
+        /// once a parent seed touches an attempt it stays parent-backed.
+        let fromParent: Bool
 
         init(
             blockCID: String,
             package: AuthenticatedChildPackage?,
             recoveryRootCID: String? = nil,
             provider: CandidateProvider? = nil,
-            weighed: Bool = false
+            weighed: Bool = false,
+            fromParent: Bool = false
         ) {
             self.blockCID = blockCID
             self.package = package
@@ -81,6 +89,7 @@ struct BlockFetcher {
                 ?? recoveryRootCID
             self.provider = provider
             self.weighed = weighed
+            self.fromParent = fromParent && package != nil
         }
     }
 
@@ -116,6 +125,8 @@ struct BlockFetcher {
         /// of a park nothing waits on: enough to survive a lost locate (the head
         /// the node syncs toward), then reclaimed like any unneeded park.
         var evidenceRetries: Int = 0
+        /// Seeded with the configured parent's evidence (`Seed.fromParent`).
+        var fromParent = false
     }
 
     private struct BlockRecord {
@@ -173,6 +184,13 @@ struct BlockFetcher {
             }
         }
     }
+    /// Whether an attempt for the block was seeded with the configured
+    /// parent's evidence, in whatever state: the parent's word that its
+    /// admission will decide. Overlay-seeded attempts never count.
+    func hasParentAttempt(_ blockCID: String) -> Bool {
+        records[blockCID]?.attempts.values.contains { $0.fromParent } ?? false
+    }
+
     var hasTimedWait: Bool {
         records.values.contains { record in
             record.attempts.values.contains {
@@ -293,17 +311,22 @@ struct BlockFetcher {
             // advertising the same attachment would re-eager a weighed block.
             attempt.weighed = attempt.weighed
                 && (seed.weighed || seed.package != nil)
+            attempt.fromParent = attempt.fromParent || seed.fromParent
             let previous = attempt.package
+            var packageChanged = false
             if let package = seed.package,
                let merged = Self.mergePackages(previous, package) {
                 attempt.package = merged
                 if previous == nil
                     || !Self.packagesEqual(previous!, merged) {
                     attempt.revision &+= 1
+                    packageChanged = true
                 }
             }
-            if case .waiting(.evidence, _) = attempt.state,
-               attempt.package != nil {
+            // Only new evidence wakes an evidence wait: the same package
+            // again (a repeated hint) is no reason to retry, and would keep
+            // the wait from ever expiring.
+            if case .waiting(.evidence, _) = attempt.state, packageChanged {
                 attempt.state = .ready
             }
             record.attempts[rootCID] = attempt
@@ -323,7 +346,8 @@ struct BlockFetcher {
                 expiresAt: nil,
                 state: .ready,
                 weighed: seed.weighed
-                    || (record.attempts[nil]?.weighed ?? false)
+                    || (record.attempts[nil]?.weighed ?? false),
+                fromParent: seed.fromParent
             )
         }
         records[seed.blockCID] = record
@@ -424,7 +448,8 @@ struct BlockFetcher {
                 providers: record.providers.values.sorted {
                     $0.publicKey < $1.publicKey
                 },
-                weighed: attempt.weighed
+                weighed: attempt.weighed,
+                fromParent: attempt.fromParent
             )
         }
         return nil
@@ -704,7 +729,12 @@ struct BlockFetcher {
             return true
         }
         guard !readySet.contains(key) else { return true }
-        guard readySet.count < Self.readyCapacity else {
+        // The parent's evidence is bounded by the parent (and durable in
+        // the inbox): it is never refused for a pool an overlay peer can
+        // fill with announcements.
+        guard readySet.count < Self.readyCapacity
+                || records[key.blockCID]?.attempts[key.rootCID]?.fromParent == true
+        else {
             return false
         }
         readySet.insert(key)
@@ -724,8 +754,10 @@ struct BlockFetcher {
             }
         }
         candidates.sort { $0.order < $1.order }
+        // Keep going past a refusal: a parent-backed attempt is scheduled
+        // over capacity (`scheduleIfReady`).
         for candidate in candidates {
-            guard scheduleIfReady(candidate.key) else { return }
+            _ = scheduleIfReady(candidate.key)
         }
     }
 
