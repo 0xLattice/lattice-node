@@ -739,7 +739,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 fetcher: fixture.parentProcess
             )
             XCTAssertNotEqual(next.postState.rawCID, oldTip.postState.rawCID)
-            let admitted = try await fixture.parentProcess.admit(
+            let admitted = try await fixture.parentProcess.importBlock(
                 try BlockHeader(node: next)
             )
             XCTAssertTrue(admitted.decision.isAccepted)
@@ -861,7 +861,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 children: [first],
                 capacity: 16
             )
-            let carried = try await parentService.admitNetworkCandidate(
+            let carried = try await parentService.importNetworkCandidate(
                 carrierHeader,
                 authenticatedChildPackage: nil,
                 preparingChildDirectories: ["Payments"],
@@ -924,14 +924,14 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                     )
                 )
             )
-            let weighed = try await fixture.childProcess.admit(
+            let weighed = try await fixture.childProcess.importBlock(
                 firstHeader,
                 authenticatedChildPackage: package,
                 remoteSource: fixture.parentProcess,
                 mode: .header
             )
             XCTAssertTrue(weighed.decision.isAccepted, "\(weighed.decision)")
-            let validated = try await fixture.childProcess.admit(
+            let validated = try await fixture.childProcess.importBlock(
                 firstHeader,
                 authenticatedChildPackage: package,
                 remoteSource: fixture.parentProcess,
@@ -1142,7 +1142,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             fetcher: fixture.parentProcess
         )
         let carrierHeader = try BlockHeader(node: carrier)
-        let carried = try await fixture.parentProcess.admit(carrierHeader)
+        let carried = try await fixture.parentProcess.importBlock(carrierHeader)
         XCTAssertTrue(carried.decision.isAccepted, "\(carried.decision)")
         let proof = try await ChildBlockProof.generate(
             rootHeader: carrierHeader,
@@ -1159,7 +1159,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 )
             )
         )
-        let weighed = try await fixture.childProcess.admit(
+        let weighed = try await fixture.childProcess.importBlock(
             weighedHeader,
             authenticatedChildPackage: package,
             remoteSource: fixture.parentProcess,
@@ -1251,7 +1251,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             fetcher: parentProcess
         )
         let carrierHeader = try BlockHeader(node: carrier)
-        let carrierAdmission = try await parentProcess.admit(carrierHeader)
+        let carrierAdmission = try await parentProcess.importBlock(carrierHeader)
         XCTAssertTrue(carrierAdmission.decision.isAccepted)
         let activated = try await childProcess.activateSeededChildGenesis(
             seed: seed,

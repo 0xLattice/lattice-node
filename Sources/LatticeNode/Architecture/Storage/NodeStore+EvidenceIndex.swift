@@ -15,7 +15,7 @@ struct IssuedChildEvidence: Sendable {
 /// Evidence verified by Lattice that the node must commit with the admission
 /// batch that made it issuable. The proof package is optional for Nexus, where
 /// the carrier is its own root.
-struct AdmissionCarrierEvidence: Sendable {
+struct ImportCarrierEvidence: Sendable {
     let proof: ChildBlockProof
     let childCID: String
 
@@ -31,9 +31,9 @@ struct AdmissionCarrierEvidence: Sendable {
 /// Hierarchy facts produced by Lattice at the same boundary as an accepted
 /// admission. They remain separate from chain facts because replay does not
 /// need them, but NodeStore commits both in one SQLite transaction.
-struct AdmissionHierarchyArtifacts: Sendable {
+struct ImportHierarchyArtifacts: Sendable {
     let carrierLink: ParentCarrierLink
-    let carrierEvidence: AdmissionCarrierEvidence?
+    let carrierEvidence: ImportCarrierEvidence?
     let parentGenesisLinks: [ParentGenesisLink]
 }
 
@@ -62,16 +62,16 @@ struct ChildRootAttachmentSummary: Equatable, Hashable, Sendable {
     let attachmentCID: String
 }
 
-struct PreparedAdmissionCarrierEvidence {
+struct PreparedImportCarrierEvidence {
     let edge: DirectChildEdge
     let rootCID: String
     let proofAttachment: ChildEvidenceVolume
 }
 
-struct PreparedAdmissionHierarchyArtifacts {
+struct PreparedImportHierarchyArtifacts {
     let carrierLink: ParentCarrierLink
     let carrierLinkPayload: Data
-    let carrierEvidence: PreparedAdmissionCarrierEvidence?
+    let carrierEvidence: PreparedImportCarrierEvidence?
     let parentGenesisLinks: [(link: ParentGenesisLink, payload: Data)]
 }
 
@@ -305,9 +305,9 @@ extension NodeStore {
     }
 
     func prepareHierarchyArtifacts(
-        _ artifacts: AdmissionHierarchyArtifacts?,
+        _ artifacts: ImportHierarchyArtifacts?,
         carrierCIDs: Set<String>
-    ) async throws -> PreparedAdmissionHierarchyArtifacts? {
+    ) async throws -> PreparedImportHierarchyArtifacts? {
         guard let artifacts else { return nil }
         let link = artifacts.carrierLink
         guard !link.carrierCID.isEmpty,
@@ -342,7 +342,7 @@ extension NodeStore {
             artifacts.parentGenesisLinks
         )
 
-        let carrierEvidence: PreparedAdmissionCarrierEvidence?
+        let carrierEvidence: PreparedImportCarrierEvidence?
         if let evidence = artifacts.carrierEvidence {
             carrierEvidence = try await prepareCarrierEvidence(
                 evidence,
@@ -353,7 +353,7 @@ extension NodeStore {
             carrierEvidence = nil
         }
 
-        return PreparedAdmissionHierarchyArtifacts(
+        return PreparedImportHierarchyArtifacts(
             carrierLink: link,
             carrierLinkPayload: try Self.encode(link),
             carrierEvidence: carrierEvidence,
@@ -362,10 +362,10 @@ extension NodeStore {
     }
 
     func prepareCarrierEvidence(
-        _ evidence: AdmissionCarrierEvidence,
+        _ evidence: ImportCarrierEvidence,
         expectedChildCIDs: Set<String>,
         expectedRootCID: String?
-    ) async throws -> PreparedAdmissionCarrierEvidence {
+    ) async throws -> PreparedImportCarrierEvidence {
         let childCID = evidence.childCID
         guard expectedChildCIDs.contains(childCID),
               expectedRootCID.map({ $0 == evidence.proof.rootCID }) ?? true,
@@ -385,7 +385,7 @@ extension NodeStore {
             envelopeBytes: portableEnvelopePayload,
             childCID: childCID
         )
-        return PreparedAdmissionCarrierEvidence(
+        return PreparedImportCarrierEvidence(
             edge: edge,
             rootCID: evidence.proof.rootCID,
             proofAttachment: proofAttachment
@@ -414,7 +414,7 @@ extension NodeStore {
 
     /// Owner: ImportJournal.stage / EvidenceIndex.persistIssuedHierarchyArtifacts — caller holds the transaction.
     func persistHierarchyArtifacts(
-        _ artifacts: PreparedAdmissionHierarchyArtifacts
+        _ artifacts: PreparedImportHierarchyArtifacts
     ) throws {
         if let evidence = artifacts.carrierEvidence {
             try persistCarrierEvidence(evidence)
@@ -428,7 +428,7 @@ extension NodeStore {
 
     /// Owner: ImportJournal.stage / EvidenceIndex.persistHierarchyArtifacts — caller holds the transaction.
     func persistCarrierEvidence(
-        _ evidence: PreparedAdmissionCarrierEvidence
+        _ evidence: PreparedImportCarrierEvidence
     ) throws {
         guard let edgeCID = evidence.edge.edgeCID else {
             throw NodeStoreError.invalidIssuedChildProof(evidence.edge.childCID)
@@ -472,7 +472,7 @@ extension NodeStore {
     }
 
     func persistIssuedHierarchyArtifacts(
-        _ artifacts: AdmissionHierarchyArtifacts,
+        _ artifacts: ImportHierarchyArtifacts,
         pendingChildProofRoutes: [PendingChildProofRoute] = [],
         pendingChildProofCapacity: Int = 16
     ) async throws {
@@ -1153,7 +1153,7 @@ extension NodeStore {
             throw NodeStoreError.invalidIssuedChildProof(directHop.childCID)
         }
         _ = try await prepareCarrierEvidence(
-            AdmissionCarrierEvidence(
+            ImportCarrierEvidence(
                 proof: package.package.proof,
                 childCID: directHop.childCID
             ),
@@ -1361,7 +1361,7 @@ extension NodeStore {
                 package: ChildValidationPackage(proof: proof)
             )
             _ = try await prepareCarrierEvidence(
-                AdmissionCarrierEvidence(
+                ImportCarrierEvidence(
                     proof: proof,
                     childCID: childCID
                 ),

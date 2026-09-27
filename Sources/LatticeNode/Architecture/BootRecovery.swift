@@ -157,7 +157,7 @@ enum BootRecovery {
         let broker = stores.broker
         // Protocol constants are ordinary Volumes and therefore ordinary GC
         // roots. Materialize them before the one exact startup reconciliation.
-        let constantStorage = NodeAdmissionStorage(storage: broker)
+        let constantStorage = NodeImportStorage(storage: broker)
         try await LatticeState.emptyHeader.storeRecursively(
             storer: constantStorage as any VolumeStorer
         )
@@ -170,7 +170,7 @@ enum BootRecovery {
     private static func reconcileRetainedRoots(
         _ stores: Stores,
         constantRoots: [String]
-    ) async throws -> [StagedAdmission] {
+    ) async throws -> [StagedImport] {
         let broker = stores.broker
         let store = stores.store
         let retentionScope = stores.retentionScope
@@ -178,7 +178,7 @@ enum BootRecovery {
         let preparedHierarchyRetentionScope = stores.preparedHierarchyRetentionScope
         let parentEvidenceInboxRetentionScope = stores.parentEvidenceInboxRetentionScope
         let contextualCandidateOwner = stores.contextualCandidateOwner
-        let staged = try await store.stagedAdmissions()
+        let staged = try await store.stagedImports()
         try await store.auditNormalizedIndexes()
         try await store.pruneAdmittedContextualCandidates()
         try await store.enforceHandoffCandidateBudget()
@@ -231,7 +231,7 @@ enum BootRecovery {
     /// log) and the blocks this boot demoted.
     private static func migrateLegacyExecutionsAndDemote(
         _ stores: Stores,
-        staged: [StagedAdmission]
+        staged: [StagedImport]
     ) async throws -> (migrated: [BlockImportBatch], bootDemoted: [String]) {
         let broker = stores.broker
         let store = stores.store
@@ -347,7 +347,7 @@ enum BootRecovery {
     private static func restoreRuntimePhase(
         _ stores: Stores,
         configuration: NodeConfiguration,
-        staged: [StagedAdmission],
+        staged: [StagedImport],
         migrated: [BlockImportBatch]
     ) async throws -> ChainProcess.RuntimePhase {
         let broker = stores.broker
@@ -362,18 +362,18 @@ enum BootRecovery {
                 guard try NexusGenesis.verifyGenesis(genesis) else {
                     throw ChainProcessError.invalidNexusGenesis
                 }
-                let admissionStorage = NodeAdmissionStorage(
+                let importStorage = NodeImportStorage(
                     storage: broker
                 )
                 let bootstrapped = try await ChainLevel.bootstrap(
                     context: context,
                     genesisHeader: try BlockHeader(node: genesis.block),
                     fetcher: localFetcher,
-                    validationContentStorer: admissionStorage,
-                    materializedVolumeStorer: admissionStorage,
+                    validationContentStorer: importStorage,
+                    materializedVolumeStorer: importStorage,
                     stage: { context in
                         let hierarchyArtifacts = context.issuedCarrierLink.map {
-                            AdmissionHierarchyArtifacts(
+                            ImportHierarchyArtifacts(
                                 carrierLink: $0,
                                 carrierEvidence: nil,
                                 parentGenesisLinks: context.parentGenesisLinks
@@ -381,7 +381,7 @@ enum BootRecovery {
                         }
                         try await ChainProcess.persist(
                             context.batch,
-                            admissionStorage: admissionStorage,
+                            importStorage: importStorage,
                             store: store,
                             broker: broker,
                             retentionScope: retentionScope,
@@ -444,7 +444,7 @@ enum BootRecovery {
     }
 
     private nonisolated static func durableRetainedRoots(
-        staged: [StagedAdmission],
+        staged: [StagedImport],
         additionalRoots: [String] = []
     ) -> [String] {
         var roots = Set(staged.flatMap(\.volumeRoots))

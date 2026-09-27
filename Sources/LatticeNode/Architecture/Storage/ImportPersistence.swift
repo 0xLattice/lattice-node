@@ -3,8 +3,8 @@ struct ImportPersistence: Sendable {
     var status: BlockStatus = .executed
     var pendingChildProofRoutes: [PendingChildProofRoute] = []
     var pendingChildProofCapacity: Int = 16
-    var hierarchyArtifacts: AdmissionHierarchyArtifacts? = nil
-    var incomingCarrierEvidence: AdmissionCarrierEvidence? = nil
+    var hierarchyArtifacts: ImportHierarchyArtifacts? = nil
+    var incomingCarrierEvidence: ImportCarrierEvidence? = nil
     var consensusRevisionFloor: UInt64? = nil
 
     /// Facts only: replay, validation and parent-report batches.

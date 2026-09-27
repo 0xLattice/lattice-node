@@ -29,11 +29,11 @@ final class ClosureNetworkInterface: NetworkInterface {
         _ volumeRootCID: String
     ) async throws -> Void
     /// Runs `admit` inside a body session bound to `blockCID`.
-    typealias ValidateBodyAdmission = @Sendable (
+    typealias ValidateBodyImport = @Sendable (
         _ blockCID: String,
         _ admit: @Sendable (_ remoteSource: any ContentSource) async throws
-            -> NodeAdmissionOutcome
-    ) async throws -> NodeAdmissionOutcome
+            -> NodeImportOutcome
+    ) async throws -> NodeImportOutcome
     typealias ValidateEvidenceSource = @Sendable (
         _ blockCID: String,
         _ requirement: CrossChainEvidenceRequirement
@@ -48,7 +48,7 @@ final class ClosureNetworkInterface: NetworkInterface {
     private let parentRunReportRequester: ParentRunReportRequester
     private let acceptedBlockPublisher: AcceptedBlockPublisher
     private let acceptedTransactionPublisher: AcceptedTransactionPublisher
-    private let validateBodySource: ValidateBodyAdmission?
+    private let validateBodySource: ValidateBodyImport?
     private let validateEvidenceSource: ValidateEvidenceSource?
 
     init(
@@ -61,7 +61,7 @@ final class ClosureNetworkInterface: NetworkInterface {
         parentRunReportRequester: @escaping ParentRunReportRequester = { _ in },
         acceptedBlockPublisher: @escaping AcceptedBlockPublisher,
         acceptedTransactionPublisher: @escaping AcceptedTransactionPublisher = { _ in },
-        validateBodySource: ValidateBodyAdmission? = nil,
+        validateBodySource: ValidateBodyImport? = nil,
         validateEvidenceSource: ValidateEvidenceSource? = nil
     ) {
         self.childCandidateProvider = childCandidateProvider
@@ -122,8 +122,8 @@ final class ClosureNetworkInterface: NetworkInterface {
         blockCID: String,
         _ admit: @Sendable (
             _ remoteSource: (any ContentSource)?
-        ) async throws -> NodeAdmissionOutcome
-    ) async throws -> NodeAdmissionOutcome {
+        ) async throws -> NodeImportOutcome
+    ) async throws -> NodeImportOutcome {
         guard let validateBodySource else { return try await admit(nil) }
         return try await validateBodySource(blockCID) { remoteSource in
             try await admit(remoteSource)

@@ -1191,7 +1191,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         let handlers = ClosureChainInterface(admission: { admission in
             await admissions.append(admission.header.rawCID)
             delivered.fulfill()
-            return NodeAdmissionOutcome(
+            return NodeImportOutcome(
                 decision: .duplicate,
                 parentCarrierLink: nil,
                 sameChainPredecessor: nil
@@ -1259,7 +1259,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         )
         let decisions = NetworkEventRecorder()
         let handlers = ClosureChainInterface(admission: { admission in
-            let outcome = try await service.admitNetworkCandidate(
+            let outcome = try await service.importNetworkCandidate(
                 admission.header,
                 authenticatedChildPackage: admission.authenticatedChildPackage,
                 preparingChildDirectories: admission.preparingChildDirectories,
@@ -1498,7 +1498,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
                 )
             }
             await admitted.append(admission.header.rawCID)
-            return NodeAdmissionOutcome(
+            return NodeImportOutcome(
                 decision: .acceptedSide(ChainCommit(
                     tipHash: admission.header.rawCID
                 )),
@@ -1580,7 +1580,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
                 _ = await gate.enter()
                 throw NetworkTestError.failedPhase("stalled acquisition")
             }
-            return NodeAdmissionOutcome(
+            return NodeImportOutcome(
                 decision: .acceptedSide(ChainCommit(
                     tipHash: admission.header.rawCID
                 )),

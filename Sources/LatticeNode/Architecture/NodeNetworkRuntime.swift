@@ -6,7 +6,7 @@ import UInt256
 import VolumeBroker
 import cashew
 
-public struct NetworkCandidateAdmission: Sendable {
+public struct NetworkCandidateImport: Sendable {
     public let header: BlockHeader
     public let authenticatedChildPackage: AuthenticatedChildPackage?
     public let preparingChildDirectories: [String]
@@ -668,7 +668,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     var portableEvidenceWorker: Task<Void, Never>?
     /// Orders parent evidence and reservation transfer within one authenticated
     /// session. Transport effects remain in this actor.
-    /// Owner: Candidates.admitCandidate / Hierarchy.appendParentEvidence /
+    /// Owner: Candidates.importCandidate / Hierarchy.appendParentEvidence /
     ///     Hierarchy.finishParentEvidence / Lifecycle.clearRuntimeState.
     var parentEvidence = ParentEvidenceFlow()
     /// The service this generation calls into; `Node.build` passes a
@@ -742,7 +742,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// the naming ended without it and nothing tracks it. The hold on it is
     /// released, or no offer would ever follow. One at a time, like the
     /// context that names it.
-    /// Owner: Candidates.admitCandidate / Hierarchy.clearHierarchyAuthorization /
+    /// Owner: Candidates.importCandidate / Hierarchy.clearHierarchyAuthorization /
     ///     Hierarchy.reviewCarriedChildHold / Lifecycle.clearRuntimeState.
     var releasedCarriedChildCID: String?
     /// The carried block an evidence scan was sent for (not merely asked
@@ -767,7 +767,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     var nextCandidateOfferSequence: UInt64 = 0
     /// Set when the offer gate deferred behind an own carried candidate's
     /// admission; the admission drain then re-arms the offer.
-    /// Owner: Candidates.drainCandidateAdmissions / Hierarchy.offerCandidate /
+    /// Owner: Candidates.drainCandidateImports / Hierarchy.offerCandidate /
     ///     Lifecycle.clearRuntimeState.
     var candidateOfferDeferredByAdmission = false
     /// Owner: Hierarchy.offerCandidate / Hierarchy.clearHierarchyAuthorization /

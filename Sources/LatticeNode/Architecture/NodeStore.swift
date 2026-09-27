@@ -8,8 +8,8 @@ import cashew
 enum NodeStoreError: Error, Equatable, LocalizedError {
     case invalidConfiguration(String)
     case wipeRequired(String)
-    case conflictingAdmissionFact
-    case conflictingAdmissionBatch
+    case conflictingImportFact
+    case conflictingImportBatch
     case conflictingIssuedParentFact
     case conflictingIssuedChildProof
     case invalidIssuedChildProof(String)
@@ -28,9 +28,9 @@ enum NodeStoreError: Error, Equatable, LocalizedError {
             "Invalid node store configuration: \(reason)"
         case .wipeRequired(let reason):
             "The node store is incompatible (\(reason)); stop the process, delete its entire configured storage directory (state.db and volumes.db), and restart."
-        case .conflictingAdmissionFact:
+        case .conflictingImportFact:
             "Conflicting bytes for an immutable chain fact."
-        case .conflictingAdmissionBatch:
+        case .conflictingImportBatch:
             "An admission batch was replayed with different Volume roots."
         case .conflictingIssuedParentFact:
             "A locally issued parent fact was replayed with different bytes."
@@ -177,7 +177,7 @@ actor NodeStore {
 }
 
 /// Records the canonical Volume boundaries materialized during one admission.
-actor NodeAdmissionStorage: VolumeStorer {
+actor NodeImportStorage: VolumeStorer {
     private let storage: any VolumeStorer
     private var roots = Set<String>()
 

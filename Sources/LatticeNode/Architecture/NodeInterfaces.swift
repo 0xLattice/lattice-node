@@ -79,8 +79,8 @@ public protocol NetworkInterface: AnyObject, Sendable {
         blockCID: String,
         _ admit: @Sendable (
             _ remoteSource: (any ContentSource)?
-        ) async throws -> NodeAdmissionOutcome
-    ) async throws -> NodeAdmissionOutcome
+        ) async throws -> NodeImportOutcome
+    ) async throws -> NodeImportOutcome
     /// Cross-chain evidence for the validate walk: a weighed CHILD block's
     /// `.execution` needs the parent fact (state continuity / genesis link) the
     /// live path obtains from the configured parent. Nil is an availability
@@ -123,9 +123,9 @@ public protocol ChainInterface: AnyObject, Sendable {
         for context: ChildCandidateRequestContext,
         parentContentSource: any ContentSource
     ) async throws -> DirectChildCandidate?
-    func admitNetworkCandidate(
-        _ admission: NetworkCandidateAdmission
-    ) async throws -> NodeAdmissionOutcome
+    func importNetworkCandidate(
+        _ admission: NetworkCandidateImport
+    ) async throws -> NodeImportOutcome
     func submitNetworkTransaction(_ transaction: Transaction) async throws -> Bool
     func transactionInventoryRoots() async -> [String]
     /// A run report from the configured parent, to be credited at the child
@@ -209,8 +209,8 @@ final class WeakNetwork: @unchecked Sendable, NetworkInterface {
         blockCID: String,
         _ admit: @Sendable (
             _ remoteSource: (any ContentSource)?
-        ) async throws -> NodeAdmissionOutcome
-    ) async throws -> NodeAdmissionOutcome {
+        ) async throws -> NodeImportOutcome
+    ) async throws -> NodeImportOutcome {
         // A weighed admit stored only the boundary; pull the deferred body
         // over the network by opening a root session on the block CID (the
         // same public-pin resolution the candidate acquirer falls back to),
@@ -259,11 +259,11 @@ final class WeakChain: @unchecked Sendable, ChainInterface {
         )
     }
 
-    func admitNetworkCandidate(
-        _ admission: NetworkCandidateAdmission
-    ) async throws -> NodeAdmissionOutcome {
+    func importNetworkCandidate(
+        _ admission: NetworkCandidateImport
+    ) async throws -> NodeImportOutcome {
         guard let service else { throw CancellationError() }
-        return try await service.admitNetworkCandidate(
+        return try await service.importNetworkCandidate(
             admission.header,
             authenticatedChildPackage: admission.authenticatedChildPackage,
             preparingChildDirectories: admission.preparingChildDirectories,

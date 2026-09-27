@@ -28,7 +28,7 @@ func inertNetworkHandlers() -> ClosureChainInterface {
 
 func duplicateNetworkHandlers() -> ClosureChainInterface {
     ClosureChainInterface(admission: { _ in
-        NodeAdmissionOutcome(
+        NodeImportOutcome(
             decision: .duplicate,
             parentCarrierLink: nil,
             sameChainPredecessor: nil

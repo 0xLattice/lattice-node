@@ -47,11 +47,11 @@ extension NodeNetworkRuntime {
         let generation = runtimeGeneration
         candidateWorkerGeneration = generation
         candidateWorker = Task { [weak self] in
-            await self?.drainCandidateAdmissions(generation: generation)
+            await self?.drainCandidateImports(generation: generation)
         }
     }
 
-    private func drainCandidateAdmissions(generation: UInt64) async {
+    private func drainCandidateImports(generation: UInt64) async {
         defer { finishCandidateWorker(generation: generation) }
         while isRunning, runtimeGeneration == generation,
               let candidate = candidateAcquirer.next() {
@@ -60,7 +60,7 @@ extension NodeNetworkRuntime {
                     generation: generation,
                     process: process
                   ) else { return }
-            await admitCandidate(
+            await importCandidate(
                 candidate,
                 generation: generation,
                 process: process
@@ -108,7 +108,7 @@ extension NodeNetworkRuntime {
         serviceCandidateAcquirer()
     }
 
-    private func admitCandidate(
+    private func importCandidate(
         _ candidate: Candidate,
         generation: UInt64,
         process: ChainProcess
@@ -136,7 +136,7 @@ extension NodeNetworkRuntime {
         var failedOverlayProviders = Set<CandidateProvider>()
         let childDirectories = authenticatedChildDirectories()
         var attempt: (
-            value: NodeAdmissionOutcome,
+            value: NodeImportOutcome,
             attribution: IvyRootContentSource.Attribution
         )?
         let header = BlockHeader(
@@ -270,12 +270,12 @@ extension NodeNetworkRuntime {
                     initialResponse: initialResponse,
                     capture: capture
                 ) { session in
-                    try await Self.enforceLocalAdmissionPolicy(
+                    try await Self.enforceLocalImportPolicy(
                         candidateCID: candidate.blockCID,
                         source: session,
                         configuration: configuration
                     )
-                    let admitted = try await chain.admitNetworkCandidate(NetworkCandidateAdmission(
+                    let admitted = try await chain.importNetworkCandidate(NetworkCandidateImport(
                         header: header,
                         authenticatedChildPackage: authenticatedPackage,
                         preparingChildDirectories: childDirectories,
@@ -307,7 +307,7 @@ extension NodeNetworkRuntime {
                     return
                 }
                 if let failure = error as? BlockImportError {
-                    let decision = NodeAdmissionDecision(failure)
+                    let decision = NodeImportDecision(failure)
                     if decision.shouldRetryWhenEvidenceChanges {
                         completeCandidate(
                             candidate,
@@ -534,7 +534,7 @@ extension NodeNetworkRuntime {
         }
     }
 
-    private nonisolated static func enforceLocalAdmissionPolicy(
+    private nonisolated static func enforceLocalImportPolicy(
         candidateCID: String,
         source: any ContentSource,
         configuration: NodeConfiguration

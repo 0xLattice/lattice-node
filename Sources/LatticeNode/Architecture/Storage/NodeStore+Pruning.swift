@@ -28,7 +28,7 @@ extension NodeStore {
 
     /// Owner: ImportJournal.stage / EvidenceIndex.persistIssuedHierarchyArtifacts — recovery-broker volume write, outside any database transaction.
     func storeRecoveryEvidence(
-        _ evidence: [PreparedAdmissionCarrierEvidence]
+        _ evidence: [PreparedImportCarrierEvidence]
     ) async throws -> [String] {
         for item in evidence {
             try await item.proofAttachment.store(storer: recoveryVolumeBroker)

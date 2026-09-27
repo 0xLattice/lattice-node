@@ -1,7 +1,7 @@
 import Lattice
 
 /// Transport-independent meaning of one chain-local admission attempt.
-public enum NodeAdmissionDecision: Sendable, Equatable {
+public enum NodeImportDecision: Sendable, Equatable {
     case canonicalized(ChainCommit)
     case acceptedSide(ChainCommit)
     case carrier

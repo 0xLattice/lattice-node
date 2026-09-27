@@ -102,7 +102,7 @@ extension NodeStore {
             )
         }
         let currentSequence = try database.row(
-            from: AdmissionBatchRow.table,
+            from: ImportBatchRow.table,
             "SELECT COALESCE(MAX(seq), 0) AS sequence FROM admission_batches"
         )?.int("sequence") ?? 0
         let snapshot = snapshotSequence ?? currentSequence
@@ -209,7 +209,7 @@ extension NodeStore {
                 parentCID: block.parentBlockHash
             )
             if let existing = blocks[record.blockCID], existing != record {
-                throw NodeStoreError.conflictingAdmissionFact
+                throw NodeStoreError.conflictingImportFact
             }
             blocks[record.blockCID] = record
         }
@@ -308,7 +308,7 @@ extension NodeStore {
     ///
     /// The weighed block fact (empty `stateDiff`) is immutable and keyed by
     /// blockHash ONLY, so re-staging the validated fact (its real `stateDiff`)
-    /// would collide (`conflictingAdmissionFact`). Deferred execution therefore
+    /// would collide (`conflictingImportFact`). Deferred execution therefore
     /// never rewrites `admission_facts` on validation: the weighed fact REMAINS
     /// the state-blind consensus-replay record, and the materialized state is a
     /// node-side availability artifact keyed by this marker plus the owner pin.
@@ -373,7 +373,7 @@ extension NodeStore {
         }
     }
 
-    func auditAcceptedBlocks(staged: [StagedAdmission]) throws -> Set<String> {
+    func auditAcceptedBlocks(staged: [StagedImport]) throws -> Set<String> {
         var expectedAcceptedBlocks: [String: PersistedAcceptedBlock] = [:]
         for admission in staged {
             for block in try Self.acceptedBlocks(in: admission.batch) {

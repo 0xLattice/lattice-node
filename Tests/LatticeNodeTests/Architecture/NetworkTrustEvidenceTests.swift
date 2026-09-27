@@ -858,7 +858,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                 guard let rootCID = admission.authenticatedChildPackage?
                     .package.proof.rootCID else {
                     await unavailable.append(admission.header.rawCID)
-                    return NodeAdmissionOutcome(
+                    return NodeImportOutcome(
                         decision: .unavailable(.childProof(
                             chainPath: targetConfiguration.chainPath,
                             childCID: admission.header.rawCID
@@ -876,7 +876,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                     _ = await firstAdmissionGate.enter()
                 }
                 await roots.append(rootCID)
-                return NodeAdmissionOutcome(
+                return NodeImportOutcome(
                     decision: .acceptedSide(ChainCommit(
                         tipHash: admission.header.rawCID
                     )),
@@ -1103,7 +1103,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                 process: process,
                 chain: ClosureChainInterface(
                     admission: { _ in
-                        NodeAdmissionOutcome(
+                        NodeImportOutcome(
                             decision: .duplicate,
                             parentCarrierLink: nil,
                             sameChainPredecessor: nil
@@ -1171,7 +1171,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                 process: fixture.process,
                 chain: ClosureChainInterface(
                     admission: { _ in
-                        NodeAdmissionOutcome(
+                        NodeImportOutcome(
                             decision: .duplicate,
                             parentCarrierLink: nil,
                             sameChainPredecessor: nil
@@ -1503,7 +1503,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
         let carrierHeader = try BlockHeader(node: carrier)
         try await carrierHeader.storeBlock(fetcher: process, storer: process)
 
-        let outcome = try await process.admit(
+        let outcome = try await process.importBlock(
             BlockHeader(
                 rawCID: carrierHeader.rawCID,
                 node: nil,
@@ -1606,7 +1606,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             nonce: 1,
             fetcher: target.process
         )
-        let admission = try await target.process.admit(
+        let admission = try await target.process.importBlock(
             BlockHeader(node: carrier)
         )
         XCTAssertTrue(admission.decision.isAccepted)
@@ -1859,7 +1859,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             previous: genesis, transactions: [authorization],
             timestamp: 3_600_000, nonce: 1, fetcher: process
         )
-        guard try await process.admit(BlockHeader(node: recording)).decision.isAccepted else {
+        guard try await process.importBlock(BlockHeader(node: recording)).decision.isAccepted else {
             throw NetworkTestError.failedPhase("recording carrier")
         }
         // The carrier commits child block 1.
@@ -1876,7 +1876,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
         )
         let carrierHeader = try BlockHeader(node: carrier)
         _ = try await process.prepareChildProofs(for: carrier, capacity: 16)
-        guard try await process.admit(
+        guard try await process.importBlock(
             carrierHeader, preparingChildDirectories: ["Payments"]
         ).decision.isAccepted else {
             throw NetworkTestError.failedPhase("carrier")
@@ -1887,7 +1887,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             previous: carrier, timestamp: 10_800_000, nonce: 3, fetcher: process
         )
         let successorHeader = try BlockHeader(node: successor)
-        guard try await process.admit(successorHeader).decision.isAccepted else {
+        guard try await process.importBlock(successorHeader).decision.isAccepted else {
             throw NetworkTestError.failedPhase("successor")
         }
 
@@ -2020,7 +2020,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                 nonce: UInt64(step),
                 fetcher: process
             )
-            let outcome = try await process.admit(BlockHeader(node: canonical))
+            let outcome = try await process.importBlock(BlockHeader(node: canonical))
             guard outcome.decision.isAccepted else {
                 throw NetworkTestError.failedPhase("canonical fixture branch")
             }
@@ -2034,7 +2034,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             fetcher: process
         )
         let sidePredecessorHeader = try BlockHeader(node: sidePredecessor)
-        let sidePredecessorOutcome = try await process.admit(sidePredecessorHeader)
+        let sidePredecessorOutcome = try await process.importBlock(sidePredecessorHeader)
         guard case .acceptedSide = sidePredecessorOutcome.decision else {
             throw NetworkTestError.failedPhase("side fixture predecessor")
         }
@@ -2102,7 +2102,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             fetcher: process,
             storer: process
         )
-        let carrierOutcome = try await process.admit(
+        let carrierOutcome = try await process.importBlock(
             BlockHeader(
                 rawCID: carrierHeader.rawCID,
                 node: nil,

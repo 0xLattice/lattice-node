@@ -5,7 +5,7 @@ import UInt256
 import VolumeBroker
 import cashew
 
-struct StagedAdmission: Sendable, Equatable {
+struct StagedImport: Sendable, Equatable {
     let sequence: Int64
     let batch: BlockImportBatch
     let volumeRoots: [String]
@@ -14,7 +14,7 @@ struct StagedAdmission: Sendable, Equatable {
 /// `admission_batches`: one immutable admission batch; `payload` and
 /// `volumeRoots` are the JSON bytes, decoded by the caller so a decode
 /// failure stays `corrupt`.
-struct AdmissionBatchRow: NodeStoreRecord {
+struct ImportBatchRow: NodeStoreRecord {
     static let table = "admission_batches"
     private let row: Row
 
@@ -26,7 +26,7 @@ struct AdmissionBatchRow: NodeStoreRecord {
 }
 
 /// `admission_facts`: one normalized fact of an admission batch.
-struct AdmissionFactRow: NodeStoreRecord {
+struct ImportFactRow: NodeStoreRecord {
     static let table = "admission_facts"
     private let row: Row
 
@@ -95,7 +95,7 @@ extension NodeStore {
             persistence.hierarchyArtifacts,
             carrierCIDs: carrierCIDs
         )
-        let preparedIncomingCarrierEvidence: PreparedAdmissionCarrierEvidence?
+        let preparedIncomingCarrierEvidence: PreparedImportCarrierEvidence?
         if let incomingCarrierEvidence = persistence.incomingCarrierEvidence {
             preparedIncomingCarrierEvidence = try await prepareCarrierEvidence(
                 incomingCarrierEvidence,
@@ -118,30 +118,30 @@ extension NodeStore {
         try database.transaction {
                 for fact in facts {
                     let existing = try database.row(
-                        AdmissionFactRow.self,
+                        ImportFactRow.self,
                         "SELECT payload FROM admission_facts WHERE fact_id = ?1",
                         params: [.blob(fact.key)]
                     )
                     if let existing {
                         guard try existing.payload == fact.value else {
-                            throw NodeStoreError.conflictingAdmissionFact
+                            throw NodeStoreError.conflictingImportFact
                         }
                     }
                 }
 
                 let replay = try database.row(
-                    AdmissionBatchRow.self,
+                    ImportBatchRow.self,
                     "SELECT seq, volume_roots FROM admission_batches WHERE payload = ?1",
                     params: [.blob(payload)]
                 )
                 if let existing = replay {
                     let existingSequence = try existing.sequence
                     guard try existing.volumeRoots == rootsPayload else {
-                        throw NodeStoreError.conflictingAdmissionBatch
+                        throw NodeStoreError.conflictingImportBatch
                     }
                     for fact in facts {
                         let existing = try database.row(
-                            AdmissionFactRow.self,
+                            ImportFactRow.self,
                             "SELECT payload FROM admission_facts WHERE fact_id = ?1",
                             params: [.blob(fact.key)]
                         )
@@ -161,7 +161,7 @@ extension NodeStore {
                         params: [.blob(payload), .blob(rootsPayload)]
                     )
                     guard let admissionSequence = try database.row(
-                        AdmissionBatchRow.self,
+                        ImportBatchRow.self,
                         "SELECT seq FROM admission_batches WHERE payload = ?1",
                         params: [.blob(payload)]
                     )?.sequence else {
@@ -211,8 +211,8 @@ extension NodeStore {
         }
     }
 
-    func stagedAdmissions() async throws -> [StagedAdmission] {
-        try loadStagedAdmissions()
+    func stagedImports() async throws -> [StagedImport] {
+        try loadStagedImports()
     }
 
     func consensusRevisionFloor() throws -> UInt64 {
@@ -235,12 +235,12 @@ extension NodeStore {
         )
     }
 
-    func loadStagedAdmissions() throws -> [StagedAdmission] {
+    func loadStagedImports() throws -> [StagedImport] {
         try database.rows(
-            AdmissionBatchRow.self,
+            ImportBatchRow.self,
             "SELECT seq, payload, volume_roots FROM admission_batches ORDER BY seq ASC"
         ).map { row in
-            StagedAdmission(
+            StagedImport(
                 sequence: try row.sequence,
                 batch: try Self.decode(BlockImportBatch.self, from: try row.payload),
                 volumeRoots: try Self.decode([String].self, from: try row.volumeRoots)
@@ -256,14 +256,14 @@ extension NodeStore {
             let id = try encode(fact.id)
             let payload = try encode(fact)
             if let existing = normalized[id], existing != payload {
-                throw NodeStoreError.conflictingAdmissionFact
+                throw NodeStoreError.conflictingImportFact
             }
             normalized[id] = payload
         }
         return normalized
     }
 
-    func auditAdmissionFacts(staged: [StagedAdmission]) throws {
+    func auditAdmissionFacts(staged: [StagedImport]) throws {
         var expectedFacts: [Data: Data] = [:]
         for admission in staged {
             for (id, payload) in try Self.normalizedFacts(in: admission.batch) {
@@ -278,7 +278,7 @@ extension NodeStore {
 
         var actualFacts: [Data: Data] = [:]
         for row in try database.rows(
-            AdmissionFactRow.self, "SELECT fact_id, payload FROM admission_facts"
+            ImportFactRow.self, "SELECT fact_id, payload FROM admission_facts"
         ) {
             actualFacts[try row.factID] = try row.payload
         }

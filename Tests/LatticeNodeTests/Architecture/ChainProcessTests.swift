@@ -435,11 +435,11 @@ final class ChainProcessTests: XCTestCase {
             encryptionInfo: nil
         )
 
-        _ = try? await consumer.admit(unresolved)
+        _ = try? await consumer.importBlock(unresolved)
         let localRequests = await remote.requests()
         XCTAssertTrue(localRequests.isEmpty)
 
-        let outcome = try await consumer.admit(
+        let outcome = try await consumer.importBlock(
             unresolved,
             remoteSource: remote
         )
@@ -479,7 +479,7 @@ final class ChainProcessTests: XCTestCase {
         )
         let carrierHeader = try BlockHeader(node: carrier)
 
-        let outcome = try await process!.admit(carrierHeader)
+        let outcome = try await process!.importBlock(carrierHeader)
         XCTAssertTrue(outcome.decision.isAccepted)
         let carrierLink = try XCTUnwrap(outcome.parentCarrierLink)
         process = nil
@@ -535,7 +535,7 @@ final class ChainProcessTests: XCTestCase {
         let carrierHeader = try BlockHeader(node: carrier)
 
         // EAGER baseline: admission issues and persists the parent-genesis link.
-        let eagerOutcome = try await producer.admit(carrierHeader)
+        let eagerOutcome = try await producer.importBlock(carrierHeader)
         XCTAssertTrue(eagerOutcome.decision.isAccepted)
         let eagerGenesisLink = try await producer.store.issuedParentGenesisLink(
             directory: "Payments",
@@ -550,7 +550,7 @@ final class ChainProcessTests: XCTestCase {
         let consumer = try await ChainProcess.open(
             configuration: try configuration(path: ["Nexus"], storage: consumerDir)
         )
-        let weighed = try await consumer.admit(
+        let weighed = try await consumer.importBlock(
             carrierHeader,
             remoteSource: FetcherContentSource(producer),
             mode: .header
@@ -566,7 +566,7 @@ final class ChainProcessTests: XCTestCase {
             "a weighed (unexecuted) block must not issue hierarchy"
         )
 
-        let validated = try await consumer.admit(
+        let validated = try await consumer.importBlock(
             carrierHeader,
             remoteSource: FetcherContentSource(producer),
             mode: .execution
@@ -641,7 +641,7 @@ final class ChainProcessTests: XCTestCase {
         ))
         let orphanHeader = try BlockHeader(node: orphan)
 
-        let first = try await process!.admit(
+        let first = try await process!.importBlock(
             orphanHeader,
             preparingChildDirectories: ["Payments"]
         )
@@ -681,9 +681,9 @@ final class ChainProcessTests: XCTestCase {
         )
         XCTAssertNil(recoveredGenesis)
 
-        let parentResult = try await process!.admit(missingParentHeader)
+        let parentResult = try await process!.importBlock(missingParentHeader)
         XCTAssertTrue(parentResult.decision.isAccepted)
-        let promoted = try await process!.admit(
+        let promoted = try await process!.importBlock(
             orphanHeader,
             preparingChildDirectories: ["Payments"]
         )
@@ -764,7 +764,7 @@ final class ChainProcessTests: XCTestCase {
         let missingFactPackage = AuthenticatedChildPackage(
             package: ChildValidationPackage(proof: fixture.proof)
         )
-        let outcome = try await process.admit(
+        let outcome = try await process.importBlock(
             fixture.childHeader,
             authenticatedChildPackage: missingFactPackage,
             remoteSource: fixture.source
@@ -825,7 +825,7 @@ final class ChainProcessTests: XCTestCase {
             package: package, advanceScan: true
         )
 
-        let deferred = try await process!.admit(
+        let deferred = try await process!.importBlock(
             carriedHeader, authenticatedChildPackage: package,
             remoteSource: parentSource, mode: .header
         )
@@ -847,9 +847,9 @@ final class ChainProcessTests: XCTestCase {
         let replayed = try XCTUnwrap(inboxAfterRestart.first)
         XCTAssertEqual(replayed.package.package.proof.rootCID, proof.rootCID)
 
-        var admitted: NodeAdmissionOutcome?
+        var admitted: NodeImportOutcome?
         try await eventually("the block is admitted once its clock is no longer ahead") {
-            let outcome = try await process!.admit(
+            let outcome = try await process!.importBlock(
                 carriedHeader, authenticatedChildPackage: replayed.package,
                 remoteSource: parentSource, mode: .header
             )
@@ -922,7 +922,7 @@ final class ChainProcessTests: XCTestCase {
             sourceID: UUID().uuidString, ordinal: 1, attachment: attachment,
             package: package, advanceScan: true
         )
-        let refused = try await process!.admit(
+        let refused = try await process!.importBlock(
             carriedHeader, authenticatedChildPackage: package,
             remoteSource: parentSource, mode: .header
         )
@@ -979,7 +979,7 @@ final class ChainProcessTests: XCTestCase {
             sourceID: UUID().uuidString, ordinal: 1, attachment: attachment,
             package: package, advanceScan: true
         )
-        let refused = try await process!.admit(
+        let refused = try await process!.importBlock(
             rivalHeader, authenticatedChildPackage: package,
             remoteSource: parentSource, mode: .header
         )
@@ -1015,7 +1015,7 @@ final class ChainProcessTests: XCTestCase {
         for verdict in verdicts {
             let result = BlockImportResult.rejected(verdict.failure)
             XCTAssertEqual(ChainProcess.isDecided(result), verdict.decided, "\(verdict.failure)")
-            let decision = NodeAdmissionDecision(result)
+            let decision = NodeImportDecision(result)
             let retried = decision.shouldRetryWhenEvidenceChanges || decision.shouldRetryLater
             XCTAssertEqual(retried, !verdict.decided, "the acquirer retries exactly the undecided: \(verdict.failure)")
         }
@@ -1074,14 +1074,14 @@ final class ChainProcessTests: XCTestCase {
 
         // B2 first: a side block whose requirement names B1, the predecessor
         // this chain does not hold yet.
-        let early = try await process.admit(
+        let early = try await process.importBlock(
             secondHeader, authenticatedChildPackage: secondPackage,
             remoteSource: parentSource, mode: .header
         )
         XCTAssertTrue(early.decision.isAccepted, "a side block awaiting B1, got \(early.decision)")
         XCTAssertEqual(early.sameChainPredecessor?.predecessorCID, firstHeader.rawCID)
         // B1 arrives: accepted, and B2 connects behind it.
-        let late = try await process.admit(
+        let late = try await process.importBlock(
             firstHeader, authenticatedChildPackage: firstPackage,
             remoteSource: parentSource, mode: .header
         )
@@ -1140,7 +1140,7 @@ final class ChainProcessTests: XCTestCase {
             configuration: fixture.configuration
         )
 
-        let early = try await process.admit(
+        let early = try await process.importBlock(
             successorHeader,
             authenticatedChildPackage: successorPackage,
             remoteSource: sameChainSource
@@ -1170,7 +1170,7 @@ final class ChainProcessTests: XCTestCase {
             confirmParentRecordedGenesis: { _ in true }
         )
         XCTAssertTrue(bootstrapped)
-        let retry = try await process.admit(
+        let retry = try await process.importBlock(
             successorHeader,
             authenticatedChildPackage: successorPackage,
             remoteSource: sameChainSource
@@ -1239,7 +1239,7 @@ final class ChainProcessTests: XCTestCase {
             phaseAfter, .active,
             "self-contained genesis did not recover active across restart"
         )
-        let retry = try await process!.admit(
+        let retry = try await process!.importBlock(
             successorHeader,
             authenticatedChildPackage: successorPackage,
             remoteSource: sameChainSource
@@ -1411,7 +1411,7 @@ final class ChainProcessTests: XCTestCase {
             await source.waitForBlockedFetch()
 
             let admission = Task {
-                return try await process.admit(candidateHeader)
+                return try await process.importBlock(candidateHeader)
             }
             let admissionFinished = expectation(
                 description: "admission bypasses blocked proof acquisition"
@@ -1439,7 +1439,7 @@ final class ChainProcessTests: XCTestCase {
             chainPath: config.chainPath,
             issuingAuthorityKey: config.processPublicKey
         )
-        let staged = try await store.stagedAdmissions()
+        let staged = try await store.stagedImports()
         XCTAssertEqual(staged.count, 2)
         XCTAssertTrue(staged.contains { admission in
             admission.batch.facts.contains { fact in
@@ -1467,7 +1467,7 @@ final class ChainProcessTests: XCTestCase {
             path: directory.appendingPathComponent("volumes.db").path,
             evictUnpinnedGraceSeconds: 0
         )
-        let admissionStorage = NodeAdmissionStorage(
+        let importStorage = NodeImportStorage(
             storage: broker
         )
         let transaction = try signedGenesisAnchorTransaction(
@@ -1475,7 +1475,7 @@ final class ChainProcessTests: XCTestCase {
             childGenesisCID: NexusGenesis.expectedBlockHash
         )
         let volume = try VolumeImpl<Transaction>(node: transaction)
-        try await volume.store(storer: admissionStorage)
+        try await volume.store(storer: importStorage)
         let root = volume.rawCID
         let batch = BlockImportBatch(facts: [
             .block(ChainBlockFact(
@@ -1496,7 +1496,7 @@ final class ChainProcessTests: XCTestCase {
         let task = Task {
             try await ChainProcess.persist(
                 batch,
-                admissionStorage: admissionStorage,
+                importStorage: importStorage,
                 store: store,
                 broker: broker,
                 retentionScope: "cancellation-test",
@@ -1516,7 +1516,7 @@ final class ChainProcessTests: XCTestCase {
         await continueStage.open()
         try await task.value
 
-        let staged = try await store.stagedAdmissions()
+        let staged = try await store.stagedImports()
         XCTAssertEqual(staged.count, 1)
         XCTAssertEqual(staged.first?.volumeRoots, [root])
         let retainedRoots = try await broker.retainedRoots(
@@ -1547,7 +1547,7 @@ final class ChainProcessTests: XCTestCase {
             path: directory.appendingPathComponent("volumes.db").path,
             evictUnpinnedGraceSeconds: 0
         )
-        let admissionStorage = NodeAdmissionStorage(
+        let importStorage = NodeImportStorage(
             storage: broker
         )
         func batch(for root: String) -> BlockImportBatch {
@@ -1571,11 +1571,11 @@ final class ChainProcessTests: XCTestCase {
             childGenesisCID: NexusGenesis.expectedBlockHash
         )
         let durableVolume = try VolumeImpl<Transaction>(node: durableTransaction)
-        try await durableVolume.store(storer: admissionStorage)
+        try await durableVolume.store(storer: importStorage)
         let durableRoot = durableVolume.rawCID
         try await ChainProcess.persist(
             batch(for: durableRoot),
-            admissionStorage: admissionStorage,
+            importStorage: importStorage,
             store: store,
             broker: broker,
             retentionScope: "failed-stage-test",
@@ -1590,13 +1590,13 @@ final class ChainProcessTests: XCTestCase {
             childGenesisCID: NexusGenesis.expectedBlockHash
         )
         let volume = try VolumeImpl<Transaction>(node: transaction)
-        try await volume.store(storer: admissionStorage)
+        try await volume.store(storer: importStorage)
         let root = volume.rawCID
 
         do {
             try await ChainProcess.persist(
                 batch(for: root),
-                admissionStorage: admissionStorage,
+                importStorage: importStorage,
                 store: store,
                 broker: broker,
                 retentionScope: "failed-stage-test",
@@ -1617,7 +1617,7 @@ final class ChainProcessTests: XCTestCase {
             XCTFail("expected invalid staging route, got \(error)")
         }
 
-        let staged = try await store.stagedAdmissions()
+        let staged = try await store.stagedImports()
         XCTAssertEqual(staged.count, 1)
         XCTAssertEqual(staged.first?.volumeRoots, [durableRoot])
         let retainedRoots = try await broker.retainedRoots(scope: "failed-stage-test")
@@ -1716,7 +1716,7 @@ final class ChainProcessTests: XCTestCase {
             childDirectory: "Payments",
             fetcher: process!
         )
-        let admitted = try await process!.admit(carrierHeader)
+        let admitted = try await process!.importBlock(carrierHeader)
         XCTAssertTrue(admitted.decision.isAccepted)
         process = nil
 
@@ -1961,7 +1961,7 @@ final class ChainProcessTests: XCTestCase {
             fetcher: live!
         )
         let carrierHeader = try BlockHeader(node: carrier)
-        let carrierOutcome = try await live!.admit(carrierHeader)
+        let carrierOutcome = try await live!.importBlock(carrierHeader)
         XCTAssertTrue(carrierOutcome.decision.isAccepted)
         let unminedExtension = try await BlockBuilder.buildBlock(
             previous: carrier,
@@ -1972,7 +1972,7 @@ final class ChainProcessTests: XCTestCase {
             block: unminedExtension,
             target: unminedExtension.target
         ))
-        let extensionOutcome = try await live!.admit(
+        let extensionOutcome = try await live!.importBlock(
             try BlockHeader(node: extensionBlock)
         )
         XCTAssertTrue(extensionOutcome.decision.isAccepted)
@@ -2041,7 +2041,7 @@ final class ChainProcessTests: XCTestCase {
             of: genesis, timestamp: 3_600_000, nonce: 1, on: process!
         )
         let aCID = try BlockHeader(node: a).rawCID
-        guard case .canonicalized = try await process!.admit(
+        guard case .canonicalized = try await process!.importBlock(
             BlockHeader(node: a)
         ).decision else {
             return XCTFail("expected A to canonicalize on genesis")
@@ -2061,7 +2061,7 @@ final class ChainProcessTests: XCTestCase {
             )
         }
         let bCID = try BlockHeader(node: b).rawCID
-        guard case .acceptedSide = try await process!.admit(
+        guard case .acceptedSide = try await process!.importBlock(
             BlockHeader(node: b)
         ).decision else {
             return XCTFail("expected B to be an accepted side block")
@@ -2071,7 +2071,7 @@ final class ChainProcessTests: XCTestCase {
             of: b, timestamp: 7_200_000, nonce: 3, on: process!
         )
         let cCID = try BlockHeader(node: c).rawCID
-        guard case .canonicalized = try await process!.admit(
+        guard case .canonicalized = try await process!.importBlock(
             BlockHeader(node: c)
         ).decision else {
             return XCTFail("expected B -> C to reorg the main chain")
@@ -2238,7 +2238,7 @@ final class ChainProcessTests: XCTestCase {
             on: producer
         )
         let blockCID = try BlockHeader(node: block).rawCID
-        guard case .canonicalized = try await producer.admit(
+        guard case .canonicalized = try await producer.importBlock(
             BlockHeader(node: block)
         ).decision else {
             return XCTFail("expected the producer block to canonicalize")
@@ -2249,7 +2249,7 @@ final class ChainProcessTests: XCTestCase {
         var process: ChainProcess? = try await ChainProcess.open(
             configuration: config
         )
-        let weighed = try await process!.admit(
+        let weighed = try await process!.importBlock(
             BlockHeader(node: block),
             remoteSource: FetcherContentSource(producer),
             mode: .header
@@ -2510,7 +2510,7 @@ final class ChainProcessTests: XCTestCase {
                 )])
             )
             let block = template.block.replacingNonce(solvedNonce(for: template))
-            let outcome = try await producer.admit(BlockHeader(node: block))
+            let outcome = try await producer.importBlock(BlockHeader(node: block))
             XCTAssertTrue(outcome.decision.isAccepted)
             chain.append(block)
         }
@@ -2525,7 +2525,7 @@ final class ChainProcessTests: XCTestCase {
         into consumer: ChainProcess
     ) async throws {
         for block in chain {
-            let weighed = try await consumer.admit(
+            let weighed = try await consumer.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
                 mode: .header
@@ -2533,7 +2533,7 @@ final class ChainProcessTests: XCTestCase {
             XCTAssertTrue(weighed.decision.isAccepted)
         }
         for block in chain {
-            let validated = try await consumer.admit(
+            let validated = try await consumer.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
                 mode: .execution

@@ -165,11 +165,11 @@ final class MetricsTests: XCTestCase {
         let producer = try await openProcess(chainPath: ["Nexus"])
         let template = try await service(for: producer)
             .miningTemplate(MiningTemplateRequest())
-        let produced = try await producer.admit(BlockHeader(node: template.block))
+        let produced = try await producer.importBlock(BlockHeader(node: template.block))
         XCTAssertTrue(produced.decision.isAccepted)
 
         let consumer = try await openProcess(chainPath: ["Nexus"])
-        let weighed = try await consumer.admit(
+        let weighed = try await consumer.importBlock(
             BlockHeader(node: template.block),
             remoteSource: FetcherContentSource(producer),
             mode: .header

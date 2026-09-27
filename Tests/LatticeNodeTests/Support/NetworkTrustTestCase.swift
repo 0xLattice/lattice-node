@@ -151,7 +151,7 @@ class NetworkTrustTestCase: XCTestCase {
                 timestamp: clock.next()
             )
             blocks.append(parent)
-            let outcome = try await process.admit(
+            let outcome = try await process.importBlock(
                 BlockHeader(node: parent),
                 remoteSource: FetcherContentSource(producer),
                 mode: .header
@@ -198,7 +198,7 @@ class NetworkTrustTestCase: XCTestCase {
                 fetcher: process
             )
         }
-        let outcome = try await process.admit(BlockHeader(node: block))
+        let outcome = try await process.importBlock(BlockHeader(node: block))
         guard outcome.decision.isAccepted else {
             throw NetworkTestError.failedPhase(
                 "producer block rejected: \(outcome.decision)"
@@ -335,7 +335,7 @@ class NetworkTrustTestCase: XCTestCase {
                     "\(admission.header.rawCID)|"
                         + (admission.weighed ? "weighed" : "eager")
                 )
-                return try await service.admitNetworkCandidate(
+                return try await service.importNetworkCandidate(
                     admission.header,
                     authenticatedChildPackage: admission.authenticatedChildPackage,
                     preparingChildDirectories: admission.preparingChildDirectories,

@@ -143,7 +143,7 @@ final class ChainServiceTests: XCTestCase {
         // `Block.storeBlock` deliberately leaves child links independent. This
         // network path has no authenticated direct-child route to materialize,
         // so hierarchy extraction is optional, but canonical visibility is not.
-        let result = try await service.admitNetworkCandidate(
+        let result = try await service.importNetworkCandidate(
             header,
             authenticatedChildPackage: nil,
             preparingChildDirectories: [],
@@ -179,7 +179,7 @@ final class ChainServiceTests: XCTestCase {
             encryptionInfo: nil
         )
         let admission = Task {
-            try await service.admitNetworkCandidate(
+            try await service.importNetworkCandidate(
                 unresolved,
                 authenticatedChildPackage: nil,
                 preparingChildDirectories: [],
@@ -210,7 +210,7 @@ final class ChainServiceTests: XCTestCase {
         let process = try await nexusProcess()
         let service = makeService(process: process)
         let template = try await service.miningTemplate(MiningTemplateRequest())
-        let first = try await process.admit(BlockHeader(node: template.block))
+        let first = try await process.importBlock(BlockHeader(node: template.block))
         guard case .canonicalized = first.decision else {
             return XCTFail("expected initial canonical admission")
         }
@@ -507,7 +507,7 @@ final class ChainServiceTests: XCTestCase {
             )
         ))
         let mined = try await service.miningTemplate(MiningTemplateRequest())
-        let admission = try await process.admit(BlockHeader(node: mined.block))
+        let admission = try await process.importBlock(BlockHeader(node: mined.block))
         guard case .canonicalized(let commit) = admission.decision else {
             return XCTFail("expected canonical direct admission")
         }
@@ -652,7 +652,7 @@ final class ChainServiceTests: XCTestCase {
         // This is the daemon's runtime-to-service injection. Local work must
         // still reconcile while that runtime is stopped.
         let handlers = ClosureChainInterface(admission: { admission in
-            try await service.admitNetworkCandidate(
+            try await service.importNetworkCandidate(
                 admission.header,
                 authenticatedChildPackage: admission.authenticatedChildPackage,
                 preparingChildDirectories: admission.preparingChildDirectories,
@@ -1200,7 +1200,7 @@ final class ChainServiceTests: XCTestCase {
             chainPath: configuration.chainPath,
             issuingAuthorityKey: configuration.processPublicKey
         )
-        let admissionsBefore = try await store.stagedAdmissions()
+        let admissionsBefore = try await store.stagedImports()
         let leavesBefore = try await process.store.acceptedLeafPage(
             afterCID: nil,
             snapshotSequence: nil,
@@ -1255,7 +1255,7 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertEqual(publicationCount, 1)
         let publishedBlockCount = await publishedBlocks.count()
         XCTAssertEqual(publishedBlockCount, 0)
-        let admissionsAfter = try await store.stagedAdmissions()
+        let admissionsAfter = try await store.stagedImports()
         let leavesAfter = try await process.store.acceptedLeafPage(
             afterCID: nil,
             snapshotSequence: nil,
@@ -1487,7 +1487,7 @@ final class ChainServiceTests: XCTestCase {
             let mined = threaded.replacingNonce(
                 firstNonce(of: threaded, from: 0) { $0 <= threaded.target }
             )
-            let outcome = try await process.admit(BlockHeader(node: mined))
+            let outcome = try await process.importBlock(BlockHeader(node: mined))
             XCTAssertTrue(
                 outcome.decision.isAccepted,
                 "a block scheduled from the carried anchor must satisfy the validator"
@@ -1568,7 +1568,7 @@ final class ChainServiceTests: XCTestCase {
             unfiltered.proofOfWorkHash(), unfiltered.target,
             "and must still carry the work its committed target demands"
         )
-        let outcome = try await process.admit(try BlockHeader(node: unfiltered))
+        let outcome = try await process.importBlock(try BlockHeader(node: unfiltered))
         XCTAssertTrue(
             outcome.decision.isAccepted,
             "minimum work is the miner's choice, not a rule the node enforces"
@@ -2233,7 +2233,7 @@ final class ChainServiceTests: XCTestCase {
             fetcher: parentProcess
         )
         let firstCarrierHeader = try BlockHeader(node: firstCarrier)
-        let parentOutcome = try await parentProcess.admit(firstCarrierHeader)
+        let parentOutcome = try await parentProcess.importBlock(firstCarrierHeader)
         XCTAssertNotNil(parentOutcome.parentCarrierLink)
 
         let childDirectory = FileManager.default.temporaryDirectory
@@ -2593,7 +2593,7 @@ final class ChainServiceTests: XCTestCase {
                     $0 <= template.block.target
                 }
             )
-            let outcome = try await producer.admit(BlockHeader(node: block))
+            let outcome = try await producer.importBlock(BlockHeader(node: block))
             XCTAssertTrue(
                 outcome.decision.isAccepted,
                 "producer block must be accepted"
@@ -2956,7 +2956,7 @@ final class ChainServiceTests: XCTestCase {
         into node: ChainProcess
     ) async throws {
         for block in fixture.honest {
-            let outcome = try await node.admit(
+            let outcome = try await node.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(fixture.honestProducer),
                 mode: .header
@@ -2964,14 +2964,14 @@ final class ChainServiceTests: XCTestCase {
             XCTAssertTrue(outcome.decision.isAccepted)
         }
         for block in fixture.attack.prefix(5) {
-            let outcome = try await node.admit(
+            let outcome = try await node.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(fixture.attackProducer),
                 mode: .header
             )
             XCTAssertTrue(outcome.decision.isAccepted)
         }
-        let forged = try await node.admit(
+        let forged = try await node.importBlock(
             BlockHeader(node: fixture.forged),
             remoteSource: FetcherContentSource(fixture.attackProducer),
             mode: .header
@@ -3003,7 +3003,7 @@ final class ChainServiceTests: XCTestCase {
         // canonical-commit publisher), so the walk does not auto-fire and the
         // intermediate non-operable state is observable.
         for block in chain {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
                 mode: .header
@@ -3072,7 +3072,7 @@ final class ChainServiceTests: XCTestCase {
         let chain = try await mineNexusChain(on: producer, depth: depth)
         let consumerProcess = try await nexusProcess()
         for block in chain {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
                 mode: .header
@@ -3084,7 +3084,7 @@ final class ChainServiceTests: XCTestCase {
         _ = await consumerProcess.deepestValidatedMainChainTip()
         await consumerProcess.resetValidatedTipStoreReadsForTesting()
         for (index, block) in chain.enumerated() {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
                 mode: .execution
@@ -3111,7 +3111,7 @@ final class ChainServiceTests: XCTestCase {
         let consumerProcess = try await nexusProcess()
         for mode in [ImportMode.header, .execution] {
             for block in chain {
-                let outcome = try await consumerProcess.admit(
+                let outcome = try await consumerProcess.importBlock(
                     BlockHeader(node: block),
                     remoteSource: FetcherContentSource(producer),
                     mode: mode
@@ -3163,7 +3163,7 @@ final class ChainServiceTests: XCTestCase {
         )
         for mode in [ImportMode.header, .execution] {
             for block in forkA {
-                let outcome = try await consumerProcess.admit(
+                let outcome = try await consumerProcess.importBlock(
                     BlockHeader(node: block),
                     remoteSource: FetcherContentSource(producerA),
                     mode: mode
@@ -3172,7 +3172,7 @@ final class ChainServiceTests: XCTestCase {
             }
         }
         for block in forkB {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producerB),
                 mode: .header
@@ -3200,7 +3200,7 @@ final class ChainServiceTests: XCTestCase {
             on: producerC, depth: 12, miner: CryptoUtils.generateKeyPair()
         )
         for block in forkC {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producerC),
                 mode: .header
@@ -3214,7 +3214,7 @@ final class ChainServiceTests: XCTestCase {
         // demoted holes (A1-A3) below the A block that survived eviction.
         let moreA = try await mineNexusChain(on: producerA, depth: 10)
         for block in moreA {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producerA),
                 mode: .header
@@ -3272,7 +3272,7 @@ final class ChainServiceTests: XCTestCase {
             _ blocks: [Block], from source: ChainProcess, mode: ImportMode
         ) async throws {
             for block in blocks {
-                let outcome = try await consumerProcess.admit(
+                let outcome = try await consumerProcess.importBlock(
                     BlockHeader(node: block),
                     remoteSource: FetcherContentSource(source),
                     mode: mode
@@ -3286,7 +3286,7 @@ final class ChainServiceTests: XCTestCase {
         {
             let process = try await nexusProcess()
             for block in prefix {
-                let outcome = try await process.admit(
+                let outcome = try await process.importBlock(
                     BlockHeader(node: block),
                     remoteSource: FetcherContentSource(source)
                 )
@@ -3406,7 +3406,7 @@ final class ChainServiceTests: XCTestCase {
         let forkA = try await mineNexusChain(on: producerA, depth: 6)
         for mode in [ImportMode.header, .execution] {
             for block in forkA {
-                let outcome = try await consumerProcess!.admit(
+                let outcome = try await consumerProcess!.importBlock(
                     BlockHeader(node: block),
                     remoteSource: FetcherContentSource(producerA),
                     mode: mode
@@ -3428,7 +3428,7 @@ final class ChainServiceTests: XCTestCase {
             on: producerF, depth: 8, miner: CryptoUtils.generateKeyPair()
         )
         for block in forkF {
-            let outcome = try await consumerProcess!.admit(
+            let outcome = try await consumerProcess!.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producerF),
                 mode: .header
@@ -3441,7 +3441,7 @@ final class ChainServiceTests: XCTestCase {
         // A returns: A1 validated, A2 a hole, A3-A6 validated above it.
         let forkAMore = try await mineNexusChain(on: producerA, depth: 4)
         for block in forkAMore {
-            let outcome = try await consumerProcess!.admit(
+            let outcome = try await consumerProcess!.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producerA),
                 mode: .header
@@ -3468,7 +3468,7 @@ final class ChainServiceTests: XCTestCase {
         ).rawCID
         for mode in [ImportMode.header, .execution] {
             for block in chain {
-                let outcome = try await consumerProcess.admit(
+                let outcome = try await consumerProcess.importBlock(
                     BlockHeader(node: block),
                     remoteSource: FetcherContentSource(producer),
                     mode: mode
@@ -3487,7 +3487,7 @@ final class ChainServiceTests: XCTestCase {
             on: rival, depth: 6, miner: CryptoUtils.generateKeyPair()
         )
         for block in fork {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(rival),
                 mode: .header
@@ -3514,7 +3514,7 @@ final class ChainServiceTests: XCTestCase {
         let chain = try await mineNexusChain(on: producer, depth: depth)
         let consumerProcess = try await nexusProcess()
         for block in chain {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
                 mode: .header
@@ -3553,7 +3553,7 @@ final class ChainServiceTests: XCTestCase {
 
         // Weighed-admit only the blocks below the gap (heights 1..gapAt-1).
         for block in chain.prefix(gapAt - 1) {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
                 mode: .header
@@ -3578,7 +3578,7 @@ final class ChainServiceTests: XCTestCase {
 
         // Release the withheld block and the rest of the range.
         for block in chain.suffix(from: gapAt - 1) {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
                 mode: .header
@@ -3633,7 +3633,7 @@ final class ChainServiceTests: XCTestCase {
         // fork — every admit stores only the boundary (a boundary fetch), no body.
         var boundaryFetches = 0
         for block in canonical {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
                 mode: .header
@@ -3642,7 +3642,7 @@ final class ChainServiceTests: XCTestCase {
             boundaryFetches += 1
         }
         for block in siblings {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(siblingProducer),
                 mode: .header
@@ -3728,7 +3728,7 @@ final class ChainServiceTests: XCTestCase {
         )
 
         for block in canonical {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
                 mode: .header
@@ -3801,7 +3801,7 @@ final class ChainServiceTests: XCTestCase {
             lock.withLock { _ = _withheld.remove(blockCID) }
         }
 
-        func admission() -> ClosureNetworkInterface.ValidateBodyAdmission {
+        func admission() -> ClosureNetworkInterface.ValidateBodyImport {
             { [self] blockCID, admit in
                 lock.withLock { _fetched.append(blockCID) }
                 let withheld = lock.withLock { _withheld.contains(blockCID) }
@@ -3851,7 +3851,7 @@ final class ChainServiceTests: XCTestCase {
                     $0 <= template.block.target
                 }
             )
-            let outcome = try await producer.admit(BlockHeader(node: block))
+            let outcome = try await producer.importBlock(BlockHeader(node: block))
             XCTAssertTrue(
                 outcome.decision.isAccepted,
                 "reward block \(index) must be accepted"
@@ -3884,7 +3884,7 @@ final class ChainServiceTests: XCTestCase {
         acceptedBlockPublisher: @escaping ClosureNetworkInterface.AcceptedBlockPublisher = { _ in },
         acceptedTransactionPublisher:
             @escaping ClosureNetworkInterface.AcceptedTransactionPublisher = { _ in },
-        validateBodySource: ClosureNetworkInterface.ValidateBodyAdmission? = nil,
+        validateBodySource: ClosureNetworkInterface.ValidateBodyImport? = nil,
         validateWalkRetryInterval: Duration = .seconds(4),
         mempoolMaxCount: Int = 10_000
     ) -> ChainService {
@@ -4029,7 +4029,7 @@ final class ChainServiceTests: XCTestCase {
                 firstNonce(of: built, from: carrierNonce) { $0 <= built.target }
             )
         let carrierHeader = try BlockHeader(node: carrier)
-        let parentAdmission = try await parent.admit(carrierHeader)
+        let parentAdmission = try await parent.importBlock(carrierHeader)
         XCTAssertNotNil(parentAdmission.parentCarrierLink)
         return AnchoredChildGenesis(
             block: block,

@@ -372,7 +372,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             try await BlockHeader(node: mined).storeBlock(
                 fetcher: producer!, storer: producer!
             )
-            let outcome = try await producer!.admit(BlockHeader(node: mined))
+            let outcome = try await producer!.importBlock(BlockHeader(node: mined))
             XCTAssertTrue(outcome.decision.isAccepted, "fixture block \(timestamp)")
             previous = mined
         }

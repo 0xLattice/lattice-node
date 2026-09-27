@@ -6,7 +6,7 @@ import UInt256
 import VolumeBroker
 import cashew
 
-private struct AdmissionEffects: Sendable {
+private struct ImportEffects: Sendable {
     let parentGenesisLinks: [ParentGenesisLink]
 }
 
@@ -662,19 +662,19 @@ public actor ChainService {
     /// The process reserves canonical reconciliation before it releases its
     /// mutation order; this method then waits behind that reservation before
     /// projecting service-owned state.
-    public func admitNetworkCandidate(
+    public func importNetworkCandidate(
         _ header: BlockHeader,
         authenticatedChildPackage: AuthenticatedChildPackage?,
         preparingChildDirectories: [String],
         contentSource: any ContentSource,
         weighed: Bool = false
-    ) async throws -> NodeAdmissionOutcome {
+    ) async throws -> NodeImportOutcome {
         // Preparing proofs for a directory is the other way a node declares it
         // hosts that child (§9.10): serve its runs from here on. Idempotent.
         for directory in preparingChildDirectories {
             await process.serveRuns(for: directory)
         }
-        let outcome = try await process.admit(
+        let outcome = try await process.importBlock(
             header,
             authenticatedChildPackage: authenticatedChildPackage,
             preparingChildDirectories: preparingChildDirectories,
@@ -689,14 +689,14 @@ public actor ChainService {
             // but its authenticated path can still carry an accepted direct
             // child. Relay any proof the process durably composed for it.
             if outcome.parentCarrierLink != nil {
-                await handleCarrierAdmission(
+                await handleCarrierImport(
                     header: header,
                     outcome: outcome
                 )
             }
             return outcome
         }
-        _ = await handleAdmission(
+        _ = await handleImport(
             block: block,
             header: header,
             outcome: outcome
@@ -1367,13 +1367,13 @@ public actor ChainService {
             children: submission.children,
             capacity: Self.templateCapacity
         )
-        let outcome = try await process.admit(
+        let outcome = try await process.importBlock(
             header,
             canonicalCommitPublisher: { [self] commit in
                 await enqueueCanonicalCommit(commit)
             }
         )
-        let effects = await applyAdmissionEffects(
+        let effects = await applyImportEffects(
             block: candidate,
             header: header,
             outcome: outcome
@@ -1423,23 +1423,23 @@ public actor ChainService {
     /// candidate was admitted through gossip, sync, or the hierarchy plane.
     /// Consensus admission itself remains exclusively in `ChainProcess`.
     @discardableResult
-    private func handleAdmission(
+    private func handleImport(
         block: Block,
         header: BlockHeader,
-        outcome: NodeAdmissionOutcome
-    ) async -> AdmissionEffects {
+        outcome: NodeImportOutcome
+    ) async -> ImportEffects {
         await acquireOperation()
         defer { releaseOperation() }
-        return await applyAdmissionEffects(
+        return await applyImportEffects(
             block: block,
             header: header,
             outcome: outcome
         )
     }
 
-    private func handleCarrierAdmission(
+    private func handleCarrierImport(
         header: BlockHeader,
-        outcome: NodeAdmissionOutcome
+        outcome: NodeImportOutcome
     ) async {
         await acquireOperation()
         defer { releaseOperation() }
@@ -1586,8 +1586,8 @@ public actor ChainService {
             let header = BlockHeader(rawCID: next, node: nil, encryptionInfo: nil)
             let admitValidate: @Sendable (
                 (any ContentSource)?, AuthenticatedChildPackage?
-            ) async throws -> NodeAdmissionOutcome = { [self] remoteSource, package in
-                try await process.admit(
+            ) async throws -> NodeImportOutcome = { [self] remoteSource, package in
+                try await process.importBlock(
                     header,
                     authenticatedChildPackage: package,
                     remoteSource: remoteSource,
@@ -1599,14 +1599,14 @@ public actor ChainService {
             }
             let attempt: @Sendable (
                 AuthenticatedChildPackage?
-            ) async throws -> NodeAdmissionOutcome = { [network] package in
+            ) async throws -> NodeImportOutcome = { [network] package in
                 try await network.withValidateBodySource(
                     blockCID: next
                 ) { remoteSource in
                     try await admitValidate(remoteSource, package)
                 }
             }
-            var outcome: NodeAdmissionOutcome
+            var outcome: NodeImportOutcome
             do {
                 outcome = try await attempt(nil)
                 // A CHILD block on the validate tier recovers its own proof but
@@ -1781,11 +1781,11 @@ public actor ChainService {
         }
     }
 
-    private func applyAdmissionEffects(
+    private func applyImportEffects(
         block: Block,
         header: BlockHeader,
-        outcome: NodeAdmissionOutcome
-    ) async -> AdmissionEffects {
+        outcome: NodeImportOutcome
+    ) async -> ImportEffects {
         // Visibility of accepted work is independent from optional child
         // materialization. A missing child payload must not suppress the
         // canonical announcement.
@@ -1846,7 +1846,7 @@ public actor ChainService {
         if outcome.decision.isAccepted {
             publishChainStateChange()
         }
-        return AdmissionEffects(
+        return ImportEffects(
             parentGenesisLinks: genesisLinks.sorted {
                 $0.directory < $1.directory
             }
@@ -1855,7 +1855,7 @@ public actor ChainService {
 
     private func publishCarrierChildProofs(
         header: BlockHeader,
-        outcome: NodeAdmissionOutcome
+        outcome: NodeImportOutcome
     ) async {
         guard let link = outcome.parentCarrierLink else { return }
         // Admission and the miner response depend only on the durable proof,
@@ -2351,7 +2351,7 @@ public actor ChainService {
 }
 
 private extension WorkDisposition {
-    init(_ decision: NodeAdmissionDecision) {
+    init(_ decision: NodeImportDecision) {
         switch decision {
         case .canonicalized: self = .canonicalized
         case .acceptedSide: self = .acceptedSide

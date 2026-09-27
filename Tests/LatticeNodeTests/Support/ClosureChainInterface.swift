@@ -12,9 +12,9 @@ final class ClosureChainInterface: ChainInterface {
         _ context: ChildCandidateRequestContext,
         _ parentContentSource: any ContentSource
     ) async throws -> DirectChildCandidate?
-    typealias AdmissionHandler = @Sendable (
-        _ admission: NetworkCandidateAdmission
-    ) async throws -> NodeAdmissionOutcome
+    typealias ImportHandler = @Sendable (
+        _ admission: NetworkCandidateImport
+    ) async throws -> NodeImportOutcome
     typealias TransactionHandler = @Sendable (
         _ transaction: Transaction
     ) async throws -> Bool
@@ -26,7 +26,7 @@ final class ClosureChainInterface: ChainInterface {
     typealias RecentCommitterProvider = @Sendable () async -> [String]
 
     private let childCandidateBuilder: ChildCandidateBuilder?
-    private let admission: AdmissionHandler
+    private let admission: ImportHandler
     private let transaction: TransactionHandler?
     private let transactionInventory: TransactionInventoryProvider?
     private let parentRunReport: ParentRunReportHandler?
@@ -36,7 +36,7 @@ final class ClosureChainInterface: ChainInterface {
 
     init(
         childCandidateBuilder: ChildCandidateBuilder? = nil,
-        admission: @escaping AdmissionHandler,
+        admission: @escaping ImportHandler,
         transaction: TransactionHandler? = nil,
         transactionInventory: TransactionInventoryProvider? = nil,
         parentRunReport: ParentRunReportHandler? = nil,
@@ -68,9 +68,9 @@ final class ClosureChainInterface: ChainInterface {
         return try await childCandidateBuilder(context, parentContentSource)
     }
 
-    func admitNetworkCandidate(
-        _ admission: NetworkCandidateAdmission
-    ) async throws -> NodeAdmissionOutcome {
+    func importNetworkCandidate(
+        _ admission: NetworkCandidateImport
+    ) async throws -> NodeImportOutcome {
         try await self.admission(admission)
     }
 
