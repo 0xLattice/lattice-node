@@ -84,11 +84,15 @@ Docker-compatible runtime without the GUI.
 | Path | What |
 |---|---|
 | `Sources/LatticeNode/Architecture` | One-chain process, service, networking, storage, and protocol wire types. |
+| `Sources/LatticeNode/Architecture/Storage` | `NodeStore` tables grouped by owner, `BlockStatus`, and `ImportPersistence`. |
 | `Sources/LatticeNodeDaemon` | CLI and loopback HTTP adapter. |
 | `Sources/LatticeMiner` | External proof-of-work worker target; nonce search only. |
 | `Sources/LatticeMiningCoordinatorTool` | Node-facing coordinator CLI; fetches work, allocates local ranges, and submits nonce results. |
 | `Sources/CSQLite` | SQLite C shim. |
 
 Core protocol types (Block, Transaction, ChainState, consensus) live in the
-upstream `Lattice`, `cashew`, `Ivy`, `VolumeBroker`, and `Tally` packages. See
+upstream `Lattice`, `cashew`, `Ivy`, `VolumeBroker`, and `Tally` packages. The
+`Lattice` product is an umbrella that re-exports its six modules
+(`LatticePrimitives`, `LatticePoW`, `LatticeValidation`, `LatticeProofs`,
+`LatticeBlockTree`, `LatticeImport`), so node code imports `Lattice`. See
 [architecture.md](architecture.md).

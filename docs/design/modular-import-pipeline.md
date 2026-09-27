@@ -1,19 +1,19 @@
 # Composable Node Architecture
 
-> **Status: implemented foundation.** The consensus details and migration gates
-> live in the [work-proof collapse north star](work-proof-collapse-north-star.md).
+The consensus details of proof-derived work and parent-state continuity live in
+[proof-derived child work](proof-derived-work.md).
 
 ## Mental model
 
 One process owns one chain. Shared transport routes messages by absolute chain
 path, while each chain has an isolated Ivy namespace, Tally scope, accepted
-graph, mempool, and Volume retention policy.
+graph, mempool, and Volume pruning policy.
 
 The node composes six orthogonal capabilities:
 
 1. **Gossip and sync** discover accepted block CIDs and transaction Volume roots.
 2. **Acquisition** resolves the complete Volumes needed by one candidate.
-3. **Validation** asks Lattice for a typed, immutable admission result.
+3. **Validation** asks Lattice for a typed, immutable import result.
 4. **Persistence** atomically records semantic facts and retains selected
    Volumes through VolumeBroker.
 5. **Insertion** updates the accepted same-chain graph with proof-derived work.
@@ -30,17 +30,34 @@ uses hierarchy routing and validation without importing parent state.
 The network actor owns transport ordering, but independent semantic state
 machines remain small reducers:
 
-- `CandidateAcquirer` owns candidate/provider/dependency scheduling.
+- `BlockFetcher` owns candidate/provider/dependency scheduling.
 - `ParentEvidenceFlow` owns session-local evidence ordering, backpressure, and
   reservation fencing.
-- `ChildCandidateOwnership` derives one disjoint reservation/handoff transfer
-  from all outstanding templates.
+- `RangeSync` owns the single forward-apply range-sync slot and the bounds
+  that shape its paging.
 
 These reducers perform neither Ivy I/O nor Lattice consensus. The parent
 evidence inbox row and scan watermark intentionally remain one NodeStore
 transaction: splitting that durability boundary would permit a crash to skip
-evidence. Reservation and handoff likewise remain distinct phases because the
-handoff is the atomic transfer from speculative to durable ownership.
+evidence.
+
+Child candidates need no reducer, because nothing is reserved. Each child
+pushes its candidate whenever one of its inputs changes; the parent keeps only
+the latest candidate per child peer, and a template takes at most one held
+candidate per directory, built on the current tip's post-state, never the block
+the branch already carries. The child keeps what it
+built in its own budgeted offer store, oldest offer evicted first. When the
+configured parent's evidence names one of those candidates carried, its row
+becomes a handoff: newer offers no longer evict it, a separate handoff budget
+bounds it, and the carried block's import takes over its roots.
+
+While the parent's tip context names a carried child block that this chain has
+not imported, the child holds its candidate offers, since a candidate built
+then would only be that block's sibling. The hold ends when the block is
+imported, when an import of the parent's evidence for it decides against it, or
+when an evidence scan round sent for it ends without it while no parent-backed
+attempt for it is pending. Only the configured parent's state can keep the
+hold; nothing an overlay peer announces or relays does.
 
 ## Content boundary
 
@@ -59,7 +76,7 @@ an exact genesis or parent-state continuity query. The unsigned answer is
 non-portable; ordinary peers can provide the underlying Volumes but never the
 parent's verdict.
 
-## Admission boundary
+## Import boundary
 
 Acquisition produces an immutable candidate attempt containing:
 
@@ -109,7 +126,7 @@ The parent learns nothing from its children. It:
   its connected accepted graph;
 - acknowledges an exact continuity or genesis query from that graph;
 - maintains run state for the directories it hosts and serves each
-  committer's run report to that directory's children (spec §9.10).
+  carrier's run report to that directory's children (spec §9.10).
 
 It does not ingest child consensus, child payloads, child provider state, or
 child weights. A grandchild repeats the same immediate-parent rule; no ancestor
@@ -136,8 +153,8 @@ proof protocol or descendant-tree export exists.
 - Parent continuity is reflexive or transitively forward, never merely
   "different" and never restricted to a direct step.
 - Volume identity is the storage and network boundary.
-- Retention depth and serving policy are local and non-consensus.
-- No minimum-work admission floor exists. Any filter on work that can reach
+- Pruning depth and serving policy are local and non-consensus.
+- No minimum-work import floor exists. Any filter on work that can reach
   fork choice is consensus-relevant — two nodes with different floors could
   select different tips — so the node ships none: the chain's own target is
   the only work gate.

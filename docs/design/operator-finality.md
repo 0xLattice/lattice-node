@@ -5,7 +5,7 @@
 A Lattice node never forgets. Three surfaces accumulate losing-fork state
 forever:
 
-- **The accepted graph.** Every valid block a node admits — canonical or a
+- **The accepted graph.** Every valid block a node imports — canonical or a
   losing sibling — stays in its accepted set permanently, and accepted-leaf
   pages serve the whole set to every peer. A live testnet child measured 74%
   losing siblings: roughly three units of junk exchanged and re-validated for
@@ -21,7 +21,7 @@ forever:
   path; the index is still served for older children.)
 - **Acquisition effort.** A bare advertised CID gives a node no way to decline
   work, so every hoarded sibling costs every peer a content fetch, an evidence
-  solicitation, and a full admission attempt — competing for the same bounded
+  solicitation, and a full import attempt — competing for the same bounded
   lanes that deliver live blocks. (This surface is addressed by the companion
   direction at the end, not by the present concept.)
 
@@ -126,7 +126,8 @@ this design.
 ### You serve what you keep
 
 Served surfaces — accepted-leaf pages and the portable-attachment index
-(both legacy-served only), content exchange — advertise the operator's
+(the leaf page is requested only as a frontier pull; the attachment index is
+legacy-served), content exchange — advertise the operator's
 retained set, nothing more. An archive
 node that keeps everything serves everything; a lean node serves the
 canonical chain plus its retained fringe. Availability, like finality, is
@@ -156,8 +157,8 @@ without closing it: execution and state storage for unselected blocks go
 away, but weighing a child block still requires soliciting its
 securing-work proof, so the per-sibling round trip below is unchanged.
 
-The bounded admission lanes are only relieved if a node can also decline
-acquiring junk, not merely evict it after paying full admission cost.
+The bounded import lanes are only relieved if a node can also decline
+acquiring junk, not merely evict it after paying full import cost.
 Advertisements could carry untrusted hints (height, claimed weight) letting
 a receiver deprioritize candidates unlikely to alter its fork choice. This
 is deliberately *not* part of the present concept, because it is the one
@@ -180,7 +181,7 @@ declined work at all. Any future design must hold these boundaries:
 ## Boundaries
 
 - Consensus (Lattice) is untouched: no fork-depth rules, no finality
-  thresholds, no changes to weight comparison or admission validity — and,
+  thresholds, no changes to weight comparison or import validity — and,
   via weight-preservation above, no retention setting may alter the head any
   node computes.
 - Retention knobs live in node configuration with sane defaults, per chain,

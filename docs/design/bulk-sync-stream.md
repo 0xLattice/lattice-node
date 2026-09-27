@@ -52,7 +52,7 @@ foreign graft — both are already the design's own.
 Sync stops being a subsystem. It is: **acquire headers into the weight graph;
 let fork choice run on them; retrieve and execute a body only when its fork is
 a canonical candidate.** The height-blind sweeps, the per-block evidence
-solicitation fired from inside failed admissions, and the single admission
+solicitation fired from inside failed imports, and the single import
 slot shared with live traffic all exist because sync today acquires and
 *executes* whole blocks through the live-edge machinery. When the weighed tier
 is header-only, that machinery is not needed for bulk: sync unifies with the
@@ -62,9 +62,9 @@ live edge, and root sync and child sync are the same operation — the
 ### 1. Establish the start: common-ancestor negotiation
 
 Sync begins by negotiating a **common ancestor**, not at the receiver's
-frontier. The receiver offers a **locator** — its own accepted main-chain CIDs
+frontier. The receiver offers a **locator** — its own accepted canonical-chain CIDs
 newest-first at exponentially widening gaps, genesis last — and the peer
-returns the highest entry on *its* main chain plus the headers forward from
+returns the highest entry on *its* canonical chain plus the headers forward from
 it. A proposed start is valid only because it is one of the receiver's own
 accepted blocks, so negotiation can never rewind a receiver past its verified
 history. Three outcomes, distinct on the wire: a shared ancestor with headers
@@ -74,18 +74,18 @@ never punish). An empty page is never again conflated with "caught up." This
 is the Bitcoin block-locator convention, and it is the mandatory, SOTA-shared
 part of the design regardless of everything below.
 
-Negotiation and the tip announcement only ever describe a peer's *main
+Negotiation and the tip announcement only ever describe a peer's *canonical
 chain*; fork choice weighs *subtrees*, so a receiver also needs the losing
 forks. The header graph is fully determined by its **leaves plus parent
 links** (every root node carries its parent CID), so a receiver pulls a peer's
-**frontier** — one accepted-leaves page (the most recently admitted leaves),
+**frontier** — one accepted-leaves page (the most recently imported leaves),
 no cursor, no retry state, correlated to the one request sent — once per
 session, at the moment it is at the live edge with respect to that peer: the
 peer's tip within two blocks of the receiver's *acquired* (weighed-inclusive)
 tip, whether at hello for a caught-up peer or when range sync toward it
 completes. Each unknown leaf's ordinary predecessor walk then reassembles its
 short ancestry down to known history — short by construction, because the
-main chain up to the edge is already held; pulled while deep, every leaf would
+canonical chain up to the edge is already held; pulled while deep, every leaf would
 descend the whole gap in competition with range sync. Announced gaps beyond
 the live edge (more than two blocks ahead) take the negotiated range sync; the
 predecessor walk serves only the true live edge and the frontier's leaves.
@@ -143,25 +143,24 @@ withholding surface as a secret-then-released heavy chain today; header-weight
 adds **no new attack**, *provided* "rank on headers, act only on validated" is
 implemented exactly. Get it wrong and a heaviest-but-invalid or
 heaviest-but-unavailable path could be acted on, or nodes with different body
-availability could split. This is the one part to model adversarially first.
+availability could split.
 
 ## Boundaries
 
-- **Consensus is untouched at the machinery level.** The consensus graph is
-  already header-only (`ConsensusBlockInput` excludes the body and state). The
-  only coupling is that admission (`ChainLocalAdmission.prepare`) refuses to
-  emit a block's weight fact until its execution succeeds. The change is to
-  split that: emit a *weighed* block fact from root + PoW with the declared
-  `postState` recorded as an unverified claim, and add the invalidity-exclusion
-  fact and a validated-subgraph notion. This is consensus-adjacent and is
-  treated with that gravity — the spec (§9) is amended: "accepted" means
+- **The consensus graph is header-only.** `ConsensusBlockInput` excludes the
+  body and state. Import in header mode (`ImportMode.header`) emits a *weighed*
+  block fact from root + PoW with the declared `postState` recorded as an
+  unverified claim. Execution mode (`ImportMode.execution`) later executes an
+  already-weighed block: success records the materialized post-state, the
+  validated marker; a completed deterministic failure records an
+  invalidity-exclusion fact. Spec §9.9 states the rule: "accepted" means
   *weighed*; validity is a second recorded, deterministic judgment; continuity
   is attested on the executed-from-genesis frontier; exclusion removes no
   weight — the descent never steps into an excluded block — and is not
   pruning: excluded facts remain served.
-- **Deferral without the exclusion seam is forbidden.** Weight may not enter
-  fork choice pre-execution unless a proven-invalid subtree can be excluded
-  from what the chain acts on. The two land as one unit.
+- **Deferral never comes without the exclusion seam.** Weight enters fork
+  choice pre-execution only because a proven-invalid subtree can be excluded
+  from what the chain acts on.
 - **Availability never judges.** Failure to obtain a body is an availability
   gap, retried forever, excluding nothing. Only a *completed* deterministic
   check records invalidity.
@@ -170,7 +169,7 @@ availability could split. This is the one part to model adversarially first.
   keep serving the existing pages; receivers fall back — slow, never wrong.
 - **Possession stays ungated.** Serving a block whose bytes match their CID is
   never a fault, validated or not; possession/serving surfaces
-  (`forwardMainChainRange`, by-CID reads) are not gated on validation.
+  (`forwardCanonicalRange`, by-CID reads) are not gated on validation.
 - **The unavailable tail is unsyncable by the same rule as today.** A chain
   whose facts no parent tracks and no peer retained cannot be synced; the model
   changes the *cost* of availability, never its existence.

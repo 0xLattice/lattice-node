@@ -8,9 +8,9 @@ swift test
 
 The suites are grouped by the boundary they actually cross:
 
-- `NodeStoreTests`: atomic admission, crash recovery, retained hierarchy
+- `NodeStoreTests`: atomic import, crash recovery, retained hierarchy
   evidence, immutable-index audit, and Volume ownership.
-- `ChainProcessTests`: one-path admission, restart, child bootstrap, proof composition, cancellation, and explicit local-versus-network acquisition boundaries.
+- `ChainProcessTests`: one-path import, restart, child bootstrap, proof composition, cancellation, and explicit local-versus-network acquisition boundaries.
 - `NetworkTrust*Tests` (FrontierSync, Evidence, Candidate, ReadURL,
   HierarchySession, over the shared `NetworkTrustTestCase`): real-network
   integration tests, not E2E. They exercise
@@ -32,7 +32,7 @@ The suites are grouped by the boundary they actually cross:
   retry across disconnect, reopen with every source offline, three-level proof
   traversal, a suspended
   non-responsive authenticated sibling, durable side-branch bootstrap after a
-  reorg, same-path higher-work and segment-base-tie convergence, and a live competing-genesis
+  reorg, same-path higher-work and equal-work CID-tie convergence, and a live competing-genesis
   reorg followed by noncanonical parent descendants that must remain at their
   own locations instead of flowing through an ancestor carrier; a second
   same-path replica reconnects late and reaches the same result from its
@@ -55,12 +55,12 @@ The suites are grouped by the boundary they actually cross:
   credit survives a crash restart
   (`testNexusWorkReachesTheGrandchildAcrossAMiddleChainOutage`). The
   coordinator is stopped for that phase because it hunts the easiest target
-  and so also produces child-only carriers, whose child blocks have no chain
-  committer to be credited through. A second scenario keeps the coordinator
+  and so also produces child-only carriers, whose child blocks have no
+  connected parent-chain block (run carrier) to be credited through. A second scenario keeps the coordinator
   mining and stops the middle chain's node mid-round, the deploy case that
   cut a deferred parent-carried block off from its retry: after the restart
   the node must be credited the outage work, which only that block's
-  committer can deliver
+  carrier can deliver
   (`testChildStoppedDuringCoMiningIsCreditedAfterRestart`).
 - `LatticeMinerCoreTests` and `LatticeMiningCoordinatorTests`: nonce search, work allocation, staleness, subprocess cancellation, and current RPC payloads.
 
@@ -69,7 +69,7 @@ content, blocked acquisition, cancellation, restart, and publication failure at
 the component that owns the consequence. In particular, they preserve these
 cross-component invariants:
 
-- only traced network admission may acquire remote content; RPC, mining, and
+- only traced network import may acquire remote content; RPC, mining, and
   reconciliation fail locally rather than fetching peers;
 - securing work comes only from a verified directory proof, while
   parent-state continuity comes only from an exact authenticated reachability
@@ -108,7 +108,7 @@ cross-component invariants:
   `testParentTipChangeDropsTheStaleCandidateUntilTheChildRepushes`);
 - an offer this chain built is kept by its own budget, oldest first, and a
   candidate the parent's evidence names carried survives every newer offer
-  until the carried block's admission owns its roots
+  until the carried block's import owns its roots
   (`testHandedOffOfferSurvivesNewerOffersUntilAdmissionOwnsRoots`,
   `testOfferBudgetEvictsTheOldestOfferWhole`);
 - the template digest changes with the tip, the mempool and the child
@@ -124,30 +124,30 @@ cross-component invariants:
   parent history, including noncanonical branches, and exact parent facts may
   be relayed by same-chain peers after restart;
 - a parent's run report is credited only at the child block it commits, bound
-  to the child's own directory and to one of the committer's grinds already
+  to the child's own directory and to one of the carrier's grinds already
   credited there, as `runWork − ownWork` under an identity keyed by the
-  committer and directory, once — a repeat is refused, never doubled — and the
+  carrier and directory, once — a repeat is refused, never doubled — and the
   credit survives the child's restart from its durable fact log
   (`testParentRunWorkIsCreditedAtTheChildBlockItCommits` in the multichain
-  invariants), and admitting a block a parent block carried asks the parent
-  for that committer's run, so a push made before the block was held here,
+  invariants), and importing a block a parent block carried asks the parent
+  for that carrier's run, so a push made before the block was held here,
   or one missed while away, never waits for the next parent block; a
-  parent-carried block is admitted weighed on its proof, its relay link
+  parent-carried block is imported weighed on its proof, its relay link
   persisted with the acceptance (child-proof recovery composes from that
   evidence and reads the link beside it; a link it does not find is not a
   reason to refuse to boot), and until an
-  admission decides it its evidence stays in the parent-evidence inbox — a
+  import decides it its evidence stays in the parent-evidence inbox — a
   deferral persists nothing, the entry survives a restart and the block is
   accepted once the rule is met; a carrier refused for good is relayed and
-  consumed and never re-admitted; a refusal with no carrier link to relay is
-  consumed all the same, and decided is exactly the set the acquirer never
-  retries; a restarted child admits the block from its inbox alone,
-  weighed, with content served by the parent; no admission of a block
-  reached through an overlay portable attachment is eager
+  consumed and never re-imported; a refusal with no carrier link to relay is
+  consumed all the same, and decided is exactly the set the fetcher never
+  retries; a restarted child imports the block from its inbox alone,
+  weighed, with content served by the parent; no import of a block
+  reached through an overlay portable attachment uses `ImportMode.full`
   (`testDeferredCarriedBlockKeepsItsEvidenceInTheInboxAcrossRestart`,
   `testCarrierRefusedForGoodIsDecidedAndConsumed`,
   `testDecidedRefusalWithoutACarrierLinkIsConsumed`,
-  `testDecidedIsExactlyWhatTheAcquirerNeverRetries`,
+  `testDecidedIsExactlyWhatTheFetcherNeverRetries`,
   `testRestartedChildAdmitsTheParentCarriedBlockFromItsInboxWeighed`,
   `testPortableAttachmentsKeepDistinctRootsForTheSameChildWhileAdmissionIsBlocked`); a run
   flows through every level — what Nexus attributes to the middle chain's

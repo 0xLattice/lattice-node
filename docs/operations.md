@@ -116,7 +116,7 @@ server-side snapshot cache with the same `max-age` it already advertises, so a
 flood costs one `readSnapshot()` per interval however fast it arrives. That is
 a tighter bound than a rate limit, which would still admit
 `--public-read-max-rate` snapshot walks per second into the `ChainProcess`
-actor that also serves sync and block admission. The exemption is limited to
+actor that also serves sync and block import. The exemption is limited to
 `GET` and `HEAD`, the only methods a health check uses; `/health` under any
 other method is charged normally rather than being handed a free path to a 404.
 
@@ -161,7 +161,7 @@ example `Nexus` or `Nexus/testnet`); label values are escaped per the format.
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
-| `lattice_chain_tip_height` | gauge | `chain`, `tier` | Main-chain tip height. `tier="validated"` is the deepest validated tip the node acts on; `tier="weighed"` is the canonical weighed-inclusive tip that same read started from, so validated never exceeds weighed within a scrape. Absent while a child awaits genesis. |
+| `lattice_chain_tip_height` | gauge | `chain`, `tier` | Canonical tip height. `tier="validated"` is the deepest validated tip the node acts on; `tier="weighed"` is the canonical weighed-inclusive tip that same read started from, so validated never exceeds weighed within a scrape. Absent while a child awaits genesis. |
 | `lattice_overlay_peers` | gauge | `chain` | Authenticated same-chain overlay peers. The parent/child fact-plane link is not counted: a child whose only link is its parent reads `0`. |
 | `lattice_mempool_transactions` | gauge | `chain` | Transactions in the mempool. |
 | `process_start_time_seconds` | gauge | `chain` | Process start time, seconds since the Unix epoch. |
@@ -205,7 +205,7 @@ lattice-mining-coordinator \
   --min-work Nexus/testnet/swap=2^20
 ```
 
-- It is an operator choice, never consensus. Validity, admission and fork
+- It is an operator choice, never consensus. Validity, import and fork
   choice are untouched, and nodes keep accepting other miners' blocks at the
   scheduled target. Unset, templates are exactly the schedule.
 - Blocks commit the canonical target by default. The difficulty schedule is
@@ -264,7 +264,7 @@ lattice-mining-coordinator \
     name.
 
   The cap costs only this miner's own template (a search harder than its
-  blocks need); it never admits a declined block and has no consensus effect.
+  blocks need); it never imports a declined block and has no consensus effect.
   Removing it would need each child node to return one witness per filtered
   path in its subtree, a change to the child candidate wire format. That
   belongs with the merged-mining design for deployed child chains and is not
@@ -380,8 +380,8 @@ lattice-node \
 
 The parent endpoint is a live verdict boundary, not merely a bootstrap hint.
 Back up the configured parent key and child process identity as operational
-secrets. Losing the live parent does not revoke already admitted history or
-fork choice, but new child admissions that change parent state wait until the
+secrets. Losing the live parent does not revoke already imported history or
+fork choice, but new child imports that change parent state wait until the
 authenticated immediate parent can acknowledge the exact continuity or genesis
 query. Same-chain peers may restore the required Volumes; they cannot relay the
 parent's unsigned session-bound answer.
@@ -481,7 +481,7 @@ systemctl start lattice-node lattice-miner
 ```
 
 An empty Nexus directory recreates the exact pinned genesis automatically. An
-empty child directory returns to `awaitingGenesis` and must admit its genesis
+empty child directory returns to `awaitingGenesis` and must import its genesis
 again, which requires its configured parent to confirm the recorded CID.
 
 Before running a recursive removal, resolve and verify the explicit path. Never
@@ -489,7 +489,7 @@ target a home directory, workspace root, or an unresolved environment variable.
 
 ## Upgrading to executed-state attestation is one-way
 
-The image that records execution as a durable admission fact writes a batch
+The image that records execution as a durable import fact writes a batch
 shape the previous image cannot decode. **Once a node has accepted a single
 block on the new image, the previous image can no longer open that data
 directory.**
@@ -539,7 +539,7 @@ retries. So the mixed-version window is **safe but stalled**, in both
 directions:
 
 - **New child, old parent:** the child's continuity questions go unanswered. It
-  parks on `.wait(.later)` and retries; admission of blocks needing a new
+  parks on `.wait(.later)` and retries; import of blocks needing a new
   anchor waits. No wrong answer is ever accepted.
 - **Old child, new parent:** an old child asks the `v1` topic, which the new
   parent no longer serves, and also asks with a `from` the new rule rejects.

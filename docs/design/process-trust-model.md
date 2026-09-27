@@ -94,7 +94,7 @@ Volumes to same-chain peers.
 
 No child sends an edge inventory, accepted topology, coverage claim, or work
 back to its parent. Downstream, the parent maintains run state for the
-directories it hosts (spec §9.10) and serves each committer's run to that
+directories it hosts (spec §9.10) and serves each carrier's run to that
 directory's children beside bounded candidate and proof publication; upstream,
 it learns nothing. The child owns the exact vertical relation used for
 consensus projection.
@@ -110,7 +110,7 @@ that commits to the empty parent state. It becomes authoritative only after an
 accepted parent block stores the exact `GenesisAction(directory, childCID)`.
 The authenticated immediate-parent process acknowledges the exact tuple
 `(directory, childCID, empty parent state)` from its durable accepted facts
-before the child admits that genesis. The acknowledgement is unsigned, non-portable, and never persisted by
+before the child imports that genesis. The acknowledgement is unsigned, non-portable, and never persisted by
 the child as peer authority.
 
 Signature and signer fields inside a genesis block carry no authority and need

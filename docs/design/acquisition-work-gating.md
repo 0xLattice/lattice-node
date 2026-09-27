@@ -37,8 +37,8 @@ offer to how much work stands behind it.
   local-work facts" (spec §12.5, invariant 9; §9.7), and recovery replays those
   facts at every restart (§9.8). A kept block costs storage forever and replay
   time on every boot.
-- **The admission lane.** Candidates are admitted one at a time
-  (`CandidateAcquirer.next`), so a slot spent on junk is a slot the live edge
+- **The import lane.** Candidates are imported one at a time
+  (`BlockFetcher.next`), so a slot spent on junk is a slot the live edge
   does not get.
 - **A proof round trip for child blocks.** Weighing a child block needs its
   securing-work proof, which is requested from the supplier and requested
@@ -82,16 +82,16 @@ target, such evidence costs almost nothing.
 ### Exposure in the current pipeline
 
 - **Every announced CID is acquired.** The block-announcement case of
-  `NodeNetworkRuntime.handleOverlay` seeds `CandidateAcquirer`, on the weighed
+  `NodeNetworkRuntime.handleOverlay` seeds `BlockFetcher`, on the weighed
   tier, with every announced block, whether or not the node holds it (held
-  blocks resolve as duplicates). The acquirer's inputs are a CID and a
+  blocks resolve as duplicates). The fetcher's inputs are a CID and a
   provider. Work is not among them and cannot be, because the root has not been
   fetched yet.
 - **A claimed height decides what gets synced.** An announcement's height is
   an unverified claim. A claim more than `RangeSync.depthThreshold` above the
-  node's acquired height starts range sync with that peer, and re-entry picks
+  node's fetched height starts range sync with that peer, and re-entry picks
   the tallest recorded claim (`maybeRestartRangeSync`). The single range-sync
-  slot then pages that peer's main chain forward from the negotiated common
+  slot then pages that peer's canonical chain forward from the negotiated common
   ancestor, and every page is stored as it arrives. Progress is measured by
   canonical height. The slot is also freed on an empty page, when there is no
   common ancestor, when the peer disconnects, or when the target is reached.
@@ -103,23 +103,23 @@ target, such evidence costs almost nothing.
   predecessor walk.
 - **The offering peer chooses how deep the node descends.** A frontier page
   seeds every unknown leaf. Each candidate whose parent is missing seeds that
-  parent with the descendant's providers (`CandidateAcquirer.complete`,
+  parent with the descendant's providers (`BlockFetcher.complete`,
   `.predecessor`), so the bytes a peer serves decide how deep the walk goes.
   The walk is limited by a fixed budget of parked candidates, and when the
-  budget is full the oldest park is evicted (`evictOldestRetained`). A flood of
+  budget is full the oldest park is evicted (`evictOldestParked`). A flood of
   fresh parks pushes out older ones, so the adversary sets the horizon.
-- **Weighed admission compares nothing.** In weighed mode,
-  `ChainLocalAdmission.prepare` verifies proof of work (or the child
+- **Header import compares nothing.** In header mode (`ImportMode.header`),
+  `BlockImport.prepare` verifies proof of work (or the child
   securing-work proof) and header linkage. It then stages the block boundary
   and the work fact. No input compares the candidate's work with anything the
   node already holds.
 - **Resource budgets limit size, not work.** `NodeResourcePolicy` limits what a
   single candidate may cost: spec bytes, witness bytes, Volume counts and member
-  counts. The acquirer's ready and park capacities limit memory. None of them
+  counts. The fetcher's ready and park capacities limit memory. None of them
   asks how much work must stand behind what the node keeps.
 
 A cheap branch never becomes canonical and is never executed, so the
-invariants hold. What it buys is bandwidth, a share of the single admission
+invariants hold. What it buys is bandwidth, a share of the single import
 lane, and permanent storage plus replay on every boot. Its price is set by the
 easiest schedule the attacker can attach to, not by the chain the node follows.
 
@@ -208,7 +208,7 @@ Acquisition spends in three steps, and only the last is permanent:
   learning an offer's work at all. Fabricated or mismatched bytes can still be
   attributed to their sender, as today.
 - **Tally.** While an offer has not yet been shown to matter, the node applies
-  every check weighed admission applies: proof of work (for a child block, the
+  every check header import applies: proof of work (for a child block, the
   securing-work proof), version, parent link, matching spec, `prevState`
   against the parent's `postState`, height, timestamp, and target schedule. It
   records the resulting proven work. Nothing is staged, stored durably, entered
@@ -244,8 +244,8 @@ which has these properties:
   assigned to the comparisons it would enter.
 - **It combines work by grind identity (§9.1).** This applies both within the
   record and against work already counted in the kept graph. An attributed
-  run (§9.10) is keyed by `(committer, directory)` — deliberately not a grind —
-  and counts once beside the committer's grinds. Summing overlaps
+  run (§9.10) is keyed by `(carrier, directory)` — deliberately not a grind —
+  and counts once beside the carrier's grinds. Summing overlaps
   would let N one-block leaves on a cheap spine each claim the spine's work.
   Failing to combine them would leave a branch that is heavier only through its
   side branches uncounted, and the node on the lighter chain.
@@ -265,8 +265,8 @@ poisoning. An attacker who announces an honest leaf first and stalls its
 ancestry leaves only a partial lower bound, which the honest peers' offers then
 extend. And an entry cannot be inflated, because work proves itself and one
 grind secures only one location per chain (§9.1); an attributed run, keyed by
-`(committer, directory)` rather than by a grind, is likewise held at one child
-location and counts once beside the committer's grinds (§9.10). Work the record
+`(carrier, directory)` rather than by a grind, is likewise held at one child
+location and counts once beside the carrier's grinds (§9.10). Work the record
 already knows
 still orders acquisition, and it is judged again whenever the bar drops.
 
@@ -355,7 +355,7 @@ from a negotiated common ancestor ([bulk-sync-stream](bulk-sync-stream.md))
 knows the attachment point before the first page, so the bar is known from the
 start. A top-down predecessor walk only finds the attachment point at the
 bottom, so each step of its descent costs a probe and draws on the tally
-budget. Beyond the live edge, the node approaches main-chain offers forward
+budget. Beyond the live edge, the node approaches canonical-chain offers forward
 instead.
 
 Claims carried in announcements (height today, any future work hint) may decide
@@ -407,11 +407,12 @@ they cannot remove.
   an honest one. What gets kept is still decided only by work that has been
   tallied again. No existing overlay request can ask for this: the frontier pull
   returns a peer's newest leaves, the legacy leaf descent walks every leaf in
-  CID order, and range sync pages only a peer's main chain. A request for the
+  CID order, and range sync pages only a peer's canonical chain. A request for the
   branches of a peer's accepted graph that descend from a named block is
   therefore a requirement of this design. It must be bounded the way the
-  existing leaf page is, with a page limit, a cursor and a fixed admission
-  snapshot so a changing forest cannot move a branch behind the cursor, and it
+  existing leaf page is, with a page limit, a cursor and a fixed import-sequence
+  snapshot (the stored column keeps its old name, `admission_seq`) so a
+  changing forest cannot move a branch behind the cursor, and it
   answers only what that peer retains. It is also a new wire topic: peers that
   predate it cannot answer, so until the fleet has upgraded, re-solicitation
   reaches only upgraded peers and the deviation lasts longer.
@@ -497,7 +498,7 @@ comparison those rules use is a node that retained B:
   function of their retention policy". That comparison node keeps the *weight
   facts*, not the bytes, and it "may select a head it has not yet re-acquired",
   so the loss of a provider does not excuse the gating node.
-- modular-admission-pipeline rules out work floors because "two nodes with
+- modular-import-pipeline rules out work floors because "two nodes with
   different floors could select different tips". Two nodes with different tally
   budgets could too.
 - protocol.md treats any filter on work that can reach fork choice as
@@ -564,15 +565,9 @@ accepts in exchange for how much storage:
 Between those ends the operator trades storage against how much verified work
 the node may forget. No protocol constant sits anywhere on the dial: like every
 other limit here, it is a node-local decision with a sane default. A node at any
-setting is fully conforming in consensus terms, and fully conforming under the
-three documents named below once they are reworded.
-
-**Rewording three documents is a prerequisite to building this.**
-operator-finality's weight-preservation rule, protocol.md's work-floor sentence
-and modular-admission-pipeline's floor sentence each state an unconditional rule
-today. Accepting a bounded deviation as an operator setting makes that rule
-operator-selected, and those documents have to say so before this is built. This
-document does not reword them.
+setting is fully conforming in consensus terms. Adopting this makes the
+unconditional rules in operator-finality, protocol.md and modular-import-pipeline
+operator-selected, and they must say so.
 
 ## Stranding
 
@@ -592,11 +587,11 @@ These are the ways that can happen, and how the concept handles each:
   validated graph. A chain heavier than the one the node follows has, by
   definition, more work above the fork point than the incumbent, so its
   combined tally always crosses the bar. A node sitting on a light chain has a
-  low bar and readily admits heavier chains. The failure only appears if work
+  low bar and readily imports heavier chains. The failure only appears if work
   the node cannot act on is allowed to raise the bar, which is why unvalidated
   incumbent weight is left out.
 - **Uncombined tallies.** A subtree can be heaviest only through its side
-  branches. A tally that sees only a main chain, or sums its pieces separately,
+  branches. A tally that sees only the spine, or sums its pieces separately,
   would never cross the bar. The shared record combines work by grind identity
   and counts spine and sides together. Its budget has to fit an honest subtree's
   width, which follows the real fork rate.
@@ -682,7 +677,7 @@ They interact in four ways:
 
 - **Consensus is untouched.** No validity rule, work measure, comparison,
   exclusion or tier changes. An offer below the bar is neither valid nor
-  invalid. Once kept, it is admitted exactly as today. Head outcomes can differ
+  invalid. Once kept, it is imported exactly as today. Head outcomes can differ
   only as set out under [The deviation](#the-deviation).
 - **Same head, except the stated deviation.** A gating node computes the head it
   would compute if it had kept every offer it is tallying, or holds a record for

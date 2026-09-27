@@ -97,7 +97,7 @@ had exercised until review named them:
 
 Reaching such an ordering in a test takes purpose-built hooks and latches:
 
-- 43431f87 added a DEBUG `resolveValidateEvidenceForTesting` seam, which
+- 43431f87 added a DEBUG evidence seam, now `resolveExecutionEvidenceForTesting`, which
   supplies the evidence package so the evidence-wait paths can be driven. The
   ordering itself comes from the test's own latch.
 - A related race is exercised by a DEBUG `demoteValidatedForTesting` call placed
@@ -140,7 +140,8 @@ notes are the clearest statement of the problem:
   unmodified main (248258d). One of its causes was the node adopting an
   equal-work peer tip, against the tie rule then in force that an exact tie holds
   the incumbent. Lattice spec §9.4 has since replaced that rule with a
-  deterministic smaller-segment-base-CID tie-break.
+  deterministic tie-break by the smaller canonical CID of the competing child
+  blocks.
 
 ### What is missing
 
@@ -198,7 +199,7 @@ by editing node state:
 - **Delay, reorder, drop and duplicate** on every channel, including the
   hierarchy plane.
 - **Crash and restart at arbitrary points.** This includes between any two
-  durable writes, and at any suspension point of an admission, eviction or
+  durable writes, and at any suspension point of an import, eviction or
   evidence flow. A restarted node sees only what its simulated disk durably held.
 - **Disk failure.** Write errors, a full device, slow writes, and loss of
   anything not yet durable at the moment of a crash.
@@ -268,39 +269,40 @@ node's observable behaviour against it; it does not restate it.
      subtree still weighed and the descent never stepping into an excluded
      block.
    - The reference ranks by greatest effective `trueCumWork` and breaks exact
-     ties by the smaller segment-base CID.
+     ties by the lexicographically smaller canonical CID of the competing
+     child blocks.
    - The result does not depend on arrival or replay order.
 
    This is the ranking head, which spec §9.9 allows to be merely weighed. The
-   validated head the node acts on is checked by invariant 7. The north star's
-   frozen reference model has no validation tier or exclusions, so it is the
-   reference only where neither applies.
+   validated head the node acts on is checked by invariant 7. Lattice's
+   `ForkChoiceOracle` is such a reference: written from the specification
+   alone, it weighs excluded subtrees and never descends into them.
 
    Sources: Lattice spec §9.2, §9.4, §9.9 and §12.5 (items 4–6, 10); Lattice
-   [consensus-fork-choice](https://github.com/adalinxx/Lattice/blob/35.0.1/docs/consensus-fork-choice.md);
-   the exact reference gate in the
-   [work-proof collapse north star](work-proof-collapse-north-star.md).
+   [consensus-fork-choice](https://github.com/adalinxx/Lattice/blob/37.0.0/docs/consensus-fork-choice.md);
+   the properties in [proof-derived child work](proof-derived-work.md).
 2. **One grind is counted once per location.**
    - A verified observation of a root whose root hash clears the terminal
      child's target credits exactly `workForTarget` of the root-most target
      it cleared along that proof, raised if greater by the terminal child's
      own (never a max over every cleared target; Lattice 35.0.1, spec §9.5);
      an observation that does not clear the terminal target yields no
-     contribution at all — no work fact, and the block is not admitted; one
+     contribution at all — no work fact, and the block is not imported; one
      chain-local location holds the strongest such observation.
    - A conflicting location is rejected atomically.
    - Distinct grinds sum.
    - Replay never multiplies weight.
 
-   Sources: spec §9.1 and §12.5 (items 3–4); north star gate items 1–2;
-   [composable node architecture](modular-admission-pipeline.md).
+   Sources: spec §9.1 and §12.5 (items 3–4); properties 1–2 in
+   [proof-derived child work](proof-derived-work.md);
+   [composable node architecture](modular-import-pipeline.md).
 3. **Work counts only where the rules place it.**
    - Work verified along a proof path does not depend on the validity,
-     admission, connectivity or canonicity of the intermediate carriers.
+     import, connectivity or canonicity of the intermediate carriers.
    - Weight contains only connected, accepted same-chain locations: grind
      contributions derived from verified proof bytes, and attributed runs the
      child bound and derived from its configured parent's report, keyed by
-     committer and directory. Exclusion removes none of it; the descent never
+     carrier and directory. Exclusion removes none of it; the descent never
      steps into an excluded block.
    - Parent canonicity alone never changes child weight.
 
@@ -342,8 +344,8 @@ node's observable behaviour against it; it does not restate it.
 
    Sources: spec §9.8; "Eviction is weight-preserving" in operator finality.
 10. **Chain structure holds.**
-    - The tip exists and is on the main chain.
-    - The main chain is a connected path from one genesis root.
+    - The tip exists and is on the canonical chain.
+    - The canonical chain is a connected path from one genesis root.
     - A canonical delta's added and removed sets are disjoint.
     - Consecutive blocks satisfy state continuity.
     - A non-genesis child's parent-state reference only stays put or moves
@@ -374,7 +376,7 @@ node's observable behaviour against it; it does not restate it.
     node declines.
 14. **State stays bounded.** Every retained collection respects its bound at
     every step, under any fault schedule. Source: invariant 10 in
-    [candidate acquisition](candidate-acquisition.md).
+    [block fetching](block-fetching.md).
 
 ### Liveness, after faults stop
 
@@ -385,25 +387,25 @@ node's observable behaviour against it; it does not restate it.
 16. **Every advertised candidate reaches an outcome.** Once faults stop, every
     candidate still advertised by a reachable honest peer eventually ends in one
     of three outcomes:
-    - admitted, and possibly later excluded by a completed check;
+    - imported, and possibly later excluded by a completed check;
     - returned as a carrier by a target miss;
-    - rejected at admission.
+    - rejected at import.
 
     Re-acquiring a candidate without end is none of these, and it fails this
     property.
-    - A runtime reset (candidate acquisition invariant 9) or a bounded retry
+    - A runtime reset (block fetching invariant 9) or a bounded retry
       budget may drop an in-flight attempt only if a later advertisement
       re-creates the obligation. That re-acquisition must itself end in one of
       those outcomes.
-    - This is a weaker liveness form than candidate acquisition invariant 8,
+    - This is a weaker liveness form than block fetching invariant 8,
       and it is the form the simulation checks. Invariant 8 as written remains a
       separate, open discrepancy: the retry-budget reclaim added in 1a18bb44
       removes an attempt without scheduling replacement work.
 
-    Sources: invariants 8–9 and the acceptance criteria in candidate acquisition;
+    Sources: invariants 8–9 in [block fetching](block-fetching.md);
     spec §9.3 and §5.4 for the carrier result; spec §9.9 for exclusion.
 
-The north star lists these adversarial scenarios:
+The adversarial scenarios to cover are:
 
 - withholding and batched release;
 - old-block targeting;
@@ -433,7 +435,7 @@ hard to recover. This section states what is achievable and what is not.
 - **Actors are reentrant.** Every `await` inside an actor is a point at which
   another message may run and change the state the suspended code resumes with.
   The node defends against this by hand:
-  - `ChainProcess` queues admission and eviction because "actors are reentrant".
+  - `ChainProcess` queues import and eviction because "actors are reentrant".
   - `ChainService` keeps "one externally observable order" because it "calls
     other actors and is therefore reentrant".
 
@@ -461,7 +463,7 @@ hard to recover. This section states what is achievable and what is not.
   - Tally's admission bookkeeping and VolumeBroker's `MemoryBroker` also read the
     clock directly.
   - Even the test helper `TestBlockClock` in `NetworkTrustTestCase` is anchored to
-    real wall time, because admission compares block timestamps with the real
+    real wall time, because block import compares block timestamps with the real
     clock.
 - **The network is real sockets.** Ivy builds SwiftNIO client, server and
   datagram bootstraps over the operating system's sockets. SwiftNIO event loops
@@ -522,36 +524,36 @@ Some consequences follow and should be accepted openly:
 The codebase already has boundaries a simulated environment could attach to,
 because boundary-focused testing needed the same things:
 
-- **Content.** Admission takes a cashew `ContentSource` (`InMemoryContentSource`,
+- **Content.** Import takes a cashew `ContentSource` (`InMemoryContentSource`,
   `FetcherContentSource`, `OverlayContentSource`). Component tests already
   substitute blocking, counting and recording sources. Ivy's content exchange is
   served through the `IvyContentSource` protocol, with test sources in
   `Tests/LatticeNodeTests/Support`.
 - **Service ports.** `ChainService` receives its network effects through one
   injected `NetworkInterface`:
-  - the validate-walk body source and evidence source;
+  - the execution-walk body source and evidence source;
   - the child-candidate provider;
   - the block, transaction and proof publishers.
 
-  Its validate-walk retry interval is a parameter. `ChainInterface` is the
+  Its execution-walk retry interval is a parameter. `ChainInterface` is the
   same kind of boundary between the runtime and the service; tests supply
   closure-backed implementations of both from `Tests/LatticeNodeTests/Support`.
-- **Pure reducers.** `CandidateAcquirer`, `ParentEvidenceFlow` and
-  `ChildCandidateOwnership` are synchronous state machines that perform neither
-  Ivy I/O nor consensus ([composable node architecture](modular-admission-pipeline.md)).
-  `CandidateAcquirer` already takes time as an explicit `now:` argument, and its
+- **Pure reducers.** `BlockFetcher`, `ParentEvidenceFlow` and `RangeSync` are
+  synchronous state machines that perform neither Ivy I/O nor consensus
+  ([composable node architecture](modular-import-pipeline.md)).
+  `BlockFetcher` already takes time as an explicit `now:` argument, and its
   tests advance time by hand. These are already deterministic.
-- **Validation time.** Lattice's admission accepts an explicit
+- **Validation time.** Lattice's block import (`importBlock`) accepts an explicit
   `ValidationContext` carrying the clock reading for one attempt, as spec §9.3
   requires. The node does not pass one today, so it takes the wall-clock default.
   The seam exists but stops at the node boundary.
 - **Peer delivery.** The node receives transport events through the
   `IvyDelegate` protocol, and tests already install recording delegates.
 - **Storage.** The retained-root path is written against VolumeBroker's broker
-  protocols. This lets `NodeStoreTests` interpose a `BlockingVolumeBroker`.
+  protocols. This lets `NodeStoreTests` interpose a `BlockingBroker`.
 - **Precedent for seeded runs.** Lattice's `LatticeSim` drives the real
   `ChainState` fork choice from a seed and requires "the same trace
-  byte-for-byte" ([consensus simulator](https://github.com/adalinxx/Lattice/blob/35.0.1/docs/consensus-simulator.md)).
+  byte-for-byte" ([consensus simulator](https://github.com/adalinxx/Lattice/blob/37.0.0/docs/consensus-simulator.md)).
   The wire fuzzers use a portable seeded generator rather than the system one.
 
 ### Where no seam exists
@@ -588,13 +590,13 @@ answers a question simulation cannot, and simulation answers one they cannot.
 
 | Tier | Keeps owning | Relation to simulation |
 |---|---|---|
-| Reducer and unit tests (`CandidateAcquirerTests`, `AdmissionDecisionTests`) | Exact contracts of small state machines | Unchanged. The reducers run inside simulated nodes as they are. |
+| Reducer and unit tests (`BlockFetcherTests`, `ImportDecisionTests`) | Exact contracts of small state machines | Unchanged. The reducers run inside simulated nodes as they are. |
 | Component tests with latches and blocking sources (`ChainProcessTests`, `ChainServiceTests`, `NodeStoreTests`) | One named interleaving, pinned forever | Complemented. Simulation searches for interleavings. A failing seed, once understood, can become a pinned component test. Purpose-built DEBUG ordering hooks become less necessary for discovery. |
 | Real-network integration (the `NetworkTrust*Tests` suites) | Ivy sessions, framing, authentication and delegate delivery over real sockets | Complemented. Simulation replaces the transport, so it cannot vouch for it. |
 | Black-box E2E with real binaries (`LatticeNodeE2ETests`, `LatticeCtlE2ETests`, release smoke) | The shipped artifact: daemon startup, configuration, HTTP, real disk, real processes, real load | Complemented. These stay the gate for the thing users run. Two things move to simulation: their role as the main place ordering bugs surface, and the scaled deadlines and opt-in gates used to absorb those bugs. |
 | Sanitizers and strict concurrency | Memory safety and true data races | Complemented. A simulation driven by the seed rather than by hardware parallelism cannot see this class, and these tools cannot see logical interleavings. |
 | Wire fuzzing and the read-router edge-case matrix | Hostile single inputs at the unauthenticated surfaces | Complemented. They vary one input; simulation varies sequences, timing and faults. Simulation keeps the wire fuzzers' seed-and-replay discipline. |
-| Lattice's `LatticeSim` and determinism goldens | Consensus rules and host-independent results | Complemented. Where no validation tier or exclusion is involved, the reference model for invariant 1 has the same shape as the frozen model the north star requires. It may be shared rather than duplicated. |
+| Lattice's `LatticeSim` and determinism goldens | Consensus rules and host-independent results | Complemented. Lattice's `ForkChoiceOracle` already has the shape of the reference model for invariant 1. It may be shared rather than duplicated. |
 | Reproducible builds | The binary is what the source says | Supports simulation. A seed replays only on the same build, and reproducible builds make "the same build" checkable. |
 | Testnet and fleet operation | Real hardware, real latency, real operators | Complemented. Simulation reaches their failure modes before the fleet does. It cannot replace the fleet as the final judge. |
 
@@ -623,7 +625,7 @@ mechanism for ordering, crash, partition, skew and peer-misbehaviour bugs.**
   skewed clocks are applied to what a node receives or reads. Nothing edits a
   node's stores or in-memory state, which is the rule the E2E tier already
   follows.
-- **Proof of work stays real.** A simulated block is admitted because its hash
+- **Proof of work stays real.** A simulated block is imported because its hash
   beats its target, not because the simulation says so.
   - Targets can be cheap, but they must be mixed and must not all sit at the
     maximum. Genesis commits the maximum target by convention, and block 1's
