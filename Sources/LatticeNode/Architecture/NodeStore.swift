@@ -2194,6 +2194,9 @@ actor NodeStore {
         )
     }
 
+    /// Returns whether this carrier's evidence was admitted before (then no
+    /// inbox entry is kept and there is nothing to admit again).
+    @discardableResult
     func storeParentEvidenceInbox(
         sourceID: String,
         ordinal: UInt64,
