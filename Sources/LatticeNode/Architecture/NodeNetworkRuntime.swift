@@ -399,10 +399,21 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// together.
         var session: AuthenticatedPeer?
         var role: HierarchyPeer?
+        /// The public read URL a wired child declared in its hierarchy
+        /// hello, per authenticated child connection. Self-declared and
+        /// unverified — a browser verifies the served genesis against the
+        /// parent's anchor.
+        var declaredReadURL: String?
 
         var isEmpty: Bool {
             helloDeadline == nil && session == nil && role == nil
+                && declaredReadURL == nil
         }
+    }
+
+    /// Whether any wired child declared a public read URL.
+    private var anyChildDeclaredReadURL: Bool {
+        hierarchyRecords.records.values.contains { $0.declaredReadURL != nil }
     }
 
     /// Every hierarchy peer's role with its key, as a snapshot.
@@ -524,10 +535,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
     private var servingAncestorRange: Set<Data> = []
     private var servingReadEndpoints: Set<Data> = []
-    /// Public read URLs declared by wired children in their hierarchy hellos,
-    /// per authenticated child connection. Self-declared and unverified — a
-    /// browser verifies the served genesis against the parent's anchor.
-    private var childDeclaredReadURLs: [PeerKey: String] = [:]
     private var pendingReadEndpoints: [UInt64: PendingReadEndpoint] = [:]
     private var readURLDiscoveries: [String: ReadURLDiscovery] = [:]
     private var readURLDiscoveryTasks:
@@ -950,7 +957,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         process = nil
         let removedOverlayRecords = overlayRecords.removeAll()
         let removedHierarchyRecords = hierarchyRecords.removeAll()
-        childDeclaredReadURLs.removeAll()
         servingReadEndpoints.removeAll()
         readURLDiscoveries.removeAll()
         for inFlight in readURLDiscoveryTasks.values {
@@ -1169,7 +1175,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // Same cheap precheck as serving an ask: the state walk runs only
         // when this node has anything to declare.
         if let process,
-           configuration.publicReadURL != nil || !childDeclaredReadURLs.isEmpty {
+           configuration.publicReadURL != nil || anyChildDeclaredReadURL {
             own = await declaredReadURLs(
                 genesisCID: genesisCID,
                 process: process
@@ -1283,7 +1289,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // declarant reachable across repeated asks.
             for (key, directory) in wiredChildren.shuffled() {
                 guard directories.contains(directory),
-                      let url = childDeclaredReadURLs[key],
+                      let url = hierarchyRecords[key]?.declaredReadURL,
                       !urls.contains(url) else { continue }
                 urls.append(url)
                 if urls.count >= ReadEndpointResponseMessage.maximumURLs {
@@ -2518,7 +2524,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             record.session = nil
             return role
         }
-        childDeclaredReadURLs.removeValue(forKey: key)
+        hierarchyRecords.update(key) { $0.declaredReadURL = nil }
         childEvidenceReadyPeers.remove(key)
         cancelChildEvidenceReadyWaiters(for: key)
         childCandidateOffers.removeValue(forKey: key)
@@ -2734,7 +2740,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // burn its timeout.
             var urls: [String] = []
             if configuration.publicReadURL != nil
-                || !childDeclaredReadURLs.isEmpty,
+                || anyChildDeclaredReadURL,
                 servingReadEndpoints.insert(peer.sessionID).inserted {
                 defer {
                     if isCurrentRuntime(
@@ -4420,9 +4426,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // Tolerant ingest of the child's self-declared read URL: invalid
             // or absent just isn't carried (never a session cost).
             if let url = normalizedPublicReadURL(remote.publicReadURL) {
-                childDeclaredReadURLs[peer.key] = url
+                hierarchyRecords.update(peer.key) { $0.declaredReadURL = url }
             } else {
-                childDeclaredReadURLs.removeValue(forKey: peer.key)
+                hierarchyRecords.update(peer.key) { $0.declaredReadURL = nil }
             }
         }
         scheduleHierarchyHelloFollowup(
@@ -4733,7 +4739,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         keys.formUnion(refusedChildEvidenceHints.keys)
         keys.formUnion(hierarchyRecords.keys)
         keys.formUnion(pendingTransactionInventories.values.map(\.peer.key))
-        keys.formUnion(childDeclaredReadURLs.keys)
         keys.formUnion(pendingReadEndpoints.values.map(\.peer.key))
         if let rangeSync { keys.insert(rangeSync.peer.key) }
         keys.formUnion(pendingEvidenceIndexes.values.map(\.peer.key))
@@ -4768,7 +4773,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         let hierarchyKeys = Set(hierarchyRecords.keys)
             .union(hierarchyRecords.keys)
-            .union(childDeclaredReadURLs.keys)
             .union(childEvidenceReadyPeers)
             .union(childEvidenceReadyWaiters.keys)
             .union(childEvidenceIndexCompleteSessions.map(\.peerKey))
