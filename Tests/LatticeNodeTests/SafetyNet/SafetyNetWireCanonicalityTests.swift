@@ -595,7 +595,8 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
                         )
                     )
                 }
-            let minimumWork = randomBool(&generator) ? [] : [MiningMinimumWork(
+            // Both trailer shapes every run, by construction.
+            let minimumWork = iteration.isMultiple(of: 2) ? [] : [MiningMinimumWork(
                 chainPath: childPath,
                 work: UInt256(UInt64.random(in: 1...UInt64.max, using: &generator))
             )]
@@ -817,9 +818,9 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
                     transaction: try rewardTransaction(chainPath: path, generator: &generator)
                 )
             }
-            // `minimumWork` is omitted from the wire when empty, so both
-            // shapes are exercised.
-            let minimumWork = randomBool(&generator) ? [] : [MiningMinimumWork(
+            // `minimumWork` is omitted from the wire when empty; both shapes
+            // every run, by construction.
+            let minimumWork = iteration.isMultiple(of: 2) ? [] : [MiningMinimumWork(
                 chainPath: randomChainPath(&generator, minimumCount: 1),
                 work: UInt256(UInt64.random(in: 1...UInt64.max, using: &generator))
             )]

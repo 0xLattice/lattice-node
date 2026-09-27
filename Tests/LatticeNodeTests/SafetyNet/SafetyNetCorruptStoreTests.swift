@@ -14,9 +14,10 @@ import XCTest
 /// child_genesis_volume_roots, contextual_candidates, contextual_candidate_roots,
 /// contextual_candidate_children), the local mempool (local_mempool_transactions),
 /// the consensus revision floor (consensus_revision) and the prepared-proof
-/// recovery (prepared_child_proofs). `pending_child_proof_routes` is NOT read
-/// on that path today, and `child_genesis_volume_roots` only through joins
-/// that an orphan row never satisfies.
+/// recovery (prepared_child_proofs). `pending_child_proof_routes` is not read
+/// by this fixture's boot (nothing is staged, no prepared proofs), and
+/// `child_genesis_volume_roots` only through joins that an orphan row never
+/// satisfies.
 ///
 /// Every case starts from one valid fixture (Nexus, two mined blocks), damages
 /// exactly one row through SQL, reopens, and records what boot did. The
@@ -41,8 +42,9 @@ import XCTest
 /// - accepted_blocks.validated out of range: read at boot and silently
 ///   tolerated — boot succeeds and the row keeps its out-of-range tier (TODO).
 /// - child_genesis_volume_roots (orphan row), pending_child_proof_routes: not
-///   read at boot today — boot succeeds and the damaged row is still there
-///   afterwards. Pinned as "unread", not as a tolerance.
+///   read by this fixture's boot (nothing is staged, no prepared proofs) —
+///   boot succeeds and the damaged row is still there afterwards. Pinned as
+///   "unread", not as a tolerance.
 /// - accepted_blocks.leaf disagreeing with the parent links: repaired at boot
 ///   (documented behaviour, pinned as such).
 ///
@@ -205,11 +207,13 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         ),
     ]
 
-    /// Not read at boot today: `pending_child_proof_routes` is not on the
-    /// `ChainProcess.open` path at all (only `pendingChildProofRoutes()` reads
-    /// it, later), and `child_genesis_volume_roots` is read only through
-    /// `WHERE EXISTS` joins on issued edges / prepared proofs that an orphan
-    /// row never satisfies. Boot succeeds and the row is still there.
+    /// Not read by this fixture's boot (nothing is staged, no prepared
+    /// proofs): `pending_child_proof_routes` is read on the stage path
+    /// (`persistPreparedChildProofs` / `persistPendingChildProofRouteRows`)
+    /// and by `pendingChildProofRoutes()`, neither of which a Nexus boot with
+    /// an empty prepared set reaches, and `child_genesis_volume_roots` only
+    /// through `WHERE EXISTS` joins on issued edges / prepared proofs that an
+    /// orphan row never satisfies. Boot succeeds and the row is still there.
     private static let unreadAtBoot: [Damage] = [
         Damage(
             table: "child_genesis_volume_roots", column: "root_cid",

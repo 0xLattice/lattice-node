@@ -101,7 +101,9 @@ final class SafetyNetDisconnectInvariantTests: XCTestCase {
             try await waitUntil("withheld volume fetch holds a session lease") {
                 !(await target.runtime.heldSessionIDsForTesting()).isEmpty
             }
-            await withholding.waitForBlockedRequest()
+            try await waitUntil("withheld request reached the peer") {
+                await withholding.blockedRequestStarted
+            }
             let heldBefore = await target.runtime.heldSessionIDsForTesting()
             let liveBefore = await target.runtime.liveSessionIDsForTesting()
             XCTAssertFalse(heldBefore.isEmpty, "a session lease must exist before disconnect")
@@ -332,9 +334,9 @@ private final class SafetyNetSilentPeer: IvyDelegate, Sendable {}
 /// not `content(...)`; both withhold so the transport path does not matter.)
 private actor SafetyNetWithholdingContentSource: IvyContentSource {
     private let blockedRoot: String
-    private var blockedRequestStarted = false
+    /// Set once the withheld root has been asked for; polled by the test.
+    private(set) var blockedRequestStarted = false
     private var released = false
-    private var startWaiters: [CheckedContinuation<Void, Never>] = []
     private var blockedWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(blockedRoot: String) {
@@ -352,18 +354,10 @@ private actor SafetyNetWithholdingContentSource: IvyContentSource {
     private func withhold(_ rootCID: String) async -> [ContentEntry] {
         guard rootCID == blockedRoot else { return [] }
         blockedRequestStarted = true
-        let pendingStarts = startWaiters
-        startWaiters.removeAll()
-        for waiter in pendingStarts { waiter.resume() }
         if !released {
             await withCheckedContinuation { blockedWaiters.append($0) }
         }
         return []
-    }
-
-    func waitForBlockedRequest() async {
-        guard !blockedRequestStarted else { return }
-        await withCheckedContinuation { startWaiters.append($0) }
     }
 
     func release() {
