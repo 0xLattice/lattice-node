@@ -326,6 +326,47 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let rootCID: String
     }
 
+    private struct OverlayPeerRecord: PeerRecord {
+        /// A key holds at most one session: connected and awaiting its
+        /// hello, or hello accepted.
+        enum Session {
+            case awaitingHello(AuthenticatedPeer)
+            case ready(AuthenticatedPeer)
+        }
+
+        var session: Session?
+
+        var isEmpty: Bool {
+            session == nil
+        }
+
+        /// The session whose hello was accepted.
+        var readyPeer: AuthenticatedPeer? {
+            guard case .ready(let peer)? = session else { return nil }
+            return peer
+        }
+
+        /// The session still awaiting its hello.
+        var awaitingHelloPeer: AuthenticatedPeer? {
+            guard case .awaitingHello(let peer)? = session else { return nil }
+            return peer
+        }
+
+        /// The session in either state.
+        var sessionPeer: AuthenticatedPeer? {
+            switch session {
+            case .awaitingHello(let peer)?, .ready(let peer)?: return peer
+            case nil: return nil
+            }
+        }
+    }
+
+    /// The overlay sessions whose hello was accepted, as a snapshot (a
+    /// send loop over it is unaffected by a record removed mid-loop).
+    private var readyOverlayPeers: [AuthenticatedPeer] {
+        overlayRecords.records.values.compactMap(\.readyPeer)
+    }
+
     private struct HelloDeadline {
         let token: UInt64
         let sessionID: Data
@@ -389,8 +430,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private let callbackEpoch = RuntimeCallbackEpoch()
     private var process: ChainProcess?
     private var isRunning = false
-    private var overlaySessions: [PeerKey: AuthenticatedPeer] = [:]
-    private var overlayPeers: [PeerKey: AuthenticatedPeer] = [:]
+    /// Per overlay peer key: the one authenticated session (pre- or
+    /// post-hello) and the state bound to it.
+    private var overlayRecords = PeerSet<OverlayPeerRecord>()
     private var hierarchyPeers: [PeerKey: HierarchyPeer] = [:]
     private var hierarchySessions: [PeerKey: AuthenticatedPeer] = [:]
     private var childEvidenceReadyPeers: Set<PeerKey> = []
@@ -855,8 +897,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
 
     private func clearRuntimeState() async {
         process = nil
-        overlaySessions.removeAll()
-        overlayPeers.removeAll()
+        _ = overlayRecords.removeAll()
         hierarchyPeers.removeAll()
         hierarchySessions.removeAll()
         childDeclaredReadURLs.removeAll()
@@ -1003,7 +1044,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             blockCID: blockCID,
             height: height
         ).encoded()
-        for peer in overlayPeers.values {
+        for peer in readyOverlayPeers {
             guard isCurrentRuntime(generation: generation, process: process) else {
                 throw NodeNetworkRuntimeError.notRunning
             }
@@ -1023,7 +1064,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// at `limit` (the daemon passes ≤ 200).
     public func peerSummaries(limit: Int) async -> ExplorerPeersResponse {
         let boundedLimit = min(max(limit, 0), Self.maximumExplorerPeerSummaries)
-        let peers = overlayPeers.values
+        let peers = readyOverlayPeers
         let summaries = peers.prefix(boundedLimit).map { peer in
             ExplorerPeerSummary(
                 key: peer.key.hex,
@@ -1112,7 +1153,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             var asked = 0
             for (index, key) in candidates.enumerated() {
                 guard asked < Self.maximumReadEndpointAsks,
-                      let peer = overlayPeers[key] else { continue }
+                      let peer = overlayRecords[key]?.readyPeer else { continue }
                 asked += 1
                 group.addTask { [weak self] in
                     guard let self else { return (index, []) }
@@ -1800,7 +1841,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard let payload = try? TransactionAvailableMessage(
             volumeRootCID: volumeRootCID
         ).encoded() else { return }
-        for peer in overlayPeers.values {
+        for peer in readyOverlayPeers {
             guard isCurrentRuntime(generation: generation, process: process) else {
                 throw NodeNetworkRuntimeError.notRunning
             }
@@ -2321,13 +2362,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
         if ivy === overlay {
             // Overlay authorization, like hierarchy authorization, belongs to
             // one authenticated connection rather than a long-lived key.
-            if let previous = overlayPeers[peer.key] {
+            if let previous = overlayRecords[peer.key]?.readyPeer {
                 candidateAcquirer.disconnect(candidateProvider(previous))
             }
-            overlayPeers.removeValue(forKey: peer.key)
+            overlayRecords.update(peer.key) { record in
+                if case .ready? = record.session { record.session = nil }
+            }
             discardServingSessions(for: peer.key)
             frontierPulls.removeValue(forKey: peer.key)
-            overlaySessions[peer.key] = peer
+            overlayRecords.update(peer.key) { $0.session = .awaitingHello(peer) }
             scheduleOverlayHelloDeadline(for: peer, generation: generation)
             SyncTrace.log("overlay connect peer=\(peer.key.hex.prefix(8))")
             topic = NodeNetworkTopic.overlayHello
@@ -2377,7 +2420,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // asynchronous disconnect callback arrives.
             guard !(await ivy.connectedPeers).contains(peer) else { return }
             overlayHelloDeadlines.removeValue(forKey: key)?.task.cancel()
-            if let disconnected = overlayPeers[key] {
+            if let disconnected = overlayRecords[key]?.readyPeer {
                 candidateAcquirer.disconnect(candidateProvider(disconnected))
             }
             discardServingSessions(for: key)
@@ -2385,8 +2428,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             if rangeSync?.peer.key == key {
                 clearRangeSync()
             }
-            overlaySessions.removeValue(forKey: key)
-            overlayPeers.removeValue(forKey: key)
+            overlayRecords.update(key) { $0.session = nil }
             announcedTips.removeValue(forKey: key)
             let disconnectedInventories = pendingTransactionInventories.filter {
                 $0.value.peer.key == key
@@ -2518,8 +2560,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard isCurrentRuntime(generation: generation, process: process),
                   expectsOverlayHello(from: peer) else { return }
             overlayHelloDeadlines.removeValue(forKey: peer.key)?.task.cancel()
-            overlaySessions.removeValue(forKey: peer.key)
-            overlayPeers[peer.key] = peer
+            overlayRecords.update(peer.key) { $0.session = .ready(peer) }
             // Advertise the ACQUIRED (canonical, weighed-inclusive) tip: every
             // receiver measures its gap, its range-sync target and its edge
             // against acquired heights, so advertising the validated tip would
@@ -2533,7 +2574,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 ).encoded()
             {
                 guard isCurrentRuntime(generation: generation, process: process),
-                      overlayPeers[peer.key]?.sessionID == peer.sessionID else {
+                      overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
                     return
                 }
                 let sent = await overlay.sendMessage(
@@ -2565,7 +2606,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             return
         }
 
-        guard overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+        guard overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
         switch message.topic {
         case NodeNetworkTopic.transactionAvailable:
             guard let available = try? TransactionAvailableMessage.decoded(
@@ -2696,7 +2737,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 peer: peer.id
             )
             guard isCurrentRuntime(generation: generation, process: process),
-                  overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+                  overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
             // Only a genuinely deep gap — far more than a predecessor pull should
             // bridge — starts a forward-apply range sync; shallow and
             // steady-state propagation and child-chain rounds keep the fast
@@ -2705,10 +2746,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // then just use the direct path).
             if await process.hasAcceptedBlock(announcement.blockCID) == false {
                 guard isCurrentRuntime(generation: generation, process: process),
-                      overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+                      overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
                 let ourHeight = await acquiredHeight(process)
                 guard isCurrentRuntime(generation: generation, process: process),
-                      overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+                      overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
                 if let announced = announcement.height {
                     // Remember the claim so a cleared range sync can re-enter
                     // on the receiver's own initiative: on a quiet network no
@@ -2729,7 +2770,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                         process: process
                     )
                     guard isCurrentRuntime(generation: generation, process: process),
-                          overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+                          overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
                 }
             }
             // At-edge evaluation happens whether or not we hold the block:
@@ -2749,7 +2790,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     process: process
                 )
                 guard isCurrentRuntime(generation: generation, process: process),
-                      overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+                      overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
             }
             // Network-sourced: weighed. It ranks on verified work and the
             // validate-on-candidacy walk executes it exactly when canonical.
@@ -2842,10 +2883,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             for cid in response.blockCIDs where CIDIdentity.isCanonical(cid) {
                 await overlay.rememberProvider(rootCID: cid, peer: peer.id)
                 guard isCurrentRuntime(generation: generation, process: process),
-                      overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+                      overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
                 if await process.hasAcceptedBlock(cid) { continue }
                 guard isCurrentRuntime(generation: generation, process: process),
-                      overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+                      overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
                 _ = enqueueCandidate(CandidateSeed(
                     blockCID: cid,
                     package: nil,
@@ -2951,7 +2992,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard remainingRoots > 0,
               handlers?.transaction != nil,
               isCurrentRuntime(generation: generation, process: process),
-              overlayPeers[peer.key]?.sessionID == peer.sessionID,
+              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
               !pendingTransactionInventories.values.contains(where: {
                   $0.peer.sessionID == peer.sessionID
               }) else { return }
@@ -3010,7 +3051,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ) async {
         guard let transactionInventoryProvider = handlers?.transactionInventory,
               isCurrentRuntime(generation: generation, process: process),
-              overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
         let roots = Array(Set(await transactionInventoryProvider())).sorted()
             .filter { root in
                 request.afterRootCID.map { root > $0 } ?? true
@@ -3063,7 +3104,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ) async {
         guard let transactionInventoryProvider = handlers?.transactionInventory,
               isCurrentRuntime(generation: generation, process: process),
-              overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
         let knownRoots = Set(await transactionInventoryProvider())
         let roots = response.volumeRootCIDs.filter {
             !knownRoots.contains($0) && !pending.seenRoots.contains($0)
@@ -3141,7 +3182,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ) -> (handler: NetworkTransactionHandler, lease: TransactionVolumeLease)? {
         guard let transactionHandler = handlers?.transaction,
               isCurrentRuntime(generation: generation, process: process),
-              overlayPeers[peer.key]?.sessionID == peer.sessionID else { return nil }
+              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return nil }
         let lease = TransactionVolumeLease(
             sessionID: peer.sessionID,
             rootCID: rootCID
@@ -3163,7 +3204,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ) async {
         defer { activeTransactionVolumes.remove(lease) }
         guard isCurrentRuntime(generation: generation, process: process),
-              overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
         if let transactionInventoryProvider = handlers?.transactionInventory,
            await transactionInventoryProvider().contains(rootCID) {
             return
@@ -3176,7 +3217,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             capacityUnavailable: { $0.failure == .localCapacityUnavailable },
             stillCurrent: {
                 isCurrentRuntime(generation: generation, process: process)
-                    && overlayPeers[peer.key]?.sessionID == peer.sessionID
+                    && overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID
             }
         ) {
         case .value(let fetched):
@@ -3208,18 +3249,18 @@ public actor NodeNetworkRuntime: IvyDelegate {
             return
         }
         guard isCurrentRuntime(generation: generation, process: process),
-              overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
         do {
             guard try await transactionHandler(transaction) else { return }
         } catch {
             return
         }
         guard isCurrentRuntime(generation: generation, process: process),
-              overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
         guard let payload = try? TransactionAvailableMessage(
             volumeRootCID: rootCID
         ).encoded() else { return }
-        for candidate in overlayPeers.values
+        for candidate in readyOverlayPeers
         where candidate.sessionID != peer.sessionID {
             _ = await overlay.sendMessage(
                 to: candidate,
@@ -3241,7 +3282,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             rootCID: rootCID,
             attachmentCID: attachmentCID
         ).encoded() else { return }
-        for peer in overlayPeers.values {
+        for peer in readyOverlayPeers {
             guard isCurrentRuntime(generation: generation, process: process) else {
                 return
             }
@@ -3331,7 +3372,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         SyncTrace.log("locate-serve \(request.childCID) hit")
         guard isCurrentRuntime(generation: generation, process: process),
-              overlayPeers[peer.key]?.sessionID == peer.sessionID,
+              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
               let payload = try? PortableAttachmentAvailableMessage(
                 edgeCID: edgeCID,
                 rootCID: package.package.proof.rootCID,
@@ -3361,7 +3402,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         var peers: [AuthenticatedPeer] = candidate.providers
             .compactMap(overlayPeer(for:))
         if let supplierPublicKey, let key = try? PeerKey(supplierPublicKey),
-           let peer = overlayPeers[key],
+           let peer = overlayRecords[key]?.readyPeer,
            !peers.contains(where: { $0.key == key }) {
             peers.append(peer)
         }
@@ -3371,7 +3412,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // peer either has the package or stays silent (same reach as the live
         // announce broadcast), bounded by the exact-source cap.
         if peers.isEmpty {
-            peers = Array(overlayPeers.values)
+            peers = readyOverlayPeers
         }
         guard !peers.isEmpty,
               let payload = try? PortableAttachmentLocateRequestMessage(
@@ -3402,7 +3443,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ) -> Bool {
         guard !configuration.address.isNexus,
               isCurrentRuntime(generation: generation, process: process),
-              overlayPeers[peer.key]?.sessionID == peer.sessionID else {
+              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
             return false
         }
         let lease = EvidenceVolumeLease(
@@ -3482,7 +3523,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ) async -> Bool {
         guard !configuration.address.isNexus,
               isCurrentRuntime(generation: generation, process: process),
-              overlayPeers[peer.key]?.sessionID == peer.sessionID else {
+              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
             return false
         }
         let lease = EvidenceVolumeLease(
@@ -3504,7 +3545,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard isCurrentRuntime(
                 generation: generation,
                 process: process
-            ), overlayPeers[peer.key]?.sessionID == peer.sessionID else {
+            ), overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
                 return .done(true)
             }
             if activeEvidenceVolumes.contains(lease) { return .done(true) }
@@ -3523,7 +3564,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard isCurrentRuntime(
                 generation: generation,
                 process: process
-            ), overlayPeers[peer.key]?.sessionID == peer.sessionID else {
+            ), overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
                 return true
             }
             // A rejected enqueue is LOCAL congestion (ready pool full), not
@@ -3571,7 +3612,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             capacityUnavailable: { $0.attribution.localCapacityUnavailable },
             stillCurrent: {
                 isCurrentRuntime(generation: generation, process: process)
-                    && overlayPeers[peer.key]?.sessionID == peer.sessionID
+                    && overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID
             }
         ) {
         case .value(let fetched):
@@ -3590,7 +3631,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
               let edge = await DirectChildEdge.derive(from: package.proof),
               edge.edgeCID == summary.edgeCID,
               isCurrentRuntime(generation: generation, process: process),
-              overlayPeers[peer.key]?.sessionID == peer.sessionID else {
+              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
             if resolved.attribution.allResponsesComplete,
                let supplier = resolved.attribution.soleRemoteSupplierPublicKey {
                 await overlay.reportDeficientContent(
@@ -4512,7 +4553,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ) -> [PeerEndpoint] {
         endpoints.filter { endpoint in
             guard let key = try? PeerKey(endpoint.publicKey) else { return false }
-            return overlayPeers[key] == nil
+            return overlayRecords[key]?.readyPeer == nil
         }
     }
 
@@ -4629,8 +4670,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// peer's key is absent from `heldPeerKeys`.
     func debugSnapshot() -> NetworkDebugSnapshot {
         var keys = Set<PeerKey>()
-        keys.formUnion(overlaySessions.keys)
-        keys.formUnion(overlayPeers.keys)
+        keys.formUnion(overlayRecords.keys)
         keys.formUnion(hierarchyPeers.keys)
         keys.formUnion(hierarchySessions.keys)
         keys.formUnion(childEvidenceReadyPeers)
@@ -4669,15 +4709,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
         sessions.formUnion(activeEvidenceVolumes.map(\.sessionID))
         sessions.formUnion(portableEvidenceOrder.map(\.sessionID))
 
-        let overlayKeys = Set(overlaySessions.keys)
-            .union(overlayPeers.keys)
+        let overlayKeys = Set(overlayRecords.keys)
             .union(overlayHelloDeadlines.keys)
             .union(frontierPulls.keys)
             .union(announcedTips.keys)
         var overlaySnapshot: [PeerKey: NetworkDebugSnapshot.OverlayPeer] = [:]
         for key in overlayKeys {
             overlaySnapshot[key] = NetworkDebugSnapshot.OverlayPeer(
-                helloAccepted: overlayPeers[key] != nil,
+                helloAccepted: overlayRecords[key]?.readyPeer != nil,
                 hasHelloDeadline: overlayHelloDeadlines[key] != nil
             )
         }
@@ -4707,8 +4746,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             heldPeerKeys: keys,
             heldSessionIDs: sessions,
             liveSessionIDs: Set(
-                overlaySessions.values.map(\.sessionID)
-                    + overlayPeers.values.map(\.sessionID)
+                overlayRecords.records.values.compactMap(\.sessionPeer?.sessionID)
                     + hierarchySessions.values.map(\.sessionID)
             ),
             rangeSyncAnchor: rangeSync.map {
@@ -4839,7 +4877,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
 
     private func expectsOverlayHello(from peer: AuthenticatedPeer) -> Bool {
-        overlaySessions[peer.key]?.sessionID == peer.sessionID
+        overlayRecords[peer.key]?.awaitingHelloPeer?.sessionID == peer.sessionID
             && overlayHelloDeadlines[peer.key]?.sessionID == peer.sessionID
     }
 
@@ -4851,9 +4889,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard isCurrentGeneration(generation), isRunning,
               overlayHelloDeadlines[peer.key]?.token == token,
               overlayHelloDeadlines[peer.key]?.sessionID == peer.sessionID,
-              overlayPeers[peer.key]?.sessionID != peer.sessionID else { return }
+              overlayRecords[peer.key]?.readyPeer?.sessionID != peer.sessionID else { return }
         overlayHelloDeadlines.removeValue(forKey: peer.key)
-        overlaySessions.removeValue(forKey: peer.key)
+        overlayRecords.update(peer.key) { record in
+            if case .awaitingHello? = record.session { record.session = nil }
+        }
         await overlay.recycleSession(ifCurrent: peer)
     }
 
@@ -4908,7 +4948,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         for provider: CandidateProvider
     ) -> AuthenticatedPeer? {
         guard let key = try? PeerKey(provider.publicKey),
-              let peer = overlayPeers[key],
+              let peer = overlayRecords[key]?.readyPeer,
               peer.sessionID == provider.sessionID else { return nil }
         return peer
     }
@@ -5131,7 +5171,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 ) else { return }
                 switch plane {
                 case .overlay:
-                    guard overlayPeers[peer.key]?.sessionID == peer.sessionID else {
+                    guard overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
                         continue
                     }
                 case .hierarchy:
@@ -5295,7 +5335,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             if attempt.attribution.allResponsesComplete,
                let supplierKey = attempt.attribution.soleRemoteSupplierPublicKey,
                let supplier = try? PeerKey(supplierKey),
-               overlayPeers[supplier] != nil,
+               overlayRecords[supplier]?.readyPeer != nil,
                configuration.address.isNexus || outcome.parentCarrierLink != nil {
                 await overlay.reportDeficientContent(
                     rootCID: candidate.blockCID,
@@ -5617,11 +5657,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ) async {
         guard isCurrentRuntime(generation: generation, process: process),
               rangeSync == nil,
-              overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
         let acquired = await process.canonicalTip()
         guard isCurrentRuntime(generation: generation, process: process),
               rangeSync == nil,
-              overlayPeers[peer.key]?.sessionID == peer.sessionID else { return }
+              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
         SyncTrace.log(
             "range-sync start target=\(targetHeight) "
                 + "peer=\(peer.key.hex.prefix(8))"
@@ -5665,7 +5705,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ) async {
         guard let sync = rangeSync, sync.negotiated, !sync.awaiting, sync.hasMore,
               isCurrentRuntime(generation: generation, process: process),
-              overlayPeers[sync.peer.key]?.sessionID == sync.peer.sessionID else { return }
+              overlayRecords[sync.peer.key]?.readyPeer?.sessionID == sync.peer.sessionID else { return }
         let applied = await acquiredHeight(process)
         guard var current = rangeSync, current.requestID == sync.requestID,
               current.negotiated, !current.awaiting, current.hasMore,
@@ -5720,7 +5760,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             await overlay.rememberProvider(rootCID: cid, peer: peer.id)
             guard isCurrentRuntime(generation: generation, process: process),
                   rangeSync?.requestID == sync.requestID else { return }
-            guard overlayPeers[peer.key]?.sessionID == peer.sessionID else {
+            guard overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
                 // The peer we were syncing from is gone (or reconnected as a new
                 // session) mid-page — release the slot so another peer can drive
                 // catch-up instead of stranding it until the progress deadline.
@@ -5822,7 +5862,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ) async {
         guard let sync = rangeSync, !sync.awaiting,
               isCurrentRuntime(generation: generation, process: process),
-              overlayPeers[sync.peer.key]?.sessionID == sync.peer.sessionID else { return }
+              overlayRecords[sync.peer.key]?.readyPeer?.sessionID == sync.peer.sessionID else { return }
         let locator = await buildBlockLocator(process: process)
         guard var current = rangeSync, current.requestID == sync.requestID,
               !current.awaiting,
@@ -5897,7 +5937,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             await overlay.rememberProvider(rootCID: cid, peer: peer.id)
             guard isCurrentRuntime(generation: generation, process: process),
                   rangeSync?.requestID == sync.requestID else { return }
-            guard overlayPeers[peer.key]?.sessionID == peer.sessionID else {
+            guard overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
                 clearRangeSync()
                 return
             }
@@ -6010,7 +6050,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             clearRangeSync()
             return
         }
-        guard overlayPeers[current.peer.key]?.sessionID == current.peer.sessionID
+        guard overlayRecords[current.peer.key]?.readyPeer?.sessionID == current.peer.sessionID
         else {
             // The peer went away before we caught up: release the slot so a new
             // deep peer can take over instead of re-driving into a dead session.
@@ -6065,7 +6105,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private func rangeSyncTimedOut(requestID: UInt64, generation: UInt64) async {
         guard let sync = rangeSync, sync.requestID == requestID, sync.awaiting,
               isCurrentGeneration(generation), let process else { return }
-        guard overlayPeers[sync.peer.key]?.sessionID == sync.peer.sessionID else {
+        guard overlayRecords[sync.peer.key]?.readyPeer?.sessionID == sync.peer.sessionID else {
             // Peer we were paging from is gone: release the slot so another
             // deep peer's announcement can start a fresh sync.
             clearRangeSync()
@@ -6125,7 +6165,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // cleared brought us there, or nothing beyond the edge remains) gets
         // its one frontier pull; the helper re-checks the edge per peer.
         for (key, claim) in announcedTips.sorted(by: { $0.key.hex < $1.key.hex })
-            where overlayPeers[key]?.sessionID == claim.peer.sessionID {
+            where overlayRecords[key]?.readyPeer?.sessionID == claim.peer.sessionID {
             await pullFrontierIfAtEdge(
                 from: claim.peer,
                 peerHeight: claim.height,
@@ -6136,7 +6176,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                   rangeSync == nil else { return }
         }
         let candidates = announcedTips.filter { key, value in
-            overlayPeers[key]?.sessionID == value.peer.sessionID
+            overlayRecords[key]?.readyPeer?.sessionID == value.peer.sessionID
                 && value.height > ourHeight + Self.rangeSyncDepthThreshold
         }
         guard let best = candidates.max(by: {
@@ -6189,11 +6229,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // whole gap; keying on the single shared range-sync slot instead let
         // one peer's unverified height claim silence every OTHER peer's
         // frontier for as long as it held the slot.
-        guard overlayPeers[peer.key]?.sessionID == peer.sessionID,
+        guard overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
               frontierPulls[peer.key]?.sessionID != peer.sessionID else { return }
         let ourHeight = await acquiredHeight(process)
         guard isCurrentRuntime(generation: generation, process: process),
-              overlayPeers[peer.key]?.sessionID == peer.sessionID,
+              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
               frontierPulls[peer.key]?.sessionID != peer.sessionID,
               peerHeight <= ourHeight + Self.rangeSyncDepthThreshold else { return }
         let requestID = makeRequestID()
@@ -6218,10 +6258,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
 
     private func discardServingSessions(for peerKey: PeerKey) {
         var sessionIDs = Set<Data>()
-        if let session = overlaySessions[peerKey] {
-            sessionIDs.insert(session.sessionID)
-        }
-        if let session = overlayPeers[peerKey] {
+        if let session = overlayRecords[peerKey]?.sessionPeer {
             sessionIDs.insert(session.sessionID)
         }
         for sessionID in sessionIDs {
