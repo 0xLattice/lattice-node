@@ -98,11 +98,6 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
     /// Refused with `NodeStoreError.corrupt`.
     private static let refusedAsCorrupt: [Damage] = [
         Damage(
-            table: "consensus_revision", column: "revision",
-            description: "non-numeric text",
-            sql: ["UPDATE consensus_revision SET revision = 'not-a-number' WHERE singleton = 1"]
-        ),
-        Damage(
             table: "admission_batches", column: "payload",
             description: "malformed JSON in the newest batch",
             sql: ["UPDATE admission_batches SET payload = X'00' WHERE seq = (SELECT MAX(seq) FROM admission_batches)"]
@@ -182,6 +177,11 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
     /// Refused with `NodeStoreError.malformedRow(table:column:)` naming the
     /// damaged table and column.
     private static let refusedAsMalformedRow: [Damage] = [
+        Damage(
+            table: "consensus_revision", column: "revision",
+            description: "non-numeric text",
+            sql: ["UPDATE consensus_revision SET revision = 'not-a-number' WHERE singleton = 1"]
+        ),
         Damage(
             table: "local_mempool_transactions", column: "transaction_cid",
             description: "inserted malformed CID text",
