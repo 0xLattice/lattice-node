@@ -123,11 +123,17 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
                     if character == "{" { depth += 1 }
                     if character == "}" { depth -= 1 }
                 }
+                // A brace the line filter mis-read (an unhandled string
+                // form) would drift the depth and silently stop the scan.
+                XCTAssertGreaterThanOrEqual(
+                    depth, 0, "\(file.path):\(index + 1): brace depth went negative"
+                )
                 if depth == 0, let finished = current {
                     found.append(finished)
                     current = nil
                 }
             }
+            XCTAssertEqual(depth, 0, "\(file.path): braces do not balance; the scan drifted")
             if let current { found.append(current) }
         }
         return found
