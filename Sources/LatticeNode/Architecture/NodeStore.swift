@@ -61,8 +61,8 @@ actor NodeStore {
     let parentEvidenceInboxCapacity: Int
     let handoffCandidateCapacity: Int
     let contextualCandidateOwner: String
-    var preparedMutationInFlight = false
-    var preparedMutationWaiters: [CheckedContinuation<Void, Never>] = []
+    private var preparedMutationInFlight = false
+    private var preparedMutationWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(
         databasePath: URL,

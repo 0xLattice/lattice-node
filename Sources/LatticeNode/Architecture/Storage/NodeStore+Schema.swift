@@ -97,6 +97,7 @@ extension NodeStore {
         "contextual_candidate_children",
     ]
 
+    /// Owner: NodeStore.init — runs before the store exists, on an empty database.
     static func createSchema(
         in database: NodeSQLite,
         schemaEpoch: Int64,
@@ -128,6 +129,7 @@ extension NodeStore {
 
     /// Every index, `IF NOT EXISTS`, run at every open (new and existing
     /// stores alike) so an index introduced later still materializes.
+    /// Owner: NodeStore.init — runs before the store exists, on every open.
     static func ensureIndexes(in database: NodeSQLite) throws {
         try database.execute(
             "CREATE INDEX IF NOT EXISTS accepted_blocks_by_parent ON accepted_blocks (parent_cid, admission_seq, block_cid)"
