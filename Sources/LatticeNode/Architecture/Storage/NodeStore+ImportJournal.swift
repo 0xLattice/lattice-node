@@ -151,10 +151,7 @@ extension NodeStore {
                     preparedIncomingCarrierEvidence?.proofAttachment.rawCID,
                 ].compactMap { $0 }
                 for attachmentCID in Set(admittedParentAttachments) {
-                    try database.execute(
-                        "DELETE FROM parent_evidence_inbox WHERE attachment_cid = ?1",
-                        params: [.text(attachmentCID)]
-                    )
+                    try deleteParentEvidenceInbox(attachmentCID: attachmentCID)
                 }
                 try persistPendingChildProofRouteRows(
                     try pendingRoutesIncludingPreparedProofs(
