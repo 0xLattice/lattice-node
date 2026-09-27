@@ -393,6 +393,24 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
     }
 
+    private struct HierarchyPeerRecord: PeerRecord {
+        var helloDeadline: HelloDeadline?
+
+        var isEmpty: Bool {
+            helloDeadline == nil
+        }
+    }
+
+    /// Takes the key's hierarchy hello deadline out of its record.
+    @discardableResult
+    private func removeHierarchyHelloDeadline(for key: PeerKey) -> HelloDeadline? {
+        hierarchyRecords.update(key) { record in
+            let deadline = record.helloDeadline
+            record.helloDeadline = nil
+            return deadline
+        }
+    }
+
     private struct HelloDeadline {
         let token: UInt64
         let sessionID: Data
@@ -460,6 +478,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// post-hello) and the state bound to it.
     private var overlayRecords = PeerSet<OverlayPeerRecord>()
     private var hierarchyPeers: [PeerKey: HierarchyPeer] = [:]
+    /// Per hierarchy peer key: the state bound to its connection.
+    private var hierarchyRecords = PeerSet<HierarchyPeerRecord>()
     private var hierarchySessions: [PeerKey: AuthenticatedPeer] = [:]
     private var childEvidenceReadyPeers: Set<PeerKey> = []
     private var childEvidenceReadyWaiters:
@@ -479,7 +499,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private var runReportApplyTail: Task<Void, Never>?
     private var childEvidencePublicationsInFlight:
         [ChildEvidenceSession: Int] = [:]
-    private var hierarchyHelloDeadlines: [PeerKey: HelloDeadline] = [:]
     private var waitingCandidateRetryTask: Task<Void, Never>?
     private var waitingCandidateRetryGeneration: UInt64?
     private var pendingTransactionInventories:
@@ -948,8 +967,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             waiter.continuation.resume(returning: false)
         }
         for record in removedOverlayRecords { record.helloDeadline?.task.cancel() }
-        for deadline in hierarchyHelloDeadlines.values { deadline.task.cancel() }
-        hierarchyHelloDeadlines.removeAll()
+        for record in hierarchyRecords.removeAll() { record.helloDeadline?.task.cancel() }
         waitingCandidateRetryTask?.cancel()
         waitingCandidateRetryTask = nil
         waitingCandidateRetryGeneration = nil
@@ -2484,7 +2502,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
 
     @discardableResult
     private func clearHierarchyAuthorization(for key: PeerKey) -> HierarchyPeer? {
-        hierarchyHelloDeadlines.removeValue(forKey: key)?.task.cancel()
+        removeHierarchyHelloDeadline(for: key)?.task.cancel()
         cancelParentEvidence(for: key)
         let removedRole = hierarchyPeers.removeValue(forKey: key)
         hierarchySessions.removeValue(forKey: key)
@@ -4371,7 +4389,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
               expectsHierarchyHello(from: peer) else {
             return
         }
-        hierarchyHelloDeadlines.removeValue(forKey: peer.key)?.task.cancel()
+        removeHierarchyHelloDeadline(for: peer.key)?.task.cancel()
         if let existing = hierarchyPeers[peer.key] {
             if existing != role {
                 await hierarchy.disconnectSession(ifCurrent: peer)
@@ -4701,7 +4719,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         keys.formUnion(childEvidencePublicationFailedSessions.map(\.peerKey))
         keys.formUnion(childEvidencePublicationsInFlight.keys.map(\.peerKey))
         keys.formUnion(refusedChildEvidenceHints.keys)
-        keys.formUnion(hierarchyHelloDeadlines.keys)
+        keys.formUnion(hierarchyRecords.keys)
         keys.formUnion(pendingTransactionInventories.values.map(\.peer.key))
         keys.formUnion(childDeclaredReadURLs.keys)
         keys.formUnion(pendingReadEndpoints.values.map(\.peer.key))
@@ -4738,7 +4756,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         let hierarchyKeys = Set(hierarchyPeers.keys)
             .union(hierarchySessions.keys)
-            .union(hierarchyHelloDeadlines.keys)
+            .union(hierarchyRecords.keys)
             .union(childDeclaredReadURLs.keys)
             .union(childEvidenceReadyPeers)
             .union(childEvidenceReadyWaiters.keys)
@@ -4752,7 +4770,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         for key in hierarchyKeys {
             hierarchySnapshot[key] = NetworkDebugSnapshot.HierarchyPeer(
                 role: hierarchyPeers[key],
-                hasHelloDeadline: hierarchyHelloDeadlines[key] != nil
+                hasHelloDeadline: hierarchyRecords[key]?.helloDeadline != nil
             )
         }
 
@@ -4848,7 +4866,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         for peer: AuthenticatedPeer,
         generation: UInt64
     ) {
-        hierarchyHelloDeadlines.removeValue(forKey: peer.key)?.task.cancel()
+        removeHierarchyHelloDeadline(for: peer.key)?.task.cancel()
         nextHelloDeadlineToken &+= 1
         let token = nextHelloDeadlineToken
         let task = Timers.deadline(
@@ -4861,11 +4879,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 token: token
             )
         }
-        hierarchyHelloDeadlines[peer.key] = HelloDeadline(
-            token: token,
-            sessionID: peer.sessionID,
-            task: task
-        )
+        hierarchyRecords.update(peer.key) {
+            $0.helloDeadline = HelloDeadline(
+                token: token,
+                sessionID: peer.sessionID,
+                task: task
+            )
+        }
     }
 
     private func scheduleOverlayHelloDeadline(
@@ -4918,7 +4938,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private func expectsHierarchyHello(from peer: AuthenticatedPeer) -> Bool {
         Self.hierarchyHelloMatches(
             sessionID: peer.sessionID,
-            deadlineSessionID: hierarchyHelloDeadlines[peer.key]?.sessionID
+            deadlineSessionID: hierarchyRecords[peer.key]?.helloDeadline?.sessionID
         )
     }
 
@@ -4936,11 +4956,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ) async {
         guard isCurrentGeneration(generation),
             isRunning,
-            hierarchyHelloDeadlines[peer.key]?.token == token,
-            hierarchyHelloDeadlines[peer.key]?.sessionID == peer.sessionID,
+            hierarchyRecords[peer.key]?.helloDeadline?.token == token,
+            hierarchyRecords[peer.key]?.helloDeadline?.sessionID == peer.sessionID,
             hierarchyPeers[peer.key] == nil
         else { return }
-        hierarchyHelloDeadlines.removeValue(forKey: peer.key)
+        removeHierarchyHelloDeadline(for: peer.key)
         await hierarchy.recycleSession(ifCurrent: peer)
     }
 
