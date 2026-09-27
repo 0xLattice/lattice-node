@@ -1377,19 +1377,21 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard let directory = $0.2.last else { return false }
             return !context.excludedDirectories.contains(directory)
         }
-        // Read from the template's own tip, not the pushed context: the push
-        // task re-mints after the tip validates, and a template built in
-        // that window on a children-only carrier (same post-state) would
-        // otherwise carry the block the tip just carried once more.
-        let carriedChildren: [String: String]
+        // What the template's own tip carries, and what the pushed context
+        // names: the push task re-mints only after the tip validates, and a
+        // template built in that window on a children-only carrier (same
+        // post-state) would otherwise carry the block the tip just carried
+        // once more; a template on an older tip is still not worth a block
+        // the current branch already carries.
+        var carriedChildren = parentTipContext?.carriedChildren ?? [:]
         if let tipCID = context.parentCarrier.parent?.rawCID {
-            carriedChildren = await process.carriedChildBlocks(
+            let onTip = await process.carriedChildBlocks(
                 on: tipCID,
                 directories: children.compactMap { $0.2.last }
             )
-        } else {
-            carriedChildren = parentTipContext?.carriedChildren ?? [:]
+            carriedChildren.merge(onTip) { _, tip in tip }
         }
+        let carriedOnContext = parentTipContext?.carriedChildren ?? [:]
         var candidates: [(Int, DirectChildCandidate)] = []
         var stale = 0
         var carried = 0
@@ -1405,7 +1407,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // the offer still fits the tip, and carrying it again would
             // only credit the same block once more.
             if let directory = path.last,
-               offer.childCID == carriedChildren[directory] {
+               offer.childCID == carriedChildren[directory]
+                || offer.childCID == carriedOnContext[directory] {
                 carried += 1
                 continue
             }
