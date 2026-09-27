@@ -1231,14 +1231,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // A dedicated short deadline, NOT the overlay's content-pull timeout:
         // a legacy peer never answers, and this wait sits on the public
         // explorer route's critical path.
-        let timeoutNanoseconds = Timers.nanoseconds(Self.readEndpointAskTimeout)
+        let timeout = Self.readEndpointAskTimeout
         return await withCheckedContinuation { continuation in
-            let timeoutTask = Task { [weak self] in
-                do {
-                    try await Task.sleep(nanoseconds: timeoutNanoseconds)
-                } catch {
-                    return
-                }
+            let timeoutTask = Timers.deadline(
+                after: timeout,
+                generation: generation
+            ) { [weak self] _ in
                 await self?.readEndpointAskTimedOut(requestID: requestID)
             }
             pendingReadEndpoints[requestID] = PendingReadEndpoint(
@@ -2968,15 +2966,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             afterRootCID: after
         )
         guard let payload = try? request.encoded() else { return }
-        let timeoutNanoseconds = Timers.nanoseconds(
-            planeConfigurations.overlay.requestTimeout
-        )
-        let timeout = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: timeoutNanoseconds)
-            } catch {
-                return
-            }
+        let timeout = Timers.deadline(
+            after: planeConfigurations.overlay.requestTimeout,
+            generation: generation
+        ) { [weak self] generation in
             await self?.transactionInventoryTimedOut(
                 requestID: request.requestID,
                 generation: generation
@@ -4822,15 +4815,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         hierarchyHelloDeadlines.removeValue(forKey: peer.key)?.task.cancel()
         nextHelloDeadlineToken &+= 1
         let token = nextHelloDeadlineToken
-        let timeoutNanoseconds = Timers.nanoseconds(
-            planeConfigurations.hierarchy.requestTimeout
-        )
-        let task = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: timeoutNanoseconds)
-            } catch {
-                return
-            }
+        let task = Timers.deadline(
+            after: planeConfigurations.hierarchy.requestTimeout,
+            generation: generation
+        ) { [weak self] generation in
             await self?.hierarchyHelloTimedOut(
                 peer: peer,
                 generation: generation,
@@ -4851,15 +4839,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         overlayHelloDeadlines.removeValue(forKey: peer.key)?.task.cancel()
         nextHelloDeadlineToken &+= 1
         let token = nextHelloDeadlineToken
-        let timeoutNanoseconds = Timers.nanoseconds(
-            planeConfigurations.overlay.requestTimeout
-        )
-        let task = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: timeoutNanoseconds)
-            } catch {
-                return
-            }
+        let task = Timers.deadline(
+            after: planeConfigurations.overlay.requestTimeout,
+            generation: generation
+        ) { [weak self] generation in
             await self?.overlayHelloTimedOut(
                 peer: peer,
                 generation: generation,
@@ -5719,14 +5702,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
             clearRangeSync()
             return
         }
-        let timeoutNanoseconds = Timers.nanoseconds(
-            planeConfigurations.overlay.requestTimeout
-        )
         current.requestID = requestID
         current.awaiting = true
-        current.responseTimeout = Task { [weak self] in
-            do { try await Task.sleep(nanoseconds: timeoutNanoseconds) }
-            catch { return }
+        current.responseTimeout = Timers.deadline(
+            after: planeConfigurations.overlay.requestTimeout,
+            generation: generation
+        ) { [weak self] generation in
             await self?.rangeSyncTimedOut(requestID: requestID, generation: generation)
         }
         let peer = current.peer
@@ -5875,14 +5856,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
             clearRangeSync()
             return
         }
-        let timeoutNanoseconds = Timers.nanoseconds(
-            planeConfigurations.overlay.requestTimeout
-        )
         current.requestID = requestID
         current.awaiting = true
-        current.responseTimeout = Task { [weak self] in
-            do { try await Task.sleep(nanoseconds: timeoutNanoseconds) }
-            catch { return }
+        current.responseTimeout = Timers.deadline(
+            after: planeConfigurations.overlay.requestTimeout,
+            generation: generation
+        ) { [weak self] generation in
             await self?.rangeSyncTimedOut(requestID: requestID, generation: generation)
         }
         let peer = current.peer
@@ -6021,12 +6000,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let epoch = nextRangeSyncProgressEpoch
         sync.progressEpoch = epoch
         sync.progressTimeout?.cancel()
-        let deadlineNanoseconds = Timers.nanoseconds(
-            planeConfigurations.overlay.requestTimeout
-        ) &* 3
-        sync.progressTimeout = Task { [weak self] in
-            do { try await Task.sleep(nanoseconds: deadlineNanoseconds) }
-            catch { return }
+        sync.progressTimeout = Timers.deadline(
+            after: planeConfigurations.overlay.requestTimeout * 3,
+            generation: generation
+        ) { [weak self] generation in
             await self?.rangeSyncProgressDeadline(
                 epoch: epoch,
                 generation: generation,
@@ -6902,13 +6879,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         generation: UInt64
     ) {
         let timeout = planeConfigurations.hierarchy.requestTimeout
-        let timeoutNanoseconds = Timers.nanoseconds(timeout)
-        Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: timeoutNanoseconds)
-            } catch {
-                return
-            }
+        Timers.deadline(
+            after: timeout,
+            generation: generation
+        ) { [weak self] generation in
             await self?.evidenceIndexRequestTimedOut(
                 requestID,
                 generation: generation
