@@ -335,9 +335,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
 
         var session: Session?
+        var helloDeadline: HelloDeadline?
 
         var isEmpty: Bool {
-            session == nil
+            session == nil && helloDeadline == nil
         }
 
         /// The session whose hello was accepted.
@@ -365,6 +366,16 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// send loop over it is unaffected by a record removed mid-loop).
     private var readyOverlayPeers: [AuthenticatedPeer] {
         overlayRecords.records.values.compactMap(\.readyPeer)
+    }
+
+    /// Takes the key's overlay hello deadline out of its record.
+    @discardableResult
+    private func removeOverlayHelloDeadline(for key: PeerKey) -> HelloDeadline? {
+        overlayRecords.update(key) { record in
+            let deadline = record.helloDeadline
+            record.helloDeadline = nil
+            return deadline
+        }
     }
 
     private struct HelloDeadline {
@@ -453,7 +464,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private var runReportApplyTail: Task<Void, Never>?
     private var childEvidencePublicationsInFlight:
         [ChildEvidenceSession: Int] = [:]
-    private var overlayHelloDeadlines: [PeerKey: HelloDeadline] = [:]
     private var hierarchyHelloDeadlines: [PeerKey: HelloDeadline] = [:]
     private var waitingCandidateRetryTask: Task<Void, Never>?
     private var waitingCandidateRetryGeneration: UInt64?
@@ -897,7 +907,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
 
     private func clearRuntimeState() async {
         process = nil
-        _ = overlayRecords.removeAll()
+        let removedOverlayRecords = overlayRecords.removeAll()
         hierarchyPeers.removeAll()
         hierarchySessions.removeAll()
         childDeclaredReadURLs.removeAll()
@@ -924,8 +934,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         for waiter in evidenceReadyWaiters {
             waiter.continuation.resume(returning: false)
         }
-        for deadline in overlayHelloDeadlines.values { deadline.task.cancel() }
-        overlayHelloDeadlines.removeAll()
+        for record in removedOverlayRecords { record.helloDeadline?.task.cancel() }
         for deadline in hierarchyHelloDeadlines.values { deadline.task.cancel() }
         hierarchyHelloDeadlines.removeAll()
         waitingCandidateRetryTask?.cancel()
@@ -2419,7 +2428,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // A replacement may already be current when the old connection's
             // asynchronous disconnect callback arrives.
             guard !(await ivy.connectedPeers).contains(peer) else { return }
-            overlayHelloDeadlines.removeValue(forKey: key)?.task.cancel()
+            removeOverlayHelloDeadline(for: key)?.task.cancel()
             if let disconnected = overlayRecords[key]?.readyPeer {
                 candidateAcquirer.disconnect(candidateProvider(disconnected))
             }
@@ -2559,7 +2568,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             }
             guard isCurrentRuntime(generation: generation, process: process),
                   expectsOverlayHello(from: peer) else { return }
-            overlayHelloDeadlines.removeValue(forKey: peer.key)?.task.cancel()
+            removeOverlayHelloDeadline(for: peer.key)?.task.cancel()
             overlayRecords.update(peer.key) { $0.session = .ready(peer) }
             // Advertise the ACQUIRED (canonical, weighed-inclusive) tip: every
             // receiver measures its gap, its range-sync target and its edge
@@ -4679,7 +4688,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         keys.formUnion(childEvidencePublicationFailedSessions.map(\.peerKey))
         keys.formUnion(childEvidencePublicationsInFlight.keys.map(\.peerKey))
         keys.formUnion(refusedChildEvidenceHints.keys)
-        keys.formUnion(overlayHelloDeadlines.keys)
         keys.formUnion(hierarchyHelloDeadlines.keys)
         keys.formUnion(pendingTransactionInventories.values.map(\.peer.key))
         keys.formUnion(frontierPulls.keys)
@@ -4710,14 +4718,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
         sessions.formUnion(portableEvidenceOrder.map(\.sessionID))
 
         let overlayKeys = Set(overlayRecords.keys)
-            .union(overlayHelloDeadlines.keys)
             .union(frontierPulls.keys)
             .union(announcedTips.keys)
         var overlaySnapshot: [PeerKey: NetworkDebugSnapshot.OverlayPeer] = [:]
         for key in overlayKeys {
             overlaySnapshot[key] = NetworkDebugSnapshot.OverlayPeer(
                 helloAccepted: overlayRecords[key]?.readyPeer != nil,
-                hasHelloDeadline: overlayHelloDeadlines[key] != nil
+                hasHelloDeadline: overlayRecords[key]?.helloDeadline != nil
             )
         }
         let hierarchyKeys = Set(hierarchyPeers.keys)
@@ -4856,7 +4863,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         for peer: AuthenticatedPeer,
         generation: UInt64
     ) {
-        overlayHelloDeadlines.removeValue(forKey: peer.key)?.task.cancel()
+        removeOverlayHelloDeadline(for: peer.key)?.task.cancel()
         nextHelloDeadlineToken &+= 1
         let token = nextHelloDeadlineToken
         let task = Timers.deadline(
@@ -4869,16 +4876,18 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 token: token
             )
         }
-        overlayHelloDeadlines[peer.key] = HelloDeadline(
-            token: token,
-            sessionID: peer.sessionID,
-            task: task
-        )
+        overlayRecords.update(peer.key) {
+            $0.helloDeadline = HelloDeadline(
+                token: token,
+                sessionID: peer.sessionID,
+                task: task
+            )
+        }
     }
 
     private func expectsOverlayHello(from peer: AuthenticatedPeer) -> Bool {
         overlayRecords[peer.key]?.awaitingHelloPeer?.sessionID == peer.sessionID
-            && overlayHelloDeadlines[peer.key]?.sessionID == peer.sessionID
+            && overlayRecords[peer.key]?.helloDeadline?.sessionID == peer.sessionID
     }
 
     private func overlayHelloTimedOut(
@@ -4887,10 +4896,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         token: UInt64
     ) async {
         guard isCurrentGeneration(generation), isRunning,
-              overlayHelloDeadlines[peer.key]?.token == token,
-              overlayHelloDeadlines[peer.key]?.sessionID == peer.sessionID,
+              overlayRecords[peer.key]?.helloDeadline?.token == token,
+              overlayRecords[peer.key]?.helloDeadline?.sessionID == peer.sessionID,
               overlayRecords[peer.key]?.readyPeer?.sessionID != peer.sessionID else { return }
-        overlayHelloDeadlines.removeValue(forKey: peer.key)
+        removeOverlayHelloDeadline(for: peer.key)
         overlayRecords.update(peer.key) { record in
             if case .awaitingHello? = record.session { record.session = nil }
         }
