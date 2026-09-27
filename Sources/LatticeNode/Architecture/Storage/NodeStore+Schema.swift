@@ -170,7 +170,7 @@ extension NodeStore {
                 block_cid TEXT PRIMARY KEY,
                 parent_cid TEXT,
                 admission_seq INTEGER NOT NULL,
-                validated INTEGER NOT NULL DEFAULT \(BlockStatus.eager.rawValue),
+                validated INTEGER NOT NULL DEFAULT \(BlockStatus.executed.rawValue),
                 leaf INTEGER NOT NULL DEFAULT 1
             ) WITHOUT ROWID
             """)

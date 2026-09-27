@@ -823,8 +823,8 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     // so the validate-on-candidacy walk (and every act-on
                     // read) knows to execute it before building on it.
                     status: {
-                        if case .header = mode { return .weighed }
-                        return .eager
+                        if case .header = mode { return .header }
+                        return .executed
                     }(),
                     pendingChildProofRoutes: hierarchyArtifacts == nil
                         ? []
@@ -2078,7 +2078,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         guard validatedTip.height > depth else { return }
         let candidateCeiling = validatedTip.height - depth
         var candidates: [(cid: String, height: UInt64)] = []
-        for blockCID in try await store.walkValidatedBlockCIDs() {
+        for blockCID in try await store.executedAndPinnedBlockCIDs() {
             guard let height = await level.chain
                 .getConsensusBlock(hash: blockCID)?.blockHeight,
                   height < candidateCeiling,

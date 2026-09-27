@@ -653,7 +653,7 @@ final class NodeStoreTests: XCTestCase {
             ),
             volumeRoots: [],
             persistence: ImportPersistence(
-                status: .weighed
+                status: .header
             )
         )
         let rootValidated = try await store.blockValidated("root")
@@ -692,12 +692,12 @@ final class NodeStoreTests: XCTestCase {
             ),
             volumeRoots: [],
             persistence: ImportPersistence(
-                status: .weighed
+                status: .header
             )
         )
         let weighedChild = try await store.blockValidated("child")
         XCTAssertFalse(weighedChild)
-        var walkValidated = try await store.walkValidatedBlockCIDs()
+        var walkValidated = try await store.executedAndPinnedBlockCIDs()
         XCTAssertTrue(walkValidated.isEmpty)
 
         // Validate-on-candidacy promotes it: the durable marker flips to the
@@ -706,7 +706,7 @@ final class NodeStoreTests: XCTestCase {
         try await store.promoteValidated(blockCID: "child")
         let validatedChild = try await store.blockValidated("child")
         XCTAssertTrue(validatedChild)
-        walkValidated = try await store.walkValidatedBlockCIDs()
+        walkValidated = try await store.executedAndPinnedBlockCIDs()
         XCTAssertEqual(
             walkValidated, ["child"],
             "the eager root is validated but not walk-validated"
@@ -723,7 +723,7 @@ final class NodeStoreTests: XCTestCase {
         let recovered = try makeStore(path: path)
         let recoveredChildValidated = try await recovered.blockValidated("child")
         XCTAssertTrue(recoveredChildValidated)
-        walkValidated = try await recovered.walkValidatedBlockCIDs()
+        walkValidated = try await recovered.executedAndPinnedBlockCIDs()
         XCTAssertEqual(walkValidated, ["child"])
         try await recovered.auditNormalizedIndexes()
 
@@ -731,7 +731,7 @@ final class NodeStoreTests: XCTestCase {
         try await recovered.demoteValidated(blockCID: "child")
         let demotedChild = try await recovered.blockValidated("child")
         XCTAssertFalse(demotedChild)
-        walkValidated = try await recovered.walkValidatedBlockCIDs()
+        walkValidated = try await recovered.executedAndPinnedBlockCIDs()
         XCTAssertTrue(walkValidated.isEmpty)
         let rootStillValidated = try await recovered.blockValidated("root")
         XCTAssertTrue(rootStillValidated)

@@ -1,6 +1,6 @@
 /// What one admission batch persists beyond its facts and Volume roots.
 struct ImportPersistence: Sendable {
-    var status: BlockStatus = .eager
+    var status: BlockStatus = .executed
     var pendingChildProofRoutes: [PendingChildProofRoute] = []
     var pendingChildProofCapacity: Int = 16
     var hierarchyArtifacts: AdmissionHierarchyArtifacts? = nil

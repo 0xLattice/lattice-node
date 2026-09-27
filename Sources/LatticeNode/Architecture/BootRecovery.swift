@@ -292,7 +292,7 @@ enum BootRecovery {
         for batch in migrated {
             try await store.stage(batch, volumeRoots: [])
         }
-        let walkValidated = try await store.walkValidatedBlockCIDs()
+        let walkValidated = try await store.executedAndPinnedBlockCIDs()
         let validatedOwnerPrefix = ChainProcess.validatedOwnerPrefix(retentionScope)
         let pinnedOwners = Set(
             await broker.pinnedOwners(prefix: validatedOwnerPrefix)
