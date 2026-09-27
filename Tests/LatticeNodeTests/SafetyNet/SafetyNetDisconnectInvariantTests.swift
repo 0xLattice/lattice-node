@@ -17,13 +17,13 @@ import cashew
 /// read-endpoint requests, evidence waiters, candidate offers, pushed context
 /// sequences, candidate providers, evidence-flow sessions…) plus six tables
 /// keyed by session ID (in-flight serves and content leases).
-/// `NodeNetworkRuntime.heldPeerKeysForTesting()` / `heldSessionIDsForTesting()`
-/// (DEBUG-only, added for this test) union them, so the assertion here is one
+/// `NodeNetworkRuntime.debugSnapshot()`'s `heldPeerKeys` / `heldSessionIDs`
+/// (DEBUG-only) union them, so the assertion here is one
 /// line and the refactor cannot drop a map from the audit by moving it.
 ///
 /// Non-vacuous by construction, in this order:
-/// - the overlay peer completes its hello (checked through the accepted-hello
-///   seam: a session and a hello deadline hold the key from connect, so the
+/// - the overlay peer completes its hello (checked through the snapshot's
+///   accepted-hello flag: a session and a hello deadline hold the key from connect, so the
 ///   key appearing is not proof of the hello);
 /// - it advertises a transaction volume it then never serves, so the
 ///   runtime's fetch — and the `activeTransactionVolumes` lease on this
@@ -94,7 +94,7 @@ final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
             // The key alone is held from connect (session + hello deadline),
             // so wait for the hello itself to be accepted.
             try await waitUntil("overlay hello accepted") {
-                await target.runtime.overlayHelloCompletedForTesting(overlayPeerKey)
+                await target.runtime.debugSnapshot().overlay[overlayPeerKey]?.helloAccepted == true
             }
             // A transaction advertisement whose volume is never served: the
             // runtime's lease on this session stays held while it fetches.
@@ -104,13 +104,13 @@ final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
                 payload: try TransactionAvailableMessage(volumeRootCID: withheldRoot).encoded()
             )
             try await waitUntil("withheld volume fetch holds a session lease") {
-                !(await target.runtime.heldSessionIDsForTesting()).isEmpty
+                !(await target.runtime.debugSnapshot().heldSessionIDs).isEmpty
             }
             try await waitUntil("withheld request reached the peer") {
                 await withholding.blockedRequestStarted
             }
-            let heldBefore = await target.runtime.heldSessionIDsForTesting()
-            let liveBefore = await target.runtime.liveSessionIDsForTesting()
+            let heldBefore = await target.runtime.debugSnapshot().heldSessionIDs
+            let liveBefore = await target.runtime.debugSnapshot().liveSessionIDs
             XCTAssertFalse(heldBefore.isEmpty, "a session lease must exist before disconnect")
             XCTAssertTrue(
                 heldBefore.isSubset(of: liveBefore),
@@ -126,7 +126,7 @@ final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
                 ).encoded()
             )
             try await waitUntil("deep tip announcement started a range sync") {
-                await target.runtime.rangeSyncAnchorForTesting() != nil
+                await target.runtime.debugSnapshot().rangeSyncAnchor != nil
             }
 
             // Hierarchy: an immediate-child hello must earn the child role.
@@ -144,14 +144,14 @@ final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
                 ).encode()
             )
             try await waitUntil("child peer granted the child role") {
-                await target.runtime.hierarchyPeerRoleForTesting(childPeerKey)
+                await target.runtime.debugSnapshot().hierarchy[childPeerKey]?.role
                     == .child(["Nexus", "Payments"])
             }
 
             // Everything the disconnect must clear is in place right now.
-            let anchorBeforeStop = await target.runtime.rangeSyncAnchorForTesting()
+            let anchorBeforeStop = await target.runtime.debugSnapshot().rangeSyncAnchor
             XCTAssertNotNil(anchorBeforeStop, "range sync must be live immediately before the disconnect")
-            let heldKeysBefore = await target.runtime.heldPeerKeysForTesting()
+            let heldKeysBefore = await target.runtime.debugSnapshot().heldPeerKeys
             XCTAssertTrue(heldKeysBefore.contains(overlayPeerKey), "overlay key held before disconnect")
             XCTAssertTrue(heldKeysBefore.contains(childPeerKey), "child key held before disconnect")
 
@@ -159,12 +159,12 @@ final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
             await overlayPeer.stop()
             await childPeer.stop()
             try await waitUntil("per-peer records cleared after disconnect") {
-                await target.runtime.heldPeerKeysForTesting()
+                await target.runtime.debugSnapshot().heldPeerKeys
                     .isDisjoint(with: [overlayPeerKey, childPeerKey])
             }
             try await waitUntil("session-keyed state released after disconnect") {
-                await target.runtime.heldSessionIDsForTesting()
-                    .isSubset(of: await target.runtime.liveSessionIDsForTesting())
+                await target.runtime.debugSnapshot().heldSessionIDs
+                    .isSubset(of: await target.runtime.debugSnapshot().liveSessionIDs)
             }
         } catch {
             await overlayPeer.stop()
@@ -173,7 +173,7 @@ final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
             throw error
         }
 
-        let held = await target.runtime.heldPeerKeysForTesting()
+        let held = await target.runtime.debugSnapshot().heldPeerKeys
         XCTAssertFalse(
             held.contains(overlayPeerKey),
             "overlay peer \(overlayPeerKey.hex.prefix(8)) still held after disconnect"
@@ -182,14 +182,14 @@ final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
             held.contains(childPeerKey),
             "hierarchy child peer \(childPeerKey.hex.prefix(8)) still held after disconnect"
         )
-        let heldSessions = await target.runtime.heldSessionIDsForTesting()
-        let liveSessions = await target.runtime.liveSessionIDsForTesting()
+        let heldSessions = await target.runtime.debugSnapshot().heldSessionIDs
+        let liveSessions = await target.runtime.debugSnapshot().liveSessionIDs
         XCTAssertTrue(
             heldSessions.isSubset(of: liveSessions),
             "session-keyed state outlives its session: "
                 + "\(heldSessions.subtracting(liveSessions).map { $0.map { String(format: "%02x", $0) }.joined().prefix(8) })"
         )
-        let rangeSyncAnchor = await target.runtime.rangeSyncAnchorForTesting()
+        let rangeSyncAnchor = await target.runtime.debugSnapshot().rangeSyncAnchor
         XCTAssertNil(
             rangeSyncAnchor,
             "range sync must not survive its source peer's disconnect"

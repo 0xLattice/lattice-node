@@ -4624,26 +4624,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
 
     #if DEBUG
-    func receivedCarriedChildCIDForTesting() -> String? {
-        receivedParentTip?.carriedChildCID
-    }
-
-    func candidateOfferHeldForTesting() -> Bool {
-        candidateOfferDeferredByAdmission
-    }
-
-    func carriedHoldCountForTesting() -> Int {
-        carriedHoldCount
-    }
-
-    func refusedChildEvidenceHintCountForTesting() -> Int {
-        refusedChildEvidenceHints.count
-    }
-
-    /// Test seam: every peer key still held by a per-peer record or a pending
-    /// request, across both planes. The safety net pins that a disconnected
-    /// peer's key is absent here.
-    func heldPeerKeysForTesting() -> Set<PeerKey> {
+    /// Test view of the per-peer and per-session state (see
+    /// `NetworkDebugSnapshot`). The safety net pins that a disconnected
+    /// peer's key is absent from `heldPeerKeys`.
+    func debugSnapshot() -> NetworkDebugSnapshot {
         var keys = Set<PeerKey>()
         keys.formUnion(overlaySessions.keys)
         keys.formUnion(overlayPeers.keys)
@@ -4672,27 +4656,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         keys.formUnion(pushedParentTipSequence.keys)
         keys.formUnion(childCandidateOffers.keys)
         if let receivedParentTip { keys.insert(receivedParentTip.peer.key) }
-        for hex in candidateAcquirer.providerPublicKeysForTesting()
-            .union(parentEvidence.peerIDsForTesting()) {
+        for hex in candidateAcquirer.debugSnapshot().providerKeys
+            .union(parentEvidence.debugSnapshot().peerIDs) {
             if let key = try? PeerKey(hex) { keys.insert(key) }
         }
-        return keys
-    }
 
-    /// Test seam: the hierarchy role a peer's hello earned, if any.
-    func hierarchyPeerRoleForTesting(_ key: PeerKey) -> HierarchyPeer? {
-        hierarchyPeers[key]
-    }
-
-    /// Test seam: whether an overlay peer's hello has been accepted (a
-    /// session and its hello deadline exist from connect, before any hello).
-    func overlayHelloCompletedForTesting(_ key: PeerKey) -> Bool {
-        overlayPeers[key] != nil
-    }
-
-    /// Test seam: every session ID held by state keyed on a session rather
-    /// than a peer key (in-flight serves and content leases).
-    func heldSessionIDsForTesting() -> Set<Data> {
         var sessions = Set<Data>()
         sessions.formUnion(servingAcceptedLeaves)
         sessions.formUnion(servingAncestorRange)
@@ -4700,16 +4668,56 @@ public actor NodeNetworkRuntime: IvyDelegate {
         sessions.formUnion(activeTransactionVolumes.map(\.sessionID))
         sessions.formUnion(activeEvidenceVolumes.map(\.sessionID))
         sessions.formUnion(portableEvidenceOrder.map(\.sessionID))
-        return sessions
-    }
 
-    /// Test seam: the session IDs of every live authenticated session on
-    /// either plane (pre- and post-hello).
-    func liveSessionIDsForTesting() -> Set<Data> {
-        Set(
-            overlaySessions.values.map(\.sessionID)
-                + overlayPeers.values.map(\.sessionID)
-                + hierarchySessions.values.map(\.sessionID)
+        let overlayKeys = Set(overlaySessions.keys)
+            .union(overlayPeers.keys)
+            .union(overlayHelloDeadlines.keys)
+            .union(frontierPulls.keys)
+            .union(announcedTips.keys)
+        var overlaySnapshot: [PeerKey: NetworkDebugSnapshot.OverlayPeer] = [:]
+        for key in overlayKeys {
+            overlaySnapshot[key] = NetworkDebugSnapshot.OverlayPeer(
+                helloAccepted: overlayPeers[key] != nil,
+                hasHelloDeadline: overlayHelloDeadlines[key] != nil
+            )
+        }
+        let hierarchyKeys = Set(hierarchyPeers.keys)
+            .union(hierarchySessions.keys)
+            .union(hierarchyHelloDeadlines.keys)
+            .union(childDeclaredReadURLs.keys)
+            .union(childEvidenceReadyPeers)
+            .union(childEvidenceReadyWaiters.keys)
+            .union(childEvidenceIndexCompleteSessions.map(\.peerKey))
+            .union(childEvidencePublicationFailedSessions.map(\.peerKey))
+            .union(childEvidencePublicationsInFlight.keys.map(\.peerKey))
+            .union(childCandidateOffers.keys)
+            .union(pushedParentTipSequence.keys)
+            .union(refusedChildEvidenceHints.keys)
+        var hierarchySnapshot: [PeerKey: NetworkDebugSnapshot.HierarchyPeer] = [:]
+        for key in hierarchyKeys {
+            hierarchySnapshot[key] = NetworkDebugSnapshot.HierarchyPeer(
+                role: hierarchyPeers[key],
+                hasHelloDeadline: hierarchyHelloDeadlines[key] != nil
+            )
+        }
+
+        return NetworkDebugSnapshot(
+            overlay: overlaySnapshot,
+            hierarchy: hierarchySnapshot,
+            heldPeerKeys: keys,
+            heldSessionIDs: sessions,
+            liveSessionIDs: Set(
+                overlaySessions.values.map(\.sessionID)
+                    + overlayPeers.values.map(\.sessionID)
+                    + hierarchySessions.values.map(\.sessionID)
+            ),
+            rangeSyncAnchor: rangeSync.map {
+                ($0.requestedAfterCID, $0.requestedHeight)
+            },
+            receivedCarriedChildCID: receivedParentTip?.carriedChildCID,
+            candidateOfferHeld: candidateOfferDeferredByAdmission,
+            carriedHoldCount: carriedHoldCount,
+            refusedChildEvidenceHintCount: refusedChildEvidenceHints.count
         )
     }
 
@@ -6207,14 +6215,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
             payload: payload
         )
     }
-
-    #if DEBUG
-    /// Test seam: the range sync's current request anchor (the block the next
-    /// page is requested after, and its height).
-    func rangeSyncAnchorForTesting() -> (afterCID: String, requestedHeight: UInt64)? {
-        rangeSync.map { ($0.requestedAfterCID, $0.requestedHeight) }
-    }
-    #endif
 
     private func discardServingSessions(for peerKey: PeerKey) {
         var sessionIDs = Set<Data>()
