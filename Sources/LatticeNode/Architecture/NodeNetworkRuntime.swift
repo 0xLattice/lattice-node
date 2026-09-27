@@ -411,16 +411,29 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// sends it only what it lacks. Recorded after the send, whether or
         /// not the session is still live; carries its own session.
         var pushedSequence: SessionSequence?
+        /// The latest evidence hint this node's own send budget refused
+        /// for the child, re-sent on the next push run. A hint carries one
+        /// index entry; the admission it triggers scans the index from the
+        /// child's cursor, so the newest re-sent hint also recovers older
+        /// refused ones.
+        var refusedHint: Data?
 
         var isEmpty: Bool {
             helloDeadline == nil && session == nil && role == nil
                 && declaredReadURL == nil && evidence.isEmpty && offer == nil
-                && pushedSequence == nil
+                && pushedSequence == nil && refusedHint == nil
         }
     }
 
     private func isChildEvidenceReady(_ key: PeerKey) -> Bool {
         hierarchyRecords[key]?.evidence.ready == true
+    }
+
+    /// Every refused evidence hint with its key, as a snapshot.
+    private var recordedRefusedHints: [(key: PeerKey, value: Data)] {
+        hierarchyRecords.records.compactMap { key, record in
+            record.refusedHint.map { (key: key, value: $0) }
+        }
     }
 
     /// Whether any wired child declared a public read URL.
@@ -586,11 +599,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private var overlayRecords = PeerSet<OverlayPeerRecord>()
     /// Per hierarchy peer key: the state bound to its connection.
     private var hierarchyRecords = PeerSet<HierarchyPeerRecord>()
-    /// The latest evidence hint this node's own send budget refused, per
-    /// child peer, re-sent on the next push run. A hint carries one index
-    /// entry; the admission it triggers scans the index from the child's
-    /// cursor, so the newest re-sent hint also recovers older refused ones.
-    private var refusedChildEvidenceHints: [PeerKey: Data] = [:]
     /// Run reports apply one after another off the delivery path; one
     /// handle, cancelled with the runtime.
     private var runReportApplyTail: Task<Void, Never>?
@@ -1113,7 +1121,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
         for key in Array(hierarchyRecords.keys) {
             hierarchyRecords.update(key) { $0.pushedSequence = nil }
         }
-        refusedChildEvidenceHints.removeAll()
+        for key in Array(hierarchyRecords.keys) {
+            hierarchyRecords.update(key) { $0.refusedHint = nil }
+        }
         parentTipPushTask?.cancel()
         parentTipPushTask = nil
         parentTipPushDirty = false
@@ -1708,7 +1718,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         generation: UInt64,
         process: ChainProcess
     ) async {
-        for (key, payload) in refusedChildEvidenceHints {
+        for (key, payload) in recordedRefusedHints {
             guard isCurrentRuntime(generation: generation, process: process),
                   let peer = hierarchyRecords[key]?.session,
                   isChildEvidenceReady(key) else { continue }
@@ -1718,8 +1728,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 payload: payload
             )
             if case .enqueued = sent,
-               refusedChildEvidenceHints[key] == payload {
-                refusedChildEvidenceHints.removeValue(forKey: key)
+               hierarchyRecords[key]?.refusedHint == payload {
+                hierarchyRecords.update(key) { $0.refusedHint = nil }
                 SyncTrace.log("child evidence announcement re-sent to \(key.hex.prefix(12))")
             }
         }
@@ -2275,7 +2285,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             case .enqueued:
                 // A newer hint delivered supersedes an older one refused:
                 // the scan its admission triggers serves the older entry.
-                refusedChildEvidenceHints.removeValue(forKey: peer.key)
+                hierarchyRecords.update(peer.key) { $0.refusedHint = nil }
                 if bootstrapping {
                     finishChildEvidencePublication(
                         to: peer,
@@ -2301,7 +2311,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 // an admission, so a refused hint left alone strands the
                 // entry until the next delivered one.
                 SyncTrace.log("child evidence announcement to \(childPath.joined(separator: "/")) not enqueued: \(result); re-sent on the next push run")
-                refusedChildEvidenceHints[peer.key] = payload
+                hierarchyRecords.update(peer.key) { $0.refusedHint = payload }
                 if bootstrapping {
                     finishChildEvidencePublication(
                         to: peer,
@@ -2617,7 +2627,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         cancelChildEvidenceReadyWaiters(for: key)
         hierarchyRecords.update(key) { $0.offer = nil }
         hierarchyRecords.update(key) { $0.pushedSequence = nil }
-        refusedChildEvidenceHints.removeValue(forKey: key)
+        hierarchyRecords.update(key) { $0.refusedHint = nil }
         Self.pruneChildPeerRotations(
             &childPeerRotation,
             activeRoles: hierarchyRoles.map(\.value)
@@ -4821,7 +4831,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     func debugSnapshot() -> NetworkDebugSnapshot {
         var keys = Set<PeerKey>()
         keys.formUnion(overlayRecords.keys)
-        keys.formUnion(refusedChildEvidenceHints.keys)
         keys.formUnion(hierarchyRecords.keys)
         keys.formUnion(pendingTransactionInventories.values.map(\.peer.key))
         keys.formUnion(pendingReadEndpoints.values.map(\.peer.key))
@@ -4856,7 +4865,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         let hierarchyKeys = Set(hierarchyRecords.keys)
             .union(hierarchyRecords.keys)
-            .union(refusedChildEvidenceHints.keys)
         var hierarchySnapshot: [PeerKey: NetworkDebugSnapshot.HierarchyPeer] = [:]
         for key in hierarchyKeys {
             hierarchySnapshot[key] = NetworkDebugSnapshot.HierarchyPeer(
@@ -4880,7 +4888,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             receivedCarriedChildCID: receivedParentTip?.carriedChildCID,
             candidateOfferHeld: candidateOfferDeferredByAdmission,
             carriedHoldCount: carriedHoldCount,
-            refusedChildEvidenceHintCount: refusedChildEvidenceHints.count
+            refusedChildEvidenceHintCount: recordedRefusedHints.count
         )
     }
 
