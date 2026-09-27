@@ -309,11 +309,17 @@ public actor NodeNetworkRuntime: IvyDelegate {
         overlayState.overlayRecords.records.values.compactMap(\.readyPeer)
     }
 
-    /// Takes the key's overlay hello deadline out of its record.
+    /// Takes the key's overlay hello deadline out of its record: any
+    /// session's (`session` nil, a connect replacing it), or only
+    /// `session`'s.
     @discardableResult
-    func removeOverlayHelloDeadline(for key: PeerKey) -> HelloDeadline? {
+    func removeOverlayHelloDeadline(
+        for key: PeerKey,
+        session: Data?
+    ) -> HelloDeadline? {
         overlayState.overlayRecords.updateExisting(key) { record in
             let deadline = record.helloDeadline
+            guard session == nil || deadline?.sessionID == session else { return nil }
             record.helloDeadline = nil
             return deadline
         } ?? nil
@@ -359,9 +365,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 && pushedSequence == nil && refusedHint == nil
         }
 
-        /// Set at the accepted hello: a record awaiting its hello is bound
-        /// to no session yet.
-        var liveSessionID: Data? { session?.sessionID }
+        /// The accepted session; before its hello, the session the hello
+        /// deadline waits on.
+        var liveSessionID: Data? { session?.sessionID ?? helloDeadline?.sessionID }
     }
 
     func isChildEvidenceReady(_ key: PeerKey) -> Bool {
@@ -382,11 +388,17 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
     }
 
-    /// Takes the key's hierarchy hello deadline out of its record.
+    /// Takes the key's hierarchy hello deadline out of its record: any
+    /// session's (`session` nil, a connect replacing it), or only
+    /// `session`'s.
     @discardableResult
-    func removeHierarchyHelloDeadline(for key: PeerKey) -> HelloDeadline? {
+    func removeHierarchyHelloDeadline(
+        for key: PeerKey,
+        session: Data?
+    ) -> HelloDeadline? {
         hierarchyState.hierarchyRecords.updateExisting(key) { record in
             let deadline = record.helloDeadline
+            guard session == nil || deadline?.sessionID == session else { return nil }
             record.helloDeadline = nil
             return deadline
         } ?? nil
@@ -1100,7 +1112,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard let payload = try? hello.encode() else { return }
         if ivy === hierarchy {
             // A hierarchy role belongs to one authenticated connection.
-            reReadyCandidates(clearHierarchyAuthorization(for: peer.key))
+            // The connect replaces whatever session the key held.
+            reReadyCandidates(clearHierarchyAuthorization(
+                for: peer.key,
+                removed: hierarchyState.hierarchyRecords.remove(peer.key)
+            ))
             scheduleHierarchyHelloDeadline(for: peer, generation: generation)
         }
         guard isCurrentRuntime(generation: generation, process: process) else {
@@ -1131,28 +1147,40 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard let key = try? PeerKey(peer.publicKey) else { return }
         if ivy === overlay {
             // A replacement may already be current when the old connection's
-            // asynchronous disconnect callback arrives.
-            guard !(await ivy.connectedPeers).contains(peer) else { return }
-            let disconnected = overlayState.overlayRecords[key]
-            disconnected?.helloDeadline?.task.cancel()
-            if let ready = disconnected?.readyPeer {
+            // asynchronous disconnect callback arrives; one may also connect
+            // while the check below is suspended. Only the binding sampled
+            // here ends: a record a newer session took meanwhile stays.
+            let ended = overlayState.overlayRecords[key]?.liveSessionID
+            guard !(await ivy.connectedPeers).contains(peer),
+                  let disconnected = overlayState.overlayRecords[key],
+                  disconnected.liveSessionID == ended else { return }
+            disconnected.helloDeadline?.task.cancel()
+            if let ready = disconnected.readyPeer {
                 disconnectProvider(ready)
             }
-            discardServingSessions(of: disconnected?.sessionPeer)
+            discardServingSessions(of: disconnected.sessionPeer)
             // The record goes after the range sync clears: the re-entry that
             // clear arms still counts this peer's announced tip, as before.
             if overlayState.rangeSync.state?.peer.key == key {
                 clearRangeSync()
             }
-            overlayState.overlayRecords.remove(key)
+            overlayState.overlayRecords.remove(key, ifBoundTo: ended)
             purgeOverlayRequests(for: key)
         } else if ivy === hierarchy {
             // Ivy may already have promoted a replacement session for this
             // identity before this asynchronous delegate callback reaches us.
             // In that case this is the old connection ending, not a loss of
             // the authenticated parent/child relationship.
-            guard !(await ivy.connectedPeers).contains(peer) else { return }
-            reReadyCandidates(clearHierarchyAuthorization(for: key))
+            // As on the overlay: only the binding sampled before the check
+            // ends, never a newer session's record.
+            let ended = hierarchyState.hierarchyRecords[key]?.liveSessionID
+            guard !(await ivy.connectedPeers).contains(peer),
+                  let removed = hierarchyState.hierarchyRecords.remove(
+                    key, ifBoundTo: ended
+                  ) else { return }
+            reReadyCandidates(clearHierarchyAuthorization(
+                for: key, removed: removed
+            ))
         }
     }
 

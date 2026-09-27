@@ -148,4 +148,21 @@ final class PeerSetTests: XCTestCase {
         set.updateExisting(k) { $0.a = nil; $0.b = nil }
         XCTAssertNil(set[k], "an emptied record is pruned")
     }
+
+    /// A session's end removes only the binding sampled for it: a record a
+    /// newer session took meanwhile stays.
+    func testRemoveIfBoundToLeavesANewerSessionsRecord() throws {
+        var set = PeerSet<Record>()
+        let k = try key(1)
+        let first = Data([1])
+        set.update(k) { $0.session = first; $0.a = 1 }
+        set.update(k) { $0.session = Data([2]) }  // the reconnect
+        XCTAssertNil(set.remove(k, ifBoundTo: first))
+        XCTAssertEqual(set[k]?.session, Data([2]))
+        XCTAssertEqual(set.remove(k, ifBoundTo: Data([2]))?.a, 1)
+        XCTAssertNil(set[k])
+        XCTAssertNil(set.remove(k, ifBoundTo: nil), "no record: nothing removed")
+        set.update(k) { $0.b = "unbound" }
+        XCTAssertEqual(set.remove(k, ifBoundTo: nil)?.b, "unbound", "nil matches an unbound record")
+    }
 }

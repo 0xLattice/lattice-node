@@ -276,6 +276,88 @@ final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
         await runtime.stop()
     }
 
+    /// A child session S1 parks in its hello follow-up waiting for evidence
+    /// readiness; the child reconnects as S2, whose connect ends S1's wait.
+    /// S1's follow-up then resumes and gives up: it must end S1 only, not
+    /// remove S2's record and hello deadline, or S2's hello is dropped and
+    /// the link wedges until the transport drops.
+    func testAStaleHelloFollowUpCannotEndTheReconnectedSession() async throws {
+        let target = try await overlayRuntime(keyByte: 0xd6, requestTimeout: .seconds(60))
+        let childKey = signingKey(0xd7)
+        let childPeerKey = peerKey(childKey)
+        let hello = try ChainHello(
+            nexusGenesisCID: target.process.configuration.nexusGenesisCID,
+            chainPath: ["Nexus", "Payments"]
+        ).encode()
+        func childIvy() -> Ivy {
+            Ivy(config: IvyConfig(
+                signingKey: childKey,
+                listenPort: 0,
+                stunServers: [],
+                healthConfig: PeerHealthConfig(enabled: false),
+                mode: .privateNetwork
+            ))
+        }
+        // Ivy holds its delegate weakly: the scripts live as long as the test.
+        let firstScript = SafetyNetScriptedChild(
+            hello: hello, childPath: ["Nexus", "Payments"], pullsIndex: false
+        )
+        let secondScript = SafetyNetScriptedChild(
+            hello: hello, childPath: ["Nexus", "Payments"]
+        )
+        let first = childIvy()
+        await first.installSafetyNetDelegate(firstScript, contentSource: nil)
+        var second: Ivy?
+        let hierarchyEndpoint = PeerEndpoint(
+            publicKey: target.process.configuration.processPublicKey,
+            host: "127.0.0.1",
+            port: target.process.configuration.factListenPort
+        )
+        let runtime = target.runtime
+        try await runtime.start(process: target.process, chain: inertNetworkHandlers())
+        do {
+            try await first.start()
+            try await first.connect(to: hierarchyEndpoint)
+            try await waitUntil("S1's hello follow-up waits for readiness") {
+                await runtime.debugEvidenceWaiterCount(childPeerKey) == 1
+            }
+            let s1 = await runtime.debugSnapshot().liveSessionIDs
+
+            // Ivy keeps the preferred of two sessions for one key (a
+            // tie-break on the session IDs), so a reconnect replaces S1 only
+            // when its ID wins: dial fresh identities-alike until one does.
+            for _ in 0..<32 where second == nil {
+                let candidate = childIvy()
+                await candidate.installSafetyNetDelegate(secondScript, contentSource: nil)
+                try await candidate.start()
+                if (try? await candidate.connect(to: hierarchyEndpoint)) != nil,
+                   (await candidate.connectedPeers).contains(target.peerID) {
+                    second = candidate
+                } else {
+                    await candidate.stop()
+                }
+            }
+            XCTAssertNotNil(second, "no reconnect replaced S1")
+            try await waitUntil("S2's hello is accepted and S2 becomes ready") {
+                let snapshot = await runtime.debugSnapshot()
+                let ready = await runtime.isChildEvidenceReady(childPeerKey)
+                return snapshot.hierarchy[childPeerKey]?.role == .child(["Nexus", "Payments"])
+                    && !snapshot.liveSessionIDs.isEmpty
+                    && snapshot.liveSessionIDs.isDisjoint(with: s1)
+                    && ready
+            }
+        } catch {
+            await first.stop()
+            await second?.stop()
+            await runtime.stop()
+            throw error
+        }
+        await first.stop()
+        await second?.stop()
+        await runtime.stop()
+        withExtendedLifetime((firstScript, secondScript)) {}
+    }
+
     // MARK: - Helpers (the runtime, keys and hello come from NetworkTrustTestCase)
 
     private func send(
@@ -318,10 +400,13 @@ private final class SafetyNetSilentPeer: IvyDelegate, Sendable {}
 private final class SafetyNetScriptedChild: IvyDelegate, Sendable {
     private let hello: Data
     private let childPath: [String]
+    /// False: the child never pulls its index, so it never becomes ready.
+    private let pullsIndex: Bool
 
-    init(hello: Data, childPath: [String]) {
+    init(hello: Data, childPath: [String], pullsIndex: Bool = true) {
         self.hello = hello
         self.childPath = childPath
+        self.pullsIndex = pullsIndex
     }
 
     func ivy(
@@ -335,6 +420,7 @@ private final class SafetyNetScriptedChild: IvyDelegate, Sendable {
                 topic: NodeNetworkTopic.hierarchyHello,
                 payload: hello
               ),
+              pullsIndex,
               let request = try? ChildEvidenceIndexRequestMessage(
                 requestID: 1,
                 childPath: childPath,
@@ -372,6 +458,11 @@ private actor SafetyNetPushRace {
 }
 
 extension NodeNetworkRuntime {
+    /// Evidence-readiness waiters parked on the key's record.
+    func debugEvidenceWaiterCount(_ key: PeerKey) -> Int {
+        hierarchyState.hierarchyRecords[key]?.evidence.waiters.count ?? 0
+    }
+
     /// No tip-context push task is running.
     func debugParentTipPushIdle() -> Bool {
         hierarchyState.parentTipPushTask.isEmpty

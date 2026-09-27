@@ -111,7 +111,7 @@ extension NodeNetworkRuntime {
             }
             guard isCurrentRuntime(generation: generation, process: process),
                   expectsOverlayHello(from: peer) else { return }
-            removeOverlayHelloDeadline(for: peer.key)?.task.cancel()
+            removeOverlayHelloDeadline(for: peer.key, session: peer.sessionID)?.task.cancel()
             overlayState.overlayRecords.update(session: peer) { $0.session = .ready(peer) }
             // Advertise the ACQUIRED (canonical, weighed-inclusive) tip: every
             // receiver measures its gap, its range-sync target and its edge
@@ -1232,7 +1232,7 @@ extension NodeNetworkRuntime {
         for peer: AuthenticatedPeer,
         generation: UInt64
     ) {
-        removeOverlayHelloDeadline(for: peer.key)?.task.cancel()
+        removeOverlayHelloDeadline(for: peer.key, session: nil)?.task.cancel()
         let token = LifetimeToken.next()
         let task = Timers.deadline(
             after: planeConfigurations.overlay.requestTimeout,
@@ -1267,7 +1267,7 @@ extension NodeNetworkRuntime {
               overlayState.overlayRecords[peer.key]?.helloDeadline?.token == token,
               overlayState.overlayRecords[peer.key]?.helloDeadline?.sessionID == peer.sessionID,
               overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID != peer.sessionID else { return }
-        removeOverlayHelloDeadline(for: peer.key)
+        removeOverlayHelloDeadline(for: peer.key, session: peer.sessionID)
         overlayState.overlayRecords.update(session: peer) { record in
             if case .awaitingHello? = record.session { record.session = nil }
         }

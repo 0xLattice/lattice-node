@@ -23,7 +23,10 @@ protocol PeerRecord {
 /// `update`. Every other write goes through `update(session:)`, which
 /// touches only the record still bound to that session, or through
 /// `updateExisting`: neither creates one, so work that resumes after its
-/// session ended cannot bring the peer's key back.
+/// session ended cannot bring the peer's key back. Removal is the same:
+/// only a connect replacing the key's old session (and teardown, with
+/// `removeAll`) removes by key; a session's end removes with
+/// `remove(_:ifBoundTo:)`, which leaves a record a newer session holds.
 struct PeerSet<Record: PeerRecord> {
     /// Dictionary-backed: iteration is hash order, as the per-field maps
     /// were; nothing sorts it.
@@ -78,6 +81,18 @@ struct PeerSet<Record: PeerRecord> {
     @discardableResult
     mutating func remove(_ key: PeerKey) -> Record? {
         records.removeValue(forKey: key)
+    }
+
+    /// Removes the key's record only while it is still bound to
+    /// `sessionID` (nil: bound to no session), the binding the caller
+    /// sampled for the session that ended; nil otherwise.
+    @discardableResult
+    mutating func remove(_ key: PeerKey, ifBoundTo sessionID: Data?) -> Record? {
+        guard let record = records[key], record.liveSessionID == sessionID else {
+            return nil
+        }
+        records.removeValue(forKey: key)
+        return record
     }
 
     mutating func removeAll() -> [Record] {

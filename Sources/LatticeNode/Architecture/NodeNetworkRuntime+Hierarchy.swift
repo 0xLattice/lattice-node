@@ -1025,11 +1025,16 @@ extension NodeNetworkRuntime {
         return isCurrentRuntime(generation: generation, process: process)
     }
 
-    /// Ends the key's hierarchy authorization. Returns the live candidates
-    /// its parent-fact requests held; the caller requeues them at once
-    /// (`reReadyCandidates`).
-    func clearHierarchyAuthorization(for key: PeerKey) -> [CandidateSeed] {
-        let removed = hierarchyState.hierarchyRecords.remove(key)
+    /// Ends the key's hierarchy authorization, given the record the caller
+    /// took out: by session when a session ended (`remove(_:ifBoundTo:)`,
+    /// so a newer session's record and state are never touched), by key
+    /// only when a connect replaces the key's session. Returns the live
+    /// candidates its parent-fact requests held; the caller requeues them
+    /// at once (`reReadyCandidates`).
+    func clearHierarchyAuthorization(
+        for key: PeerKey,
+        removed: HierarchyPeerRecord?
+    ) -> [CandidateSeed] {
         removed?.helloDeadline?.task.cancel()
         cancelParentEvidence(for: key)
         for waiter in removed?.evidence.waiters ?? [] {
@@ -1808,7 +1813,7 @@ extension NodeNetworkRuntime {
               expectsHierarchyHello(from: peer) else {
             return
         }
-        removeHierarchyHelloDeadline(for: peer.key)?.task.cancel()
+        removeHierarchyHelloDeadline(for: peer.key, session: peer.sessionID)?.task.cancel()
         if let existing = hierarchyState.hierarchyRecords[peer.key]?.role {
             if existing != role {
                 await hierarchy.disconnectSession(ifCurrent: peer)
@@ -1875,7 +1880,15 @@ extension NodeNetworkRuntime {
             )
         } else if case .child(let childPath) = role {
             guard await waitForChildEvidenceReady(peer: peer) else {
-                reReadyCandidates(clearHierarchyAuthorization(for: peer.key))
+                // Only this session ends: a reconnect that replaced it while
+                // the wait was suspended keeps its record and hello deadline.
+                if let removed = hierarchyState.hierarchyRecords.remove(
+                    peer.key, ifBoundTo: peer.sessionID
+                ) {
+                    reReadyCandidates(clearHierarchyAuthorization(
+                        for: peer.key, removed: removed
+                    ))
+                }
                 await hierarchy.recycleSession(ifCurrent: peer)
                 return
             }
@@ -1996,7 +2009,7 @@ extension NodeNetworkRuntime {
         for peer: AuthenticatedPeer,
         generation: UInt64
     ) {
-        removeHierarchyHelloDeadline(for: peer.key)?.task.cancel()
+        removeHierarchyHelloDeadline(for: peer.key, session: nil)?.task.cancel()
         let token = LifetimeToken.next()
         let task = Timers.deadline(
             after: planeConfigurations.hierarchy.requestTimeout,
@@ -2042,7 +2055,7 @@ extension NodeNetworkRuntime {
             hierarchyState.hierarchyRecords[peer.key]?.helloDeadline?.sessionID == peer.sessionID,
             hierarchyState.hierarchyRecords[peer.key]?.role == nil
         else { return }
-        removeHierarchyHelloDeadline(for: peer.key)
+        removeHierarchyHelloDeadline(for: peer.key, session: peer.sessionID)
         await hierarchy.recycleSession(ifCurrent: peer)
     }
 
