@@ -206,6 +206,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// its timeout) is handed back as the merged package (or nil) instead
         /// of re-seeding a live candidate.
         var continuation: CheckedContinuation<AuthenticatedChildPackage?, Never>? = nil
+
+        /// The live candidate the request holds, to hand back to the fetcher.
+        var candidateSeed: CandidateSeed {
+            CandidateSeed(blockCID: blockCID, package: package)
+        }
     }
 
     struct PendingGenesisVerification: Sendable {
@@ -346,11 +351,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         hierarchyState.hierarchyRecords.records.compactMap { key, record in
             record.refusedHint.map { (key: key, value: $0) }
         }
-    }
-
-    /// Whether any wired child declared a public read URL.
-    var anyChildDeclaredReadURL: Bool {
-        hierarchyState.hierarchyRecords.records.values.contains { $0.declaredReadURL != nil }
     }
 
     /// Every hierarchy peer's role with its key, as a snapshot.
@@ -561,12 +561,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
         var overlayRecords = PeerSet<OverlayPeerRecord>()
         /// Owner: Lifecycle.clearRuntimeState / Overlay.requestTransactionInventory /
         ///     Overlay.transactionInventoryTimedOut / Overlay.scheduleTransactionInventory /
-        ///     NodeNetworkRuntime.purgeRequests.
+        ///     Overlay.purgeOverlayRequests.
         var pendingTransactionInventories:
             [UInt64: PendingTransactionInventory] = [:]
         /// Owner: Lifecycle.clearRuntimeState / Overlay.handleOverlay /
         ///     ReadURL.discoverProviderReadURLs / ReadURL.performReadURLDiscovery /
-        ///     ReadURL.readEndpointAskTimedOut / NodeNetworkRuntime.purgeRequests.
+        ///     ReadURL.readEndpointAskTimedOut / Overlay.purgeOverlayRequests.
         var readURLDiscovery = ReadURLDiscovery()
         /// Owner: Lifecycle.clearRuntimeState / RangeSync.startRangeSync /
         ///     RangeSync.pumpRangeSync / RangeSync.handleForwardRangeResponse /
@@ -621,7 +621,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         var childProofRecoveryNeedsRefresh = false
         /// Owner: Hierarchy.handleHierarchy / Hierarchy.requestEvidenceIndex /
         ///     Hierarchy.evidenceIndexRequestTimedOut / Lifecycle.clearRuntimeState /
-        ///     NodeNetworkRuntime.purgeRequests.
+        ///     Hierarchy.purgeHierarchyRequests.
         var pendingEvidenceIndexes: [UInt64: PendingChildEvidenceIndex] = [:]
         /// Owner: Hierarchy.handleHierarchy / Hierarchy.discardPendingParentChainFacts /
         ///     Hierarchy.requestParentChainFact / Hierarchy.parentChainFactRequestTimedOut.
@@ -657,7 +657,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// the naming ended without it and nothing tracks it. The hold on it is
         /// released, or no offer would ever follow. One at a time, like the
         /// context that names it.
-        /// Owner: Candidates.importCandidate / Hierarchy.clearHierarchyAuthorization /
+        /// Owner: Hierarchy.releaseCarriedHold / Hierarchy.clearHierarchyAuthorization /
         ///     Hierarchy.reviewCarriedChildHold / Lifecycle.clearRuntimeState.
         var releasedCarriedChildCID: String?
         /// The carried block an evidence scan was sent for (not merely asked
@@ -724,12 +724,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
     var genesisAnnounceTask: Task<Void, Never>?
     /// Endpoints dialled from the one provider lookup a widening performs.
     private static let maximumPeerSearchDials = 4
-    /// Owner: Candidates.enqueueCandidate / Candidates.completeCandidate /
-    ///     Candidates.retryWaitingCandidates / Hierarchy.offerCandidate /
-    ///     Hierarchy.reviewCarriedChildHold / Hierarchy.adoptedGenesisBootstrapLoop /
-    ///     Hierarchy.acceptParentChainFact / Hierarchy.retryParentFactCandidate /
-    ///     Lifecycle.startNow / Lifecycle.clearRuntimeState / NodeNetworkRuntime.didConnect /
-    ///     NodeNetworkRuntime.didDisconnect.
+    /// Owner: Candidates (the planes reach it through its seams:
+    ///     enqueueCandidate / reReadyCandidates / predecessorConnectedOutOfBand /
+    ///     disconnectProvider / fetcherTracks / offerGate) /
+    ///     Lifecycle.startNow / Lifecycle.clearRuntimeState.
     var blockFetcher = BlockFetcher()
     /// Owner: Candidates.startCandidateWorker / Candidates.finishCandidateWorker /
     ///     Lifecycle.clearRuntimeState.
@@ -803,8 +801,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
     /// Set when the offer gate deferred behind an own carried candidate's
     /// admission; the admission drain then re-arms the offer.
-    /// Owner: Candidates.drainCandidateImports / Hierarchy.offerCandidate /
-    ///     Lifecycle.clearRuntimeState.
+    /// Owner: Candidates.drainCandidateImports / Candidates.offerGate /
+    ///     Candidates.markOfferDeferred / Lifecycle.clearRuntimeState.
     var candidateOfferDeferredByAdmission = false
     private var nextRequestID: UInt64 = 0
     /// Owner: Hierarchy.scheduleHierarchyHelloDeadline / Overlay.scheduleOverlayHelloDeadline.
@@ -1040,7 +1038,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // ready one's are released by their own tasks.
             let previous = overlayState.overlayRecords[peer.key]
             if let previous = previous?.readyPeer {
-                blockFetcher.disconnect(candidateProvider(previous))
+                disconnectProvider(previous)
             }
             discardServingSessions(of: previous?.awaitingHelloPeer)
             overlayState.overlayRecords.update(peer.key) {
@@ -1062,7 +1060,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard let payload = try? hello.encode() else { return }
         if ivy === hierarchy {
             // A hierarchy role belongs to one authenticated connection.
-            _ = clearHierarchyAuthorization(for: peer.key)
+            reReadyCandidates(clearHierarchyAuthorization(for: peer.key))
             scheduleHierarchyHelloDeadline(for: peer, generation: generation)
         }
         guard isCurrentRuntime(generation: generation, process: process) else {
@@ -1098,7 +1096,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             let disconnected = overlayState.overlayRecords[key]
             disconnected?.helloDeadline?.task.cancel()
             if let ready = disconnected?.readyPeer {
-                blockFetcher.disconnect(candidateProvider(ready))
+                disconnectProvider(ready)
             }
             discardServingSessions(of: disconnected?.sessionPeer)
             // The record goes after the range sync clears: the re-entry that
@@ -1107,53 +1105,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 clearRangeSync()
             }
             overlayState.overlayRecords.remove(key)
-            purgeRequests(for: key, plane: .overlay)
+            purgeOverlayRequests(for: key)
         } else if ivy === hierarchy {
             // Ivy may already have promoted a replacement session for this
             // identity before this asynchronous delegate callback reaches us.
             // In that case this is the old connection ending, not a loss of
             // the authenticated parent/child relationship.
             guard !(await ivy.connectedPeers).contains(peer) else { return }
-            _ = clearHierarchyAuthorization(for: key)
-        }
-    }
-
-    /// Drops the requests a gone session can never answer. Each table is
-    /// keyed by requestID; the peer is only a filter. The genesis verify and
-    /// resolve tables are not purged here: they resolve on their own
-    /// timeouts (or restart).
-    func purgeRequests(for key: PeerKey, plane: CandidateSourcePlane) {
-        switch plane {
-        case .overlay:
-            let disconnectedInventories = overlayState.pendingTransactionInventories.filter {
-                $0.value.peer.key == key
-            }
-            for pending in disconnectedInventories.values {
-                pending.timeout.cancel()
-            }
-            overlayState.pendingTransactionInventories = overlayState.pendingTransactionInventories.filter {
-                $0.value.peer.key != key
-            }
-            // A response can never arrive on a gone session (a reconnect gets
-            // a fresh sessionID the response guard rejects), so resolve the
-            // ask empty now instead of burning its timeout.
-            let disconnectedReadEndpoints = overlayState.readURLDiscovery.removePendingReadEndpoints(of: key)
-            for pending in disconnectedReadEndpoints.values {
-                pending.timeout.cancel()
-                pending.continuation.resume(returning: [])
-            }
-        case .hierarchy:
-            // Only the parent sends these requests' answers.
-            hierarchyState.pendingEvidenceIndexes.removeAll()
-            // A response can never arrive on the gone session: requeue the
-            // live candidates now, and resolve a validate walk's request nil
-            // (it is not a candidate — re-seeding an accepted main-chain block
-            // would be wrong — and an unresumed continuation would suspend
-            // the walk for the process lifetime).
-            discardPendingParentChainFacts(
-                where: { $0.peer.key == key },
-                requeue: true
-            )
+            reReadyCandidates(clearHierarchyAuthorization(for: key))
         }
     }
 

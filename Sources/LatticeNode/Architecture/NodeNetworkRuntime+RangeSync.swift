@@ -147,7 +147,7 @@ extension NodeNetworkRuntime {
                 package: nil,
                 provider: candidateProvider(peer),
                 weighed: true
-            ))
+            ), generation: generation)
             lastCID = cid
             enqueued += 1
         }
@@ -319,7 +319,7 @@ extension NodeNetworkRuntime {
                 package: nil,
                 provider: candidateProvider(peer),
                 weighed: true
-            ))
+            ), generation: generation)
             lastCID = cid
             enqueued += 1
         }

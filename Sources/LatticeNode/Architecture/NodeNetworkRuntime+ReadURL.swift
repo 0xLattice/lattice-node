@@ -116,56 +116,6 @@ extension NodeNetworkRuntime {
         return bounded
     }
 
-    /// This node's own self-description for `genesisCID`: its configured
-    /// public read URL when that is its own chain's genesis, plus the URLs its
-    /// wired children declared in their hierarchy hellos when the CID is one
-    /// this node anchored for a child directory. Deduped, bounded.
-    func declaredReadURLs(
-        genesisCID: String,
-        process: ChainProcess
-    ) async -> [String] {
-        var urls: [String] = []
-        if let own = configuration.publicReadURL,
-           await process.canonicalBlockCID(atHeight: 0) == genesisCID {
-            urls.append(own)
-        }
-        // One sample of the wired children, taken before the resolve suspends
-        // and iterated below: the answer then describes a single consistent
-        // moment. Reading live hierarchy roles after the suspension instead
-        // would mix a child admitted mid-resolve into a lookup that never
-        // asked for its directory, and drop it anyway. It is served from the
-        // next ask on.
-        let wiredChildren = hierarchyRoles.compactMap { key, role -> (PeerKey, String)? in
-            guard case .child(let path) = role, let directory = path.last else {
-                return nil
-            }
-            return (key, directory)
-        }
-        let anchored = await process.anchoredChildGenesisCIDs(
-            directories: Set(wiredChildren.map(\.1))
-        )
-        let directories = Set(
-            anchored.filter { $0.value == genesisCID }.map(\.key)
-        )
-        if !directories.isEmpty {
-            // Shuffled, not dictionary order: wired-child roles are
-            // permissionless, and a stable iteration order would let a batch
-            // of sybil declarants shadow the honest child's URL from every
-            // answer for the process lifetime. Random selection keeps every
-            // declarant reachable across repeated asks.
-            for (key, directory) in wiredChildren.shuffled() {
-                guard directories.contains(directory),
-                      let url = hierarchyState.hierarchyRecords[key]?.declaredReadURL,
-                      !urls.contains(url) else { continue }
-                urls.append(url)
-                if urls.count >= ReadEndpointResponseMessage.maximumURLs {
-                    break
-                }
-            }
-        }
-        return Array(urls.prefix(ReadEndpointResponseMessage.maximumURLs))
-    }
-
     /// One bounded ask against an authenticated overlay session. Registered
     /// before the send so the response can never race the pending entry;
     /// resolves empty on send failure, timeout (legacy peers drop the topic

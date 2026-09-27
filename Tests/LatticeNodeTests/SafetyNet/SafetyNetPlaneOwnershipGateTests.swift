@@ -2,11 +2,14 @@ import Foundation
 import XCTest
 
 /// Structural gate over the `NodeNetworkRuntime` plane extensions: overlay
-/// code (`+Overlay`, `+RangeSync`, the overlay part of `+ReadURL`) never
-/// touches `hierarchyState`, and hierarchy code (`+Hierarchy`, the hierarchy
-/// part of `+ReadURL`) never touches `overlayState`. One plane reaches the
-/// other only by calling one of the named seams below, so every cross-plane
-/// dependency is listed here and nowhere else.
+/// code (`+Overlay`, `+RangeSync`, `+ReadURL`) never touches
+/// `hierarchyState`, hierarchy code (`+Hierarchy`) never touches
+/// `overlayState`, neither touches the fetcher (`blockFetcher`,
+/// `candidateOfferDeferredByAdmission`), and the fetcher side
+/// (`+Candidates`) touches neither plane's state. The fetcher side reaches a
+/// plane through that plane's seam functions; overlay and hierarchy reach
+/// each other only by calling one of the named seams below, so every
+/// cross-plane dependency is listed here and nowhere else.
 ///
 /// Members are attributed by brace depth inside the file's
 /// `extension NodeNetworkRuntime`. Comments and string literal text are
@@ -24,33 +27,36 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
     private enum Plane: String {
         case overlay
         case hierarchy
+        case fetcher
 
-        var ownState: String {
+        /// State this plane's code never names.
+        var foreignState: [String] {
             switch self {
-            case .overlay: return "overlayState"
-            case .hierarchy: return "hierarchyState"
+            case .overlay:
+                return ["hierarchyState", "blockFetcher", "candidateOfferDeferredByAdmission"]
+            case .hierarchy:
+                return ["overlayState", "blockFetcher", "candidateOfferDeferredByAdmission"]
+            case .fetcher:
+                return ["overlayState", "hierarchyState"]
             }
         }
     }
 
-    /// The plane each file belongs to; `+ReadURL` members default to the
-    /// overlay unless named in `readURLHierarchyMembers`.
+    /// The plane each file belongs to.
     private static let files: [String: Plane] = [
         "NodeNetworkRuntime+Overlay.swift": .overlay,
         "NodeNetworkRuntime+RangeSync.swift": .overlay,
         "NodeNetworkRuntime+ReadURL.swift": .overlay,
         "NodeNetworkRuntime+Hierarchy.swift": .hierarchy,
+        "NodeNetworkRuntime+Candidates.swift": .fetcher,
     ]
-
-    /// `+ReadURL` members that are the hierarchy's: they read the wired
-    /// children's declared URLs.
-    private static let readURLHierarchyMembers: Set<String> = ["declaredReadURLs"]
 
     /// Hierarchy members overlay code may call.
     private static let overlayToHierarchySeams: Set<String> = [
         // An overlay hello or an admission makes child proofs worth another pass.
         "scheduleChildProofRecovery",
         // Serving and discovering read URLs includes the wired children's.
+        "anyChildDeclaredReadURL",
         "declaredReadURLs",
     ]
 
@@ -63,6 +69,9 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
         let name: String
         /// A static member holds no plane state; calling one is not a crossing.
         let isStatic: Bool
+        /// A function is named by a call (`name(`); a local of the same
+        /// name elsewhere is not a use of it.
+        let isFunction: Bool
         var lines: [(number: Int, code: String)] = []
     }
 
@@ -77,14 +86,14 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
     }
 
     private static let memberPattern =
-        #"^\s*(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:private|fileprivate|internal|public|nonisolated|static|override|final|mutating)\s+)*(?:func|var|let)\s+(\w+)"#
+        #"^\s*(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:private|fileprivate|internal|public|nonisolated|static|override|final|mutating)\s+)*(func|var|let)\s+(\w+)"#
 
     /// Every member of each file's type bodies with its code lines. A line
     /// at the extension's own depth that declares a member starts it; its
     /// body is every line until the depth returns.
     private func members(
         in files: [(path: String, text: String)],
-        plane: (String, String) -> Plane
+        plane: (String) -> Plane
     ) throws -> [Member] {
         let declaration = try NSRegularExpression(pattern: Self.memberPattern)
         var found: [Member] = []
@@ -96,14 +105,15 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
                 let range = NSRange(line.startIndex..., in: line)
                 if depth == 1,
                    let match = declaration.firstMatch(in: line, range: range),
-                   let nameRange = Range(match.range(at: 1), in: line) {
+                   let kindRange = Range(match.range(at: 1), in: line),
+                   let nameRange = Range(match.range(at: 2), in: line) {
                     if let current { found.append(current) }
-                    let name = String(line[nameRange])
                     current = Member(
-                        plane: plane(file.path, name),
+                        plane: plane(file.path),
                         file: file.path,
-                        name: name,
-                        isStatic: line.range(of: #"\bstatic\b"#, options: .regularExpression) != nil
+                        name: String(line[nameRange]),
+                        isStatic: line.range(of: #"\bstatic\b"#, options: .regularExpression) != nil,
+                        isFunction: line[kindRange] == "func"
                     )
                 }
                 if depth >= 1 {
@@ -124,40 +134,55 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
     }
 
     private func runtimeMembers() throws -> [Member] {
-        try members(in: sources()) { file, name in
-            if file == "NodeNetworkRuntime+ReadURL.swift",
-               Self.readURLHierarchyMembers.contains(name) {
-                return .hierarchy
-            }
-            return Self.files[file] ?? .overlay
-        }
+        try members(in: sources()) { Self.files[$0] ?? .fetcher }
     }
 
     /// `file:line: member` for every line of `plane`'s members that names
-    /// the other plane's state, or a member of the other plane that is not
-    /// one of the seams it may call.
+    /// state foreign to it, or (between overlay and hierarchy) a member of
+    /// the other plane that is not one of the seams it may call.
     private func crossings(in members: [Member], from plane: Plane) throws -> [String] {
-        let other: Plane = plane == .overlay ? .hierarchy : .overlay
-        let seams = plane == .overlay
-            ? Self.overlayToHierarchySeams
-            : Self.hierarchyToOverlaySeams
-        let otherNames = Set(members.filter { $0.plane == other && !$0.isStatic }.map(\.name))
-            .subtracting(members.filter { $0.plane == plane }.map(\.name))
-            .subtracting(seams)
-        let state = try NSRegularExpression(pattern: #"\b\#(other.ownState)\b"#)
-        let calls = try otherNames.sorted().map {
-            ($0, try NSRegularExpression(pattern: #"(?<![\w.])(?:self\.|Self\.)?\#($0)\b"#))
+        var otherPlane: Plane?
+        var seams: Set<String> = []
+        switch plane {
+        case .overlay:
+            otherPlane = .hierarchy
+            seams = Self.overlayToHierarchySeams
+        case .hierarchy:
+            otherPlane = .overlay
+            seams = Self.hierarchyToOverlaySeams
+        case .fetcher:
+            otherPlane = nil
+        }
+        let otherMembers = members.filter {
+            $0.plane == otherPlane && !$0.isStatic && !seams.contains($0.name)
+        }
+        let ownNames = Set(members.filter { $0.plane == plane }.map(\.name))
+        var calls: [(name: String, plane: Plane, pattern: NSRegularExpression)] = []
+        for member in otherMembers where !ownNames.contains(member.name)
+            && !calls.contains(where: { $0.name == member.name }) {
+            let use = member.isFunction ? #"\s*\("# : #"\b"#
+            calls.append((
+                member.name,
+                member.plane,
+                try NSRegularExpression(
+                    pattern: #"(?<![\w.])(?:self\.|Self\.)?\#(member.name)"# + use
+                )
+            ))
+        }
+        let state = try plane.foreignState.map {
+            ($0, try NSRegularExpression(pattern: #"\b\#($0)\b"#))
         }
         var found: [String] = []
         for member in members where member.plane == plane {
             for line in member.lines {
                 let range = NSRange(line.code.startIndex..., in: line.code)
-                if state.firstMatch(in: line.code, range: range) != nil {
-                    found.append("\(member.file):\(line.number): \(member.name) touches \(other.ownState)")
+                for (name, pattern) in state
+                where pattern.firstMatch(in: line.code, range: range) != nil {
+                    found.append("\(member.file):\(line.number): \(member.name) touches \(name)")
                 }
-                for (name, call) in calls
-                where call.firstMatch(in: line.code, range: range) != nil {
-                    found.append("\(member.file):\(line.number): \(member.name) calls \(other.rawValue) \(name)")
+                for call in calls.sorted(by: { $0.name < $1.name })
+                where call.pattern.firstMatch(in: line.code, range: range) != nil {
+                    found.append("\(member.file):\(line.number): \(member.name) calls \(call.plane.rawValue) \(call.name)")
                 }
             }
         }
@@ -215,6 +240,7 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
                 log("tip \\(hierarchyState.receivedParentTip)")
                 seam()
                 hierarchyOnly()
+                let hierarchyOnly = blockFetcher.tracks(cid)
             }
             var overlayView: Int { 1 }
             nonisolated static func pure() -> Int { 1 }
@@ -231,21 +257,33 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
             }
         }
         """
+        let fetcher = """
+        extension NodeNetworkRuntime {
+            func admit() {
+                blockFetcher.next()
+                hierarchyState.releasedCarriedChildCID = cid
+                hierarchyOnly()
+            }
+        }
+        """
         let members = try members(
-            in: [("o", overlay), ("h", hierarchy)]
-        ) { file, _ in file == "o" ? .overlay : .hierarchy }
+            in: [("o", overlay), ("h", hierarchy), ("f", fetcher)]
+        ) { ["o": .overlay, "h": .hierarchy][$0] ?? .fetcher }
         XCTAssertEqual(
             members.map { "\($0.file).\($0.name)" },
-            ["o.overlayWork", "o.overlayView", "o.pure", "h.seam", "h.hierarchyOnly"]
+            ["o.overlayWork", "o.overlayView", "o.pure", "h.seam", "h.hierarchyOnly", "f.admit"]
         )
-        let fromOverlay = try crossings(in: members, from: .overlay)
-        XCTAssertEqual(fromOverlay, [
+        XCTAssertEqual(try crossings(in: members, from: .overlay), [
             "o:5: overlayWork touches hierarchyState",
             "o:6: overlayWork calls hierarchy seam",
             "o:7: overlayWork calls hierarchy hierarchyOnly",
+            "o:8: overlayWork touches blockFetcher",
         ])
         XCTAssertEqual(try crossings(in: members, from: .hierarchy), [
             "h:5: hierarchyOnly calls overlay overlayView",
+        ])
+        XCTAssertEqual(try crossings(in: members, from: .fetcher), [
+            "f:4: admit touches hierarchyState",
         ])
     }
 
@@ -267,23 +305,26 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
             Self.hierarchyToOverlaySeams.subtracting(overlayNames), [],
             "a hierarchy-to-overlay seam is no longer an overlay member"
         )
-        XCTAssertEqual(
-            Self.readURLHierarchyMembers.subtracting(hierarchyNames), [],
-            "a +ReadURL hierarchy member is gone"
-        )
     }
 
     func testOverlayReachesTheHierarchyOnlyThroughItsSeams() throws {
         XCTAssertEqual(
             try crossings(in: runtimeMembers(), from: .overlay), [],
-            "overlay code reaches hierarchy state; add a named hierarchy seam"
+            "overlay code reaches hierarchy or fetcher state; add a named seam"
         )
     }
 
     func testHierarchyReachesTheOverlayOnlyThroughItsSeams() throws {
         XCTAssertEqual(
             try crossings(in: runtimeMembers(), from: .hierarchy), [],
-            "hierarchy code reaches overlay state; add a named overlay seam"
+            "hierarchy code reaches overlay or fetcher state; add a named seam"
+        )
+    }
+
+    func testFetcherReachesThePlanesOnlyThroughTheirSeams() throws {
+        XCTAssertEqual(
+            try crossings(in: runtimeMembers(), from: .fetcher), [],
+            "+Candidates reaches plane state; add a seam on the owning plane"
         )
     }
 }

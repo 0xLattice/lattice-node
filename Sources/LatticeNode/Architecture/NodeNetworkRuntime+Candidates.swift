@@ -7,12 +7,70 @@ import VolumeBroker
 import cashew
 
 extension NodeNetworkRuntime {
+    /// Seam: the one way plane code hands the fetcher a candidate. Every
+    /// caller has just checked `generation` against the fence in the same
+    /// synchronous segment.
     @discardableResult
-    func enqueueCandidate(_ seed: CandidateSeed) -> Bool {
-        guard isRunning else { return false }
+    func enqueueCandidate(_ seed: CandidateSeed, generation: UInt64) -> Bool {
+        guard isRunning, isCurrentGeneration(generation) else { return false }
         let result = blockFetcher.observe(seed)
         serviceBlockFetcher()
         return result.accepted
+    }
+
+    /// Seam: candidates a parent fact was holding, handed back when the fact
+    /// arrives, times out or its session ends. `observe` flips only a
+    /// `.waiting(.evidence)` attempt back to `.ready`, never a
+    /// `.waiting(.later)` one, so each is also retried explicitly; without
+    /// that it would wedge until the wall-clock poll (or 2h expiry).
+    func reReadyCandidates(_ seeds: [CandidateSeed]) {
+        for seed in seeds {
+            _ = blockFetcher.observe(seed)
+            blockFetcher.retryExternalDependency(
+                blockCID: seed.blockCID,
+                rootCID: seed.recoveryRootCID
+            )
+            serviceBlockFetcher()
+        }
+    }
+
+    /// Seam: a predecessor activated outside admission (an adopted genesis)
+    /// wakes the successors parked behind it.
+    func predecessorConnectedOutOfBand(_ blockCID: String) {
+        blockFetcher.predecessorConnectedOutOfBand(blockCID)
+        serviceBlockFetcher()
+    }
+
+    /// Seam: an overlay session ended or was replaced; its provider no
+    /// longer serves any candidate.
+    func disconnectProvider(_ peer: AuthenticatedPeer) {
+        blockFetcher.disconnect(candidateProvider(peer))
+    }
+
+    /// Seam: whether any attempt for the block is held.
+    func fetcherTracks(_ blockCID: String) -> Bool {
+        blockFetcher.tracks(blockCID)
+    }
+
+    /// Seam: the candidate offer's gate against admission. Deferred while
+    /// any of `pendingHandoff` (own candidates the parent names as carried)
+    /// is ready for or in its admission: the flag is set and the admission
+    /// drain re-arms the offer. Open otherwise, which also clears a deferral
+    /// the drain never got to read (its attempt left the fetcher without an
+    /// admission).
+    func offerGate(pendingHandoff: [String]) -> Bool {
+        if pendingHandoff.contains(where: { blockFetcher.isAwaitingAdmission($0) }) {
+            candidateOfferDeferredByAdmission = true
+            return false
+        }
+        candidateOfferDeferredByAdmission = false
+        return true
+    }
+
+    /// Seam: the offer held behind a carried block; the admission drain
+    /// re-arms it.
+    func markOfferDeferred() {
+        candidateOfferDeferredByAdmission = true
     }
 
     func candidateProvider(
@@ -22,15 +80,6 @@ extension NodeNetworkRuntime {
             publicKey: peer.id.publicKey,
             sessionID: peer.sessionID
         )
-    }
-
-    func overlayPeer(
-        for provider: CandidateProvider
-    ) -> AuthenticatedPeer? {
-        guard let key = try? PeerKey(provider.publicKey),
-              let peer = overlayState.overlayRecords[key]?.readyPeer,
-              peer.sessionID == provider.sessionID else { return nil }
-        return peer
     }
 
     func serviceBlockFetcher() {
@@ -161,7 +210,7 @@ extension NodeNetworkRuntime {
             source: IvyRootContentSource,
             plane: CandidateSourcePlane?
         )] = Self.boundedOrderedExactPeers(
-            candidate.providers.compactMap(overlayPeer(for:)),
+            readyPeers(for: candidate.providers),
             blockCID: candidate.blockCID
         ).map {
             (
@@ -251,7 +300,7 @@ extension NodeNetworkRuntime {
                 ) else { return }
                 switch plane {
                 case .overlay:
-                    guard overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
+                    guard isReadySession(peer) else {
                         continue
                     }
                 case .hierarchy:
@@ -405,17 +454,16 @@ extension NodeNetworkRuntime {
         // authenticates only parent facts and never vouches for the child
         // transition. "Blame" is a per-root routing suppression, never a ban.
         SyncTrace.log("admit \(candidate.blockCID.prefix(12)) weighed=\(candidate.weighed) decision=\(outcome.decision)")
-        if candidate.blockCID == hierarchyState.receivedParentTip?.carriedChildCID,
-           !outcome.decision.isAccepted,
+        if !outcome.decision.isAccepted,
            !outcome.decision.shouldRetryWhenEvidenceChanges,
            !outcome.decision.shouldRetryLater {
-            hierarchyState.releasedCarriedChildCID = candidate.blockCID
+            releaseCarriedHold(ifCarried: candidate.blockCID)
         }
         if outcome.decision == .invalid {
             if attempt.attribution.allResponsesComplete,
                let supplierKey = attempt.attribution.soleRemoteSupplierPublicKey,
                let supplier = try? PeerKey(supplierKey),
-               overlayState.overlayRecords[supplier]?.readyPeer != nil,
+               hasReadySession(supplier),
                configuration.address.isNexus || outcome.parentCarrierLink != nil {
                 await overlay.reportDeficientContent(
                     rootCID: candidate.blockCID,
@@ -523,10 +571,7 @@ extension NodeNetworkRuntime {
         )
         if outcome.decision.isAccepted, authenticatedPackage != nil,
            (try? await process.store.parentEvidenceInboxHasCapacity()) == true {
-            if let parent = configuredParentPeer(),
-               let session = parentEvidenceSession(for: parent) {
-                parentEvidence.capacityBecameAvailable(for: session)
-            }
+            parentEvidenceCapacityBecameAvailable()
             await requestEvidenceIndex(
                 generation: generation,
                 process: process

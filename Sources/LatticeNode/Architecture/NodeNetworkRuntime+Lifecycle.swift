@@ -176,7 +176,7 @@ extension NodeNetworkRuntime {
                       hierarchyState.hierarchyRecords[$0.key]?.session?.sessionID == $0.sessionID
                         && hierarchyState.hierarchyRecords[$0.key]?.role == .parent
                   }) ?? true else { return .done(false) }
-            return enqueueCandidate(candidate) ? .done(true) : .again
+            return enqueueCandidate(candidate, generation: generation) ? .done(true) : .again
         }
     }
 
@@ -251,7 +251,7 @@ extension NodeNetworkRuntime {
                 * Self.maximumCandidateWaitTicks
         )
         hierarchyState.pendingEvidenceIndexes.removeAll()
-        discardPendingParentChainFacts(where: { _ in true }, requeue: false)
+        _ = discardPendingParentChainFacts(where: { _ in true })
         for pending in hierarchyState.pendingGenesisVerifications.values {
             pending.continuation.resume(returning: false)
         }

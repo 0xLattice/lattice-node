@@ -354,7 +354,7 @@ extension NodeNetworkRuntime {
                 provider: candidateProvider(peer),
                 weighed: true
             )
-            guard enqueueCandidate(candidate) else { return }
+            guard enqueueCandidate(candidate, generation: generation) else { return }
         case NodeNetworkTopic.acceptedLeavesRequest:
             // Answers a peer's one-shot frontier pull (see
             // `pullFrontierIfAtEdge`) with one page of accepted leaves; older
@@ -446,7 +446,7 @@ extension NodeNetworkRuntime {
                     package: nil,
                     provider: candidateProvider(peer),
                     weighed: true
-                ))
+                ), generation: generation)
             }
         case NodeNetworkTopic.forwardRangeRequest:
             guard
@@ -957,8 +957,7 @@ extension NodeNetworkRuntime {
         process: ChainProcess
     ) async {
         guard !configuration.address.isNexus else { return }
-        var peers: [AuthenticatedPeer] = candidate.providers
-            .compactMap(overlayPeer(for:))
+        var peers: [AuthenticatedPeer] = readyPeers(for: candidate.providers)
         if let supplierPublicKey, let key = try? PeerKey(supplierPublicKey),
            let peer = overlayState.overlayRecords[key]?.readyPeer,
            !peers.contains(where: { $0.key == key }) {
@@ -1137,7 +1136,7 @@ extension NodeNetworkRuntime {
                     package: ChildValidationPackage(proof: evidence.proof)
                 ),
                 weighed: true
-            ))
+            ), generation: generation)
             return true
         }
         // The peer advertising an attachment is responsible for serving its
@@ -1206,7 +1205,7 @@ extension NodeNetworkRuntime {
             blockCID: edge.childCID,
             package: gated,
             weighed: true
-        ))
+        ), generation: generation)
         return true
     }
 
@@ -1331,6 +1330,53 @@ extension NodeNetworkRuntime {
     func discardServingSessions(of session: AuthenticatedPeer?) {
         if let session {
             sessionLeases.discardServing(session.sessionID)
+        }
+    }
+
+    /// The provider's session when it is still the key's ready session.
+    func overlayPeer(
+        for provider: CandidateProvider
+    ) -> AuthenticatedPeer? {
+        guard let key = try? PeerKey(provider.publicKey),
+              let peer = overlayState.overlayRecords[key]?.readyPeer,
+              peer.sessionID == provider.sessionID else { return nil }
+        return peer
+    }
+
+    /// Seam: the providers whose sessions are still ready, in order.
+    func readyPeers(for providers: [CandidateProvider]) -> [AuthenticatedPeer] {
+        providers.compactMap(overlayPeer(for:))
+    }
+
+    /// Seam: whether `peer` is still its key's ready overlay session.
+    func isReadySession(_ peer: AuthenticatedPeer) -> Bool {
+        overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID
+    }
+
+    /// Seam: whether the key holds a ready overlay session.
+    func hasReadySession(_ key: PeerKey) -> Bool {
+        overlayState.overlayRecords[key]?.readyPeer != nil
+    }
+
+    /// Drops the overlay requests a gone session can never answer. Each
+    /// table is keyed by requestID; the peer is only a filter.
+    func purgeOverlayRequests(for key: PeerKey) {
+        let disconnectedInventories = overlayState.pendingTransactionInventories.filter {
+            $0.value.peer.key == key
+        }
+        for pending in disconnectedInventories.values {
+            pending.timeout.cancel()
+        }
+        overlayState.pendingTransactionInventories = overlayState.pendingTransactionInventories.filter {
+            $0.value.peer.key != key
+        }
+        // A response can never arrive on a gone session (a reconnect gets
+        // a fresh sessionID the response guard rejects), so resolve the
+        // ask empty now instead of burning its timeout.
+        let disconnectedReadEndpoints = overlayState.readURLDiscovery.removePendingReadEndpoints(of: key)
+        for pending in disconnectedReadEndpoints.values {
+            pending.timeout.cancel()
+            pending.continuation.resume(returning: [])
         }
     }
 }

@@ -362,7 +362,7 @@ extension NodeNetworkRuntime {
         if let carried = hierarchyState.receivedParentTip?.carriedChildCID,
            carried != hierarchyState.releasedCarriedChildCID,
            !(await process.hasAcceptedBlock(carried)) {
-            candidateOfferDeferredByAdmission = true
+            markOfferDeferred()
             hierarchyState.carriedHoldCount += 1
             SyncTrace.log("candidate offer deferred: carried \(carried.prefix(12)) not yet admitted")
             return
@@ -375,16 +375,14 @@ extension NodeNetworkRuntime {
         // configured parent's evidence, so no overlay peer can populate
         // this set; an announcement can at most re-ready an inbox entry's
         // own attempt. Offer once the admission decides or parks; the
-        // drain re-arms the offer either way.
-        if let pending = try? await process.store.pendingHandoffChildCIDs(),
-           pending.contains(where: { blockFetcher.isAwaitingAdmission($0) }) {
-            candidateOfferDeferredByAdmission = true
+        // drain re-arms the offer either way. An open gate also clears a
+        // deferral the drain never got to read.
+        guard offerGate(
+            pendingHandoff: (try? await process.store.pendingHandoffChildCIDs()) ?? []
+        ) else {
             SyncTrace.log("candidate offer deferred: own carried candidate awaiting admission")
             return
         }
-        // The gate is open: a deferral the drain never got to read (its
-        // attempt left the fetcher without an admission) is moot now.
-        candidateOfferDeferredByAdmission = false
         guard let context = hierarchyState.receivedParentTip,
               hierarchyState.hierarchyRecords[context.peer.key]?.session?.sessionID
                 == context.peer.sessionID,
@@ -935,8 +933,10 @@ extension NodeNetworkRuntime {
         return isCurrentRuntime(generation: generation, process: process)
     }
 
-    @discardableResult
-    func clearHierarchyAuthorization(for key: PeerKey) -> HierarchyPeer? {
+    /// Ends the key's hierarchy authorization. Returns the live candidates
+    /// its parent-fact requests held; the caller requeues them at once
+    /// (`reReadyCandidates`).
+    func clearHierarchyAuthorization(for key: PeerKey) -> [CandidateSeed] {
         let removed = hierarchyState.hierarchyRecords.remove(key)
         removed?.helloDeadline?.task.cancel()
         cancelParentEvidence(for: key)
@@ -958,8 +958,9 @@ extension NodeNetworkRuntime {
             // gone (those got no admission-time route seeded for it).
             hierarchyState.backfilledChildDirectories.remove(directory)
         }
+        var requeue: [CandidateSeed] = []
         if case .parent? = removedRole {
-            purgeRequests(for: key, plane: .hierarchy)
+            requeue = purgeHierarchyRequests(for: key)
         }
         if hierarchyState.receivedParentTip?.peer.key == key {
             hierarchyState.receivedParentTip = nil
@@ -967,7 +968,7 @@ extension NodeNetworkRuntime {
             hierarchyState.requestedCarriedChildCID = nil
             hierarchyState.lastOfferedCandidateCID = nil
         }
-        return removedRole
+        return requeue
     }
 
     private func scheduleParentEvidencePage(
@@ -1058,7 +1059,7 @@ extension NodeNetworkRuntime {
               let carried = hierarchyState.receivedParentTip?.carriedChildCID,
               carried != hierarchyState.releasedCarriedChildCID,
               !(await process.hasAcceptedBlock(carried)),
-              !blockFetcher.tracks(carried) else { return }
+              !fetcherTracks(carried) else { return }
         if hierarchyState.requestedCarriedChildCID == carried {
             hierarchyState.releasedCarriedChildCID = carried
             SyncTrace.log("carried \(carried.prefix(12)) not served by a scan round: offer hold released")
@@ -1727,7 +1728,7 @@ extension NodeNetworkRuntime {
             )
         } else if case .child(let childPath) = role {
             guard await waitForChildEvidenceReady(peer: peer) else {
-                _ = clearHierarchyAuthorization(for: peer.key)
+                reReadyCandidates(clearHierarchyAuthorization(for: peer.key))
                 await hierarchy.recycleSession(ifCurrent: peer)
                 return
             }
@@ -1749,10 +1750,15 @@ extension NodeNetworkRuntime {
         }
     }
 
+    /// Seam: overlay hellos and admissions call this too. A stale caller
+    /// (a generation that has ended) schedules nothing: it would otherwise
+    /// claim the one recovery slot for its generation and swallow the
+    /// current generation's schedules.
     func scheduleChildProofRecovery(
         generation: UInt64,
         process: ChainProcess
     ) {
+        guard isCurrentRuntime(generation: generation, process: process) else { return }
         if hierarchyState.childProofRecoveryTask != nil {
             if hierarchyState.childProofRecoveryGeneration == generation {
                 hierarchyState.childProofRecoveryNeedsRefresh = true
@@ -2058,8 +2064,7 @@ extension NodeNetworkRuntime {
                     // signal. Wake the successors that parked behind it while
                     // awaitingGenesis, or the whole chain above the genesis stays
                     // orphaned and the child never canonicalizes past height 0.
-                    blockFetcher.predecessorConnectedOutOfBand(genesisCID)
-                    serviceBlockFetcher()
+                    predecessorConnectedOutOfBand(genesisCID)
                     await requestEvidenceIndex(
                         generation: generation,
                         process: process
@@ -2182,22 +2187,56 @@ extension NodeNetworkRuntime {
     }
 
     /// The one teardown path for pending parent-fact requests: a walk's
-    /// continuation is resumed nil, a live candidate's entry is requeued when
-    /// asked. No other site may drop an entry without going through here.
+    /// continuation is resumed nil, a live candidate's entry is returned for
+    /// the caller to requeue (`reReadyCandidates`) or drop. No other site may
+    /// drop an entry without going through here.
     func discardPendingParentChainFacts(
-        where predicate: (PendingParentChainFact) -> Bool,
-        requeue: Bool
-    ) {
+        where predicate: (PendingParentChainFact) -> Bool
+    ) -> [CandidateSeed] {
         let discarded = hierarchyState.pendingParentChainFacts.values.filter(predicate)
         hierarchyState.pendingParentChainFacts = hierarchyState.pendingParentChainFacts.filter {
             !predicate($0.value)
         }
+        var live: [CandidateSeed] = []
         for pending in discarded {
             if let continuation = pending.continuation {
                 continuation.resume(returning: nil)
-            } else if requeue {
-                retryParentFactCandidate(pending)
+            } else {
+                live.append(pending.candidateSeed)
             }
+        }
+        return live
+    }
+
+    /// Drops the hierarchy requests a gone parent session can never answer
+    /// and returns the live candidates they held, to requeue. The genesis
+    /// verify and resolve tables are not purged here: they resolve on their
+    /// own timeouts (or restart).
+    func purgeHierarchyRequests(for key: PeerKey) -> [CandidateSeed] {
+        // Only the parent sends these requests' answers.
+        hierarchyState.pendingEvidenceIndexes.removeAll()
+        // A response can never arrive on the gone session: its live
+        // candidates are requeued, and a validate walk's request resolves
+        // nil (it is not a candidate — re-seeding an accepted main-chain
+        // block would be wrong — and an unresumed continuation would
+        // suspend the walk for the process lifetime).
+        return discardPendingParentChainFacts(where: { $0.peer.key == key })
+    }
+
+    /// Seam: admission decided against `blockCID`; when it is the block
+    /// the parent's context names as carried, the offer hold on it is
+    /// released, or no offer would ever follow.
+    func releaseCarriedHold(ifCarried blockCID: String) {
+        guard blockCID == hierarchyState.receivedParentTip?.carriedChildCID else { return }
+        hierarchyState.releasedCarriedChildCID = blockCID
+    }
+
+    /// Seam: the parent-evidence inbox has room again; the configured
+    /// parent's evidence session may resume.
+    func parentEvidenceCapacityBecameAvailable() {
+        if let parent = configuredParentPeer(),
+           let session = parentEvidenceSession(for: parent) {
+            parentEvidence.capacityBecameAvailable(for: session)
         }
     }
 
@@ -2339,9 +2378,8 @@ extension NodeNetworkRuntime {
             generation: generation,
             process: process
         ) else {
-            discardPendingParentChainFacts(
-                where: { $0.request.requestID == request.requestID },
-                requeue: false
+            _ = discardPendingParentChainFacts(
+                where: { $0.request.requestID == request.requestID }
             )
             return
         }
@@ -2393,20 +2431,13 @@ extension NodeNetworkRuntime {
             return
         }
         // A parent fact that arrives SUCCESSFULLY must re-ready the candidate that
-        // was blocked waiting for it. observe()/enqueueCandidate only flips a
-        // `.waiting(.evidence)` attempt back to `.ready`, never a `.waiting(.later)`
-        // one, so without retryExternalDependency the candidate would wedge until
-        // the wall-clock poll (or 2h expiry). Mirror the timeout path
-        // (retryParentFactCandidate) so the fact's arrival is itself the trigger.
-        _ = blockFetcher.observe(CandidateSeed(
+        // was blocked waiting for it, as the timeout path does, so the fact's
+        // arrival is itself the trigger. The merged package keeps the pending
+        // proof, so the attempt is the same.
+        reReadyCandidates([CandidateSeed(
             blockCID: pending.blockCID,
             package: merged
-        ))
-        blockFetcher.retryExternalDependency(
-            blockCID: pending.blockCID,
-            rootCID: pending.package.package.proof.rootCID
-        )
-        serviceBlockFetcher()
+        )])
     }
 
     private func parentChainFactRequestTimedOut(
@@ -2422,19 +2453,7 @@ extension NodeNetworkRuntime {
             continuation.resume(returning: nil)
             return
         }
-        retryParentFactCandidate(pending)
-    }
-
-    private func retryParentFactCandidate(_ pending: PendingParentChainFact) {
-        _ = blockFetcher.observe(CandidateSeed(
-            blockCID: pending.blockCID,
-            package: pending.package
-        ))
-        blockFetcher.retryExternalDependency(
-            blockCID: pending.blockCID,
-            rootCID: pending.package.package.proof.rootCID
-        )
-        serviceBlockFetcher()
+        reReadyCandidates([pending.candidateSeed])
     }
 
     /// Returns whether a request was sent: none is while a round is in
@@ -2749,5 +2768,60 @@ extension NodeNetworkRuntime {
                 else { return }
             }
         }
+    }
+
+    /// Seam: whether any wired child declared a public read URL.
+    var anyChildDeclaredReadURL: Bool {
+        hierarchyState.hierarchyRecords.records.values.contains { $0.declaredReadURL != nil }
+    }
+
+    /// Seam: this node's own self-description for `genesisCID`: its configured
+    /// public read URL when that is its own chain's genesis, plus the URLs its
+    /// wired children declared in their hierarchy hellos when the CID is one
+    /// this node anchored for a child directory. Deduped, bounded.
+    func declaredReadURLs(
+        genesisCID: String,
+        process: ChainProcess
+    ) async -> [String] {
+        var urls: [String] = []
+        if let own = configuration.publicReadURL,
+           await process.canonicalBlockCID(atHeight: 0) == genesisCID {
+            urls.append(own)
+        }
+        // One sample of the wired children, taken before the resolve suspends
+        // and iterated below: the answer then describes a single consistent
+        // moment. Reading live hierarchy roles after the suspension instead
+        // would mix a child admitted mid-resolve into a lookup that never
+        // asked for its directory, and drop it anyway. It is served from the
+        // next ask on.
+        let wiredChildren = hierarchyRoles.compactMap { key, role -> (PeerKey, String)? in
+            guard case .child(let path) = role, let directory = path.last else {
+                return nil
+            }
+            return (key, directory)
+        }
+        let anchored = await process.anchoredChildGenesisCIDs(
+            directories: Set(wiredChildren.map(\.1))
+        )
+        let directories = Set(
+            anchored.filter { $0.value == genesisCID }.map(\.key)
+        )
+        if !directories.isEmpty {
+            // Shuffled, not dictionary order: wired-child roles are
+            // permissionless, and a stable iteration order would let a batch
+            // of sybil declarants shadow the honest child's URL from every
+            // answer for the process lifetime. Random selection keeps every
+            // declarant reachable across repeated asks.
+            for (key, directory) in wiredChildren.shuffled() {
+                guard directories.contains(directory),
+                      let url = hierarchyState.hierarchyRecords[key]?.declaredReadURL,
+                      !urls.contains(url) else { continue }
+                urls.append(url)
+                if urls.count >= ReadEndpointResponseMessage.maximumURLs {
+                    break
+                }
+            }
+        }
+        return Array(urls.prefix(ReadEndpointResponseMessage.maximumURLs))
     }
 }
