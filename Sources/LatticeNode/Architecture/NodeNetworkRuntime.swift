@@ -554,6 +554,27 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let process: ChainProcess
     }
 
+    /// State keyed by session ID rather than peer key: in-flight serves and
+    /// content leases. Each entry is released by its own task's `defer`,
+    /// which checks the runtime fence, so a reconnect (a new session ID)
+    /// never lets an old task's release touch the new session. A session's
+    /// end discards only the accepted-leaves and ancestor-range serves;
+    /// `servingReadEndpoints` is released by its task alone (or restart).
+    private struct SessionLeases {
+        var servingAcceptedLeaves: Set<Data> = []
+        var servingAncestorRange: Set<Data> = []
+        var servingReadEndpoints: Set<Data> = []
+        var activeTransactionVolumes = Set<TransactionVolumeLease>()
+        var activeEvidenceVolumes = Set<EvidenceVolumeLease>()
+        var portableEvidenceOrder: [EvidenceVolumeLease] = []
+        var portableEvidenceWork: [EvidenceVolumeLease: PortableEvidenceWork] = [:]
+
+        mutating func discardServing(_ sessionID: Data) {
+            servingAcceptedLeaves.remove(sessionID)
+            servingAncestorRange.remove(sessionID)
+        }
+    }
+
     private enum CandidateSourcePlane: Hashable {
         case overlay
         case hierarchy
@@ -606,8 +627,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private var waitingCandidateRetryGeneration: UInt64?
     private var pendingTransactionInventories:
         [UInt64: PendingTransactionInventory] = [:]
-    private var activeTransactionVolumes = Set<TransactionVolumeLease>()
-    private var servingAcceptedLeaves: Set<Data> = []
     /// The one frontier (accepted-leaves) pull per overlay session: sent once
     /// we are at the live edge with respect to the peer, answered by exactly
     /// the page whose requestID matches (`requestID` is cleared on receipt).
@@ -616,8 +635,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let sessionID: Data
         var requestID: UInt64?
     }
-    private var servingAncestorRange: Set<Data> = []
-    private var servingReadEndpoints: Set<Data> = []
     private var pendingReadEndpoints: [UInt64: PendingReadEndpoint] = [:]
     private var readURLDiscoveries: [String: ReadURLDiscovery] = [:]
     private var readURLDiscoveryTasks:
@@ -661,10 +678,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         capacity: NodeNetworkRuntime.maximumConcurrentParentStateQueries
     )
     private var rangeSyncReentryTask: Task<Void, Never>?
-    private var activeEvidenceVolumes = Set<EvidenceVolumeLease>()
-    private var portableEvidenceOrder: [EvidenceVolumeLease] = []
-    private var portableEvidenceWork:
-        [EvidenceVolumeLease: PortableEvidenceWork] = [:]
+    private var sessionLeases = SessionLeases()
     private var portableEvidenceWorker: Task<Void, Never>?
     /// Orders parent evidence and reservation transfer within one authenticated
     /// session. Transport effects remain in this actor.
@@ -1036,7 +1050,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         process = nil
         let removedOverlayRecords = overlayRecords.removeAll()
         let removedHierarchyRecords = hierarchyRecords.removeAll()
-        servingReadEndpoints.removeAll()
+        sessionLeases.servingReadEndpoints.removeAll()
         readURLDiscoveries.removeAll()
         for inFlight in readURLDiscoveryTasks.values {
             inFlight.task.cancel()
@@ -1048,11 +1062,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             pending.timeout.cancel()
             pending.continuation.resume(returning: [])
         }
-        let evidenceReadyWaiters = removedHierarchyRecords.flatMap {
-            $0.evidence.waiters
-        }
-        for waiter in evidenceReadyWaiters {
-            waiter.continuation.resume(returning: false)
+        for record in removedHierarchyRecords {
+            for waiter in record.evidence.waiters {
+                waiter.continuation.resume(returning: false)
+            }
         }
         for record in removedOverlayRecords { record.helloDeadline?.task.cancel() }
         for record in removedHierarchyRecords { record.helloDeadline?.task.cancel() }
@@ -1063,7 +1076,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             pending.timeout.cancel()
         }
         pendingTransactionInventories.removeAll()
-        activeTransactionVolumes.removeAll()
+        sessionLeases.activeTransactionVolumes.removeAll()
         childProofRecoveryTask?.cancel()
         childProofRecoveryTask = nil
         genesisAnnounceTask?.cancel()
@@ -1081,8 +1094,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         await peerSearch?.value
         childProofRecoveryGeneration = nil
         childProofRecoveryNeedsRefresh = false
-        servingAcceptedLeaves.removeAll()
-        servingAncestorRange.removeAll()
+        sessionLeases.servingAcceptedLeaves.removeAll()
+        sessionLeases.servingAncestorRange.removeAll()
         clearRangeSync()
         candidateWorker?.cancel()
         candidateWorker = nil
@@ -1104,26 +1117,25 @@ public actor NodeNetworkRuntime: IvyDelegate {
         parentStateQueryGuard.removeAll()
         rangeSyncReentryTask?.cancel()
         rangeSyncReentryTask = nil
-        activeEvidenceVolumes.removeAll()
+        sessionLeases.activeEvidenceVolumes.removeAll()
         portableEvidenceWorker?.cancel()
         portableEvidenceWorker = nil
-        portableEvidenceOrder.removeAll()
-        portableEvidenceWork.removeAll()
+        sessionLeases.portableEvidenceOrder.removeAll()
+        sessionLeases.portableEvidenceWork.removeAll()
         parentEvidence.reset()
-        // After the peer-search join, as before: clear what may have been
-        // written while it was awaited.
+        // After the peer-search join, as before: a pushed sequence (recorded
+        // after its send, without a session check) or anything else these
+        // fields took while the join was awaited is dropped too.
         for key in Array(hierarchyRecords.keys) {
-            hierarchyRecords.update(key) { $0.offer = nil }
+            hierarchyRecords.update(key) {
+                $0.offer = nil
+                $0.pushedSequence = nil
+                $0.refusedHint = nil
+            }
         }
         runReportApplyTail?.cancel()
         runReportApplyTail = nil
         parentTipContext = nil
-        for key in Array(hierarchyRecords.keys) {
-            hierarchyRecords.update(key) { $0.pushedSequence = nil }
-        }
-        for key in Array(hierarchyRecords.keys) {
-            hierarchyRecords.update(key) { $0.refusedHint = nil }
-        }
         parentTipPushTask?.cancel()
         parentTipPushTask = nil
         parentTipPushDirty = false
@@ -2025,12 +2037,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
               let session = parentEvidenceSession(for: peer) else {
             return .rejected
         }
-        let activePortable = activeEvidenceVolumes.lazy.filter {
+        let activePortable = sessionLeases.activeEvidenceVolumes.lazy.filter {
             $0.plane == .overlay
         }.count
         guard let append = parentEvidence.beginAppend(
             for: session,
-            competingOperationCount: portableEvidenceWork.count
+            competingOperationCount: sessionLeases.portableEvidenceWork.count
                 + activePortable,
             capacity: Self.maximumEvidenceCandidates
         ) else { return .backpressured }
@@ -2512,15 +2524,19 @@ public actor NodeNetworkRuntime: IvyDelegate {
         if ivy === overlay {
             // Overlay authorization, like hierarchy authorization, belongs to
             // one authenticated connection rather than a long-lived key.
-            if let previous = overlayRecords[peer.key]?.readyPeer {
+            // The record is updated in place: its announced tip survives
+            // (every reader compares its session). Only a still-awaiting
+            // previous session's serves are discarded here, as before; a
+            // ready one's are released by their own tasks.
+            let previous = overlayRecords[peer.key]
+            if let previous = previous?.readyPeer {
                 candidateAcquirer.disconnect(candidateProvider(previous))
             }
-            overlayRecords.update(peer.key) { record in
-                if case .ready? = record.session { record.session = nil }
+            discardServingSessions(of: previous?.awaitingHelloPeer)
+            overlayRecords.update(peer.key) {
+                $0.session = .awaitingHello(peer)
+                $0.frontierPull = nil
             }
-            discardServingSessions(for: peer.key)
-            overlayRecords.update(peer.key) { $0.frontierPull = nil }
-            overlayRecords.update(peer.key) { $0.session = .awaitingHello(peer) }
             scheduleOverlayHelloDeadline(for: peer, generation: generation)
             SyncTrace.log("overlay connect peer=\(peer.key.hex.prefix(8))")
             topic = NodeNetworkTopic.overlayHello
@@ -2569,17 +2585,71 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // A replacement may already be current when the old connection's
             // asynchronous disconnect callback arrives.
             guard !(await ivy.connectedPeers).contains(peer) else { return }
-            removeOverlayHelloDeadline(for: key)?.task.cancel()
-            if let disconnected = overlayRecords[key]?.readyPeer {
-                candidateAcquirer.disconnect(candidateProvider(disconnected))
+            let disconnected = overlayRecords[key]
+            disconnected?.helloDeadline?.task.cancel()
+            if let ready = disconnected?.readyPeer {
+                candidateAcquirer.disconnect(candidateProvider(ready))
             }
-            discardServingSessions(for: key)
-            overlayRecords.update(key) { $0.frontierPull = nil }
+            discardServingSessions(of: disconnected?.sessionPeer)
+            // The record goes after the range sync clears: the re-entry that
+            // clear arms still counts this peer's announced tip, as before.
             if rangeSync?.peer.key == key {
                 clearRangeSync()
             }
-            overlayRecords.update(key) { $0.session = nil }
-            overlayRecords.update(key) { $0.announcedTip = nil }
+            overlayRecords.remove(key)
+            purgeRequests(for: key, plane: .overlay)
+        } else if ivy === hierarchy {
+            // Ivy may already have promoted a replacement session for this
+            // identity before this asynchronous delegate callback reaches us.
+            // In that case this is the old connection ending, not a loss of
+            // the authenticated parent/child relationship.
+            guard !(await ivy.connectedPeers).contains(peer) else { return }
+            _ = clearHierarchyAuthorization(for: key)
+        }
+    }
+
+    @discardableResult
+    private func clearHierarchyAuthorization(for key: PeerKey) -> HierarchyPeer? {
+        let removed = hierarchyRecords.remove(key)
+        removed?.helloDeadline?.task.cancel()
+        cancelParentEvidence(for: key)
+        for waiter in removed?.evidence.waiters ?? [] {
+            waiter.continuation.resume(returning: false)
+        }
+        let removedRole = removed?.role
+        Self.pruneChildPeerRotations(
+            &childPeerRotation,
+            activeRoles: hierarchyRoles.map(\.value)
+        )
+        if case .child(let path)? = removedRole, let directory = path.last,
+           !hierarchyRoles.map(\.value).contains(where: { role in
+               guard case .child(let other) = role else { return false }
+               return other.last == directory
+           }) {
+            // Last peer for this directory left: let a reconnecting child
+            // re-run the late-child backfill for carriers admitted while it was
+            // gone (those got no admission-time route seeded for it).
+            backfilledChildDirectories.remove(directory)
+        }
+        if case .parent? = removedRole {
+            purgeRequests(for: key, plane: .hierarchy)
+        }
+        if receivedParentTip?.peer.key == key {
+            receivedParentTip = nil
+            releasedCarriedChildCID = nil
+            requestedCarriedChildCID = nil
+            lastOfferedCandidateCID = nil
+        }
+        return removedRole
+    }
+
+    /// Drops the requests a gone session can never answer. Each table is
+    /// keyed by requestID; the peer is only a filter. The genesis verify and
+    /// resolve tables are not purged here: they resolve on their own
+    /// timeouts (or restart).
+    private func purgeRequests(for key: PeerKey, plane: CandidateSourcePlane) {
+        switch plane {
+        case .overlay:
             let disconnectedInventories = pendingTransactionInventories.filter {
                 $0.value.peer.key == key
             }
@@ -2602,47 +2672,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 pending.timeout.cancel()
                 pending.continuation.resume(returning: [])
             }
-        } else if ivy === hierarchy {
-            // Ivy may already have promoted a replacement session for this
-            // identity before this asynchronous delegate callback reaches us.
-            // In that case this is the old connection ending, not a loss of
-            // the authenticated parent/child relationship.
-            guard !(await ivy.connectedPeers).contains(peer) else { return }
-            _ = clearHierarchyAuthorization(for: key)
-        }
-    }
-
-    @discardableResult
-    private func clearHierarchyAuthorization(for key: PeerKey) -> HierarchyPeer? {
-        removeHierarchyHelloDeadline(for: key)?.task.cancel()
-        cancelParentEvidence(for: key)
-        let removedRole = hierarchyRecords.update(key) { record -> HierarchyPeer? in
-            let role = record.role
-            record.role = nil
-            record.session = nil
-            return role
-        }
-        hierarchyRecords.update(key) { $0.declaredReadURL = nil }
-        hierarchyRecords.update(key) { $0.evidence.ready = false }
-        cancelChildEvidenceReadyWaiters(for: key)
-        hierarchyRecords.update(key) { $0.offer = nil }
-        hierarchyRecords.update(key) { $0.pushedSequence = nil }
-        hierarchyRecords.update(key) { $0.refusedHint = nil }
-        Self.pruneChildPeerRotations(
-            &childPeerRotation,
-            activeRoles: hierarchyRoles.map(\.value)
-        )
-        if case .child(let path)? = removedRole, let directory = path.last,
-           !hierarchyRoles.map(\.value).contains(where: { role in
-               guard case .child(let other) = role else { return false }
-               return other.last == directory
-           }) {
-            // Last peer for this directory left: let a reconnecting child
-            // re-run the late-child backfill for carriers admitted while it was
-            // gone (those got no admission-time route seeded for it).
-            backfilledChildDirectories.remove(directory)
-        }
-        if case .parent? = removedRole {
+        case .hierarchy:
+            // Only the parent sends these requests' answers.
             pendingEvidenceIndexes.removeAll()
             // A response can never arrive on the gone session: requeue the
             // live candidates now, and resolve a validate walk's request nil
@@ -2654,13 +2685,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 requeue: true
             )
         }
-        if receivedParentTip?.peer.key == key {
-            receivedParentTip = nil
-            releasedCarriedChildCID = nil
-            requestedCarriedChildCID = nil
-            lastOfferedCandidateCID = nil
-        }
-        return removedRole
     }
 
     private func didReceive(
@@ -2839,13 +2863,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
             var urls: [String] = []
             if configuration.publicReadURL != nil
                 || anyChildDeclaredReadURL,
-                servingReadEndpoints.insert(peer.sessionID).inserted {
+                sessionLeases.servingReadEndpoints.insert(peer.sessionID).inserted {
                 defer {
                     if isCurrentRuntime(
                         generation: generation,
                         process: process
                     ) {
-                        servingReadEndpoints.remove(peer.sessionID)
+                        sessionLeases.servingReadEndpoints.remove(peer.sessionID)
                     }
                 }
                 if parentStateQueryGuard.acquire(peer.key) {
@@ -2965,7 +2989,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard
                 let request = try? AcceptedLeavesRequestMessage.decoded(
                     message.payload
-                ), servingAcceptedLeaves.insert(peer.sessionID).inserted
+                ), sessionLeases.servingAcceptedLeaves.insert(peer.sessionID).inserted
             else {
                 return
             }
@@ -2974,7 +2998,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     generation: generation,
                     process: process
                 ) {
-                    servingAcceptedLeaves.remove(peer.sessionID)
+                    sessionLeases.servingAcceptedLeaves.remove(peer.sessionID)
                 }
             }
             guard
@@ -3054,13 +3078,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard
                 let request = try? ForwardRangeRequestMessage.decoded(
                     message.payload
-                ), servingAncestorRange.insert(peer.sessionID).inserted
+                ), sessionLeases.servingAncestorRange.insert(peer.sessionID).inserted
             else {
                 return
             }
             defer {
                 if isCurrentRuntime(generation: generation, process: process) {
-                    servingAncestorRange.remove(peer.sessionID)
+                    sessionLeases.servingAncestorRange.remove(peer.sessionID)
                 }
             }
             let page = await process.forwardMainChainRange(
@@ -3094,13 +3118,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard
                 let request = try? AncestorRangeRequestMessage.decoded(
                     message.payload
-                ), servingAncestorRange.insert(peer.sessionID).inserted
+                ), sessionLeases.servingAncestorRange.insert(peer.sessionID).inserted
             else {
                 return
             }
             defer {
                 if isCurrentRuntime(generation: generation, process: process) {
-                    servingAncestorRange.remove(peer.sessionID)
+                    sessionLeases.servingAncestorRange.remove(peer.sessionID)
                 }
             }
             let page = await process.commonAncestorRange(
@@ -3343,10 +3367,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             sessionID: peer.sessionID,
             rootCID: rootCID
         )
-        guard !activeTransactionVolumes.contains(lease),
-              activeTransactionVolumes.count
+        guard !sessionLeases.activeTransactionVolumes.contains(lease),
+              sessionLeases.activeTransactionVolumes.count
                   < Self.maximumConcurrentTransactionVolumes,
-              activeTransactionVolumes.insert(lease).inserted else { return nil }
+              sessionLeases.activeTransactionVolumes.insert(lease).inserted else { return nil }
         return (transactionHandler, lease)
     }
 
@@ -3358,7 +3382,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         transactionHandler: @escaping NetworkTransactionHandler,
         lease: TransactionVolumeLease
     ) async {
-        defer { activeTransactionVolumes.remove(lease) }
+        defer { sessionLeases.activeTransactionVolumes.remove(lease) }
         guard isCurrentRuntime(generation: generation, process: process),
               overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
         if let transactionInventoryProvider = handlers?.transactionInventory,
@@ -3607,18 +3631,18 @@ public actor NodeNetworkRuntime: IvyDelegate {
             sessionID: peer.sessionID,
             attachmentCID: summary.attachmentCID
         )
-        guard !activeEvidenceVolumes.contains(lease),
-              portableEvidenceWork[lease] == nil else { return true }
+        guard !sessionLeases.activeEvidenceVolumes.contains(lease),
+              sessionLeases.portableEvidenceWork[lease] == nil else { return true }
         let work = PortableEvidenceWork(
             summary: summary,
             peer: peer,
             generation: generation,
             process: process
         )
-        let activePortable = activeEvidenceVolumes.lazy.filter {
+        let activePortable = sessionLeases.activeEvidenceVolumes.lazy.filter {
             $0.plane == .overlay
         }.count
-        guard portableEvidenceWork.count + parentEvidence.activeOperationCount
+        guard sessionLeases.portableEvidenceWork.count + parentEvidence.activeOperationCount
                 + activePortable
                 < Self.maximumEvidenceCandidates - 1 else {
             // Overflow drops the item, never the session: for a NATed
@@ -3631,8 +3655,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
             )
             return true
         }
-        portableEvidenceWork[lease] = work
-        portableEvidenceOrder.append(lease)
+        sessionLeases.portableEvidenceWork[lease] = work
+        sessionLeases.portableEvidenceOrder.append(lease)
         startPortableEvidenceWorker()
         return true
     }
@@ -3647,13 +3671,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private func drainPortableEvidence() async {
         defer {
             portableEvidenceWorker = nil
-            if !portableEvidenceOrder.isEmpty {
+            if !sessionLeases.portableEvidenceOrder.isEmpty {
                 startPortableEvidenceWorker()
             }
         }
-        while !portableEvidenceOrder.isEmpty {
-            let lease = portableEvidenceOrder.removeFirst()
-            guard let work = portableEvidenceWork.removeValue(forKey: lease)
+        while !sessionLeases.portableEvidenceOrder.isEmpty {
+            let lease = sessionLeases.portableEvidenceOrder.removeFirst()
+            guard let work = sessionLeases.portableEvidenceWork.removeValue(forKey: lease)
             else { continue }
             let handled = await recoverPortableAttachment(
                 work.summary,
@@ -3687,7 +3711,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             sessionID: peer.sessionID,
             attachmentCID: summary.attachmentCID
         )
-        if activeEvidenceVolumes.contains(lease) { return true }
+        if sessionLeases.activeEvidenceVolumes.contains(lease) { return true }
         // Reserve one slot for the structurally-required parent endpoint (a
         // connectivity reservation, NOT validation trust — parent facts are still
         // verified and never vouch for the child transition) so overlay churn
@@ -3704,14 +3728,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
             ), overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
                 return .done(true)
             }
-            if activeEvidenceVolumes.contains(lease) { return .done(true) }
-            return activeEvidenceVolumes.count >= Self.maximumEvidenceCandidates - 1
+            if sessionLeases.activeEvidenceVolumes.contains(lease) { return .done(true) }
+            return sessionLeases.activeEvidenceVolumes.count >= Self.maximumEvidenceCandidates - 1
                 ? .again
                 : .done(nil)
         }
         if let slotWait { return slotWait }
-        activeEvidenceVolumes.insert(lease)
-        defer { activeEvidenceVolumes.remove(lease) }
+        sessionLeases.activeEvidenceVolumes.insert(lease)
+        defer { sessionLeases.activeEvidenceVolumes.remove(lease) }
         if let evidence = try? await process.store.issuedChildEvidence(
             scope: .incomingCarrier,
             edgeCID: summary.edgeCID,
@@ -3938,7 +3962,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             sessionID: peer.sessionID,
             attachmentCID: summary.attachmentCID
         )
-        if activeEvidenceVolumes.contains(lease) { return .handled }
+        if sessionLeases.activeEvidenceVolumes.contains(lease) { return .handled }
         // nil: a slot is free. The stale and lease checks also pass on the
         // first step: both were just made above with no suspension between.
         let slotWait: ParentEvidenceResult? = await Timers.poll(
@@ -3952,14 +3976,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
                hierarchyRecords[peer.key]?.role == .parent else {
                 return .done(.failed)
             }
-            if activeEvidenceVolumes.contains(lease) { return .done(.handled) }
-            return activeEvidenceVolumes.count >= Self.maximumEvidenceCandidates
+            if sessionLeases.activeEvidenceVolumes.contains(lease) { return .done(.handled) }
+            return sessionLeases.activeEvidenceVolumes.count >= Self.maximumEvidenceCandidates
                 ? .again
                 : .done(nil)
         }
         if let slotWait { return slotWait }
-        activeEvidenceVolumes.insert(lease)
-        defer { activeEvidenceVolumes.remove(lease) }
+        sessionLeases.activeEvidenceVolumes.insert(lease)
+        defer { sessionLeases.activeEvidenceVolumes.remove(lease) }
         let source = IvyRootContentSource(
             ivy: hierarchy,
             peer: peer,
@@ -4840,7 +4864,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         keys.formUnion(pendingGenesisVerifications.values.map(\.peer.key))
         keys.formUnion(pendingGenesisResolves.values.map(\.peer.key))
         keys.formUnion(parentStateQueryGuard.peers)
-        keys.formUnion(portableEvidenceWork.values.map(\.peer.key))
+        keys.formUnion(sessionLeases.portableEvidenceWork.values.map(\.peer.key))
         if let receivedParentTip { keys.insert(receivedParentTip.peer.key) }
         for hex in candidateAcquirer.debugSnapshot().providerKeys
             .union(parentEvidence.debugSnapshot().peerIDs) {
@@ -4848,34 +4872,26 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
 
         var sessions = Set<Data>()
-        sessions.formUnion(servingAcceptedLeaves)
-        sessions.formUnion(servingAncestorRange)
-        sessions.formUnion(servingReadEndpoints)
-        sessions.formUnion(activeTransactionVolumes.map(\.sessionID))
-        sessions.formUnion(activeEvidenceVolumes.map(\.sessionID))
-        sessions.formUnion(portableEvidenceOrder.map(\.sessionID))
-
-        let overlayKeys = Set(overlayRecords.keys)
-        var overlaySnapshot: [PeerKey: NetworkDebugSnapshot.OverlayPeer] = [:]
-        for key in overlayKeys {
-            overlaySnapshot[key] = NetworkDebugSnapshot.OverlayPeer(
-                helloAccepted: overlayRecords[key]?.readyPeer != nil,
-                hasHelloDeadline: overlayRecords[key]?.helloDeadline != nil
-            )
-        }
-        let hierarchyKeys = Set(hierarchyRecords.keys)
-            .union(hierarchyRecords.keys)
-        var hierarchySnapshot: [PeerKey: NetworkDebugSnapshot.HierarchyPeer] = [:]
-        for key in hierarchyKeys {
-            hierarchySnapshot[key] = NetworkDebugSnapshot.HierarchyPeer(
-                role: hierarchyRecords[key]?.role,
-                hasHelloDeadline: hierarchyRecords[key]?.helloDeadline != nil
-            )
-        }
+        sessions.formUnion(sessionLeases.servingAcceptedLeaves)
+        sessions.formUnion(sessionLeases.servingAncestorRange)
+        sessions.formUnion(sessionLeases.servingReadEndpoints)
+        sessions.formUnion(sessionLeases.activeTransactionVolumes.map(\.sessionID))
+        sessions.formUnion(sessionLeases.activeEvidenceVolumes.map(\.sessionID))
+        sessions.formUnion(sessionLeases.portableEvidenceOrder.map(\.sessionID))
 
         return NetworkDebugSnapshot(
-            overlay: overlaySnapshot,
-            hierarchy: hierarchySnapshot,
+            overlay: overlayRecords.records.mapValues {
+                NetworkDebugSnapshot.OverlayPeer(
+                    helloAccepted: $0.readyPeer != nil,
+                    hasHelloDeadline: $0.helloDeadline != nil
+                )
+            },
+            hierarchy: hierarchyRecords.records.mapValues {
+                NetworkDebugSnapshot.HierarchyPeer(
+                    role: $0.role,
+                    hasHelloDeadline: $0.helloDeadline != nil
+                )
+            },
             heldPeerKeys: keys,
             heldSessionIDs: sessions,
             liveSessionIDs: Set(
@@ -6395,14 +6411,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
         )
     }
 
-    private func discardServingSessions(for peerKey: PeerKey) {
-        var sessionIDs = Set<Data>()
-        if let session = overlayRecords[peerKey]?.sessionPeer {
-            sessionIDs.insert(session.sessionID)
-        }
-        for sessionID in sessionIDs {
-            servingAcceptedLeaves.remove(sessionID)
-            servingAncestorRange.remove(sessionID)
+    private func discardServingSessions(of session: AuthenticatedPeer?) {
+        if let session {
+            sessionLeases.discardServing(session.sessionID)
         }
     }
 
