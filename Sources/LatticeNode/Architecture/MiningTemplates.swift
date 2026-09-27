@@ -138,9 +138,12 @@ public struct MiningTemplate: Sendable {
             .sorted(by: >)
     }
 
-    private static let emptyChildrenCID = try? HeaderImpl<
-        MerkleDictionaryImpl<VolumeImpl<Block>>
-    >(node: MerkleDictionaryImpl<VolumeImpl<Block>>()).rawCID
+    /// The canonical empty index. A candidate whose index bytes are not
+    /// canonical has a different CID and is treated as carrying children,
+    /// which only makes its work advertise the search target alone.
+    private static let emptyChildrenCID = try? HeaderImpl<ChildIndex>(
+        node: ChildIndex()
+    ).rawCID
 
     var remainingLifetimeMilliseconds: UInt64 {
         let components = ContinuousClock.now.duration(to: expiresAt).components

@@ -12,7 +12,8 @@ private func testSpec() -> ChainSpec {
         premine: 0,
         targetBlockTime: 1_000,
         initialReward: 1_024,
-        halvingInterval: 10_000
+        halvingInterval: 10_000,
+        halfLife: 10
     )
 }
 

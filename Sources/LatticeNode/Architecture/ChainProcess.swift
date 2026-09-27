@@ -1957,7 +1957,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             uniquingKeysWith: { first, _ in first }
         )
         var prepared: [PreparedChildProof] = []
-        for (directory, childHeader) in try children.allKeysAndValues().sorted(by: {
+        for (directory, childHeader) in children.entries.sorted(by: {
             $0.key < $1.key
         }) {
             guard let child = childHeader.node else {
@@ -2000,7 +2000,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     }
 
     /// Targeted retry for authenticated direct-child routes. This never walks
-    /// or enumerates the complete children trie.
+    /// or enumerates the complete child index.
     func prepareChildProofs(
         for carrier: BlockHeader,
         directories: [String],
@@ -2799,7 +2799,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                   let children = block.children.node else {
                 return .unavailable
             }
-            guard let childHeader = try children.get(key: directory) else {
+            guard let childHeader = children[directory] else {
                 return .absent
             }
             guard let child = childHeader.node else {

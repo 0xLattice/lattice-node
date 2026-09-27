@@ -963,9 +963,8 @@ final class ParentChildE2ETests: XCTestCase {
             nonce += 1
         }
         let directChildCount: Int
-        if let children = template.block.children.node,
-           let entries = try? children.allKeysAndValues() {
-            directChildCount = entries.count
+        if let children = template.block.children.node {
+            directChildCount = children.count
         } else {
             directChildCount = 0
         }

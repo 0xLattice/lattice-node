@@ -447,7 +447,7 @@ public struct ExplorerChainSpec: Codable, Sendable, Equatable {
     public let maxBlockSize: Int
     public let maxNumberOfTransactionsPerBlock: UInt64
     public let premine: UInt64
-    public let retargetWindow: UInt64
+    public let halfLife: UInt64
 }
 
 public struct ExplorerChainGenesis: Codable, Sendable, Equatable {
@@ -980,15 +980,15 @@ public actor ChainService {
         limit: Int
     ) async -> ExplorerBlockChildren? {
         guard let block = await block(cid: cid) else { return nil }
-        guard let dictionary = (try? await block.children.resolve(
+        guard let index = (try? await block.children.resolve(
             fetcher: process
         ))?.node else { return nil }
         let boundedLimit = min(max(limit, 0), 100)
         guard boundedLimit > 0 else { return ExplorerBlockChildren(children: []) }
-        guard let entries = try? await dictionary.boundedKeysAndValues(
-            limit: boundedLimit,
-            fetcher: process
-        ) else { return nil }
+        // The index is one node: the first `limit` directories in order.
+        let entries = index.entries.keys.sorted().prefix(boundedLimit).map {
+            ($0, index.entries[$0]!)
+        }
         var children: [ExplorerChildBlock] = []
         for (directory, volume) in entries {
             guard let child = try? await volume.resolve(fetcher: process).node else {
@@ -1097,7 +1097,7 @@ public actor ChainService {
             maxBlockSize: spec.maxBlockSize,
             maxNumberOfTransactionsPerBlock: spec.maxNumberOfTransactionsPerBlock,
             premine: spec.premine,
-            retargetWindow: spec.retargetWindow
+            halfLife: spec.halfLife
         )
     }
 

@@ -117,7 +117,8 @@ final class ChainServiceTests: XCTestCase {
                 premine: 0,
                 targetBlockTime: 1_000,
                 initialReward: 10,
-                halvingInterval: 100
+                halvingInterval: 100,
+                halfLife: 10
             ),
             parentState: parent.postState,
             transactions: [],
@@ -861,7 +862,8 @@ final class ChainServiceTests: XCTestCase {
                 premine: 0,
                 targetBlockTime: 1_000,
                 initialReward: 1,
-                halvingInterval: 100
+                halvingInterval: 100,
+                halfLife: 10
             )
         }
         func candidate(
@@ -947,7 +949,8 @@ final class ChainServiceTests: XCTestCase {
                 premine: 0,
                 targetBlockTime: 1_000,
                 initialReward: 1,
-                halvingInterval: 100
+                halvingInterval: 100,
+                halfLife: 10
             )
         }
         func candidate(
@@ -1020,7 +1023,8 @@ final class ChainServiceTests: XCTestCase {
                 premine: 0,
                 targetBlockTime: 1_000,
                 initialReward: 1,
-                halvingInterval: 100
+                halvingInterval: 100,
+                halfLife: 10
             )
         }
 
@@ -1155,7 +1159,7 @@ final class ChainServiceTests: XCTestCase {
                 parentContentSource: FetcherContentSource(stableFixture.parent)
             )
             return try XCTUnwrap(
-                candidate.block.children.node?.allKeysAndValues().keys.first
+                candidate.block.children.node?.entries.keys.first
             )
         }
         let firstDirectory = try await scheduledDirectory()
@@ -1824,8 +1828,7 @@ final class ChainServiceTests: XCTestCase {
         )
         let lastChildCandidate = await merged.children.last()
         let childBlock = try XCTUnwrap(lastChildCandidate)
-        let grandchildHeader: BlockHeader? = try childBlock.children.node?
-            .get(key: "Grandchild")
+        let grandchildHeader: BlockHeader? = childBlock.children.node?["Grandchild"]
         XCTAssertEqual(template.block.target, parentTarget)
         XCTAssertEqual(childBlock.target, .max)
         XCTAssertEqual(grandchildHeader?.node?.target, .max)
@@ -2008,7 +2011,8 @@ final class ChainServiceTests: XCTestCase {
                 premine: 0,
                 targetBlockTime: 1_000,
                 initialReward: 10,
-                halvingInterval: 100
+                halvingInterval: 100,
+                halfLife: 10
             ),
             parentState: parent.postState,
             transactions: [],
@@ -2048,8 +2052,7 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertEqual(provisional.nextTarget, template.block.nextTarget)
         XCTAssertEqual(provisional.prevState.rawCID, template.block.prevState.rawCID)
         XCTAssertEqual(
-            try template.block.children.node?.allKeysAndValues()["Existing"]?
-                .rawCID,
+            template.block.children.node?["Existing"]?.rawCID,
             try BlockHeader(node: child).rawCID
         )
         let provisionalWorkID = try BlockHeader(node: provisional).rawCID
@@ -2094,7 +2097,8 @@ final class ChainServiceTests: XCTestCase {
                 premine: 0,
                 targetBlockTime: 1_000,
                 initialReward: 10,
-                halvingInterval: 100
+                halvingInterval: 100,
+                halfLife: 10
             ),
             parentState: parent.postState,
             transactions: [],
@@ -2129,7 +2133,7 @@ final class ChainServiceTests: XCTestCase {
 
         let template = try await service.miningTemplate(MiningTemplateRequest())
         XCTAssertEqual(
-            Set(try XCTUnwrap(template.block.children.node).allKeysAndValues().keys),
+            Set(try XCTUnwrap(template.block.children.node).entries.keys),
             ["Healthy", "Incomplete"]
         )
         let submitted = try await service.submitWork(SubmitWorkRequest(
@@ -2149,7 +2153,8 @@ final class ChainServiceTests: XCTestCase {
                 premine: 0,
                 targetBlockTime: 1_000,
                 initialReward: 10,
-                halvingInterval: 100
+                halvingInterval: 100,
+                halfLife: 10
             ),
             parentState: parent.postState,
             transactions: [],
@@ -2176,7 +2181,7 @@ final class ChainServiceTests: XCTestCase {
             MiningTemplateRequest()
         )
         let children = try XCTUnwrap(template.block.children.node)
-        XCTAssertEqual(Set(try children.allKeysAndValues().keys), ["A"])
+        XCTAssertEqual(Set(children.entries.keys), ["A"])
     }
 
     func testContextualChildCandidateBindsNewParentCarrierState() async throws {
@@ -2188,7 +2193,8 @@ final class ChainServiceTests: XCTestCase {
             premine: 0,
             targetBlockTime: 1_000,
             initialReward: 10,
-            halvingInterval: 100
+            halvingInterval: 100,
+            halfLife: 10
         )
         // A self-contained child genesis (empty parentState): the parent only
         // RECORDS its CID via a plain GenesisAction; the child rebuilds it from
@@ -2506,7 +2512,7 @@ final class ChainServiceTests: XCTestCase {
     }
 
     func testAncestorRangeMessagesRoundTripAndBound() throws {
-        let genesis = "bafyreiayw4z5qz4lt2sljf2enzn7uol3qa6bebadav7qwnqz7agxkiuwhq"
+        let genesis = "bafyreifvxwhqbwvnrtr2plvtmlvpceqxnexyayjs7klgy6dbkj7yppdsz4"
         let request = AncestorRangeRequestMessage(requestID: 7, locator: [genesis])
         XCTAssertEqual(
             try AncestorRangeRequestMessage.decoded(request.encoded()), request
@@ -3999,7 +4005,7 @@ final class ChainServiceTests: XCTestCase {
         // the target it commits is where the chain's schedule begins. A test
         // that needs a hard parent has to commit one here and mine it, the way
         // a launch does. It cannot mine its way down instead -- the absolute
-        // schedule moves one doubling per `retargetWindow` blocks, so reaching
+        // schedule moves one doubling per `halfLife` blocks, so reaching
         // a hard target by retargeting would take thousands of blocks.
         let built = try await BlockBuilder.buildBlock(
             previous: parentGenesis,

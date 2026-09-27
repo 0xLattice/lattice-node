@@ -1777,9 +1777,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard let emptyTransactions = try? HeaderImpl<
                   MerkleDictionaryImpl<VolumeImpl<Transaction>>
               >(node: MerkleDictionaryImpl<VolumeImpl<Transaction>>()),
-              let emptyChildren = try? HeaderImpl<
-                  MerkleDictionaryImpl<VolumeImpl<Block>>
-              >(node: MerkleDictionaryImpl<VolumeImpl<Block>>()),
+              let emptyChildren = try? HeaderImpl<ChildIndex>(node: ChildIndex()),
               tip.height < UInt64.max else { return nil }
         let now = Int64(Date().timeIntervalSince1970 * 1_000)
         return Block(

@@ -16,7 +16,7 @@ public enum NexusGenesis {
         targetBlockTime: 3_600_000,
         initialReward: 1_048_576,
         halvingInterval: 876_600,
-        retargetWindow: 120
+        halfLife: 120
     )
     public static let config = GenesisConfig(
         spec: spec,
@@ -25,7 +25,7 @@ public enum NexusGenesis {
 
     /// Canonical identity of the Nexus bootstrap block.
     public static let expectedBlockHash =
-        "bafyreiayw4z5qz4lt2sljf2enzn7uol3qa6bebadav7qwnqz7agxkiuwhq"
+        "bafyreifvxwhqbwvnrtr2plvtmlvpceqxnexyayjs7klgy6dbkj7yppdsz4"
 
     public static func buildGenesisBlock(fetcher: any Fetcher) async throws -> Block {
         let body = TransactionBody(

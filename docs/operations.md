@@ -83,7 +83,7 @@ Important fields:
   no tip-dependent intermediate phase.
 - `chainPath`: the complete path owned by this process.
 - `nexusGenesisCID`: must be
-  `bafyreiayw4z5qz4lt2sljf2enzn7uol3qa6bebadav7qwnqz7agxkiuwhq`.
+  `bafyreifvxwhqbwvnrtr2plvtmlvpceqxnexyayjs7klgy6dbkj7yppdsz4`.
 - `tipCID` and `height`: null only while a child awaits genesis.
 - `revision`: the local consensus mutation watermark.
 - `mempoolCount` and `mempoolBytes`: bounded service pressure indicators.
@@ -223,7 +223,7 @@ lattice-mining-coordinator \
   committed difficulty where the anchor put it: the schedule reads only the
   anchor and the block, and on-schedule blocks are exactly what it holds
   still for. Difficulty climbs only through blocks faster than the target, and
-  it climbs at most one doubling per half-life (`retargetWindow ×
+  it climbs at most one doubling per half-life (`halfLife ×
   targetBlockTime`) — there is no single-step over-correction to fear, and
   equally no way to harden quickly. Choose the value knowing it paces blocks
   without raising the schedule: roughly `expected hashrate × targetBlockTime` keeps the rate near
@@ -288,7 +288,7 @@ Difficulty then follows, because the schedule reads elapsed time against
 height. Blocks arriving faster than `targetBlockTime` pull the target harder;
 slower, easier. So an operator sets the filter to choose a starting block
 rate, and the chain converges on the difficulty that rate implies — at one
-doubling per half-life, `retargetWindow × targetBlockTime`.
+doubling per half-life, `halfLife × targetBlockTime`.
 
 This is why it is a chain-launch instrument. A new chain's genesis commits the
 maximum target by convention, so without a filter the first blocks are free and

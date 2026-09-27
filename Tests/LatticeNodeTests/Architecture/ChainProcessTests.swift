@@ -2033,9 +2033,18 @@ final class ChainProcessTests: XCTestCase {
             return XCTFail("expected A to canonicalize on genesis")
         }
 
-        let b = try await mineChild(
-            of: genesis, timestamp: 3_600_001, nonce: 2, on: process!
+        // Equal work ties break by the smaller CID: pick a nonce whose block
+        // sorts after A, so B is the side block whatever the encoding.
+        var bNonce: UInt64 = 2
+        var b = try await mineChild(
+            of: genesis, timestamp: 3_600_001, nonce: bNonce, on: process!
         )
+        while try BlockHeader(node: b).rawCID < aCID {
+            bNonce += 1
+            b = try await mineChild(
+                of: genesis, timestamp: 3_600_001, nonce: bNonce, on: process!
+            )
+        }
         let bCID = try BlockHeader(node: b).rawCID
         guard case .acceptedSide = try await process!.admit(
             BlockHeader(node: b)
