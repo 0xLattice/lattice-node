@@ -2194,13 +2194,16 @@ actor NodeStore {
         )
     }
 
+    /// Returns whether this carrier's evidence was admitted before (then no
+    /// inbox entry is kept and there is nothing to admit again).
+    @discardableResult
     func storeParentEvidenceInbox(
         sourceID: String,
         ordinal: UInt64,
         attachment: ChildEvidenceVolume,
         package: AuthenticatedChildPackage,
         advanceScan: Bool
-    ) async throws {
+    ) async throws -> Bool {
         guard UUID(uuidString: sourceID) != nil,
               ordinal > 0,
               let sqlOrdinal = Int64(exactly: ordinal),
@@ -2334,6 +2337,7 @@ actor NodeStore {
                 roots: parentEvidenceInboxRoots()
             )
         }
+        return admittedDuringStore
     }
 
     private func admittedCarrierEvidenceExists(

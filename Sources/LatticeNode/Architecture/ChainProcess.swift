@@ -2234,26 +2234,29 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         try await store.parentEvidenceInboxHasCapacity()
     }
 
+    /// Returns whether this carrier's evidence was admitted before: then the
+    /// inbox holds no entry for it and there is nothing to admit again.
+    @discardableResult
     func retainParentEvidence(
         sourceID: String,
         ordinal: UInt64,
         attachment: ChildEvidenceVolume,
         package: AuthenticatedChildPackage,
         advanceScan: Bool
-    ) async throws {
+    ) async throws -> Bool {
         try await acquireMutationOperation()
         defer { releaseOperation() }
-        try await store.storeParentEvidenceInbox(
+        // The handoff budget is deliberately NOT enforced here: evidence
+        // retention is the critical path for child admission, and evidence
+        // only arrives while the parent is mining — the same cadence on
+        // which this chain's stored offers already enforce the budget.
+        return try await store.storeParentEvidenceInbox(
             sourceID: sourceID,
             ordinal: ordinal,
             attachment: attachment,
             package: package,
             advanceScan: advanceScan
         )
-        // The handoff budget is deliberately NOT enforced here: evidence
-        // retention is the critical path for child admission, and evidence
-        // only arrives while the parent is mining — the same cadence on
-        // which this chain's stored offers already enforce the budget.
     }
 
     public func status() async -> ChainProcessStatus {
@@ -2362,6 +2365,32 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         guard case .active(let level) = runtimePhase,
               servedRunDirectories.contains(directory) else { return nil }
         return await level.chain.parentRunReport(at: committer, directory: directory)
+    }
+
+    /// Per directory, the child block the branch through `tipCID` last
+    /// committed into it: the nearest committer's commitment, read from
+    /// the durable block facts, so it follows the branch under a reorg.
+    /// Only directories this chain serves runs for are answered; the rest
+    /// are absent, never "none".
+    func carriedChildBlocks(
+        on tipCID: String,
+        directories: [String]
+    ) async -> [String: String] {
+        guard case .active(let level) = runtimePhase, !directories.isEmpty,
+              let tip = await level.chain.getConsensusBlock(hash: tipCID)
+        else { return [:] }
+        var carried: [String: String] = [:]
+        var committers: [String: BlockMeta?] = [:]
+        for directory in directories {
+            guard let committer = tip.nearestCommitter[directory] else { continue }
+            if committers[committer] == nil {
+                committers[committer] = await level.chain.getConsensusBlock(hash: committer)
+            }
+            if let child = committers[committer]??.childCommitments?[directory] {
+                carried[directory] = child
+            }
+        }
+        return carried
     }
 
     /// The committing parent blocks of the blocks this chain ACCEPTED with a

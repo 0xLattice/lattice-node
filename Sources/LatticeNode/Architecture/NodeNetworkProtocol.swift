@@ -768,6 +768,16 @@ struct ParentTipContextMessage: Sendable {
     /// Encoded after the parent block only when non-empty, so a request
     /// without minimum work keeps its exact prior layout.
     let minimumWork: [MiningMinimumWork]
+    /// The child block the tip's branch last committed into the child's
+    /// directory, when it committed one: the child learns of a carry here,
+    /// at push latency, and holds its offers until that block is admitted.
+    /// Encoded after the minimum work only when present.
+    let carriedChildCID: String?
+
+    /// Trailers after the parent block, each tagged, in ascending tag order,
+    /// each at most once and never empty.
+    static let minimumWorkTrailer: UInt8 = 1
+    static let carriedChildTrailer: UInt8 = 2
 
     init(
         sequence: UInt64,
@@ -775,7 +785,8 @@ struct ParentTipContextMessage: Sendable {
         tipCID: String,
         tipData: Data,
         rewards: [MiningReward],
-        minimumWork: [MiningMinimumWork] = []
+        minimumWork: [MiningMinimumWork] = [],
+        carriedChildCID: String? = nil
     ) {
         self.sequence = sequence
         self.childPath = childPath
@@ -783,6 +794,7 @@ struct ParentTipContextMessage: Sendable {
         self.tipData = tipData
         self.rewards = rewards
         self.minimumWork = minimumWork
+        self.carriedChildCID = carriedChildCID
     }
 
     func encoded() throws -> Data {
@@ -806,13 +818,18 @@ struct ParentTipContextMessage: Sendable {
         )
         guard rewardBytes.count <= Self.maximumRewardBytes,
               rewardBytes.count <= Int(UInt32.max),
-              minimumWorkBytes.count <= Int(UInt32.max) else {
+              minimumWorkBytes.count <= Int(UInt32.max),
+              carriedChildCID.map({ _isBoundedWireAtom($0) }) ?? true else {
             throw NodeNetworkWireError.malformed
         }
-        let size = 8 + 2 + pathBytes.reduce(0) { $0 + 2 + $1.count }
-            + 2 + tipBytes.count + 4 + rewardBytes.count
-            + 4 + tipData.count
-            + (minimumWorkBytes.isEmpty ? 0 : 4 + minimumWorkBytes.count)
+        let carriedBytes = carriedChildCID.map { Data($0.utf8) }
+        let pathSize: Int = pathBytes.reduce(0) { $0 + 2 + $1.count }
+        let minimumWorkSize: Int = minimumWorkBytes.isEmpty ? 0 : 1 + 4 + minimumWorkBytes.count
+        let carriedSize: Int = carriedBytes.map { 1 + 2 + $0.count } ?? 0
+        var size = 8 + 2 + pathSize
+        size += 2 + tipBytes.count + 4 + rewardBytes.count
+        size += 4 + tipData.count
+        size += minimumWorkSize + carriedSize
         guard size <= Self.maximumEncodedBytes else {
             throw NodeNetworkWireError.oversized
         }
@@ -830,8 +847,14 @@ struct ParentTipContextMessage: Sendable {
         data.appendUInt32(UInt32(tipData.count))
         data.append(tipData)
         if !minimumWorkBytes.isEmpty {
+            data.append(Self.minimumWorkTrailer)
             data.appendUInt32(UInt32(minimumWorkBytes.count))
             data.append(minimumWorkBytes)
+        }
+        if let carriedBytes {
+            data.append(Self.carriedChildTrailer)
+            data.appendUInt16(UInt16(carriedBytes.count))
+            data.append(carriedBytes)
         }
         return data
     }
@@ -896,21 +919,48 @@ struct ParentTipContextMessage: Sendable {
         let tipData = Data(data[position..<blockEnd])
         position = blockEnd
         var minimumWork: [MiningMinimumWork] = []
-        if position < data.endIndex {
-            guard let length = data.readUInt32(at: &position), length > 0,
-                  data.distance(from: position, to: data.endIndex) >= Int(length) else {
+        var carriedChildCID: String?
+        var lastTrailer: UInt8 = 0
+        while position < data.endIndex {
+            let trailer = data[position]
+            position = data.index(after: position)
+            guard trailer > lastTrailer else {
                 throw NodeNetworkWireError.malformed
             }
-            let entriesEnd = data.index(position, offsetBy: Int(length))
-            guard let entries = try? _decodeMiningMinimumWork(
-                      Data(data[position..<entriesEnd]),
-                      under: childPath
-                  ),
-                  !entries.isEmpty else {
+            lastTrailer = trailer
+            switch trailer {
+            case Self.minimumWorkTrailer:
+                guard let length = data.readUInt32(at: &position), length > 0,
+                      data.distance(from: position, to: data.endIndex) >= Int(length) else {
+                    throw NodeNetworkWireError.malformed
+                }
+                let entriesEnd = data.index(position, offsetBy: Int(length))
+                guard let entries = try? _decodeMiningMinimumWork(
+                          Data(data[position..<entriesEnd]),
+                          under: childPath
+                      ),
+                      !entries.isEmpty else {
+                    throw NodeNetworkWireError.malformed
+                }
+                minimumWork = entries
+                position = entriesEnd
+            case Self.carriedChildTrailer:
+                guard let length = data.readUInt16(at: &position), length > 0,
+                      data.distance(from: position, to: data.endIndex) >= Int(length) else {
+                    throw NodeNetworkWireError.malformed
+                }
+                let cidEnd = data.index(position, offsetBy: Int(length))
+                guard let cid = String(
+                          data: data[position..<cidEnd],
+                          encoding: .utf8
+                      ), _isBoundedWireAtom(cid) else {
+                    throw NodeNetworkWireError.malformed
+                }
+                carriedChildCID = cid
+                position = cidEnd
+            default:
                 throw NodeNetworkWireError.malformed
             }
-            minimumWork = entries
-            position = entriesEnd
         }
         let message = Self(
             sequence: sequence,
@@ -918,7 +968,8 @@ struct ParentTipContextMessage: Sendable {
             tipCID: tipCID,
             tipData: tipData,
             rewards: rewards,
-            minimumWork: minimumWork
+            minimumWork: minimumWork,
+            carriedChildCID: carriedChildCID
         )
         guard try message.encoded() == data else {
             throw NodeNetworkWireError.nonCanonical
