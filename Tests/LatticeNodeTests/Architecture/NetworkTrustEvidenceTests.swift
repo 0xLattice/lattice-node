@@ -1401,7 +1401,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             // wait for that refusal to be on record, not for the clock.
             var refused = 0
             for _ in 0..<1_000 where refused == 0 {
-                refused = await fixture.runtime.refusedChildEvidenceHintCountForTesting()
+                refused = await fixture.runtime.debugSnapshot().refusedChildEvidenceHintCount
                 if refused == 0 { try await Task.sleep(for: .milliseconds(10)) }
             }
             XCTAssertEqual(refused, 1, "the hint was refused and remembered")

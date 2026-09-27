@@ -366,9 +366,15 @@ struct CandidateAcquirer {
     }
 
 #if DEBUG
-    /// Test seam: every provider key still recorded against some block.
-    func providerPublicKeysForTesting() -> Set<String> {
-        Set(records.values.flatMap { $0.providers.keys })
+    struct DebugSnapshot {
+        /// Every provider key still recorded against some block.
+        let providerKeys: Set<String>
+    }
+
+    func debugSnapshot() -> DebugSnapshot {
+        DebugSnapshot(
+            providerKeys: Set(records.values.flatMap { $0.providers.keys })
+        )
     }
 #endif
 

@@ -1989,7 +1989,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
                 "the at-edge peer's frontier is pulled once"
             )
             // The pull landed WHILE the slot was still held: that is the point.
-            let anchor = await fixture.runtime.rangeSyncAnchorForTesting()
+            let anchor = await fixture.runtime.debugSnapshot().rangeSyncAnchor
             XCTAssertNotNil(
                 anchor,
                 "the stalling peer must still hold the range-sync slot, "
@@ -2879,7 +2879,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
                 NodeNetworkTopic.ancestorRangeRequest,
                 in: topics
             )
-            let anchorValue = await fixture.runtime.rangeSyncAnchorForTesting()
+            let anchorValue = await fixture.runtime.debugSnapshot().rangeSyncAnchor
             let anchor = try XCTUnwrap(anchorValue)
             XCTAssertEqual(anchor.requestedHeight, UInt64(depth))
             XCTAssertEqual(anchor.afterCID, tipCID, "anchor CID is the acquired tip")
@@ -3037,7 +3037,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             // pump would instead have paged forward from our tip, bumped the
             // requestID, and left the negotiated anchor discarded.)
             try await eventually("negotiated anchor committed") {
-                (await fixture.runtime.rangeSyncAnchorForTesting())?.afterCID
+                (await fixture.runtime.debugSnapshot().rangeSyncAnchor)?.afterCID
                     == pageLastCID
             }
             let forward = await scripted.forwardRequests()

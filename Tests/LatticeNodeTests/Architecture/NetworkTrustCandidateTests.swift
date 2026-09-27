@@ -888,7 +888,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             // and offers nothing on the tip before it.
             var named: String?
             for _ in 0..<250 {
-                named = await fixture.childRuntime.receivedCarriedChildCIDForTesting()
+                named = await fixture.childRuntime.debugSnapshot().receivedCarriedChildCID
                 if named != nil { break }
                 try await Task.sleep(for: .milliseconds(20))
             }
@@ -900,7 +900,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             // hold again: what is pinned is that the hold happened.)
             var holds = 0
             for _ in 0..<250 {
-                holds = await fixture.childRuntime.carriedHoldCountForTesting()
+                holds = await fixture.childRuntime.debugSnapshot().carriedHoldCount
                 if holds > 0 { break }
                 try await Task.sleep(for: .milliseconds(20))
             }
@@ -947,7 +947,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             }
             XCTAssertEqual(next.first?.block.height, 2, "built on the carried block")
             XCTAssertEqual(next.first?.block.parent?.rawCID, firstHeader.rawCID)
-            let stillHeld = await fixture.childRuntime.candidateOfferHeldForTesting()
+            let stillHeld = await fixture.childRuntime.debugSnapshot().candidateOfferHeld
             XCTAssertFalse(stillHeld, "the hold lifts once the carried block is admitted")
         } catch {
             await fixture.childRuntime.stop()

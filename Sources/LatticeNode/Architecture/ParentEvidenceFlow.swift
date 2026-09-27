@@ -134,13 +134,19 @@ struct ParentEvidenceFlow {
     }
 
 #if DEBUG
-    /// Test seam: every peer still named by a tail, failure, backpressure or
-    /// reservation record.
-    func peerIDsForTesting() -> Set<String> {
-        Set(
-            tails.keys.map(\.peerID) + failed.map(\.peerID)
-                + backpressured.map(\.peerID)
-                + activeReservations.map(\.peerID)
+    struct DebugSnapshot {
+        /// Every peer still named by a tail, failure, backpressure or
+        /// reservation record.
+        let peerIDs: Set<String>
+    }
+
+    func debugSnapshot() -> DebugSnapshot {
+        DebugSnapshot(
+            peerIDs: Set(
+                tails.keys.map(\.peerID) + failed.map(\.peerID)
+                    + backpressured.map(\.peerID)
+                    + activeReservations.map(\.peerID)
+            )
         )
     }
 #endif
