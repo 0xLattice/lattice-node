@@ -99,10 +99,10 @@ actor NodeStore {
         }
         let database = try NodeSQLite(path: databasePath.path)
         let pathData = try Self.encode(chainPath)
-        let tables = try database.query(
+        let tableNames = Set(try database.rows(
+            from: "sqlite_master",
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-        )
-        let tableNames = Set(tables.compactMap { $0["name"]?.textValue })
+        ).map { try $0.text("name") })
 
         if tableNames.isEmpty {
             try Self.createSchema(

@@ -27,18 +27,24 @@ import XCTest
 /// malformed row, which is the only row boot can then read.
 ///
 /// Summary of CURRENT behaviour, as pinned by the three tests below
-/// (`// TODO(refactor)` marks the cases the refactor should flip to a typed
-/// error naming table and column):
+/// (`// TODO(refactor)` marks the case the refactor should still flip to a
+/// typed error naming table and column):
 ///
 /// - node_metadata: refused with `NodeStoreError.wipeRequired` (an untyped
 ///   reason string; the column is not named).
-/// - consensus_revision, admission_batches, admission_facts, accepted_blocks
-///   (parent / sequence), issued_parent_fact_sources, issued_parent_facts,
-///   issued_child_edges, issued_child_proofs, parent_evidence_scan,
-///   parent_evidence_inbox, local_mempool_transactions, prepared_child_proofs,
-///   contextual_candidates, contextual_candidate_roots,
-///   contextual_candidate_children: refused with `NodeStoreError.corrupt`
-///   (a free-text reason; neither table nor column is named).
+/// - A column that cannot be read as its table declares it (consensus_revision
+///   text that is not an integer, an empty accepted_blocks parent or a
+///   non-positive sequence, a non-canonical CID in issued_child_proofs,
+///   parent_evidence_inbox, local_mempool_transactions or
+///   prepared_child_proofs, a non-UUID parent_evidence_scan source): refused
+///   with `NodeStoreError.malformedRow(table:column:)` naming exactly the
+///   damaged table and column.
+/// - Semantic damage the row layer cannot see (admission_batches and
+///   issued_parent_fact_sources JSON that fails to decode, admission_facts and
+///   issued_parent_facts that disagree with their sources, an orphaned
+///   issued_child_edges row, contextual_candidates / contextual_candidate_roots
+///   / contextual_candidate_children rows that break the index's SQL
+///   consistency): refused with `NodeStoreError.corrupt` (a free-text reason).
 /// - accepted_blocks.validated out of range: read at boot and silently
 ///   tolerated — boot succeeds and the row keeps its out-of-range tier (TODO).
 /// - child_genesis_volume_roots (orphan row), pending_child_proof_routes: not
