@@ -113,16 +113,6 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             sql: ["UPDATE admission_facts SET payload = X'00' WHERE fact_id = (SELECT MIN(fact_id) FROM admission_facts)"]
         ),
         Damage(
-            table: "accepted_blocks", column: "parent_cid",
-            description: "empty parent CID on a non-genesis block",
-            sql: ["UPDATE accepted_blocks SET parent_cid = '' WHERE block_cid = (SELECT MIN(block_cid) FROM accepted_blocks WHERE parent_cid IS NOT NULL)"]
-        ),
-        Damage(
-            table: "accepted_blocks", column: "admission_seq",
-            description: "zero admission sequence",
-            sql: ["UPDATE accepted_blocks SET admission_seq = 0 WHERE block_cid = (SELECT MIN(block_cid) FROM accepted_blocks)"]
-        ),
-        Damage(
             table: "issued_parent_fact_sources", column: "payload",
             description: "inserted malformed JSON source",
             sql: ["INSERT INTO issued_parent_fact_sources (payload) VALUES (X'00')"]
@@ -181,6 +171,16 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             table: "consensus_revision", column: "revision",
             description: "non-numeric text",
             sql: ["UPDATE consensus_revision SET revision = 'not-a-number' WHERE singleton = 1"]
+        ),
+        Damage(
+            table: "accepted_blocks", column: "parent_cid",
+            description: "empty parent CID on a non-genesis block",
+            sql: ["UPDATE accepted_blocks SET parent_cid = '' WHERE block_cid = (SELECT MIN(block_cid) FROM accepted_blocks WHERE parent_cid IS NOT NULL)"]
+        ),
+        Damage(
+            table: "accepted_blocks", column: "admission_seq",
+            description: "zero admission sequence",
+            sql: ["UPDATE accepted_blocks SET admission_seq = 0 WHERE block_cid = (SELECT MIN(block_cid) FROM accepted_blocks)"]
         ),
         Damage(
             table: "local_mempool_transactions", column: "transaction_cid",

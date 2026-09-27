@@ -19,6 +19,48 @@ struct PersistedAcceptedBlock: Hashable {
     let blockCID: String
     let parentCID: String?
     let admissionSequence: Int64
+
+    init(blockCID: String, parentCID: String?, admissionSequence: Int64) {
+        self.blockCID = blockCID
+        self.parentCID = parentCID
+        self.admissionSequence = admissionSequence
+    }
+
+    init(_ row: AcceptedBlockRow) throws {
+        self.init(
+            blockCID: try row.blockCID,
+            parentCID: try row.parentCID,
+            admissionSequence: try row.admissionSequence
+        )
+    }
+}
+
+/// `accepted_blocks`: one accepted block's index row. `block_cid` is any
+/// non-empty text (tests stage blocks whose hashes are plain labels), so
+/// only the readers that need a canonical CID ask for `canonicalBlockCID`.
+/// `parent_cid` is NULL for a root and otherwise non-empty text; an empty
+/// string is malformed.
+struct AcceptedBlockRow: NodeStoreRecord {
+    static let table = "accepted_blocks"
+    private let row: Row
+
+    init(_ row: Row) { self.row = row }
+
+    var blockCID: String { get throws { try row.nonEmptyText("block_cid") } }
+    var canonicalBlockCID: String { get throws { try row.cid("block_cid") } }
+    var parentCID: String? {
+        get throws {
+            guard let parent = try row.optionalText("parent_cid") else { return nil }
+            guard !parent.isEmpty else {
+                throw NodeStoreError.malformedRow(table: Self.table, column: "parent_cid")
+            }
+            return parent
+        }
+    }
+    var admissionSequence: Int64 { get throws { try row.positiveInt("admission_seq") } }
+    /// The raw execution tier (`0` weighed, `1` eager, `2` walk-validated).
+    var validatedTier: Int64 { get throws { try row.int("validated") } }
+    var leaf: Bool { get throws { try row.bool("leaf") } }
 }
 
 extension NodeStore {
@@ -50,9 +92,10 @@ extension NodeStore {
                 "accepted-leaf page limit must be positive"
             )
         }
-        let currentSequence = try database.query(
+        let currentSequence = try database.row(
+            from: AdmissionBatchRow.table,
             "SELECT COALESCE(MAX(seq), 0) AS sequence FROM admission_batches"
-        ).first?["sequence"]?.intValue ?? 0
+        )?.int("sequence") ?? 0
         let snapshot = snapshotSequence ?? currentSequence
         guard snapshot >= 0, snapshot <= currentSequence else {
             throw NodeStoreError.invalidConfiguration(
@@ -60,26 +103,23 @@ extension NodeStore {
             )
         }
 
-        let rows: [[String: NodeSQLiteValue]]
+        let rows: [AcceptedBlockRow]
         if let afterCID {
             // Legacy cursored descent (older peers only; dead after the
             // flag-day roll — delete with the cursored request handling).
-            rows = try database.query(
+            rows = try database.rows(
+                AcceptedBlockRow.self,
                 "SELECT block_cid FROM accepted_blocks AS block WHERE block.admission_seq <= ?1 AND block.block_cid > ?2 AND NOT EXISTS (SELECT 1 FROM accepted_blocks AS child WHERE child.parent_cid = block.block_cid AND child.admission_seq <= ?1) ORDER BY block.block_cid LIMIT ?3",
                 params: [.int(snapshot), .text(afterCID), .int(sqlLimit)]
             )
         } else {
-            rows = try database.query(
+            rows = try database.rows(
+                AcceptedBlockRow.self,
                 Self.frontierLeafPageSQL,
                 params: [.int(snapshot), .int(sqlLimit)]
             )
         }
-        let blockCIDs = try rows.map { row -> String in
-            guard let cid = row["block_cid"]?.textValue, !cid.isEmpty else {
-                throw NodeStoreError.corrupt("malformed accepted-block leaf index")
-            }
-            return cid
-        }
+        let blockCIDs = try rows.map { try $0.blockCID }
         return AcceptedLeafPage(
             snapshotSequence: snapshot,
             blockCIDs: blockCIDs
@@ -104,10 +144,11 @@ extension NodeStore {
         guard CIDIdentity.isCanonical(blockCID) else {
             throw NodeStoreError.corrupt("invalid accepted block lookup")
         }
-        return try database.query(
+        return try database.row(
+            AcceptedBlockRow.self,
             "SELECT parent_cid FROM accepted_blocks WHERE block_cid = ?1 LIMIT 1",
             params: [.text(blockCID)]
-        ).first?["parent_cid"]?.textValue
+        )?.parentCID
     }
 
     /// The most recently admitted accepted-block CIDs, newest first, capped at
@@ -116,17 +157,11 @@ extension NodeStore {
     /// fallback rather than parent self-issuance.
     func recentAcceptedBlockCIDs(limit: Int) throws -> [String] {
         guard limit > 0 else { return [] }
-        let rows = try database.query(
+        return try database.rows(
+            AcceptedBlockRow.self,
             "SELECT block_cid FROM accepted_blocks ORDER BY admission_seq DESC LIMIT ?1",
             params: [.int(Int64(limit))]
-        )
-        return try rows.map { row in
-            guard let cid = row["block_cid"]?.textValue,
-                  CIDIdentity.isCanonical(cid) else {
-                throw NodeStoreError.corrupt("malformed recent accepted block")
-            }
-            return cid
-        }
+        ).map { try $0.canonicalBlockCID }
     }
 
     func hasConnectedAcceptedBlock(_ blockCID: String) throws -> Bool {
@@ -172,48 +207,23 @@ extension NodeStore {
         return blocks.values.sorted { $0.blockCID < $1.blockCID }
     }
 
-    func persistedAcceptedBlock(
-        from row: [String: NodeSQLiteValue]
-    ) throws -> PersistedAcceptedBlock {
-        guard let blockCID = row["block_cid"]?.textValue,
-              !blockCID.isEmpty,
-              let admissionSequence = row["admission_seq"]?.intValue,
-              admissionSequence > 0,
-              let rawParent = row["parent_cid"] else {
-            throw NodeStoreError.corrupt("malformed accepted-block index")
-        }
-        let parentCID: String?
-        switch rawParent {
-        case .null:
-            parentCID = nil
-        case .text(let value) where !value.isEmpty:
-            parentCID = value
-        default:
-            throw NodeStoreError.corrupt("malformed accepted-block parent")
-        }
-        return PersistedAcceptedBlock(
-            blockCID: blockCID,
-            parentCID: parentCID,
-            admissionSequence: admissionSequence
-        )
-    }
-
     /// Owner: ImportJournal.stage — caller holds the transaction.
     func validateAcceptedBlockRows(
         _ blocks: [AcceptedBlockRecord],
         admissionSequence: Int64
     ) throws {
         for block in blocks {
-            let rows = try database.query(
+            let row = try database.row(
+                AcceptedBlockRow.self,
                 "SELECT block_cid, parent_cid, admission_seq FROM accepted_blocks WHERE block_cid = ?1",
                 params: [.text(block.blockCID)]
             )
-            guard let row = rows.first else {
+            guard let row else {
                 throw NodeStoreError.corrupt(
                     "an admission batch is missing its accepted-block index"
                 )
             }
-            let persisted = try persistedAcceptedBlock(from: row)
+            let persisted = try PersistedAcceptedBlock(row)
             guard persisted.parentCID == block.parentCID,
                   persisted.admissionSequence <= admissionSequence else {
                 throw NodeStoreError.corrupt("malformed accepted-block index")
@@ -228,12 +238,13 @@ extension NodeStore {
         validated: Bool
     ) throws {
         for block in blocks {
-            let rows = try database.query(
+            let row = try database.row(
+                AcceptedBlockRow.self,
                 "SELECT block_cid, parent_cid, admission_seq FROM accepted_blocks WHERE block_cid = ?1",
                 params: [.text(block.blockCID)]
             )
-            if let row = rows.first {
-                let persisted = try persistedAcceptedBlock(from: row)
+            if let row {
+                let persisted = try PersistedAcceptedBlock(row)
                 guard persisted.parentCID == block.parentCID,
                       persisted.admissionSequence <= admissionSequence else {
                     throw NodeStoreError.corrupt("conflicting accepted-block index")
@@ -273,10 +284,11 @@ extension NodeStore {
     /// validated (body + state under the block's owner pin). A downgrade that
     /// only knows `1` reads `2` as "not validated" — the safe direction.
     func blockValidated(_ blockCID: String) throws -> Bool {
-        (try database.query(
+        (try database.row(
+            AcceptedBlockRow.self,
             "SELECT validated FROM accepted_blocks WHERE block_cid = ?1 LIMIT 1",
             params: [.text(blockCID)]
-        ).first?["validated"]?.intValue ?? 0) >= 1
+        )?.validatedTier ?? 0) >= 1
     }
 
     /// Flip an already-weighed accepted block's durable marker to the walk-
@@ -305,9 +317,10 @@ extension NodeStore {
     /// Every block marked walk-validated (tier `2`): the set whose body and
     /// post-state must be held by a per-block owner pin.
     func walkValidatedBlockCIDs() throws -> Set<String> {
-        Set(try database.query(
+        Set(try database.rows(
+            AcceptedBlockRow.self,
             "SELECT block_cid FROM accepted_blocks WHERE validated = 2"
-        ).compactMap { $0["block_cid"]?.textValue })
+        ).map { try $0.blockCID })
     }
 
     /// Every block this store has executed, at either tier (`1` eager, `2`
@@ -323,9 +336,10 @@ extension NodeStore {
     /// never fires. What makes them qualify is that they were written `1` or
     /// `2` by an image that really did execute them.
     func executedBlockCIDs() throws -> Set<String> {
-        Set(try database.query(
+        Set(try database.rows(
+            AcceptedBlockRow.self,
             "SELECT block_cid FROM accepted_blocks WHERE validated >= 1"
-        ).compactMap { $0["block_cid"]?.textValue })
+        ).map { try $0.blockCID })
     }
 
     /// Return a walk-validated block to the weighed tier (its owner pin is
@@ -369,15 +383,13 @@ extension NodeStore {
 
         var actualAcceptedBlocks: [String: PersistedAcceptedBlock] = [:]
         var leafFlags: [String: Bool] = [:]
-        for row in try database.query(
+        for row in try database.rows(
+            AcceptedBlockRow.self,
             "SELECT block_cid, parent_cid, admission_seq, leaf FROM accepted_blocks"
         ) {
-            let block = try persistedAcceptedBlock(from: row)
+            let block = try PersistedAcceptedBlock(row)
             actualAcceptedBlocks[block.blockCID] = block
-            guard let leaf = row["leaf"]?.intValue else {
-                throw NodeStoreError.corrupt("malformed accepted-block leaf flag")
-            }
-            leafFlags[block.blockCID] = leaf == 1
+            leafFlags[block.blockCID] = try row.leaf
         }
         guard actualAcceptedBlocks == expectedAcceptedBlocks else {
             throw NodeStoreError.corrupt(
