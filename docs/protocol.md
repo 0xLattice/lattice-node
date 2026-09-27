@@ -84,10 +84,10 @@ genesis and parent-state continuity facts and serves the run reports of spec
 §9.10 for the directories it hosts; it cannot declare the child valid or
 choose the child's tip. A run report names a quantity, and only a quantity:
 the child binds it — its own directory, the block THIS chain's verified
-carrier proof says that committer commits (a report naming any other block is
-refused), one of the committer's grinds already credited there — and derives
+carrier proof says that carrier commits (a report naming any other block is
+refused), one of the carrier's grinds already credited there — and derives
 the credit itself, `runWork − ownWork`,
-under an identity keyed by the committer and directory, applied only as a
+under an identity keyed by the carrier and directory, applied only as a
 strict increase and never revoked. The quantity is the configured immediate
 parent's word: the same trust the child already extends to that process for
 state continuity, which gates minting outright, so no new trust class is
@@ -100,7 +100,7 @@ actually produced.
 Anchoring to the predecessor instead would make this an induction, and the
 induction has no base. The weighed tier never runs these checks, so a weighed
 predecessor proves nothing about its own `parentState`; a block could match its
-unchecked predecessor and be admitted on no evidence at all. Every block
+unchecked predecessor and be imported on no evidence at all. Every block
 therefore proves its own anchor, at every height, block 1 included — there is no
 height-1 exemption, and none is needed, because the executed-from-genesis
 frontier answers the question without walking the chain.
@@ -113,12 +113,12 @@ never paid.
 Because that anchor is the only continuity question the protocol defines, it is
 also the only continuity question a parent answers. (A parent also serves run
 reports for the directories it hosts: it pushes the changed run of each served
-directory's nearest committer after every accepted admission and after every
+directory's nearest carrier after every accepted import and after every
 credit it is itself handed by its own parent — so a run flows down every
 level without a re-ask — for each run a child could actually credit (its
 `runWork` exceeds its `ownWork`), once per value it reaches; and it serves
-the runs of the committers a child names: a child asks for a block's
-committers when it admits a block they carried, and for its recent committers
+the runs of the carriers a child names: a child asks for a block's
+carriers when it imports a block they carried, and for its recent carriers
 after every evidence catch-up round, so a push it could not yet bind or one
 it missed while away is recovered without waiting for the next parent block.
 Those report work; they answer nothing about continuity or validity.) A
@@ -136,7 +136,7 @@ while a truncated one is silently wrong and splits honest nodes by local policy.
 A restarted child recomputes fork choice entirely from its durable fact log:
 accepted blocks, proof-derived work, and the attributed work-only batches it
 credited from parent run reports. A block its parent carried is a network
-block: admitted weighed on the verified proof — in fork choice with its work
+block: imported weighed on the verified proof — in fork choice with its work
 at once, executed when the chain would step into it — never held back for a
 continuity fact or a rule not yet met. Its carriage is relayed at once,
 with the acceptance, as for a carrier this chain refused: deeper chains are owed the proof of carriage whatever this
@@ -144,21 +144,21 @@ chain makes of the block, and the proofs this chain composes for its own
 children follow from that relay. Only the parent-process facts it issues —
 the genesis links a child's first block anchors to — wait for its
 validation, since a child must not anchor to state this chain has not
-executed. Until an admission DECIDES it
+executed. Until an import DECIDES it
 (accepted, a duplicate, or refused for a reason no retry would change: the
 grind missed this chain's target, the block or its evidence is invalid, the
 node could not verify it), its evidence stays in the parent-evidence inbox,
-the one durable record of a block still to be admitted, replayed on every
+the one durable record of a block still to be imported, replayed on every
 restart. Decided is exactly what the node never retries: a deferral persists
 nothing, and a decision consumes the entry whether or not it leaves relay
 evidence behind. So no stop or crash between a deferral and its retry can
 lose a parent-carried block, no refusal can hold an inbox slot for good,
 and a child never stays on a branch its parent chain has left for want of
-one. It asks its parent for a committer's run when it admits a block that
-committer carried and after each evidence round, the fallback for a push it
+one. It asks its parent for a carrier's run when it imports a block that
+carrier carried and after each evidence round, the fallback for a push it
 missed; a credit it already holds never depends on the parent being
 reachable again.
-When admission needs a new genesis or continuity
+When import needs a new genesis or continuity
 fact, the child asks its authenticated immediate-parent process. A positive
 answer is an unsigned acknowledgement bound to that live session and exact
 request; peers cannot relay it.
@@ -166,7 +166,7 @@ request; peers cannot relay it.
 `parentState` commits the carrier's `prevState`. It is not a parent-block
 backlink and is never inverted to discover ancestry.
 
-## Admission and durability
+## Import and durability
 
 All ingress follows one sequence:
 
@@ -183,12 +183,12 @@ acquire
 The stage callback is the durability boundary. Success means the complete batch
 is durable; failure exposes none of it. Live execution and recovery both apply
 the same staged facts. Publication, proof replay, and other post-commit network
-effects cannot rewrite an already durable admission result.
+effects cannot rewrite an already durable import result.
 
 Each path stores operational metadata and Volume-root references in `state.db`,
 and every content-addressed byte in `volumes.db`. VolumeBroker is the only
 durable local CID-to-bytes store. The node owns acquisition, authentication,
-retention, routing, and operational projections. Lattice owns accepted
+pruning, routing, and operational projections. Lattice owns accepted
 consensus facts and never uses storage presence or peer identity as validity.
 
 ## Network planes
@@ -201,7 +201,7 @@ The node uses two Ivy sessions:
   root-bound proof facts, and parent run reports
   (`lattice.hierarchy.parent-run-report.v1`, pushed by the parent whenever a
   served run changes; `lattice.hierarchy.parent-run-report.request.v1`, a
-  child's request for the runs of the committers it names). A parent that does
+  child's request for the runs of the carriers it names). A parent that does
   not know the topic drops it unread and the child keeps the credit it already
   holds, so parents roll before children.
 
@@ -230,7 +230,7 @@ minimum work for the child's subtree — and the child pushes back its current
 candidate for that tip whenever one of its inputs changes. Both messages
 carry a sequence that is monotonic per session; a lower one is dropped. The
 context also names the child block the tip's branch last committed into the
-child's directory (the nearest committer's commitment, so it follows the
+child's directory (the nearest carrier's commitment, so it follows the
 branch under a reorg): that is how a child learns it was carried, at push
 latency rather than evidence latency. The
 parent holds the latest candidate per child peer — a candidate it already
@@ -242,25 +242,25 @@ so that offer still fits; carried again it would only be credited once
 more). Nothing is requested at
 template time and no child can stall parent consensus. A child builds no
 candidate while the block its parent's context names as carried is not yet
-admitted here (it asks for the parent's evidence index once per named
+imported here (it asks for the parent's evidence index once per named
 block, and again when a scan round ends without it; a decision against that
 block, or a round sent for it that ends without it while nothing holds an
 attempt for it, releases the hold, so no offer waits on a block that will
-never land), while its validate walk is stepping, while its validated
+never land), while its execution walk is stepping, while its validated
 tip is behind its weighed tip and the walk can still step (the request arms
 the walk), or while a candidate it built that the parent's evidence has
-named and still holds in its inbox is ready for or in its admission; it
-offers when the walk or the admission decides, on the tip it reached, and
+named and still holds in its inbox is ready for or in its import; it
+offers when the walk or the import decides, on the tip it reached, and
 it rebuilds only when an input of the candidate changed. A candidate built
 before the child knew of a carry would only be a sibling of the carried
 block: carried, it would reorg the child's tip to the heavier carrier, and
 at a fast parent the child could never get ahead of its own forks. Parent
-evidence re-served for a carrier whose admission already credited the block
-(a scan, a repeated hint) is not admitted again.
+evidence re-served for a carrier whose import already credited the block
+(a scan, a repeated hint) is not imported again.
 Candidates are
 offers, not miner-work durability: the child keeps a candidate's content by
 its own bounded budget, oldest offer first, until the carried block's
-admission owns the roots or the budget sheds it, and a candidate named in the
+import owns the roots or the budget sheds it, and a candidate named in the
 parent's evidence is a handoff the budget never sheds. Parent-proof
 acquisition is a separate retryable path. Pushes and candidates are accepted
 only on the authenticated direct parent/child session for the exact child
@@ -313,9 +313,9 @@ physical root CID, and complete attachment Volume CID. An index walk fixes its
 `through` ordinal on the first page and advances by durable `next` cursors, so
 new evidence cannot reshuffle the walk. A changed source ID restarts at zero.
 The child fetches the Volume directly from the exact parent session, validates
-it, and durably retains it in a pre-admission inbox before advancing its scan
+it, and durably retains it in a pre-import inbox before advancing its scan
 cursor. Live summaries use the same inbox without advancing that cursor.
-Admission transfers ownership to ordinary chain recovery before releasing the
+Import transfers ownership to ordinary chain recovery before releasing the
 inbox root. Multiple roots for one child are separate summaries. No proof-root
 pagination or evidence request/response layer exists beneath this inventory.
 
@@ -329,7 +329,7 @@ Responses are unsigned, bound to the current authenticated session and pending
 request, and never portable. Parent canonicity does not affect reachability.
 
 Child work is derived directly from the candidate's content-addressed directory
-proof. A carrier need not be admitted or valid on its own chain: the root grind
+proof. A carrier need not be imported or valid on its own chain: the root grind
 must be real, beat the terminal target, and commit uniquely to the child along
 the directory path. Once the child is accepted and connected, that contribution
 is ordinary chain-local GHOST input. There is no live parent-work stream or
@@ -364,7 +364,7 @@ pooled but never become restart authority.
 ## External mining
 
 The node constructs the final nonce-zero template and owns transaction
-selection, contextual child candidates, target calculation, admission,
+selection, contextual child candidates, target calculation, import,
 durability, and publication. It never runs a nonce-search loop.
 
 `lattice-mining-coordinator` fetches work, allocates disjoint ranges, detects a

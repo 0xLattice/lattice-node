@@ -8,7 +8,7 @@ verification plus objectively comparable work, under partial synchrony.
 The one non-peer trust edge is the node's own configured immediate parent.
 Publishing a block's bytes is, and remains, the price of being weighed:
 this design never weakens the network's data-availability enforcement,
-which today lives — easily missed — inside the admission gate itself.
+which today lives — easily missed — inside the import gate itself.
 
 ## Problem
 
@@ -23,7 +23,7 @@ skeleton-sized (~1 KB), and a losing sibling's transactions are largely
 the same content-addressed objects as its canonical rival's — already
 held, deduplicated by CID. What each accepted block actually costs is the
 state execution, the materialized state it durably stores, and its
-occupancy of the single sequential admission lane. On the live testnet
+occupancy of the single sequential import lane. On the live testnet
 child, ~74% of the accepted graph is losing same-height siblings: the
 majority of execution and state-storage work is spent on blocks whose
 only consensus contribution is their weight — which never required
@@ -87,7 +87,7 @@ Invariants:
   block whose bytes it obtained. Computed weight includes work beneath
   blocks a validating node has excluded — as does that node's own, since
   exclusion removes no weight (spec §9.9); the pivotality rule guarantees
-  such weight never reaches an action. A validate-at-admission
+  such weight never reaches an action. A validate-at-import
   node and a deferred-execution node therefore differ only in *when*
   work is examined, never in any decision either acts on, and the two
   interoperate on one network.
@@ -160,7 +160,7 @@ move bytes in order, execute exactly what matters.**
   effective-work invariant (and its rider that exclusion removes no
   weight while the descent never steps into an excluded block); the
   never-prunes invariant's rider that exclusion is
-  not pruning and excluded facts remain served; the admission procedure's
+  not pruning and excluded facts remain served; the import procedure's
   split into per-tier gates with per-tier durability ordering, the
   invalidity marking included; and continuity's "connected accepted
   graph" becoming the validated subgraph. The sibling fork-choice doc's

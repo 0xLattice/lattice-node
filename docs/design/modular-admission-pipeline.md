@@ -7,13 +7,13 @@
 
 One process owns one chain. Shared transport routes messages by absolute chain
 path, while each chain has an isolated Ivy namespace, Tally scope, accepted
-graph, mempool, and Volume retention policy.
+graph, mempool, and Volume pruning policy.
 
 The node composes six orthogonal capabilities:
 
 1. **Gossip and sync** discover accepted block CIDs and transaction Volume roots.
 2. **Acquisition** resolves the complete Volumes needed by one candidate.
-3. **Validation** asks Lattice for a typed, immutable admission result.
+3. **Validation** asks Lattice for a typed, immutable import result.
 4. **Persistence** atomically records semantic facts and retains selected
    Volumes through VolumeBroker.
 5. **Insertion** updates the accepted same-chain graph with proof-derived work.
@@ -30,7 +30,7 @@ uses hierarchy routing and validation without importing parent state.
 The network actor owns transport ordering, but independent semantic state
 machines remain small reducers:
 
-- `CandidateAcquirer` owns candidate/provider/dependency scheduling.
+- `BlockFetcher` owns candidate/provider/dependency scheduling.
 - `ParentEvidenceFlow` owns session-local evidence ordering, backpressure, and
   reservation fencing.
 - `ChildCandidateOwnership` derives one disjoint reservation/handoff transfer
@@ -59,7 +59,7 @@ an exact genesis or parent-state continuity query. The unsigned answer is
 non-portable; ordinary peers can provide the underlying Volumes but never the
 parent's verdict.
 
-## Admission boundary
+## Import boundary
 
 Acquisition produces an immutable candidate attempt containing:
 
@@ -109,7 +109,7 @@ The parent learns nothing from its children. It:
   its connected accepted graph;
 - acknowledges an exact continuity or genesis query from that graph;
 - maintains run state for the directories it hosts and serves each
-  committer's run report to that directory's children (spec §9.10).
+  carrier's run report to that directory's children (spec §9.10).
 
 It does not ingest child consensus, child payloads, child provider state, or
 child weights. A grandchild repeats the same immediate-parent rule; no ancestor
@@ -136,8 +136,8 @@ proof protocol or descendant-tree export exists.
 - Parent continuity is reflexive or transitively forward, never merely
   "different" and never restricted to a direct step.
 - Volume identity is the storage and network boundary.
-- Retention depth and serving policy are local and non-consensus.
-- No minimum-work admission floor exists. Any filter on work that can reach
+- Pruning depth and serving policy are local and non-consensus.
+- No minimum-work import floor exists. Any filter on work that can reach
   fork choice is consensus-relevant — two nodes with different floors could
   select different tips — so the node ships none: the chain's own target is
   the only work gate.

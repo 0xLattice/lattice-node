@@ -67,7 +67,7 @@ non-mutating public read, omits it. Absent before the chain has a tip.
 
 A child reports `phase: "awaitingGenesis"`, with null tip and height, until its
 authenticated immediate parent confirms the recorded genesis CID and the child
-admits that genesis.
+imports that genesis.
 After bootstrap, it reports `phase: "active"` from its durable accepted graph;
 parent connectivity does not change the meaning of proof-derived work.
 
@@ -155,7 +155,7 @@ down is normally left unnamed and still caps the search. Removing that
 over-strictness needs a child to return one witness per filtered path in its
 subtree, a change to the child candidate wire format that this API does not
 make. It is a template choice of the miner that asked,
-not consensus: admission, validation, and fork choice are untouched, and a
+not consensus: import, validation, and fork choice are untouched, and a
 block from any other miner at the scheduled target is still accepted. Absent,
 templates are exactly the schedule.
 
@@ -210,7 +210,7 @@ Possible dispositions are `canonicalized`, `acceptedSide`, `carrier`,
 A `carrier` cleared only child targets and leaves the work open until it
 expires: a later nonce for the same `workID` that clears a harder target is
 still submittable. Any other disposition consumes the work.
-A submission the node refuses before admission returns `400 Bad Request` with
+A submission the node refuses before import returns `400 Bad Request` with
 `{"error":{"message":"<case>"}}`, where `<case>` is `unknownWork`, `expired`,
 or `missesSearchTarget`. The refusal is final; the coordinator reports the case
 as the disposition instead of retrying. Only `expired` also drops the work.
@@ -230,12 +230,12 @@ returns at most 100 of those entries with no offset, so on a parent with more
 children a recorded child can be absent from it.
 
 A child process launched with `--chain-path Nexus/Payments` and `--parent
-<parent-key>@<host>:<fact-port>` stays `awaitingGenesis` until it can admit
+<parent-key>@<host>:<fact-port>` stays `awaitingGenesis` until it can import
 that genesis, which it pursues by two concurrent paths. If its data directory
 contains the seed as `child-genesis.json` at startup (the file is read only
 then), it rebuilds the genesis from the seed. Independently, it asks its parent
 for the CID recorded under its directory and fetches the genesis block by that
-CID from child-overlay peers. Either way it admits the genesis only after its
+CID from child-overlay peers. Either way it imports the genesis only after its
 authenticated immediate parent confirms that it recorded exactly that CID.
 `lattice child deploy` performs these steps; see [Operator CLI](operator-cli.md).
 

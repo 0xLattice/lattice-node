@@ -46,7 +46,7 @@ authenticated immediate parent's fact-plane public key and endpoint.
 ```text
 LatticeNodeDaemon
   ├─ NodeConfiguration     immutable path, keys, ports
-  ├─ ChainProcess          consensus admission and durable recovery
+  ├─ ChainProcess          block import and durable recovery
   ├─ ChainService          transactions, templates, work results
   ├─ NodeStore             state.db: semantic facts, indexes, root references
   ├─ DiskBroker            volumes.db: materialized CAS volumes
@@ -55,9 +55,22 @@ LatticeNodeDaemon
   └─ loopback HTTP         thin JSON adapter over ChainService
 ```
 
-`ChainProcess` is the sole consensus-admission boundary. Service and network
-code may prepare data, but canonical state changes only through process
-admission and its staged durable batch.
+`Node.build` assembles the process, service, and network runtime the way the
+daemon runs them. `ChainService` reaches the runtime only through
+`NetworkInterface`, and the runtime reaches the service only through
+`ChainInterface`. `ChainProcess.open` runs `BootRecovery` before anything is
+exposed to networking. `NodeStore` groups its tables by owner (import journal,
+block index, evidence index, candidate store, mempool journal, pruning).
+`NodeNetworkRuntime` is one actor whose code is split by concern into
+`+Lifecycle`, `+Overlay`, `+Hierarchy`, `+Candidates` (the `BlockFetcher`
+side), `+ReadURL`, and `+RangeSync`. Each plane's state lives in its own
+`OverlayState` or `HierarchyState`, per-peer state is a `PeerSet`, and one
+plane reaches another's state only through named seams. Every sleep in the node
+library goes through `Timers`.
+
+`ChainProcess` is the sole block-import boundary (`importBlock`). Service and
+network code may prepare data, but canonical state changes only through process
+import and its staged durable batch.
 
 Production ingress is intentionally one-way:
 
@@ -74,7 +87,7 @@ reconciliation fence before process mutation order is released. That prevents a
 new template or mempool operation from observing a canonical
 commit before its service projection catches up, without allowing a slow peer
 to stall mining or RPC. Miner/RPC/reconciliation reads are local-only; remote
-content acquisition is explicit and root-scoped to network admission or a
+content acquisition is explicit and root-scoped to network import or a
 targeted retry.
 
 Each network generation receives one immutable handler bundle before either
@@ -128,7 +141,7 @@ not carried that round; nothing is asked and nothing is awaited.
 A candidate's content is retained by the chain that built it, as its own
 budgeted policy (`maximumRetainedCandidateOffers`, oldest offer first), never
 by a parent's reservation: the parent commits the candidate's block node it
-holds, and the carried block's admission at the child later owns the roots
+holds, and the carried block's import at the child later owns the roots
 the offer pinned. Once the parent's evidence names a candidate carried, its
 row is a handoff and no wave of newer offers evicts it. An offer the parent
 never carried costs nothing for long; an offer evicted before its block
@@ -143,8 +156,8 @@ templates until the final page of its durable evidence index is ordered into
 that session, and is pushed the current context as soon as it is. The index
 resumes from a durable `(source, ordinal)` cursor against one fixed cut; a
 changed parent store source restarts at zero. Validated attachments enter a
-durable, VolumeBroker-retained inbox before the cursor advances and leave it
-only after an admission decides the block.
+durable inbox protected from VolumeBroker pruning before the cursor advances
+and leave it only after an import decides the block.
 
 ## Child genesis flow
 
@@ -178,7 +191,7 @@ validated graph. These positive acknowledgements are unsigned, session-bound,
 and non-portable.
 
 The process that directly parents an edge retains only its sparse commitment
-proof. Ordinary child validation Volumes remain child-chain data. Admission stages a
+proof. Ordinary child validation Volumes remain child-chain data. Import stages a
 newly authorized child's proof route in the same transaction as its genesis
 link, because that child cannot authenticate before the authorization exists.
 The parent replays durable authorized-genesis availability when the child
@@ -240,7 +253,7 @@ lattice-miner workers
 lattice-mining-coordinator
   │ POST /v1/mining/work
   ▼
-lattice-node admission → durability → overlay and child-proof publication
+lattice-node import → durability → overlay and child-proof publication
 ```
 
 The node owns chain truth and template validity. The coordinator owns work
@@ -265,18 +278,24 @@ Each process directory contains:
   volumes.db    # materialized content volumes
 ```
 
-Admission publishes each complete Volume, merge-retains its root, and only then
+Import publishes each complete Volume, merge-retains its root, and only then
 commits the protocol fact that references it. A failed fact commit may leave a
-safe retained orphan. Admission and issued hierarchy roots therefore grow
+safe retained orphan. Import and issued hierarchy roots therefore grow
 merge-only while live. Prepared hierarchy evidence is different: it is a
 bounded cache, so one serialized store gate performs its Volume writes, SQLite
 capacity eviction, and exact retained-set advance as a single ordered
 operation. Under the exclusive startup lock, the node materializes protocol
-constants, derives the exact roots for admission, issued hierarchy, and
+constants, derives the exact roots for import, issued hierarchy, and
 prepared hierarchy scopes, verifies every referenced Volume, populates the
 hierarchy scopes before removing legacy ownership, audits semantic indexes,
-and reconstructs the chain by replaying staged admission batches. Networking
+and reconstructs the chain by replaying staged import batches. Networking
 starts afterward. Nexus also verifies the exact genesis CID.
+
+The on-disk names predate the import vocabulary and are kept deliberately: the
+import journal is still stored in the `admission_batches` and `admission_facts`
+tables, and a block's `BlockStatus` (`header`, `executed`, `executedAndPinned`)
+is stored in the `accepted_blocks.validated` column with its original integer
+values.
 
 Legacy databases and volume layouts are not migrated in place. Operators must
 remove the entire configured storage directory and resync; keeping only one of

@@ -1,6 +1,6 @@
 # Correctness invariants
 
-## NODE-SEMANTICS-001 — every admission outcome has one node meaning
+## NODE-SEMANTICS-001 — every import outcome has one node meaning
 
 `canonicalized`, `acceptedSide`, `carrier`, `duplicate`, `unavailable`,
 `temporarilyInvalid`, `invalid`, and `localFailure` remain distinct at the
@@ -8,7 +8,7 @@ node boundary.
 
 ## NODE-SEMANTICS-002 — side validity is not canonicity
 
-`acceptedSide` is valid admission but never publishes a canonical tip.
+`acceptedSide` is a valid import but never publishes a canonical tip.
 
 ## NODE-SEMANTICS-003 — availability is retriable, not punishable
 
@@ -25,7 +25,7 @@ Only a complete `invalid` same-chain candidate may be attributed to its
 supplier. Authenticated parent evidence establishes parent facts; it never
 vouches for a child transition.
 
-Established by: `AdmissionDecisionTests`.
+Established by: `ImportDecisionTests`.
 
 ## NODE-STORAGE-001 — peers and persistence exchange complete Volumes
 
@@ -40,7 +40,7 @@ partial assembly is never application-visible.
 ## NODE-STORAGE-002 — a durable fact never outruns its content
 
 Live publication orders complete Volume storage, merge retention, then the
-SQLite semantic reference. Admission and issued-hierarchy retention grow
+SQLite semantic reference. Import and issued-hierarchy pruning protection grow
 merge-only while live. Prepared proof eviction serializes its store, SQLite
 capacity mutation, and exact retained-set advance through one gate. Contextual
 child offers use a separate durable bounded LRU owned by the chain that built
@@ -48,8 +48,8 @@ them: new roots are pinned before the index changes, the oldest offer is
 evicted first, and a candidate the parent's evidence names carried is a
 handoff that offer eviction never touches. No parent reserves anything at a
 child and no acknowledgement gates parent progress. Proof acquisition is
-independent. Admission then transfers the roots before the handoff is
-released; the handoff budget bounds what is kept. Canonicity never changes retention or validity; accepted, shared,
+independent. Import then transfers the roots before the handoff is
+released; the handoff budget bounds what is kept. Canonicity never changes pruning protection or validity; accepted, shared,
 and independently retained roots remain owned.
 
 ## NODE-MEMPOOL-001 — the mempool is tip-relative, not consensus

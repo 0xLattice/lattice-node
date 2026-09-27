@@ -5,7 +5,7 @@
 A Lattice node never forgets. Three surfaces accumulate losing-fork state
 forever:
 
-- **The accepted graph.** Every valid block a node admits — canonical or a
+- **The accepted graph.** Every valid block a node imports — canonical or a
   losing sibling — stays in its accepted set permanently, and accepted-leaf
   pages serve the whole set to every peer. A live testnet child measured 74%
   losing siblings: roughly three units of junk exchanged and re-validated for
@@ -21,7 +21,7 @@ forever:
   path; the index is still served for older children.)
 - **Acquisition effort.** A bare advertised CID gives a node no way to decline
   work, so every hoarded sibling costs every peer a content fetch, an evidence
-  solicitation, and a full admission attempt — competing for the same bounded
+  solicitation, and a full import attempt — competing for the same bounded
   lanes that deliver live blocks. (This surface is addressed by the companion
   direction at the end, not by the present concept.)
 
@@ -42,7 +42,7 @@ how much losing-fork state their node keeps materialized, and that choice
 bounds — for that node only — how *expensively* it can act on a deep reorg,
 never *whether* its fork choice follows one:
 
-- Within the operator's retention horizon, a competing fork can be adopted
+- Within the operator's pruning horizon, a competing fork can be adopted
   without re-acquiring anything: the node holds it in full.
 - Below the horizon, losing forks are evicted. The node's head may still
   move to an evicted branch — it kept the weight facts (see below) — but
@@ -67,8 +67,8 @@ re-examine.
 Fork choice weighs whole subtrees, so a losing sibling is not weight-neutral:
 its work contributes to every ancestor's total. If eviction silently removed
 weight the node had already counted, nodes could compute different heaviest
-branches purely as a function of their retention policy — a partition along
-retention class with no attacker and no protocol change, healed only when
+branches purely as a function of their pruning policy — a partition along
+pruning class with no attacker and no protocol change, healed only when
 the omitted weight is re-learned. Therefore:
 
 - **Eviction discards stored bytes and service willingness, never verified
@@ -81,7 +81,7 @@ the omitted weight is re-learned. Therefore:
   optimization may solve it by quietly dropping counted edges.
 - The effect of an eviction is immediate and identical before and after a
   restart; no node's head may change across a restart without new facts.
-- Retention changes what a node stores and serves, never which head it
+- Pruning changes what a node stores and serves, never which head it
   *selects*: a miner-serving node selects the same head regardless of its
   horizon.
 - A node may select a head it has not yet re-acquired. In that interval it
@@ -142,7 +142,7 @@ honestly offer. Two consequences must be stated:
 - A query for evicted data answers "not retained here" — it never errors and
   never asserts nonexistence.
 
-Operator retention governs *non-canonical* state only; this design never
+Operator pruning governs *non-canonical* state only; this design never
 evicts canonical genesis-to-tip closure, and whether canonical pruning is
 ever offered is out of scope here. That closure is a distinct axis: fresh
 nodes re-execute from genesis by design, so joinability depends on canonical
@@ -156,8 +156,8 @@ without closing it: execution and state storage for unselected blocks go
 away, but weighing a child block still requires soliciting its
 securing-work proof, so the per-sibling round trip below is unchanged.
 
-The bounded admission lanes are only relieved if a node can also decline
-acquiring junk, not merely evict it after paying full admission cost.
+The bounded import lanes are only relieved if a node can also decline
+acquiring junk, not merely evict it after paying full import cost.
 Advertisements could carry untrusted hints (height, claimed weight) letting
 a receiver deprioritize candidates unlikely to alter its fork choice. This
 is deliberately *not* part of the present concept, because it is the one
@@ -180,10 +180,10 @@ declined work at all. Any future design must hold these boundaries:
 ## Boundaries
 
 - Consensus (Lattice) is untouched: no fork-depth rules, no finality
-  thresholds, no changes to weight comparison or admission validity — and,
-  via weight-preservation above, no retention setting may alter the head any
+  thresholds, no changes to weight comparison or import validity — and,
+  via weight-preservation above, no pruning setting may alter the head any
   node computes.
-- Retention knobs live in node configuration with sane defaults, per chain,
+- Pruning knobs live in node configuration with sane defaults, per chain,
   like every other operator budget. No knob is ever load-bearing for
   correctness — a node with any setting, including "keep everything", is a
   fully conforming peer.

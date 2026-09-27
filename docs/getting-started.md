@@ -132,7 +132,7 @@ It initially reports `awaitingGenesis`. To give a new chain its genesis:
 A child started with the seed retries until the parent's record lands. A child
 also tries to fetch the recorded genesis block by CID from child-overlay peers,
 but a brand-new chain has no peer serving it, so the first node of a new chain
-needs the seed. Either way, the child admits the genesis only after its
+needs the seed. Either way, the child imports the genesis only after its
 authenticated parent confirms that exact record. The child does not accept
 opaque genesis bytes on its command line. `lattice child deploy` performs all
 of these steps for a local tree.
