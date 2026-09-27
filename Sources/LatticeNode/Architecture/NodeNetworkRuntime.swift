@@ -6,24 +6,6 @@ import UInt256
 import VolumeBroker
 import cashew
 
-/// Public explorer peer DTOs. Defined here (module LatticeNode) so both the
-/// runtime and the daemon's HTTP handlers (module LatticeNodeDaemon) can see
-/// them; the handlers only `json()` these.
-public struct ExplorerPeerSummary: Codable, Sendable, Equatable {
-    public let key: String
-    public let role: String
-}
-
-public struct ExplorerPeersResponse: Codable, Sendable, Equatable {
-    public let count: Int
-    public let peers: [ExplorerPeerSummary]
-
-    public init(count: Int, peers: [ExplorerPeerSummary]) {
-        self.count = count
-        self.peers = peers
-    }
-}
-
 public typealias ContextualChildCandidateBuilder = @Sendable (
     _ context: ChildCandidateRequestContext,
     _ parentContentSource: any ContentSource
