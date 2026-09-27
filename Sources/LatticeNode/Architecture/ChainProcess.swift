@@ -103,7 +103,7 @@ struct DurableLocalTransaction: Sendable {
 /// pre-genesis phase so target-miss carriers can relay deeper accepted work
 /// without inventing local chain state.
 public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
-    private enum RuntimePhase: Sendable {
+    enum RuntimePhase: Sendable {
         case awaitingGenesis
         case active(ChainLevel)
     }
@@ -115,19 +115,19 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     }
 
     private static let maximumDirectChildRoutes = 64
-    private static let preparedChildProofCapacity = 16
+    static let preparedChildProofCapacity = 16
     /// Page size for walking a child's incoming carrier-proof roots.
     private static let incomingCarrierProofRootPageSize = 257
 
     /// Owner pins holding a walk-validated block's body + post-state, one
     /// owner per block: `<retentionScope>:validated:<blockCID>`.
-    private nonisolated static func validatedOwnerPrefix(
+    nonisolated static func validatedOwnerPrefix(
         _ retentionScope: String
     ) -> String {
         retentionScope + ":validated:"
     }
 
-    private nonisolated static func validatedOwner(
+    nonisolated static func validatedOwner(
         _ retentionScope: String,
         _ blockCID: String
     ) -> String {
@@ -185,297 +185,18 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     public static func open(
         configuration: NodeConfiguration
     ) async throws -> ChainProcess {
-        guard configuration.storagePath.isFileURL else {
-            throw ChainProcessError.invalidStoragePath
-        }
-        try FileManager.default.createDirectory(
-            at: configuration.storagePath,
-            withIntermediateDirectories: true
-        )
-        let directoryLock: StorageDirectoryLock
-        do {
-            directoryLock = try StorageDirectoryLock(directory: configuration.storagePath)
-        } catch StorageDirectoryLockError.alreadyLocked {
-            throw ChainProcessError.storageInUse
-        } catch {
-            throw ChainProcessError.storageUnavailable
-        }
-
-        let broker = try DiskBroker(
-            path: configuration.storagePath.appendingPathComponent("volumes.db").path
-        )
-        let localFetcher = CoalescingFetcher(broker)
-        let retentionScope = [
-            configuration.nexusGenesisCID,
-            configuration.address.key,
-        ].joined(separator: ":")
-        let issuedHierarchyRetentionScope = retentionScope + ":issued-hierarchy"
-        let preparedHierarchyRetentionScope = retentionScope + ":prepared-hierarchy"
-        let parentEvidenceInboxRetentionScope =
-            retentionScope + ":parent-evidence-inbox"
-        let durableMempoolOwner = retentionScope + ":durable-mempool"
-        let liveMempoolOwner = retentionScope + ":live-mempool"
-        let contextualCandidateOwner = retentionScope + ":contextual-candidates"
-        let store = try NodeStore(
-            databasePath: configuration.storagePath.appendingPathComponent("state.db"),
-            nexusGenesisCID: configuration.nexusGenesisCID,
-            chainPath: configuration.chainPath,
-            recoveryVolumeBroker: broker,
-            blockRetentionScope: retentionScope,
-            issuedRecoveryRetentionScope: issuedHierarchyRetentionScope,
-            preparedRecoveryRetentionScope: preparedHierarchyRetentionScope,
-            parentEvidenceInboxRetentionScope:
-                parentEvidenceInboxRetentionScope,
-            parentEvidenceInboxCapacity:
-                configuration.resourcePolicy.maximumPendingParentEvidence,
-            contextualCandidateOwner: contextualCandidateOwner,
-            handoffCandidateCapacity:
-                configuration.resourcePolicy.maximumRetainedHandoffCandidates
-        )
-
-        // Protocol constants are ordinary Volumes and therefore ordinary GC
-        // roots. Materialize them before the one exact startup reconciliation.
-        let constantStorage = NodeAdmissionStorage(storage: broker)
-        try await LatticeState.emptyHeader.storeRecursively(
-            storer: constantStorage as any VolumeStorer
-        )
-        let constantRoots = await constantStorage.takeStoredVolumeRoots()
-
-        let staged = try await store.stagedAdmissions()
-        try await store.auditNormalizedIndexes()
-        try await store.pruneAdmittedContextualCandidates()
-        try await store.enforceHandoffCandidateBudget()
-        let retainedRoots = durableRetainedRoots(
-            staged: staged,
-            additionalRoots: constantRoots
-        )
-        let issuedRecoveryRoots = try await store.issuedRecoveryVolumeRoots()
-        let preparedRecoveryRoots = try await store.preparedRecoveryVolumeRoots()
-        let parentEvidenceInboxRoots = try await store
-            .parentEvidenceInboxRoots()
-        let contextualCandidateRoots = try await store
-            .contextualCandidateVolumeRoots()
-        for root in Set(
-            retainedRoots + issuedRecoveryRoots + preparedRecoveryRoots
-                + parentEvidenceInboxRoots + contextualCandidateRoots
-        ) {
-            guard await broker.fetchVolumeLocal(root: root) != nil else {
-                throw ChainProcessError.missingMaterializedVolume(root)
-            }
-        }
-        try await broker.advanceRetainedRoots(
-            scope: issuedHierarchyRetentionScope,
-            roots: issuedRecoveryRoots
-        )
-        // Startup is quiescent under the storage-directory lock, so stale
-        // counts can be replaced before any local garbage-collection pass.
-        try await broker.unpinAll(owner: contextualCandidateOwner)
-        try await broker.pinBatch(
-            roots: contextualCandidateRoots,
-            owner: contextualCandidateOwner
-        )
-        try await broker.advanceRetainedRoots(
-            scope: preparedHierarchyRetentionScope,
-            roots: preparedRecoveryRoots
-        )
-        try await broker.advanceRetainedRoots(
-            scope: parentEvidenceInboxRetentionScope,
-            roots: parentEvidenceInboxRoots
-        )
-        try await broker.advanceRetainedRoots(
-            scope: retentionScope,
-            roots: retainedRoots
-        )
-        // Walk-validated tier invariant: a block is marked `2` iff its body +
-        // post-state are pinned under its owner. Owner pins persist in
-        // volumes.db (unlike the batch-rebuilt scope above). A marker whose
-        // pin is gone is demoted to weighed so the walk re-validates it; a pin
-        // whose marker never flipped (crash between pin and flip) is released.
-        // Read BEFORE the demotion below rewrites this column. Demotion is
-        // retention bookkeeping — it says a cached post-state may be evicted,
-        // not that the transition never ran — so an execution demoted on this
-        // boot must still be carried across.
-        let executedBeforeDemotion = try await store.executedBlockCIDs()
-        // Admission batches are the only recovery authority. The projection is
-        // a derived cache and must not be able to add facts or prevent a valid
-        // history from reopening.
-        //
-        // The one exception is history written before durable validation facts
-        // existed: those rows record executions this store really performed,
-        // and replaying without them would come back having forgotten every one
-        // — leaving the chain unable to attest any state it produced, so no
-        // child could anchor and no child could advance.
-        //
-        // They are STAGED, not merely replayed. Replaying alone would leave the
-        // mutable tier column as the only record of those executions forever,
-        // and demotion sets it to zero — so a demote would erase an execution
-        // that actually happened, permanently. Staging makes this a one-time
-        // migration after which the immutable fact is the authority, matching
-        // every execution recorded from here on.
-        //
-        // Staged BEFORE the demotion loop below, not merely read before it.
-        // Demotion commits per block while this writes its own transactions, so
-        // a crash in between would leave a legacy row demoted to `.weighed`
-        // with no durable fact — `executedBlockCIDs()` would never return it
-        // again and no later boot could carry it. Ordering the writes closes
-        // that window; the migration needs nothing the demotion produces.
-        let carriedFacts = Set(staged.flatMap { admission in
-            admission.batch.facts.compactMap { fact -> String? in
-                guard case .validation(let value) = fact else { return nil }
-                return value.blockHash
-            }
-        })
-        // Only blocks this log actually admitted: a validation naming a block
-        // absent from the replayed facts would defer forever and turn a boot
-        // into `corruptConsensusGraph`.
-        let admittedBlocks = Set(staged.flatMap { admission in
-            admission.batch.facts.compactMap { fact -> String? in
-                guard case .block(let value) = fact else { return nil }
-                return value.blockHash
-            }
-        })
-        let migrated = executedBeforeDemotion
-            .intersection(admittedBlocks)
-            .subtracting(carriedFacts)
-            .sorted()
-            .map { ChainAdmissionBatch.validation(blockHash: $0) }
-        for batch in migrated {
-            try await store.stage(batch, volumeRoots: [])
-        }
-        let walkValidated = try await store.walkValidatedBlockCIDs()
-        let validatedOwnerPrefix = Self.validatedOwnerPrefix(retentionScope)
-        let pinnedOwners = Set(
-            await broker.pinnedOwners(prefix: validatedOwnerPrefix)
-        )
-        var bootDemoted: [String] = []
-        for blockCID in walkValidated.sorted()
-        where !pinnedOwners.contains(
-            Self.validatedOwner(retentionScope, blockCID)
-        ) {
-            try await store.demoteValidated(blockCID: blockCID)
-            bootDemoted.append(blockCID)
-        }
-        for owner in pinnedOwners.sorted()
-        where !walkValidated.contains(
-            String(owner.dropFirst(validatedOwnerPrefix.count))
-        ) {
-            try await broker.unpinAll(owner: owner)
-        }
-        let localMempoolRoots = try await store.localMempoolTransactions()
-            .map(\.transactionCID)
-        for root in localMempoolRoots {
-            guard await broker.fetchVolumeLocal(root: root) != nil,
-                  let resolved = try? await VolumeImpl<Transaction>(
-                    rawCID: root
-                  ).resolveRecursive(source: broker),
-                  resolved.node != nil else {
-                throw ChainProcessError.missingMaterializedVolume(root)
-            }
-        }
-        try await broker.unpinAll(owner: durableMempoolOwner)
-        try await broker.pinBatch(
-            roots: localMempoolRoots,
-            owner: durableMempoolOwner
-        )
-        // The live pool is operational cache, not restart authority. Owner
-        // pins support O(changes) updates and are cleared for each process.
-        try await broker.unpinAll(owner: liveMempoolOwner)
-
-        let context = try configuration.runtimeContext
-        let runtimePhase: RuntimePhase
-        if staged.isEmpty {
-            if configuration.address.isNexus {
-                let genesis = try await NexusGenesis.create(fetcher: localFetcher)
-                guard try NexusGenesis.verifyGenesis(genesis) else {
-                    throw ChainProcessError.invalidNexusGenesis
-                }
-                let admissionStorage = NodeAdmissionStorage(
-                    storage: broker
-                )
-                let bootstrapped = try await ChainLevel.bootstrap(
-                    context: context,
-                    genesisHeader: try BlockHeader(node: genesis.block),
-                    fetcher: localFetcher,
-                    validationContentStorer: admissionStorage,
-                    materializedVolumeStorer: admissionStorage,
-                    stage: { context in
-                        let hierarchyArtifacts = context.issuedCarrierLink.map {
-                            AdmissionHierarchyArtifacts(
-                                carrierLink: $0,
-                                carrierEvidence: nil,
-                                parentGenesisLinks: context.parentGenesisLinks
-                            )
-                        }
-                        try await persist(
-                            context.batch,
-                            admissionStorage: admissionStorage,
-                            store: store,
-                            broker: broker,
-                            retentionScope: retentionScope,
-                            persistence: ImportPersistence(
-                                pendingChildProofCapacity: Self.preparedChildProofCapacity,
-                                hierarchyArtifacts: hierarchyArtifacts
-                            )
-                        )
-                    }
-                )
-                runtimePhase = .active(bootstrapped.level)
-            } else {
-                runtimePhase = .awaitingGenesis
-            }
-        } else {
-            if configuration.address.isNexus {
-                let genesisRoots = Set(staged.flatMap { admission in
-                    admission.batch.facts.compactMap { fact -> String? in
-                        guard case .block(let block) = fact,
-                              block.parentBlockHash == nil,
-                              block.blockHeight == 0 else { return nil }
-                        return block.blockHash
-                    }
-                })
-                guard genesisRoots == [NexusGenesis.expectedBlockHash] else {
-                    throw ChainProcessError.invalidNexusGenesis
-                }
-            }
-            // The legacy-execution migration was staged before the boot
-            // demotion above; replay it alongside the durable log.
-            let batches = staged.map(\.batch) + migrated
-            let chain = try await ChainState.restore(
-                replaying: batches,
-                revisionFloor: try await store.consensusRevisionFloor()
-            )
-            let level = ChainLevel(chain: chain, context: context)
-            runtimePhase = .active(level)
-        }
-
-        try await recoverPreparedChildProofs(
-            store: store,
-            configuration: configuration
-        )
-
-        // A block boot reconciliation demoted can later reorg onto the main
-        // chain beneath still-validated blocks: seed the probe's hole
-        // ceiling with the highest such height (see `demotedHoleCeiling`).
-        var bootHoleCeiling: UInt64?
-        if case .active(let level) = runtimePhase {
-            for blockCID in bootDemoted {
-                guard let height = await level.chain
-                    .getConsensusBlock(hash: blockCID)?.blockHeight
-                else { continue }
-                bootHoleCeiling = max(bootHoleCeiling ?? height, height)
-            }
-        }
+        let recovered = try await BootRecovery.run(configuration: configuration)
         return ChainProcess(
             configuration: configuration,
-            store: store,
-            broker: broker,
-            localFetcher: localFetcher,
-            retentionScope: retentionScope,
-            durableMempoolOwner: durableMempoolOwner,
-            liveMempoolOwner: liveMempoolOwner,
-            directoryLock: directoryLock,
-            runtimePhase: runtimePhase,
-            bootHoleCeiling: bootHoleCeiling
+            store: recovered.store,
+            broker: recovered.broker,
+            localFetcher: recovered.localFetcher,
+            retentionScope: recovered.retentionScope,
+            durableMempoolOwner: recovered.durableMempoolOwner,
+            liveMempoolOwner: recovered.liveMempoolOwner,
+            directoryLock: recovered.directoryLock,
+            runtimePhase: recovered.runtimePhase,
+            bootHoleCeiling: recovered.bootHoleCeiling
         )
     }
 
@@ -2747,7 +2468,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         }
     }
 
-    private nonisolated static func recoverPreparedChildProofs(
+    nonisolated static func recoverPreparedChildProofs(
         store: NodeStore,
         configuration: NodeConfiguration
     ) async throws {
@@ -2900,14 +2621,5 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             throw ChainProcessError.consensusRevisionExhausted
         }
         return revision + 1
-    }
-
-    private nonisolated static func durableRetainedRoots(
-        staged: [StagedAdmission],
-        additionalRoots: [String] = []
-    ) -> [String] {
-        var roots = Set(staged.flatMap(\.volumeRoots))
-        roots.formUnion(additionalRoots)
-        return roots.sorted()
     }
 }

@@ -18,7 +18,7 @@ struct CandidateAcquirer {
     // the first block we hold, each block possibly holding a rootless
     // .predecessor park AND a rooted evidence wait at once) plus
     // durable-descendant seeding at restart. Generous relative to the live
-    // edge: gaps beyond rangeSyncDepthThreshold go through range sync, which
+    // edge: gaps beyond RangeSync.depthThreshold go through range sync, which
     // admits parent-first and retains nothing, so a walk only ever spans a
     // leaf's short ancestry. Over budget, the oldest park is evicted, never
     // the fresh one — an evicted obligation re-enters through a later

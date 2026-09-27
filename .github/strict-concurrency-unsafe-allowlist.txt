@@ -5,7 +5,7 @@ Sources/LatticeNode/Architecture/NodeSQLite.swift|final class NodeSQLite: @unche
 Sources/LatticeNode/Architecture/IvyContentBridge.swift|public final class AttributionCapture: @unchecked Sendable {|All access to the optional attribution value is guarded by AttributionCapture's NSLock.
 Sources/LatticeNode/Architecture/IvyContentBridge.swift|private final class Trace: @unchecked Sendable {|All mutable attribution state is guarded by Trace's NSLock.
 Sources/LatticeNode/Architecture/IvyContentBridge.swift|private final class Context: @unchecked Sendable {|The root CID is immutable and the referenced Trace synchronizes its own mutable state.
-Sources/LatticeNode/Architecture/NodeNetworkRuntime.swift|private final class RuntimeCallbackEpoch: @unchecked Sendable {|Every read and increment of the callback generation is guarded by the epoch's NSLock.
+Sources/LatticeNode/Architecture/NodeNetworkRuntime.swift|final class RuntimeCallbackEpoch: @unchecked Sendable {|Every read and increment of the callback generation is guarded by the epoch's NSLock.
 Tests/LatticeMiningCoordinatorTests/MiningCoordinatorTests.swift|nonisolated(unsafe) static var responder: ((URLRequest) -> (Int, Data))?|The URLProtocol test stub installs and clears this callback serially within each test.
 Tests/LatticeNodeTests/Support/NetworkTrustStubs.swift|private nonisolated(unsafe) static var allocated = Set<UInt16>()|The issued test port set is read and mutated only while holding its static NSLock.
 Tests/LatticeNodeTests/Support/NetworkTrustStubs.swift|private nonisolated(unsafe) static var cursor = UInt16(|The next test port to probe is read and advanced only while holding the same static NSLock.
