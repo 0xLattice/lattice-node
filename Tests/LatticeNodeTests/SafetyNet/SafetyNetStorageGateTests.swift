@@ -37,6 +37,7 @@ final class SafetyNetStorageGateTests: XCTestCase {
             let relative = String(path.dropFirst(root.path.count + 1))
             files.append((relative, try String(contentsOf: url, encoding: .utf8)))
         }
+        XCTAssertFalse(files.isEmpty, "no Swift sources under \(root.path)")
         return files.sorted { $0.path < $1.path }
     }
 
@@ -77,7 +78,7 @@ final class SafetyNetStorageGateTests: XCTestCase {
     func testNoExecutionTierIsSpelledAsAnInteger() throws {
         let files = try sources()
         for pattern in [
-            #"\bvalidated\s*(=|!=|>=|<=|<|>|IN)\s*\(?\s*-?[0-9]"#,
+            #"\bvalidated\s*(==|!=|>=|<=|=|<|>|IN)\s*\(?\s*-?[0-9]"#,
             #"validated\s*\?\s*1\s*:\s*0"#,
             #"validated INTEGER NOT NULL DEFAULT [0-9]"#,
         ] {
