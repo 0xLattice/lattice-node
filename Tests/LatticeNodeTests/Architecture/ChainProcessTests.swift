@@ -1498,8 +1498,10 @@ final class ChainProcessTests: XCTestCase {
                 store: store,
                 broker: broker,
                 retentionScope: "cancellation-test",
-                pendingChildProofRoutes: [],
-                pendingChildProofCapacity: 1,
+                persistence: ImportPersistence(
+                    pendingChildProofRoutes: [],
+                    pendingChildProofCapacity: 1
+                ),
                 afterRetainingRoots: {
                     await retained.open()
                     await continueStage.wait()
@@ -1575,8 +1577,10 @@ final class ChainProcessTests: XCTestCase {
             store: store,
             broker: broker,
             retentionScope: "failed-stage-test",
-            pendingChildProofRoutes: [],
-            pendingChildProofCapacity: 1
+            persistence: ImportPersistence(
+                pendingChildProofRoutes: [],
+                pendingChildProofCapacity: 1
+            )
         )
 
         let transaction = try signedGenesisAnchorTransaction(
@@ -1594,11 +1598,13 @@ final class ChainProcessTests: XCTestCase {
                 store: store,
                 broker: broker,
                 retentionScope: "failed-stage-test",
-                pendingChildProofRoutes: [PendingChildProofRoute(
-                    carrierCID: "not-in-batch",
-                    directory: "Payments"
-                )],
-                pendingChildProofCapacity: 1
+                persistence: ImportPersistence(
+                    pendingChildProofRoutes: [PendingChildProofRoute(
+                        carrierCID: "not-in-batch",
+                        directory: "Payments"
+                    )],
+                    pendingChildProofCapacity: 1
+                )
             )
             XCTFail("invalid staging route unexpectedly succeeded")
         } catch let error as NodeStoreError {

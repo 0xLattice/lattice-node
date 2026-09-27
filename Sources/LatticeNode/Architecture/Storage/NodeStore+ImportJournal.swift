@@ -57,18 +57,13 @@ extension NodeStore {
     func stage(
         _ batch: ChainAdmissionBatch,
         volumeRoots: [String],
-        validated: Bool = true,
-        pendingChildProofRoutes: [PendingChildProofRoute] = [],
-        pendingChildProofCapacity: Int = 16,
-        hierarchyArtifacts: AdmissionHierarchyArtifacts? = nil,
-        incomingCarrierEvidence: AdmissionCarrierEvidence? = nil,
-        consensusRevisionFloor: UInt64? = nil
+        persistence: ImportPersistence = .factsOnly
     ) async throws {
         let payload = try Self.encode(batch)
         let factsInBatch = try Self.normalizedFacts(in: batch)
         let facts = factsInBatch.sorted { $0.key.lexicographicallyPrecedes($1.key) }
         let acceptedBlocks = try Self.acceptedBlocks(in: batch)
-        let pendingRoutes = Array(Set(pendingChildProofRoutes)).sorted {
+        let pendingRoutes = Array(Set(persistence.pendingChildProofRoutes)).sorted {
             ($0.carrierCID, $0.directory) < ($1.carrierCID, $1.directory)
         }
         let carrierCIDs = Set(batch.facts.map { fact -> String in
@@ -97,11 +92,11 @@ extension NodeStore {
             )
         }
         let preparedHierarchyArtifacts = try await prepareHierarchyArtifacts(
-            hierarchyArtifacts,
+            persistence.hierarchyArtifacts,
             carrierCIDs: carrierCIDs
         )
         let preparedIncomingCarrierEvidence: PreparedAdmissionCarrierEvidence?
-        if let incomingCarrierEvidence {
+        if let incomingCarrierEvidence = persistence.incomingCarrierEvidence {
             preparedIncomingCarrierEvidence = try await prepareCarrierEvidence(
                 incomingCarrierEvidence,
                 expectedChildCIDs: carrierCIDs,
@@ -181,7 +176,7 @@ extension NodeStore {
                     try persistAcceptedBlockRows(
                         acceptedBlocks,
                         admissionSequence: admissionSequence,
-                        status: validated ? .eager : .weighed
+                        status: persistence.status
                     )
                 }
                 if let preparedHierarchyArtifacts {
@@ -203,9 +198,9 @@ extension NodeStore {
                         pendingRoutes,
                         carrierCIDs: Set(acceptedBlocks.map(\.blockCID))
                     ),
-                    capacity: pendingChildProofCapacity
+                    capacity: persistence.pendingChildProofCapacity
                 )
-                if let consensusRevisionFloor {
+                if let consensusRevisionFloor = persistence.consensusRevisionFloor {
                     try persistConsensusRevisionFloor(consensusRevisionFloor)
                 }
         }

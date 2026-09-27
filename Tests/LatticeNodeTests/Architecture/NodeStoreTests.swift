@@ -268,7 +268,9 @@ final class NodeStoreTests: XCTestCase {
         try await store.stage(
             blockBatch(postStateCID: "state", blockHash: "carrier"),
             volumeRoots: [],
-            hierarchyArtifacts: artifacts
+            persistence: ImportPersistence(
+                hierarchyArtifacts: artifacts
+            )
         )
 
         let storedCarrier = try await store.issuedParentCarrierLink(
@@ -295,10 +297,12 @@ final class NodeStoreTests: XCTestCase {
         try await store.stage(
             blockBatch(postStateCID: "state", blockHash: "carrier"),
             volumeRoots: [],
-            hierarchyArtifacts: AdmissionHierarchyArtifacts(
-                carrierLink: carrier,
-                carrierEvidence: nil,
-                parentGenesisLinks: []
+            persistence: ImportPersistence(
+                hierarchyArtifacts: AdmissionHierarchyArtifacts(
+                    carrierLink: carrier,
+                    carrierEvidence: nil,
+                    parentGenesisLinks: []
+                )
             )
         )
         try await store.auditNormalizedIndexes()
@@ -331,10 +335,12 @@ final class NodeStoreTests: XCTestCase {
                 )),
             ]),
             volumeRoots: [],
-            hierarchyArtifacts: AdmissionHierarchyArtifacts(
-                carrierLink: carrier,
-                carrierEvidence: nil,
-                parentGenesisLinks: []
+            persistence: ImportPersistence(
+                hierarchyArtifacts: AdmissionHierarchyArtifacts(
+                    carrierLink: carrier,
+                    carrierEvidence: nil,
+                    parentGenesisLinks: []
+                )
             )
         )
 
@@ -355,10 +361,12 @@ final class NodeStoreTests: XCTestCase {
             try await store.stage(
                 blockBatch(postStateCID: "state", blockHash: "carrier"),
                 volumeRoots: [],
-                hierarchyArtifacts: AdmissionHierarchyArtifacts(
-                    carrierLink: outsideBatch,
-                    carrierEvidence: nil,
-                    parentGenesisLinks: []
+                persistence: ImportPersistence(
+                    hierarchyArtifacts: AdmissionHierarchyArtifacts(
+                        carrierLink: outsideBatch,
+                        carrierEvidence: nil,
+                        parentGenesisLinks: []
+                    )
                 )
             )
         ) { error in
@@ -385,10 +393,12 @@ final class NodeStoreTests: XCTestCase {
             try await store.stage(
                 blockBatch(postStateCID: "state", blockHash: "carrier"),
                 volumeRoots: [],
-                hierarchyArtifacts: AdmissionHierarchyArtifacts(
-                    carrierLink: carrier,
-                    carrierEvidence: nil,
-                    parentGenesisLinks: []
+                persistence: ImportPersistence(
+                    hierarchyArtifacts: AdmissionHierarchyArtifacts(
+                        carrierLink: carrier,
+                        carrierEvidence: nil,
+                        parentGenesisLinks: []
+                    )
                 )
             )
         ) { error in
@@ -641,7 +651,9 @@ final class NodeStoreTests: XCTestCase {
                 blockHeight: 1
             ),
             volumeRoots: [],
-            validated: false
+            persistence: ImportPersistence(
+                status: .weighed
+            )
         )
         let rootValidated = try await store.blockValidated("root")
         let childValidated = try await store.blockValidated("child")
@@ -678,7 +690,9 @@ final class NodeStoreTests: XCTestCase {
                 blockHeight: 1
             ),
             volumeRoots: [],
-            validated: false
+            persistence: ImportPersistence(
+                status: .weighed
+            )
         )
         let weighedChild = try await store.blockValidated("child")
         XCTAssertFalse(weighedChild)
@@ -779,10 +793,12 @@ final class NodeStoreTests: XCTestCase {
         try await store!.stage(
             blockBatch(postStateCID: "state", blockHash: "carrier"),
             volumeRoots: [],
-            hierarchyArtifacts: AdmissionHierarchyArtifacts(
-                carrierLink: carrier,
-                carrierEvidence: nil,
-                parentGenesisLinks: [genesis]
+            persistence: ImportPersistence(
+                hierarchyArtifacts: AdmissionHierarchyArtifacts(
+                    carrierLink: carrier,
+                    carrierEvidence: nil,
+                    parentGenesisLinks: [genesis]
+                )
             )
         )
         store = nil
@@ -819,10 +835,12 @@ final class NodeStoreTests: XCTestCase {
             try await store.stage(
                 blockBatch(postStateCID: "state", blockHash: carrierCID),
                 volumeRoots: [],
-                hierarchyArtifacts: AdmissionHierarchyArtifacts(
-                    carrierLink: carrier,
-                    carrierEvidence: nil,
-                    parentGenesisLinks: [genesis]
+                persistence: ImportPersistence(
+                    hierarchyArtifacts: AdmissionHierarchyArtifacts(
+                        carrierLink: carrier,
+                        carrierEvidence: nil,
+                        parentGenesisLinks: [genesis]
+                    )
                 )
             )
         }
@@ -1177,17 +1195,19 @@ final class NodeStoreTests: XCTestCase {
                 blockHash: carrierHeader.rawCID
             ),
             volumeRoots: [],
-            hierarchyArtifacts: AdmissionHierarchyArtifacts(
-                carrierLink: try decode(ParentCarrierLink.self, json: """
-                    {"parentPath":["Nexus"],"carrierCID":"\(carrierHeader.rawCID)","rootCID":"\(carrierHeader.rawCID)"}
-                """),
-                carrierEvidence: nil,
-                parentGenesisLinks: [try decode(
-                    ParentGenesisLink.self,
-                    json: """
-                    {"parentPath":["Nexus"],"directory":"Alpha","childGenesisCID":"historical-alpha-genesis","parentStateCID":"historical-parent-state"}
-                    """
-                )]
+            persistence: ImportPersistence(
+                hierarchyArtifacts: AdmissionHierarchyArtifacts(
+                    carrierLink: try decode(ParentCarrierLink.self, json: """
+                        {"parentPath":["Nexus"],"carrierCID":"\(carrierHeader.rawCID)","rootCID":"\(carrierHeader.rawCID)"}
+                    """),
+                    carrierEvidence: nil,
+                    parentGenesisLinks: [try decode(
+                        ParentGenesisLink.self,
+                        json: """
+                        {"parentPath":["Nexus"],"directory":"Alpha","childGenesisCID":"historical-alpha-genesis","parentStateCID":"historical-parent-state"}
+                        """
+                    )]
+                )
             )
         )
         let alphaSummaries = try await store.issuedChildEvidenceSummaries(
@@ -1622,20 +1642,22 @@ final class NodeStoreTests: XCTestCase {
                 blockHash: carrierHeader.rawCID
             ),
             volumeRoots: [],
-            hierarchyArtifacts: AdmissionHierarchyArtifacts(
-                carrierLink: try decode(ParentCarrierLink.self, json: """
-                    {"parentPath":["Nexus","A"],"carrierCID":"\(carrierHeader.rawCID)","rootCID":"\(rootHeader.rawCID)"}
-                    """),
-                carrierEvidence: AdmissionCarrierEvidence(
-                    proof: incoming,
-                    childCID: carrierHeader.rawCID
-                ),
-                parentGenesisLinks: [try decode(
-                    ParentGenesisLink.self,
-                    json: """
-                    {"parentPath":["Nexus","A"],"directory":"A","childGenesisCID":"\(leafCID)","parentStateCID":"parent-state"}
-                    """
-                )]
+            persistence: ImportPersistence(
+                hierarchyArtifacts: AdmissionHierarchyArtifacts(
+                    carrierLink: try decode(ParentCarrierLink.self, json: """
+                        {"parentPath":["Nexus","A"],"carrierCID":"\(carrierHeader.rawCID)","rootCID":"\(rootHeader.rawCID)"}
+                        """),
+                    carrierEvidence: AdmissionCarrierEvidence(
+                        proof: incoming,
+                        childCID: carrierHeader.rawCID
+                    ),
+                    parentGenesisLinks: [try decode(
+                        ParentGenesisLink.self,
+                        json: """
+                        {"parentPath":["Nexus","A"],"directory":"A","childGenesisCID":"\(leafCID)","parentStateCID":"parent-state"}
+                        """
+                    )]
+                )
             )
         )
         try await persistIssuedChildProof(
@@ -1971,11 +1993,13 @@ final class NodeStoreTests: XCTestCase {
         try await store.stage(
             blockBatch(postStateCID: "state", blockHash: "accepted"),
             volumeRoots: [],
-            pendingChildProofRoutes: [PendingChildProofRoute(
-                carrierCID: "accepted",
-                directory: "AcceptedChild"
-            )],
-            pendingChildProofCapacity: 1
+            persistence: ImportPersistence(
+                pendingChildProofRoutes: [PendingChildProofRoute(
+                    carrierCID: "accepted",
+                    directory: "AcceptedChild"
+                )],
+                pendingChildProofCapacity: 1
+            )
         )
         try await store.persistIssuedHierarchyArtifacts(
             AdmissionHierarchyArtifacts(
@@ -2039,8 +2063,10 @@ final class NodeStoreTests: XCTestCase {
                 blockHash: fixture.first.rootCID
             ),
             volumeRoots: [],
-            pendingChildProofRoutes: [],
-            pendingChildProofCapacity: 1
+            persistence: ImportPersistence(
+                pendingChildProofRoutes: [],
+                pendingChildProofCapacity: 1
+            )
         )
 
         let routes = try await store.pendingChildProofRoutes()
@@ -2535,17 +2561,19 @@ final class NodeStoreTests: XCTestCase {
                 blockHash: fixture.first.rootCID
             ),
             volumeRoots: [],
-            hierarchyArtifacts: AdmissionHierarchyArtifacts(
-                carrierLink: try decode(ParentCarrierLink.self, json: """
-                    {"parentPath":["Nexus"],"carrierCID":"\(fixture.first.rootCID)","rootCID":"\(fixture.first.rootCID)"}
-                """),
-                carrierEvidence: nil,
-                parentGenesisLinks: [try decode(
-                    ParentGenesisLink.self,
-                    json: """
-                    {"parentPath":["Nexus"],"directory":"Child","childGenesisCID":"\(fixture.childCID)","parentStateCID":"parent-state"}
-                    """
-                )]
+            persistence: ImportPersistence(
+                hierarchyArtifacts: AdmissionHierarchyArtifacts(
+                    carrierLink: try decode(ParentCarrierLink.self, json: """
+                        {"parentPath":["Nexus"],"carrierCID":"\(fixture.first.rootCID)","rootCID":"\(fixture.first.rootCID)"}
+                    """),
+                    carrierEvidence: nil,
+                    parentGenesisLinks: [try decode(
+                        ParentGenesisLink.self,
+                        json: """
+                        {"parentPath":["Nexus"],"directory":"Child","childGenesisCID":"\(fixture.childCID)","parentStateCID":"parent-state"}
+                        """
+                    )]
+                )
             )
         )
         let scan = try await parent.issuedChildEvidenceScanHead(
@@ -2680,9 +2708,11 @@ final class NodeStoreTests: XCTestCase {
                 blockHash: fixture.childCID
             ),
             volumeRoots: [],
-            incomingCarrierEvidence: AdmissionCarrierEvidence(
-                proof: package.package.proof,
-                childCID: fixture.childCID
+            persistence: ImportPersistence(
+                incomingCarrierEvidence: AdmissionCarrierEvidence(
+                    proof: package.package.proof,
+                    childCID: fixture.childCID
+                )
             )
         )
         let admittedInbox = try await child!.parentEvidenceInbox()
@@ -2881,10 +2911,12 @@ final class NodeStoreTests: XCTestCase {
                 blockHash: admitted.first.rootCID
             ),
             volumeRoots: [admitted.first.rootCID],
-            pendingChildProofRoutes: [PendingChildProofRoute(
-                carrierCID: admitted.first.rootCID,
-                directory: "Child"
-            )]
+            persistence: ImportPersistence(
+                pendingChildProofRoutes: [PendingChildProofRoute(
+                    carrierCID: admitted.first.rootCID,
+                    directory: "Child"
+                )]
+            )
         )
         try await store!.persistPreparedChildProofs(
             carrierCID: admitted.first.rootCID,
