@@ -1894,6 +1894,154 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         await fixture.runtime.stop()
     }
 
+    /// A block that arrives before its parent waits for the parent at a
+    /// constant request cost. Resolving its difficulty anchor by walking the
+    /// missing ancestry over the network — one Volume request per ancestor,
+    /// repeated at every level of the predecessor walk down from an announced
+    /// deep tip — is quadratic, and drained the supplier's per-peer budget
+    /// until requests went unanswered for a full request timeout each (#201).
+    /// Admission now answers the anchor from what it holds or parks.
+    func testOutOfOrderBlockParksOnItsParentWithoutWalkingItsAncestry()
+        async throws
+    {
+        let fixture = try await overlayRuntime(
+            keyByte: 0xe1,
+            requestTimeout: .seconds(5)
+        )
+        let depth = 16
+        let producer = try await canonicalNetworkProcess()
+        let clock = TestBlockClock()
+        var parent = try await producer.canonicalTipBlock()
+        var chain: [String] = []
+        var volumes: [SerializedVolume] = []
+        for _ in 0..<depth {
+            parent = try await acceptNexusBlock(
+                on: parent,
+                process: producer,
+                timestamp: clock.next()
+            )
+            let cid = try BlockHeader(node: parent).rawCID
+            chain.append(cid)
+            let volume = await producer.volume(cid)
+            volumes.append(try XCTUnwrap(volume))
+        }
+        let source = RecordingVolumesSource(volumes)
+        let client = Ivy(config: IvyConfig(
+            signingKey: signingKey(0xe2),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        // Answers no range request: the tip and the predecessor walk under
+        // it are the only way the joiner acquires this chain.
+        let delegate = TopicRecordingPeer(recorder: TopicRecorder())
+        await client.installTestDelegate(delegate)
+        await client.setContentSource(source)
+        let service = networkService(
+            process: fixture.process,
+            runtime: fixture.runtime
+        )
+        do {
+            try await fixture.runtime.start(
+                process: fixture.process,
+                chain: transactionServiceHandlers(service)
+            )
+            try await connectAndHello(
+                client,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            guard case .enqueued = await client.sendMessage(
+                to: fixture.peerID,
+                topic: NodeNetworkTopic.blockAnnouncement,
+                payload: try BlockAnnouncementMessage(
+                    blockCID: try XCTUnwrap(chain.last),
+                    height: UInt64(depth)
+                ).encoded()
+            ) else {
+                throw NetworkTestError.failedSend
+            }
+            try await eventually("joiner acquires the announced chain") {
+                await fixture.process.canonicalTipHeight() == UInt64(depth)
+            }
+            let requests = await source.requests()
+            // A constant per block, whatever its depth: its own admission
+            // (which parks it), its child's admission reading it as the
+            // parent (for the grandparent's difficulty anchor), and its
+            // re-admission when its parent connects. The ancestor walk asked
+            // for the lowest blocks once per level above them.
+            for (height, cid) in chain.enumerated() {
+                let count = requests.filter { $0 == cid }.count
+                XCTAssertLessThanOrEqual(
+                    count, 3,
+                    "block at height \(height + 1) requested \(count) times"
+                )
+            }
+        } catch {
+            await client.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await client.stop()
+        await fixture.runtime.stop()
+    }
+
+    /// Waiting on a missing parent applies only to a block that clears its
+    /// own target. A target miss is a carrier: decided and relayed from its
+    /// own bytes, whatever its parent (§9.5), so it is never held behind a
+    /// parent this node may never accept.
+    func testTargetMissWithUnknownParentIsACarrierNotAPark() async throws {
+        let producer = try await canonicalNetworkProcess()
+        let joiner = try await canonicalNetworkProcess()
+        let clock = TestBlockClock()
+        let genesis = try await producer.canonicalTipBlock()
+        let parent = try await acceptNexusBlock(
+            on: genesis,
+            process: producer,
+            timestamp: clock.next()
+        )
+        let parentCID = try BlockHeader(node: parent).rawCID
+        var nonce: UInt64 = 0
+        var miss = try await BlockBuilder.buildBlock(
+            previous: parent, timestamp: clock.next(), target: UInt256(1) << 8,
+            nonce: nonce, fetcher: producer
+        )
+        while miss.validateProofOfWork(nexusHash: miss.proofOfWorkHash()) {
+            nonce += 1
+            miss = try await BlockBuilder.buildBlock(
+                previous: parent, timestamp: clock.next(), target: UInt256(1) << 8,
+                nonce: nonce, fetcher: producer
+            )
+        }
+        let missHeader = try BlockHeader(node: miss)
+        try await missHeader.storeBlock(fetcher: producer, storer: producer)
+        let carrier = try await joiner.importBlock(
+            missHeader, remoteSource: producer, mode: .header
+        )
+        guard case .carrier = carrier.decision else {
+            return XCTFail("a target miss is a carrier, got \(carrier.decision)")
+        }
+        XCTAssertEqual(
+            carrier.parentCarrierLink?.carrierCID, missHeader.rawCID,
+            "the carrier is relayed"
+        )
+        XCTAssertNil(carrier.sameChainPredecessor, "not parked on its parent")
+
+        // The same parent under a block that clears its target: it waits
+        // for that parent.
+        let child = try await acceptNexusBlock(
+            on: parent,
+            process: producer,
+            timestamp: clock.next()
+        )
+        let waiting = try await joiner.importBlock(
+            try BlockHeader(node: child), remoteSource: producer, mode: .header
+        )
+        XCTAssertEqual(waiting.sameChainPredecessor?.predecessorCID, parentCID)
+    }
+
     /// One peer's in-flight range sync must not silence every OTHER peer's
     /// frontier pull. The edge test is PER PEER — our acquired tip against that
     /// peer's own claimed height — so a third party's claim has no bearing on

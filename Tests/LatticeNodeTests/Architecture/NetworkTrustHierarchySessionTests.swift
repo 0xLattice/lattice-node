@@ -556,9 +556,12 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             rpcPort: rpcPort
         )
 
-        // Persist P (not admitted) -> O (accepted orphan) -> D (accepted
-        // orphan), then reopen. Replaying the remote accepted leaf D must walk
-        // the missing predecessor suffix and wake it in connection order.
+        // Persist P (not admitted) -> O (accepted orphan: its height-1 parent
+        // in hand anchors it) -> D (not admitted: its parent is held but
+        // disconnected and its grandparent unknown, so admission cannot
+        // anchor it and asks for its predecessor), then reopen. Replaying the
+        // remote leaf D must park it behind P — the deepest missing ancestor,
+        // not its held parent O — and wake O and D once P connects.
         var stagingProcess: ChainProcess? = try await ChainProcess.open(
             configuration: configuration
         )
@@ -620,14 +623,10 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         }
         let orphanAdmission = try await stagingProcess!.importBlock(orphanHeader)
         let descendantAdmission = try await stagingProcess!.importBlock(descendantHeader)
-        // O validates against its height-1 parent P, in hand. D's anchor is
-        // P too, but P is not in the graph and nothing is walked, so D parks
-        // on its predecessor rather than being admitted ahead of it.
-        guard case .acceptedSide = orphanAdmission.decision,
-              case .unavailable = descendantAdmission.decision
-        else {
-            return XCTFail("expected accepted orphan and parked descendant")
+        guard case .acceptedSide = orphanAdmission.decision else {
+            return XCTFail("expected an accepted orphan, got \(orphanAdmission.decision)")
         }
+        XCTAssertEqual(descendantAdmission.decision, .unavailable(nil))
         XCTAssertEqual(
             orphanAdmission.sameChainPredecessor,
             SameChainPredecessorRequirement(
@@ -671,8 +670,6 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         )
         let recoveredRequirements = await recoveredProcess
             .unresolvedSameChainPredecessors()
-        // Only the admitted orphan is durable; the parked descendant returns
-        // when a peer announces it again.
         XCTAssertEqual(
             recoveredRequirements,
             [
