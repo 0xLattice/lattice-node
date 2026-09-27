@@ -43,8 +43,9 @@ evidence.
 
 Child candidates need no reducer, because nothing is reserved. Each child
 pushes its candidate whenever one of its inputs changes; the parent keeps only
-the latest candidate per child peer, and a template takes every held candidate
-whose parent state is the current tip's post-state. The child keeps what it
+the latest candidate per child peer, and a template takes at most one held
+candidate per directory, built on the current tip's post-state, never the block
+the branch already carries. The child keeps what it
 built in its own budgeted offer store, oldest offer evicted first. When the
 configured parent's evidence names one of those candidates carried, its row
 becomes a handoff: newer offers no longer evict it, a separate handoff budget
@@ -53,8 +54,9 @@ bounds it, and the carried block's import takes over its roots.
 While the parent's tip context names a carried child block that this chain has
 not imported, the child holds its candidate offers, since a candidate built
 then would only be that block's sibling. The hold ends when the block is
-imported, when an import decides against it, or when an evidence scan round
-sent for it ends without it. Only the configured parent's state can keep the
+imported, when an import of the parent's evidence for it decides against it, or
+when an evidence scan round sent for it ends without it while no parent-backed
+attempt for it is pending. Only the configured parent's state can keep the
 hold; nothing an overlay peer announces or relays does.
 
 ## Content boundary

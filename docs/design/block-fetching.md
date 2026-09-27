@@ -35,8 +35,8 @@ The fetcher does not own:
 
 Evidence is authenticated before entering the fetcher. Consensus remains the
 only authority that decides whether a complete candidate is accepted. The
-fetcher references no Ivy type, and the network runtime keeps no candidate
-state of its own beyond the fetcher it drives.
+fetcher references no Ivy type, and the network runtime keeps no
+candidate-acquisition state machine of its own beyond the fetcher it drives.
 
 ## Invariants
 

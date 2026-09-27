@@ -495,7 +495,7 @@ comparison those rules use is a node that retained B:
 - operator-finality requires that "A node's fork choice must be identical to
   that of a node which retained everything it has ever verified". It warns that
   otherwise nodes "could compute different heaviest branches purely as a
-  function of their pruning policy". That comparison node keeps the *weight
+  function of their retention policy". That comparison node keeps the *weight
   facts*, not the bytes, and it "may select a head it has not yet re-acquired",
   so the loss of a provider does not excuse the gating node.
 - modular-import-pipeline rules out work floors because "two nodes with
@@ -565,7 +565,9 @@ accepts in exchange for how much storage:
 Between those ends the operator trades storage against how much verified work
 the node may forget. No protocol constant sits anywhere on the dial: like every
 other limit here, it is a node-local decision with a sane default. A node at any
-setting is fully conforming in consensus terms.
+setting is fully conforming in consensus terms. Adopting this makes the
+unconditional rules in operator-finality, protocol.md and modular-import-pipeline
+operator-selected, and they must say so.
 
 ## Stranding
 

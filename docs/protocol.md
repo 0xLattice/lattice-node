@@ -216,8 +216,9 @@ frontier pull, when a peer's announced height is within the range-sync depth
 threshold of its own fetched tip; the cursored descent it answers is never
 sent. It never sends the portable-attachment index request: header-graph range
 sync (common-ancestor negotiation plus forward pages), live announcements and
-the predecessor walk carry sync, and a never-validated carrier's proof is
-solicited per block through a locate request.
+the predecessor walk carry sync. When a cold-synced child block needs a proof
+this node cannot recover locally, a per-block locate request asks the block's
+advertisers and supplier for its portable proof package.
 
 Peer content exchange is Volume-native. An announcer names one complete Volume
 by its root CID and must serve that Volume from the exact authenticated session
@@ -236,9 +237,9 @@ branch under a reorg): that is how a child learns it was carried, at push
 latency rather than evidence latency. The
 parent holds the latest candidate per child peer — a candidate it already
 holds on that session, or an older one, is dropped from the frame's head
-without decoding the block — and a template carries every held candidate
-built on its current tip's post-state, except the block the branch already
-carries for that directory (a children-only carrier leaves the post-state,
+without decoding the block — and a template carries at most one held
+candidate per directory, built on its current tip's post-state, never the
+block the branch already carries for that directory (a children-only carrier leaves the post-state,
 so that offer still fits; carried again it would only be credited once
 more). Nothing is requested at
 template time and no child can stall parent consensus. A child builds no

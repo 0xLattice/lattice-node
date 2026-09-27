@@ -42,7 +42,7 @@ how much losing-fork state their node keeps materialized, and that choice
 bounds — for that node only — how *expensively* it can act on a deep reorg,
 never *whether* its fork choice follows one:
 
-- Within the operator's pruning horizon, a competing fork can be adopted
+- Within the operator's retention horizon, a competing fork can be adopted
   without re-acquiring anything: the node holds it in full.
 - Below the horizon, losing forks are evicted. The node's head may still
   move to an evicted branch — it kept the weight facts (see below) — but
@@ -67,8 +67,8 @@ re-examine.
 Fork choice weighs whole subtrees, so a losing sibling is not weight-neutral:
 its work contributes to every ancestor's total. If eviction silently removed
 weight the node had already counted, nodes could compute different heaviest
-branches purely as a function of their pruning policy — a partition along
-pruning class with no attacker and no protocol change, healed only when
+branches purely as a function of their retention policy — a partition along
+retention class with no attacker and no protocol change, healed only when
 the omitted weight is re-learned. Therefore:
 
 - **Eviction discards stored bytes and service willingness, never verified
@@ -81,7 +81,7 @@ the omitted weight is re-learned. Therefore:
   optimization may solve it by quietly dropping counted edges.
 - The effect of an eviction is immediate and identical before and after a
   restart; no node's head may change across a restart without new facts.
-- Pruning changes what a node stores and serves, never which head it
+- Retention changes what a node stores and serves, never which head it
   *selects*: a miner-serving node selects the same head regardless of its
   horizon.
 - A node may select a head it has not yet re-acquired. In that interval it
@@ -126,7 +126,8 @@ this design.
 ### You serve what you keep
 
 Served surfaces — accepted-leaf pages and the portable-attachment index
-(both legacy-served only), content exchange — advertise the operator's
+(the leaf page is requested only as a frontier pull; the attachment index is
+legacy-served), content exchange — advertise the operator's
 retained set, nothing more. An archive
 node that keeps everything serves everything; a lean node serves the
 canonical chain plus its retained fringe. Availability, like finality, is
@@ -142,7 +143,7 @@ honestly offer. Two consequences must be stated:
 - A query for evicted data answers "not retained here" — it never errors and
   never asserts nonexistence.
 
-Operator pruning governs *non-canonical* state only; this design never
+Operator retention governs *non-canonical* state only; this design never
 evicts canonical genesis-to-tip closure, and whether canonical pruning is
 ever offered is out of scope here. That closure is a distinct axis: fresh
 nodes re-execute from genesis by design, so joinability depends on canonical
@@ -181,9 +182,9 @@ declined work at all. Any future design must hold these boundaries:
 
 - Consensus (Lattice) is untouched: no fork-depth rules, no finality
   thresholds, no changes to weight comparison or import validity — and,
-  via weight-preservation above, no pruning setting may alter the head any
+  via weight-preservation above, no retention setting may alter the head any
   node computes.
-- Pruning knobs live in node configuration with sane defaults, per chain,
+- Retention knobs live in node configuration with sane defaults, per chain,
   like every other operator budget. No knob is ever load-bearing for
   correctness — a node with any setting, including "keep everything", is a
   fully conforming peer.

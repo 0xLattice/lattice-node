@@ -55,8 +55,8 @@ The suites are grouped by the boundary they actually cross:
   credit survives a crash restart
   (`testNexusWorkReachesTheGrandchildAcrossAMiddleChainOutage`). The
   coordinator is stopped for that phase because it hunts the easiest target
-  and so also produces child-only carriers, whose child blocks have no chain
-  carrier to be credited through. A second scenario keeps the coordinator
+  and so also produces child-only carriers, whose child blocks have no
+  connected parent-chain block (run carrier) to be credited through. A second scenario keeps the coordinator
   mining and stops the middle chain's node mid-round, the deploy case that
   cut a deferred parent-carried block off from its retry: after the restart
   the node must be credited the outage work, which only that block's
