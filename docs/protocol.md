@@ -340,7 +340,8 @@ The pool separates executable, future-nonce, and temporarily unavailable
 transactions by signer nonce. Template selection advances a dependency
 frontier across every signer, choosing the highest-fee eligible transaction
 without copying state validity out of Lattice. The pool applies
-bounded replacement, expiry, and low-value eviction, caps non-ready work per
+bounded replacement and low-value eviction (there is no time-based expiry),
+caps non-ready work per
 signer, and always evicts non-ready work before executable work regardless of
 an unpaid declared fee. It revalidates after every canonical change.
 Transactions confirmed on the new chain leave the pool;
@@ -379,14 +380,30 @@ direct-child candidates supplied by their processes.
 
 ## HTTP surface
 
-The unauthenticated adapter is loopback-only:
+Two listeners serve two surfaces. The unauthenticated operator adapter binds
+loopback only and refuses any other bind address; it carries the writes and
+the operator-only reads:
 
 ```text
-GET  /health
-GET  /v1/status
+GET  /v1/status              (with the template digest; reconciling)
+GET  /metrics
 POST /v1/transactions
 POST /v1/mining/templates
 POST /v1/mining/work
+```
+
+The public read listener (`--public-read-port`) binds all interfaces and
+serves only the bounded, non-mutating read allowlist below; the same routes
+are registered on the loopback listener so the two cannot drift. `/health`
+is served from an ungated snapshot and omits the template digest.
+
+```text
+GET|HEAD /health
+GET /v1/blocks, /v1/blocks/:cid, /v1/transactions/:cid, /v1/accounts/:owner
+GET /api/block/latest, /api/block/:id, /api/block/:id/transactions,
+    /api/block/:id/children, /api/transaction/:cid, /api/state/account/:addr,
+    /api/mempool, /api/peers, /api/chain/info, /api/chain/spec,
+    /api/chain/genesis, /api/chain/children, /api/chain/endpoints
 ```
 
 See [RPC API](rpc-api.md) for DTOs and [Architecture](architecture.md) for
