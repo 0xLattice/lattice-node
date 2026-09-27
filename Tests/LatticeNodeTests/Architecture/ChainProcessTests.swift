@@ -1097,6 +1097,86 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertTrue(inbox.isEmpty, "both decided: consumed")
     }
 
+    /// Two steps out of order on the carried path: B3's evidence arrives
+    /// before B1's and B2's. Its parent is not held, so admission parks it on
+    /// B2 without resolving anything over the network, and the parked
+    /// evidence stays in the durable inbox. Once B1 and B2 connect, B3 is
+    /// admitted and its entry consumed.
+    func testCarriedBlockTwoStepsAheadParksInTheInboxUntilItsParentConnects()
+        async throws
+    {
+        let fixture = try await childBootstrapFixture()
+        let parentSource = fixture.source
+        let process = try await ChainProcess.open(configuration: fixture.configuration)
+        let bootstrapped = try await process.activateSeededChildGenesis(
+            seed: fixture.seed, confirmParentRecordedGenesis: { _ in true }
+        )
+        XCTAssertTrue(bootstrapped)
+        var previous = try XCTUnwrap(fixture.childHeader.node)
+        var headers: [BlockHeader] = []
+        var packages: [AuthenticatedChildPackage] = []
+        for step in 1...3 {
+            let block = try await BlockBuilder.buildBlock(
+                previous: previous, timestamp: Int64(step + 1), nonce: UInt64(step),
+                fetcher: parentSource
+            )
+            let header = try BlockHeader(node: block)
+            try await header.storeBlock(fetcher: parentSource, storer: parentSource)
+            let carrier = try await BlockBuilder.buildGenesis(
+                spec: NexusGenesis.spec, children: ["Payments": block],
+                timestamp: Int64(step + 2), target: UInt256.max, fetcher: parentSource
+            )
+            let proof = try await ChildBlockProof.generate(
+                rootHeader: try BlockHeader(node: carrier), childDirectory: "Payments",
+                fetcher: parentSource
+            )
+            let package = AuthenticatedChildPackage(
+                package: ChildValidationPackage(proof: proof)
+            )
+            try await process.retainParentEvidence(
+                sourceID: "00000000-0000-4000-8000-000000000003",
+                ordinal: UInt64(step),
+                attachment: try ChildEvidenceVolume(
+                    envelopeBytes: try ChildValidationPackageEnvelope(package.package).encode(),
+                    childCID: header.rawCID
+                ),
+                package: package, advanceScan: true
+            )
+            headers.append(header)
+            packages.append(package)
+            previous = block
+        }
+        // B3 first, with its supplier reachable: admission still parks it
+        // rather than walking B2 and B1 in through the supplier.
+        let early = try await process.importBlock(
+            headers[2], authenticatedChildPackage: packages[2],
+            remoteSource: parentSource, mode: .header
+        )
+        XCTAssertEqual(early.decision, .unavailable(nil), "parked, not decided")
+        XCTAssertEqual(early.sameChainPredecessor?.predecessorCID, headers[1].rawCID)
+        var inbox = try await process.store.parentEvidenceInbox()
+        XCTAssertEqual(inbox.count, 3, "B3's evidence waits in the inbox")
+
+        for index in 0..<2 {
+            let connected = try await process.importBlock(
+                headers[index], authenticatedChildPackage: packages[index],
+                remoteSource: parentSource, mode: .header
+            )
+            XCTAssertTrue(connected.decision.isAccepted, "\(connected.decision)")
+            XCTAssertNil(connected.sameChainPredecessor)
+        }
+        let late = try await process.importBlock(
+            headers[2], authenticatedChildPackage: packages[2],
+            remoteSource: parentSource, mode: .header
+        )
+        XCTAssertTrue(late.decision.isAccepted, "\(late.decision)")
+        XCTAssertNil(late.sameChainPredecessor)
+        let tips = await process.metricsTipHeights()
+        XCTAssertEqual(tips.weighed, 3)
+        inbox = try await process.store.parentEvidenceInbox()
+        XCTAssertTrue(inbox.isEmpty, "all three decided: consumed")
+    }
+
     func testSuccessorAttachmentWaitsForChildGenesis() async throws {
         let fixture = try await childBootstrapFixture()
         let parentSource = fixture.source
