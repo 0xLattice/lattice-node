@@ -365,6 +365,13 @@ struct CandidateAcquirer {
         return accepted
     }
 
+#if DEBUG
+    /// Test seam: every provider key still recorded against some block.
+    func providerPublicKeysForTesting() -> Set<String> {
+        Set(records.values.flatMap { $0.providers.keys })
+    }
+#endif
+
     mutating func disconnect(_ provider: CandidateProvider) {
         for blockCID in Array(records.keys) {
             guard var record = records[blockCID],

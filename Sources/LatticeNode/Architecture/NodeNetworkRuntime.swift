@@ -4677,6 +4677,45 @@ public actor NodeNetworkRuntime: IvyDelegate {
         refusedChildEvidenceHints.count
     }
 
+    /// Test seam: every peer key still held by a per-peer record or a pending
+    /// request, across both planes. The safety net pins that a disconnected
+    /// peer's key is absent here.
+    func heldPeerKeysForTesting() -> Set<PeerKey> {
+        var keys = Set<PeerKey>()
+        keys.formUnion(overlaySessions.keys)
+        keys.formUnion(overlayPeers.keys)
+        keys.formUnion(hierarchyPeers.keys)
+        keys.formUnion(hierarchySessions.keys)
+        keys.formUnion(childEvidenceReadyPeers)
+        keys.formUnion(childEvidenceReadyWaiters.keys)
+        keys.formUnion(childEvidenceIndexCompleteSessions.map(\.peerKey))
+        keys.formUnion(childEvidencePublicationFailedSessions.map(\.peerKey))
+        keys.formUnion(childEvidencePublicationsInFlight.keys.map(\.peerKey))
+        keys.formUnion(refusedChildEvidenceHints.keys)
+        keys.formUnion(overlayHelloDeadlines.keys)
+        keys.formUnion(hierarchyHelloDeadlines.keys)
+        keys.formUnion(pendingTransactionInventories.values.map(\.peer.key))
+        keys.formUnion(frontierPulls.keys)
+        keys.formUnion(childDeclaredReadURLs.keys)
+        keys.formUnion(pendingReadEndpoints.values.map(\.peer.key))
+        if let rangeSync { keys.insert(rangeSync.peer.key) }
+        keys.formUnion(pendingEvidenceIndexes.values.map(\.peer.key))
+        keys.formUnion(pendingParentChainFacts.values.map(\.peer.key))
+        keys.formUnion(pendingGenesisVerifications.values.map(\.peer.key))
+        keys.formUnion(pendingGenesisResolves.values.map(\.peer.key))
+        keys.formUnion(parentStateQueryGuard.peers)
+        keys.formUnion(announcedTips.keys)
+        keys.formUnion(portableEvidenceWork.values.map(\.peer.key))
+        keys.formUnion(pushedParentTipSequence.keys)
+        keys.formUnion(childCandidateOffers.keys)
+        if let receivedParentTip { keys.insert(receivedParentTip.peer.key) }
+        for hex in candidateAcquirer.providerPublicKeysForTesting()
+            .union(parentEvidence.peerIDsForTesting()) {
+            if let key = try? PeerKey(hex) { keys.insert(key) }
+        }
+        return keys
+    }
+
     /// Test seam: one pass of the genesis-provider announce loop, which
     /// otherwise repeats only once a minute.
     func announceGenesisProvidersForTesting(process: ChainProcess) async {
