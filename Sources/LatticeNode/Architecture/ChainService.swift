@@ -6,37 +6,6 @@ import UInt256
 import VolumeBroker
 import cashew
 
-/// Internal publication passed directly to the hierarchy runtime. Deliberately
-/// not Codable so it cannot accidentally become an HTTP DTO.
-public struct DirectChildProofPublication: Sendable {
-    public let directory: String
-    public let childCID: String
-    public let proof: ChildBlockProof
-}
-
-/// The runtime requests authenticated direct-child candidates against this
-/// exact provisional carrier. It owns the bounded deadline and returns partial
-/// success when only some children respond.
-public struct ChildCandidateRequestContext: Sendable {
-    public let parentCarrier: Block
-    public let rewards: [MiningReward]
-    /// The requesting miner's minimum work for descendant chains.
-    public let minimumWork: [MiningMinimumWork]
-    public let excludedDirectories: Set<String>
-
-    public init(
-        parentCarrier: Block,
-        rewards: [MiningReward],
-        minimumWork: [MiningMinimumWork] = [],
-        excludedDirectories: Set<String> = []
-    ) {
-        self.parentCarrier = parentCarrier
-        self.rewards = rewards
-        self.minimumWork = minimumWork
-        self.excludedDirectories = excludedDirectories
-    }
-}
-
 public typealias ChildCandidateProvider = @Sendable (
     ChildCandidateRequestContext
 ) async throws
@@ -142,15 +111,7 @@ public actor ChainService {
     private let process: ChainProcess
     private let pool: TransactionPool
     private let templates: MiningTemplateBook
-    private let childCandidateProvider: ChildCandidateProvider
-    private let chainStateChangePublisher: ChainStateChangePublisher
-    private let descendantPlanPublisher: DescendantPlanPublisher
-    private let childCandidateDigestProvider: ChildCandidateDigestProvider
-    private let childProofPublisher: ChildProofPublisher
-    private let parentRunReportPublisher: ParentRunReportPublisher
-    private let parentRunReportRequester: ParentRunReportRequester
-    private let acceptedBlockPublisher: AcceptedBlockPublisher
-    private let acceptedTransactionPublisher: AcceptedTransactionPublisher
+    private let network: any NetworkInterface
     private let maximumChildCandidates: Int
     private var liveMempoolRoots = Set<String>()
     private var mempoolUnavailable = false
@@ -171,19 +132,18 @@ public actor ChainService {
     /// block it will not re-execute). While a walk is merely behind and able
     /// to step, no candidate is built; a parked one withholds none.
     private var validateWalkParked = false
-    // Network body acquisition for the validate walk (see ValidateBodyAdmission).
-    // When present the walk pulls a weighed block's deferred body over the network;
-    // when the body is temporarily unavailable the walk parks and a single delayed
-    // retry re-arms it — there is no push signal on body arrival, and once weighed
-    // sync completes the acquirer may hold no timed wait to re-drive it, so the
-    // walk owns its own liveness retry rather than borrowing the acquirer's.
-    private let validateBodySource: ValidateBodyAdmission?
-    // Cross-chain evidence acquisition for the validate walk: a weighed CHILD
-    // block's `.validate` needs the parent fact (state continuity / genesis
-    // link) the live path obtains from the configured parent. The walk hands
-    // the requirement to this source and re-admits with the package it
-    // returns; nil parks the walk on the retry timer as an availability gap.
-    private let validateEvidenceSource: ValidateEvidenceSource?
+    // Network body acquisition for the validate walk (see
+    // NetworkInterface.withValidateBodySource). When the network has a body
+    // source the walk pulls a weighed block's deferred body over it; when the
+    // body is temporarily unavailable the walk parks and a single delayed
+    // retry re-arms it — there is no push signal on body arrival, and once
+    // weighed sync completes the acquirer may hold no timed wait to re-drive
+    // it, so the walk owns its own liveness retry rather than borrowing the
+    // acquirer's. Cross-chain evidence for the walk comes from
+    // NetworkInterface.resolveValidateEvidence: a weighed CHILD block's
+    // `.validate` needs the parent fact (state continuity / genesis link) the
+    // live path obtains from the configured parent; nil parks the walk on the
+    // retry timer as an availability gap.
     private let validateWalkRetryInterval: Duration
     private var validateWalkRetryTask: Task<Void, Never>?
     private var validateWalkParkedCount: UInt64 = 0
@@ -199,6 +159,34 @@ public actor ChainService {
     // template cache, and pending intents in one externally observable order.
     private var operationInFlight = false
     private var operationWaiters: [OperationWaiter] = []
+
+    public init(
+        process: ChainProcess,
+        network: any NetworkInterface,
+        validateWalkRetryInterval: Duration = .seconds(4),
+        mempoolMaxCount: Int = 10_000,
+        mempoolMaxNonReadyPerSigner: Int = 64,
+        maximumChildCandidates: Int = 64
+    ) {
+        precondition(
+            mempoolMaxCount > 0 && mempoolMaxNonReadyPerSigner > 0
+                && maximumChildCandidates > 0
+        )
+        self.validateWalkRetryInterval = validateWalkRetryInterval
+        self.process = process
+        self.network = network
+        self.pool = TransactionPool(
+            maxCount: mempoolMaxCount,
+            maxBytes: 64 * 1024 * 1024,
+            maxNonReadyPerSigner: mempoolMaxNonReadyPerSigner
+        )
+        self.templates = MiningTemplateBook(
+            chainPath: process.configuration.chainPath,
+            lifetime: .seconds(Self.templateLifetimeSeconds),
+            capacity: Self.templateCapacity
+        )
+        self.maximumChildCandidates = maximumChildCandidates
+    }
 
     public init(
         process: ChainProcess,
@@ -218,34 +206,26 @@ public actor ChainService {
         mempoolMaxNonReadyPerSigner: Int = 64,
         maximumChildCandidates: Int = 64
     ) {
-        precondition(
-            mempoolMaxCount > 0 && mempoolMaxNonReadyPerSigner > 0
-                && maximumChildCandidates > 0
+        self.init(
+            process: process,
+            network: ClosureNetworkInterface(
+                childCandidateProvider: childCandidateProvider,
+                chainStateChangePublisher: chainStateChangePublisher,
+                descendantPlanPublisher: descendantPlanPublisher,
+                childCandidateDigestProvider: childCandidateDigestProvider,
+                childProofPublisher: childProofPublisher,
+                parentRunReportPublisher: parentRunReportPublisher,
+                parentRunReportRequester: parentRunReportRequester,
+                acceptedBlockPublisher: acceptedBlockPublisher,
+                acceptedTransactionPublisher: acceptedTransactionPublisher,
+                validateBodySource: validateBodySource,
+                validateEvidenceSource: validateEvidenceSource
+            ),
+            validateWalkRetryInterval: validateWalkRetryInterval,
+            mempoolMaxCount: mempoolMaxCount,
+            mempoolMaxNonReadyPerSigner: mempoolMaxNonReadyPerSigner,
+            maximumChildCandidates: maximumChildCandidates
         )
-        self.validateBodySource = validateBodySource
-        self.validateEvidenceSource = validateEvidenceSource
-        self.validateWalkRetryInterval = validateWalkRetryInterval
-        self.process = process
-        self.childCandidateProvider = childCandidateProvider
-        self.chainStateChangePublisher = chainStateChangePublisher
-        self.descendantPlanPublisher = descendantPlanPublisher
-        self.childCandidateDigestProvider = childCandidateDigestProvider
-        self.childProofPublisher = childProofPublisher
-        self.parentRunReportPublisher = parentRunReportPublisher
-        self.parentRunReportRequester = parentRunReportRequester
-        self.acceptedBlockPublisher = acceptedBlockPublisher
-        self.acceptedTransactionPublisher = acceptedTransactionPublisher
-        self.pool = TransactionPool(
-            maxCount: mempoolMaxCount,
-            maxBytes: 64 * 1024 * 1024,
-            maxNonReadyPerSigner: mempoolMaxNonReadyPerSigner
-        )
-        self.templates = MiningTemplateBook(
-            chainPath: process.configuration.chainPath,
-            lifetime: .seconds(Self.templateLifetimeSeconds),
-            capacity: Self.templateCapacity
-        )
-        self.maximumChildCandidates = maximumChildCandidates
     }
 
     /// Join this service's three coalesced background workers — canonical
@@ -1080,8 +1060,11 @@ public actor ChainService {
         // Pushed after the template so the miner never waits on it.
         let descendantRewards = rewardPlan.descendants
         let descendantMinimumWork = minimumWorkPlan.descendants
-        Task { [descendantPlanPublisher] in
-            await descendantPlanPublisher(descendantRewards, descendantMinimumWork)
+        Task { [network] in
+            await network.updateDescendantPlan(
+                rewards: descendantRewards,
+                minimumWork: descendantMinimumWork
+            )
         }
         return MiningTemplateResponse(
             template: template,
@@ -1106,7 +1089,9 @@ public actor ChainService {
             .filter { $0.disposition != .unavailable }
             .map(\.cid).sorted().joined(separator: ",")))
         if let tip {
-            lines += await childCandidateDigestProvider(tip.postState.rawCID)
+            lines += await network.childCandidateDigestInput(
+                parentStateCID: tip.postState.rawCID
+            )
         }
         let digest = SHA256.hash(data: Data(lines.joined(separator: "\n").utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
@@ -1597,7 +1582,7 @@ public actor ChainService {
         }
     }
 
-    /// See `validateEvidenceSource`.
+    /// See `NetworkInterface.resolveValidateEvidence`.
     public typealias ValidateEvidenceSource = @Sendable (
         _ blockCID: String,
         _ requirement: CrossChainEvidenceRequirement
@@ -1707,13 +1692,12 @@ public actor ChainService {
             }
             let attempt: @Sendable (
                 AuthenticatedChildPackage?
-            ) async throws -> NodeAdmissionOutcome = { [validateBodySource] package in
-                if let validateBodySource {
-                    return try await validateBodySource(next) { remoteSource in
-                        try await admitValidate(remoteSource, package)
-                    }
+            ) async throws -> NodeAdmissionOutcome = { [network] package in
+                try await network.withValidateBodySource(
+                    blockCID: next
+                ) { remoteSource in
+                    try await admitValidate(remoteSource, package)
                 }
-                return try await admitValidate(nil, package)
             }
             var outcome: NodeAdmissionOutcome
             do {
@@ -1724,8 +1708,10 @@ public actor ChainService {
                 // package; if it cannot be obtained now, fall through to the
                 // availability park below.
                 if case .unavailable(let requirement?) = outcome.decision,
-                   let validateEvidenceSource,
-                   let package = await validateEvidenceSource(next, requirement) {
+                   let package = await network.resolveValidateEvidence(
+                       for: next,
+                       requirement: requirement
+                   ) {
                     outcome = try await attempt(package)
                 }
             } catch {
@@ -1868,7 +1854,7 @@ public actor ChainService {
             let key = "\(report.directory)/\(report.blockHash)"
             if let last = pushedRunWork[key], last >= report.runWork { continue }
             pushedRunWork[key] = report.runWork
-            try? await parentRunReportPublisher(report)
+            try? await network.announceParentRunReport(report)
         }
     }
 
@@ -1901,9 +1887,9 @@ public actor ChainService {
             if outcome.canonicalCommitReceipt == nil {
                 await reconcileCanonicalCommitOrResetLocked(commit)
             }
-            try? await acceptedBlockPublisher(header.rawCID)
+            try? await network.publishAcceptedBlock(header.rawCID)
         case .acceptedSide:
-            try? await acceptedBlockPublisher(header.rawCID)
+            try? await network.publishAcceptedBlock(header.rawCID)
         default:
             break
         }
@@ -1947,7 +1933,7 @@ public actor ChainService {
                let committers = try? await process.incomingCarrierCommitters(
                    of: header.rawCID
                ), !committers.isEmpty {
-                await parentRunReportRequester(committers)
+                await network.requestParentRunReports(committers: committers)
             }
         }
         if outcome.decision.isAccepted {
@@ -1992,7 +1978,7 @@ public actor ChainService {
                 childCID: durable.childCID,
                 proof: durable.proof
             )
-            do { try await childProofPublisher(publication) } catch {
+            do { try await network.publishChildProof(publication) } catch {
                 // Proofs and links are durable; hierarchy pull/reconnect can
                 // retry a failed eager publication.
             }
@@ -2076,7 +2062,7 @@ public actor ChainService {
 
     private func drainTransactionPublications() async {
         while let cid = transactionPublications.popFirst() {
-            try? await acceptedTransactionPublisher(cid)
+            try? await network.publishTransaction(cid)
         }
         transactionPublicationWorker = nil
     }
@@ -2087,8 +2073,8 @@ public actor ChainService {
 
     /// Fire-and-forget: never hold the service lease across the network.
     private func publishChainStateChange() {
-        Task { [chainStateChangePublisher] in
-            await chainStateChangePublisher()
+        Task { [network] in
+            await network.chainStateChanged()
         }
     }
 
@@ -2303,7 +2289,7 @@ public actor ChainService {
     private func validatedProvidedChildren(
         context: ChildCandidateRequestContext
     ) async throws -> [DirectChildCandidate] {
-        let candidates = try await childCandidateProvider(context)
+        let candidates = try await network.directChildCandidates(context)
         var directories: Set<String> = []
         var accepted: [DirectChildCandidate] = []
         for candidate in candidates.sorted(by: candidateOrder) {
