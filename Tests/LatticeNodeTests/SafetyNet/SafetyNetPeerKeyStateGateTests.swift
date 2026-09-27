@@ -29,7 +29,7 @@ final class SafetyNetPeerKeyStateGateTests: XCTestCase {
     /// A `var`/`let` declaration whose annotated type or initializer is a
     /// peer-keyed dictionary or a set of peer keys.
     private static let declarationPattern =
-        #"^\s*(?:[\w()]+\s+)*(?:var|let)\s+(\w+)\s*(?::\s*(?:\[\s*PeerKey\s*:|Set<\s*PeerKey\s*>)|=\s*(?:Set<\s*PeerKey\s*>|\[\s*PeerKey\s*:))"#
+        #"^\s*(?:[\w()]+\s+)*(?:var|let)\s+(\w+)\s*(?::\s*(?:\[\s*PeerKey\s*:|Set<\s*PeerKey\s*>|Dictionary<\s*PeerKey\s*,)|=\s*(?:Set<\s*PeerKey\s*>|\[\s*PeerKey\s*:|Dictionary<\s*PeerKey\s*,))"#
 
     /// A line opening a type body.
     private static let typePattern =
