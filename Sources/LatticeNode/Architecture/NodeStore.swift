@@ -140,36 +140,36 @@ struct PendingChildProofRoute: Sendable, Hashable {
     let directory: String
 }
 
-private struct PreparedAdmissionCarrierEvidence {
+struct PreparedAdmissionCarrierEvidence {
     let edge: DirectChildEdge
     let rootCID: String
     let proofAttachment: ChildEvidenceVolume
 }
 
-private struct PreparedAdmissionHierarchyArtifacts {
+struct PreparedAdmissionHierarchyArtifacts {
     let carrierLink: ParentCarrierLink
     let carrierLinkPayload: Data
     let carrierEvidence: PreparedAdmissionCarrierEvidence?
     let parentGenesisLinks: [(link: ParentGenesisLink, payload: Data)]
 }
 
-private struct PersistedParentFactSource: Codable {
+struct PersistedParentFactSource: Codable {
     let carrierLink: ParentCarrierLink
     let parentGenesisLinks: [ParentGenesisLink]
 }
 
-private struct IssuedParentFactKey: Hashable {
+struct IssuedParentFactKey: Hashable {
     let kind: String
     let keyA: String
     let keyB: String
 }
 
-private struct AcceptedBlockRecord: Hashable {
+struct AcceptedBlockRecord: Hashable {
     let blockCID: String
     let parentCID: String?
 }
 
-private struct PersistedAcceptedBlock: Hashable {
+struct PersistedAcceptedBlock: Hashable {
     let blockCID: String
     let parentCID: String?
     let admissionSequence: Int64
@@ -192,7 +192,7 @@ actor NodeStore {
     /// wiped; Nexus deterministically recreates the configured exact genesis.
     static let currentSchemaEpoch: Int64 = 40
 
-    private static func parentGenesisFactKey(
+    static func parentGenesisFactKey(
         _ link: ParentGenesisLink
     ) -> String {
         parentGenesisFactKey(
@@ -201,26 +201,26 @@ actor NodeStore {
         )
     }
 
-    private static func parentGenesisFactKey(
+    static func parentGenesisFactKey(
         childGenesisCID: String,
         parentStateCID: String
     ) -> String {
         "\(parentStateCID.utf8.count):\(parentStateCID)\(childGenesisCID)"
     }
 
-    private let database: NodeSQLite
-    private let nexusGenesisCID: String
-    private let chainPath: [String]
-    private let recoveryVolumeBroker: any RetainedRootMergeBroker
-    private let blockRetentionScope: String
-    private let issuedRecoveryRetentionScope: String
-    private let preparedRecoveryRetentionScope: String
-    private let parentEvidenceInboxRetentionScope: String
-    private let parentEvidenceInboxCapacity: Int
-    private let handoffCandidateCapacity: Int
-    private let contextualCandidateOwner: String
-    private var preparedMutationInFlight = false
-    private var preparedMutationWaiters: [CheckedContinuation<Void, Never>] = []
+    let database: NodeSQLite
+    let nexusGenesisCID: String
+    let chainPath: [String]
+    let recoveryVolumeBroker: any RetainedRootMergeBroker
+    let blockRetentionScope: String
+    let issuedRecoveryRetentionScope: String
+    let preparedRecoveryRetentionScope: String
+    let parentEvidenceInboxRetentionScope: String
+    let parentEvidenceInboxCapacity: Int
+    let handoffCandidateCapacity: Int
+    let contextualCandidateOwner: String
+    var preparedMutationInFlight = false
+    var preparedMutationWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(
         databasePath: URL,
@@ -300,7 +300,7 @@ actor NodeStore {
         self.handoffCandidateCapacity = handoffCandidateCapacity
     }
 
-    private func acquirePreparedMutation() async {
+    func acquirePreparedMutation() async {
         guard preparedMutationInFlight else {
             preparedMutationInFlight = true
             return
@@ -310,7 +310,7 @@ actor NodeStore {
         }
     }
 
-    private func releasePreparedMutation() {
+    func releasePreparedMutation() {
         guard !preparedMutationWaiters.isEmpty else {
             preparedMutationInFlight = false
             return
@@ -318,7 +318,7 @@ actor NodeStore {
         preparedMutationWaiters.removeFirst().resume()
     }
 
-    private func mergeRecoveryRetention(
+    func mergeRecoveryRetention(
         scope: String,
         roots: [String]
     ) async throws {
@@ -329,7 +329,7 @@ actor NodeStore {
         )
     }
 
-    private func reconcilePreparedRecoveryRetention() async throws {
+    func reconcilePreparedRecoveryRetention() async throws {
         try await recoveryVolumeBroker.advanceRetainedRoots(
             scope: preparedRecoveryRetentionScope,
             roots: preparedRecoveryVolumeRoots()
@@ -1037,7 +1037,7 @@ actor NodeStore {
         }
     }
 
-    private func hasConnectedAcceptedBlock(_ blockCID: String) throws -> Bool {
+    func hasConnectedAcceptedBlock(_ blockCID: String) throws -> Bool {
         guard CIDIdentity.isCanonical(blockCID) else {
             throw NodeStoreError.corrupt("invalid connected block lookup")
         }
@@ -1072,7 +1072,7 @@ actor NodeStore {
         return sourceID
     }
 
-    private static func acceptedBlocks(
+    static func acceptedBlocks(
         in batch: ChainAdmissionBatch
     ) throws -> [AcceptedBlockRecord] {
         var blocks: [String: AcceptedBlockRecord] = [:]
@@ -1090,7 +1090,7 @@ actor NodeStore {
         return blocks.values.sorted { $0.blockCID < $1.blockCID }
     }
 
-    private func persistedAcceptedBlock(
+    func persistedAcceptedBlock(
         from row: [String: NodeSQLiteValue]
     ) throws -> PersistedAcceptedBlock {
         guard let blockCID = row["block_cid"]?.textValue,
@@ -1116,7 +1116,7 @@ actor NodeStore {
         )
     }
 
-    private func validateAcceptedBlockRows(
+    func validateAcceptedBlockRows(
         _ blocks: [AcceptedBlockRecord],
         admissionSequence: Int64
     ) throws {
@@ -1138,7 +1138,7 @@ actor NodeStore {
         }
     }
 
-    private func persistAcceptedBlockRows(
+    func persistAcceptedBlockRows(
         _ blocks: [AcceptedBlockRecord],
         admissionSequence: Int64,
         validated: Bool
@@ -1263,7 +1263,7 @@ actor NodeStore {
         }
     }
 
-    private func prepareHierarchyArtifacts(
+    func prepareHierarchyArtifacts(
         _ artifacts: AdmissionHierarchyArtifacts?,
         carrierCIDs: Set<String>
     ) async throws -> PreparedAdmissionHierarchyArtifacts? {
@@ -1320,7 +1320,7 @@ actor NodeStore {
         )
     }
 
-    private func prepareCarrierEvidence(
+    func prepareCarrierEvidence(
         _ evidence: AdmissionCarrierEvidence,
         expectedChildCIDs: Set<String>,
         expectedRootCID: String?
@@ -1371,7 +1371,7 @@ actor NodeStore {
         return try links.map { (link: $0, payload: try Self.encode($0)) }
     }
 
-    private func persistHierarchyArtifacts(
+    func persistHierarchyArtifacts(
         _ artifacts: PreparedAdmissionHierarchyArtifacts
     ) throws {
         if let evidence = artifacts.carrierEvidence {
@@ -1384,7 +1384,7 @@ actor NodeStore {
         )
     }
 
-    private func persistCarrierEvidence(
+    func persistCarrierEvidence(
         _ evidence: PreparedAdmissionCarrierEvidence
     ) throws {
         guard let edgeCID = evidence.edge.edgeCID else {
@@ -1399,7 +1399,7 @@ actor NodeStore {
         )
     }
 
-    private func storeRecoveryEvidence(
+    func storeRecoveryEvidence(
         _ evidence: [PreparedAdmissionCarrierEvidence]
     ) async throws -> [String] {
         for item in evidence {
@@ -1658,7 +1658,7 @@ actor NodeStore {
         )
     }
 
-    private func recoveryVolume(
+    func recoveryVolume(
         attachmentCID: String,
         childCID: String
     ) async throws -> ChildEvidenceVolume {
@@ -2823,7 +2823,7 @@ actor NodeStore {
         }
     }
 
-    private func persistChildGenesisVolumeRoots(
+    func persistChildGenesisVolumeRoots(
         childCID: String,
         roots: [String]
     ) throws {
@@ -2839,7 +2839,7 @@ actor NodeStore {
         }
     }
 
-    private func retainChildGenesisVolumes(
+    func retainChildGenesisVolumes(
         _ roots: [String],
         storer: any VolumeStorer
     ) async throws {
@@ -2853,7 +2853,7 @@ actor NodeStore {
         }
     }
 
-    private func childGenesisVolumeRoots(
+    func childGenesisVolumeRoots(
         childCID: String
     ) throws -> [String] {
         try database.query(
@@ -3118,7 +3118,7 @@ actor NodeStore {
         }
     }
 
-    private func persistPendingChildProofRouteRows(
+    func persistPendingChildProofRouteRows(
         _ routes: [PendingChildProofRoute],
         capacity: Int
     ) throws {
@@ -3178,7 +3178,7 @@ actor NodeStore {
         }
     }
 
-    private func pendingRoutesIncludingPreparedProofs(
+    func pendingRoutesIncludingPreparedProofs(
         _ routes: [PendingChildProofRoute],
         carrierCIDs: Set<String>
     ) throws -> [PendingChildProofRoute] {
@@ -3364,7 +3364,7 @@ actor NodeStore {
         }
     }
 
-    private func loadStagedAdmissions() throws -> [StagedAdmission] {
+    func loadStagedAdmissions() throws -> [StagedAdmission] {
         try database.query(
             "SELECT seq, payload, volume_roots FROM admission_batches ORDER BY seq ASC"
         ).map { row in
@@ -3421,7 +3421,7 @@ actor NodeStore {
         ).first?["payload"]?.blobValue
     }
 
-    private static func addExpectedParentFact(
+    static func addExpectedParentFact(
         key: IssuedParentFactKey,
         payload: Data,
         to facts: inout [IssuedParentFactKey: Data]
@@ -3434,7 +3434,7 @@ actor NodeStore {
         facts[key] = payload
     }
 
-    private static func validateMetadata(
+    static func validateMetadata(
         in database: NodeSQLite,
         tableNames: Set<String>,
         schemaEpoch: Int64,
@@ -3464,7 +3464,7 @@ actor NodeStore {
         }
     }
 
-    private static let expectedTables: Set<String> = [
+    static let expectedTables: Set<String> = [
         "node_metadata",
         "consensus_revision",
         "admission_batches",
@@ -3485,7 +3485,7 @@ actor NodeStore {
         "contextual_candidate_children",
     ]
 
-    private static func createSchema(
+    static func createSchema(
         in database: NodeSQLite,
         schemaEpoch: Int64,
         nexusGenesisCID: String,
@@ -3516,7 +3516,7 @@ actor NodeStore {
 
     /// Every index, `IF NOT EXISTS`, run at every open (new and existing
     /// stores alike) so an index introduced later still materializes.
-    private static func ensureIndexes(in database: NodeSQLite) throws {
+    static func ensureIndexes(in database: NodeSQLite) throws {
         try database.execute(
             "CREATE INDEX IF NOT EXISTS accepted_blocks_by_parent ON accepted_blocks (parent_cid, admission_seq, block_cid)"
         )
@@ -3690,13 +3690,13 @@ actor NodeStore {
             """)
     }
 
-    private static func encode<T: Encodable>(_ value: T) throws -> Data {
+    static func encode<T: Encodable>(_ value: T) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         return try encoder.encode(value)
     }
 
-    private static func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
+    static func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
         do {
             return try JSONDecoder().decode(type, from: data)
         } catch {
@@ -3704,7 +3704,7 @@ actor NodeStore {
         }
     }
 
-    private static func normalizedFacts(
+    static func normalizedFacts(
         in batch: ChainAdmissionBatch
     ) throws -> [Data: Data] {
         var normalized: [Data: Data] = [:]
@@ -3721,7 +3721,7 @@ actor NodeStore {
 
     /// Checks only the content-addressed root-to-leaf association and path
     /// scope. Consensus work and transition validity remain Lattice's job.
-    private static func proves(
+    static func proves(
         _ proof: ChildBlockProof,
         childCID: String,
         from chainPath: [String]
