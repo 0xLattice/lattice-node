@@ -551,7 +551,9 @@ struct BlockFetcher {
                 records[ticket.key.blockCID] = record
                 removeAttempt(ticket.key)
             } else if parkedCount() >= Self.parkedCapacity,
-                      !evictOldestParked() {
+                      !evictOldestParked(
+                        sparing: walk(above: ticket.key.blockCID)
+                      ) {
                 record.attempts[ticket.key.rootCID] = attempt
                 records[ticket.key.blockCID] = record
                 removeAttempt(ticket.key)
@@ -781,23 +783,50 @@ struct BlockFetcher {
         }
     }
 
+    /// The parks a predecessor walk has left above `blockCID`: every attempt
+    /// waiting, transitively, for it to connect, up to the walk's head.
+    private func walk(above blockCID: String) -> Set<AttemptKey> {
+        var parks = Set<AttemptKey>()
+        var frontier = [blockCID]
+        while let cid = frontier.popLast() {
+            for key in waitingOn[cid] ?? [] where parks.insert(key).inserted {
+                frontier.append(key.blockCID)
+            }
+        }
+        return parks
+    }
+
     /// Reclaims one retained slot by evicting the oldest waiting or parked
     /// attempt. Retention is an operator-budget cache, never a protocol rule:
     /// a live predecessor walk must always be able to park, and an evicted
     /// obligation is re-derivable (durable recovery edges re-derive from the
     /// accepted graph at restart; a live wait re-enters through a later
     /// announcement or range-sync page).
-    private mutating func evictOldestParked() -> Bool {
+    ///
+    /// A walk extending itself spares its own parks while anything else can
+    /// go: its oldest park is its head — the announced tip the walk exists
+    /// to connect — and evicting it would leave the walk connecting only the
+    /// ancestry below a block it no longer holds. Only a single walk deeper
+    /// than the whole budget evicts from itself, head first so the walk
+    /// keeps descending; the connected segment then carries the evicted top
+    /// back in through the next announcement or frontier pull, which walks
+    /// down only to that segment.
+    private mutating func evictOldestParked(
+        sparing spared: Set<AttemptKey> = []
+    ) -> Bool {
+        evictOldest(excluding: spared) || evictOldest(excluding: [])
+    }
+
+    private mutating func evictOldest(excluding spared: Set<AttemptKey>) -> Bool {
         var victim: (key: AttemptKey, order: UInt64)?
         for (blockCID, record) in records {
             for (rootCID, attempt) in record.attempts {
+                let key = AttemptKey(blockCID: blockCID, rootCID: rootCID)
+                guard !spared.contains(key) else { continue }
                 switch attempt.state {
                 case .waiting, .predecessor:
                     if victim == nil || attempt.order < victim!.order {
-                        victim = (
-                            AttemptKey(blockCID: blockCID, rootCID: rootCID),
-                            attempt.order
-                        )
+                        victim = (key, attempt.order)
                     }
                 default:
                     break
