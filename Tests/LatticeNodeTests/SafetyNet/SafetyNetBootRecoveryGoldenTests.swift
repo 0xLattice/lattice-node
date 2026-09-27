@@ -12,7 +12,10 @@ import cashew
 /// fresh `ChainProcess` is booted from it, and the booted view — canonical tip
 /// and height, validated tip, every accepted block's parent / height /
 /// canonicality / leaf flag / durable validation tier / process-level
-/// validated flag, and the volume broker's pinned roots and owners — is
+/// validated flag, the admission log (batch count, each batch's fact kinds in
+/// sequence order, normalized fact count — so a boot that re-stages, drops a
+/// validation fact or reorders batches is caught), and the volume broker's
+/// pinned roots and owners — is
 /// compared against the checked-in expectation in
 /// `Goldens/boot-recovery.json`, both by value and byte-for-byte (the file
 /// must be exactly what the sorted-keys encoder emits, so a hand edit or a
@@ -57,6 +60,10 @@ final class SafetyNetBootRecoveryGoldenTests: XCTestCase {
         let validatedHeight: UInt64?
         /// Sorted by CID.
         let blocks: [AcceptedBlock]
+        let admissionBatchCount: Int
+        /// Per batch in `seq` order, the kind of each fact in batch order.
+        let admissionBatchFactKinds: [[String]]
+        let admissionFactCount: Int
         let pinnedRoots: [String]
         let pinnedOwners: [String]
     }
@@ -114,6 +121,12 @@ final class SafetyNetBootRecoveryGoldenTests: XCTestCase {
         where block != expectedBlock {
             XCTFail("block \(block.cid) recovered as \(block), golden says \(expectedBlock)")
         }
+        XCTAssertEqual(actual.admissionBatchCount, expected.admissionBatchCount, "admissionBatchCount")
+        XCTAssertEqual(
+            actual.admissionBatchFactKinds, expected.admissionBatchFactKinds,
+            "admissionBatchFactKinds"
+        )
+        XCTAssertEqual(actual.admissionFactCount, expected.admissionFactCount, "admissionFactCount")
         XCTAssertEqual(actual.pinnedRoots, expected.pinnedRoots, "pinnedRoots")
         XCTAssertEqual(actual.pinnedOwners, expected.pinnedOwners, "pinnedOwners")
         XCTAssertEqual(actual, expected)
@@ -181,6 +194,27 @@ final class SafetyNetBootRecoveryGoldenTests: XCTestCase {
                 "SELECT schema_epoch FROM node_metadata WHERE singleton = 1"
             ).first?["schema_epoch"]?.intValue
         )
+        var batchFactKinds: [[String]] = []
+        for row in try database.query(
+            "SELECT payload FROM admission_batches ORDER BY seq ASC"
+        ) {
+            let batch = try JSONDecoder().decode(
+                ChainAdmissionBatch.self,
+                from: try XCTUnwrap(row["payload"]?.blobValue)
+            )
+            batchFactKinds.append(batch.facts.map { fact in
+                switch fact {
+                case .block: "block"
+                case .work: "work"
+                case .exclusion: "exclusion"
+                case .validation: "validation"
+                }
+            })
+        }
+        let factCount = try XCTUnwrap(
+            try database.query("SELECT COUNT(*) AS n FROM admission_facts")
+                .first?["n"]?.intValue
+        )
 
         // Release the storage lock before reading the broker independently.
         booted = nil
@@ -202,6 +236,9 @@ final class SafetyNetBootRecoveryGoldenTests: XCTestCase {
             validatedTipCID: status.tipCID,
             validatedHeight: status.height,
             blocks: blocks,
+            admissionBatchCount: batchFactKinds.count,
+            admissionBatchFactKinds: batchFactKinds,
+            admissionFactCount: Int(factCount),
             pinnedRoots: pinnedRoots,
             pinnedOwners: pinnedOwners
         )
