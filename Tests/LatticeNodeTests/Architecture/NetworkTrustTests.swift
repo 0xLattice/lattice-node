@@ -6392,10 +6392,12 @@ final class NetworkTrustTests: XCTestCase {
                 contentSource: fixture.parentProcess
             )
             XCTAssertTrue(carried.decision.isAccepted, "\(carried.decision)")
+            // Bounded poll, not a fixed wait: the parent re-mints its context
+            // after the carrier validates, and a sanitizer build is slow.
             var afterCarry = await fixture.parentRuntime.directChildCandidates(
                 fixture.context
             )
-            for _ in 0..<100 where !afterCarry.isEmpty {
+            for _ in 0..<500 where !afterCarry.isEmpty {
                 try await Task.sleep(for: .milliseconds(20))
                 afterCarry = await fixture.parentRuntime.directChildCandidates(
                     fixture.context
