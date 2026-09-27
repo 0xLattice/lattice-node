@@ -133,6 +133,18 @@ struct ParentEvidenceFlow {
         tails[session]?.task
     }
 
+#if DEBUG
+    /// Test seam: every peer still named by a tail, failure, backpressure or
+    /// reservation record.
+    func peerIDsForTesting() -> Set<String> {
+        Set(
+            tails.keys.map(\.peerID) + failed.map(\.peerID)
+                + backpressured.map(\.peerID)
+                + activeReservations.map(\.peerID)
+        )
+    }
+#endif
+
     mutating func cancel(peerID: String) {
         let sessions = tails.keys.filter { $0.peerID == peerID }
         for session in sessions {

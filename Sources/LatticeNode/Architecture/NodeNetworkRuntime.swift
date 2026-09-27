@@ -4677,6 +4677,79 @@ public actor NodeNetworkRuntime: IvyDelegate {
         refusedChildEvidenceHints.count
     }
 
+    /// Test seam: every peer key still held by a per-peer record or a pending
+    /// request, across both planes. The safety net pins that a disconnected
+    /// peer's key is absent here.
+    func heldPeerKeysForTesting() -> Set<PeerKey> {
+        var keys = Set<PeerKey>()
+        keys.formUnion(overlaySessions.keys)
+        keys.formUnion(overlayPeers.keys)
+        keys.formUnion(hierarchyPeers.keys)
+        keys.formUnion(hierarchySessions.keys)
+        keys.formUnion(childEvidenceReadyPeers)
+        keys.formUnion(childEvidenceReadyWaiters.keys)
+        keys.formUnion(childEvidenceIndexCompleteSessions.map(\.peerKey))
+        keys.formUnion(childEvidencePublicationFailedSessions.map(\.peerKey))
+        keys.formUnion(childEvidencePublicationsInFlight.keys.map(\.peerKey))
+        keys.formUnion(refusedChildEvidenceHints.keys)
+        keys.formUnion(overlayHelloDeadlines.keys)
+        keys.formUnion(hierarchyHelloDeadlines.keys)
+        keys.formUnion(pendingTransactionInventories.values.map(\.peer.key))
+        keys.formUnion(frontierPulls.keys)
+        keys.formUnion(childDeclaredReadURLs.keys)
+        keys.formUnion(pendingReadEndpoints.values.map(\.peer.key))
+        if let rangeSync { keys.insert(rangeSync.peer.key) }
+        keys.formUnion(pendingEvidenceIndexes.values.map(\.peer.key))
+        keys.formUnion(pendingParentChainFacts.values.map(\.peer.key))
+        keys.formUnion(pendingGenesisVerifications.values.map(\.peer.key))
+        keys.formUnion(pendingGenesisResolves.values.map(\.peer.key))
+        keys.formUnion(parentStateQueryGuard.peers)
+        keys.formUnion(announcedTips.keys)
+        keys.formUnion(portableEvidenceWork.values.map(\.peer.key))
+        keys.formUnion(pushedParentTipSequence.keys)
+        keys.formUnion(childCandidateOffers.keys)
+        if let receivedParentTip { keys.insert(receivedParentTip.peer.key) }
+        for hex in candidateAcquirer.providerPublicKeysForTesting()
+            .union(parentEvidence.peerIDsForTesting()) {
+            if let key = try? PeerKey(hex) { keys.insert(key) }
+        }
+        return keys
+    }
+
+    /// Test seam: the hierarchy role a peer's hello earned, if any.
+    func hierarchyPeerRoleForTesting(_ key: PeerKey) -> HierarchyPeer? {
+        hierarchyPeers[key]
+    }
+
+    /// Test seam: whether an overlay peer's hello has been accepted (a
+    /// session and its hello deadline exist from connect, before any hello).
+    func overlayHelloCompletedForTesting(_ key: PeerKey) -> Bool {
+        overlayPeers[key] != nil
+    }
+
+    /// Test seam: every session ID held by state keyed on a session rather
+    /// than a peer key (in-flight serves and content leases).
+    func heldSessionIDsForTesting() -> Set<Data> {
+        var sessions = Set<Data>()
+        sessions.formUnion(servingAcceptedLeaves)
+        sessions.formUnion(servingAncestorRange)
+        sessions.formUnion(servingReadEndpoints)
+        sessions.formUnion(activeTransactionVolumes.map(\.sessionID))
+        sessions.formUnion(activeEvidenceVolumes.map(\.sessionID))
+        sessions.formUnion(portableEvidenceOrder.map(\.sessionID))
+        return sessions
+    }
+
+    /// Test seam: the session IDs of every live authenticated session on
+    /// either plane (pre- and post-hello).
+    func liveSessionIDsForTesting() -> Set<Data> {
+        Set(
+            overlaySessions.values.map(\.sessionID)
+                + overlayPeers.values.map(\.sessionID)
+                + hierarchySessions.values.map(\.sessionID)
+        )
+    }
+
     /// Test seam: one pass of the genesis-provider announce loop, which
     /// otherwise repeats only once a minute.
     func announceGenesisProvidersForTesting(process: ChainProcess) async {
