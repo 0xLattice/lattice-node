@@ -405,10 +405,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// parent's anchor.
         var declaredReadURL: String?
         var evidence = ChildEvidenceState()
+        /// The latest candidate the child pushed; carries its own session.
+        var offer: CachedChildCandidate?
 
         var isEmpty: Bool {
             helloDeadline == nil && session == nil && role == nil
-                && declaredReadURL == nil && evidence.isEmpty
+                && declaredReadURL == nil && evidence.isEmpty && offer == nil
         }
     }
 
@@ -696,7 +698,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let sessionID: Data
         let sequence: UInt64
     }
-    private var childCandidateOffers: [PeerKey: CachedChildCandidate] = [:]
     /// The parent's context as last received (this chain being the child),
     /// bound to the session it came on: a new session restarts sequences.
     private struct ReceivedParentTipContext {
@@ -1099,7 +1100,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         portableEvidenceOrder.removeAll()
         portableEvidenceWork.removeAll()
         parentEvidence.reset()
-        childCandidateOffers.removeAll()
+        // After the peer-search join, as before: clear what may have been
+        // written while it was awaited.
+        for key in Array(hierarchyRecords.keys) {
+            hierarchyRecords.update(key) { $0.offer = nil }
+        }
         runReportApplyTail?.cancel()
         runReportApplyTail = nil
         parentTipContext = nil
@@ -1504,7 +1509,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         for (key, role) in hierarchyRoles {
             guard case .child(let path) = role, let directory = path.last,
                   isChildEvidenceReady(key),
-                  let offer = childCandidateOffers[key],
+                  let offer = hierarchyRecords[key]?.offer,
                   offer.candidate.block.parentState.rawCID == parentStateCID,
                   offer.childCID != parentTipContext?.carriedChildren[directory]
             else { continue }
@@ -1548,7 +1553,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         var stale = 0
         var carried = 0
         for (rank, key, path) in children {
-            guard let offer = childCandidateOffers[key] else { continue }
+            guard let offer = hierarchyRecords[key]?.offer else { continue }
             guard offer.candidate.block.parentState.rawCID == wantedParentState
             else {
                 stale += 1
@@ -2604,7 +2609,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         hierarchyRecords.update(key) { $0.declaredReadURL = nil }
         hierarchyRecords.update(key) { $0.evidence.ready = false }
         cancelChildEvidenceReadyWaiters(for: key)
-        childCandidateOffers.removeValue(forKey: key)
+        hierarchyRecords.update(key) { $0.offer = nil }
         pushedParentTipSequence.removeValue(forKey: key)
         refusedChildEvidenceHints.removeValue(forKey: key)
         Self.pruneChildPeerRotations(
@@ -4395,7 +4400,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // Sequences are per session: a candidate cached from an
             // earlier session of this peer (a restart Ivy replaced before
             // the disconnect reached us) neither dedupes nor orders this one.
-            if let cached = childCandidateOffers[peer.key],
+            if let cached = hierarchyRecords[peer.key]?.offer,
                cached.sessionID == peer.sessionID {
                 if cached.childCID == head.childCID {
                     SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: already held")
@@ -4433,18 +4438,20 @@ public actor NodeNetworkRuntime: IvyDelegate {
                   hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID else {
                 return
             }
-            if let cached = childCandidateOffers[peer.key],
+            if let cached = hierarchyRecords[peer.key]?.offer,
                cached.sessionID == peer.sessionID,
                offer.sequence <= cached.sequence {
                 SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: stale sequence")
                 return
             }
-            childCandidateOffers[peer.key] = CachedChildCandidate(
-                sequence: offer.sequence,
-                sessionID: peer.sessionID,
-                childCID: offer.childCID,
-                candidate: candidate
-            )
+            hierarchyRecords.update(peer.key) {
+                $0.offer = CachedChildCandidate(
+                    sequence: offer.sequence,
+                    sessionID: peer.sessionID,
+                    childCID: offer.childCID,
+                    candidate: candidate
+                )
+            }
             SyncTrace.log("child candidate cached from \(childPath.joined(separator: "/")): h=\(block.height) parentState=\(block.parentState.rawCID.prefix(12)) seq=\(offer.sequence)")
             // This chain's own candidate now carries a fresher child: rebuild
             // it for our parent, if we have one.
@@ -4820,7 +4827,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         keys.formUnion(parentStateQueryGuard.peers)
         keys.formUnion(portableEvidenceWork.values.map(\.peer.key))
         keys.formUnion(pushedParentTipSequence.keys)
-        keys.formUnion(childCandidateOffers.keys)
         if let receivedParentTip { keys.insert(receivedParentTip.peer.key) }
         for hex in candidateAcquirer.debugSnapshot().providerKeys
             .union(parentEvidence.debugSnapshot().peerIDs) {
@@ -4845,7 +4851,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         let hierarchyKeys = Set(hierarchyRecords.keys)
             .union(hierarchyRecords.keys)
-            .union(childCandidateOffers.keys)
             .union(pushedParentTipSequence.keys)
             .union(refusedChildEvidenceHints.keys)
         var hierarchySnapshot: [PeerKey: NetworkDebugSnapshot.HierarchyPeer] = [:]
