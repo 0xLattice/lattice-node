@@ -26,17 +26,16 @@ import XCTest
 /// candidate tables of a childless Nexus node) are damaged by INSERTING one
 /// malformed row, which is the only row boot can then read.
 ///
-/// Summary of CURRENT behaviour, as pinned by the three tests below
-/// (`// TODO(refactor)` marks the case the refactor should still flip to a
-/// typed error naming table and column):
+/// Summary of CURRENT behaviour, as pinned by the tests below:
 ///
 /// - node_metadata: refused with `NodeStoreError.wipeRequired` (an untyped
 ///   reason string; the column is not named).
 /// - A column that cannot be read as its table declares it (consensus_revision
-///   text that is not an integer, an empty accepted_blocks parent or a
-///   non-positive sequence, a non-canonical CID in issued_child_proofs,
-///   parent_evidence_inbox, local_mempool_transactions or
-///   prepared_child_proofs, a non-UUID parent_evidence_scan source): refused
+///   text that is not an integer, an empty accepted_blocks parent, a
+///   non-positive sequence or an execution tier outside `BlockStatus`, a
+///   non-canonical CID in issued_child_proofs, parent_evidence_inbox,
+///   local_mempool_transactions or prepared_child_proofs, a non-UUID
+///   parent_evidence_scan source): refused
 ///   with `NodeStoreError.malformedRow(table:column:)` naming exactly the
 ///   damaged table and column.
 /// - Semantic damage the row layer cannot see (admission_batches and
@@ -45,8 +44,6 @@ import XCTest
 ///   issued_child_edges row, contextual_candidates / contextual_candidate_roots
 ///   / contextual_candidate_children rows that break the index's SQL
 ///   consistency): refused with `NodeStoreError.corrupt` (a free-text reason).
-/// - accepted_blocks.validated out of range: read at boot and silently
-///   tolerated — boot succeeds and the row keeps its out-of-range tier (TODO).
 /// - child_genesis_volume_roots (orphan row), pending_child_proof_routes: not
 ///   read by this fixture's boot (nothing is staged, no prepared proofs) —
 ///   boot succeeds and the damaged row is still there afterwards. Pinned as
@@ -169,6 +166,11 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             sql: ["UPDATE accepted_blocks SET admission_seq = 0 WHERE block_cid = (SELECT MIN(block_cid) FROM accepted_blocks)"]
         ),
         Damage(
+            table: "accepted_blocks", column: "validated",
+            description: "tier 7 (neither weighed, eager nor walk-validated)",
+            sql: ["UPDATE accepted_blocks SET validated = 7 WHERE block_cid = (SELECT MIN(block_cid) FROM accepted_blocks WHERE parent_cid IS NOT NULL)"]
+        ),
+        Damage(
             table: "issued_child_proofs", column: "root_cid",
             description: "inserted proof with malformed CID text",
             sql: ["INSERT INTO issued_child_proofs (scope, edge_cid, root_cid, attachment_cid, ordinal) VALUES ('outgoing_direct_child', 'edge', 'not-a-cid', 'not-a-cid', 1)"]
@@ -209,18 +211,6 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         ),
     ]
 
-    /// Read at boot (`executedBlockCIDs` / `walkValidatedBlockCIDs`), yet boot
-    /// succeeds and the row keeps its out-of-range tier.
-    // TODO(refactor): should be a typed error naming table and column.
-    private static let silentlyTolerated: [Damage] = [
-        Damage(
-            table: "accepted_blocks", column: "validated",
-            description: "tier 7 (neither weighed, eager nor walk-validated)",
-            sql: ["UPDATE accepted_blocks SET validated = 7 WHERE block_cid = (SELECT MIN(block_cid) FROM accepted_blocks WHERE parent_cid IS NOT NULL)"],
-            stillPresent: "SELECT COUNT(*) AS n FROM accepted_blocks WHERE validated = 7"
-        ),
-    ]
-
     /// Not read by this fixture's boot (nothing is staged, no prepared
     /// proofs): `pending_child_proof_routes` is read on the stage path
     /// (`persistPreparedChildProofs` / `persistPendingChildProofRouteRows`)
@@ -256,11 +246,6 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
 
     func testBootRefusesDamagedMetadataWithWipeRequired() async throws {
         try await assertBoot(Self.refusedAsWipeRequired, observes: .wipeRequired)
-    }
-
-    // TODO(refactor): should be a typed error naming table and column.
-    func testBootSilentlyToleratesDamagedRowsTODO() async throws {
-        try await assertBoot(Self.silentlyTolerated, observes: .opened)
     }
 
     func testBootDoesNotReadTheseTablesAndTheDamagedRowSurvives() async throws {

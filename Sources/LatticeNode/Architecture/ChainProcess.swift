@@ -315,7 +315,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         //
         // Staged BEFORE the demotion loop below, not merely read before it.
         // Demotion commits per block while this writes its own transactions, so
-        // a crash in between would leave a legacy row demoted to `validated=0`
+        // a crash in between would leave a legacy row demoted to `.weighed`
         // with no durable fact — `executedBlockCIDs()` would never return it
         // again and no later boot could carry it. Ordering the writes closes
         // that window; the migration needs nothing the demotion produces.
@@ -412,9 +412,10 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                             store: store,
                             broker: broker,
                             retentionScope: retentionScope,
-                            pendingChildProofRoutes: [],
-                            pendingChildProofCapacity: Self.preparedChildProofCapacity,
-                            hierarchyArtifacts: hierarchyArtifacts
+                            persistence: ImportPersistence(
+                                pendingChildProofCapacity: Self.preparedChildProofCapacity,
+                                hierarchyArtifacts: hierarchyArtifacts
+                            )
                         )
                     }
                 )
@@ -609,9 +610,10 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     store: self.store,
                     broker: self.broker,
                     retentionScope: self.retentionScope,
-                    pendingChildProofRoutes: [],
-                    pendingChildProofCapacity: Self.preparedChildProofCapacity,
-                    hierarchyArtifacts: hierarchyArtifacts
+                    persistence: ImportPersistence(
+                        pendingChildProofCapacity: Self.preparedChildProofCapacity,
+                        hierarchyArtifacts: hierarchyArtifacts
+                    )
                 )
             }
         )
@@ -770,18 +772,20 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 store: self.store,
                 broker: self.broker,
                 retentionScope: self.retentionScope,
-                pendingChildProofRoutes: hierarchyArtifacts == nil
-                    ? []
-                    : Self.pendingChildProofRoutes(
-                        carrierCID: blockHeader.rawCID,
-                        directories: directChildDirectories,
-                        parentGenesisLinks: context.parentGenesisLinks
-                    ),
-                pendingChildProofCapacity: Self.preparedChildProofCapacity,
-                hierarchyArtifacts: hierarchyArtifacts,
-                incomingCarrierEvidence: hierarchyArtifacts == nil
-                    ? carrierEvidence
-                    : nil
+                persistence: ImportPersistence(
+                    pendingChildProofRoutes: hierarchyArtifacts == nil
+                        ? []
+                        : Self.pendingChildProofRoutes(
+                            carrierCID: blockHeader.rawCID,
+                            directories: directChildDirectories,
+                            parentGenesisLinks: context.parentGenesisLinks
+                        ),
+                    pendingChildProofCapacity: Self.preparedChildProofCapacity,
+                    hierarchyArtifacts: hierarchyArtifacts,
+                    incomingCarrierEvidence: hierarchyArtifacts == nil
+                        ? carrierEvidence
+                        : nil
+                )
             )
         }
         // A self-contained child genesis is authorized solely by the parent
@@ -986,10 +990,11 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                         store: self.store,
                         broker: self.broker,
                         retentionScope: self.retentionScope,
-                        pendingChildProofRoutes: [],
-                        pendingChildProofCapacity: Self.preparedChildProofCapacity,
-                        consensusRevisionFloor: try Self.nextConsensusRevision(
-                            await level.chain.currentRevision()
+                        persistence: ImportPersistence(
+                            pendingChildProofCapacity: Self.preparedChildProofCapacity,
+                            consensusRevisionFloor: try Self.nextConsensusRevision(
+                                await level.chain.currentRevision()
+                            )
                         )
                     )
                 } else {
@@ -1091,28 +1096,30 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 store: self.store,
                 broker: self.broker,
                 retentionScope: self.retentionScope,
-                pendingChildProofRoutes: hierarchyArtifacts == nil
-                    ? []
-                    : Self.pendingChildProofRoutes(
-                        carrierCID: blockHeader.rawCID,
-                        directories: directChildDirectories,
-                        parentGenesisLinks: context.parentGenesisLinks
-                ),
-                pendingChildProofCapacity: Self.preparedChildProofCapacity,
-                // A weighed admission enters fork choice on verified work but
-                // is not executed: record it below the validated tier so the
-                // validate-on-candidacy walk (and every act-on read) knows to
-                // execute it before building on it.
-                validated: {
-                    if case .weighed = mode { return false }
-                    return true
-                }(),
-                hierarchyArtifacts: hierarchyArtifacts,
-                incomingCarrierEvidence: hierarchyArtifacts == nil
-                    ? carrierEvidence
-                    : nil,
-                consensusRevisionFloor: try Self.nextConsensusRevision(
-                    await level.chain.currentRevision()
+                persistence: ImportPersistence(
+                    // A weighed admission enters fork choice on verified work
+                    // but is not executed: record it below the validated tier
+                    // so the validate-on-candidacy walk (and every act-on
+                    // read) knows to execute it before building on it.
+                    status: {
+                        if case .weighed = mode { return .weighed }
+                        return .eager
+                    }(),
+                    pendingChildProofRoutes: hierarchyArtifacts == nil
+                        ? []
+                        : Self.pendingChildProofRoutes(
+                            carrierCID: blockHeader.rawCID,
+                            directories: directChildDirectories,
+                            parentGenesisLinks: context.parentGenesisLinks
+                    ),
+                    pendingChildProofCapacity: Self.preparedChildProofCapacity,
+                    hierarchyArtifacts: hierarchyArtifacts,
+                    incomingCarrierEvidence: hierarchyArtifacts == nil
+                        ? carrierEvidence
+                        : nil,
+                    consensusRevisionFloor: try Self.nextConsensusRevision(
+                        await level.chain.currentRevision()
+                    )
                 )
             )
         }
@@ -3010,12 +3017,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         store: NodeStore,
         broker: DiskBroker,
         retentionScope: String,
-        pendingChildProofRoutes: [PendingChildProofRoute],
-        pendingChildProofCapacity: Int,
-        validated: Bool = true,
-        hierarchyArtifacts: AdmissionHierarchyArtifacts? = nil,
-        incomingCarrierEvidence: AdmissionCarrierEvidence? = nil,
-        consensusRevisionFloor: UInt64? = nil,
+        persistence: ImportPersistence,
         afterRetainingRoots: (@Sendable () async -> Void)? = nil
     ) async throws {
         let roots = await admissionStorage.takeStoredVolumeRoots()
@@ -3034,12 +3036,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         try await store.stage(
             batch,
             volumeRoots: roots,
-            validated: validated,
-            pendingChildProofRoutes: pendingChildProofRoutes,
-            pendingChildProofCapacity: pendingChildProofCapacity,
-            hierarchyArtifacts: hierarchyArtifacts,
-            incomingCarrierEvidence: incomingCarrierEvidence,
-            consensusRevisionFloor: consensusRevisionFloor
+            persistence: persistence
         )
     }
 
