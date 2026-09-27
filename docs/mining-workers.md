@@ -82,7 +82,7 @@ Validate any implementation against this before mining (from
 - preimage prefix begins
   `310000626166797265696736747066673369653766796c6132327279346d…`
 - `SHA256(prefix || be64(12345))` =
-  `20f5f3cd686a1287bf49fab897b39f560387282e60f2c982006b68a660137762`
+  `333434e7dd9f1435f139ff66c64635d7f901e2663ac87bebc73114c853f34f6c`
 
 Run your worker with the Nexus genesis prefix, `--target` set to that hash,
 `--start-nonce 12345 --count 1`: it must report `found` at nonce `12345` with

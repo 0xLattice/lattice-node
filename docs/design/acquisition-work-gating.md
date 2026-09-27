@@ -222,7 +222,7 @@ Acquisition spends in three steps, and only the last is permanent:
   A node holding the parent in its consensus graph reads the anchor from it in
   O(1). A node that does not — an out-of-order arrival, which is exactly this
   path — falls back to walking the ancestry to height 1, which is O(chain
-  depth) rather than the `retargetWindow` ancestors the windowed rule needed.
+  depth) rather than the ancestor window the windowed rule needed.
   That is bounded by the offered branch's depth, not by a committed parameter,
   and it grows with the chain. It is a cost to watch as Nexus deepens.
 - **Keep.** Once the work that would enter a comparison reaches the bar, the

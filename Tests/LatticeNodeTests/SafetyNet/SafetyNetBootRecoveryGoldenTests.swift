@@ -251,7 +251,13 @@ final class SafetyNetBootRecoveryGoldenTests: XCTestCase {
         let genesis = try await producer.canonicalTipBlock()
         let a = try await mineChild(of: genesis, timestamp: 3_600_000, on: producer)
         try await admitEager(a, on: producer, expecting: "canonicalized")
-        let b = try await mineChild(of: genesis, timestamp: 3_600_001, on: producer)
+        // Equal work: A stays canonical only if Lattice's CID comparator does
+        // not prefer B, so B's nonce is searched under that rule rather than
+        // assumed from the encoding.
+        let b = try await mineChild(
+            of: genesis, timestamp: 3_600_001, on: producer,
+            notPreferredOver: BlockHeader(node: a).rawCID
+        )
         try await admitEager(b, on: producer, expecting: "acceptedSide")
         let c = try await mineChild(of: b, timestamp: 7_200_000, on: producer)
         try await admitEager(c, on: producer, expecting: "canonicalized")
@@ -311,25 +317,39 @@ final class SafetyNetBootRecoveryGoldenTests: XCTestCase {
     }
 
     /// Deterministic mining (the `mineChild` pattern of `ChainProcessTests`):
-    /// fixed timestamp, nonce search from zero.
+    /// fixed timestamp, nonce search from zero. With `notPreferredOver`, the
+    /// search continues past every nonce whose block the fork-choice
+    /// comparator would prefer over that sibling, so the result is a side
+    /// block under the consensus rule itself.
     private func mineChild(
-        of previous: Block, timestamp: Int64, on process: ChainProcess
+        of previous: Block,
+        timestamp: Int64,
+        on process: ChainProcess,
+        notPreferredOver sibling: String? = nil
     ) async throws -> Block {
-        let candidate = try await BlockBuilder.buildBlock(
-            previous: previous,
-            timestamp: timestamp,
-            fetcher: process
-        )
-        let mined = try XCTUnwrap(BlockBuilder.mine(
-            block: candidate,
-            target: candidate.target,
-            maxAttempts: 1 << 16
-        ))
-        try await BlockHeader(node: mined).storeBlock(
-            fetcher: process,
-            storer: process
-        )
-        return mined
+        // `BlockBuilder.mine` restarts its search at nonce 0, so the search
+        // is done here: the nonce is part of the built block and checked with
+        // the same proof-of-work hash the validator uses.
+        for nonce in UInt64(0)..<(1 << 16) {
+            let candidate = try await BlockBuilder.buildBlock(
+                previous: previous,
+                timestamp: timestamp,
+                nonce: nonce,
+                fetcher: process
+            )
+            guard candidate.proofOfWorkHash() <= candidate.target else { continue }
+            if let sibling,
+               forkChoicePrefersBlock(try BlockHeader(node: candidate).rawCID, over: sibling) {
+                continue
+            }
+            try await BlockHeader(node: candidate).storeBlock(
+                fetcher: process,
+                storer: process
+            )
+            return candidate
+        }
+        XCTFail("fixture: no nonce below 2^16 mined a block at timestamp \(timestamp)")
+        throw FixtureError.nonceSearchExhausted
     }
 
     private func configuration(_ storage: URL) throws -> NodeConfiguration {
@@ -346,4 +366,8 @@ final class SafetyNetBootRecoveryGoldenTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         return url
     }
+}
+
+private enum FixtureError: Error {
+    case nonceSearchExhausted
 }

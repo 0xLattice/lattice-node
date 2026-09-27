@@ -24,7 +24,7 @@ A block has two independent halves, and consensus only ever needed the first:
 
 - A **header** — the block's cashew *root node*: parent CID, target,
   `nextTarget`, height, timestamp, nonce, and the CIDs of its sub-bodies
-  (transactions, state roots, children trie). One targeted content-addressed
+  (transactions, state roots, child index). One targeted content-addressed
   retrieval. Proof of work is computable from the root alone (the PoW preimage
   hashes the inline scalars plus the *CID strings* of the references, never
   their contents). The consensus graph is **already header-only**:
@@ -112,7 +112,7 @@ proof is not fetched per child block: the child's securing weight is
 ("proofs are regenerated from the retained closure when it exists"). So the
 hierarchy syncs **top-down** — acquire the Nexus header graph first; a child
 header is then weighed against the Nexus carriers already held. Regenerating a
-securing proof does read parent carrier *sub-bodies* (the children trie of the
+securing proof does read parent carrier *sub-bodies* (the child index of the
 committing carrier), so child weighing is heavier than root weighing, but far
 cheaper than a per-block child-evidence download, and it is the carrier owner's
 own retained data.

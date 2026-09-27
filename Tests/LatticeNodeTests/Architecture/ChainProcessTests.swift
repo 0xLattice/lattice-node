@@ -2033,9 +2033,19 @@ final class ChainProcessTests: XCTestCase {
             return XCTFail("expected A to canonicalize on genesis")
         }
 
-        let b = try await mineChild(
-            of: genesis, timestamp: 3_600_001, nonce: 2, on: process!
+        // Equal work ties break by Lattice's CID comparator: pick a nonce
+        // whose block the comparator does not prefer over A, so B is the
+        // side block under the consensus rule itself, not textual order.
+        var bNonce: UInt64 = 2
+        var b = try await mineChild(
+            of: genesis, timestamp: 3_600_001, nonce: bNonce, on: process!
         )
+        while forkChoicePrefersBlock(try BlockHeader(node: b).rawCID, over: aCID) {
+            bNonce = b.nonce + 1
+            b = try await mineChild(
+                of: genesis, timestamp: 3_600_001, nonce: bNonce, on: process!
+            )
+        }
         let bCID = try BlockHeader(node: b).rawCID
         guard case .acceptedSide = try await process!.admit(
             BlockHeader(node: b)
@@ -2521,22 +2531,26 @@ final class ChainProcessTests: XCTestCase {
         nonce: UInt64,
         on process: ChainProcess
     ) async throws -> Block {
-        let candidate = try await BlockBuilder.buildBlock(
-            previous: previous,
-            timestamp: timestamp,
-            nonce: nonce,
-            fetcher: process
-        )
-        let mined = try XCTUnwrap(BlockBuilder.mine(
-            block: candidate,
-            target: candidate.target,
-            maxAttempts: 4_096
-        ))
-        try await BlockHeader(node: mined).storeBlock(
-            fetcher: process,
-            storer: process
-        )
-        return mined
+        // `BlockBuilder.mine` restarts its search at nonce 0, which would
+        // discard the requested nonce; search upward from it instead so a
+        // caller choosing nonces (the fork-choice tie-break test) gets the
+        // block it asked for.
+        for attempt in nonce..<(nonce + 4_096) {
+            let candidate = try await BlockBuilder.buildBlock(
+                previous: previous,
+                timestamp: timestamp,
+                nonce: attempt,
+                fetcher: process
+            )
+            guard candidate.proofOfWorkHash() <= candidate.target else { continue }
+            try await BlockHeader(node: candidate).storeBlock(
+                fetcher: process,
+                storer: process
+            )
+            return candidate
+        }
+        XCTFail("no nonce in \(nonce)..<\(nonce + 4_096) mined a block")
+        throw ChainProcessTestError.nonceSearchExhausted
     }
 
     private func configuration(
@@ -2831,4 +2845,8 @@ private actor BlockingContentSource: ContentSource {
             waiter.continuation.resume(returning: waiter.entries)
         }
     }
+}
+
+private enum ChainProcessTestError: Error {
+    case nonceSearchExhausted
 }

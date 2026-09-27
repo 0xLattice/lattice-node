@@ -113,7 +113,7 @@ Nexus starts from one deterministic local bootstrap block. Its sole unsigned
 transaction credits the premine; the node recomputes the block CID locally and
 requires the exact configured value:
 
-`bafyreiayw4z5qz4lt2sljf2enzn7uol3qa6bebadav7qwnqz7agxkiuwhq`
+`bafyreifvxwhqbwvnrtr2plvtmlvpceqxnexyayjs7klgy6dbkj7yppdsz4`
 
 | Parameter | Value |
 |---|---:|
@@ -124,7 +124,7 @@ requires the exact configured value:
 | Initial reward | `1,048,576` |
 | Halving interval | `876,600` blocks |
 | Premine | `175,320` reward-block equivalents |
-| Retarget window | `120` blocks |
+| Half-life | `120` blocks |
 | Maximum transactions | `5,000` per block |
 | Maximum state growth | `3,000,000` bytes per block |
 | Maximum block size | `1,000,000` bytes |

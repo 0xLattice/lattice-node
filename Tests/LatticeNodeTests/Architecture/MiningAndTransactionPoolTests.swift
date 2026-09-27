@@ -992,7 +992,8 @@ final class MiningTemplateBookTests: XCTestCase {
             premine: 10,
             targetBlockTime: 1_000,
             initialReward: 100,
-            halvingInterval: 10_000
+            halvingInterval: 10_000,
+            halfLife: 10
         )
         let premine = try signedTransaction(
             key: key,
@@ -1842,7 +1843,8 @@ private func testSpec(maxBlockSize: Int = 1_000_000) -> ChainSpec {
         premine: 0,
         targetBlockTime: 1_000,
         initialReward: 100,
-        halvingInterval: 10_000
+        halvingInterval: 10_000,
+        halfLife: 10
     )
 }
 

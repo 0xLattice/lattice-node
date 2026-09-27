@@ -48,7 +48,7 @@ Both routes return the same chain-process status:
 {
   "phase": "active",
   "chainPath": ["Nexus"],
-  "nexusGenesisCID": "bafyreiayw4z5qz4lt2sljf2enzn7uol3qa6bebadav7qwnqz7agxkiuwhq",
+  "nexusGenesisCID": "bafyreifvxwhqbwvnrtr2plvtmlvpceqxnexyayjs7klgy6dbkj7yppdsz4",
   "tipCID": "<cid>",
   "height": 42,
   "revision": 57,

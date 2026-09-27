@@ -317,7 +317,7 @@ final class LatticeCtlE2ETests: XCTestCase {
             "targetBlockTime": 1_000,
             "initialReward": 10,
             "halvingInterval": 100_000,
-            "retargetWindow": 120,
+            "halfLife": 120,
         ]
         let specURL = host.root.appendingPathComponent("spec-\(directory).json")
         try JSONSerialization.data(withJSONObject: spec).write(to: specURL)
