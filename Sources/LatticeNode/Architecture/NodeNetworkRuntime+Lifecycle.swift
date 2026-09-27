@@ -158,7 +158,8 @@ extension NodeNetworkRuntime {
             candidates.append(CandidateSeed(
                 blockCID: childCID,
                 package: item.package,
-                weighed: true
+                weighed: true,
+                fromParent: true
             ))
         }
         return candidates
@@ -290,6 +291,9 @@ extension NodeNetworkRuntime {
         hierarchyState.receivedParentTip = nil
         hierarchyState.releasedCarriedChildCID = nil
         hierarchyState.requestedCarriedChildCID = nil
+        hierarchyState.requestedCarriedRound = nil
+        hierarchyState.carriedRoundEndedCID = nil
+        hierarchyState.evidenceRoundStarting = false
         hierarchyState.candidateOfferTask?.cancel()
         hierarchyState.candidateOfferTask = nil
         hierarchyState.candidateOfferDirty = false
