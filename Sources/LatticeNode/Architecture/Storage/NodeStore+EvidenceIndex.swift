@@ -1475,4 +1475,154 @@ extension NodeStore {
         }
         return await proof.directHop()?.childCID == childCID
     }
+
+    func auditIssuedParentFacts(connected connectedAcceptedBlocks: Set<String>) throws {
+        var expectedParentFacts: [IssuedParentFactKey: Data] = [:]
+        for row in try database.query(
+            "SELECT payload FROM issued_parent_fact_sources ORDER BY payload"
+        ) {
+            guard let payload = row["payload"]?.blobValue else {
+                throw NodeStoreError.corrupt("malformed parent-fact source")
+            }
+            let source = try Self.decode(
+                PersistedParentFactSource.self,
+                from: payload
+            )
+            guard try Self.encode(source) == payload,
+                  source.carrierLink.parentPath == chainPath,
+                  !source.carrierLink.carrierCID.isEmpty,
+                  !source.carrierLink.rootCID.isEmpty,
+                  chainPath.count > 1
+                    || source.carrierLink.carrierCID
+                        == source.carrierLink.rootCID else {
+                throw NodeStoreError.corrupt("invalid parent-fact source")
+            }
+            let sortedGenesis = Array(Set(source.parentGenesisLinks)).sorted {
+                ($0.directory, $0.childGenesisCID, $0.parentStateCID)
+                    < ($1.directory, $1.childGenesisCID, $1.parentStateCID)
+            }
+            guard source.parentGenesisLinks == sortedGenesis,
+                  source.parentGenesisLinks.allSatisfy({
+                      $0.parentPath == chainPath
+                          && !$0.directory.isEmpty
+                          && !$0.childGenesisCID.isEmpty
+                          && !$0.parentStateCID.isEmpty
+                  }),
+                  source.parentGenesisLinks.isEmpty
+                    || connectedAcceptedBlocks.contains(
+                        source.carrierLink.carrierCID
+                    ) else {
+                throw NodeStoreError.corrupt("invalid genesis-fact source")
+            }
+            try Self.addExpectedParentFact(
+                key: IssuedParentFactKey(
+                    kind: "carrier",
+                    keyA: source.carrierLink.carrierCID,
+                    keyB: source.carrierLink.rootCID
+                ),
+                payload: try Self.encode(source.carrierLink),
+                to: &expectedParentFacts
+            )
+            for link in source.parentGenesisLinks {
+                try Self.addExpectedParentFact(
+                    key: IssuedParentFactKey(
+                        kind: "genesis",
+                        keyA: link.directory,
+                        keyB: Self.parentGenesisFactKey(link)
+                    ),
+                    payload: try Self.encode(link),
+                    to: &expectedParentFacts
+                )
+            }
+        }
+        var actualParentFacts: [IssuedParentFactKey: Data] = [:]
+        for row in try database.query(
+            "SELECT kind, key_a, key_b, payload FROM issued_parent_facts"
+        ) {
+            guard let kind = row["kind"]?.textValue,
+                  let keyA = row["key_a"]?.textValue,
+                  let keyB = row["key_b"]?.textValue,
+                  let payload = row["payload"]?.blobValue else {
+                throw NodeStoreError.corrupt("malformed issued parent fact")
+            }
+            actualParentFacts[IssuedParentFactKey(
+                kind: kind,
+                keyA: keyA,
+                keyB: keyB
+            )] = payload
+        }
+        guard actualParentFacts == expectedParentFacts else {
+            throw NodeStoreError.corrupt(
+                "issued parent facts do not match immutable sources"
+            )
+        }
+    }
+
+    func auditIssuedChildAttachments() async throws {
+        // Startup-bounded attachment audit: shape, edge linkage, and LOCAL
+        // COMPLETENESS of every attachment Volume (the broker's SQL
+        // completeness predicate) — but never materialization. The issued
+        // index grows with every proof issued over the chain's whole life, so
+        // fetching and decoding each attachment here made process startup
+        // O(history x volume-decode) and wedged long-lived nodes for hours;
+        // the full decode-and-bind validation still runs fail-closed at every
+        // actual use (`recoveryVolume`).
+        let attachments = try database.query(
+            """
+            SELECT p.scope, p.root_cid, p.attachment_cid, e.edge_cid
+            FROM issued_child_proofs AS p
+            LEFT JOIN issued_child_edges AS e ON e.edge_cid = p.edge_cid
+            ORDER BY p.scope, p.edge_cid, p.root_cid
+            """
+        )
+        for row in attachments {
+            guard let rawScope = row["scope"]?.textValue,
+                  IssuedChildProofScope(rawValue: rawScope) != nil,
+                  let rootCID = row["root_cid"]?.textValue,
+                  CIDIdentity.isCanonical(rootCID),
+                  let attachmentCID = row["attachment_cid"]?.textValue,
+                  CIDIdentity.isCanonical(attachmentCID),
+                  row["edge_cid"]?.textValue != nil,
+                  await recoveryVolumeBroker.hasVolume(root: attachmentCID)
+            else {
+                throw NodeStoreError.corrupt(
+                    "malformed direct-child attachment index"
+                )
+            }
+        }
+        let outgoingOrdinals = try database.query(
+            "SELECT ordinal FROM issued_child_proofs WHERE scope = ?1 ORDER BY ordinal",
+            params: [.text(IssuedChildProofScope.outgoingDirectChild.rawValue)]
+        )
+        for (offset, row) in outgoingOrdinals.enumerated() {
+            guard row["ordinal"]?.intValue == Int64(offset + 1) else {
+                throw NodeStoreError.corrupt(
+                    "child-evidence ordinals are not contiguous"
+                )
+            }
+        }
+        let invalidIncomingOrdinal = try database.query(
+            "SELECT 1 FROM issued_child_proofs WHERE scope != ?1 AND ordinal IS NOT NULL LIMIT 1",
+            params: [.text(IssuedChildProofScope.outgoingDirectChild.rawValue)]
+        )
+        guard invalidIncomingOrdinal.isEmpty else {
+            throw NodeStoreError.corrupt(
+                "incoming evidence has an outgoing ordinal"
+            )
+        }
+        let edgeCount = try database.query(
+            "SELECT COUNT(*) AS count FROM issued_child_edges"
+        ).first?["count"]?.intValue
+        let attachedEdgeCount = try database.query(
+            "SELECT COUNT(DISTINCT edge_cid) AS count FROM issued_child_proofs"
+        ).first?["count"]?.intValue
+        guard edgeCount == attachedEdgeCount else {
+            throw NodeStoreError.corrupt("orphaned direct-child content")
+        }
+    }
+
+    func auditParentEvidence() async throws {
+        _ = try parentEvidenceScanCursor()
+        _ = try await parentEvidenceInbox()
+    }
 }

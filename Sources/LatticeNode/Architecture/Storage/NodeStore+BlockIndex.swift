@@ -346,4 +346,73 @@ extension NodeStore {
             )
         }
     }
+
+    func auditAcceptedBlocks(staged: [StagedAdmission]) throws -> Set<String> {
+        var expectedAcceptedBlocks: [String: PersistedAcceptedBlock] = [:]
+        for admission in staged {
+            for block in try Self.acceptedBlocks(in: admission.batch) {
+                if let existing = expectedAcceptedBlocks[block.blockCID] {
+                    guard existing.parentCID == block.parentCID else {
+                        throw NodeStoreError.corrupt(
+                            "admission batches disagree about an accepted block parent"
+                        )
+                    }
+                } else {
+                    expectedAcceptedBlocks[block.blockCID] = PersistedAcceptedBlock(
+                        blockCID: block.blockCID,
+                        parentCID: block.parentCID,
+                        admissionSequence: admission.sequence
+                    )
+                }
+            }
+        }
+
+        var actualAcceptedBlocks: [String: PersistedAcceptedBlock] = [:]
+        var leafFlags: [String: Bool] = [:]
+        for row in try database.query(
+            "SELECT block_cid, parent_cid, admission_seq, leaf FROM accepted_blocks"
+        ) {
+            let block = try persistedAcceptedBlock(from: row)
+            actualAcceptedBlocks[block.blockCID] = block
+            guard let leaf = row["leaf"]?.intValue else {
+                throw NodeStoreError.corrupt("malformed accepted-block leaf flag")
+            }
+            leafFlags[block.blockCID] = leaf == 1
+        }
+        guard actualAcceptedBlocks == expectedAcceptedBlocks else {
+            throw NodeStoreError.corrupt(
+                "accepted-block index does not match immutable batches"
+            )
+        }
+        var connectedAcceptedBlocks = Set(
+            actualAcceptedBlocks.values.compactMap {
+                $0.parentCID == nil ? $0.blockCID : nil
+            }
+        )
+        var childrenByParent: [String: [String]] = [:]
+        for block in actualAcceptedBlocks.values {
+            if let parentCID = block.parentCID {
+                childrenByParent[parentCID, default: []].append(block.blockCID)
+            }
+        }
+        // The maintained leaf flag is a derived index over the parent links
+        // verified above, so a disagreeing row is repaired from that truth,
+        // never a wipe: only the disagreeing rows are rewritten.
+        for (cid, leaf) in leafFlags.sorted(by: { $0.key < $1.key })
+        where leaf != (childrenByParent[cid] == nil) {
+            SyncTrace.log("boot audit: repairing leaf flag block=\(cid.prefix(12))")
+            try database.execute(
+                "UPDATE accepted_blocks SET leaf = ?1 WHERE block_cid = ?2",
+                params: [.int(childrenByParent[cid] == nil ? 1 : 0), .text(cid)]
+            )
+        }
+        var connectedQueue = Array(connectedAcceptedBlocks)
+        while let parentCID = connectedQueue.popLast() {
+            for childCID in childrenByParent[parentCID] ?? []
+            where connectedAcceptedBlocks.insert(childCID).inserted {
+                connectedQueue.append(childCID)
+            }
+        }
+        return connectedAcceptedBlocks
+    }
 }

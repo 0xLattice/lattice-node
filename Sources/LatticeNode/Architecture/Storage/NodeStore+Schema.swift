@@ -281,4 +281,17 @@ extension NodeStore {
             ) WITHOUT ROWID
             """)
     }
+
+    /// Boot-time audit of every normalized index against the immutable
+    /// admission batches: one audit per table owner, in a fixed order.
+    func auditNormalizedIndexes() async throws {
+        let staged = try loadStagedAdmissions()
+        try auditAdmissionFacts(staged: staged)
+        let connectedAcceptedBlocks = try auditAcceptedBlocks(staged: staged)
+        try auditIssuedParentFacts(connected: connectedAcceptedBlocks)
+        try await auditIssuedChildAttachments()
+        try await auditParentEvidence()
+        try await auditPreparedChildProofs()
+        try auditContextualCandidates()
+    }
 }

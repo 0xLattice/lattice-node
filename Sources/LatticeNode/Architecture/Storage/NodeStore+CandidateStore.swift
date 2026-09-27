@@ -749,4 +749,61 @@ extension NodeStore {
             )
             """)
     }
+
+    func auditPreparedChildProofs() async throws {
+        for carrierCID in try await preparedChildProofCarrierCIDs() {
+            _ = try await preparedChildProofs(carrierCID: carrierCID)
+        }
+    }
+
+    func auditContextualCandidates() throws {
+        let malformedContextualCandidates = try database.query("""
+            SELECT 1 FROM contextual_candidate_roots AS roots
+            WHERE NOT EXISTS (
+                SELECT 1 FROM contextual_candidates AS candidate
+                WHERE candidate.candidate_cid = roots.candidate_cid
+            )
+            UNION ALL
+            SELECT 1 FROM contextual_candidates AS candidate
+            WHERE NOT EXISTS (
+                SELECT 1 FROM contextual_candidate_roots AS roots
+                WHERE roots.candidate_cid = candidate.candidate_cid
+                    AND roots.root_cid = candidate.candidate_cid
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM accepted_blocks AS block
+                WHERE block.block_cid = candidate.candidate_cid
+            )
+            UNION ALL
+            SELECT 1 FROM contextual_candidate_children AS child
+            WHERE NOT EXISTS (
+                SELECT 1 FROM contextual_candidates AS candidate
+                WHERE candidate.candidate_cid = child.candidate_cid
+            )
+            LIMIT 1
+            """)
+        guard malformedContextualCandidates.isEmpty else {
+            throw NodeStoreError.corrupt(
+                "contextual candidate index is inconsistent"
+            )
+        }
+        let conflictedContextualCandidates = try database.query(
+            "SELECT 1 FROM contextual_candidates WHERE (issued = 1 AND handoff = 1) OR ((handoff = 1) != (handoff_seq IS NOT NULL)) LIMIT 1"
+        )
+        guard conflictedContextualCandidates.isEmpty else {
+            throw NodeStoreError.corrupt(
+                "contextual candidate handoff state is inconsistent"
+            )
+        }
+        for row in try database.query(
+            "SELECT DISTINCT child_peer_key FROM contextual_candidate_children"
+        ) {
+            guard let rawPeerKey = row["child_peer_key"]?.textValue,
+                  (try? PeerKey(rawPeerKey)) != nil else {
+                throw NodeStoreError.corrupt(
+                    "contextual candidate child peer key is malformed"
+                )
+            }
+        }
+    }
 }

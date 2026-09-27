@@ -227,4 +227,32 @@ extension NodeStore {
         }
         return normalized
     }
+
+    func auditAdmissionFacts(staged: [StagedAdmission]) throws {
+        var expectedFacts: [Data: Data] = [:]
+        for admission in staged {
+            for (id, payload) in try Self.normalizedFacts(in: admission.batch) {
+                if let existing = expectedFacts[id], existing != payload {
+                    throw NodeStoreError.corrupt(
+                        "admission batches disagree about an immutable fact"
+                    )
+                }
+                expectedFacts[id] = payload
+            }
+        }
+
+        var actualFacts: [Data: Data] = [:]
+        for row in try database.query("SELECT fact_id, payload FROM admission_facts") {
+            guard let id = row["fact_id"]?.blobValue,
+                  let payload = row["payload"]?.blobValue else {
+                throw NodeStoreError.corrupt("malformed normalized admission fact")
+            }
+            actualFacts[id] = payload
+        }
+        guard actualFacts == expectedFacts else {
+            throw NodeStoreError.corrupt(
+                "normalized admission facts do not match immutable batches"
+            )
+        }
+    }
 }
