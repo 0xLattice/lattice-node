@@ -1231,7 +1231,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // A dedicated short deadline, NOT the overlay's content-pull timeout:
         // a legacy peer never answers, and this wait sits on the public
         // explorer route's critical path.
-        let timeoutNanoseconds = Self.nanoseconds(Self.readEndpointAskTimeout)
+        let timeoutNanoseconds = Timers.nanoseconds(Self.readEndpointAskTimeout)
         return await withCheckedContinuation { continuation in
             let timeoutTask = Task { [weak self] in
                 do {
@@ -2968,7 +2968,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             afterRootCID: after
         )
         guard let payload = try? request.encoded() else { return }
-        let timeoutNanoseconds = Self.nanoseconds(
+        let timeoutNanoseconds = Timers.nanoseconds(
             planeConfigurations.overlay.requestTimeout
         )
         let timeout = Task { [weak self] in
@@ -3191,7 +3191,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             }
             do {
                 try await Task.sleep(
-                    nanoseconds: Self.nanoseconds(
+                    nanoseconds: Timers.nanoseconds(
                         planeConfigurations.overlay.requestTimeout
                     )
                 )
@@ -3517,7 +3517,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         while activeEvidenceVolumes.count >= Self.maximumEvidenceCandidates - 1 {
             do {
                 try await Task.sleep(
-                    nanoseconds: Self.nanoseconds(
+                    nanoseconds: Timers.nanoseconds(
                         planeConfigurations.overlay.requestTimeout
                     )
                 )
@@ -3590,7 +3590,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             }
             do {
                 try await Task.sleep(
-                    nanoseconds: Self.nanoseconds(
+                    nanoseconds: Timers.nanoseconds(
                         planeConfigurations.overlay.requestTimeout
                     )
                 )
@@ -3673,7 +3673,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 // retry THIS page after a beat — the scan must make progress
                 // through congestion, not restart from a fresh reconnect.
                 Task { [weak self] in
-                    try? await Task.sleep(nanoseconds: Self.nanoseconds(
+                    try? await Task.sleep(nanoseconds: Timers.nanoseconds(
                         self?.planeConfigurations.hierarchy.requestTimeout
                             ?? .seconds(15)
                     ))
@@ -3769,7 +3769,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         while activeEvidenceVolumes.count >= Self.maximumEvidenceCandidates {
             do {
                 try await Task.sleep(
-                    nanoseconds: Self.nanoseconds(
+                    nanoseconds: Timers.nanoseconds(
                         planeConfigurations.hierarchy.requestTimeout
                     )
                 )
@@ -3815,7 +3815,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             }
             do {
                 try await Task.sleep(
-                    nanoseconds: Self.nanoseconds(
+                    nanoseconds: Timers.nanoseconds(
                         planeConfigurations.hierarchy.requestTimeout
                     )
                 )
@@ -4822,7 +4822,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         hierarchyHelloDeadlines.removeValue(forKey: peer.key)?.task.cancel()
         nextHelloDeadlineToken &+= 1
         let token = nextHelloDeadlineToken
-        let timeoutNanoseconds = Self.nanoseconds(
+        let timeoutNanoseconds = Timers.nanoseconds(
             planeConfigurations.hierarchy.requestTimeout
         )
         let task = Task { [weak self] in
@@ -4851,7 +4851,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         overlayHelloDeadlines.removeValue(forKey: peer.key)?.task.cancel()
         nextHelloDeadlineToken &+= 1
         let token = nextHelloDeadlineToken
-        let timeoutNanoseconds = Self.nanoseconds(
+        let timeoutNanoseconds = Timers.nanoseconds(
             planeConfigurations.overlay.requestTimeout
         )
         let task = Task { [weak self] in
@@ -5576,7 +5576,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
               candidateAcquirer.hasTimedWait else { return }
         let generation = runtimeGeneration
         waitingCandidateRetryGeneration = generation
-        let delay = Self.nanoseconds(Self.futureCandidateRetryInterval)
+        let delay = Timers.nanoseconds(Self.futureCandidateRetryInterval)
         waitingCandidateRetryTask = Task { [weak self] in
             do {
                 try await Task.sleep(nanoseconds: delay)
@@ -5719,7 +5719,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             clearRangeSync()
             return
         }
-        let timeoutNanoseconds = Self.nanoseconds(
+        let timeoutNanoseconds = Timers.nanoseconds(
             planeConfigurations.overlay.requestTimeout
         )
         current.requestID = requestID
@@ -5875,7 +5875,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             clearRangeSync()
             return
         }
-        let timeoutNanoseconds = Self.nanoseconds(
+        let timeoutNanoseconds = Timers.nanoseconds(
             planeConfigurations.overlay.requestTimeout
         )
         current.requestID = requestID
@@ -6021,7 +6021,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let epoch = nextRangeSyncProgressEpoch
         sync.progressEpoch = epoch
         sync.progressTimeout?.cancel()
-        let deadlineNanoseconds = Self.nanoseconds(
+        let deadlineNanoseconds = Timers.nanoseconds(
             planeConfigurations.overlay.requestTimeout
         ) &* 3
         sync.progressTimeout = Task { [weak self] in
@@ -6150,7 +6150,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             return
         }
         let generation = runtimeGeneration
-        let delay = Self.nanoseconds(planeConfigurations.overlay.requestTimeout)
+        let delay = Timers.nanoseconds(planeConfigurations.overlay.requestTimeout)
         rangeSyncReentryTask = Task { [weak self] in
             do { try await Task.sleep(nanoseconds: delay) } catch { return }
             await self?.maybeRestartRangeSync(generation: generation)
@@ -6304,7 +6304,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             )
         )
         guard let payload = try? request.encoded() else { return false }
-        let delay = Self.nanoseconds(
+        let delay = Timers.nanoseconds(
             planeConfigurations.hierarchy.requestTimeout
         )
         return await withCheckedContinuation { continuation in
@@ -6354,7 +6354,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard let payload = try? ChildGenesisAnchorRequestMessage(
             requestID: requestID
         ).encoded() else { return nil }
-        let delay = Self.nanoseconds(
+        let delay = Timers.nanoseconds(
             planeConfigurations.hierarchy.requestTimeout
         )
         return await withCheckedContinuation { continuation in
@@ -6708,7 +6708,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // enqueue is transient — the same timeout used for an unanswered
         // parent response requeues the candidate (or resolves the walk's
         // request nil); a disconnect does so sooner.
-        let delay = Self.nanoseconds(
+        let delay = Timers.nanoseconds(
             planeConfigurations.hierarchy.requestTimeout
         )
         Task { [weak self] in
@@ -6902,7 +6902,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         generation: UInt64
     ) {
         let timeout = planeConfigurations.hierarchy.requestTimeout
-        let timeoutNanoseconds = Self.nanoseconds(timeout)
+        let timeoutNanoseconds = Timers.nanoseconds(timeout)
         Task { [weak self] in
             do {
                 try await Task.sleep(nanoseconds: timeoutNanoseconds)
@@ -7151,19 +7151,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let (scaled, overflow) = seconds.multipliedReportingOverflow(by: 1_000)
         if overflow { return UInt64.max }
         let (total, additionOverflow) = scaled.addingReportingOverflow(milliseconds)
-        return additionOverflow ? UInt64.max : total
-    }
-
-    private static func nanoseconds(_ duration: Duration) -> UInt64 {
-        // Keep Duration out of optimized async task frames: the generic Clock
-        // sleep overload can trip Swift's task allocator during teardown.
-        let components = duration.components
-        guard components.seconds >= 0, components.attoseconds >= 0 else { return 0 }
-        let seconds = UInt64(components.seconds)
-        let nanoseconds = UInt64(components.attoseconds / 1_000_000_000)
-        let (scaled, overflow) = seconds.multipliedReportingOverflow(by: 1_000_000_000)
-        if overflow { return UInt64.max }
-        let (total, additionOverflow) = scaled.addingReportingOverflow(nanoseconds)
         return additionOverflow ? UInt64.max : total
     }
 
