@@ -151,7 +151,7 @@ class NetworkTrustTestCase: XCTestCase {
                 timestamp: clock.next()
             )
             blocks.append(parent)
-            let outcome = try await process.admit(
+            let outcome = try await process.importBlock(
                 BlockHeader(node: parent),
                 remoteSource: FetcherContentSource(producer),
                 mode: .header
@@ -198,7 +198,7 @@ class NetworkTrustTestCase: XCTestCase {
                 fetcher: process
             )
         }
-        let outcome = try await process.admit(BlockHeader(node: block))
+        let outcome = try await process.importBlock(BlockHeader(node: block))
         guard outcome.decision.isAccepted else {
             throw NetworkTestError.failedPhase(
                 "producer block rejected: \(outcome.decision)"
@@ -302,7 +302,7 @@ class NetworkTrustTestCase: XCTestCase {
                 },
                 // Mirror the daemon: a weighed admit stored only the boundary, so the
                 // validate walk pulls the deferred body over the network.
-                validateBodySource: { [weak runtime] blockCID, admit in
+                executionBodySource: { [weak runtime] blockCID, admit in
                     guard let runtime else { throw CancellationError() }
                     return try await runtime.remoteContentSource
                         .withRoot(blockCID) { session in
@@ -310,7 +310,7 @@ class NetworkTrustTestCase: XCTestCase {
                         }
                 },
                 validateEvidenceSource: { [weak runtime] blockCID, requirement in
-                    await runtime?.resolveValidateEvidence(
+                    await runtime?.resolveExecutionEvidence(
                         for: blockCID,
                         requirement: requirement
                     )
@@ -335,7 +335,7 @@ class NetworkTrustTestCase: XCTestCase {
                     "\(admission.header.rawCID)|"
                         + (admission.weighed ? "weighed" : "eager")
                 )
-                return try await service.admitNetworkCandidate(
+                return try await service.importNetworkCandidate(
                     admission.header,
                     authenticatedChildPackage: admission.authenticatedChildPackage,
                     preparingChildDirectories: admission.preparingChildDirectories,

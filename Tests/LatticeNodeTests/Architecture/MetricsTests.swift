@@ -107,7 +107,7 @@ final class MetricsTests: XCTestCase {
         }
     }
 
-    func testMetricsExposeParentReportAndValidateWalkCounters() throws {
+    func testMetricsExposeParentReportAndExecutionWalkCounters() throws {
         let rendered = renderNodeMetrics(NodeMetricsSample(
             chainPath: ["Nexus", "Payments"],
             validatedTipHeight: 1,
@@ -117,7 +117,7 @@ final class MetricsTests: XCTestCase {
             processStartTime: Date(timeIntervalSince1970: 0),
             parentReportsApplied: 3,
             parentReportRefusals: ["notStronger": 2, "locationConflict": 1],
-            validateWalkParked: 4
+            executionWalkParked: 4
         ))
         let samples = try parseExposition(rendered)
         let chain = "chain=\"Nexus/Payments\""
@@ -165,11 +165,11 @@ final class MetricsTests: XCTestCase {
         let producer = try await openProcess(chainPath: ["Nexus"])
         let template = try await service(for: producer)
             .miningTemplate(MiningTemplateRequest())
-        let produced = try await producer.admit(BlockHeader(node: template.block))
+        let produced = try await producer.importBlock(BlockHeader(node: template.block))
         XCTAssertTrue(produced.decision.isAccepted)
 
         let consumer = try await openProcess(chainPath: ["Nexus"])
-        let weighed = try await consumer.admit(
+        let weighed = try await consumer.importBlock(
             BlockHeader(node: template.block),
             remoteSource: FetcherContentSource(producer),
             mode: .header

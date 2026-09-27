@@ -170,7 +170,7 @@ extension NodeStore {
                 block_cid TEXT PRIMARY KEY,
                 parent_cid TEXT,
                 admission_seq INTEGER NOT NULL,
-                validated INTEGER NOT NULL DEFAULT \(BlockStatus.eager.rawValue),
+                validated INTEGER NOT NULL DEFAULT \(BlockStatus.executed.rawValue),
                 leaf INTEGER NOT NULL DEFAULT 1
             ) WITHOUT ROWID
             """)
@@ -307,7 +307,7 @@ extension NodeStore {
     /// Boot-time audit of every normalized index against the immutable
     /// admission batches: one audit per table owner, in a fixed order.
     func auditNormalizedIndexes() async throws {
-        let staged = try loadStagedAdmissions()
+        let staged = try loadStagedImports()
         try auditAdmissionFacts(staged: staged)
         let connectedAcceptedBlocks = try auditAcceptedBlocks(staged: staged)
         try auditIssuedParentFacts(connected: connectedAcceptedBlocks)

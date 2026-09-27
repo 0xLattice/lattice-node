@@ -39,7 +39,7 @@ actor StaleTipPeerSearch {
     let maximumDiscoveredDials: Int
 
     private let clock: @Sendable () async -> Date
-    private let acquiredHeight: @Sendable () async -> UInt64?
+    private let fetchedHeight: @Sendable () async -> UInt64?
     private let configuredPeersWithoutSession: @Sendable () async -> [PeerEndpoint]
     private let discoveredPeersWithoutSession: @Sendable () async -> [PeerEndpoint]
     private let dial: @Sendable (PeerEndpoint) async -> Void
@@ -52,7 +52,7 @@ actor StaleTipPeerSearch {
         interval: TimeInterval,
         maximumDiscoveredDials: Int,
         clock: @escaping @Sendable () async -> Date,
-        acquiredHeight: @escaping @Sendable () async -> UInt64?,
+        fetchedHeight: @escaping @Sendable () async -> UInt64?,
         configuredPeersWithoutSession: @escaping @Sendable () async -> [PeerEndpoint],
         discoveredPeersWithoutSession: @escaping @Sendable () async -> [PeerEndpoint],
         dial: @escaping @Sendable (PeerEndpoint) async -> Void
@@ -60,7 +60,7 @@ actor StaleTipPeerSearch {
         self.interval = interval
         self.maximumDiscoveredDials = maximumDiscoveredDials
         self.clock = clock
-        self.acquiredHeight = acquiredHeight
+        self.fetchedHeight = fetchedHeight
         self.configuredPeersWithoutSession = configuredPeersWithoutSession
         self.discoveredPeersWithoutSession = discoveredPeersWithoutSession
         self.dial = dial
@@ -71,7 +71,7 @@ actor StaleTipPeerSearch {
     func tick() async {
         guard interval > 0 else { return }
         let now = await clock()
-        let height = await acquiredHeight()
+        let height = await fetchedHeight()
         guard let progressAt = lastProgressAt,
               (height ?? 0) <= (lastHeight ?? 0) else {
             // Either the first observation or the tip reached a new high: the

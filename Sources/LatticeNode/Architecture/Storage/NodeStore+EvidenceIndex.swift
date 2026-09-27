@@ -15,7 +15,7 @@ struct IssuedChildEvidence: Sendable {
 /// Evidence verified by Lattice that the node must commit with the admission
 /// batch that made it issuable. The proof package is optional for Nexus, where
 /// the carrier is its own root.
-struct AdmissionCarrierEvidence: Sendable {
+struct ImportCarrierEvidence: Sendable {
     let proof: ChildBlockProof
     let childCID: String
 
@@ -31,9 +31,9 @@ struct AdmissionCarrierEvidence: Sendable {
 /// Hierarchy facts produced by Lattice at the same boundary as an accepted
 /// admission. They remain separate from chain facts because replay does not
 /// need them, but NodeStore commits both in one SQLite transaction.
-struct AdmissionHierarchyArtifacts: Sendable {
+struct ImportHierarchyArtifacts: Sendable {
     let carrierLink: ParentCarrierLink
-    let carrierEvidence: AdmissionCarrierEvidence?
+    let carrierEvidence: ImportCarrierEvidence?
     let parentGenesisLinks: [ParentGenesisLink]
 }
 
@@ -62,16 +62,16 @@ struct ChildRootAttachmentSummary: Equatable, Hashable, Sendable {
     let attachmentCID: String
 }
 
-struct PreparedAdmissionCarrierEvidence {
+struct PreparedImportCarrierEvidence {
     let edge: DirectChildEdge
     let rootCID: String
     let proofAttachment: ChildEvidenceVolume
 }
 
-struct PreparedAdmissionHierarchyArtifacts {
+struct PreparedImportHierarchyArtifacts {
     let carrierLink: ParentCarrierLink
     let carrierLinkPayload: Data
-    let carrierEvidence: PreparedAdmissionCarrierEvidence?
+    let carrierEvidence: PreparedImportCarrierEvidence?
     let parentGenesisLinks: [(link: ParentGenesisLink, payload: Data)]
 }
 
@@ -305,9 +305,9 @@ extension NodeStore {
     }
 
     func prepareHierarchyArtifacts(
-        _ artifacts: AdmissionHierarchyArtifacts?,
+        _ artifacts: ImportHierarchyArtifacts?,
         carrierCIDs: Set<String>
-    ) async throws -> PreparedAdmissionHierarchyArtifacts? {
+    ) async throws -> PreparedImportHierarchyArtifacts? {
         guard let artifacts else { return nil }
         let link = artifacts.carrierLink
         guard !link.carrierCID.isEmpty,
@@ -342,7 +342,7 @@ extension NodeStore {
             artifacts.parentGenesisLinks
         )
 
-        let carrierEvidence: PreparedAdmissionCarrierEvidence?
+        let carrierEvidence: PreparedImportCarrierEvidence?
         if let evidence = artifacts.carrierEvidence {
             carrierEvidence = try await prepareCarrierEvidence(
                 evidence,
@@ -353,7 +353,7 @@ extension NodeStore {
             carrierEvidence = nil
         }
 
-        return PreparedAdmissionHierarchyArtifacts(
+        return PreparedImportHierarchyArtifacts(
             carrierLink: link,
             carrierLinkPayload: try Self.encode(link),
             carrierEvidence: carrierEvidence,
@@ -362,10 +362,10 @@ extension NodeStore {
     }
 
     func prepareCarrierEvidence(
-        _ evidence: AdmissionCarrierEvidence,
+        _ evidence: ImportCarrierEvidence,
         expectedChildCIDs: Set<String>,
         expectedRootCID: String?
-    ) async throws -> PreparedAdmissionCarrierEvidence {
+    ) async throws -> PreparedImportCarrierEvidence {
         let childCID = evidence.childCID
         guard expectedChildCIDs.contains(childCID),
               expectedRootCID.map({ $0 == evidence.proof.rootCID }) ?? true,
@@ -385,7 +385,7 @@ extension NodeStore {
             envelopeBytes: portableEnvelopePayload,
             childCID: childCID
         )
-        return PreparedAdmissionCarrierEvidence(
+        return PreparedImportCarrierEvidence(
             edge: edge,
             rootCID: evidence.proof.rootCID,
             proofAttachment: proofAttachment
@@ -414,7 +414,7 @@ extension NodeStore {
 
     /// Owner: ImportJournal.stage / EvidenceIndex.persistIssuedHierarchyArtifacts — caller holds the transaction.
     func persistHierarchyArtifacts(
-        _ artifacts: PreparedAdmissionHierarchyArtifacts
+        _ artifacts: PreparedImportHierarchyArtifacts
     ) throws {
         if let evidence = artifacts.carrierEvidence {
             try persistCarrierEvidence(evidence)
@@ -428,7 +428,7 @@ extension NodeStore {
 
     /// Owner: ImportJournal.stage / EvidenceIndex.persistHierarchyArtifacts — caller holds the transaction.
     func persistCarrierEvidence(
-        _ evidence: PreparedAdmissionCarrierEvidence
+        _ evidence: PreparedImportCarrierEvidence
     ) throws {
         guard let edgeCID = evidence.edge.edgeCID else {
             throw NodeStoreError.invalidIssuedChildProof(evidence.edge.childCID)
@@ -472,7 +472,7 @@ extension NodeStore {
     }
 
     func persistIssuedHierarchyArtifacts(
-        _ artifacts: AdmissionHierarchyArtifacts,
+        _ artifacts: ImportHierarchyArtifacts,
         pendingChildProofRoutes: [PendingChildProofRoute] = [],
         pendingChildProofCapacity: Int = 16
     ) async throws {
@@ -499,7 +499,7 @@ extension NodeStore {
         let recoveryRoots = try await storeRecoveryEvidence(
             [prepared.carrierEvidence].compactMap { $0 }
         )
-        try await mergeRecoveryRetention(
+        try await mergeRecoveryPruningProtection(
             scope: issuedRecoveryRetentionScope,
             roots: recoveryRoots
         )
@@ -519,7 +519,7 @@ extension NodeStore {
             )
         }
         if prepared.carrierEvidence != nil {
-            await reconcileParentEvidenceInboxRetention()
+            await reconcileParentEvidenceInboxPruningProtection()
         }
     }
 
@@ -610,7 +610,7 @@ extension NodeStore {
         try await proofAttachment.store(storer: recoveryVolumeBroker)
         let recoveryRoots = bootstrapRoots
             + [proofAttachment.rawCID]
-        try await mergeRecoveryRetention(
+        try await mergeRecoveryPruningProtection(
             scope: issuedRecoveryRetentionScope,
             roots: recoveryRoots
         )
@@ -766,7 +766,7 @@ extension NodeStore {
     /// evidence table also records carriers of blocks this chain refused —
     /// every merged-mining round whose root missed this chain's target — and
     /// those are not committers of anything here.
-    func incomingCarrierCommitters(limit: Int) throws -> [String] {
+    func incomingCarriers(limit: Int) throws -> [String] {
         let rows = try database.rows(
             ProofEdgeJoinRow.self,
             "SELECT e.parent_carrier_cid \(Self.proofEdgeJoinSQL) INNER JOIN accepted_blocks AS a ON a.block_cid = e.child_cid WHERE p.scope = ?1 GROUP BY e.parent_carrier_cid ORDER BY MAX(p.rowid) DESC LIMIT ?2",
@@ -779,11 +779,11 @@ extension NodeStore {
     /// carrier proof verified at that block's admission — the edge was derived
     /// from the sparse proof, never taken from the wire — or nil for a
     /// committer of nothing this chain accepted.
-    func incomingCarrierChildBlock(committer: String) throws -> String? {
+    func incomingCarrierChildBlock(carrier: String) throws -> String? {
         try database.row(
             ProofEdgeJoinRow.self,
             "SELECT e.child_cid \(Self.proofEdgeJoinSQL) INNER JOIN accepted_blocks AS a ON a.block_cid = e.child_cid WHERE p.scope = ?1 AND e.parent_carrier_cid = ?2 LIMIT 1",
-            params: [.text(IssuedChildProofScope.incomingCarrier.rawValue), .text(committer)]
+            params: [.text(IssuedChildProofScope.incomingCarrier.rawValue), .text(carrier)]
         )?.childCID
     }
 
@@ -1153,7 +1153,7 @@ extension NodeStore {
             throw NodeStoreError.invalidIssuedChildProof(directHop.childCID)
         }
         _ = try await prepareCarrierEvidence(
-            AdmissionCarrierEvidence(
+            ImportCarrierEvidence(
                 proof: package.package.proof,
                 childCID: directHop.childCID
             ),
@@ -1190,7 +1190,7 @@ extension NodeStore {
         }
         try await attachment.store(storer: recoveryVolumeBroker)
         if !alreadyAdmitted {
-            try await mergeRecoveryRetention(
+            try await mergeRecoveryPruningProtection(
                 scope: parentEvidenceInboxRetentionScope,
                 roots: [attachment.rawCID]
             )
@@ -1250,12 +1250,12 @@ extension NodeStore {
             }
         } catch {
             if !alreadyAdmitted {
-                await reconcileParentEvidenceInboxRetention()
+                await reconcileParentEvidenceInboxPruningProtection()
             }
             throw error
         }
         if admittedDuringStore {
-            await reconcileParentEvidenceInboxRetention()
+            await reconcileParentEvidenceInboxPruningProtection()
         }
         return admittedDuringStore
     }
@@ -1316,7 +1316,7 @@ extension NodeStore {
             "DELETE FROM parent_evidence_inbox WHERE child_cid = ?1 AND root_cid = ?2",
             params: [.text(childCID), .text(rootCID)]
         )
-        await reconcileParentEvidenceInboxRetention()
+        await reconcileParentEvidenceInboxPruningProtection()
     }
 
     func parentEvidenceInboxHasCapacity() throws -> Bool {
@@ -1361,7 +1361,7 @@ extension NodeStore {
                 package: ChildValidationPackage(proof: proof)
             )
             _ = try await prepareCarrierEvidence(
-                AdmissionCarrierEvidence(
+                ImportCarrierEvidence(
                     proof: proof,
                     childCID: childCID
                 ),
@@ -1400,7 +1400,7 @@ extension NodeStore {
     /// Permanent root-independent hops already published by this parent.
     /// They outlive the bounded pre-publication recovery buffer and can be
     /// recomposed whenever this carrier gains another authenticated root.
-    func retainedDirectChildProofs(
+    func publishedDirectChildProofs(
         carrierCID: String
     ) async throws -> [PreparedChildProof] {
         let rows = try database.rows(

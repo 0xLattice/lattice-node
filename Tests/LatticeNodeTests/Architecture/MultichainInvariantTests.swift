@@ -51,7 +51,7 @@ final class MultichainInvariantTests: XCTestCase {
         let recordingCarrier = try XCTUnwrap(BlockBuilder.mine(
             block: unminedRecording, target: parentGenesis.nextTarget
         ))
-        let recordingOutcome = try await parent.admit(try BlockHeader(node: recordingCarrier))
+        let recordingOutcome = try await parent.importBlock(try BlockHeader(node: recordingCarrier))
         XCTAssertTrue(recordingOutcome.decision.isAccepted)
         let provisional = try await BlockBuilder.buildBlock(
             previous: recordingCarrier, timestamp: 2, nonce: 0, fetcher: parent
@@ -85,7 +85,7 @@ final class MultichainInvariantTests: XCTestCase {
                 acceptedBlockPublisher: { _ in }
             )
         )
-        let carrierOutcome = try await parentService.admitNetworkCandidate(
+        let carrierOutcome = try await parentService.importNetworkCandidate(
             carrierHeader,
             authenticatedChildPackage: nil,
             preparingChildDirectories: ["Payments"],
@@ -132,11 +132,11 @@ final class MultichainInvariantTests: XCTestCase {
             network: ClosureNetworkInterface(
                 childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
-                parentRunReportRequester: { committers in await asked.record(committers) },
+                parentRunReportRequester: { carriers in await asked.record(carriers) },
                 acceptedBlockPublisher: { _ in }
             )
         )
-        let admitted = try await XCTUnwrap(childService).admitNetworkCandidate(
+        let admitted = try await XCTUnwrap(childService).importNetworkCandidate(
             childBlockHeader,
             authenticatedChildPackage: AuthenticatedChildPackage(package: ChildValidationPackage(
                 proof: evidence.proof,
@@ -153,7 +153,7 @@ final class MultichainInvariantTests: XCTestCase {
         XCTAssertTrue(admitted.decision.isAccepted)
         let askedFor = await asked.received()
         XCTAssertEqual(askedFor, [[carrierHeader.rawCID]], "one ask, naming the admitted block's carrier")
-        let remembered = try await child().recentCommitters()
+        let remembered = try await child().recentCarriers()
         XCTAssertEqual(remembered, [carrierHeader.rawCID], "the child remembers whom to re-ask")
         // A directory this chain never anchored a child genesis for is not
         // served, whoever names it.
@@ -177,7 +177,7 @@ final class MultichainInvariantTests: XCTestCase {
         let successorHeader = try BlockHeader(node: successor)
         // Through the service, so the emission path is the one under test:
         // every accepted admission pushes each served directory's changed run.
-        let successorOutcome = try await parentService.admitNetworkCandidate(
+        let successorOutcome = try await parentService.importNetworkCandidate(
             successorHeader,
             authenticatedChildPackage: nil,
             preparingChildDirectories: [],
@@ -191,9 +191,9 @@ final class MultichainInvariantTests: XCTestCase {
         let grown = try XCTUnwrap(successorReports.first)
         XCTAssertEqual(grown.blockHash, carrierHeader.rawCID, "credited to the nearest committer")
         XCTAssertGreaterThan(grown.runWork, grown.ownWork)
-        let byRequest = await parent.runReport(committer: carrierHeader.rawCID, directory: "Payments")
+        let byRequest = await parent.runReport(carrier: carrierHeader.rawCID, directory: "Payments")
         XCTAssertEqual(byRequest, grown, "the re-serve request answers with the same report")
-        let unserved = await parent.runReport(committer: carrierHeader.rawCID, directory: "Markets")
+        let unserved = await parent.runReport(carrier: carrierHeader.rawCID, directory: "Markets")
         XCTAssertNil(unserved)
 
         // The child credits it — once.
@@ -279,7 +279,7 @@ final class MultichainInvariantTests: XCTestCase {
             return XCTFail("the attributed credit must survive a restart, got \(afterRestart)")
         }
         // ... and so does whom to re-ask: the fallback works after a restart.
-        let rememberedAfterRestart = try await reopened.recentCommitters()
+        let rememberedAfterRestart = try await reopened.recentCarriers()
         XCTAssertEqual(rememberedAfterRestart, [carrierHeader.rawCID])
     }
 
@@ -347,7 +347,7 @@ final class MultichainInvariantTests: XCTestCase {
         let n2 = try XCTUnwrap(BlockBuilder.mine(block: unminedN2, target: min(a1.carrier.nextTarget, a2.target)))
         let n2Header = try BlockHeader(node: n2)
         _ = try await nexus.prepareChildProofs(for: n2, capacity: 16)
-        let n2Outcome = try await nexus.admit(n2Header, preparingChildDirectories: ["A"])
+        let n2Outcome = try await nexus.importBlock(n2Header, preparingChildDirectories: ["A"])
         XCTAssertTrue(n2Outcome.decision.isAccepted)
         _ = try await nexus.retryPendingChildProofs(carrierCID: n2Header.rawCID)
         let a2CID = try BlockHeader(node: a2).rawCID
@@ -359,7 +359,7 @@ final class MultichainInvariantTests: XCTestCase {
         try await BlockHeader(node: a2).storeBlock(fetcher: UnionFetcher([nexus, a]), storer: aContent)
         // The carrier package brings the committed child block along.
         try await BlockHeader(node: b1).storeBlock(fetcher: UnionFetcher([a, nexus]), storer: aContent)
-        let a2Outcome = try await a.admit(
+        let a2Outcome = try await a.importBlock(
             BlockHeader(rawCID: a2CID, node: nil, encryptionInfo: nil),
             authenticatedChildPackage: AuthenticatedChildPackage(package: ChildValidationPackage(
                 proof: a2Evidence.proof,
@@ -380,7 +380,7 @@ final class MultichainInvariantTests: XCTestCase {
         let b1Evidence = try XCTUnwrap(b1Issued)
         let bContent = InMemoryContentStore()
         try await BlockHeader(node: b1).storeBlock(fetcher: UnionFetcher([a, nexus]), storer: bContent)
-        let b1Outcome = try await b.admit(
+        let b1Outcome = try await b.importBlock(
             BlockHeader(rawCID: b1CID, node: nil, encryptionInfo: nil),
             authenticatedChildPackage: AuthenticatedChildPackage(package: ChildValidationPackage(
                 proof: b1Evidence.proof,
@@ -397,7 +397,7 @@ final class MultichainInvariantTests: XCTestCase {
         await a.serveRuns(for: "B")
         let servedOnA = await a.servedRunDirectoryList()
         XCTAssertEqual(servedOnA, ["B"], "A anchored B, so A serves it")
-        let runBeforeValue = await a.runReport(committer: a2CID, directory: "B")
+        let runBeforeValue = await a.runReport(carrier: a2CID, directory: "B")
         let runBefore = try XCTUnwrap(runBeforeValue)
         XCTAssertEqual(runBefore.childBlock, b1CID)
         XCTAssertEqual(runBefore.runWork, runBefore.ownWork)
@@ -430,7 +430,7 @@ final class MultichainInvariantTests: XCTestCase {
         // serves B grew by exactly what Nexus attributed, while A2's own
         // grinds — what B already holds — did not change. B credits the
         // difference: two levels down, undiminished.
-        let runAfterValue = await a.runReport(committer: a2CID, directory: "B")
+        let runAfterValue = await a.runReport(carrier: a2CID, directory: "B")
         let runAfter = try XCTUnwrap(runAfterValue)
         XCTAssertEqual(runAfter.ownWork, runBefore.ownWork, "an attributed run is no grind of A2")
         XCTAssertEqual(runAfter.grinds, runBefore.grinds)
@@ -485,7 +485,7 @@ final class MultichainInvariantTests: XCTestCase {
         let recordingCarrier = try XCTUnwrap(BlockBuilder.mine(
             block: unminedRecording, target: parentGenesis.nextTarget
         ))
-        let recordingOutcome = try await parent.admit(
+        let recordingOutcome = try await parent.importBlock(
             try BlockHeader(node: recordingCarrier)
         )
         XCTAssertTrue(recordingOutcome.decision.isAccepted)
@@ -514,7 +514,7 @@ final class MultichainInvariantTests: XCTestCase {
         ))
         _ = try await parent.prepareChildProofs(for: carrier, capacity: 16)
         let carrierHeader = try BlockHeader(node: carrier)
-        let carrierOutcome = try await parent.admit(
+        let carrierOutcome = try await parent.importBlock(
             carrierHeader, preparingChildDirectories: ["Payments"]
         )
         XCTAssertTrue(carrierOutcome.decision.isAccepted)
@@ -540,7 +540,7 @@ final class MultichainInvariantTests: XCTestCase {
         )
 
         // 1. The carrier proof alone is no longer enough.
-        let withoutLink = try await child.admit(
+        let withoutLink = try await child.importBlock(
             childBlockHeader,
             authenticatedChildPackage: AuthenticatedChildPackage(
                 package: ChildValidationPackage(proof: evidence.proof)
@@ -564,7 +564,7 @@ final class MultichainInvariantTests: XCTestCase {
         )
 
         // 3. The link built from that answer admits the block.
-        let admitted = try await child.admit(
+        let admitted = try await child.importBlock(
             childBlockHeader,
             authenticatedChildPackage: AuthenticatedChildPackage(
                 package: ChildValidationPackage(
@@ -646,7 +646,7 @@ final class MultichainInvariantTests: XCTestCase {
             block: unminedRecordingCarrier,
             target: unminedRecordingCarrier.target
         ))
-        let recordingOutcome = try await parent!.admit(
+        let recordingOutcome = try await parent!.importBlock(
             try BlockHeader(node: recordingCarrier)
         )
         XCTAssertTrue(recordingOutcome.decision.isAccepted)
@@ -679,7 +679,7 @@ final class MultichainInvariantTests: XCTestCase {
             capacity: 16
         )
         let carrierHeader = try BlockHeader(node: carrier)
-        let carrierOutcome = try await parent!.admit(
+        let carrierOutcome = try await parent!.importBlock(
             carrierHeader,
             preparingChildDirectories: ["Payments"]
         )
@@ -772,7 +772,7 @@ final class MultichainInvariantTests: XCTestCase {
         var receipts: ChainProcess? = try await ChainProcess.open(
             configuration: receiptsConfiguration
         )
-        let receiptsOutcome = try await receipts!.admit(
+        let receiptsOutcome = try await receipts!.importBlock(
             childBlockHeader,
             authenticatedChildPackage: package,
             remoteSource: childContent
@@ -803,7 +803,7 @@ final class MultichainInvariantTests: XCTestCase {
                 confirmParentRecordedGenesis: { _ in true }
             )
         XCTAssertTrue(paymentsBootstrapped)
-        let accepted = try await payments!.admit(
+        let accepted = try await payments!.importBlock(
             childBlockHeader,
             authenticatedChildPackage: package,
             remoteSource: childContent
@@ -849,7 +849,7 @@ final class MultichainInvariantTests: XCTestCase {
             previous: previous, transactions: [authorization], timestamp: timestamp, nonce: 0, fetcher: chain
         )
         let mined = try XCTUnwrap(BlockBuilder.mine(block: unmined, target: previous.nextTarget))
-        let outcome = try await chain.admit(try BlockHeader(node: mined))
+        let outcome = try await chain.importBlock(try BlockHeader(node: mined))
         XCTAssertTrue(outcome.decision.isAccepted, "recording block on \(chainPath)")
         return mined
     }
@@ -860,7 +860,7 @@ final class MultichainInvariantTests: XCTestCase {
             previous: previous, timestamp: timestamp, nonce: 0, fetcher: chain
         )
         let mined = try XCTUnwrap(BlockBuilder.mine(block: unmined, target: previous.nextTarget))
-        let outcome = try await chain.admit(try BlockHeader(node: mined))
+        let outcome = try await chain.importBlock(try BlockHeader(node: mined))
         XCTAssertTrue(outcome.decision.isAccepted)
         return mined
     }
@@ -896,7 +896,7 @@ final class MultichainInvariantTests: XCTestCase {
         ))
         _ = try await parent.prepareChildProofs(for: carrier, capacity: 16)
         let carrierHeader = try BlockHeader(node: carrier)
-        let carrierOutcome = try await parent.admit(carrierHeader, preparingChildDirectories: [directory])
+        let carrierOutcome = try await parent.importBlock(carrierHeader, preparingChildDirectories: [directory])
         XCTAssertTrue(carrierOutcome.decision.isAccepted, "carrier into \(directory)")
         _ = try await parent.retryPendingChildProofs(carrierCID: carrierHeader.rawCID)
         let childBlockCID = try BlockHeader(node: childBlock).rawCID
@@ -906,7 +906,7 @@ final class MultichainInvariantTests: XCTestCase {
         let evidence = try XCTUnwrap(issued)
         let content = InMemoryContentStore()
         try await BlockHeader(node: childBlock).storeBlock(fetcher: parent, storer: content)
-        let admitted = try await child.admit(
+        let admitted = try await child.importBlock(
             BlockHeader(rawCID: childBlockCID, node: nil, encryptionInfo: nil),
             authenticatedChildPackage: AuthenticatedChildPackage(package: ChildValidationPackage(
                 proof: evidence.proof,
@@ -924,7 +924,7 @@ final class MultichainInvariantTests: XCTestCase {
 
     private actor RunReportRequestSink {
         private var asks: [[String]] = []
-        func record(_ committers: [String]) { asks.append(committers) }
+        func record(_ carriers: [String]) { asks.append(carriers) }
         func received() -> [[String]] { asks }
     }
 

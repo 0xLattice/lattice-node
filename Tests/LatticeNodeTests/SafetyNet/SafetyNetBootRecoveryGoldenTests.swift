@@ -164,7 +164,7 @@ final class SafetyNetBootRecoveryGoldenTests: XCTestCase {
         var canonicalCIDs = Set<String>()
         if let canonical {
             for height in 0...canonical.height {
-                if let cid = await process.mainChainBlockCID(atHeight: height) {
+                if let cid = await process.canonicalBlockCID(atHeight: height) {
                     canonicalCIDs.insert(cid)
                 }
             }
@@ -274,7 +274,7 @@ final class SafetyNetBootRecoveryGoldenTests: XCTestCase {
         let chain = [a, b, c, e, d]
         for mode in [ImportMode.header, .execution] {
             for block in chain {
-                let outcome = try await consumer!.admit(
+                let outcome = try await consumer!.importBlock(
                     BlockHeader(node: block),
                     remoteSource: FetcherContentSource(producer),
                     mode: mode
@@ -303,7 +303,7 @@ final class SafetyNetBootRecoveryGoldenTests: XCTestCase {
     private func admitEager(
         _ block: Block, on process: ChainProcess, expecting: String
     ) async throws {
-        let decision = try await process.admit(BlockHeader(node: block)).decision
+        let decision = try await process.importBlock(BlockHeader(node: block)).decision
         let observed: String
         switch decision {
         case .canonicalized: observed = "canonicalized"

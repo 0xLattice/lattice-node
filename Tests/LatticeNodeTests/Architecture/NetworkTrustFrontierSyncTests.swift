@@ -1191,7 +1191,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         let handlers = ClosureChainInterface(admission: { admission in
             await admissions.append(admission.header.rawCID)
             delivered.fulfill()
-            return NodeAdmissionOutcome(
+            return NodeImportOutcome(
                 decision: .duplicate,
                 parentCarrierLink: nil,
                 sameChainPredecessor: nil
@@ -1259,7 +1259,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         )
         let decisions = NetworkEventRecorder()
         let handlers = ClosureChainInterface(admission: { admission in
-            let outcome = try await service.admitNetworkCandidate(
+            let outcome = try await service.importNetworkCandidate(
                 admission.header,
                 authenticatedChildPackage: admission.authenticatedChildPackage,
                 preparingChildDirectories: admission.preparingChildDirectories,
@@ -1498,7 +1498,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
                 )
             }
             await admitted.append(admission.header.rawCID)
-            return NodeAdmissionOutcome(
+            return NodeImportOutcome(
                 decision: .acceptedSide(ChainCommit(
                     tipHash: admission.header.rawCID
                 )),
@@ -1580,7 +1580,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
                 _ = await gate.enter()
                 throw NetworkTestError.failedPhase("stalled acquisition")
             }
-            return NodeAdmissionOutcome(
+            return NodeImportOutcome(
                 decision: .acceptedSide(ChainCommit(
                     tipHash: admission.header.rawCID
                 )),
@@ -2190,7 +2190,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
     /// inclusive) tip — what we hold — not the validated tip: a node holding
     /// weighed blocks to H treats H+1 as the live edge (direct predecessor
     /// path) and H+3 as a gap (range sync).
-    func testRangeSyncGapIsMeasuredAgainstTheAcquiredTip() async throws {
+    func testRangeSyncGapIsMeasuredAgainstTheFetchedTip() async throws {
         let fixture = try await overlayRuntime(
             keyByte: 0xc1,
             requestTimeout: .seconds(5)
@@ -2676,7 +2676,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
     /// whose validated tip lags (deferred execution) must not advertise the
     /// validated one — a joiner would range-sync to the validated height,
     /// clear as "caught up", and never re-enter on a quiet network.
-    func testHelloReplyAdvertisesTheAcquiredTip() async throws {
+    func testHelloReplyAdvertisesTheFetchedTip() async throws {
         let fixture = try await overlayRuntime(
             keyByte: 0xc3,
             requestTimeout: .seconds(5)
@@ -2834,7 +2834,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
     /// The range-sync anchor is one (cid, height) pair describing the SAME
     /// block — the acquired tip — never the validated tip's CID under the
     /// acquired height (which would re-page every held block above it).
-    func testRangeSyncAnchorsAtTheAcquiredTip() async throws {
+    func testRangeSyncAnchorsAtTheFetchedTip() async throws {
         let fixture = try await overlayRuntime(
             keyByte: 0xc7,
             requestTimeout: .seconds(5)

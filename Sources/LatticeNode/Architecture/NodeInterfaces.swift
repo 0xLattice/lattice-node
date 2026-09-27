@@ -62,7 +62,7 @@ public protocol NetworkInterface: AnyObject, Sendable {
     /// Ask this chain's configured parent for the runs of the committing
     /// blocks behind one block admitted here (§9.10) — one ask per admission,
     /// so the credit for those runs never waits for a push or a reconnect.
-    func requestParentRunReports(committers: [String]) async
+    func requestParentRunReports(carriers: [String]) async
     func publishAcceptedBlock(_ blockCID: String) async throws
     func publishTransaction(_ volumeRootCID: String) async throws
     /// Opens a network body-acquisition session bound to one block's root and
@@ -75,17 +75,17 @@ public protocol NetworkInterface: AnyObject, Sendable {
     /// interface with no network body source runs `admit(nil)`: broker-only,
     /// as unit contexts that admit empty blocks (whose boundary already is the
     /// whole block) do.
-    func withValidateBodySource(
+    func withExecutionBodySource(
         blockCID: String,
         _ admit: @Sendable (
             _ remoteSource: (any ContentSource)?
-        ) async throws -> NodeAdmissionOutcome
-    ) async throws -> NodeAdmissionOutcome
+        ) async throws -> NodeImportOutcome
+    ) async throws -> NodeImportOutcome
     /// Cross-chain evidence for the validate walk: a weighed CHILD block's
     /// `.execution` needs the parent fact (state continuity / genesis link) the
     /// live path obtains from the configured parent. Nil is an availability
     /// gap; the walk parks on its retry timer.
-    func resolveValidateEvidence(
+    func resolveExecutionEvidence(
         for blockCID: String,
         requirement: CrossChainEvidenceRequirement
     ) async -> AuthenticatedChildPackage?
@@ -106,11 +106,11 @@ public struct ChainNetworkCapabilities: OptionSet, Sendable {
     public static let transactionInventory = ChainNetworkCapabilities(rawValue: 1 << 2)
     public static let parentRunReports = ChainNetworkCapabilities(rawValue: 1 << 3)
     public static let runReportServing = ChainNetworkCapabilities(rawValue: 1 << 4)
-    public static let recentCommitters = ChainNetworkCapabilities(rawValue: 1 << 5)
+    public static let recentCarriers = ChainNetworkCapabilities(rawValue: 1 << 5)
 
     public static let all: ChainNetworkCapabilities = [
         .childCandidates, .transactions, .transactionInventory,
-        .parentRunReports, .runReportServing, .recentCommitters,
+        .parentRunReports, .runReportServing, .recentCarriers,
     ]
 }
 
@@ -123,9 +123,9 @@ public protocol ChainInterface: AnyObject, Sendable {
         for context: ChildCandidateRequestContext,
         parentContentSource: any ContentSource
     ) async throws -> DirectChildCandidate?
-    func admitNetworkCandidate(
-        _ admission: NetworkCandidateAdmission
-    ) async throws -> NodeAdmissionOutcome
+    func importNetworkCandidate(
+        _ admission: NetworkCandidateImport
+    ) async throws -> NodeImportOutcome
     func submitNetworkTransaction(_ transaction: Transaction) async throws -> Bool
     func transactionInventoryRoots() async -> [String]
     /// A run report from the configured parent, to be credited at the child
@@ -136,7 +136,7 @@ public protocol ChainInterface: AnyObject, Sendable {
     func serveRuns(for directory: String) async
     /// The committers this chain asks its parent to re-serve after each
     /// evidence catch-up round.
-    func recentCommitters() async -> [String]
+    func recentCarriers() async -> [String]
 }
 
 /// The service's view of the runtime. Holds the runtime weakly, so the
@@ -191,8 +191,8 @@ final class WeakNetwork: @unchecked Sendable, NetworkInterface {
         await runtime.announceParentRunReport(report)
     }
 
-    func requestParentRunReports(committers: [String]) async {
-        await runtime?.requestParentRunReports(committers: committers)
+    func requestParentRunReports(carriers: [String]) async {
+        await runtime?.requestParentRunReports(carriers: carriers)
     }
 
     func publishAcceptedBlock(_ blockCID: String) async throws {
@@ -205,15 +205,15 @@ final class WeakNetwork: @unchecked Sendable, NetworkInterface {
         try await runtime.publishTransaction(volumeRootCID)
     }
 
-    func withValidateBodySource(
+    func withExecutionBodySource(
         blockCID: String,
         _ admit: @Sendable (
             _ remoteSource: (any ContentSource)?
-        ) async throws -> NodeAdmissionOutcome
-    ) async throws -> NodeAdmissionOutcome {
+        ) async throws -> NodeImportOutcome
+    ) async throws -> NodeImportOutcome {
         // A weighed admit stored only the boundary; pull the deferred body
         // over the network by opening a root session on the block CID (the
-        // same public-pin resolution the candidate acquirer falls back to),
+        // same public-pin resolution the candidate fetcher falls back to),
         // and admit `.execution` inside it so [broker, session] serves the
         // local boundary free and fetches only the missing body.
         guard let runtime else { throw CancellationError() }
@@ -223,14 +223,14 @@ final class WeakNetwork: @unchecked Sendable, NetworkInterface {
             }
     }
 
-    func resolveValidateEvidence(
+    func resolveExecutionEvidence(
         for blockCID: String,
         requirement: CrossChainEvidenceRequirement
     ) async -> AuthenticatedChildPackage? {
         // A weighed child block's validate tier needs the parent fact (state
         // continuity / genesis link) the live path requests from the
         // configured parent; the same request, awaited.
-        await runtime?.resolveValidateEvidence(
+        await runtime?.resolveExecutionEvidence(
             for: blockCID,
             requirement: requirement
         )
@@ -259,11 +259,11 @@ final class WeakChain: @unchecked Sendable, ChainInterface {
         )
     }
 
-    func admitNetworkCandidate(
-        _ admission: NetworkCandidateAdmission
-    ) async throws -> NodeAdmissionOutcome {
+    func importNetworkCandidate(
+        _ admission: NetworkCandidateImport
+    ) async throws -> NodeImportOutcome {
         guard let service else { throw CancellationError() }
-        return try await service.admitNetworkCandidate(
+        return try await service.importNetworkCandidate(
             admission.header,
             authenticatedChildPackage: admission.authenticatedChildPackage,
             preparingChildDirectories: admission.preparingChildDirectories,
@@ -291,8 +291,8 @@ final class WeakChain: @unchecked Sendable, ChainInterface {
         await service?.serveRuns(for: directory)
     }
 
-    func recentCommitters() async -> [String] {
+    func recentCarriers() async -> [String] {
         guard let service else { return [] }
-        return (try? await service.recentCommitters()) ?? []
+        return (try? await service.recentCarriers()) ?? []
     }
 }

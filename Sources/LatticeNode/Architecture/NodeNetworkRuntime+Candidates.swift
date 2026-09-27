@@ -10,8 +10,8 @@ extension NodeNetworkRuntime {
     @discardableResult
     func enqueueCandidate(_ seed: CandidateSeed) -> Bool {
         guard isRunning else { return false }
-        let result = candidateAcquirer.observe(seed)
-        serviceCandidateAcquirer()
+        let result = blockFetcher.observe(seed)
+        serviceBlockFetcher()
         return result.accepted
     }
 
@@ -33,11 +33,11 @@ extension NodeNetworkRuntime {
         return peer
     }
 
-    func serviceCandidateAcquirer() {
-        if candidateAcquirer.hasTimedWait {
+    func serviceBlockFetcher() {
+        if blockFetcher.hasTimedWait {
             scheduleWaitingCandidateRetry()
         }
-        if candidateAcquirer.hasReadyCandidate {
+        if blockFetcher.hasReadyCandidate {
             startCandidateWorker()
         }
     }
@@ -47,20 +47,20 @@ extension NodeNetworkRuntime {
         let generation = runtimeGeneration
         candidateWorkerGeneration = generation
         candidateWorker = Task { [weak self] in
-            await self?.drainCandidateAdmissions(generation: generation)
+            await self?.drainCandidateImports(generation: generation)
         }
     }
 
-    private func drainCandidateAdmissions(generation: UInt64) async {
+    private func drainCandidateImports(generation: UInt64) async {
         defer { finishCandidateWorker(generation: generation) }
         while isRunning, runtimeGeneration == generation,
-              let candidate = candidateAcquirer.next() {
+              let candidate = blockFetcher.next() {
             guard let process,
                   isCurrentRuntime(
                     generation: generation,
                     process: process
                   ) else { return }
-            await admitCandidate(
+            await importCandidate(
                 candidate,
                 generation: generation,
                 process: process
@@ -69,7 +69,7 @@ extension NodeNetworkRuntime {
                 generation: generation,
                 process: process
             ) else { return }
-            serviceCandidateAcquirer()
+            serviceBlockFetcher()
             // An offer deferred behind an admission is owed a look whatever
             // that admission decided: an acceptance reports a state change,
             // a park reports nothing. Only then; an admission a peer drove
@@ -86,29 +86,29 @@ extension NodeNetworkRuntime {
         guard candidateWorkerGeneration == generation else { return }
         candidateWorker = nil
         candidateWorkerGeneration = nil
-        if isRunning, candidateAcquirer.hasReadyCandidate {
+        if isRunning, blockFetcher.hasReadyCandidate {
             startCandidateWorker()
         }
     }
 
     private func completeCandidate(
         _ candidate: Candidate,
-        resolution: CandidateAcquirer.Resolution,
+        resolution: BlockFetcher.Resolution,
         deficientProviders: Set<CandidateProvider> = []
     ) {
         SyncTrace.log(
             "complete \(candidate.blockCID) \(resolution) "
                 + "deficient=\(deficientProviders.count)"
         )
-        _ = candidateAcquirer.complete(
+        _ = blockFetcher.complete(
             candidate.ticket,
             resolution: resolution,
             deficientProviders: deficientProviders
         )
-        serviceCandidateAcquirer()
+        serviceBlockFetcher()
     }
 
-    private func admitCandidate(
+    private func importCandidate(
         _ candidate: Candidate,
         generation: UInt64,
         process: ChainProcess
@@ -136,7 +136,7 @@ extension NodeNetworkRuntime {
         var failedOverlayProviders = Set<CandidateProvider>()
         let childDirectories = authenticatedChildDirectories()
         var attempt: (
-            value: NodeAdmissionOutcome,
+            value: NodeImportOutcome,
             attribution: IvyRootContentSource.Attribution
         )?
         let header = BlockHeader(
@@ -270,12 +270,12 @@ extension NodeNetworkRuntime {
                     initialResponse: initialResponse,
                     capture: capture
                 ) { session in
-                    try await Self.enforceLocalAdmissionPolicy(
+                    try await Self.enforceLocalImportPolicy(
                         candidateCID: candidate.blockCID,
                         source: session,
                         configuration: configuration
                     )
-                    let admitted = try await chain.admitNetworkCandidate(NetworkCandidateAdmission(
+                    let admitted = try await chain.importNetworkCandidate(NetworkCandidateImport(
                         header: header,
                         authenticatedChildPackage: authenticatedPackage,
                         preparingChildDirectories: childDirectories,
@@ -307,7 +307,7 @@ extension NodeNetworkRuntime {
                     return
                 }
                 if let failure = error as? BlockImportError {
-                    let decision = NodeAdmissionDecision(failure)
+                    let decision = NodeImportDecision(failure)
                     if decision.shouldRetryWhenEvidenceChanges {
                         completeCandidate(
                             candidate,
@@ -477,7 +477,7 @@ extension NodeNetworkRuntime {
                 process: process
             )
         }
-        let resolution: CandidateAcquirer.Resolution
+        let resolution: BlockFetcher.Resolution
         if let predecessor = outcome.sameChainPredecessor,
            await process.hasAcceptedBlock(predecessor.predecessorCID) == false {
             // Park only when the predecessor is genuinely still missing. An
@@ -534,7 +534,7 @@ extension NodeNetworkRuntime {
         }
     }
 
-    private nonisolated static func enforceLocalAdmissionPolicy(
+    private nonisolated static func enforceLocalImportPolicy(
         candidateCID: String,
         source: any ContentSource,
         configuration: NodeConfiguration
@@ -657,7 +657,7 @@ extension NodeNetworkRuntime {
 
     private func scheduleWaitingCandidateRetry() {
         guard waitingCandidateRetryTask == nil,
-              candidateAcquirer.hasTimedWait else { return }
+              blockFetcher.hasTimedWait else { return }
         let generation = runtimeGeneration
         waitingCandidateRetryGeneration = generation
         waitingCandidateRetryTask = Timers.deadline(
@@ -673,7 +673,7 @@ extension NodeNetworkRuntime {
         waitingCandidateRetryTask = nil
         waitingCandidateRetryGeneration = nil
         guard isCurrentGeneration(generation), isRunning else { return }
-        candidateAcquirer.retry()
-        serviceCandidateAcquirer()
+        blockFetcher.retry()
+        serviceBlockFetcher()
     }
 }

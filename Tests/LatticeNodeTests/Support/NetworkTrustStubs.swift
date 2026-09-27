@@ -28,7 +28,7 @@ func inertNetworkHandlers() -> ClosureChainInterface {
 
 func duplicateNetworkHandlers() -> ClosureChainInterface {
     ClosureChainInterface(admission: { _ in
-        NodeAdmissionOutcome(
+        NodeImportOutcome(
             decision: .duplicate,
             parentCarrierLink: nil,
             sameChainPredecessor: nil
@@ -231,12 +231,12 @@ final class HierarchyRetryPeer: IvyDelegate, Sendable {
                 message.payload
             ) else { return }
             await recorder.recordRunReportRequest(request)
-            for committer in request.committerCIDs {
+            for carrier in request.carrierCIDs {
                 guard let payload = try? ParentRunReportMessage(
                     directory: "Retry",
-                    committerCID: committer,
+                    carrierCID: carrier,
                     childBlockCID: testCID("run-report-child-block"),
-                    grinds: [committer],
+                    grinds: [carrier],
                     runWork: WorkSum(UInt256(9)),
                     ownWork: WorkSum(UInt256(4)),
                     revision: 7

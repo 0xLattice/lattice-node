@@ -6,7 +6,7 @@ import UInt256
 import VolumeBroker
 import cashew
 
-public struct NetworkCandidateAdmission: Sendable {
+public struct NetworkCandidateImport: Sendable {
     public let header: BlockHeader
     public let authenticatedChildPackage: AuthenticatedChildPackage?
     public let preparingChildDirectories: [String]
@@ -180,10 +180,10 @@ struct NodeNetworkPlaneConfigurations {
 /// The public overlay carries same-chain candidates and CAS content. The
 /// private hierarchy plane carries only direct parent/child facts.
 public actor NodeNetworkRuntime: IvyDelegate {
-    typealias Candidate = CandidateAcquirer.Candidate
-    typealias CandidateSeed = CandidateAcquirer.Seed
-    private typealias CandidateWaitReason = CandidateAcquirer.WaitReason
-    typealias DurableDescendant = CandidateAcquirer.DurableDescendant
+    typealias Candidate = BlockFetcher.Candidate
+    typealias CandidateSeed = BlockFetcher.Seed
+    private typealias CandidateWaitReason = BlockFetcher.WaitReason
+    typealias DurableDescendant = BlockFetcher.DurableDescendant
     typealias ParentEvidenceResult = ParentEvidenceFlow.Result
     typealias ParentEvidenceSession = ParentEvidenceFlow.Session
 
@@ -630,7 +630,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ///     Hierarchy.acceptParentChainFact / Hierarchy.retryParentFactCandidate /
     ///     Lifecycle.startNow / Lifecycle.clearRuntimeState / NodeNetworkRuntime.didConnect /
     ///     NodeNetworkRuntime.didDisconnect.
-    var candidateAcquirer = CandidateAcquirer()
+    var blockFetcher = BlockFetcher()
     /// Owner: Candidates.startCandidateWorker / Candidates.finishCandidateWorker /
     ///     Lifecycle.clearRuntimeState.
     var candidateWorker: Task<Void, Never>?
@@ -668,7 +668,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     var portableEvidenceWorker: Task<Void, Never>?
     /// Orders parent evidence and reservation transfer within one authenticated
     /// session. Transport effects remain in this actor.
-    /// Owner: Candidates.admitCandidate / Hierarchy.appendParentEvidence /
+    /// Owner: Candidates.importCandidate / Hierarchy.appendParentEvidence /
     ///     Hierarchy.finishParentEvidence / Lifecycle.clearRuntimeState.
     var parentEvidence = ParentEvidenceFlow()
     /// The service this generation calls into; `Node.build` passes a
@@ -742,7 +742,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// the naming ended without it and nothing tracks it. The hold on it is
     /// released, or no offer would ever follow. One at a time, like the
     /// context that names it.
-    /// Owner: Candidates.admitCandidate / Hierarchy.clearHierarchyAuthorization /
+    /// Owner: Candidates.importCandidate / Hierarchy.clearHierarchyAuthorization /
     ///     Hierarchy.reviewCarriedChildHold / Lifecycle.clearRuntimeState.
     var releasedCarriedChildCID: String?
     /// The carried block an evidence scan was sent for (not merely asked
@@ -767,7 +767,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     var nextCandidateOfferSequence: UInt64 = 0
     /// Set when the offer gate deferred behind an own carried candidate's
     /// admission; the admission drain then re-arms the offer.
-    /// Owner: Candidates.drainCandidateAdmissions / Hierarchy.offerCandidate /
+    /// Owner: Candidates.drainCandidateImports / Hierarchy.offerCandidate /
     ///     Lifecycle.clearRuntimeState.
     var candidateOfferDeferredByAdmission = false
     /// Owner: Hierarchy.offerCandidate / Hierarchy.clearHierarchyAuthorization /
@@ -1021,7 +1021,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // ready one's are released by their own tasks.
             let previous = overlayRecords[peer.key]
             if let previous = previous?.readyPeer {
-                candidateAcquirer.disconnect(candidateProvider(previous))
+                blockFetcher.disconnect(candidateProvider(previous))
             }
             discardServingSessions(of: previous?.awaitingHelloPeer)
             overlayRecords.update(peer.key) {
@@ -1079,7 +1079,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             let disconnected = overlayRecords[key]
             disconnected?.helloDeadline?.task.cancel()
             if let ready = disconnected?.readyPeer {
-                candidateAcquirer.disconnect(candidateProvider(ready))
+                blockFetcher.disconnect(candidateProvider(ready))
             }
             discardServingSessions(of: disconnected?.sessionPeer)
             // The record goes after the range sync clears: the re-entry that
@@ -1242,7 +1242,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // The acquired (weighed-inclusive) tip: it advances only on work
             // this node verified itself. The validated tip lags behind it under
             // deferred execution and would read as staleness that is not there.
-            acquiredHeight: { await process.canonicalTipHeight() },
+            fetchedHeight: { await process.canonicalTipHeight() },
             configuredPeersWithoutSession: { [weak self] in
                 await self?.peersWithoutSession(configured) ?? []
             },
@@ -1275,7 +1275,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private func discoveredPeersWithoutSession(
         process: ChainProcess
     ) async -> [PeerEndpoint] {
-        guard let genesis = await process.mainChainBlockCID(atHeight: 0) else {
+        guard let genesis = await process.canonicalBlockCID(atHeight: 0) else {
             return []
         }
         let ownKey = try? PeerKey(configuration.processPublicKey)
@@ -1335,7 +1335,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ) async {
         // (1) This node's own chain genesis, on its own overlay — peers of
         // this chain can find providers of it.
-        if let ownGenesis = await process.mainChainBlockCID(atHeight: 0) {
+        if let ownGenesis = await process.canonicalBlockCID(atHeight: 0) {
             await overlay.announceProvider(
                 rootCID: ownGenesis,
                 expiresAt: expiresAt
@@ -1385,7 +1385,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         keys.formUnion(parentStateQueryGuard.peers)
         keys.formUnion(sessionLeases.portableEvidenceWork.values.map(\.peer.key))
         if let receivedParentTip { keys.insert(receivedParentTip.peer.key) }
-        for hex in candidateAcquirer.debugSnapshot().providerKeys
+        for hex in blockFetcher.debugSnapshot().providerKeys
             .union(parentEvidence.debugSnapshot().peerIDs) {
             if let key = try? PeerKey(hex) { keys.insert(key) }
         }
@@ -1534,7 +1534,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         _ current: AuthenticatedChildPackage?,
         with received: AuthenticatedChildPackage
     ) -> AuthenticatedChildPackage? {
-        CandidateAcquirer.mergePackages(current, received)
+        BlockFetcher.mergePackages(current, received)
     }
 
 }

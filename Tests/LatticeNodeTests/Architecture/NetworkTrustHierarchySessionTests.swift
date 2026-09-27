@@ -618,8 +618,8 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
                 storer: remoteContent
             )
         }
-        let orphanAdmission = try await stagingProcess!.admit(orphanHeader)
-        let descendantAdmission = try await stagingProcess!.admit(descendantHeader)
+        let orphanAdmission = try await stagingProcess!.importBlock(orphanHeader)
+        let descendantAdmission = try await stagingProcess!.importBlock(descendantHeader)
         guard case .acceptedSide = orphanAdmission.decision,
               case .acceptedSide = descendantAdmission.decision
         else {
@@ -685,7 +685,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         )
 
         let handlers = ClosureChainInterface(admission: { admission in
-            try await recoveredProcess.admit(
+            try await recoveredProcess.importBlock(
                 admission.header,
                 authenticatedChildPackage:
                     admission.authenticatedChildPackage,
@@ -874,7 +874,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             timestamp: 12
         )
         XCTAssertNotEqual(orphanCarrierA, orphanCarrierB)
-        let detached = try await process!.admit(
+        let detached = try await process!.importBlock(
             orphanHeader,
             authenticatedChildPackage: orphanPackageA
         )
@@ -889,7 +889,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             detached.parentCarrierLink?.rootCID,
             orphanCarrierA
         )
-        let secondRoot = try await process!.admit(
+        let secondRoot = try await process!.importBlock(
             orphanHeader,
             authenticatedChildPackage: orphanPackageB
         )
@@ -913,7 +913,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         let admissions = NetworkEventRecorder()
         let handlers = ClosureChainInterface(admission: { [weak recovered] admission in
             guard let recovered else { throw CancellationError() }
-            let outcome = try await recovered.admit(
+            let outcome = try await recovered.importBlock(
                 admission.header,
                 authenticatedChildPackage: admission.header.rawCID == predecessorHeader.rawCID
                     ? predecessorPackage
@@ -990,7 +990,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         await runtime.stop()
     }
 
-    /// The restart the three-node smoke found, through the real acquirer and
+    /// The restart the three-node smoke found, through the real fetcher and
     /// the real merged-mining shape: the parent carried a block that commits
     /// parent state — admitted eagerly it would first wait on a continuity
     /// fact the parent had not served, the deferral whose only memory was
@@ -1110,7 +1110,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         let admissions = NetworkEventRecorder()
         let handlers = ClosureChainInterface(admission: { [weak recovered] admission in
             guard let recovered else { throw CancellationError() }
-            let outcome = try await recovered.admit(
+            let outcome = try await recovered.importBlock(
                 admission.header,
                 authenticatedChildPackage: admission.authenticatedChildPackage,
                 remoteSource: admission.contentSource,

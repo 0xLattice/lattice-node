@@ -320,7 +320,7 @@ extension NodeStore {
             ).map { try $0.rootCID }
         guard !candidateRoots.isEmpty else { return false }
         guard let rootsPayload = try database.row(
-                AdmissionBatchRow.self,
+                ImportBatchRow.self,
                 "SELECT batch.volume_roots FROM accepted_blocks AS block INNER JOIN admission_batches AS batch ON batch.seq = block.admission_seq WHERE block.block_cid = ?1",
                 params: [.text(candidateCID)]
             )?.volumeRoots else { return false }
@@ -494,7 +494,7 @@ extension NodeStore {
                     storer: recoveryVolumeBroker
                 )
             }
-            try await mergeRecoveryRetention(
+            try await mergeRecoveryPruningProtection(
                 scope: preparedRecoveryRetentionScope,
                 roots: canonical.flatMap(\.bootstrapRoots)
                     + canonical.map(\.attachment.rawCID)
@@ -586,9 +586,9 @@ extension NodeStore {
                 }
                 try pruneUnreferencedChildGenesisVolumeRoots()
             }
-            try await reconcilePreparedRecoveryRetention()
+            try await reconcilePreparedRecoveryPruningProtection()
         } catch {
-            try? await reconcilePreparedRecoveryRetention()
+            try? await reconcilePreparedRecoveryPruningProtection()
             throw error
         }
     }
@@ -784,9 +784,9 @@ extension NodeStore {
                 )
                 try pruneUnreferencedChildGenesisVolumeRoots()
             }
-            try await reconcilePreparedRecoveryRetention()
+            try await reconcilePreparedRecoveryPruningProtection()
         } catch {
-            try? await reconcilePreparedRecoveryRetention()
+            try? await reconcilePreparedRecoveryPruningProtection()
             throw error
         }
     }

@@ -102,7 +102,7 @@ extension NodeStore {
             )
         }
         let currentSequence = try database.row(
-            from: AdmissionBatchRow.table,
+            from: ImportBatchRow.table,
             "SELECT COALESCE(MAX(seq), 0) AS sequence FROM admission_batches"
         )?.int("sequence") ?? 0
         let snapshot = snapshotSequence ?? currentSequence
@@ -209,7 +209,7 @@ extension NodeStore {
                 parentCID: block.parentBlockHash
             )
             if let existing = blocks[record.blockCID], existing != record {
-                throw NodeStoreError.conflictingAdmissionFact
+                throw NodeStoreError.conflictingImportFact
             }
             blocks[record.blockCID] = record
         }
@@ -308,7 +308,7 @@ extension NodeStore {
     ///
     /// The weighed block fact (empty `stateDiff`) is immutable and keyed by
     /// blockHash ONLY, so re-staging the validated fact (its real `stateDiff`)
-    /// would collide (`conflictingAdmissionFact`). Deferred execution therefore
+    /// would collide (`conflictingImportFact`). Deferred execution therefore
     /// never rewrites `admission_facts` on validation: the weighed fact REMAINS
     /// the state-blind consensus-replay record, and the materialized state is a
     /// node-side availability artifact keyed by this marker plus the owner pin.
@@ -318,29 +318,29 @@ extension NodeStore {
         try database.transaction {
             _ = try database.execute(
                 "UPDATE accepted_blocks SET validated = ?2 WHERE block_cid = ?1",
-                params: [.text(blockCID), BlockStatus.walkValidated.sqlValue]
+                params: [.text(blockCID), BlockStatus.executedAndPinned.sqlValue]
             )
         }
     }
 
-    /// Every block marked walk-validated (tier `2`): the set whose body and
+    /// Every block marked `executedAndPinned` (tier `2`): the set whose body and
     /// post-state must be held by a per-block owner pin.
-    func walkValidatedBlockCIDs() throws -> Set<String> {
+    func executedAndPinnedBlockCIDs() throws -> Set<String> {
         Set(try database.rows(
             AcceptedBlockRow.self,
             "SELECT block_cid FROM accepted_blocks WHERE validated = ?1",
-            params: [BlockStatus.walkValidated.sqlValue]
+            params: [BlockStatus.executedAndPinned.sqlValue]
         ).map { try $0.blockCID })
     }
 
-    /// Every block this store has executed, at either tier (`1` eager, `2`
-    /// walk-validated). Used once per boot to carry pre-existing history across
+    /// Every block this store has executed, at either tier (`1` executed, `2`
+    /// executed and pinned). Used once per boot to carry pre-existing history across
     /// the introduction of durable validation facts: rows written before that
     /// fact existed carry no fact, and without them a chain would come back
     /// having forgotten every execution and would attest nothing.
     ///
-    /// "Not weighed" and not "eager" so the walk-validated tier counts too.
-    /// The column's DEFAULT (eager) is not what makes legacy rows qualify —
+    /// "Not header" and not "executed" so the executed-and-pinned tier counts
+    /// too. The column's DEFAULT (executed) is not what makes legacy rows qualify —
     /// every row is inserted with an explicit `BlockStatus`, and the schema
     /// epoch wipes any store old enough to predate the column, so the default
     /// never fires. What makes them qualify is that they were written eager or
@@ -350,11 +350,11 @@ extension NodeStore {
         Set(try database.rows(
             AcceptedBlockRow.self,
             "SELECT block_cid FROM accepted_blocks WHERE validated != ?1",
-            params: [BlockStatus.weighed.sqlValue]
+            params: [BlockStatus.header.sqlValue]
         ).map { try $0.blockCID })
     }
 
-    /// Return a walk-validated block to the weighed tier (its owner pin is
+    /// Return an executed-and-pinned block to the header tier (its owner pin is
     /// gone, so its state may be evicted); the walk re-validates it on
     /// candidacy.
     ///
@@ -368,12 +368,12 @@ extension NodeStore {
         try database.transaction {
             _ = try database.execute(
                 "UPDATE accepted_blocks SET validated = ?2 WHERE block_cid = ?1",
-                params: [.text(blockCID), BlockStatus.weighed.sqlValue]
+                params: [.text(blockCID), BlockStatus.header.sqlValue]
             )
         }
     }
 
-    func auditAcceptedBlocks(staged: [StagedAdmission]) throws -> Set<String> {
+    func auditAcceptedBlocks(staged: [StagedImport]) throws -> Set<String> {
         var expectedAcceptedBlocks: [String: PersistedAcceptedBlock] = [:]
         for admission in staged {
             for block in try Self.acceptedBlocks(in: admission.batch) {

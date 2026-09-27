@@ -76,7 +76,7 @@ extension NodeNetworkRuntime {
         guard let sync = rangeSync.state, sync.negotiated, !sync.awaiting, sync.hasMore,
               isCurrentRuntime(generation: generation, process: process),
               overlayRecords[sync.peer.key]?.readyPeer?.sessionID == sync.peer.sessionID else { return }
-        let applied = await acquiredHeight(process)
+        let applied = await fetchedHeight(process)
         guard var current = rangeSync.state, current.requestID == sync.requestID,
               current.negotiated, !current.awaiting, current.hasMore,
               isCurrentRuntime(generation: generation, process: process) else { return }
@@ -190,7 +190,7 @@ extension NodeNetworkRuntime {
         // actually reaches the target — a single wedged content fetch mid-apply
         // would otherwise strand catch-up with no path to re-request the block.
         rangeSync.state = current
-        serviceCandidateAcquirer()
+        serviceBlockFetcher()
         await pumpRangeSync(generation: generation, process: process)
     }
 
@@ -217,7 +217,7 @@ extension NodeNetworkRuntime {
         if heights.last != 0 { heights.append(0) }
         var locator: [String] = []
         for height in heights {
-            if let cid = await process.mainChainBlockCID(atHeight: height) {
+            if let cid = await process.canonicalBlockCID(atHeight: height) {
                 locator.append(cid)
             }
         }
@@ -363,7 +363,7 @@ extension NodeNetworkRuntime {
         committed.progressBaselineHeight = min(committed.progressBaselineHeight, base)
         committed.hasMore = response.hasMore
         rangeSync.state = committed
-        serviceCandidateAcquirer()
+        serviceBlockFetcher()
         await pumpRangeSync(generation: generation, process: process)
     }
 
@@ -519,7 +519,7 @@ extension NodeNetworkRuntime {
         rangeSync.reentryTask = nil
         guard isCurrentGeneration(generation), isRunning,
               rangeSync.state == nil, let process else { return }
-        let ourHeight = await acquiredHeight(process)
+        let ourHeight = await fetchedHeight(process)
         guard isCurrentRuntime(generation: generation, process: process),
               rangeSync.state == nil else { return }
         // Every recorded peer we are now at the edge with (the sync that just
@@ -558,7 +558,7 @@ extension NodeNetworkRuntime {
     /// weighed admissions never advance it, so gap tests, the paging window
     /// and the locator measured against it would pace range sync on the
     /// validate walk and re-page history already held.
-    func acquiredHeight(_ process: ChainProcess) async -> UInt64 {
+    func fetchedHeight(_ process: ChainProcess) async -> UInt64 {
         await process.canonicalTipHeight() ?? 0
     }
 }

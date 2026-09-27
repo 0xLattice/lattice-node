@@ -149,7 +149,7 @@ extension NodeNetworkRuntime {
             return path.last
         })
         if let current = parentTipContext,
-           let cheapTip = await process.deepestValidatedMainChainTip()?.cid,
+           let cheapTip = await process.deepestValidatedCanonicalTip()?.cid,
            cheapTip == current.tipCID,
            current.directories == directories,
            Self.sameRewardPlan(current.rewards, rewards),
@@ -377,13 +377,13 @@ extension NodeNetworkRuntime {
         // own attempt. Offer once the admission decides or parks; the
         // drain re-arms the offer either way.
         if let pending = try? await process.store.pendingHandoffChildCIDs(),
-           pending.contains(where: { candidateAcquirer.isAwaitingAdmission($0) }) {
+           pending.contains(where: { blockFetcher.isAwaitingAdmission($0) }) {
             candidateOfferDeferredByAdmission = true
             SyncTrace.log("candidate offer deferred: own carried candidate awaiting admission")
             return
         }
         // The gate is open: a deferral the drain never got to read (its
-        // attempt left the acquirer without an admission) is moot now.
+        // attempt left the fetcher without an admission) is moot now.
         candidateOfferDeferredByAdmission = false
         guard let context = receivedParentTip,
               hierarchyRecords[context.peer.key]?.session?.sessionID
@@ -1044,7 +1044,7 @@ extension NodeNetworkRuntime {
     }
 
     /// After a scan round: the block the parent's context names as carried
-    /// is either here, in the acquirer (its admission will decide), asked
+    /// is either here, in the fetcher (its admission will decide), asked
     /// for now (the request this chain made while a round was in flight
     /// sent nothing), or, when a round sent for it ended without it, let
     /// go: the offer hold is released and the child builds on the tip it
@@ -1058,7 +1058,7 @@ extension NodeNetworkRuntime {
               let carried = receivedParentTip?.carriedChildCID,
               carried != releasedCarriedChildCID,
               !(await process.hasAcceptedBlock(carried)),
-              !candidateAcquirer.tracks(carried) else { return }
+              !blockFetcher.tracks(carried) else { return }
         if requestedCarriedChildCID == carried {
             releasedCarriedChildCID = carried
             SyncTrace.log("carried \(carried.prefix(12)) not served by a scan round: offer hold released")
@@ -1196,7 +1196,7 @@ extension NodeNetworkRuntime {
             SyncTrace.log("parent evidence for \(summary.childCID.prefix(12)) already admitted: not re-entered")
             return .handled
         }
-        return await enqueueRetainedParentCandidate(
+        return await enqueueInboxParentCandidate(
             // Weighed, like every network-sourced block: the verified proof is
             // all the weighed tier needs, so the block enters fork choice with
             // its work at once and is executed when the chain would step into
@@ -1305,7 +1305,7 @@ extension NodeNetworkRuntime {
             // for a directory already served, one anchored-genesis lookup
             // for one that is not, like the genesis-anchor arm; each named
             // committer is then one O(1) read, at most
-            // `maximumParentRunReportRequestCommitters` of them. A committer
+            // `maximumParentRunReportRequestCarriers` of them. A committer
             // this node does not serve is silence, never a claim.
             guard let request = try?
                     ParentRunReportRequestMessage.decoded(message.payload),
@@ -1322,19 +1322,19 @@ extension NodeNetworkRuntime {
                chain.networkCapabilities.contains(.runReportServing) {
                 await chain.serveRuns(for: directory)
             }
-            SyncTrace.log("run-report request from child dir=\(directory) committers=\(request.committerCIDs.count)")
-            for committer in request.committerCIDs {
+            SyncTrace.log("run-report request from child dir=\(directory) committers=\(request.carrierCIDs.count)")
+            for carrier in request.carrierCIDs {
                 guard isCurrentRuntime(generation: generation, process: process),
                       hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID,
                       let report = await process.runReport(
-                          committer: committer, directory: directory
+                          carrier: carrier, directory: directory
                       ),
                       let payload = try? ParentRunReportMessage(report).encoded()
                 else {
-                    SyncTrace.log("run-report request committer=\(committer.prefix(16)) silence")
+                    SyncTrace.log("run-report request committer=\(carrier.prefix(16)) silence")
                     continue
                 }
-                SyncTrace.log("run-report answer committer=\(committer.prefix(16)) run=\(report.runWork) own=\(report.ownWork)")
+                SyncTrace.log("run-report answer committer=\(carrier.prefix(16)) run=\(report.runWork) own=\(report.ownWork)")
                 _ = await hierarchy.sendMessage(
                     to: peer,
                     topic: NodeNetworkTopic.parentRunReport,
@@ -2058,8 +2058,8 @@ extension NodeNetworkRuntime {
                     // signal. Wake the successors that parked behind it while
                     // awaitingGenesis, or the whole chain above the genesis stays
                     // orphaned and the child never canonicalizes past height 0.
-                    candidateAcquirer.predecessorConnectedOutOfBand(genesisCID)
-                    serviceCandidateAcquirer()
+                    blockFetcher.predecessorConnectedOutOfBand(genesisCID)
+                    serviceBlockFetcher()
                     await requestEvidenceIndex(
                         generation: generation,
                         process: process
@@ -2083,7 +2083,7 @@ extension NodeNetworkRuntime {
     /// not obtainable now (no parent session, request budget, timeout); the
     /// walk then parks and retries. Without this, every weighed child block
     /// parks the walk on `.unavailable(.parentStateContinuity)` forever.
-    public func resolveValidateEvidence(
+    public func resolveExecutionEvidence(
         for blockCID: String,
         requirement: CrossChainEvidenceRequirement
     ) async -> AuthenticatedChildPackage? {
@@ -2107,10 +2107,10 @@ extension NodeNetworkRuntime {
     }
 
     #if DEBUG
-    /// Test seam: `resolveValidateEvidence` with the block's package supplied
+    /// Test seam: `resolveExecutionEvidence` with the block's package supplied
     /// instead of recovered from the store — the request, await and every
     /// resumption path are the production ones.
-    public func resolveValidateEvidenceForTesting(
+    public func resolveExecutionEvidenceForTesting(
         for blockCID: String,
         requirement: CrossChainEvidenceRequirement,
         package: AuthenticatedChildPackage
@@ -2212,36 +2212,36 @@ extension NodeNetworkRuntime {
         process: ChainProcess
     ) async {
         guard let chain,
-              chain.networkCapabilities.contains(.recentCommitters)
+              chain.networkCapabilities.contains(.recentCarriers)
         else { return }
-        let committers = await chain.recentCommitters()
+        let carriers = await chain.recentCarriers()
         await requestParentRunReports(
-            committers: committers, generation: generation, process: process
+            carriers: carriers, generation: generation, process: process
         )
     }
 
     /// Ask the parent for the runs of the committers of a block just
     /// admitted here (§9.10) — one message for all of them. Public for the
     /// service's admission effects.
-    public func requestParentRunReports(committers: [String]) async {
+    public func requestParentRunReports(carriers: [String]) async {
         guard isRunning, let process else { return }
         await requestParentRunReports(
-            committers: committers, generation: runtimeGeneration, process: process
+            carriers: carriers, generation: runtimeGeneration, process: process
         )
     }
 
     private func requestParentRunReports(
-        committers: [String],
+        carriers: [String],
         generation: UInt64,
         process: ChainProcess
     ) async {
         guard !configuration.address.isNexus,
               isCurrentRuntime(generation: generation, process: process),
               let parent = configuredParentPeer(),
-              !committers.isEmpty,
+              !carriers.isEmpty,
               let payload = try? ParentRunReportRequestMessage(
                   requestID: makeRequestID(),
-                  committerCIDs: committers
+                  carrierCIDs: carriers
               ).encoded()
         else { return }
         let sent = await hierarchy.sendMessage(
@@ -2249,7 +2249,7 @@ extension NodeNetworkRuntime {
             topic: NodeNetworkTopic.parentRunReportRequest,
             payload: payload
         )
-        SyncTrace.log("run-report request committers=\(committers.count) sent=\(sent)")
+        SyncTrace.log("run-report request committers=\(carriers.count) sent=\(sent)")
     }
 
     /// Push one run report to every authenticated child of its directory
@@ -2379,7 +2379,7 @@ extension NodeNetworkRuntime {
                 )
             ))
         }
-        guard let merged = CandidateAcquirer.mergePackages(
+        guard let merged = BlockFetcher.mergePackages(
             pending.package,
             localFact
         ) else {
@@ -2398,15 +2398,15 @@ extension NodeNetworkRuntime {
         // one, so without retryExternalDependency the candidate would wedge until
         // the wall-clock poll (or 2h expiry). Mirror the timeout path
         // (retryParentFactCandidate) so the fact's arrival is itself the trigger.
-        _ = candidateAcquirer.observe(CandidateSeed(
+        _ = blockFetcher.observe(CandidateSeed(
             blockCID: pending.blockCID,
             package: merged
         ))
-        candidateAcquirer.retryExternalDependency(
+        blockFetcher.retryExternalDependency(
             blockCID: pending.blockCID,
             rootCID: pending.package.package.proof.rootCID
         )
-        serviceCandidateAcquirer()
+        serviceBlockFetcher()
     }
 
     private func parentChainFactRequestTimedOut(
@@ -2426,15 +2426,15 @@ extension NodeNetworkRuntime {
     }
 
     private func retryParentFactCandidate(_ pending: PendingParentChainFact) {
-        _ = candidateAcquirer.observe(CandidateSeed(
+        _ = blockFetcher.observe(CandidateSeed(
             blockCID: pending.blockCID,
             package: pending.package
         ))
-        candidateAcquirer.retryExternalDependency(
+        blockFetcher.retryExternalDependency(
             blockCID: pending.blockCID,
             rootCID: pending.package.package.proof.rootCID
         )
-        serviceCandidateAcquirer()
+        serviceBlockFetcher()
     }
 
     /// Returns whether a request was sent: none is while a round is in

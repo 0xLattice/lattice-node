@@ -299,7 +299,7 @@ extension NodeNetworkRuntime {
             if await process.hasAcceptedBlock(announcement.blockCID) == false {
                 guard isCurrentRuntime(generation: generation, process: process),
                       overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
-                let ourHeight = await acquiredHeight(process)
+                let ourHeight = await fetchedHeight(process)
                 guard isCurrentRuntime(generation: generation, process: process),
                       overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
                 if let announced = announcement.height {
@@ -461,7 +461,7 @@ extension NodeNetworkRuntime {
                     sessionLeases.servingAncestorRange.remove(peer.sessionID)
                 }
             }
-            let page = await process.forwardMainChainRange(
+            let page = await process.forwardCanonicalRange(
                 afterCID: request.afterCID,
                 limit: ForwardRangeResponseMessage.maximumBlocks
             )
@@ -1301,7 +1301,7 @@ extension NodeNetworkRuntime {
         // frontier for as long as it held the slot.
         guard overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
               overlayRecords[peer.key]?.frontierPull?.sessionID != peer.sessionID else { return }
-        let ourHeight = await acquiredHeight(process)
+        let ourHeight = await fetchedHeight(process)
         guard isCurrentRuntime(generation: generation, process: process),
               overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
               overlayRecords[peer.key]?.frontierPull?.sessionID != peer.sessionID,

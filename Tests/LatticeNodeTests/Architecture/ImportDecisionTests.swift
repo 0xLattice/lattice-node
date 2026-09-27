@@ -2,9 +2,9 @@ import Lattice
 import XCTest
 @testable import LatticeNode
 
-final class AdmissionDecisionTests: XCTestCase {
+final class ImportDecisionTests: XCTestCase {
     func testAvailabilityAndInvalidityStayDistinct() {
-        let unavailable = NodeAdmissionDecision(
+        let unavailable = NodeImportDecision(
             .rejected(.crossChainEvidenceRequired(.childProof(
                 chainPath: ["Nexus", "Payments"],
                 childCID: "child"
@@ -12,17 +12,17 @@ final class AdmissionDecisionTests: XCTestCase {
         )
         XCTAssertTrue(unavailable.shouldRetryWhenEvidenceChanges)
 
-        let invalid = NodeAdmissionDecision(.rejected(.protocolInvalid))
+        let invalid = NodeImportDecision(.rejected(.protocolInvalid))
         XCTAssertFalse(invalid.shouldRetryWhenEvidenceChanges)
         XCTAssertFalse(invalid.shouldRetryLater)
     }
 
     func testTemporalAndTargetMissResultsStayNeutral() {
-        let temporal = NodeAdmissionDecision(.rejected(.notYetValid))
+        let temporal = NodeImportDecision(.rejected(.notYetValid))
         XCTAssertTrue(temporal.shouldRetryLater)
         XCTAssertFalse(temporal.shouldRetryWhenEvidenceChanges)
 
-        let targetMiss = NodeAdmissionDecision(
+        let targetMiss = NodeImportDecision(
             .rejected(.notAcceptedAtCurrentChain)
         )
         XCTAssertEqual(targetMiss, .carrier)

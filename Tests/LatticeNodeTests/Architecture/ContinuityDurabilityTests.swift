@@ -65,7 +65,7 @@ final class ContinuityDurabilityTests: XCTestCase {
             let block = template.block.auditReplacingNonce(
                 nonce(of: template.block, from: 0) { $0 <= template.block.target }
             )
-            let outcome = try await producer.admit(BlockHeader(node: block))
+            let outcome = try await producer.importBlock(BlockHeader(node: block))
             XCTAssertTrue(outcome.decision.isAccepted, "block \(index)")
             blocks.append(block)
         }
@@ -118,7 +118,7 @@ final class ContinuityDurabilityTests: XCTestCase {
         var consumer: ChainProcess? = try await ChainProcess.open(configuration: config)
         for mode in [ImportMode.header, .execution] {
             for block in chain {
-                let outcome = try await consumer!.admit(
+                let outcome = try await consumer!.importBlock(
                     BlockHeader(node: block),
                     remoteSource: FetcherContentSource(producer),
                     mode: mode
@@ -151,7 +151,7 @@ final class ContinuityDurabilityTests: XCTestCase {
         let config = try configuration(dir)
         var consumer: ChainProcess? = try await ChainProcess.open(configuration: config)
         for block in chain {
-            let outcome = try await consumer!.admit(
+            let outcome = try await consumer!.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
                 mode: .header
@@ -196,7 +196,7 @@ final class ContinuityDurabilityTests: XCTestCase {
         var consumer: ChainProcess? = try await ChainProcess.open(configuration: config)
         for mode in [ImportMode.header, .execution] {
             for block in chain {
-                _ = try await consumer!.admit(
+                _ = try await consumer!.importBlock(
                     BlockHeader(node: block),
                     remoteSource: FetcherContentSource(producer),
                     mode: mode
@@ -288,7 +288,7 @@ final class ContinuityDurabilityTests: XCTestCase {
         var consumer: ChainProcess? = try await ChainProcess.open(configuration: config)
         for mode in [ImportMode.header, .execution] {
             for block in chain {
-                _ = try await consumer!.admit(
+                _ = try await consumer!.importBlock(
                     BlockHeader(node: block),
                     remoteSource: FetcherContentSource(producer),
                     mode: mode

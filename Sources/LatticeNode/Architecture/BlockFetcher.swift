@@ -11,7 +11,7 @@ struct CandidateProvider: Hashable, Sendable {
 /// Synchronous per-chain acquisition reducer. The enclosing runtime actor is
 /// its serialization domain; Ivy and consensus admission are injected by the
 /// runtime as effects of `next()`.
-struct CandidateAcquirer {
+struct BlockFetcher {
     static let readyCapacity = 1_024
     // Operator budget for parked/waiting attempts: the live-edge predecessor
     // walk (a chain of parks from an announced tip or frontier leaf down to
@@ -23,7 +23,7 @@ struct CandidateAcquirer {
     // leaf's short ancestry. Over budget, the oldest park is evicted, never
     // the fresh one — an evicted obligation re-enters through a later
     // announcement, frontier page or range-sync page.
-    static let retainedCapacity = 512
+    static let parkedCapacity = 512
 
     enum WaitReason: Equatable, Sendable {
         case evidence
@@ -189,7 +189,7 @@ struct CandidateAcquirer {
     ) {
         var nextEpoch = epoch &+ 1
         if nextEpoch == 0 { nextEpoch = 1 }
-        self = CandidateAcquirer(
+        self = BlockFetcher(
             retryWindow: retryWindow,
             evidenceRetryWindow: evidenceRetryWindow
         )
@@ -208,7 +208,7 @@ struct CandidateAcquirer {
             for descendant in descendants.sorted(by: {
                 ($0.blockCID, $0.rootCID ?? "") < ($1.blockCID, $1.rootCID ?? "")
             }) {
-                guard seeded < Self.retainedCapacity else { break seeding }
+                guard seeded < Self.parkedCapacity else { break seeding }
                 descendantCIDs.insert(descendant.blockCID)
                 // Durable network history: weighed, like the frontier below.
                 // Eager-wins is monotone, so an eager seed here would pin the
@@ -232,7 +232,7 @@ struct CandidateAcquirer {
         var frontierSeeded = 0
         for predecessorCID in durableDescendants.keys.sorted()
             where !descendantCIDs.contains(predecessorCID) {
-            guard frontierSeeded < Self.retainedCapacity else { break }
+            guard frontierSeeded < Self.parkedCapacity else { break }
             // Network history: weighed.
             _ = observe(Seed(
                 blockCID: predecessorCID,
@@ -488,8 +488,8 @@ struct CandidateAcquirer {
                 attempt.state = .ready
                 record.attempts[ticket.key.rootCID] = attempt
                 records[ticket.key.blockCID] = record
-            } else if retainedCount() >= Self.retainedCapacity,
-                      !evictOldestRetained() {
+            } else if parkedCount() >= Self.parkedCapacity,
+                      !evictOldestParked() {
                 record.attempts[ticket.key.rootCID] = attempt
                 records[ticket.key.blockCID] = record
                 removeAttempt(ticket.key)
@@ -525,8 +525,8 @@ struct CandidateAcquirer {
                 record.attempts[ticket.key.rootCID] = attempt
                 records[ticket.key.blockCID] = record
                 removeAttempt(ticket.key)
-            } else if retainedCount() >= Self.retainedCapacity,
-                      !evictOldestRetained() {
+            } else if parkedCount() >= Self.parkedCapacity,
+                      !evictOldestParked() {
                 record.attempts[ticket.key.rootCID] = attempt
                 records[ticket.key.blockCID] = record
                 removeAttempt(ticket.key)
@@ -755,7 +755,7 @@ struct CandidateAcquirer {
     /// obligation is re-derivable (durable recovery edges re-derive from the
     /// accepted graph at restart; a live wait re-enters through a later
     /// announcement or range-sync page).
-    private mutating func evictOldestRetained() -> Bool {
+    private mutating func evictOldestParked() -> Bool {
         var victim: (key: AttemptKey, order: UInt64)?
         for (blockCID, record) in records {
             for (rootCID, attempt) in record.attempts {
@@ -808,7 +808,7 @@ struct CandidateAcquirer {
         removeReady(key)
     }
 
-    private func retainedCount() -> Int {
+    private func parkedCount() -> Int {
         records.values.reduce(0) { count, record in
             count + record.attempts.values.reduce(0) {
                 switch $1.state {

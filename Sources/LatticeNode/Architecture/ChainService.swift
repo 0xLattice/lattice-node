@@ -6,7 +6,7 @@ import UInt256
 import VolumeBroker
 import cashew
 
-private struct AdmissionEffects: Sendable {
+private struct ImportEffects: Sendable {
     let parentGenesisLinks: [ParentGenesisLink]
 }
 
@@ -78,32 +78,32 @@ public actor ChainService {
     // deliberately does NOT hold this actor's operation gate: it re-acquires the
     // process gate per block, so holding the service gate would head-of-line-block
     // every other operation for the length of a deep catch-up.
-    private var validateWalkWorker: Task<Void, Never>?
-    private var validateWalkDirty = false
+    private var executionWalkWorker: Task<Void, Never>?
+    private var executionWalkDirty = false
     /// The last walk pass stopped short of the canonical tip on something it
     /// cannot step past by itself (a missing body or fact, an invalidity, a
     /// block it will not re-execute). While a walk is merely behind and able
     /// to step, no candidate is built; a parked one withholds none.
-    private var validateWalkParked = false
+    private var executionWalkParked = false
     // Network body acquisition for the validate walk (see
-    // NetworkInterface.withValidateBodySource). When the network has a body
+    // NetworkInterface.withExecutionBodySource). When the network has a body
     // source the walk pulls a weighed block's deferred body over it; when the
     // body is temporarily unavailable the walk parks and a single delayed
     // retry re-arms it — there is no push signal on body arrival, and once
-    // weighed sync completes the acquirer may hold no timed wait to re-drive
+    // weighed sync completes the fetcher may hold no timed wait to re-drive
     // it, so the walk owns its own liveness retry rather than borrowing the
-    // acquirer's. Cross-chain evidence for the walk comes from
-    // NetworkInterface.resolveValidateEvidence: a weighed CHILD block's
+    // fetcher's. Cross-chain evidence for the walk comes from
+    // NetworkInterface.resolveExecutionEvidence: a weighed CHILD block's
     // `.execution` needs the parent fact (state continuity / genesis link) the
     // live path obtains from the configured parent; nil parks the walk on the
     // retry timer as an availability gap.
-    private let validateWalkRetryInterval: Duration
-    private var validateWalkRetryTask: Task<Void, Never>?
-    private var validateWalkParkedCount: UInt64 = 0
+    private let executionWalkRetryInterval: Duration
+    private var executionWalkRetryTask: Task<Void, Never>?
+    private var executionWalkParkedCount: UInt64 = 0
     #if DEBUG
     // Test seam: invoked with each height about to be `.execution`-admitted, in
     // walk order. Lets tests assert strictly-forward progress (never tip-first).
-    var onValidateWalkStep: (@Sendable (UInt64) -> Void)?
+    var onExecutionWalkStep: (@Sendable (UInt64) -> Void)?
     #endif
     private var transactionPublications = Set<String>()
     private var transactionPublicationWorker: Task<Void, Never>?
@@ -116,7 +116,7 @@ public actor ChainService {
     public init(
         process: ChainProcess,
         network: any NetworkInterface,
-        validateWalkRetryInterval: Duration = .seconds(4),
+        executionWalkRetryInterval: Duration = .seconds(4),
         mempoolMaxCount: Int = 10_000,
         mempoolMaxNonReadyPerSigner: Int = 64,
         maximumChildCandidates: Int = 64
@@ -125,7 +125,7 @@ public actor ChainService {
             mempoolMaxCount > 0 && mempoolMaxNonReadyPerSigner > 0
                 && maximumChildCandidates > 0
         )
-        self.validateWalkRetryInterval = validateWalkRetryInterval
+        self.executionWalkRetryInterval = executionWalkRetryInterval
         self.process = process
         self.network = network
         self.pool = TransactionPool(
@@ -165,9 +165,9 @@ public actor ChainService {
     /// yet started is also not visible to the join. See #135 before wiring this
     /// into daemon shutdown.
     public func shutdown() async {
-        validateWalkRetryTask?.cancel()
-        validateWalkRetryTask = nil
-        while let worker = canonicalCommitWorker ?? validateWalkWorker
+        executionWalkRetryTask?.cancel()
+        executionWalkRetryTask = nil
+        while let worker = canonicalCommitWorker ?? executionWalkWorker
             ?? transactionPublicationWorker {
             await worker.value
         }
@@ -231,7 +231,7 @@ public actor ChainService {
             processStartTime: processStartTime,
             parentReportsApplied: reports.applied,
             parentReportRefusals: reports.refusals,
-            validateWalkParked: validateWalkParkedCount
+            executionWalkParked: executionWalkParkedCount
         ))
     }
 
@@ -349,8 +349,8 @@ public actor ChainService {
 
     /// Main-chain block CID at `height` (ungated height-index lookup), so the
     /// daemon can resolve a numeric `:id` to a CID before reading.
-    public func explorerMainChainBlockCID(atHeight height: UInt64) async -> String? {
-        await process.mainChainBlockCID(atHeight: height)
+    public func explorerCanonicalBlockCID(atHeight height: UInt64) async -> String? {
+        await process.canonicalBlockCID(atHeight: height)
     }
 
     public func explorerLatestBlock() async -> ExplorerLatestBlock? {
@@ -553,7 +553,7 @@ public actor ChainService {
     public func explorerChainInfo() async -> ExplorerChainInfo {
         let snapshot = await process.readSnapshot()
         return ExplorerChainInfo(
-            genesisHash: await process.mainChainBlockCID(atHeight: 0),
+            genesisHash: await process.canonicalBlockCID(atHeight: 0),
             height: snapshot.height,
             tipCID: snapshot.tipCID,
             chain: process.configuration.chainPath
@@ -662,19 +662,19 @@ public actor ChainService {
     /// The process reserves canonical reconciliation before it releases its
     /// mutation order; this method then waits behind that reservation before
     /// projecting service-owned state.
-    public func admitNetworkCandidate(
+    public func importNetworkCandidate(
         _ header: BlockHeader,
         authenticatedChildPackage: AuthenticatedChildPackage?,
         preparingChildDirectories: [String],
         contentSource: any ContentSource,
         weighed: Bool = false
-    ) async throws -> NodeAdmissionOutcome {
+    ) async throws -> NodeImportOutcome {
         // Preparing proofs for a directory is the other way a node declares it
         // hosts that child (§9.10): serve its runs from here on. Idempotent.
         for directory in preparingChildDirectories {
             await process.serveRuns(for: directory)
         }
-        let outcome = try await process.admit(
+        let outcome = try await process.importBlock(
             header,
             authenticatedChildPackage: authenticatedChildPackage,
             preparingChildDirectories: preparingChildDirectories,
@@ -689,14 +689,14 @@ public actor ChainService {
             // but its authenticated path can still carry an accepted direct
             // child. Relay any proof the process durably composed for it.
             if outcome.parentCarrierLink != nil {
-                await handleCarrierAdmission(
+                await handleCarrierImport(
                     header: header,
                     outcome: outcome
                 )
             }
             return outcome
         }
-        _ = await handleAdmission(
+        _ = await handleImport(
             block: block,
             header: header,
             outcome: outcome
@@ -758,7 +758,7 @@ public actor ChainService {
     public func restoreLocalTransactions() async throws {
         await acquireOperation()
         defer { releaseOperation() }
-        await reserveValidateWalkIfBehind()
+        await reserveExecutionWalkIfBehind()
         try await restoreLocalTransactionsLocked()
         publishChainStateChange()
     }
@@ -1028,7 +1028,7 @@ public actor ChainService {
         // or parked — and the offer follows; a parked walk never withholds
         // one, since building on the validated tip is how a chain outweighs
         // a branch it cannot validate.
-        guard validateWalkWorker == nil else {
+        guard executionWalkWorker == nil else {
             SyncTrace.log("child candidate deferred: validate walk stepping")
             throw ChainServiceError.validateWalkInProgress
         }
@@ -1037,12 +1037,12 @@ public actor ChainService {
         // — one sibling per parent block, and the validated tip crawls under
         // the reorgs — so the walk is armed here if nothing armed it, and
         // its stop reports the change that builds the next candidate.
-        if !validateWalkParked {
-            let validated = await process.deepestValidatedMainChainTip()?.height
+        if !executionWalkParked {
+            let validated = await process.deepestValidatedCanonicalTip()?.height
             if let target = await process.canonicalTipHeight(),
                (validated.map { Int64($0) } ?? -1) < Int64(target) {
                 SyncTrace.log("child candidate deferred: validated \(validated.map(String.init) ?? "none") behind weighed \(target)")
-                reserveValidateWalkWorker()
+                reserveExecutionWalkWorker()
                 throw ChainServiceError.validateWalkInProgress
             }
         }
@@ -1367,13 +1367,13 @@ public actor ChainService {
             children: submission.children,
             capacity: Self.templateCapacity
         )
-        let outcome = try await process.admit(
+        let outcome = try await process.importBlock(
             header,
             canonicalCommitPublisher: { [self] commit in
                 await enqueueCanonicalCommit(commit)
             }
         )
-        let effects = await applyAdmissionEffects(
+        let effects = await applyImportEffects(
             block: candidate,
             header: header,
             outcome: outcome
@@ -1423,23 +1423,23 @@ public actor ChainService {
     /// candidate was admitted through gossip, sync, or the hierarchy plane.
     /// Consensus admission itself remains exclusively in `ChainProcess`.
     @discardableResult
-    private func handleAdmission(
+    private func handleImport(
         block: Block,
         header: BlockHeader,
-        outcome: NodeAdmissionOutcome
-    ) async -> AdmissionEffects {
+        outcome: NodeImportOutcome
+    ) async -> ImportEffects {
         await acquireOperation()
         defer { releaseOperation() }
-        return await applyAdmissionEffects(
+        return await applyImportEffects(
             block: block,
             header: header,
             outcome: outcome
         )
     }
 
-    private func handleCarrierAdmission(
+    private func handleCarrierImport(
         header: BlockHeader,
-        outcome: NodeAdmissionOutcome
+        outcome: NodeImportOutcome
     ) async {
         await acquireOperation()
         defer { releaseOperation() }
@@ -1487,11 +1487,11 @@ public actor ChainService {
     /// and the walk re-acquires the process gate per block. `nil` validated
     /// height means nothing on the main chain is validated yet (below
     /// genesis), so treat it as strictly behind any canonical tip.
-    private func reserveValidateWalkIfBehind() async {
-        let validatedHeight = await process.deepestValidatedMainChainTip()?.height
+    private func reserveExecutionWalkIfBehind() async {
+        let validatedHeight = await process.deepestValidatedCanonicalTip()?.height
         if let target = await process.canonicalTipHeight(),
            (validatedHeight.map { Int64($0) } ?? -1) < Int64(target) {
-            reserveValidateWalkWorker()
+            reserveExecutionWalkWorker()
         }
     }
 
@@ -1501,22 +1501,22 @@ public actor ChainService {
     /// another pass) rather than spawning a second walk. Unlike the canonical
     /// worker this does NOT reserve the operation gate — the walk must interleave
     /// with other operations because it re-takes the process gate per block.
-    private func reserveValidateWalkWorker() {
-        validateWalkDirty = true
-        guard validateWalkWorker == nil else { return }
-        validateWalkWorker = Task { [weak self] in
-            await self?.drainValidateWalk()
+    private func reserveExecutionWalkWorker() {
+        executionWalkDirty = true
+        guard executionWalkWorker == nil else { return }
+        executionWalkWorker = Task { [weak self] in
+            await self?.drainExecutionWalk()
         }
     }
 
-    private func drainValidateWalk() async {
+    private func drainExecutionWalk() async {
         var caughtUp = false
-        while validateWalkDirty {
-            validateWalkDirty = false
-            caughtUp = await runValidateWalkPass()
+        while executionWalkDirty {
+            executionWalkDirty = false
+            caughtUp = await runExecutionWalkPass()
         }
-        validateWalkParked = !caughtUp
-        validateWalkWorker = nil
+        executionWalkParked = !caughtUp
+        executionWalkWorker = nil
         // The walk stopped, caught up or parked: a candidate deferred while
         // it stepped builds now.
         publishChainStateChange()
@@ -1529,24 +1529,24 @@ public actor ChainService {
     /// servable. A broker-only walk never parks on a fetch, but a store error
     /// can park it in any configuration, so the timer is not gated on a body
     /// source.
-    private func scheduleValidateWalkRetry() {
-        guard validateWalkRetryTask == nil else { return }
-        validateWalkRetryTask = Timers.deadline(
-            after: validateWalkRetryInterval,
+    private func scheduleExecutionWalkRetry() {
+        guard executionWalkRetryTask == nil else { return }
+        executionWalkRetryTask = Timers.deadline(
+            after: executionWalkRetryInterval,
             generation: 0
         ) { [weak self] _ in
-            await self?.fireValidateWalkRetry()
+            await self?.fireExecutionWalkRetry()
         }
     }
 
-    private func fireValidateWalkRetry() {
-        validateWalkRetryTask = nil
-        reserveValidateWalkWorker()
+    private func fireExecutionWalkRetry() {
+        executionWalkRetryTask = nil
+        reserveExecutionWalkWorker()
     }
 
     #if DEBUG
-    func setValidateWalkObserver(_ observer: (@Sendable (UInt64) -> Void)?) {
-        onValidateWalkStep = observer
+    func setExecutionWalkObserver(_ observer: (@Sendable (UInt64) -> Void)?) {
+        onExecutionWalkStep = observer
     }
     #endif
 
@@ -1557,14 +1557,14 @@ public actor ChainService {
     /// every iteration so a mid-walk reorg or exclusion re-projection re-targets.
     /// Returns whether the pass reached the canonical tip; `false` is a park.
     @discardableResult
-    func runValidateWalkPass() async -> Bool {
+    func runExecutionWalkPass() async -> Bool {
         // Height of the last admit that returned a non-parking decision. If the
         // durable validated height does not advance past it on the next read,
         // park (return) instead of hot-spinning — defence against any future
         // no-progress case (an exclusion that re-projects re-arms a fresh pass).
         var lastAdmittedHeight: UInt64?
         while true {
-            let validated = await process.deepestValidatedMainChainTip()
+            let validated = await process.deepestValidatedCanonicalTip()
             guard let target = await process.canonicalTipHeight() else { return true }
             let validatedHeight = validated.map { Int64($0.height) } ?? -1
             if let lastAdmittedHeight, validatedHeight < Int64(lastAdmittedHeight) {
@@ -1578,16 +1578,16 @@ public actor ChainService {
             // session], so the local boundary is served free and only the missing
             // body is fetched. With no source wired (empty-block unit contexts whose
             // boundary already is the whole block), admit broker-only as before.
-            guard let next = await process.mainChainBlockCID(atHeight: nextHeight)
+            guard let next = await process.canonicalBlockCID(atHeight: nextHeight)
             else { return false }
             #if DEBUG
-            onValidateWalkStep?(nextHeight)
+            onExecutionWalkStep?(nextHeight)
             #endif
             let header = BlockHeader(rawCID: next, node: nil, encryptionInfo: nil)
             let admitValidate: @Sendable (
                 (any ContentSource)?, AuthenticatedChildPackage?
-            ) async throws -> NodeAdmissionOutcome = { [self] remoteSource, package in
-                try await process.admit(
+            ) async throws -> NodeImportOutcome = { [self] remoteSource, package in
+                try await process.importBlock(
                     header,
                     authenticatedChildPackage: package,
                     remoteSource: remoteSource,
@@ -1599,14 +1599,14 @@ public actor ChainService {
             }
             let attempt: @Sendable (
                 AuthenticatedChildPackage?
-            ) async throws -> NodeAdmissionOutcome = { [network] package in
-                try await network.withValidateBodySource(
+            ) async throws -> NodeImportOutcome = { [network] package in
+                try await network.withExecutionBodySource(
                     blockCID: next
                 ) { remoteSource in
                     try await admitValidate(remoteSource, package)
                 }
             }
-            var outcome: NodeAdmissionOutcome
+            var outcome: NodeImportOutcome
             do {
                 outcome = try await attempt(nil)
                 // A CHILD block on the validate tier recovers its own proof but
@@ -1615,7 +1615,7 @@ public actor ChainService {
                 // package; if it cannot be obtained now, fall through to the
                 // availability park below.
                 if case .unavailable(let requirement?) = outcome.decision,
-                   let package = await network.resolveValidateEvidence(
+                   let package = await network.resolveExecutionEvidence(
                        for: next,
                        requirement: requirement
                    ) {
@@ -1634,7 +1634,7 @@ public actor ChainService {
                 SyncTrace.log(
                     "validate walk h=\(nextHeight) store error: \(error)"
                 )
-                scheduleValidateWalkRetry()
+                scheduleExecutionWalkRetry()
                 return false
             }
             SyncTrace.log(
@@ -1662,7 +1662,7 @@ public actor ChainService {
                 // retry — the body arrives over the network with no local signal, so
                 // the walk polls until it is present. A later canonical commit also
                 // re-arms the walk.
-                scheduleValidateWalkRetry()
+                scheduleExecutionWalkRetry()
                 return false
             case .temporarilyInvalid:
                 // A parked verdict: a not-yet-admissible timestamp, or a root
@@ -1674,8 +1674,8 @@ public actor ChainService {
                 // invalid own genesis — dead until a new root lands — where
                 // one genesis-sized prepare per interval is the cost of not
                 // guessing. Counted where the operator can see it.
-                validateWalkParkedCount += 1
-                scheduleValidateWalkRetry()
+                executionWalkParkedCount += 1
+                scheduleExecutionWalkRetry()
                 return false
             case .invalid, .localFailure, .carrier:
                 // Ordering / non-availability park: keep acting on the last
@@ -1696,14 +1696,14 @@ public actor ChainService {
     }
 
     /// One committer's run report for a child's re-serve request.
-    public func runReport(committer: String, directory: String) async -> ParentRunReport? {
-        await process.runReport(committer: committer, directory: directory)
+    public func runReport(carrier: String, directory: String) async -> ParentRunReport? {
+        await process.runReport(carrier: carrier, directory: directory)
     }
 
     /// The committers this chain asks its parent to re-serve after each
     /// evidence catch-up round.
-    public func recentCommitters() async throws -> [String] {
-        try await process.recentCommitters()
+    public func recentCarriers() async throws -> [String] {
+        try await process.recentCarriers()
     }
 
     /// Credit a parent's run report at the child block it names. The commit,
@@ -1781,11 +1781,11 @@ public actor ChainService {
         }
     }
 
-    private func applyAdmissionEffects(
+    private func applyImportEffects(
         block: Block,
         header: BlockHeader,
-        outcome: NodeAdmissionOutcome
-    ) async -> AdmissionEffects {
+        outcome: NodeImportOutcome
+    ) async -> ImportEffects {
         // Visibility of accepted work is independent from optional child
         // materialization. A missing child payload must not suppress the
         // canonical announcement.
@@ -1837,16 +1837,16 @@ public actor ChainService {
         if outcome.decision.isAccepted {
             await pushChangedRuns(of: header.rawCID)
             if outcome.parentCarrierLink != nil,
-               let committers = try? await process.incomingCarrierCommitters(
+               let carriers = try? await process.incomingCarriers(
                    of: header.rawCID
-               ), !committers.isEmpty {
-                await network.requestParentRunReports(committers: committers)
+               ), !carriers.isEmpty {
+                await network.requestParentRunReports(carriers: carriers)
             }
         }
         if outcome.decision.isAccepted {
             publishChainStateChange()
         }
-        return AdmissionEffects(
+        return ImportEffects(
             parentGenesisLinks: genesisLinks.sorted {
                 $0.directory < $1.directory
             }
@@ -1855,7 +1855,7 @@ public actor ChainService {
 
     private func publishCarrierChildProofs(
         header: BlockHeader,
-        outcome: NodeAdmissionOutcome
+        outcome: NodeImportOutcome
     ) async {
         guard let link = outcome.parentCarrierLink else { return }
         // Admission and the miner response depend only on the durable proof,
@@ -1907,7 +1907,7 @@ public actor ChainService {
         // Reserved BEFORE the mempool bookkeeping below: operability must not
         // hinge on it, and a body-less weighed tip is exactly the case where
         // that bookkeeping has the least to work with.
-        await reserveValidateWalkIfBehind()
+        await reserveExecutionWalkIfBehind()
         try await prepareMempoolLocked()
 
         let addedTransactions = try await transactions(
@@ -2351,7 +2351,7 @@ public actor ChainService {
 }
 
 private extension WorkDisposition {
-    init(_ decision: NodeAdmissionDecision) {
+    init(_ decision: NodeImportDecision) {
         switch decision {
         case .canonicalized: self = .canonicalized
         case .acceptedSide: self = .acceptedSide

@@ -12,9 +12,9 @@ final class ClosureChainInterface: ChainInterface {
         _ context: ChildCandidateRequestContext,
         _ parentContentSource: any ContentSource
     ) async throws -> DirectChildCandidate?
-    typealias AdmissionHandler = @Sendable (
-        _ admission: NetworkCandidateAdmission
-    ) async throws -> NodeAdmissionOutcome
+    typealias ImportHandler = @Sendable (
+        _ admission: NetworkCandidateImport
+    ) async throws -> NodeImportOutcome
     typealias TransactionHandler = @Sendable (
         _ transaction: Transaction
     ) async throws -> Bool
@@ -23,25 +23,25 @@ final class ClosureChainInterface: ChainInterface {
         _ report: ParentRunReport
     ) async throws -> Void
     typealias RunReportServingHandler = @Sendable (_ directory: String) async -> Void
-    typealias RecentCommitterProvider = @Sendable () async -> [String]
+    typealias RecentCarrierProvider = @Sendable () async -> [String]
 
     private let childCandidateBuilder: ChildCandidateBuilder?
-    private let admission: AdmissionHandler
+    private let admission: ImportHandler
     private let transaction: TransactionHandler?
     private let transactionInventory: TransactionInventoryProvider?
     private let parentRunReport: ParentRunReportHandler?
     private let runReportServing: RunReportServingHandler?
-    private let recentCommitterProvider: RecentCommitterProvider?
+    private let recentCarrierProvider: RecentCarrierProvider?
     let networkCapabilities: ChainNetworkCapabilities
 
     init(
         childCandidateBuilder: ChildCandidateBuilder? = nil,
-        admission: @escaping AdmissionHandler,
+        admission: @escaping ImportHandler,
         transaction: TransactionHandler? = nil,
         transactionInventory: TransactionInventoryProvider? = nil,
         parentRunReport: ParentRunReportHandler? = nil,
         runReportServing: RunReportServingHandler? = nil,
-        recentCommitters: RecentCommitterProvider? = nil
+        recentCarriers: RecentCarrierProvider? = nil
     ) {
         self.childCandidateBuilder = childCandidateBuilder
         self.admission = admission
@@ -49,14 +49,14 @@ final class ClosureChainInterface: ChainInterface {
         self.transactionInventory = transactionInventory
         self.parentRunReport = parentRunReport
         self.runReportServing = runReportServing
-        self.recentCommitterProvider = recentCommitters
+        self.recentCarrierProvider = recentCarriers
         var capabilities: ChainNetworkCapabilities = []
         if childCandidateBuilder != nil { capabilities.insert(.childCandidates) }
         if transaction != nil { capabilities.insert(.transactions) }
         if transactionInventory != nil { capabilities.insert(.transactionInventory) }
         if parentRunReport != nil { capabilities.insert(.parentRunReports) }
         if runReportServing != nil { capabilities.insert(.runReportServing) }
-        if recentCommitters != nil { capabilities.insert(.recentCommitters) }
+        if recentCarriers != nil { capabilities.insert(.recentCarriers) }
         networkCapabilities = capabilities
     }
 
@@ -68,9 +68,9 @@ final class ClosureChainInterface: ChainInterface {
         return try await childCandidateBuilder(context, parentContentSource)
     }
 
-    func admitNetworkCandidate(
-        _ admission: NetworkCandidateAdmission
-    ) async throws -> NodeAdmissionOutcome {
+    func importNetworkCandidate(
+        _ admission: NetworkCandidateImport
+    ) async throws -> NodeImportOutcome {
         try await self.admission(admission)
     }
 
@@ -92,7 +92,7 @@ final class ClosureChainInterface: ChainInterface {
         await runReportServing?(directory)
     }
 
-    func recentCommitters() async -> [String] {
-        await recentCommitterProvider?() ?? []
+    func recentCarriers() async -> [String] {
+        await recentCarrierProvider?() ?? []
     }
 }

@@ -414,41 +414,41 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         XCTAssertTrue(slots.allSatisfy { $0.peer == 0 })
     }
 
-    func testCandidateAcquirerIsBoundedFIFOAndDeduplicated() throws {
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
+    func testCandidateFetcherIsBoundedFIFOAndDeduplicated() throws {
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "first",
             package: nil
         )).accepted)
-        XCTAssertTrue(acquirer.observe(.init(
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "second",
             package: nil
         )).accepted)
-        XCTAssertTrue(acquirer.observe(.init(
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "first",
             package: nil
         )).accepted)
-        let first = try XCTUnwrap(acquirer.next())
+        let first = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(first.blockCID, "first")
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             first.ticket,
             resolution: .terminal
         ))
-        let second = try XCTUnwrap(acquirer.next())
+        let second = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(second.blockCID, "second")
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             second.ticket,
             resolution: .terminal
         ))
-        XCTAssertNil(acquirer.next())
+        XCTAssertNil(fetcher.next())
 
-        for index in 0..<CandidateAcquirer.readyCapacity {
-            XCTAssertTrue(acquirer.observe(.init(
+        for index in 0..<BlockFetcher.readyCapacity {
+            XCTAssertTrue(fetcher.observe(.init(
                 blockCID: "cid-\(index)",
                 package: nil
             )).accepted)
         }
-        XCTAssertFalse(acquirer.observe(.init(
+        XCTAssertFalse(fetcher.observe(.init(
             blockCID: "overflow",
             package: nil
         )).accepted)
@@ -739,7 +739,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 fetcher: fixture.parentProcess
             )
             XCTAssertNotEqual(next.postState.rawCID, oldTip.postState.rawCID)
-            let admitted = try await fixture.parentProcess.admit(
+            let admitted = try await fixture.parentProcess.importBlock(
                 try BlockHeader(node: next)
             )
             XCTAssertTrue(admitted.decision.isAccepted)
@@ -861,7 +861,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 children: [first],
                 capacity: 16
             )
-            let carried = try await parentService.admitNetworkCandidate(
+            let carried = try await parentService.importNetworkCandidate(
                 carrierHeader,
                 authenticatedChildPackage: nil,
                 preparingChildDirectories: ["Payments"],
@@ -924,14 +924,14 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                     )
                 )
             )
-            let weighed = try await fixture.childProcess.admit(
+            let weighed = try await fixture.childProcess.importBlock(
                 firstHeader,
                 authenticatedChildPackage: package,
                 remoteSource: fixture.parentProcess,
                 mode: .header
             )
             XCTAssertTrue(weighed.decision.isAccepted, "\(weighed.decision)")
-            let validated = try await fixture.childProcess.admit(
+            let validated = try await fixture.childProcess.importBlock(
                 firstHeader,
                 authenticatedChildPackage: package,
                 remoteSource: fixture.parentProcess,
@@ -962,7 +962,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
     /// parked on a fact it cannot get, or never armed — does not withhold
     /// the child's candidate: the child builds on its validated tip, since
     /// that is how a chain outweighs a branch it cannot validate.
-    func testAParkedValidateWalkDoesNotWithholdTheChildsCandidate() async throws {
+    func testAParkedExecutionWalkDoesNotWithholdTheChildsCandidate() async throws {
         let fixture = try await provisionalRootFixture(keyByte: 0x9c)
         // No evidence source: the walk the deferral arms parks on the
         // continuity fact it cannot get, and the retry is out of the way.
@@ -977,7 +977,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in }
             ),
-            validateWalkRetryInterval: .seconds(60)
+            executionWalkRetryInterval: .seconds(60)
         )
         let childHandlers = ClosureChainInterface(
             childCandidateBuilder: { [weak childService] context, parentSource in
@@ -1030,7 +1030,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
     /// built either. When the walk stops, the service reports a state
     /// change so the deferred candidate is offered, built on the tip the
     /// walk reached.
-    func testChildCandidateWaitsWhileTheValidateWalkSteps() async throws {
+    func testChildCandidateWaitsWhileTheExecutionWalkSteps() async throws {
         let fixture = try await provisionalRootFixture(keyByte: 0x9d)
         let weighedOnly = try await weighedOnlyChildBlock(fixture)
         let gate = Latch()
@@ -1044,7 +1044,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 chainStateChangePublisher: { await changes.append("change") },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
-                validateBodySource: { _, admit in
+                executionBodySource: { _, admit in
                     await gate.wait()
                     return try await admit(parentProcess)
                 },
@@ -1142,7 +1142,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             fetcher: fixture.parentProcess
         )
         let carrierHeader = try BlockHeader(node: carrier)
-        let carried = try await fixture.parentProcess.admit(carrierHeader)
+        let carried = try await fixture.parentProcess.importBlock(carrierHeader)
         XCTAssertTrue(carried.decision.isAccepted, "\(carried.decision)")
         let proof = try await ChildBlockProof.generate(
             rootHeader: carrierHeader,
@@ -1159,7 +1159,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 )
             )
         )
-        let weighed = try await fixture.childProcess.admit(
+        let weighed = try await fixture.childProcess.importBlock(
             weighedHeader,
             authenticatedChildPackage: package,
             remoteSource: fixture.parentProcess,
@@ -1251,7 +1251,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             fetcher: parentProcess
         )
         let carrierHeader = try BlockHeader(node: carrier)
-        let carrierAdmission = try await parentProcess.admit(carrierHeader)
+        let carrierAdmission = try await parentProcess.importBlock(carrierHeader)
         XCTAssertTrue(carrierAdmission.decision.isAccepted)
         let activated = try await childProcess.activateSeededChildGenesis(
             seed: seed,

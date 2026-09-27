@@ -34,14 +34,14 @@ public struct ChainProcessStatus: Sendable, Equatable {
 
 /// The result must be routed immediately when `parentCarrierLink` is present;
 /// the link is authenticated evidence, not local consensus state.
-public struct NodeAdmissionOutcome: Sendable {
-    public let decision: NodeAdmissionDecision
+public struct NodeImportOutcome: Sendable {
+    public let decision: NodeImportDecision
     public let parentCarrierLink: ParentCarrierLink?
     public let sameChainPredecessor: SameChainPredecessorRequirement?
     let canonicalCommitReceipt: CanonicalCommitReceipt?
 
     init(
-        decision: NodeAdmissionDecision,
+        decision: NodeImportDecision,
         parentCarrierLink: ParentCarrierLink?,
         sameChainPredecessor: SameChainPredecessorRequirement?,
         canonicalCommitReceipt: CanonicalCommitReceipt? = nil
@@ -309,17 +309,17 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             childGenesisCID: header.rawCID,
             parentStateCID: LatticeState.emptyHeader.rawCID
         )
-        let admissionStorage = NodeAdmissionStorage(storage: broker)
+        let importStorage = NodeImportStorage(storage: broker)
         let result = try await ChainLevel.bootstrap(
             context: context,
             genesisHeader: header,
             fetcher: fetcher,
             parentGenesisLink: parentGenesisLink,
-            validationContentStorer: admissionStorage,
-            materializedVolumeStorer: admissionStorage,
+            validationContentStorer: importStorage,
+            materializedVolumeStorer: importStorage,
             stage: { context in
                 let hierarchyArtifacts = context.issuedCarrierLink.map {
-                    AdmissionHierarchyArtifacts(
+                    ImportHierarchyArtifacts(
                         carrierLink: $0,
                         carrierEvidence: nil,
                         parentGenesisLinks: context.parentGenesisLinks
@@ -327,7 +327,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 }
                 try await Self.persist(
                     context.batch,
-                    admissionStorage: admissionStorage,
+                    importStorage: importStorage,
                     store: self.store,
                     broker: self.broker,
                     retentionScope: self.retentionScope,
@@ -343,7 +343,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         return true
     }
 
-    func admit(
+    func importBlock(
         _ blockHeader: BlockHeader,
         authenticatedChildPackage suppliedAuthenticatedChildPackage:
             AuthenticatedChildPackage? = nil,
@@ -351,7 +351,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         remoteSource: (any ContentSource)? = nil,
         mode: ImportMode = .full,
         canonicalCommitPublisher: CanonicalCommitPublisher? = nil
-    ) async throws -> NodeAdmissionOutcome {
+    ) async throws -> NodeImportOutcome {
         let authenticatedChildPackage: AuthenticatedChildPackage?
         if let supplied = suppliedAuthenticatedChildPackage {
             authenticatedChildPackage = supplied
@@ -376,7 +376,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             } ?? broker
         )
         if case .active(let level) = runtimePhase {
-            return try await admitActive(
+            return try await importActive(
                 blockHeader,
                 level: level,
                 authenticatedPackage: authenticatedChildPackage,
@@ -396,7 +396,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         if case .active(let level) = runtimePhase {
             releaseOperation()
             operationHeld = false
-            return try await admitActive(
+            return try await importActive(
                 blockHeader,
                 level: level,
                 authenticatedPackage: authenticatedChildPackage,
@@ -417,7 +417,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             throw ChainProcessError.chainNotBootstrapped
         }
         guard let package else {
-            return NodeAdmissionOutcome(
+            return NodeImportOutcome(
                 decision: .unavailable(.childProof(
                     chainPath: configuration.chainPath,
                     childCID: blockHeader.rawCID
@@ -446,20 +446,20 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             case .success(let link):
                 relayLink = link
             case .failure(.crossChainEvidenceRequired(let requirement)):
-                return NodeAdmissionOutcome(
+                return NodeImportOutcome(
                     decision: .unavailable(requirement),
                     parentCarrierLink: nil,
                     sameChainPredecessor: nil
                 )
             case .failure(.malformedEvidence),
                  .failure(.protocolInvalid):
-                return NodeAdmissionOutcome(
+                return NodeImportOutcome(
                     decision: .invalid,
                     parentCarrierLink: nil,
                     sameChainPredecessor: nil
                 )
             }
-            return NodeAdmissionOutcome(
+            return NodeImportOutcome(
                 decision: .unavailable(nil),
                 parentCarrierLink: relayLink,
                 sameChainPredecessor: SameChainPredecessorRequirement(
@@ -468,7 +468,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 )
             )
         }
-        let admissionStorage = NodeAdmissionStorage(storage: broker)
+        let importStorage = NodeImportStorage(storage: broker)
         let carrierEvidence = try await Self.canonicalCarrierEvidence(
             blockHeader,
             authenticatedPackage: authenticatedChildPackage,
@@ -476,9 +476,9 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         )
         let stage: @Sendable (BlockImportStagingContext) async throws -> Void = {
             context in
-            let hierarchyArtifacts: AdmissionHierarchyArtifacts?
+            let hierarchyArtifacts: ImportHierarchyArtifacts?
             if let link = context.issuedCarrierLink {
-                hierarchyArtifacts = AdmissionHierarchyArtifacts(
+                hierarchyArtifacts = ImportHierarchyArtifacts(
                     carrierLink: link,
                     carrierEvidence: carrierEvidence,
                     parentGenesisLinks: context.parentGenesisLinks
@@ -489,7 +489,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             try Task.checkCancellation()
             try await Self.persist(
                 context.batch,
-                admissionStorage: admissionStorage,
+                importStorage: importStorage,
                 store: self.store,
                 broker: self.broker,
                 retentionScope: self.retentionScope,
@@ -514,7 +514,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         // package carries the parent-issued ParentGenesisLink; without it the
         // parent has not yet recorded this genesis, so defer (retriable).
         guard let parentGenesisLink = package.parentGenesisLink else {
-            return NodeAdmissionOutcome(
+            return NodeImportOutcome(
                 decision: .unavailable(.parentGenesis(
                     parentPath: Array(configuration.chainPath.dropLast()),
                     directory: configuration.chainPath.last ?? "",
@@ -530,11 +530,11 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             genesisHeader: blockHeader,
             fetcher: attemptFetcher,
             parentGenesisLink: parentGenesisLink,
-            validationContentStorer: admissionStorage,
-            materializedVolumeStorer: admissionStorage,
+            validationContentStorer: importStorage,
+            materializedVolumeStorer: importStorage,
             stage: stage
         )
-        let decision: NodeAdmissionDecision
+        let decision: NodeImportDecision
         let link: ParentCarrierLink
         switch result {
         case .accepted(let acceptance):
@@ -553,7 +553,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             }
             releaseOperation()
             operationHeld = false
-            return NodeAdmissionOutcome(
+            return NodeImportOutcome(
                 decision: .canonicalized(commit),
                 parentCarrierLink: acceptance.parentCarrierLink,
                 sameChainPredecessor: nil,
@@ -563,7 +563,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             decision = .carrier
             link = resultLink
         case .rejected(let failure, let resultLink):
-            decision = NodeAdmissionDecision(failure)
+            decision = NodeImportDecision(failure)
             link = resultLink
         }
         let evidence = try await Self.canonicalCarrierEvidence(
@@ -578,7 +578,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         )
         releaseOperation()
         operationHeld = false
-        return NodeAdmissionOutcome(
+        return NodeImportOutcome(
             decision: decision,
             parentCarrierLink: link,
             sameChainPredecessor: nil
@@ -591,7 +591,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// carrier for deeper chains only, which merged mining produces every
     /// round it clears only a deeper target), the block or its evidence is
     /// invalid, or this node could not verify it. Decided is exactly the set
-    /// the candidate acquirer never retries, by the same predicate: what it
+    /// the candidate fetcher never retries, by the same predicate: what it
     /// would retry (evidence not yet held, a rule not yet met) is a deferral.
     /// A deferral persists nothing; the block's evidence stays in the
     /// parent-evidence inbox and is replayed on restart, so no stop or crash
@@ -600,7 +600,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// coming for would be re-admitted at every start and, at capacity,
     /// refuse every later parent-carried block.
     static func isDecided(_ result: BlockImportResult) -> Bool {
-        let decision = NodeAdmissionDecision(result)
+        let decision = NodeImportDecision(result)
         return !(decision.shouldRetryWhenEvidenceChanges || decision.shouldRetryLater)
     }
 
@@ -641,7 +641,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         }
     }
 
-    private func admitActive(
+    private func importActive(
         _ blockHeader: BlockHeader,
         level: ChainLevel,
         authenticatedPackage: AuthenticatedChildPackage?,
@@ -650,14 +650,14 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         pendingChildProofRoutes: [PendingChildProofRoute],
         mode: ImportMode = .full,
         canonicalCommitPublisher: CanonicalCommitPublisher?
-    ) async throws -> NodeAdmissionOutcome {
+    ) async throws -> NodeImportOutcome {
         let package = authenticatedPackage?.package
-        let admissionStorage = NodeAdmissionStorage(storage: broker)
+        let importStorage = NodeImportStorage(storage: broker)
         let preflight = try await level.preflightBlockImport(
             blockHeader,
             fetcher: attemptFetcher,
             childPackage: package,
-            validationContentStorer: admissionStorage,
+            validationContentStorer: importStorage,
             mode: mode
         )
         // Keep all remote acquisition before the one serial durability lane.
@@ -671,7 +671,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         case .terminal(let result, _):
             mayIssueCarrierLink = result.parentCarrierLink != nil
         }
-        let carrierEvidence: AdmissionCarrierEvidence?
+        let carrierEvidence: ImportCarrierEvidence?
         if mayIssueCarrierLink, authenticatedPackage != nil {
             carrierEvidence = try await Self.canonicalCarrierEvidence(
                 blockHeader,
@@ -707,7 +707,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 if isExclusion {
                     try await Self.persist(
                         context.batch,
-                        admissionStorage: admissionStorage,
+                        importStorage: importStorage,
                         store: self.store,
                         broker: self.broker,
                         retentionScope: self.retentionScope,
@@ -747,7 +747,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     // orphan pin that boot reclaims, never a marker without its
                     // state. The owner pin (not the batch-rebuilt retention
                     // scope) is what survives a restart.
-                    let roots = await admissionStorage.takeStoredVolumeRoots()
+                    let roots = await importStorage.takeStoredVolumeRoots()
                     try await self.broker.pinBatch(
                         roots: roots,
                         owner: Self.validatedOwner(
@@ -765,7 +765,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     // a validated block whose carrier link is lost for good —
                     // boot reconciliation checks the pin, not the link.
                     if let hierarchyArtifacts = context.issuedCarrierLink.map({
-                        AdmissionHierarchyArtifacts(
+                        ImportHierarchyArtifacts(
                             carrierLink: $0,
                             carrierEvidence: carrierEvidence,
                             parentGenesisLinks: context.parentGenesisLinks
@@ -805,7 +805,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 return
             }
             let hierarchyArtifacts = context.issuedCarrierLink.map {
-                AdmissionHierarchyArtifacts(
+                ImportHierarchyArtifacts(
                     carrierLink: $0,
                     carrierEvidence: carrierEvidence,
                     parentGenesisLinks: context.parentGenesisLinks
@@ -813,7 +813,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             }
             try await Self.persist(
                 context.batch,
-                admissionStorage: admissionStorage,
+                importStorage: importStorage,
                 store: self.store,
                 broker: self.broker,
                 retentionScope: self.retentionScope,
@@ -823,8 +823,8 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     // so the validate-on-candidacy walk (and every act-on
                     // read) knows to execute it before building on it.
                     status: {
-                        if case .header = mode { return .weighed }
-                        return .eager
+                        if case .header = mode { return .header }
+                        return .executed
                     }(),
                     pendingChildProofRoutes: hierarchyArtifacts == nil
                         ? []
@@ -863,12 +863,12 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         case .ready(let token):
             result = try await level.commitPreflight(
                 token,
-                materializedVolumeStorer: admissionStorage,
+                materializedVolumeStorer: importStorage,
                 stage: stage
             )
         }
 
-        let decision = NodeAdmissionDecision(result)
+        let decision = NodeImportDecision(result)
         let admissionStaged = result.commit != nil
         // A disconnected accepted block is not yet a parent-fact issuer, but
         // its content-verified carrier remains valid relay data for deeper
@@ -901,7 +901,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
            Self.isDecided(result),
            let link = result.parentCarrierLink {
             try await store.persistIssuedHierarchyArtifacts(
-                AdmissionHierarchyArtifacts(
+                ImportHierarchyArtifacts(
                     carrierLink: link,
                     carrierEvidence: carrierEvidence,
                     parentGenesisLinks: decision.isAccepted
@@ -945,7 +945,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         releaseOperation()
         operationHeld = false
 
-        return NodeAdmissionOutcome(
+        return NodeImportOutcome(
             decision: decision,
             parentCarrierLink: result.parentCarrierLink,
             sameChainPredecessor: result.sameChainPredecessor,
@@ -959,7 +959,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// forward-apply sync so a receiver can apply a bounded page and page again,
     /// never buffering the whole gap. Empty when `afterCID` is not on our main
     /// chain or we have nothing after it.
-    func forwardMainChainRange(
+    func forwardCanonicalRange(
         afterCID: String,
         limit: Int
     ) async -> (blockCIDs: [String], hasMore: Bool) {
@@ -993,7 +993,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// retention) — distinct from a present ancestor with an empty page, which
     /// is "the receiver is caught up to us." The start is one of the receiver's
     /// own accepted CIDs by construction, so this never rewinds it past its own
-    /// verified history. Same main-chain test as `forwardMainChainRange`.
+    /// verified history. Same main-chain test as `forwardCanonicalRange`.
     func commonAncestorRange(
         locator: [String],
         limit: Int
@@ -1005,7 +1005,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             guard let meta = await level.chain.getConsensusBlock(hash: cid),
                   await level.chain.canonicalBlockHash(atHeight: meta.blockHeight) == cid
             else { continue }
-            let page = await forwardMainChainRange(afterCID: cid, limit: limit)
+            let page = await forwardCanonicalRange(afterCID: cid, limit: limit)
             return (cid, page.blockCIDs, page.hasMore)
         }
         return (nil, [], false)
@@ -1022,9 +1022,9 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
 
     /// Main-chain block CID at `height`, or nil when the process is not active
     /// or the height is past the tip. Ungated explorer read over the in-memory
-    /// height index (same source as `forwardMainChainRange`), so a by-height
+    /// height index (same source as `forwardCanonicalRange`), so a by-height
     /// lookup never walks parents or touches the operation gate.
-    func mainChainBlockCID(atHeight height: UInt64) async -> String? {
+    func canonicalBlockCID(atHeight height: UInt64) async -> String? {
         guard case .active(let level) = runtimePhase else { return nil }
         return await level.chain.canonicalBlockHash(atHeight: height)
     }
@@ -1074,7 +1074,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         directories: Set<String>
     ) async -> [String: String] {
         guard case .active(let level) = runtimePhase, !directories.isEmpty,
-              let tip = await deepestValidatedMainChainTip(level: level)?.cid
+              let tip = await deepestValidatedCanonicalTip(level: level)?.cid
         else { return [:] }
         let header = BlockHeader(rawCID: tip, node: nil, encryptionInfo: nil)
         guard let block = try? await header.resolve(fetcher: localFetcher).node,
@@ -1271,7 +1271,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             return
         }
 
-        let storage = NodeAdmissionStorage(storage: broker)
+        let storage = NodeImportStorage(storage: broker)
         try await header.storeBlock(fetcher: fetcher, storer: storage)
         let roots = Array(Set(await storage.takeStoredVolumeRoots())).sorted()
         guard roots.contains(header.rawCID) else {
@@ -1357,12 +1357,12 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// Under all-eager admission every accepted block is validated, so this is
     /// the canonical tip. Nil only when the process is inactive or (impossible
     /// while genesis is eager) no main-chain block is validated.
-    func deepestValidatedMainChainTip() async -> (cid: String, height: UInt64)? {
+    func deepestValidatedCanonicalTip() async -> (cid: String, height: UInt64)? {
         guard case .active(let level) = runtimePhase else { return nil }
-        return await deepestValidatedMainChainTip(level: level)
+        return await deepestValidatedCanonicalTip(level: level)
     }
 
-    /// The last answer of `deepestValidatedMainChainTip`. Validated main-chain
+    /// The last answer of `deepestValidatedCanonicalTip`. Validated main-chain
     /// blocks form a PREFIX (the walk validates forward from validated+1,
     /// self-mined blocks attach on the validated tip, a reorg leaves a
     /// validated prefix below the fork point), so the last answer is a floor:
@@ -1415,13 +1415,13 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         return (try? await store.blockValidated(cid)) == true
     }
 
-    private func deepestValidatedMainChainTip(
+    private func deepestValidatedCanonicalTip(
         level: ChainLevel
     ) async -> (cid: String, height: UInt64)? {
         await validatedTipWalk(level: level)?.validated
     }
 
-    /// `deepestValidatedMainChainTip` together with the canonical tip height
+    /// `deepestValidatedCanonicalTip` together with the canonical tip height
     /// the walk started from, which the validated height never exceeds.
     private func validatedTipWalk(
         level: ChainLevel
@@ -1487,7 +1487,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         await acquireOperation()
         defer { releaseOperation() }
         guard case .active(let level) = runtimePhase,
-              let validated = await deepestValidatedMainChainTip(level: level)
+              let validated = await deepestValidatedCanonicalTip(level: level)
         else {
             throw ChainProcessError.chainNotBootstrapped
         }
@@ -1652,7 +1652,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             try Task.checkCancellation()
             let available = Set(try await store.preparedChildProofs(
                 carrierCID: carrier.rawCID
-            ).map(\.directory)).union(try await store.retainedDirectChildProofs(
+            ).map(\.directory)).union(try await store.publishedDirectChildProofs(
                 carrierCID: carrier.rawCID
             ).map(\.directory))
             directories.removeAll { available.contains($0) }
@@ -1663,7 +1663,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 capacity: Self.preparedChildProofCapacity
             )
         }
-        _ = try await acquirePendingChildProofs(
+        _ = try await fetchPendingChildProofs(
             carrier: carrier,
             directories: directories,
             fetcher: CoalescingFetcher(remoteSource.map {
@@ -1732,7 +1732,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 .sorted()
         }
         guard !directories.isEmpty else { return [] }
-        return try await acquirePendingChildProofs(
+        return try await fetchPendingChildProofs(
             carrier: BlockHeader(
                 rawCID: carrierCID,
                 node: nil,
@@ -1751,7 +1751,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         directories: Set<String>? = nil
     ) async throws -> [DurableDirectChildProof] {
         var durable: [DurableDirectChildProof] = []
-        let retained = try await store.retainedDirectChildProofs(
+        let retained = try await store.publishedDirectChildProofs(
             carrierCID: carrierCID
         )
         for edge in retained
@@ -1810,7 +1810,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 revision: nil
             )
         }
-        let validated = await deepestValidatedMainChainTip(level: level)
+        let validated = await deepestValidatedCanonicalTip(level: level)
         return ChainProcessStatus(
             phase: .active,
             chainPath: configuration.chainPath,
@@ -1835,7 +1835,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 revision: nil
             )
         }
-        let validated = await deepestValidatedMainChainTip(level: level)
+        let validated = await deepestValidatedCanonicalTip(level: level)
         return ChainProcessStatus(
             phase: .active,
             chainPath: configuration.chainPath,
@@ -1887,11 +1887,11 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         else { return [] }
         var reports: [ParentRunReport] = []
         for directory in servedRunDirectories.sorted() {
-            guard let committer = await level.chain.nearestCarrier(
+            guard let carrier = await level.chain.nearestCarrier(
                       of: blockHash, directory: directory
                   ),
                   let report = await level.chain.parentRunReport(
-                      at: committer, directory: directory
+                      at: carrier, directory: directory
                   ) else { continue }
             reports.append(report)
         }
@@ -1901,10 +1901,10 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// One committer's run report, for a child's re-serve request. Nil when
     /// the directory is not served here or the block is not a committer into
     /// it — silence, never a claim.
-    func runReport(committer: String, directory: String) async -> ParentRunReport? {
+    func runReport(carrier: String, directory: String) async -> ParentRunReport? {
         guard case .active(let level) = runtimePhase,
               servedRunDirectories.contains(directory) else { return nil }
-        return await level.chain.parentRunReport(at: committer, directory: directory)
+        return await level.chain.parentRunReport(at: carrier, directory: directory)
     }
 
     /// Per directory, the child block the branch through `tipCID` last
@@ -1920,15 +1920,15 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
               await level.chain.getConsensusBlock(hash: tipCID) != nil
         else { return [:] }
         var carried: [String: String] = [:]
-        var committers: [String: BlockMeta?] = [:]
+        var carriers: [String: BlockMeta?] = [:]
         for directory in directories {
-            guard let committer = await level.chain.nearestCarrier(
+            guard let carrier = await level.chain.nearestCarrier(
                 of: tipCID, directory: directory
             ) else { continue }
-            if committers[committer] == nil {
-                committers[committer] = await level.chain.getConsensusBlock(hash: committer)
+            if carriers[carrier] == nil {
+                carriers[carrier] = await level.chain.getConsensusBlock(hash: carrier)
             }
-            if let child = committers[committer]??.childCommitments?[directory] {
+            if let child = carriers[carrier]??.childCommitments?[directory] {
                 carried[directory] = child
             }
         }
@@ -1942,8 +1942,8 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// joined on acceptance (a carrier of a block this chain refused commits
     /// nothing here), so a child restarted while its parent was down still
     /// asks, and asks only about its own blocks.
-    func recentCommitters() async throws -> [String] {
-        try await store.incomingCarrierCommitters(limit: Self.recentCommitterCapacity)
+    func recentCarriers() async throws -> [String] {
+        try await store.incomingCarriers(limit: Self.recentCarrierCapacity)
     }
 
     /// The committing parent blocks behind one block accepted here with a
@@ -1952,14 +1952,14 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// edge fails the whole ask closed (the round re-ask still covers it).
     /// Bounded at the source to what one request may name, so a block
     /// carried by more parent forks than that never builds an unsendable ask.
-    func incomingCarrierCommitters(of childBlock: String) async throws -> [String] {
+    func incomingCarriers(of childBlock: String) async throws -> [String] {
         Array(
             try await store.incomingParentCarrierBlockCIDs(forChildBlockCID: childBlock)
-                .sorted().prefix(Self.recentCommitterCapacity)
+                .sorted().prefix(Self.recentCarrierCapacity)
         )
     }
 
-    static let recentCommitterCapacity = maximumParentRunReportRequestCommitters
+    static let recentCarrierCapacity = maximumParentRunReportRequestCarriers
 
     public enum ParentReportApplication: Sendable {
         /// The attributed batch is durable and applied; the commit, if the
@@ -1992,8 +1992,9 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         // at that block's admission. A committer this chain never admitted a
         // block from names nothing here.
         guard let childBlock = try await store.incomingCarrierChildBlock(
-            committer: report.blockHash
+            carrier: report.blockHash
         ) else {
+            // The label predates the carrier naming; dashboards read it.
             parentReportRefusalCounts["unknownCommitter", default: 0] += 1
             return .refused(.notCarrierOfChild)
         }
@@ -2025,9 +2026,19 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         (parentReportsAppliedCount, parentReportRefusalCounts)
     }
 
+    /// The `/metrics` refusal label. Spelled out rather than derived from the
+    /// Lattice case name, so a rename there cannot silently change a label a
+    /// dashboard reads.
     static func refusalName(_ outcome: ParentReportStrengthening) -> String {
-        let description = String(describing: outcome)
-        return String(description.prefix { $0 != "(" })
+        switch outcome {
+        case .strengthened: "strengthened"
+        case .notCarrierOfChild: "notCarrierOfChild"
+        case .wrongDirectory: "wrongDirectory"
+        case .locationConflict: "locationConflict"
+        case .malformedReport: "malformedReport"
+        case .unrepresentable: "unrepresentable"
+        case .notStronger: "notStronger"
+        }
     }
 
     /// Ungated tip heights for `/metrics`, from ONE validated-tip walk: the
@@ -2049,7 +2060,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         return await level.chain.unresolvedSameChainPredecessors()
     }
 
-    public func evictUnretainedVolumes() async throws -> Int {
+    public func pruneUnpinnedVolumes() async throws -> Int {
         try await acquireMutationOperation()
         defer { releaseOperation() }
         try Task.checkCancellation()
@@ -2071,14 +2082,14 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// demoted here.
     private func evictDemotableValidatedBlocks() async throws {
         guard case .active(let level) = runtimePhase,
-              let validatedTip = await deepestValidatedMainChainTip(level: level)
+              let validatedTip = await deepestValidatedCanonicalTip(level: level)
         else { return }
         let policy = configuration.resourcePolicy
         let depth = UInt64(policy.offChainValidatedRetentionDepth)
         guard validatedTip.height > depth else { return }
         let candidateCeiling = validatedTip.height - depth
         var candidates: [(cid: String, height: UInt64)] = []
-        for blockCID in try await store.walkValidatedBlockCIDs() {
+        for blockCID in try await store.executedAndPinnedBlockCIDs() {
             guard let height = await level.chain
                 .getConsensusBlock(hash: blockCID)?.blockHeight,
                   height < candidateCeiling,
@@ -2216,19 +2227,19 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         _ header: BlockHeader,
         authenticatedPackage: AuthenticatedChildPackage?,
         fetcher: any Fetcher
-    ) async throws -> AdmissionCarrierEvidence {
+    ) async throws -> ImportCarrierEvidence {
         guard let authenticatedPackage else {
             throw ChainProcessError.malformedAuthenticatedChildProof
         }
         let package = authenticatedPackage.package
         let child = try await resolvedCandidate(header, fetcher: fetcher)
-        return AdmissionCarrierEvidence(
+        return ImportCarrierEvidence(
             proof: package.proof,
             childCID: try BlockHeader(node: child).rawCID
         )
     }
 
-    private func acquirePendingChildProofs(
+    private func fetchPendingChildProofs(
         carrier: BlockHeader,
         directories: [String],
         fetcher: any Fetcher
@@ -2239,7 +2250,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 .map(\.directory)
         )
         let retainedDirectories = Set(
-            try await store.retainedDirectChildProofs(carrierCID: carrier.rawCID)
+            try await store.publishedDirectChildProofs(carrierCID: carrier.rawCID)
                 .map(\.directory)
         )
         let availableDirectories = preparedDirectories.union(retainedDirectories)
@@ -2282,7 +2293,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             carrierCID: carrier.rawCID
         )
         try Task.checkCancellation()
-        let retained = Set(try await store.retainedDirectChildProofs(
+        let retained = Set(try await store.publishedDirectChildProofs(
             carrierCID: carrier.rawCID
         ).map(\.directory))
         let completed = Array(active.intersection(
@@ -2338,13 +2349,13 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
 
     private func persistHierarchyArtifacts(
         _ link: ParentCarrierLink,
-        carrierEvidence: AdmissionCarrierEvidence?,
+        carrierEvidence: ImportCarrierEvidence?,
         parentGenesisLinks: [ParentGenesisLink] = [],
         pendingChildProofRoutes: [PendingChildProofRoute]
     ) async throws {
         try Task.checkCancellation()
         try await store.persistIssuedHierarchyArtifacts(
-            AdmissionHierarchyArtifacts(
+            ImportHierarchyArtifacts(
                 carrierLink: link,
                 carrierEvidence: carrierEvidence,
                 parentGenesisLinks: parentGenesisLinks
@@ -2373,7 +2384,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         upstreamProof: ChildBlockProof?,
         additional: [PreparedChildProof] = []
     ) async throws {
-        let retained = try await store.retainedDirectChildProofs(
+        let retained = try await store.publishedDirectChildProofs(
             carrierCID: carrierCID
         )
         let newlyPrepared = try await store.preparedChildProofs(
@@ -2591,14 +2602,14 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
 
     nonisolated static func persist(
         _ batch: BlockImportBatch,
-        admissionStorage: NodeAdmissionStorage,
+        importStorage: NodeImportStorage,
         store: NodeStore,
         broker: DiskBroker,
         retentionScope: String,
         persistence: ImportPersistence,
         afterRetainingRoots: (@Sendable () async -> Void)? = nil
     ) async throws {
-        let roots = await admissionStorage.takeStoredVolumeRoots()
+        let roots = await importStorage.takeStoredVolumeRoots()
         // Retaining an orphan is harmless; staging a batch without durable
         // retention is not. Once retention succeeds, the batch must finish:
         // cancellation between these writes would pin its roots until restart.

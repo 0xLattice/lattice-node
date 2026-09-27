@@ -183,7 +183,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                     )) == true {
                         return
                     }
-                    // Not `Task.sleep(for:)`: see ChainService.scheduleValidateWalkRetry.
+                    // Not `Task.sleep(for:)`: see ChainService.scheduleExecutionWalkRetry.
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
                 }
             }
@@ -243,7 +243,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
 
         let volumeMaintenance = Task {
             await runVolumeMaintenance {
-                _ = try await process.evictUnretainedVolumes()
+                _ = try await process.pruneUnpinnedVolumes()
             }
         }
         do {
@@ -624,7 +624,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
         let byCID: Bool
         switch explorerBlockID(id) {
         case .height(let height):
-            guard let resolved = await service.explorerMainChainBlockCID(
+            guard let resolved = await service.explorerCanonicalBlockCID(
                 atHeight: height
             ) else {
                 throw HTTPError(.notFound)

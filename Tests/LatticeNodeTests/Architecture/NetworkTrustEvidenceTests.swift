@@ -127,18 +127,18 @@ private final class ChildEvidencePeer: IvyDelegate, Sendable {
     private let childPath: [String]
     /// Committers to ask the parent to re-serve once the evidence index has
     /// answered (i.e. once this child is evidence-ready on the parent).
-    private let runReportCommitters: [String]
+    private let runReportCarriers: [String]
 
     init(
         recorder: ChildEvidenceRecorder,
         hello: Data,
         childPath: [String],
-        runReportCommitters: [String] = []
+        runReportCarriers: [String] = []
     ) {
         self.recorder = recorder
         self.hello = hello
         self.childPath = childPath
-        self.runReportCommitters = runReportCommitters
+        self.runReportCarriers = runReportCarriers
     }
 
     func ivy(
@@ -172,10 +172,10 @@ private final class ChildEvidencePeer: IvyDelegate, Sendable {
                 message.payload
             ) else { return }
             await recorder.record(response)
-            guard !runReportCommitters.isEmpty,
+            guard !runReportCarriers.isEmpty,
                   let payload = try? ParentRunReportRequestMessage(
                     requestID: await recorder.nextRunReportRequestID(),
-                    committerCIDs: runReportCommitters
+                    carrierCIDs: runReportCarriers
                   ).encoded() else { return }
             _ = await ivy.sendMessage(
                 to: peer,
@@ -858,7 +858,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                 guard let rootCID = admission.authenticatedChildPackage?
                     .package.proof.rootCID else {
                     await unavailable.append(admission.header.rawCID)
-                    return NodeAdmissionOutcome(
+                    return NodeImportOutcome(
                         decision: .unavailable(.childProof(
                             chainPath: targetConfiguration.chainPath,
                             childCID: admission.header.rawCID
@@ -876,7 +876,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                     _ = await firstAdmissionGate.enter()
                 }
                 await roots.append(rootCID)
-                return NodeAdmissionOutcome(
+                return NodeImportOutcome(
                     decision: .acceptedSide(ChainCommit(
                         tipHash: admission.header.rawCID
                     )),
@@ -1090,7 +1090,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
     /// one — with the successor's work in it — and is silent about the other,
     /// exactly once each; and the directory was served only because this
     /// chain anchored the child's genesis, not because a peer named it.
-    func testParentServesRunReportsForTheCommittersAChildNamesAndOnlyThose()
+    func testParentServesRunReportsForTheCarriersAChildNamesAndOnlyThose()
         async throws
     {
         let fixture = try await runReportServeFixture(keyByte: 0x68)
@@ -1103,7 +1103,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                 process: process,
                 chain: ClosureChainInterface(
                     admission: { _ in
-                        NodeAdmissionOutcome(
+                        NodeImportOutcome(
                             decision: .duplicate,
                             parentCarrierLink: nil,
                             sameChainPredecessor: nil
@@ -1133,7 +1133,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             XCTAssertTrue(strangerSaw.isEmpty, "a directory this node never anchored is served nothing")
             XCTAssertEqual(served.count, 1, "one report for the one committer; silence for the stranger")
             let report = try XCTUnwrap(served.first)
-            XCTAssertEqual(report.committerCID, fixture.carrierCID)
+            XCTAssertEqual(report.carrierCID, fixture.carrierCID)
             XCTAssertEqual(report.childBlockCID, fixture.childCID)
             XCTAssertEqual(report.directory, "Payments")
             XCTAssertGreaterThan(report.runWork, report.ownWork,
@@ -1163,7 +1163,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
         addTeardownBlock {
             try? FileManager.default.removeItem(at: fixture.storage)
         }
-        let committer = testCID("run-report-committer")
+        let carrier = testCID("run-report-committer")
         let sink = ParentRunReportSink()
         do {
             try await fixture.parent.start()
@@ -1171,14 +1171,14 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                 process: fixture.process,
                 chain: ClosureChainInterface(
                     admission: { _ in
-                        NodeAdmissionOutcome(
+                        NodeImportOutcome(
                             decision: .duplicate,
                             parentCarrierLink: nil,
                             sameChainPredecessor: nil
                         )
                     },
                     parentRunReport: { report in await sink.record(report) },
-                    recentCommitters: { [committer] }
+                    recentCarriers: { [carrier] }
                 )
             )
             try await eventually("parent role granted") {
@@ -1188,17 +1188,17 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                 !(await fixture.recorder.runReportRequestsSeen()).isEmpty
             }
             let requests = await fixture.recorder.runReportRequestsSeen()
-            XCTAssertEqual(requests.map(\.committerCIDs), [[committer]],
+            XCTAssertEqual(requests.map(\.carrierCIDs), [[carrier]],
                            "exactly the committers this chain knows, once per session")
             try await eventually("the parent's report reached the handler") {
                 !(await sink.received()).isEmpty
             }
             let received = await sink.received()
             let report = try XCTUnwrap(received.first)
-            XCTAssertEqual(report.blockHash, committer)
+            XCTAssertEqual(report.blockHash, carrier)
             XCTAssertEqual(report.directory, "Retry")
             XCTAssertEqual(report.childBlock, testCID("run-report-child-block"))
-            XCTAssertEqual(report.grinds, [committer])
+            XCTAssertEqual(report.grinds, [carrier])
             XCTAssertEqual(report.runWork, WorkSum(UInt256(9)))
             XCTAssertEqual(report.ownWork, WorkSum(UInt256(4)))
             XCTAssertEqual(report.revision, 7)
@@ -1215,7 +1215,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
     /// resolve nil (the walk parks and retries) — never stay suspended: an
     /// unresumed continuation would leave the walk worker alive and every
     /// later reserve a no-op for the process lifetime.
-    func testValidateEvidenceRequestResolvesNilWhenTheParentSessionDrops()
+    func testExecutionEvidenceRequestResolvesNilWhenTheParentSessionDrops()
         async throws
     {
         let fixture = try await hierarchyRetryFixture(
@@ -1243,7 +1243,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             }
             // In flight: the parent never answers.
             let resolved = Task { [runtime = fixture.runtime] in
-                await runtime.resolveValidateEvidenceForTesting(
+                await runtime.resolveExecutionEvidenceForTesting(
                     for: testCID("child-block"),
                     requirement: .parentStateContinuity(
                         parentPath: ["Nexus"],
@@ -1503,7 +1503,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
         let carrierHeader = try BlockHeader(node: carrier)
         try await carrierHeader.storeBlock(fetcher: process, storer: process)
 
-        let outcome = try await process.admit(
+        let outcome = try await process.importBlock(
             BlockHeader(
                 rawCID: carrierHeader.rawCID,
                 node: nil,
@@ -1606,7 +1606,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             nonce: 1,
             fetcher: target.process
         )
-        let admission = try await target.process.admit(
+        let admission = try await target.process.importBlock(
             BlockHeader(node: carrier)
         )
         XCTAssertTrue(admission.decision.isAccepted)
@@ -1859,7 +1859,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             previous: genesis, transactions: [authorization],
             timestamp: 3_600_000, nonce: 1, fetcher: process
         )
-        guard try await process.admit(BlockHeader(node: recording)).decision.isAccepted else {
+        guard try await process.importBlock(BlockHeader(node: recording)).decision.isAccepted else {
             throw NetworkTestError.failedPhase("recording carrier")
         }
         // The carrier commits child block 1.
@@ -1876,7 +1876,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
         )
         let carrierHeader = try BlockHeader(node: carrier)
         _ = try await process.prepareChildProofs(for: carrier, capacity: 16)
-        guard try await process.admit(
+        guard try await process.importBlock(
             carrierHeader, preparingChildDirectories: ["Payments"]
         ).decision.isAccepted else {
             throw NetworkTestError.failedPhase("carrier")
@@ -1887,7 +1887,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             previous: carrier, timestamp: 10_800_000, nonce: 3, fetcher: process
         )
         let successorHeader = try BlockHeader(node: successor)
-        guard try await process.admit(successorHeader).decision.isAccepted else {
+        guard try await process.importBlock(successorHeader).decision.isAccepted else {
             throw NetworkTestError.failedPhase("successor")
         }
 
@@ -1900,7 +1900,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                 chainPath: childPath
             ).encode(),
             childPath: childPath,
-            runReportCommitters: [carrierHeader.rawCID, successorHeader.rawCID]
+            runReportCarriers: [carrierHeader.rawCID, successorHeader.rawCID]
         )
         let child = Ivy(config: IvyConfig(
             signingKey: childKey,
@@ -1926,7 +1926,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                 chainPath: strangerPath
             ).encode(),
             childPath: strangerPath,
-            runReportCommitters: [carrierHeader.rawCID]
+            runReportCarriers: [carrierHeader.rawCID]
         )
         let stranger = Ivy(config: IvyConfig(
             signingKey: signingKey(keyByte &+ 2),
@@ -2020,7 +2020,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                 nonce: UInt64(step),
                 fetcher: process
             )
-            let outcome = try await process.admit(BlockHeader(node: canonical))
+            let outcome = try await process.importBlock(BlockHeader(node: canonical))
             guard outcome.decision.isAccepted else {
                 throw NetworkTestError.failedPhase("canonical fixture branch")
             }
@@ -2034,7 +2034,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             fetcher: process
         )
         let sidePredecessorHeader = try BlockHeader(node: sidePredecessor)
-        let sidePredecessorOutcome = try await process.admit(sidePredecessorHeader)
+        let sidePredecessorOutcome = try await process.importBlock(sidePredecessorHeader)
         guard case .acceptedSide = sidePredecessorOutcome.decision else {
             throw NetworkTestError.failedPhase("side fixture predecessor")
         }
@@ -2102,7 +2102,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             fetcher: process,
             storer: process
         )
-        let carrierOutcome = try await process.admit(
+        let carrierOutcome = try await process.importBlock(
             BlockHeader(
                 rawCID: carrierHeader.rawCID,
                 node: nil,

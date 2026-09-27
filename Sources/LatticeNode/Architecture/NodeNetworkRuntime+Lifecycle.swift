@@ -59,7 +59,7 @@ extension NodeNetworkRuntime {
         runtimeGeneration = callbackEpoch.advance()
         self.process = process
         self.chain = chain
-        candidateAcquirer.reset(
+        blockFetcher.reset(
             retryWindow: planeConfigurations.overlay.requestTimeout
                 * Self.maximumCandidateWaitTicks,
             durableDescendants: recoveredDescendants
@@ -88,7 +88,7 @@ extension NodeNetworkRuntime {
             )
             isRunning = true
             for candidate in recoveredParentCandidates {
-                guard await enqueueRetainedParentCandidate(
+                guard await enqueueInboxParentCandidate(
                     candidate,
                     generation: runtimeGeneration,
                     process: process
@@ -164,7 +164,7 @@ extension NodeNetworkRuntime {
         return candidates
     }
 
-    func enqueueRetainedParentCandidate(
+    func enqueueInboxParentCandidate(
         _ candidate: CandidateSeed,
         peer: AuthenticatedPeer? = nil,
         generation: UInt64,
@@ -246,7 +246,7 @@ extension NodeNetworkRuntime {
         candidateWorker?.cancel()
         candidateWorker = nil
         candidateWorkerGeneration = nil
-        candidateAcquirer.reset(
+        blockFetcher.reset(
             retryWindow: planeConfigurations.overlay.requestTimeout
                 * Self.maximumCandidateWaitTicks
         )

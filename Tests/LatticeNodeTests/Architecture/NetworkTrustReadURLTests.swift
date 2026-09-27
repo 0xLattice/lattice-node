@@ -209,7 +209,7 @@ final class NetworkTrustReadURLTests: NetworkTrustTestCase {
                 ).isEmpty { break }
                 try await Task.sleep(for: .milliseconds(10))
             }
-            let maybeOwnGenesis = await target.process.mainChainBlockCID(
+            let maybeOwnGenesis = await target.process.canonicalBlockCID(
                 atHeight: 0
             )
             let ownGenesis = try XCTUnwrap(maybeOwnGenesis)
@@ -267,7 +267,7 @@ final class NetworkTrustReadURLTests: NetworkTrustTestCase {
             requestTimeout: .seconds(2),
             publicReadURL: "https://nexus.example"
         )
-        let maybeOwnGenesis = await target.process.mainChainBlockCID(
+        let maybeOwnGenesis = await target.process.canonicalBlockCID(
             atHeight: 0
         )
         let ownGenesis = try XCTUnwrap(maybeOwnGenesis)

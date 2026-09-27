@@ -143,7 +143,7 @@ final class ChainServiceTests: XCTestCase {
         // `Block.storeBlock` deliberately leaves child links independent. This
         // network path has no authenticated direct-child route to materialize,
         // so hierarchy extraction is optional, but canonical visibility is not.
-        let result = try await service.admitNetworkCandidate(
+        let result = try await service.importNetworkCandidate(
             header,
             authenticatedChildPackage: nil,
             preparingChildDirectories: [],
@@ -179,7 +179,7 @@ final class ChainServiceTests: XCTestCase {
             encryptionInfo: nil
         )
         let admission = Task {
-            try await service.admitNetworkCandidate(
+            try await service.importNetworkCandidate(
                 unresolved,
                 authenticatedChildPackage: nil,
                 preparingChildDirectories: [],
@@ -210,7 +210,7 @@ final class ChainServiceTests: XCTestCase {
         let process = try await nexusProcess()
         let service = makeService(process: process)
         let template = try await service.miningTemplate(MiningTemplateRequest())
-        let first = try await process.admit(BlockHeader(node: template.block))
+        let first = try await process.importBlock(BlockHeader(node: template.block))
         guard case .canonicalized = first.decision else {
             return XCTFail("expected initial canonical admission")
         }
@@ -507,7 +507,7 @@ final class ChainServiceTests: XCTestCase {
             )
         ))
         let mined = try await service.miningTemplate(MiningTemplateRequest())
-        let admission = try await process.admit(BlockHeader(node: mined.block))
+        let admission = try await process.importBlock(BlockHeader(node: mined.block))
         guard case .canonicalized(let commit) = admission.decision else {
             return XCTFail("expected canonical direct admission")
         }
@@ -652,7 +652,7 @@ final class ChainServiceTests: XCTestCase {
         // This is the daemon's runtime-to-service injection. Local work must
         // still reconcile while that runtime is stopped.
         let handlers = ClosureChainInterface(admission: { admission in
-            try await service.admitNetworkCandidate(
+            try await service.importNetworkCandidate(
                 admission.header,
                 authenticatedChildPackage: admission.authenticatedChildPackage,
                 preparingChildDirectories: admission.preparingChildDirectories,
@@ -1200,7 +1200,7 @@ final class ChainServiceTests: XCTestCase {
             chainPath: configuration.chainPath,
             issuingAuthorityKey: configuration.processPublicKey
         )
-        let admissionsBefore = try await store.stagedAdmissions()
+        let admissionsBefore = try await store.stagedImports()
         let leavesBefore = try await process.store.acceptedLeafPage(
             afterCID: nil,
             snapshotSequence: nil,
@@ -1255,7 +1255,7 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertEqual(publicationCount, 1)
         let publishedBlockCount = await publishedBlocks.count()
         XCTAssertEqual(publishedBlockCount, 0)
-        let admissionsAfter = try await store.stagedAdmissions()
+        let admissionsAfter = try await store.stagedImports()
         let leavesAfter = try await process.store.acceptedLeafPage(
             afterCID: nil,
             snapshotSequence: nil,
@@ -1487,7 +1487,7 @@ final class ChainServiceTests: XCTestCase {
             let mined = threaded.replacingNonce(
                 firstNonce(of: threaded, from: 0) { $0 <= threaded.target }
             )
-            let outcome = try await process.admit(BlockHeader(node: mined))
+            let outcome = try await process.importBlock(BlockHeader(node: mined))
             XCTAssertTrue(
                 outcome.decision.isAccepted,
                 "a block scheduled from the carried anchor must satisfy the validator"
@@ -1568,7 +1568,7 @@ final class ChainServiceTests: XCTestCase {
             unfiltered.proofOfWorkHash(), unfiltered.target,
             "and must still carry the work its committed target demands"
         )
-        let outcome = try await process.admit(try BlockHeader(node: unfiltered))
+        let outcome = try await process.importBlock(try BlockHeader(node: unfiltered))
         XCTAssertTrue(
             outcome.decision.isAccepted,
             "minimum work is the miner's choice, not a rule the node enforces"
@@ -2233,7 +2233,7 @@ final class ChainServiceTests: XCTestCase {
             fetcher: parentProcess
         )
         let firstCarrierHeader = try BlockHeader(node: firstCarrier)
-        let parentOutcome = try await parentProcess.admit(firstCarrierHeader)
+        let parentOutcome = try await parentProcess.importBlock(firstCarrierHeader)
         XCTAssertNotNil(parentOutcome.parentCarrierLink)
 
         let childDirectory = FileManager.default.temporaryDirectory
@@ -2490,7 +2490,7 @@ final class ChainServiceTests: XCTestCase {
             SubmitWorkRequest(workID: templateB.workID, nonce: nonceB)
         )
         XCTAssertTrue(submittedB.accepted)
-        let canonical4Opt = await process.mainChainBlockCID(atHeight: 4)
+        let canonical4Opt = await process.canonicalBlockCID(atHeight: 4)
         let canonical4 = try XCTUnwrap(canonical4Opt)
         let sibling4 = canonical4 == cidA ? cidB : cidA
         let deepAncestor = mainCIDs[2] // canonical height-3 block
@@ -2593,7 +2593,7 @@ final class ChainServiceTests: XCTestCase {
                     $0 <= template.block.target
                 }
             )
-            let outcome = try await producer.admit(BlockHeader(node: block))
+            let outcome = try await producer.importBlock(BlockHeader(node: block))
             XCTAssertTrue(
                 outcome.decision.isAccepted,
                 "producer block must be accepted"
@@ -2669,14 +2669,14 @@ final class ChainServiceTests: XCTestCase {
         struct BodyUnavailable: Error {}
         var starved: ChainService? = makeService(
             process: node!,
-            validateBodySource: { cid, admit in
+            executionBodySource: { cid, admit in
                 guard cid != forgedCID else { throw BodyUnavailable() }
                 return try await admit(FetcherContentSource(attackProducer))
             }
         )
-        await starved!.runValidateWalkPass()
+        await starved!.runExecutionWalkPass()
         starved = nil
-        let starvedValidated = await node!.deepestValidatedMainChainTip()
+        let starvedValidated = await node!.deepestValidatedCanonicalTip()
         XCTAssertEqual(
             starvedValidated?.cid, lastValidCID,
             "the walk really did execute the branch and stop at the withheld block"
@@ -2695,11 +2695,11 @@ final class ChainServiceTests: XCTestCase {
         // completes the deterministic check, and fork choice reprojects.
         var service: ChainService? = makeService(
             process: node!,
-            validateBodySource: { _, admit in
+            executionBodySource: { _, admit in
                 try await admit(FetcherContentSource(attackProducer))
             }
         )
-        await service!.runValidateWalkPass()
+        await service!.runExecutionWalkPass()
 
         let afterTip = try BlockHeader(
             node: await node!.canonicalTipBlock()
@@ -2722,7 +2722,7 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertNotNil(
             honestServed[honestTip], "and still be servable"
         )
-        let validated = await node!.deepestValidatedMainChainTip()
+        let validated = await node!.deepestValidatedCanonicalTip()
         XCTAssertEqual(validated?.cid, lastValidCID)
         XCTAssertEqual(validated?.height, lastValid.height)
 
@@ -2789,7 +2789,7 @@ final class ChainServiceTests: XCTestCase {
         // walk completes the deterministic check, and fork choice reprojects.
         var service: ChainService? = makeService(
             process: node!,
-            validateBodySource: { [attackProducer = fixture.attackProducer] _, admit in
+            executionBodySource: { [attackProducer = fixture.attackProducer] _, admit in
                 try await admit(FetcherContentSource(attackProducer))
             }
         )
@@ -2805,7 +2805,7 @@ final class ChainServiceTests: XCTestCase {
             rankedTip, forgedCID,
             "precondition: the forgery must hold the tip, or there is no exclusion to re-derive"
         )
-        await service!.runValidateWalkPass()
+        await service!.runExecutionWalkPass()
         let excludedTip = try BlockHeader(
             node: await node!.canonicalTipBlock()
         ).rawCID
@@ -2956,7 +2956,7 @@ final class ChainServiceTests: XCTestCase {
         into node: ChainProcess
     ) async throws {
         for block in fixture.honest {
-            let outcome = try await node.admit(
+            let outcome = try await node.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(fixture.honestProducer),
                 mode: .header
@@ -2964,14 +2964,14 @@ final class ChainServiceTests: XCTestCase {
             XCTAssertTrue(outcome.decision.isAccepted)
         }
         for block in fixture.attack.prefix(5) {
-            let outcome = try await node.admit(
+            let outcome = try await node.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(fixture.attackProducer),
                 mode: .header
             )
             XCTAssertTrue(outcome.decision.isAccepted)
         }
-        let forged = try await node.admit(
+        let forged = try await node.importBlock(
             BlockHeader(node: fixture.forged),
             remoteSource: FetcherContentSource(fixture.attackProducer),
             mode: .header
@@ -2987,7 +2987,7 @@ final class ChainServiceTests: XCTestCase {
     /// validate-on-candidacy walk executes the branch FORWARD and makes it
     /// operable. Folds in the forward-order assertion (strictly increasing from
     /// lastValidated+1, never tip-first).
-    func testWeighedColdSyncBecomesOperableViaForwardValidateWalk() async throws {
+    func testWeighedColdSyncBecomesOperableViaForwardExecutionWalk() async throws {
         let depth = 6
         let producer = try await nexusProcess()
         let chain = try await mineNexusChain(on: producer, depth: depth)
@@ -3003,7 +3003,7 @@ final class ChainServiceTests: XCTestCase {
         // canonical-commit publisher), so the walk does not auto-fire and the
         // intermediate non-operable state is observable.
         for block in chain {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
                 mode: .header
@@ -3019,7 +3019,7 @@ final class ChainServiceTests: XCTestCase {
         let weighedTipHeight = await consumerProcess.canonicalTipHeight()
         XCTAssertEqual(weighedTipHeight, UInt64(depth))
         let intermediateValidated = await consumerProcess
-            .deepestValidatedMainChainTip()
+            .deepestValidatedCanonicalTip()
         XCTAssertEqual(intermediateValidated?.height, 0)
         XCTAssertEqual(intermediateValidated?.cid, genesisCID)
         let intermediateStatus = await consumer.status()
@@ -3033,9 +3033,9 @@ final class ChainServiceTests: XCTestCase {
 
         // Run the walk, recording each validated height to prove forward order.
         let recorder = ValidateStepRecorder()
-        await consumer.setValidateWalkObserver { recorder.record($0) }
-        await consumer.runValidateWalkPass()
-        await consumer.setValidateWalkObserver(nil)
+        await consumer.setExecutionWalkObserver { recorder.record($0) }
+        await consumer.runExecutionWalkPass()
+        await consumer.setExecutionWalkObserver(nil)
 
         XCTAssertEqual(
             recorder.heights, (1...UInt64(depth)).map { $0 },
@@ -3045,7 +3045,7 @@ final class ChainServiceTests: XCTestCase {
 
         // OPERABILITY: the validated tier now meets the canonical tier.
         let operableValidated = await consumerProcess
-            .deepestValidatedMainChainTip()
+            .deepestValidatedCanonicalTip()
         let canonicalTipCID = try BlockHeader(
             node: await consumerProcess.canonicalTipBlock()
         ).rawCID
@@ -3062,7 +3062,7 @@ final class ChainServiceTests: XCTestCase {
         )
     }
 
-    /// `deepestValidatedMainChainTip` is read on every walk iteration and every
+    /// `deepestValidatedCanonicalTip` is read on every walk iteration and every
     /// gated `status()`. Validated main-chain blocks form a prefix, so each
     /// read after the first must cost O(delta) store reads (the blocks
     /// validated since), never O(gap) — draining a backlog was O(gap²).
@@ -3072,7 +3072,7 @@ final class ChainServiceTests: XCTestCase {
         let chain = try await mineNexusChain(on: producer, depth: depth)
         let consumerProcess = try await nexusProcess()
         for block in chain {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
                 mode: .header
@@ -3081,16 +3081,16 @@ final class ChainServiceTests: XCTestCase {
         }
         // Prime once (the full downward walk), then count only the reads the
         // per-block probes make while the tier advances one block at a time.
-        _ = await consumerProcess.deepestValidatedMainChainTip()
+        _ = await consumerProcess.deepestValidatedCanonicalTip()
         await consumerProcess.resetValidatedTipStoreReadsForTesting()
         for (index, block) in chain.enumerated() {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
                 mode: .execution
             )
             XCTAssertTrue(outcome.decision.isAccepted)
-            let validated = await consumerProcess.deepestValidatedMainChainTip()
+            let validated = await consumerProcess.deepestValidatedCanonicalTip()
             XCTAssertEqual(validated?.height, UInt64(index + 1))
         }
         let reads = await consumerProcess.validatedTipStoreReadsForTesting()
@@ -3111,7 +3111,7 @@ final class ChainServiceTests: XCTestCase {
         let consumerProcess = try await nexusProcess()
         for mode in [ImportMode.header, .execution] {
             for block in chain {
-                let outcome = try await consumerProcess.admit(
+                let outcome = try await consumerProcess.importBlock(
                     BlockHeader(node: block),
                     remoteSource: FetcherContentSource(producer),
                     mode: mode
@@ -3119,12 +3119,12 @@ final class ChainServiceTests: XCTestCase {
                 XCTAssertTrue(outcome.decision.isAccepted)
             }
         }
-        let cached = await consumerProcess.deepestValidatedMainChainTip()
+        let cached = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(cached?.height, UInt64(depth))
         // Demote the cached tip behind the probe's back (the race).
         let tipCID = try BlockHeader(node: try XCTUnwrap(chain.last)).rawCID
         try await consumerProcess.demoteValidatedForTesting(tipCID)
-        let probed = await consumerProcess.deepestValidatedMainChainTip()
+        let probed = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(probed?.height, UInt64(depth - 1))
         XCTAssertNotEqual(probed?.cid, tipCID, "a demoted floor is never validated")
     }
@@ -3163,7 +3163,7 @@ final class ChainServiceTests: XCTestCase {
         )
         for mode in [ImportMode.header, .execution] {
             for block in forkA {
-                let outcome = try await consumerProcess.admit(
+                let outcome = try await consumerProcess.importBlock(
                     BlockHeader(node: block),
                     remoteSource: FetcherContentSource(producerA),
                     mode: mode
@@ -3172,7 +3172,7 @@ final class ChainServiceTests: XCTestCase {
             }
         }
         for block in forkB {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producerB),
                 mode: .header
@@ -3181,16 +3181,16 @@ final class ChainServiceTests: XCTestCase {
         }
         let consumer = makeService(
             process: consumerProcess,
-            validateBodySource: { cid, admit in
+            executionBodySource: { cid, admit in
                 try await admit(FetcherContentSource(producerB))
             }
         )
-        await consumer.runValidateWalkPass()
-        let onB = await consumerProcess.deepestValidatedMainChainTip()
+        await consumer.runExecutionWalkPass()
+        let onB = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(onB?.height, 8, "B validated to its tip")
         // Eviction: A's validated blocks are off-chain and deeper than the
         // retention depth below the validated head — all but one demoted.
-        _ = try await consumerProcess.evictUnretainedVolumes()
+        _ = try await consumerProcess.pruneUnpinnedVolumes()
 
         // A third fork C from genesis, heavier than B and weighed only: the
         // probe falls back (B's floor left the main chain) and parks the
@@ -3200,21 +3200,21 @@ final class ChainServiceTests: XCTestCase {
             on: producerC, depth: 12, miner: CryptoUtils.generateKeyPair()
         )
         for block in forkC {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producerC),
                 mode: .header
             )
             XCTAssertTrue(outcome.decision.isAccepted)
         }
-        let onC = await consumerProcess.deepestValidatedMainChainTip()
+        let onC = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(onC?.height, 0, "nothing on C above genesis is validated")
 
         // Reorg back to A: extend it past C. The main chain is A with
         // demoted holes (A1-A3) below the A block that survived eviction.
         let moreA = try await mineNexusChain(on: producerA, depth: 10)
         for block in moreA {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producerA),
                 mode: .header
@@ -3223,12 +3223,12 @@ final class ChainServiceTests: XCTestCase {
         }
         let canonical = await consumerProcess.canonicalTipHeight()
         XCTAssertEqual(canonical, 14, "A must win again")
-        let probed = await consumerProcess.deepestValidatedMainChainTip()
+        let probed = await consumerProcess.deepestValidatedCanonicalTip()
         // The full downward walk from the tip, computed independently.
         var expected: (cid: String, height: UInt64)?
         var height: UInt64 = 14
         while true {
-            if let cid = await consumerProcess.mainChainBlockCID(atHeight: height),
+            if let cid = await consumerProcess.canonicalBlockCID(atHeight: height),
                await consumerProcess.blockValidated(cid) {
                 expected = (cid, height)
                 break
@@ -3240,7 +3240,7 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertEqual(probed?.height, expected?.height)
         XCTAssertEqual(probed?.cid, expected?.cid)
         // And it keeps agreeing on a second probe (the fast path).
-        let again = await consumerProcess.deepestValidatedMainChainTip()
+        let again = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(again?.height, expected?.height)
     }
 
@@ -3272,7 +3272,7 @@ final class ChainServiceTests: XCTestCase {
             _ blocks: [Block], from source: ChainProcess, mode: ImportMode
         ) async throws {
             for block in blocks {
-                let outcome = try await consumerProcess.admit(
+                let outcome = try await consumerProcess.importBlock(
                     BlockHeader(node: block),
                     remoteSource: FetcherContentSource(source),
                     mode: mode
@@ -3286,7 +3286,7 @@ final class ChainServiceTests: XCTestCase {
         {
             let process = try await nexusProcess()
             for block in prefix {
-                let outcome = try await process.admit(
+                let outcome = try await process.importBlock(
                     BlockHeader(node: block),
                     remoteSource: FetcherContentSource(source)
                 )
@@ -3297,7 +3297,7 @@ final class ChainServiceTests: XCTestCase {
         func downwardWalk(from height: UInt64) async -> (cid: String, height: UInt64)? {
             var height = height
             while true {
-                if let cid = await consumerProcess.mainChainBlockCID(atHeight: height),
+                if let cid = await consumerProcess.canonicalBlockCID(atHeight: height),
                    await consumerProcess.blockValidated(cid) {
                     return (cid, height)
                 }
@@ -3327,30 +3327,30 @@ final class ChainServiceTests: XCTestCase {
         )
         let consumer = makeService(
             process: consumerProcess,
-            validateBodySource: { _, admit in
+            executionBodySource: { _, admit in
                 try await admit(FetcherContentSource(producerD))
             }
         )
-        await consumer.runValidateWalkPass()
-        let onTrunk = await consumerProcess.deepestValidatedMainChainTip()
+        await consumer.runExecutionWalkPass()
+        let onTrunk = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(onTrunk?.height, 12)
         // Eviction 1: A5-A8 demoted (holes 5-8 on fork A).
-        _ = try await consumerProcess.evictUnretainedVolumes()
+        _ = try await consumerProcess.pruneUnpinnedVolumes()
 
         let forkD = try await mineNexusRewardChain(
             on: producerD, depth: 6, miner: CryptoUtils.generateKeyPair()
         )
         try await admitAll(forkD, from: producerD, mode: .header)
-        await consumer.runValidateWalkPass()
-        let onD = await consumerProcess.deepestValidatedMainChainTip()
+        await consumer.runExecutionWalkPass()
+        let onD = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(onD?.height, 14, "D9-D14 validated while main")
         // Trunk T13-T16: D is off-chain; eviction 2 demotes D9-D10 (below
         // the retention ceiling 12 - 1), leaving D11-D14 validated ABOVE.
         let trunkEven = try await mineNexusChain(on: producerT, depth: 4)
         try await admitAll(trunkEven, from: producerT, mode: .header)
-        let backOnTrunk = await consumerProcess.deepestValidatedMainChainTip()
+        let backOnTrunk = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(backOnTrunk?.height, 12)
-        _ = try await consumerProcess.evictUnretainedVolumes()
+        _ = try await consumerProcess.pruneUnpinnedVolumes()
         let d9 = try BlockHeader(node: forkD[0]).rawCID
         let d11 = try BlockHeader(node: forkD[2]).rawCID
         let d9Validated = await consumerProcess.blockValidated(d9)
@@ -3367,7 +3367,7 @@ final class ChainServiceTests: XCTestCase {
         )
         let forkE = try await mineNexusChain(on: producerE, depth: 18)
         try await admitAll(forkE, from: producerE, mode: .header)
-        let onE = await consumerProcess.deepestValidatedMainChainTip()
+        let onE = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(onE?.height, 6, "floor parked at T6")
 
         // D returns, heavier than E: T1-T8 validated, D9-D10 holes, D11-D14
@@ -3378,7 +3378,7 @@ final class ChainServiceTests: XCTestCase {
         try await admitAll(forkDMore, from: producerD, mode: .header)
         let canonical = await consumerProcess.canonicalTipHeight()
         XCTAssertEqual(canonical, 22)
-        let probed = await consumerProcess.deepestValidatedMainChainTip()
+        let probed = await consumerProcess.deepestValidatedCanonicalTip()
         let expected = await downwardWalk(from: 22)
         XCTAssertEqual(expected?.height, 14, "D14 is the true validated top")
         XCTAssertEqual(probed?.height, expected?.height)
@@ -3406,7 +3406,7 @@ final class ChainServiceTests: XCTestCase {
         let forkA = try await mineNexusChain(on: producerA, depth: 6)
         for mode in [ImportMode.header, .execution] {
             for block in forkA {
-                let outcome = try await consumerProcess!.admit(
+                let outcome = try await consumerProcess!.importBlock(
                     BlockHeader(node: block),
                     remoteSource: FetcherContentSource(producerA),
                     mode: mode
@@ -3428,20 +3428,20 @@ final class ChainServiceTests: XCTestCase {
             on: producerF, depth: 8, miner: CryptoUtils.generateKeyPair()
         )
         for block in forkF {
-            let outcome = try await consumerProcess!.admit(
+            let outcome = try await consumerProcess!.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producerF),
                 mode: .header
             )
             XCTAssertTrue(outcome.decision.isAccepted)
         }
-        let onF = await consumerProcess!.deepestValidatedMainChainTip()
+        let onF = await consumerProcess!.deepestValidatedCanonicalTip()
         XCTAssertEqual(onF?.height, 0)
 
         // A returns: A1 validated, A2 a hole, A3-A6 validated above it.
         let forkAMore = try await mineNexusChain(on: producerA, depth: 4)
         for block in forkAMore {
-            let outcome = try await consumerProcess!.admit(
+            let outcome = try await consumerProcess!.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producerA),
                 mode: .header
@@ -3450,7 +3450,7 @@ final class ChainServiceTests: XCTestCase {
         }
         let canonical = await consumerProcess!.canonicalTipHeight()
         XCTAssertEqual(canonical, 10, "A must win again")
-        let probed = await consumerProcess!.deepestValidatedMainChainTip()
+        let probed = await consumerProcess!.deepestValidatedCanonicalTip()
         XCTAssertEqual(probed?.height, 6, "the downward walk's A6, not A1")
         let a6 = try BlockHeader(node: forkA[5]).rawCID
         XCTAssertEqual(probed?.cid, a6)
@@ -3468,7 +3468,7 @@ final class ChainServiceTests: XCTestCase {
         ).rawCID
         for mode in [ImportMode.header, .execution] {
             for block in chain {
-                let outcome = try await consumerProcess.admit(
+                let outcome = try await consumerProcess.importBlock(
                     BlockHeader(node: block),
                     remoteSource: FetcherContentSource(producer),
                     mode: mode
@@ -3476,7 +3476,7 @@ final class ChainServiceTests: XCTestCase {
                 XCTAssertTrue(outcome.decision.isAccepted)
             }
         }
-        let cached = await consumerProcess.deepestValidatedMainChainTip()
+        let cached = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(cached?.height, 4)
 
         // A heavier competing fork from genesis (reward blocks, so its CIDs
@@ -3487,7 +3487,7 @@ final class ChainServiceTests: XCTestCase {
             on: rival, depth: 6, miner: CryptoUtils.generateKeyPair()
         )
         for block in fork {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(rival),
                 mode: .header
@@ -3496,7 +3496,7 @@ final class ChainServiceTests: XCTestCase {
         }
         let canonical = await consumerProcess.canonicalTipHeight()
         XCTAssertEqual(canonical, 6, "the fork must win")
-        let reorged = await consumerProcess.deepestValidatedMainChainTip()
+        let reorged = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(reorged?.height, 0)
         XCTAssertEqual(reorged?.cid, genesisCID)
     }
@@ -3506,7 +3506,7 @@ final class ChainServiceTests: XCTestCase {
     /// network traffic nothing would ever run it and templates would build on
     /// the stale validated tip. Service start (`restoreLocalTransactions`, the
     /// daemon's pre-networking hook) must arm it itself.
-    func testServiceStartDrivesTheValidateWalkWhenValidatedLagsCanonical()
+    func testServiceStartDrivesTheExecutionWalkWhenValidatedLagsCanonical()
         async throws
     {
         let depth = 4
@@ -3514,7 +3514,7 @@ final class ChainServiceTests: XCTestCase {
         let chain = try await mineNexusChain(on: producer, depth: depth)
         let consumerProcess = try await nexusProcess()
         for block in chain {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
                 mode: .header
@@ -3522,14 +3522,14 @@ final class ChainServiceTests: XCTestCase {
             XCTAssertTrue(outcome.decision.isAccepted)
         }
         let consumer = makeService(process: consumerProcess)
-        let before = await consumerProcess.deepestValidatedMainChainTip()
+        let before = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(before?.height, 0, "restart state: validated lags")
 
         try await consumer.restoreLocalTransactions()
 
         var validated: UInt64?
         for _ in 0..<500 {
-            validated = await consumerProcess.deepestValidatedMainChainTip()?.height
+            validated = await consumerProcess.deepestValidatedCanonicalTip()?.height
             if validated == UInt64(depth) { break }
             try await Task.sleep(for: .milliseconds(10))
         }
@@ -3542,7 +3542,7 @@ final class ChainServiceTests: XCTestCase {
     /// A gap in the below-tip range parks the walk at gap-1: the node keeps
     /// acting on the last validated tip (no wedge) and resumes to the tip once
     /// the missing block becomes admissible.
-    func testValidateWalkParksAtGapAndResumesOnRelease() async throws {
+    func testExecutionWalkParksAtGapAndResumesOnRelease() async throws {
         let depth = 6
         let gapAt = 3 // heights 1,2 available; 3 withheld; 4,5,6 blocked behind it
         let producer = try await nexusProcess()
@@ -3553,7 +3553,7 @@ final class ChainServiceTests: XCTestCase {
 
         // Weighed-admit only the blocks below the gap (heights 1..gapAt-1).
         for block in chain.prefix(gapAt - 1) {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
                 mode: .header
@@ -3562,8 +3562,8 @@ final class ChainServiceTests: XCTestCase {
         }
 
         // The walk validates up to the last contiguous weighed block and parks.
-        await consumer.runValidateWalkPass()
-        let parked = await consumerProcess.deepestValidatedMainChainTip()
+        await consumer.runExecutionWalkPass()
+        let parked = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(
             parked?.height, UInt64(gapAt - 1),
             "the walk must park one block below the gap"
@@ -3578,7 +3578,7 @@ final class ChainServiceTests: XCTestCase {
 
         // Release the withheld block and the rest of the range.
         for block in chain.suffix(from: gapAt - 1) {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
                 mode: .header
@@ -3587,8 +3587,8 @@ final class ChainServiceTests: XCTestCase {
         }
 
         // The walk resumes and reaches the tip.
-        await consumer.runValidateWalkPass()
-        let resumed = await consumerProcess.deepestValidatedMainChainTip()
+        await consumer.runExecutionWalkPass()
+        let resumed = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(resumed?.height, UInt64(depth))
         let resumedTipCID = try BlockHeader(
             node: await consumerProcess.validatedTipBlock()
@@ -3606,7 +3606,7 @@ final class ChainServiceTests: XCTestCase {
     /// length, never the total weighed block count (canonical + losing siblings):
     /// the below-tip saving. The joiner still reaches its validated tip and builds
     /// a template on the canonical tip. Also folds in the forward-order assertion.
-    func testValidateWalkFetchesBodyForCanonicalOnlyNotSiblings() async throws {
+    func testExecutionWalkFetchesBodyForCanonicalOnlyNotSiblings() async throws {
         let depth = 6
         let siblingDepth = 4
         let miner = CryptoUtils.generateKeyPair()
@@ -3626,14 +3626,14 @@ final class ChainServiceTests: XCTestCase {
         let bodySource = CountingValidateBodySource(producer: producer)
         let consumer = makeService(
             process: consumerProcess,
-            validateBodySource: bodySource.admission()
+            executionBodySource: bodySource.admission()
         )
 
         // Weighed cold-sync the canonical chain FIRST (incumbent), then the losing
         // fork — every admit stores only the boundary (a boundary fetch), no body.
         var boundaryFetches = 0
         for block in canonical {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
                 mode: .header
@@ -3642,7 +3642,7 @@ final class ChainServiceTests: XCTestCase {
             boundaryFetches += 1
         }
         for block in siblings {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(siblingProducer),
                 mode: .header
@@ -3657,14 +3657,14 @@ final class ChainServiceTests: XCTestCase {
         let preWalkCanonical = await consumerProcess.canonicalTipHeight()
         XCTAssertEqual(preWalkCanonical, UInt64(depth))
         let preWalkValidated = await consumerProcess
-            .deepestValidatedMainChainTip()?.height
+            .deepestValidatedCanonicalTip()?.height
         XCTAssertEqual(preWalkValidated, 0)
 
         // Run the walk. It fetches ONLY canonical bodies, strictly forward.
         let recorder = ValidateStepRecorder()
-        await consumer.setValidateWalkObserver { recorder.record($0) }
-        await consumer.runValidateWalkPass()
-        await consumer.setValidateWalkObserver(nil)
+        await consumer.setExecutionWalkObserver { recorder.record($0) }
+        await consumer.runExecutionWalkPass()
+        await consumer.setExecutionWalkObserver(nil)
 
         XCTAssertEqual(
             recorder.heights, (1...UInt64(depth)).map { $0 },
@@ -3692,7 +3692,7 @@ final class ChainServiceTests: XCTestCase {
             node: await consumerProcess.canonicalTipBlock()
         ).rawCID
         let operableValidated = await consumerProcess
-            .deepestValidatedMainChainTip()?.height
+            .deepestValidatedCanonicalTip()?.height
         XCTAssertEqual(operableValidated, UInt64(depth))
         let template = try await consumer
             .miningTemplate(MiningTemplateRequest())
@@ -3707,7 +3707,7 @@ final class ChainServiceTests: XCTestCase {
     /// wedge), and releasing the body lets the walk's OWN retry timer re-drive it
     /// to the tip with no new canonical commit. Extends the 3a.2 park-and-resume
     /// test for bodies pulled over the network.
-    func testValidateWalkParksOnWithheldBodyAndAutoResumesOnRelease()
+    func testExecutionWalkParksOnWithheldBodyAndAutoResumesOnRelease()
         async throws {
         let depth = 6
         let gapAt: UInt64 = 3
@@ -3723,12 +3723,12 @@ final class ChainServiceTests: XCTestCase {
         bodySource.withhold(gapCID)
         let consumer = makeService(
             process: consumerProcess,
-            validateBodySource: bodySource.admission(),
-            validateWalkRetryInterval: .milliseconds(20)
+            executionBodySource: bodySource.admission(),
+            executionWalkRetryInterval: .milliseconds(20)
         )
 
         for block in canonical {
-            let outcome = try await consumerProcess.admit(
+            let outcome = try await consumerProcess.importBlock(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
                 mode: .header
@@ -3737,9 +3737,9 @@ final class ChainServiceTests: XCTestCase {
         }
 
         // Walk parks one block below the withheld body; still operable there.
-        await consumer.runValidateWalkPass()
+        await consumer.runExecutionWalkPass()
         let parkedHeight = await consumerProcess
-            .deepestValidatedMainChainTip()?.height
+            .deepestValidatedCanonicalTip()?.height
         XCTAssertEqual(
             parkedHeight, gapAt - 1,
             "the walk parks one block below the withheld body"
@@ -3759,11 +3759,11 @@ final class ChainServiceTests: XCTestCase {
         bodySource.release(gapCID)
         let deadline = ContinuousClock.now.advanced(by: .seconds(10))
         var resumed = await consumerProcess
-            .deepestValidatedMainChainTip()?.height
+            .deepestValidatedCanonicalTip()?.height
         while resumed != UInt64(depth), ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(25))
             resumed = await consumerProcess
-                .deepestValidatedMainChainTip()?.height
+                .deepestValidatedCanonicalTip()?.height
         }
         XCTAssertEqual(
             resumed, UInt64(depth),
@@ -3801,7 +3801,7 @@ final class ChainServiceTests: XCTestCase {
             lock.withLock { _ = _withheld.remove(blockCID) }
         }
 
-        func admission() -> ClosureNetworkInterface.ValidateBodyAdmission {
+        func admission() -> ClosureNetworkInterface.ExecutionBodyImport {
             { [self] blockCID, admit in
                 lock.withLock { _fetched.append(blockCID) }
                 let withheld = lock.withLock { _withheld.contains(blockCID) }
@@ -3851,7 +3851,7 @@ final class ChainServiceTests: XCTestCase {
                     $0 <= template.block.target
                 }
             )
-            let outcome = try await producer.admit(BlockHeader(node: block))
+            let outcome = try await producer.importBlock(BlockHeader(node: block))
             XCTAssertTrue(
                 outcome.decision.isAccepted,
                 "reward block \(index) must be accepted"
@@ -3884,8 +3884,8 @@ final class ChainServiceTests: XCTestCase {
         acceptedBlockPublisher: @escaping ClosureNetworkInterface.AcceptedBlockPublisher = { _ in },
         acceptedTransactionPublisher:
             @escaping ClosureNetworkInterface.AcceptedTransactionPublisher = { _ in },
-        validateBodySource: ClosureNetworkInterface.ValidateBodyAdmission? = nil,
-        validateWalkRetryInterval: Duration = .seconds(4),
+        executionBodySource: ClosureNetworkInterface.ExecutionBodyImport? = nil,
+        executionWalkRetryInterval: Duration = .seconds(4),
         mempoolMaxCount: Int = 10_000
     ) -> ChainService {
         ChainService(
@@ -3897,9 +3897,9 @@ final class ChainServiceTests: XCTestCase {
                 childProofPublisher: childProofPublisher,
                 acceptedBlockPublisher: acceptedBlockPublisher,
                 acceptedTransactionPublisher: acceptedTransactionPublisher,
-                validateBodySource: validateBodySource
+                executionBodySource: executionBodySource
             ),
-            validateWalkRetryInterval: validateWalkRetryInterval,
+            executionWalkRetryInterval: executionWalkRetryInterval,
             mempoolMaxCount: mempoolMaxCount
         )
     }
@@ -4029,7 +4029,7 @@ final class ChainServiceTests: XCTestCase {
                 firstNonce(of: built, from: carrierNonce) { $0 <= built.target }
             )
         let carrierHeader = try BlockHeader(node: carrier)
-        let parentAdmission = try await parent.admit(carrierHeader)
+        let parentAdmission = try await parent.importBlock(carrierHeader)
         XCTAssertNotNil(parentAdmission.parentCarrierLink)
         return AnchoredChildGenesis(
             block: block,

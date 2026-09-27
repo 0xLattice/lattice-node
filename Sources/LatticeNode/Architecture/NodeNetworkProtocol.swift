@@ -157,19 +157,30 @@ struct ParentChainFactMessage: NodeJSONMessage, Equatable, Sendable {
 /// not have come from a correct parent: `ownWork` never exceeds `runWork`.
 struct ParentRunReportMessage: NodeJSONMessage, Equatable, Sendable {
     let directory: String
-    let committerCID: String
+    let carrierCID: String
     let childBlockCID: String
     let grinds: [String]
     let runWork: WorkSum
     let ownWork: WorkSum
     let revision: UInt64
 
+    /// `carrierCID` travels as `committerCID`: the JSON key is wire bytes.
+    private enum CodingKeys: String, CodingKey {
+        case directory
+        case carrierCID = "committerCID"
+        case childBlockCID
+        case grinds
+        case runWork
+        case ownWork
+        case revision
+    }
+
     init(
-        directory: String, committerCID: String, childBlockCID: String,
+        directory: String, carrierCID: String, childBlockCID: String,
         grinds: [String], runWork: WorkSum, ownWork: WorkSum, revision: UInt64
     ) {
         self.directory = directory
-        self.committerCID = committerCID
+        self.carrierCID = carrierCID
         self.childBlockCID = childBlockCID
         self.grinds = grinds
         self.runWork = runWork
@@ -180,7 +191,7 @@ struct ParentRunReportMessage: NodeJSONMessage, Equatable, Sendable {
     init(_ report: ParentRunReport) {
         self.init(
             directory: report.directory,
-            committerCID: report.blockHash,
+            carrierCID: report.blockHash,
             childBlockCID: report.childBlock,
             grinds: report.grinds.sorted(),
             runWork: report.runWork,
@@ -191,7 +202,7 @@ struct ParentRunReportMessage: NodeJSONMessage, Equatable, Sendable {
 
     var report: ParentRunReport {
         ParentRunReport(
-            blockHash: committerCID,
+            blockHash: carrierCID,
             directory: directory,
             childBlock: childBlockCID,
             grinds: Set(grinds),
@@ -203,7 +214,7 @@ struct ParentRunReportMessage: NodeJSONMessage, Equatable, Sendable {
 
     func validate() throws {
         guard _isBoundedWireAtom(directory), !directory.isEmpty,
-              _isCanonicalWireCID(committerCID),
+              _isCanonicalWireCID(carrierCID),
               _isCanonicalWireCID(childBlockCID),
               !grinds.isEmpty,
               Set(grinds).count == grinds.count,
@@ -215,11 +226,11 @@ struct ParentRunReportMessage: NodeJSONMessage, Equatable, Sendable {
 }
 
 /// The most committers one re-serve request may name — what a correct child
-/// asks for (its newest carriers, `ChainProcess.recentCommitterCapacity`).
+/// asks for (its newest carriers, `ChainProcess.recentCarrierCapacity`).
 /// Structural, not a budget: a larger request is one no correct child sends,
 /// so it is malformed rather than served slowly. Each named committer costs
 /// the parent one O(1) read and at most one push.
-let maximumParentRunReportRequestCommitters = 256
+let maximumParentRunReportRequestCarriers = 256
 
 /// A child asks its authenticated immediate parent to re-serve the runs of the
 /// committers it names — on admitting a block one of them carried, and for
@@ -230,14 +241,20 @@ let maximumParentRunReportRequestCommitters = 256
 /// the rest: a committer the parent does not serve is silence, not a claim.
 struct ParentRunReportRequestMessage: NodeJSONMessage, Equatable, Sendable {
     let requestID: UInt64
-    let committerCIDs: [String]
+    let carrierCIDs: [String]
+
+    /// `carrierCIDs` travels as `committerCIDs`: the JSON key is wire bytes.
+    private enum CodingKeys: String, CodingKey {
+        case requestID
+        case carrierCIDs = "committerCIDs"
+    }
 
     func validate() throws {
         guard requestID != 0,
-              !committerCIDs.isEmpty,
-              committerCIDs.count <= maximumParentRunReportRequestCommitters,
-              Set(committerCIDs).count == committerCIDs.count,
-              committerCIDs.allSatisfy(_isCanonicalWireCID) else {
+              !carrierCIDs.isEmpty,
+              carrierCIDs.count <= maximumParentRunReportRequestCarriers,
+              Set(carrierCIDs).count == carrierCIDs.count,
+              carrierCIDs.allSatisfy(_isCanonicalWireCID) else {
             throw NodeNetworkWireError.malformed
         }
     }

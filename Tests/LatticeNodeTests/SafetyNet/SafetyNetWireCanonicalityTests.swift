@@ -399,7 +399,7 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
             let own = UInt64.random(in: 0...run, using: &g)
             return ParentRunReportMessage(
                 directory: self.randomAtom(&g),
-                committerCID: self.randomCID(&g),
+                carrierCID: self.randomCID(&g),
                 childBlockCID: self.randomCID(&g),
                 grinds: self.randomCIDs(&g, count: self.randomInt(&g, 1...6)),
                 runWork: WorkSum(UInt256(run)),
@@ -413,10 +413,10 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
         try assertCanonical(ParentRunReportRequestMessage.self, seed: 0x15) { g in
             ParentRunReportRequestMessage(
                 requestID: self.nonZeroID(&g),
-                committerCIDs: self.randomCIDs(
+                carrierCIDs: self.randomCIDs(
                     &g,
                     count: self.randomInt(
-                        &g, 1...maximumParentRunReportRequestCommitters
+                        &g, 1...maximumParentRunReportRequestCarriers
                     )
                 )
             )
