@@ -4,26 +4,9 @@ import UInt256
 import cashew
 @testable import LatticeNode
 
-private actor GenesisTestStore: Fetcher, Storer, VolumeStorer {
-    private var entries: [String: Data] = [:]
-
-    func fetch(rawCid: String) async throws -> Data {
-        guard let data = entries[rawCid] else { throw FetcherError.notFound(rawCid) }
-        return data
-    }
-
-    func store(entries newEntries: [String: Data]) async throws {
-        entries.merge(newEntries) { existing, _ in existing }
-    }
-
-    func store(volume: SerializedVolume) async throws {
-        entries.merge(volume.entries) { existing, _ in existing }
-    }
-}
-
 final class NexusGenesisArchitectureTests: XCTestCase {
     func testCanonicalNexusGenesisIsDeterministicAndUnsigned() async throws {
-        let store = GenesisTestStore()
+        let store = InMemoryContentStore()
         let first = try await NexusGenesis.create(fetcher: store)
         let second = try await NexusGenesis.create(fetcher: store)
         let computed = try await NexusGenesis.computedBlockHash(fetcher: store)
@@ -49,7 +32,7 @@ final class NexusGenesisArchitectureTests: XCTestCase {
     }
 
     func testCanonicalNexusGenesisBootstrapsAsConfiguredRoot() async throws {
-        let store = GenesisTestStore()
+        let store = InMemoryContentStore()
         let genesis = try await NexusGenesis.create(fetcher: store)
         let header = try BlockHeader(node: genesis.block)
         XCTAssertTrue(try NexusGenesis.verifyGenesis(genesis))
@@ -75,7 +58,7 @@ final class NexusGenesisArchitectureTests: XCTestCase {
     }
 
     func testComputedVerificationRejectsTampering() async throws {
-        let store = GenesisTestStore()
+        let store = InMemoryContentStore()
         let canonical = try await NexusGenesis.create(fetcher: store)
         let block = canonical.block
         let tampered = Block(

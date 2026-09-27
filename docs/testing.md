@@ -11,7 +11,9 @@ The suites are grouped by the boundary they actually cross:
 - `NodeStoreTests`: atomic admission, crash recovery, retained hierarchy
   evidence, immutable-index audit, and Volume ownership.
 - `ChainProcessTests`: one-path admission, restart, child bootstrap, proof composition, cancellation, and explicit local-versus-network acquisition boundaries.
-- `NetworkTrustTests`: real-network integration tests, not E2E. They exercise
+- `NetworkTrust*Tests` (FrontierSync, Evidence, Candidate, ReadURL,
+  HierarchySession, over the shared `NetworkTrustTestCase`): real-network
+  integration tests, not E2E. They exercise
   overlay/fact-plane separation, bounded/canonical wire input, real
   peer-to-runtime async delegate delivery, root-scoped content attribution,
   per-connection hierarchy authorization, lifecycle fencing, proof

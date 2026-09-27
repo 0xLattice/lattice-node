@@ -1028,7 +1028,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// in-memory authenticated overlay set — no mutation, no gate. Hard-capped
     /// at `limit` (the daemon passes ≤ 200).
     public func peerSummaries(limit: Int) async -> ExplorerPeersResponse {
-        let boundedLimit = min(max(limit, 0), 200)
+        let boundedLimit = min(max(limit, 0), Self.maximumExplorerPeerSummaries)
         let peers = overlayPeers.values
         let summaries = peers.prefix(boundedLimit).map { peer in
             ExplorerPeerSummary(
@@ -1157,6 +1157,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
 
     private static let maximumReadEndpointAsks = 8
+    private static let maximumExplorerPeerSummaries = 200
     private static let maximumDeclaredURLsPerResponder = 2
     private static let maximumReadURLDiscoveryCacheEntries = 64
     private static let readURLDiscoveryCacheSeconds: TimeInterval = 30
@@ -2017,7 +2018,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 childPath: childPath,
                 childCID: childCID,
                 rootCID: proof.rootCID,
-                proof: proof,
                 generation: generation,
                 process: process
             )
@@ -2034,7 +2034,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         childPath: [String],
         childCID: String,
         rootCID: String,
-        proof: ChildBlockProof,
         generation: UInt64,
         process: ChainProcess
     ) async -> Bool {
@@ -2236,7 +2235,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
                             childPath: configuration.chainPath + [proof.directory],
                             childCID: proof.childCID,
                             rootCID: proof.proof.rootCID,
-                            proof: proof.proof,
                             generation: generation,
                             process: process
                         )
@@ -4930,14 +4928,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let result = candidateAcquirer.observe(seed)
         serviceCandidateAcquirer()
         return result.accepted
-    }
-
-    @discardableResult
-    private func requeueCandidate(_ seed: CandidateSeed) -> Bool {
-        guard isRunning else { return false }
-        let accepted = candidateAcquirer.requeue(seed)
-        serviceCandidateAcquirer()
-        return accepted
     }
 
     private func candidateProvider(

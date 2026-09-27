@@ -7,16 +7,12 @@ import cashew
 @testable import Lattice
 @testable import LatticeNode
 
-private func testCID(_ seed: String) -> String {
-    try! HeaderImpl<PublicKey>(node: PublicKey(key: seed)).rawCID
-}
-
 final class NodeStoreTests: XCTestCase {
     private let genesisCID = NexusGenesis.expectedBlockHash
     private let parentProcessKey = String(repeating: "a", count: 64)
 
     func testLegacyDatabaseFailsBeforeNewDDL() throws {
-        let directory = temporaryDirectory()
+        let directory = temporaryDirectory(create: true)
         let path = directory.appendingPathComponent("state.db")
         let legacy = try NodeSQLite(path: path.path)
         try legacy.execute("CREATE TABLE legacy_state (value TEXT NOT NULL)")
@@ -35,7 +31,7 @@ final class NodeStoreTests: XCTestCase {
     }
 
     func testMetadataRejectsWrongEpochRootAndPath() throws {
-        let directory = temporaryDirectory()
+        let directory = temporaryDirectory(create: true)
         let path = directory.appendingPathComponent("state.db")
         _ = try makeStore(path: path)
 
@@ -78,7 +74,7 @@ final class NodeStoreTests: XCTestCase {
     }
 
     func testMatchingMetadataDoesNotRepairMissingTables() throws {
-        let directory = temporaryDirectory()
+        let directory = temporaryDirectory(create: true)
         let path = directory.appendingPathComponent("state.db")
         _ = try makeStore(path: path)
         let database = try NodeSQLite(path: path.path)
@@ -92,7 +88,7 @@ final class NodeStoreTests: XCTestCase {
     }
 
     func testCurrentSchemaHasNoInheritedWorkProjection() throws {
-        let directory = temporaryDirectory()
+        let directory = temporaryDirectory(create: true)
         let path = directory.appendingPathComponent("state.db")
         _ = try makeStore(path: path)
 
@@ -117,7 +113,7 @@ final class NodeStoreTests: XCTestCase {
 
     func testOutgoingChildEvidenceRequiresItsAcceptedLocalCarrier()
         async throws {
-        let content = TestContentStore()
+        let content = InMemoryContentStore()
         try await LatticeState.emptyHeader.storeRecursively(storer: content)
         let leaf = try await BlockBuilder.buildChildGenesis(
             spec: NexusGenesis.spec,
@@ -241,7 +237,7 @@ final class NodeStoreTests: XCTestCase {
     }
 
     func testAdmissionReplayFailsWhenNormalizedFactRowsAreMissing() async throws {
-        let factsPath = temporaryDirectory().appendingPathComponent("state.db")
+        let factsPath = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let factsStore = try makeStore(path: factsPath)
         let batch = blockBatch(postStateCID: "state", blockHash: "child")
         try await factsStore.stage(batch, volumeRoots: [])
@@ -291,7 +287,7 @@ final class NodeStoreTests: XCTestCase {
     }
 
     func testNormalizedIndexAuditRejectsParentFactWithoutSource() async throws {
-        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let store = try makeStore(path: path)
         let carrier = try decode(ParentCarrierLink.self, json: """
             {"parentPath":["Nexus"],"carrierCID":"carrier","rootCID":"carrier"}
@@ -444,7 +440,7 @@ final class NodeStoreTests: XCTestCase {
     /// store too, whose open path runs no other DDL — never scan and
     /// temp-sort the accepted set.
     func testFrontierLeafPageUsesTheFrontierIndexOnAnExistingStore() async throws {
-        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         var store: NodeStore? = try makeStore(path: path)
         try await store!.stage(
             blockBatch(postStateCID: "root-a-state", blockHash: "root-a"),
@@ -482,7 +478,7 @@ final class NodeStoreTests: XCTestCase {
     /// disagreeing row is REPAIRED by the boot audit from those links, never
     /// treated as corruption that wipes the store.
     func testBootAuditRepairsAWrongLeafFlag() async throws {
-        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let store = try makeStore(path: path)
         try await store.stage(
             blockBatch(postStateCID: "root-state", blockHash: "root"),
@@ -517,7 +513,7 @@ final class NodeStoreTests: XCTestCase {
     func testAcceptedBlockLeafFlagsTrackChildrenInEitherInsertionOrder()
         async throws
     {
-        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let store = try makeStore(path: path)
         // In order: root, then child.
         try await store.stage(
@@ -568,7 +564,7 @@ final class NodeStoreTests: XCTestCase {
     /// The maintained-flag frontier page is the same set the correlated
     /// NOT EXISTS leaf filter produces on a forked fixture.
     func testFrontierPageMatchesTheLeafFilterOnAForkedFixture() async throws {
-        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let store = try makeStore(path: path)
         try await store.stage(
             blockBatch(postStateCID: "r-state", blockHash: "r"),
@@ -631,7 +627,7 @@ final class NodeStoreTests: XCTestCase {
     }
 
     func testValidatedTierMarkerSurvivesRecovery() async throws {
-        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let store = try makeStore(path: path)
         try await store.stage(
             blockBatch(postStateCID: "root-state", blockHash: "root"),
@@ -666,7 +662,7 @@ final class NodeStoreTests: XCTestCase {
     }
 
     func testPromoteValidatedFlipsMarkerOnlyAndSurvivesRecovery() async throws {
-        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let store = try makeStore(path: path)
         // A weighed child: enters the accepted index below the validated tier,
         // carrying the empty-stateDiff block fact.
@@ -727,7 +723,7 @@ final class NodeStoreTests: XCTestCase {
     }
 
     func testNormalizedIndexAuditRequiresExactBatchDerivedRows() async throws {
-        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let store = try makeStore(path: path)
         try await store.stage(
             blockBatch(postStateCID: "state", blockHash: "child"),
@@ -749,7 +745,7 @@ final class NodeStoreTests: XCTestCase {
     }
 
     func testNormalizedIndexAuditRejectsMissingAcceptedBlockRow() async throws {
-        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let store = try makeStore(path: path)
         try await store.stage(
             blockBatch(postStateCID: "state", blockHash: "accepted"),
@@ -771,7 +767,7 @@ final class NodeStoreTests: XCTestCase {
     }
 
     func testIssuedParentFactsAreDurable() async throws {
-        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         var store: NodeStore? = try makeStore(path: path)
         let carrier = try decode(ParentCarrierLink.self, json: """
             {"parentPath":["Nexus"],"carrierCID":"carrier","rootCID":"carrier"}
@@ -928,7 +924,7 @@ final class NodeStoreTests: XCTestCase {
     }
 
     func testIssuedChildProofsAreSetValuedContentBoundAndDurable() async throws {
-        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         var store: NodeStore? = try makeStore(path: path)
         let fixture = try await childProofFixture()
 
@@ -1009,7 +1005,7 @@ final class NodeStoreTests: XCTestCase {
 
     func testBootstrapRootsStayLocalAndRetainedOutsideEvidenceVolume()
         async throws {
-        let directory = temporaryDirectory()
+        let directory = temporaryDirectory(create: true)
         let path = directory.appendingPathComponent("state.db")
         let broker = try DiskBroker(
             path: directory.appendingPathComponent("volumes.db").path,
@@ -1108,7 +1104,7 @@ final class NodeStoreTests: XCTestCase {
     }
 
     func testIssuedChildProofsKeepSameChildDistinctAcrossDirectories() async throws {
-        let content = TestContentStore()
+        let content = InMemoryContentStore()
         try await LatticeState.emptyHeader.storeRecursively(storer: content)
         let child = try await BlockBuilder.buildChildGenesis(
             spec: NexusGenesis.spec,
@@ -1219,7 +1215,7 @@ final class NodeStoreTests: XCTestCase {
 
 
     func testIssuedCarrierEvidencePersistsProofAndLinkTogether() async throws {
-        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let store = try makeStore(path: path, chainPath: ["Nexus", "Child"])
         let fixture = try await childProofFixture()
         let link = try decode(ParentCarrierLink.self, json: """
@@ -1347,7 +1343,7 @@ final class NodeStoreTests: XCTestCase {
 
     func testIncomingAndOutgoingAttachmentsShareOneDirectEdgeAcrossRoots()
         async throws {
-        let content = TestContentStore()
+        let content = InMemoryContentStore()
         try await LatticeState.emptyHeader.storeRecursively(storer: content)
         let leaf = try await BlockBuilder.buildChildGenesis(
             spec: NexusGenesis.spec,
@@ -1388,7 +1384,7 @@ final class NodeStoreTests: XCTestCase {
             ).composing(hop: direct))
         }
 
-        let parentPath = temporaryDirectory().appendingPathComponent("state.db")
+        let parentPath = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let parentBroker = try DiskBroker(
             path: parentPath.deletingLastPathComponent()
                 .appendingPathComponent("volumes.db").path
@@ -1580,7 +1576,7 @@ final class NodeStoreTests: XCTestCase {
     }
 
     func testIncomingCarrierProofIsNeverAdvertisedAsOutgoingChildProof() async throws {
-        let content = TestContentStore()
+        let content = InMemoryContentStore()
         try await LatticeState.emptyHeader.storeRecursively(storer: content)
         let leaf = try await BlockBuilder.buildChildGenesis(
             spec: NexusGenesis.spec,
@@ -1682,7 +1678,7 @@ final class NodeStoreTests: XCTestCase {
     }
 
     func testPreparedChildProofsAreDurableAndBoundedByCarrier() async throws {
-        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         var store: NodeStore? = try makeStore(path: path)
         let fixture = try await childProofFixture()
         let first = try PreparedChildProof(
@@ -1736,7 +1732,7 @@ final class NodeStoreTests: XCTestCase {
     }
 
     func testEvictedPreparedGenesisDropsUnownedBootstrapRoots() async throws {
-        let directory = temporaryDirectory()
+        let directory = temporaryDirectory(create: true)
         let broker = try DiskBroker(
             path: directory.appendingPathComponent("volumes.db").path
         )
@@ -1805,11 +1801,11 @@ final class NodeStoreTests: XCTestCase {
 
     func testPreparedRetentionMutationIsSerializedThroughExactReconciliation()
         async throws {
-        let directory = temporaryDirectory()
+        let directory = temporaryDirectory(create: true)
         let broker = try DiskBroker(
             path: directory.appendingPathComponent("volumes.db").path
         )
-        let blockingBroker = BlockingVolumeBroker(broker: broker)
+        let blockingBroker = BlockingBroker(broker: broker)
         let store = try makeStore(
             path: directory.appendingPathComponent("state.db"),
             broker: blockingBroker
@@ -1877,7 +1873,7 @@ final class NodeStoreTests: XCTestCase {
 
     func testIssuedGenesisKeepsBootstrapRootsAfterPreparationRemoval()
         async throws {
-        let directory = temporaryDirectory()
+        let directory = temporaryDirectory(create: true)
         let broker = try DiskBroker(
             path: directory.appendingPathComponent("volumes.db").path
         )
@@ -1930,7 +1926,7 @@ final class NodeStoreTests: XCTestCase {
     }
 
     func testPendingChildProofRoutesUnionRecoverAndEvictByCarrier() async throws {
-        let path = temporaryDirectory().appendingPathComponent("state.db")
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         var store: NodeStore? = try makeStore(path: path)
         try await store!.persistPendingChildProofRoutes(
             carrierCID: "carrier-a",
@@ -2055,7 +2051,7 @@ final class NodeStoreTests: XCTestCase {
     }
 
     func testPreparedChildProofRoutesGrowByImmutableDirectory() async throws {
-        let content = TestContentStore()
+        let content = InMemoryContentStore()
         try await LatticeState.emptyHeader.storeRecursively(storer: content)
         let alpha = try await BlockBuilder.buildChildGenesis(
             spec: NexusGenesis.spec,
@@ -2142,7 +2138,7 @@ final class NodeStoreTests: XCTestCase {
     func testContextualCandidateRootsUseDurableLRUReplacement()
         async throws
     {
-        let directory = temporaryDirectory()
+        let directory = temporaryDirectory(create: true)
         let path = directory.appendingPathComponent("state.db")
         let broker = try DiskBroker(
             path: directory.appendingPathComponent("volumes.db").path
@@ -2242,7 +2238,7 @@ final class NodeStoreTests: XCTestCase {
     func testHandedOffOfferSurvivesNewerOffersUntilAdmissionOwnsRoots()
         async throws
     {
-        let directory = temporaryDirectory()
+        let directory = temporaryDirectory(create: true)
         let broker = try DiskBroker(
             path: directory.appendingPathComponent("volumes.db").path
         )
@@ -2317,7 +2313,7 @@ final class NodeStoreTests: XCTestCase {
     /// child that rebuilds often cannot pin without bound, and an offer the
     /// parent never carried costs nothing for long.
     func testOfferBudgetEvictsTheOldestOfferWhole() async throws {
-        let directory = temporaryDirectory()
+        let directory = temporaryDirectory(create: true)
         let broker = try DiskBroker(
             path: directory.appendingPathComponent("volumes.db").path
         )
@@ -2360,7 +2356,7 @@ final class NodeStoreTests: XCTestCase {
     func testHandoffBudgetEvictsOldestAndEvictedCandidateCanReturn()
         async throws
     {
-        let directory = temporaryDirectory()
+        let directory = temporaryDirectory(create: true)
         let broker = try DiskBroker(
             path: directory.appendingPathComponent("volumes.db").path
         )
@@ -2432,7 +2428,7 @@ final class NodeStoreTests: XCTestCase {
     /// admission decided, or the mark predates a wipe of the inbox), is
     /// not one, so the gate cannot latch on it.
     func testPendingHandoffsAreThoseStillInTheInbox() async throws {
-        let directory = temporaryDirectory()
+        let directory = temporaryDirectory(create: true)
         let broker = try DiskBroker(
             path: directory.appendingPathComponent("volumes.db").path
         )
@@ -2462,7 +2458,7 @@ final class NodeStoreTests: XCTestCase {
     /// the oldest handoff beyond capacity, with no explicit call, so a run
     /// that never restarts still keeps handoffs bounded.
     func testStoringAnOfferEnforcesTheHandoffBudget() async throws {
-        let directory = temporaryDirectory()
+        let directory = temporaryDirectory(create: true)
         let broker = try DiskBroker(
             path: directory.appendingPathComponent("volumes.db").path
         )
@@ -2516,7 +2512,7 @@ final class NodeStoreTests: XCTestCase {
     func testParentEvidenceScanAndInboxSurviveCrashUntilAdmissionOwnsVolume()
         async throws
     {
-        let directory = temporaryDirectory()
+        let directory = temporaryDirectory(create: true)
         let parentBroker = try DiskBroker(
             path: directory.appendingPathComponent("parent-volumes.db").path
         )
@@ -2786,7 +2782,7 @@ final class NodeStoreTests: XCTestCase {
     func testContextualCandidateProtectsPreparedDescendantProofAtCapacity()
         async throws
     {
-        let directory = temporaryDirectory()
+        let directory = temporaryDirectory(create: true)
         let broker = try DiskBroker(
             path: directory.appendingPathComponent("volumes.db").path
         )
@@ -2849,7 +2845,7 @@ final class NodeStoreTests: XCTestCase {
     func testAcceptedPendingCarrierProtectsPreparedProofAtCapacity()
         async throws
     {
-        let directory = temporaryDirectory()
+        let directory = temporaryDirectory(create: true)
         let broker = try DiskBroker(
             path: directory.appendingPathComponent("volumes.db").path
         )
@@ -2925,30 +2921,17 @@ final class NodeStoreTests: XCTestCase {
         path: URL? = nil,
         genesisCID: String? = nil,
         chainPath: [String] = ["Nexus"],
-        broker suppliedBroker: (any RetainedRootMergeBroker)? = nil,
+        broker: (any RetainedRootMergeBroker)? = nil,
         parentEvidenceInboxCapacity: Int = 64,
         handoffCandidateCapacity: Int = 1_024
     ) throws -> NodeStore {
-        let path = path ?? temporaryDirectory().appendingPathComponent("state.db")
-        let broker: any RetainedRootMergeBroker
-        if let suppliedBroker {
-            broker = suppliedBroker
-        } else {
-            broker = try DiskBroker(
-                path: path.deletingLastPathComponent()
-                    .appendingPathComponent("volumes.db").path
-            )
-        }
-        return try NodeStore(
-            databasePath: path,
+        try testNodeStore(
+            databasePath: path
+                ?? temporaryDirectory(create: true).appendingPathComponent("state.db"),
             nexusGenesisCID: genesisCID ?? self.genesisCID,
             chainPath: chainPath,
-            recoveryVolumeBroker: broker,
-            blockRetentionScope: "test:blocks",
-            issuedRecoveryRetentionScope: "test:issued-hierarchy",
-            preparedRecoveryRetentionScope: "test:prepared-hierarchy",
+            broker: broker,
             parentEvidenceInboxCapacity: parentEvidenceInboxCapacity,
-            contextualCandidateOwner: "test:contextual-candidates",
             handoffCandidateCapacity: handoffCandidateCapacity
         )
     }
@@ -2972,14 +2955,6 @@ final class NodeStoreTests: XCTestCase {
             parentCarrierCID: parentCarrierCID,
             rootEnvelope: envelope
         )
-    }
-
-    private func temporaryDirectory() -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("lattice-node-store-\(UUID().uuidString)")
-        try! FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
-        return url
     }
 
     private func blockBatch(
@@ -3022,7 +2997,7 @@ final class NodeStoreTests: XCTestCase {
         second: ChildBlockProof,
         rootVolumes: [SerializedVolume]
     ) {
-        let content = TestContentStore()
+        let content = InMemoryContentStore()
         try await LatticeState.emptyHeader.storeRecursively(storer: content)
         let child = try await BlockBuilder.buildChildGenesis(
             spec: NexusGenesis.spec,
@@ -3068,128 +3043,6 @@ final class NodeStoreTests: XCTestCase {
             proofs[1],
             rootVolumes
         )
-    }
-}
-
-private actor RecordingVolumeStorer: VolumeStorer {
-    private var roots: [String] = []
-
-    func store(volume: SerializedVolume) async throws {
-        roots.append(volume.root)
-    }
-
-    func storedRoots() -> [String] {
-        roots
-    }
-}
-
-private actor TestContentStore: Fetcher, Storer, VolumeStorer {
-    private var entries: [String: Data] = [:]
-    private var volumes: [String: SerializedVolume] = [:]
-
-    func fetch(rawCid: String) throws -> Data {
-        guard let data = entries[rawCid] else { throw FetcherError.notFound(rawCid) }
-        return data
-    }
-
-    func store(entries: [String: Data]) {
-        self.entries.merge(entries) { existing, _ in existing }
-    }
-
-    func store(volume: SerializedVolume) {
-        entries.merge(volume.entries) { existing, _ in existing }
-        volumes[volume.root] = volume
-    }
-
-    func allEntries() -> [String: Data] { entries }
-    func volume(root: String) -> SerializedVolume? { volumes[root] }
-}
-
-private actor BlockingVolumeBroker: RetainedRootMergeBroker {
-    nonisolated let near: (any VolumeBroker)? = nil
-    nonisolated let far: (any VolumeBroker)? = nil
-
-    private let broker: DiskBroker
-    private var stores = 0
-    private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
-    private var releaseContinuation: CheckedContinuation<Void, Never>?
-
-    init(broker: DiskBroker) {
-        self.broker = broker
-    }
-
-    func hasVolume(root: String) async -> Bool {
-        await broker.hasVolume(root: root)
-    }
-
-    func fetchVolumeLocal(root: String) async -> SerializedVolume? {
-        await broker.fetchVolumeLocal(root: root)
-    }
-
-    func storeVolumesLocal(_ volumes: [SerializedVolume]) async throws {
-        let shouldBlock = stores == 0 && !volumes.isEmpty
-        stores += volumes.count
-        if shouldBlock {
-            enteredWaiters.forEach { $0.resume() }
-            enteredWaiters.removeAll()
-            await withCheckedContinuation { continuation in
-                releaseContinuation = continuation
-            }
-        }
-        try await broker.storeVolumesLocal(volumes)
-    }
-
-    func pin(
-        root: String,
-        owner: String,
-        count: Int,
-        ttl: Duration?
-    ) async throws {
-        try await broker.pin(root: root, owner: owner, count: count, ttl: ttl)
-    }
-
-    func unpin(root: String, owner: String, count: Int) async throws {
-        try await broker.unpin(root: root, owner: owner, count: count)
-    }
-
-    func unpinAll(owner: String) async throws {
-        try await broker.unpinAll(owner: owner)
-    }
-
-    func owners(root: String) async -> Set<String> {
-        await broker.owners(root: root)
-    }
-
-    func evictUnpinned() async throws -> Int {
-        try await broker.evictUnpinned()
-    }
-
-    func advanceRetainedRoots(scope: String, roots: [String]) async throws {
-        try await broker.advanceRetainedRoots(scope: scope, roots: roots)
-    }
-
-    func retainedRoots(scope: String) async throws -> [String] {
-        try await broker.retainedRoots(scope: scope)
-    }
-
-    func mergeRetainedRoots(scope: String, roots: [String]) async throws {
-        try await broker.mergeRetainedRoots(scope: scope, roots: roots)
-    }
-
-    func waitUntilFirstStore() async {
-        guard stores == 0 else { return }
-        await withCheckedContinuation { continuation in
-            enteredWaiters.append(continuation)
-        }
-    }
-
-    func releaseFirstStore() {
-        releaseContinuation?.resume()
-        releaseContinuation = nil
-    }
-
-    func storeCount() -> Int {
-        stores
     }
 }
 

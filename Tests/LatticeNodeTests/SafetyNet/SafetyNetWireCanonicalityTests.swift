@@ -500,7 +500,7 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
     /// Content-bound blocks for `tipData` / `blockData`: real genesis blocks
     /// at distinct timestamps, so every frame binds a different CID.
     private func genesisBlocks(count: Int) async throws -> [(cid: String, block: Block)] {
-        let store = SafetyNetWireContentStore()
+        let store = InMemoryContentStore()
         try await LatticeState.emptyHeader.storeRecursively(storer: store as any Storer)
         var blocks: [(String, Block)] = []
         for index in 0..<count {
@@ -521,7 +521,7 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
     private func childProof(
         timestamp: Int64
     ) async throws -> (proof: ChildBlockProof, root: Block) {
-        let store = SafetyNetWireContentStore()
+        let store = InMemoryContentStore()
         try await LatticeState.emptyHeader.storeRecursively(storer: store as any Storer)
         let child = try await BlockBuilder.buildChildGenesis(
             spec: NexusGenesis.spec,
@@ -864,24 +864,5 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
                 "\(provenance): encode(decode(bytes)) != bytes"
             )
         }
-    }
-}
-
-/// Minimal content store for building blocks and proofs (the pattern of the
-/// private `ChainProcessTestContentStore` in `ChainProcessTests`).
-private actor SafetyNetWireContentStore: Fetcher, Storer, VolumeStorer {
-    private var entries: [String: Data] = [:]
-
-    func fetch(rawCid: String) throws -> Data {
-        guard let data = entries[rawCid] else { throw FetcherError.notFound(rawCid) }
-        return data
-    }
-
-    func store(entries: [String: Data]) {
-        self.entries.merge(entries) { existing, _ in existing }
-    }
-
-    func store(volume: SerializedVolume) {
-        entries.merge(volume.entries) { existing, _ in existing }
     }
 }

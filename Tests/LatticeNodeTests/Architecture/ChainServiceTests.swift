@@ -477,9 +477,9 @@ final class ChainServiceTests: XCTestCase {
 
         // The process has already enqueued its canonical commit, while the
         // service operation is deliberately paused in publication.
-        let laterRequestStarted = TaskStartLatch()
+        let laterRequestStarted = Latch()
         let laterTemplate = Task {
-            await laterRequestStarted.signal()
+            await laterRequestStarted.open()
             return try await service.miningTemplate(MiningTemplateRequest())
         }
         await laterRequestStarted.wait()
@@ -513,9 +513,9 @@ final class ChainServiceTests: XCTestCase {
         }
 
         let receipt = await service.enqueueCanonicalCommit(commit)
-        let laterRequestStarted = TaskStartLatch()
+        let laterRequestStarted = Latch()
         let laterTemplate = Task {
-            await laterRequestStarted.signal()
+            await laterRequestStarted.open()
             return try await service.miningTemplate(MiningTemplateRequest())
         }
         await laterRequestStarted.wait()
@@ -583,9 +583,9 @@ final class ChainServiceTests: XCTestCase {
             tipHash: "missing-block",
             mainChainBlocksAdded: ["missing-block": 0]
         ))
-        let laterRequestStarted = TaskStartLatch()
+        let laterRequestStarted = Latch()
         let laterTemplate = Task {
-            await laterRequestStarted.signal()
+            await laterRequestStarted.open()
             return try await service.miningTemplate(MiningTemplateRequest())
         }
         await laterRequestStarted.wait()
@@ -3796,15 +3796,11 @@ final class ChainServiceTests: XCTestCase {
                 lock.withLock { _fetched.append(blockCID) }
                 let withheld = lock.withLock { _withheld.contains(blockCID) }
                 let source: any ContentSource = withheld
-                    ? EmptyContentSource()
+                    ? InMemoryContentStore()
                     : FetcherContentSource(producer)
                 return try await admit(source)
             }
         }
-    }
-
-    private struct EmptyContentSource: ContentSource {
-        func fetch(_ cids: Set<String>) async -> [String: Data] { [:] }
     }
 
     /// Mine `depth` blocks on `producer`, each carrying a reward transaction (so
@@ -4057,76 +4053,6 @@ private enum TestPublicationError: Error {
     case failed
 }
 
-private actor TaskStartLatch {
-    private var signaled = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    func signal() {
-        signaled = true
-        let waiters = self.waiters
-        self.waiters.removeAll()
-        for waiter in waiters { waiter.resume() }
-    }
-
-    func wait() async {
-        guard !signaled else { return }
-        await withCheckedContinuation { waiters.append($0) }
-    }
-}
-
-private actor BlockingContentSource: ContentSource {
-    private struct Waiter {
-        let entries: [String: Data]
-        let continuation: CheckedContinuation<[String: Data], Never>
-    }
-
-    private let blockedCID: String
-    private var entries: [String: Data] = [:]
-    private var blocked = false
-    private var released = false
-    private var startWaiters: [CheckedContinuation<Void, Never>] = []
-    private var fetchWaiters: [Waiter] = []
-
-    init(blockedCID: String) {
-        self.blockedCID = blockedCID
-    }
-
-    func setEntries(_ entries: [String: Data]) {
-        self.entries = entries
-    }
-
-    func fetch(_ cids: Set<String>) async -> [String: Data] {
-        let found = entries.filter { cids.contains($0.key) }
-        guard cids.contains(blockedCID) else { return found }
-
-        blocked = true
-        let pendingStarts = startWaiters
-        startWaiters.removeAll()
-        for waiter in pendingStarts { waiter.resume() }
-        guard !released else { return found }
-        return await withCheckedContinuation { continuation in
-            fetchWaiters.append(Waiter(
-                entries: found,
-                continuation: continuation
-            ))
-        }
-    }
-
-    func waitForBlockedFetch() async {
-        guard !blocked else { return }
-        await withCheckedContinuation { startWaiters.append($0) }
-    }
-
-    func releaseBlockedFetch() {
-        released = true
-        let pending = fetchWaiters
-        fetchWaiters.removeAll()
-        for waiter in pending {
-            waiter.continuation.resume(returning: waiter.entries)
-        }
-    }
-}
-
 private actor CanonicalCommitLatch {
     private var entered = false
     private var released = false
@@ -4187,24 +4113,6 @@ private actor PublishedBlocks {
     }
 }
 
-private actor CountingContentSource: ContentSource {
-    private let entries: [String: Data]
-    private var requests = 0
-
-    init(entries: [String: Data]) {
-        self.entries = entries
-    }
-
-    func fetch(_ cids: Set<String>) -> [String: Data] {
-        requests += 1
-        return entries.filter { cids.contains($0.key) }
-    }
-
-    func requestCount() -> Int {
-        requests
-    }
-}
-
 private actor ProvisionalParents {
     private var values: [Block] = []
 
@@ -4215,55 +4123,6 @@ private actor ProvisionalParents {
     func first() -> Block? {
         values.first
     }
-}
-
-private func signedTransaction(
-    key: (privateKey: String, publicKey: String),
-    chainPath: [String],
-    accountActions: [AccountAction] = [],
-    actions: [Action] = [],
-    genesisActions: [GenesisAction] = [],
-    fee: UInt64 = 0,
-    nonce: UInt64 = 0
-) throws -> Transaction {
-    let body = transactionBody(
-        key: key,
-        chainPath: chainPath,
-        accountActions: accountActions,
-        actions: actions,
-        genesisActions: genesisActions,
-        fee: fee,
-        nonce: nonce
-    )
-    let header = try HeaderImpl(node: body)
-    let signature = try XCTUnwrap(TransactionSigning.sign(
-        bodyHeader: header,
-        privateKeyHex: key.privateKey
-    ))
-    return Transaction(signatures: [key.publicKey: signature], body: header)
-}
-
-private func transactionBody(
-    key: (privateKey: String, publicKey: String),
-    chainPath: [String],
-    accountActions: [AccountAction] = [],
-    actions: [Action] = [],
-    genesisActions: [GenesisAction] = [],
-    fee: UInt64 = 0,
-    nonce: UInt64 = 0
-) -> TransactionBody {
-    TransactionBody(
-        accountActions: accountActions,
-        actions: actions,
-        depositActions: [],
-        genesisActions: genesisActions,
-        receiptActions: [],
-        withdrawalActions: [],
-        signers: [CryptoUtils.createAddress(from: key.publicKey)],
-        fee: fee,
-        nonce: nonce,
-        chainPath: chainPath
-    )
 }
 
 private func XCTAssertThrowsErrorAsync<T>(

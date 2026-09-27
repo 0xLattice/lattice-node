@@ -4,23 +4,6 @@ import LatticeMinerCore
 import cashew
 @testable import LatticeNode
 
-private actor ContractTestStore: Fetcher, Storer, VolumeStorer {
-    private var entries: [String: Data] = [:]
-
-    func fetch(rawCid: String) async throws -> Data {
-        guard let data = entries[rawCid] else { throw FetcherError.notFound(rawCid) }
-        return data
-    }
-
-    func store(entries newEntries: [String: Data]) async throws {
-        entries.merge(newEntries) { existing, _ in existing }
-    }
-
-    func store(volume: SerializedVolume) async throws {
-        entries.merge(volume.entries) { existing, _ in existing }
-    }
-}
-
 /// Pins the external mining-worker contract documented in
 /// `docs/mining-workers.md`. The reference vector below is quoted verbatim in
 /// that document; if this test changes, the document must change with it —
@@ -35,7 +18,7 @@ final class MiningWorkerContractTests: XCTestCase {
         "310000626166797265696736747066673369653766796c6132327279346d"
 
     func testReferenceVectorMatchesConsensusPreimage() async throws {
-        let store = ContractTestStore()
+        let store = InMemoryContentStore()
         let genesis = try await NexusGenesis.create(fetcher: store)
         let block = genesis.block
         let prefix = ProofOfWork.proofOfWorkHashPrefixBytes(block)
@@ -66,7 +49,7 @@ final class MiningWorkerContractTests: XCTestCase {
     }
 
     func testTemplateResponseCarriesConsensusPrefix() async throws {
-        let store = ContractTestStore()
+        let store = InMemoryContentStore()
         let genesis = try await NexusGenesis.create(fetcher: store)
         let response = MiningTemplateResponse(
             template: MiningTemplate(
