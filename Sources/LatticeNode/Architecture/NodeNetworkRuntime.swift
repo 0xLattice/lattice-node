@@ -395,9 +395,20 @@ public actor NodeNetworkRuntime: IvyDelegate {
 
     private struct HierarchyPeerRecord: PeerRecord {
         var helloDeadline: HelloDeadline?
+        /// Set together at an accepted hello (not at connect) and cleared
+        /// together.
+        var session: AuthenticatedPeer?
+        var role: HierarchyPeer?
 
         var isEmpty: Bool {
-            helloDeadline == nil
+            helloDeadline == nil && session == nil && role == nil
+        }
+    }
+
+    /// Every hierarchy peer's role with its key, as a snapshot.
+    private var hierarchyRoles: [(key: PeerKey, value: HierarchyPeer)] {
+        hierarchyRecords.records.compactMap { key, record in
+            record.role.map { (key: key, value: $0) }
         }
     }
 
@@ -477,10 +488,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// Per overlay peer key: the one authenticated session (pre- or
     /// post-hello) and the state bound to it.
     private var overlayRecords = PeerSet<OverlayPeerRecord>()
-    private var hierarchyPeers: [PeerKey: HierarchyPeer] = [:]
     /// Per hierarchy peer key: the state bound to its connection.
     private var hierarchyRecords = PeerSet<HierarchyPeerRecord>()
-    private var hierarchySessions: [PeerKey: AuthenticatedPeer] = [:]
     private var childEvidenceReadyPeers: Set<PeerKey> = []
     private var childEvidenceReadyWaiters:
         [PeerKey: [ChildEvidenceReadyWaiter]] = [:]
@@ -918,8 +927,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         await Timers.poll(every: .milliseconds(10), onCancel: false) {
             guard isCurrentRuntime(generation: generation, process: process),
                   peer.map({
-                      hierarchySessions[$0.key]?.sessionID == $0.sessionID
-                        && hierarchyPeers[$0.key] == .parent
+                      hierarchyRecords[$0.key]?.session?.sessionID == $0.sessionID
+                        && hierarchyRecords[$0.key]?.role == .parent
                   }) ?? true else { return .done(false) }
             return enqueueCandidate(candidate) ? .done(true) : .again
         }
@@ -940,8 +949,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private func clearRuntimeState() async {
         process = nil
         let removedOverlayRecords = overlayRecords.removeAll()
-        hierarchyPeers.removeAll()
-        hierarchySessions.removeAll()
+        let removedHierarchyRecords = hierarchyRecords.removeAll()
         childDeclaredReadURLs.removeAll()
         servingReadEndpoints.removeAll()
         readURLDiscoveries.removeAll()
@@ -967,7 +975,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             waiter.continuation.resume(returning: false)
         }
         for record in removedOverlayRecords { record.helloDeadline?.task.cancel() }
-        for record in hierarchyRecords.removeAll() { record.helloDeadline?.task.cancel() }
+        for record in removedHierarchyRecords { record.helloDeadline?.task.cancel() }
         waitingCandidateRetryTask?.cancel()
         waitingCandidateRetryTask = nil
         waitingCandidateRetryGeneration = nil
@@ -1251,11 +1259,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         // One sample of the wired children, taken before the resolve suspends
         // and iterated below: the answer then describes a single consistent
-        // moment. Reading live `hierarchyPeers` after the suspension instead
+        // moment. Reading live hierarchy roles after the suspension instead
         // would mix a child admitted mid-resolve into a lookup that never
         // asked for its directory, and drop it anyway. It is served from the
         // next ask on.
-        let wiredChildren = hierarchyPeers.compactMap { key, role -> (PeerKey, String)? in
+        let wiredChildren = hierarchyRoles.compactMap { key, role -> (PeerKey, String)? in
             guard case .child(let path) = role, let directory = path.last else {
                 return nil
             }
@@ -1424,7 +1432,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// parent state is not carried, so it is not an input.
     public func childCandidateDigestInput(parentStateCID: String) -> [String] {
         var byDirectory: [String: [String]] = [:]
-        for (key, role) in hierarchyPeers {
+        for (key, role) in hierarchyRoles {
             guard case .child(let path) = role, let directory = path.last,
                   childEvidenceReadyPeers.contains(key),
                   let offer = childCandidateOffers[key],
@@ -1518,7 +1526,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard isCurrentRuntime(generation: generation, process: process) else {
             return
         }
-        let hasChildren = hierarchyPeers.values.contains {
+        let hasChildren = hierarchyRoles.map(\.value).contains {
             if case .child = $0 { return true }
             return false
         }
@@ -1529,7 +1537,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // A walk step publishes a state change per block, and this must
         // not cost the process gate three times per step when nothing the
         // children build against changed.
-        let directories = Set(hierarchyPeers.values.compactMap { role -> String? in
+        let directories = Set(hierarchyRoles.map(\.value).compactMap { role -> String? in
             guard case .child(let path) = role else { return nil }
             return path.last
         })
@@ -1607,10 +1615,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard !Task.isCancelled,
                   isCurrentRuntime(generation: generation, process: process),
                   let context = parentTipContext else { return }
-            for (key, role) in hierarchyPeers {
+            for (key, role) in hierarchyRoles {
                 guard case .child(let childPath) = role,
                       childEvidenceReadyPeers.contains(key),
-                      let peer = hierarchySessions[key],
+                      let peer = hierarchyRecords[key]?.session,
                       sequence(pushedParentTipSequence[key], on: peer) != context.sequence
                 else { continue }
                 await pushParentTipContext(context, to: peer, childPath: childPath)
@@ -1624,7 +1632,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ) async {
         for (key, payload) in refusedChildEvidenceHints {
             guard isCurrentRuntime(generation: generation, process: process),
-                  let peer = hierarchySessions[key],
+                  let peer = hierarchyRecords[key]?.session,
                   childEvidenceReadyPeers.contains(key) else { continue }
             let sent = await hierarchy.sendMessage(
                 to: peer,
@@ -1768,9 +1776,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // attempt left the acquirer without an admission) is moot now.
         candidateOfferDeferredByAdmission = false
         guard let context = receivedParentTip,
-              hierarchySessions[context.peer.key]?.sessionID
+              hierarchyRecords[context.peer.key]?.session?.sessionID
                 == context.peer.sessionID,
-              hierarchyPeers[context.peer.key] == .parent,
+              hierarchyRecords[context.peer.key]?.role == .parent,
               let builder = handlers?.childCandidateBuilder,
               let carrier = Self.provisionalCarrier(
                 on: context.tip,
@@ -1806,7 +1814,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         guard let candidate = built,
               isCurrentRuntime(generation: generation, process: process),
-              hierarchySessions[context.peer.key]?.sessionID
+              hierarchyRecords[context.peer.key]?.session?.sessionID
                 == context.peer.sessionID,
               candidate.directory == configuration.address.directory,
               let blockData = candidate.block.toData(),
@@ -1894,8 +1902,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private func parentEvidenceSession(
         for peer: AuthenticatedPeer
     ) -> ParentEvidenceSession? {
-        guard hierarchySessions[peer.key]?.sessionID == peer.sessionID,
-              hierarchyPeers[peer.key] == .parent else { return nil }
+        guard hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID,
+              hierarchyRecords[peer.key]?.role == .parent else { return nil }
         return ParentEvidenceSession(
             peerID: peer.key.hex,
             sessionID: peer.sessionID
@@ -2014,7 +2022,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
 
     private func markChildEvidenceReady(_ peer: AuthenticatedPeer) {
-        guard hierarchySessions[peer.key]?.sessionID == peer.sessionID else {
+        guard hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID else {
             return
         }
         childEvidenceReadyPeers.insert(peer.key)
@@ -2051,8 +2059,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
 
     private func canServeHierarchyContent(to peer: AuthenticatedPeer) -> Bool {
         runtimeGeneration != 0
-            && hierarchyPeers[peer.key] != nil
-            && hierarchySessions[peer.key]?.sessionID == peer.sessionID
+            && hierarchyRecords[peer.key]?.role != nil
+            && hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID
     }
 
     /// Publishes an already-promoted absolute proof prepared durably by the
@@ -2111,12 +2119,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard isCurrentRuntime(generation: generation, process: process) else {
             return false
         }
-        let bootstrappingPeers = hierarchyPeers.compactMap {
+        let bootstrappingPeers = hierarchyRoles.compactMap {
             key, role -> AuthenticatedPeer? in
             guard case .child(let path) = role,
                   path == childPath,
                   !childEvidenceReadyPeers.contains(key) else { return nil }
-            return hierarchySessions[key]
+            return hierarchyRecords[key]?.session
         }
         for peer in bootstrappingPeers {
             let session = ChildEvidenceSession(
@@ -2155,16 +2163,16 @@ public actor NodeNetworkRuntime: IvyDelegate {
             }
             return false
         }
-        let readyPeers = hierarchyPeers.compactMap {
+        let readyPeers = hierarchyRoles.compactMap {
             key, role -> AuthenticatedPeer? in
             guard case .child(let path) = role,
                   path == childPath,
                   childEvidenceReadyPeers.contains(key) else { return nil }
-            return hierarchySessions[key]
+            return hierarchyRecords[key]?.session
         }
         for peer in bootstrappingPeers + readyPeers {
             guard isCurrentRuntime(generation: generation, process: process),
-                  hierarchySessions[peer.key]?.sessionID == peer.sessionID else {
+                  hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID else {
                 if !childEvidenceReadyPeers.contains(peer.key) {
                     finishChildEvidencePublication(
                         to: peer,
@@ -2244,7 +2252,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             if permitsCleanup,
                !childEvidencePublicationFailedSessions.contains(session),
                childEvidenceIndexCompleteSessions.contains(session),
-               hierarchySessions[peer.key]?.sessionID == peer.sessionID {
+               hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID {
                 markChildEvidenceReady(peer)
             }
         } else {
@@ -2504,8 +2512,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private func clearHierarchyAuthorization(for key: PeerKey) -> HierarchyPeer? {
         removeHierarchyHelloDeadline(for: key)?.task.cancel()
         cancelParentEvidence(for: key)
-        let removedRole = hierarchyPeers.removeValue(forKey: key)
-        hierarchySessions.removeValue(forKey: key)
+        let removedRole = hierarchyRecords.update(key) { record -> HierarchyPeer? in
+            let role = record.role
+            record.role = nil
+            record.session = nil
+            return role
+        }
         childDeclaredReadURLs.removeValue(forKey: key)
         childEvidenceReadyPeers.remove(key)
         cancelChildEvidenceReadyWaiters(for: key)
@@ -2514,10 +2526,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         refusedChildEvidenceHints.removeValue(forKey: key)
         Self.pruneChildPeerRotations(
             &childPeerRotation,
-            activeRoles: Array(hierarchyPeers.values)
+            activeRoles: hierarchyRoles.map(\.value)
         )
         if case .child(let path)? = removedRole, let directory = path.last,
-           !hierarchyPeers.values.contains(where: { role in
+           !hierarchyRoles.map(\.value).contains(where: { role in
                guard case .child(let other) = role else { return false }
                return other.last == directory
            }) {
@@ -3813,8 +3825,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         process: ChainProcess
     ) async -> ParentEvidenceResult {
         guard isCurrentRuntime(generation: generation, process: process),
-              hierarchySessions[peer.key]?.sessionID == peer.sessionID,
-              hierarchyPeers[peer.key] == .parent else {
+              hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID,
+              hierarchyRecords[peer.key]?.role == .parent else {
             return .failed
         }
         let lease = EvidenceVolumeLease(
@@ -3832,8 +3844,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard isCurrentRuntime(
                 generation: generation,
                 process: process
-            ), hierarchySessions[peer.key]?.sessionID == peer.sessionID,
-               hierarchyPeers[peer.key] == .parent else {
+            ), hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID,
+               hierarchyRecords[peer.key]?.role == .parent else {
                 return .done(.failed)
             }
             if activeEvidenceVolumes.contains(lease) { return .done(.handled) }
@@ -3872,8 +3884,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
             capacityUnavailable: { $0.attribution.localCapacityUnavailable },
             stillCurrent: {
                 isCurrentRuntime(generation: generation, process: process)
-                    && hierarchySessions[peer.key]?.sessionID == peer.sessionID
-                    && hierarchyPeers[peer.key] == .parent
+                    && hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID
+                    && hierarchyRecords[peer.key]?.role == .parent
             }
         ) {
         case .value(let fetched):
@@ -3907,8 +3919,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
             return .failed
         }
         guard isCurrentRuntime(generation: generation, process: process),
-              hierarchySessions[peer.key]?.sessionID == peer.sessionID,
-              hierarchyPeers[peer.key] == .parent else {
+              hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID,
+              hierarchyRecords[peer.key]?.role == .parent else {
             return .failed
         }
         let alreadyAdmitted: Bool
@@ -3959,8 +3971,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
             )
             return
         }
-        guard hierarchySessions[peer.key]?.sessionID == peer.sessionID,
-              let role = hierarchyPeers[peer.key] else { return }
+        guard hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID,
+              let role = hierarchyRecords[peer.key]?.role else { return }
 
         switch (message.topic, role) {
         case (NodeNetworkTopic.parentChainFactRequest,
@@ -4058,7 +4070,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             SyncTrace.log("run-report request from child dir=\(directory) committers=\(request.committerCIDs.count)")
             for committer in request.committerCIDs {
                 guard isCurrentRuntime(generation: generation, process: process),
-                      hierarchySessions[peer.key]?.sessionID == peer.sessionID,
+                      hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID,
                       let report = await process.runReport(
                           committer: committer, directory: directory
                       ),
@@ -4335,7 +4347,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 return
             }
             guard isCurrentRuntime(generation: generation, process: process),
-                  hierarchySessions[peer.key]?.sessionID == peer.sessionID else {
+                  hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID else {
                 return
             }
             if let cached = childCandidateOffers[peer.key],
@@ -4390,18 +4402,20 @@ public actor NodeNetworkRuntime: IvyDelegate {
             return
         }
         removeHierarchyHelloDeadline(for: peer.key)?.task.cancel()
-        if let existing = hierarchyPeers[peer.key] {
+        if let existing = hierarchyRecords[peer.key]?.role {
             if existing != role {
                 await hierarchy.disconnectSession(ifCurrent: peer)
                 return
             }
         }
-        if hierarchySessions[peer.key]?.sessionID != peer.sessionID {
+        if hierarchyRecords[peer.key]?.session?.sessionID != peer.sessionID {
             childEvidenceReadyPeers.remove(peer.key)
             cancelChildEvidenceReadyWaiters(for: peer.key)
         }
-        hierarchyPeers[peer.key] = role
-        hierarchySessions[peer.key] = peer
+        hierarchyRecords.update(peer.key) {
+            $0.role = role
+            $0.session = peer
+        }
         if case .child = role {
             // Tolerant ingest of the child's self-declared read URL: invalid
             // or absent just isn't carried (never a session cost).
@@ -4442,7 +4456,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         process: ChainProcess
     ) async {
         guard isCurrentRuntime(generation: generation, process: process),
-              hierarchySessions[peer.key]?.sessionID == peer.sessionID else {
+              hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID else {
             return
         }
         if case .parent = role {
@@ -4698,7 +4712,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
 
     /// Directories of the immediate children currently wired to this node.
     private func wiredChildDirectories() -> Set<String> {
-        Set(hierarchyPeers.values.compactMap { role -> String? in
+        Set(hierarchyRoles.map(\.value).compactMap { role -> String? in
             guard case .child(let path) = role else { return nil }
             return path.last
         })
@@ -4711,8 +4725,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     func debugSnapshot() -> NetworkDebugSnapshot {
         var keys = Set<PeerKey>()
         keys.formUnion(overlayRecords.keys)
-        keys.formUnion(hierarchyPeers.keys)
-        keys.formUnion(hierarchySessions.keys)
         keys.formUnion(childEvidenceReadyPeers)
         keys.formUnion(childEvidenceReadyWaiters.keys)
         keys.formUnion(childEvidenceIndexCompleteSessions.map(\.peerKey))
@@ -4754,8 +4766,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 hasHelloDeadline: overlayRecords[key]?.helloDeadline != nil
             )
         }
-        let hierarchyKeys = Set(hierarchyPeers.keys)
-            .union(hierarchySessions.keys)
+        let hierarchyKeys = Set(hierarchyRecords.keys)
             .union(hierarchyRecords.keys)
             .union(childDeclaredReadURLs.keys)
             .union(childEvidenceReadyPeers)
@@ -4769,7 +4780,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         var hierarchySnapshot: [PeerKey: NetworkDebugSnapshot.HierarchyPeer] = [:]
         for key in hierarchyKeys {
             hierarchySnapshot[key] = NetworkDebugSnapshot.HierarchyPeer(
-                role: hierarchyPeers[key],
+                role: hierarchyRecords[key]?.role,
                 hasHelloDeadline: hierarchyRecords[key]?.helloDeadline != nil
             )
         }
@@ -4781,7 +4792,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             heldSessionIDs: sessions,
             liveSessionIDs: Set(
                 overlayRecords.records.values.compactMap(\.sessionPeer?.sessionID)
-                    + hierarchySessions.values.map(\.sessionID)
+                    + hierarchyRecords.records.values.compactMap(\.session?.sessionID)
             ),
             rangeSyncAnchor: rangeSync.map {
                 ($0.requestedAfterCID, $0.requestedHeight)
@@ -4819,7 +4830,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // window rely on the verified any-peer proof fallback — a bounded
         // window, not silent completeness.
         let connectedChildDirectories = Set(
-            hierarchyPeers.values.compactMap { role -> String? in
+            hierarchyRoles.map(\.value).compactMap { role -> String? in
                 guard case .child(let path) = role else { return nil }
                 return path.last
             }
@@ -4958,7 +4969,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             isRunning,
             hierarchyRecords[peer.key]?.helloDeadline?.token == token,
             hierarchyRecords[peer.key]?.helloDeadline?.sessionID == peer.sessionID,
-            hierarchyPeers[peer.key] == nil
+            hierarchyRecords[peer.key]?.role == nil
         else { return }
         removeHierarchyHelloDeadline(for: peer.key)
         await hierarchy.recycleSession(ifCurrent: peer)
@@ -6674,15 +6685,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
               let payload = try? ParentRunReportMessage(report).encoded()
         else { return }
         let generation = runtimeGeneration
-        let children = hierarchyPeers.compactMap {
+        let children = hierarchyRoles.compactMap {
             key, role -> AuthenticatedPeer? in
             guard case .child(let path) = role,
                   path.last == report.directory else { return nil }
-            return hierarchySessions[key]
+            return hierarchyRecords[key]?.session
         }
         for peer in children {
             guard isCurrentRuntime(generation: generation, process: process),
-                  hierarchySessions[peer.key]?.sessionID == peer.sessionID
+                  hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID
             else { continue }
             _ = await hierarchy.sendMessage(
                 to: peer,
@@ -6995,7 +7006,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private func selectedChildPeers() -> [(Int, PeerKey, [String])] {
         var paths: [String: [String]] = [:]
         var peers: [String: [PeerKey]] = [:]
-        for (key, role) in hierarchyPeers {
+        for (key, role) in hierarchyRoles {
             guard case .child(let path) = role,
                   childEvidenceReadyPeers.contains(key) else {
                 continue
@@ -7042,7 +7053,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private func authenticatedChildDirectories() -> [String] {
         let directories: [String] = Array(
             Set<String>(
-            hierarchyPeers.values.compactMap { role in
+            hierarchyRoles.map(\.value).compactMap { role in
             guard case .child(let path) = role else { return nil }
             return path.last
             }
@@ -7220,9 +7231,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private func configuredParentPeer() -> AuthenticatedPeer? {
         guard let parentKey = configuration.parentEndpoint?.publicKey,
               let key = try? PeerKey(parentKey),
-              case .parent? = hierarchyPeers[key]
+              case .parent? = hierarchyRecords[key]?.role
         else { return nil }
-        return hierarchySessions[key]
+        return hierarchyRecords[key]?.session
     }
 
     private func makeRequestID() -> UInt64 {
