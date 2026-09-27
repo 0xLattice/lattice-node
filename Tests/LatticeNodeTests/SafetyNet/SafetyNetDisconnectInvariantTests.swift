@@ -281,33 +281,31 @@ final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
     /// S1's follow-up then resumes and gives up: it must end S1 only, not
     /// remove S2's record and hello deadline, or S2's hello is dropped and
     /// the link wedges until the transport drops.
+    ///
+    /// S2 is delivered through the runtime's own delegate entry points
+    /// (`didConnect`, then its hello), so the interleaving is exact: the
+    /// real transport would keep whichever session wins Ivy's tie-break.
     func testAStaleHelloFollowUpCannotEndTheReconnectedSession() async throws {
         let target = try await overlayRuntime(keyByte: 0xd6, requestTimeout: .seconds(60))
         let childKey = signingKey(0xd7)
         let childPeerKey = peerKey(childKey)
+        let childPath = ["Nexus", "Payments"]
         let hello = try ChainHello(
             nexusGenesisCID: target.process.configuration.nexusGenesisCID,
-            chainPath: ["Nexus", "Payments"]
+            chainPath: childPath
         ).encode()
-        func childIvy() -> Ivy {
-            Ivy(config: IvyConfig(
-                signingKey: childKey,
-                listenPort: 0,
-                stunServers: [],
-                healthConfig: PeerHealthConfig(enabled: false),
-                mode: .privateNetwork
-            ))
-        }
-        // Ivy holds its delegate weakly: the scripts live as long as the test.
+        // Ivy holds its delegate weakly: the script lives as long as the test.
         let firstScript = SafetyNetScriptedChild(
-            hello: hello, childPath: ["Nexus", "Payments"], pullsIndex: false
+            hello: hello, childPath: childPath, pullsIndex: false
         )
-        let secondScript = SafetyNetScriptedChild(
-            hello: hello, childPath: ["Nexus", "Payments"]
-        )
-        let first = childIvy()
+        let first = Ivy(config: IvyConfig(
+            signingKey: childKey,
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .privateNetwork
+        ))
         await first.installSafetyNetDelegate(firstScript, contentSource: nil)
-        var second: Ivy?
         let hierarchyEndpoint = PeerEndpoint(
             publicKey: target.process.configuration.processPublicKey,
             host: "127.0.0.1",
@@ -321,41 +319,38 @@ final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
             try await waitUntil("S1's hello follow-up waits for readiness") {
                 await runtime.debugEvidenceWaiterCount(childPeerKey) == 1
             }
-            let s1 = await runtime.debugSnapshot().liveSessionIDs
 
-            // Ivy keeps the preferred of two sessions for one key (a
-            // tie-break on the session IDs), so a reconnect replaces S1 only
-            // when its ID wins: dial fresh identities-alike until one does.
-            for _ in 0..<32 where second == nil {
-                let candidate = childIvy()
-                await candidate.installSafetyNetDelegate(secondScript, contentSource: nil)
-                try await candidate.start()
-                if (try? await candidate.connect(to: hierarchyEndpoint)) != nil,
-                   (await candidate.connectedPeers).contains(target.peerID) {
-                    second = candidate
-                } else {
-                    await candidate.stop()
-                }
+            // The reconnect: same key, a fresh session, a direct route.
+            let s2 = AuthenticatedPeer(
+                key: childPeerKey,
+                role: .endpoint,
+                route: .direct,
+                metadata: PeerMetadata(),
+                sessionID: Data(UUID().uuidString.utf8)
+            )
+            await runtime.ivy(runtime.hierarchy, didConnect: s2)
+            try await waitUntil("S2's connect ended S1's wait") {
+                await runtime.debugEvidenceWaiterCount(childPeerKey) == 0
             }
-            XCTAssertNotNil(second, "no reconnect replaced S1")
-            try await waitUntil("S2's hello is accepted and S2 becomes ready") {
-                let snapshot = await runtime.debugSnapshot()
-                let ready = await runtime.isChildEvidenceReady(childPeerKey)
-                return snapshot.hierarchy[childPeerKey]?.role == .child(["Nexus", "Payments"])
-                    && !snapshot.liveSessionIDs.isEmpty
-                    && snapshot.liveSessionIDs.isDisjoint(with: s1)
-                    && ready
-            }
+            let deadlineSession = await runtime.debugHierarchyHelloDeadlineSession(childPeerKey)
+            XCTAssertEqual(deadlineSession, s2.sessionID, "S2's hello deadline survives S1's follow-up")
+
+            await runtime.ivy(
+                runtime.hierarchy,
+                didReceiveMessage: PeerMessage(topic: NodeNetworkTopic.hierarchyHello, payload: hello),
+                from: s2
+            )
+            let bound = await runtime.debugHierarchySession(childPeerKey)
+            XCTAssertEqual(bound.role, .child(childPath), "S2's hello is accepted")
+            XCTAssertEqual(bound.sessionID, s2.sessionID, "the record is bound to S2")
         } catch {
             await first.stop()
-            await second?.stop()
             await runtime.stop()
             throw error
         }
         await first.stop()
-        await second?.stop()
         await runtime.stop()
-        withExtendedLifetime((firstScript, secondScript)) {}
+        withExtendedLifetime(firstScript) {}
     }
 
     // MARK: - Helpers (the runtime, keys and hello come from NetworkTrustTestCase)
@@ -458,6 +453,19 @@ private actor SafetyNetPushRace {
 }
 
 extension NodeNetworkRuntime {
+    /// The session the key's hierarchy hello deadline waits on.
+    func debugHierarchyHelloDeadlineSession(_ key: PeerKey) -> Data? {
+        hierarchyState.hierarchyRecords[key]?.helloDeadline?.sessionID
+    }
+
+    /// The role and session bound to the key's hierarchy record.
+    func debugHierarchySession(_ key: PeerKey) -> (role: HierarchyPeer?, sessionID: Data?) {
+        (
+            hierarchyState.hierarchyRecords[key]?.role,
+            hierarchyState.hierarchyRecords[key]?.session?.sessionID
+        )
+    }
+
     /// Evidence-readiness waiters parked on the key's record.
     func debugEvidenceWaiterCount(_ key: PeerKey) -> Int {
         hierarchyState.hierarchyRecords[key]?.evidence.waiters.count ?? 0

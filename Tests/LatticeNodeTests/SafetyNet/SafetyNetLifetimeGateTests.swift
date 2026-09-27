@@ -189,7 +189,7 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
     private static func mentionsTask(_ text: String, aliases: Set<String>) throws -> Bool {
         let range = NSRange(text.startIndex..., in: text)
         let task = try NSRegularExpression(
-            pattern: #"(?<![\w.])Task\s*(?:<|\{|\.detached\b|\?|\]|,|\)|$)|\bTimers\.deadline\s*\("#,
+            pattern: #"(?<![\w.])Task\s*(?:<|\{|\(|\.detached\b|\.immediate\b|\?|\]|,|\)|$)|\bTimers\.deadline\s*\("#,
             options: [.anchorsMatchLines]
         )
         if task.firstMatch(in: text, range: range) != nil { return true }
@@ -332,6 +332,8 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
             ] = [:]
             private var inferred = Task { }
             var detached = Task.detached { }
+            var prioritized = Task(priority: .low) { }
+            var immediate = Task.immediate { }
             var timer = Timers.deadline(after: .seconds(1), generation: 0) { _ in }
             var slot = TaskSlot()
             var group: TaskGroup<Int>?
@@ -350,7 +352,7 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
                 "Sample.plain", "Sample.fixed", "Sample.wrapped", "Sample.byKey",
                 "Sample.list", "Sample.pair", "Sample.aliased", "Sample.aliasedList",
                 "Sample.split", "Sample.spread", "Sample.inferred", "Sample.detached",
-                "Sample.timer",
+                "Sample.prioritized", "Sample.immediate", "Sample.timer",
             ]
         )
     }
