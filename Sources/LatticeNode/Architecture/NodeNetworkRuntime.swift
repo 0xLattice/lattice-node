@@ -336,9 +336,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
 
         var session: Session?
         var helloDeadline: HelloDeadline?
+        /// Carries its own session ID (see `FrontierPull`).
+        var frontierPull: FrontierPull?
 
         var isEmpty: Bool {
-            session == nil && helloDeadline == nil
+            session == nil && helloDeadline == nil && frontierPull == nil
         }
 
         /// The session whose hello was accepted.
@@ -479,7 +481,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let sessionID: Data
         var requestID: UInt64?
     }
-    private var frontierPulls: [PeerKey: FrontierPull] = [:]
     private var servingAncestorRange: Set<Data> = []
     private var servingReadEndpoints: Set<Data> = []
     /// Public read URLs declared by wired children in their hierarchy hellos,
@@ -963,7 +964,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         childProofRecoveryGeneration = nil
         childProofRecoveryNeedsRefresh = false
         servingAcceptedLeaves.removeAll()
-        frontierPulls.removeAll()
         servingAncestorRange.removeAll()
         clearRangeSync()
         candidateWorker?.cancel()
@@ -2378,7 +2378,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 if case .ready? = record.session { record.session = nil }
             }
             discardServingSessions(for: peer.key)
-            frontierPulls.removeValue(forKey: peer.key)
+            overlayRecords.update(peer.key) { $0.frontierPull = nil }
             overlayRecords.update(peer.key) { $0.session = .awaitingHello(peer) }
             scheduleOverlayHelloDeadline(for: peer, generation: generation)
             SyncTrace.log("overlay connect peer=\(peer.key.hex.prefix(8))")
@@ -2433,7 +2433,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 candidateAcquirer.disconnect(candidateProvider(disconnected))
             }
             discardServingSessions(for: key)
-            frontierPulls.removeValue(forKey: key)
+            overlayRecords.update(key) { $0.frontierPull = nil }
             if rangeSync?.peer.key == key {
                 clearRangeSync()
             }
@@ -2874,7 +2874,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard let response = try? AcceptedLeavesResponseMessage.decoded(
                 message.payload
             ) else { return }
-            guard var pull = frontierPulls[peer.key],
+            guard var pull = overlayRecords[peer.key]?.frontierPull,
                   pull.sessionID == peer.sessionID,
                   pull.requestID == response.requestID else {
                 SyncTrace.log(
@@ -2884,7 +2884,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 return
             }
             pull.requestID = nil
-            frontierPulls[peer.key] = pull
+            overlayRecords.update(peer.key) { $0.frontierPull = pull }
             SyncTrace.log(
                 "frontier page peer=\(peer.key.hex.prefix(8)) "
                     + "leaves=\(response.blockCIDs.count)"
@@ -4690,7 +4690,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         keys.formUnion(refusedChildEvidenceHints.keys)
         keys.formUnion(hierarchyHelloDeadlines.keys)
         keys.formUnion(pendingTransactionInventories.values.map(\.peer.key))
-        keys.formUnion(frontierPulls.keys)
         keys.formUnion(childDeclaredReadURLs.keys)
         keys.formUnion(pendingReadEndpoints.values.map(\.peer.key))
         if let rangeSync { keys.insert(rangeSync.peer.key) }
@@ -4718,7 +4717,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         sessions.formUnion(portableEvidenceOrder.map(\.sessionID))
 
         let overlayKeys = Set(overlayRecords.keys)
-            .union(frontierPulls.keys)
             .union(announcedTips.keys)
         var overlaySnapshot: [PeerKey: NetworkDebugSnapshot.OverlayPeer] = [:]
         for key in overlayKeys {
@@ -6239,21 +6237,23 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // one peer's unverified height claim silence every OTHER peer's
         // frontier for as long as it held the slot.
         guard overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
-              frontierPulls[peer.key]?.sessionID != peer.sessionID else { return }
+              overlayRecords[peer.key]?.frontierPull?.sessionID != peer.sessionID else { return }
         let ourHeight = await acquiredHeight(process)
         guard isCurrentRuntime(generation: generation, process: process),
               overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
-              frontierPulls[peer.key]?.sessionID != peer.sessionID,
+              overlayRecords[peer.key]?.frontierPull?.sessionID != peer.sessionID,
               peerHeight <= ourHeight + Self.rangeSyncDepthThreshold else { return }
         let requestID = makeRequestID()
         guard let payload = try? AcceptedLeavesRequestMessage(
             requestID: requestID,
             afterCID: nil
         ).encoded() else { return }
-        frontierPulls[peer.key] = FrontierPull(
-            sessionID: peer.sessionID,
-            requestID: requestID
-        )
+        overlayRecords.update(peer.key) {
+            $0.frontierPull = FrontierPull(
+                sessionID: peer.sessionID,
+                requestID: requestID
+            )
+        }
         SyncTrace.log(
             "frontier pull peer=\(peer.key.hex.prefix(8)) "
                 + "peerHeight=\(peerHeight) ours=\(ourHeight)"
