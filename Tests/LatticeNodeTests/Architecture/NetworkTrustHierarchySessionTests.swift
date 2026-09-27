@@ -969,11 +969,11 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             ])
             let status = await recovered.status()
             XCTAssertEqual(status.tipCID, orphanHeader.rawCID)
-            let promotedA = try await recovered.issuedParentCarrierLink(
+            let promotedA = try await recovered.store.issuedParentCarrierLink(
                 carrierCID: orphanHeader.rawCID,
                 rootCID: orphanCarrierA
             )
-            let promotedB = try await recovered.issuedParentCarrierLink(
+            let promotedB = try await recovered.store.issuedParentCarrierLink(
                 carrierCID: orphanHeader.rawCID,
                 rootCID: orphanCarrierB
             )
@@ -1149,7 +1149,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             XCTAssertEqual(tips.validated, 0, "and is not executed by arriving")
             let weight = await recovered.subtreeWeight(of: carriedHeader.rawCID)
             XCTAssertNotNil(weight)
-            let inbox = try await recovered.parentEvidenceInbox()
+            let inbox = try await recovered.store.parentEvidenceInbox()
             XCTAssertTrue(inbox.isEmpty, "decided: consumed")
         } catch {
             await parent.stop()

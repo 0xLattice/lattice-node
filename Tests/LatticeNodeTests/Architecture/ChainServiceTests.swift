@@ -1201,7 +1201,7 @@ final class ChainServiceTests: XCTestCase {
             issuingAuthorityKey: configuration.processPublicKey
         )
         let admissionsBefore = try await store.stagedAdmissions()
-        let leavesBefore = try await process.acceptedLeafPage(
+        let leavesBefore = try await process.store.acceptedLeafPage(
             afterCID: nil,
             snapshotSequence: nil,
             limit: 16
@@ -1256,7 +1256,7 @@ final class ChainServiceTests: XCTestCase {
         let publishedBlockCount = await publishedBlocks.count()
         XCTAssertEqual(publishedBlockCount, 0)
         let admissionsAfter = try await store.stagedAdmissions()
-        let leavesAfter = try await process.acceptedLeafPage(
+        let leavesAfter = try await process.store.acceptedLeafPage(
             afterCID: nil,
             snapshotSequence: nil,
             limit: 16

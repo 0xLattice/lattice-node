@@ -1391,7 +1391,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             // take several times longer to get here.
             var indexed = false
             for _ in 0..<1_000 where !indexed {
-                indexed = try await fixture.process.issuedChildEvidenceScanHead(
+                indexed = try await fixture.process.store.issuedChildEvidenceScanHead(
                     directory: "Payments"
                 ).throughOrdinal > 0
                 if !indexed { try await Task.sleep(for: .milliseconds(10)) }
@@ -2119,7 +2119,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
         }
         guard try await process.pendingChildProofCarrierCIDs()
             == [carrierHeader.rawCID],
-              try await process.issuedChildEvidenceSummaries(
+              try await process.store.issuedChildEvidenceSummaries(
                 directory: "Payments",
                 afterOrdinal: 0,
                 throughOrdinal: UInt64(Int64.max),

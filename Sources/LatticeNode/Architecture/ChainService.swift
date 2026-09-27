@@ -2348,7 +2348,7 @@ public actor ChainService {
                 // A self-contained child genesis commits to the empty parent
                 // state, so its recorded authorization binds to emptyHeader —
                 // never the recording block's prevState.
-                if let link = try? await process.issuedParentGenesisLink(
+                if let link = try? await process.store.issuedParentGenesisLink(
                     directory: anchor.directory,
                     childGenesisCID: anchor.genesisCID,
                     parentStateCID: LatticeState.emptyHeader.rawCID

@@ -91,7 +91,7 @@ final class MultichainInvariantTests: XCTestCase {
         )
         XCTAssertTrue(carrierOutcome.decision.isAccepted)
         _ = try await parent.retryPendingChildProofs(carrierCID: carrierHeader.rawCID)
-        let issued = try await parent.issuedChildEvidence(
+        let issued = try await parent.store.issuedChildEvidence(
             childCID: childBlockCID, directory: "Payments", rootCID: carrierHeader.rawCID
         )
         let evidence = try XCTUnwrap(issued)
@@ -347,7 +347,7 @@ final class MultichainInvariantTests: XCTestCase {
         XCTAssertTrue(n2Outcome.decision.isAccepted)
         _ = try await nexus.retryPendingChildProofs(carrierCID: n2Header.rawCID)
         let a2CID = try BlockHeader(node: a2).rawCID
-        let a2Issued = try await nexus.issuedChildEvidence(childCID: a2CID, directory: "A", rootCID: n2Header.rawCID)
+        let a2Issued = try await nexus.store.issuedChildEvidence(childCID: a2CID, directory: "A", rootCID: n2Header.rawCID)
         let a2Evidence = try XCTUnwrap(a2Issued)
         // A2's prevState is A1's post-state: A executed A1, Nexus never did.
         // What A pulls from Nexus's node joins what A already holds.
@@ -372,7 +372,7 @@ final class MultichainInvariantTests: XCTestCase {
         _ = try await a.retryPendingChildProofs(carrierCID: a2CID, remoteSource: aContent)
         // The proof's root is the Nexus block whose work secures it, not A2.
         let b1CID = try BlockHeader(node: b1).rawCID
-        let b1Issued = try await a.issuedChildEvidence(childCID: b1CID, directory: "B", rootCID: n2Header.rawCID)
+        let b1Issued = try await a.store.issuedChildEvidence(childCID: b1CID, directory: "B", rootCID: n2Header.rawCID)
         let b1Evidence = try XCTUnwrap(b1Issued)
         let bContent = InMemoryContentStore()
         try await BlockHeader(node: b1).storeBlock(fetcher: UnionFetcher([a, nexus]), storer: bContent)
@@ -513,7 +513,7 @@ final class MultichainInvariantTests: XCTestCase {
         )
         XCTAssertTrue(carrierOutcome.decision.isAccepted)
         _ = try await parent.retryPendingChildProofs(carrierCID: carrierHeader.rawCID)
-        let issued = try await parent.issuedChildEvidence(
+        let issued = try await parent.store.issuedChildEvidence(
             childCID: try BlockHeader(node: childBlock).rawCID,
             directory: "Payments",
             rootCID: carrierHeader.rawCID
@@ -686,7 +686,7 @@ final class MultichainInvariantTests: XCTestCase {
             carrierOutcome.parentCarrierLink?.carrierCID,
             carrierHeader.rawCID
         )
-        let persistedEvidence = try await parent!.issuedChildEvidence(
+        let persistedEvidence = try await parent!.store.issuedChildEvidence(
             childCID: childHeader.rawCID,
             directory: "Payments",
             rootCID: carrierHeader.rawCID
@@ -695,18 +695,18 @@ final class MultichainInvariantTests: XCTestCase {
 
         parent = nil
         parent = try await ChainProcess.open(configuration: parentConfiguration)
-        let reopenedEvidence = try await parent!.issuedChildEvidence(
+        let reopenedEvidence = try await parent!.store.issuedChildEvidence(
             childCID: childHeader.rawCID,
             directory: "Payments",
             rootCID: carrierHeader.rawCID
         )
         let evidence = try XCTUnwrap(reopenedEvidence)
-        let reopenedCarrierLink = try await parent!.issuedParentCarrierLink(
+        let reopenedCarrierLink = try await parent!.store.issuedParentCarrierLink(
             carrierCID: carrierHeader.rawCID,
             rootCID: carrierHeader.rawCID
         )
         let carrierLink = try XCTUnwrap(reopenedCarrierLink)
-        let reopenedGenesisLink = try await parent!.issuedParentGenesisLink(
+        let reopenedGenesisLink = try await parent!.store.issuedParentGenesisLink(
             directory: "Payments",
             childGenesisCID: childGenesisCID,
             // A self-contained genesis's recorded link binds to the empty parent
@@ -894,7 +894,7 @@ final class MultichainInvariantTests: XCTestCase {
         XCTAssertTrue(carrierOutcome.decision.isAccepted, "carrier into \(directory)")
         _ = try await parent.retryPendingChildProofs(carrierCID: carrierHeader.rawCID)
         let childBlockCID = try BlockHeader(node: childBlock).rawCID
-        let issued = try await parent.issuedChildEvidence(
+        let issued = try await parent.store.issuedChildEvidence(
             childCID: childBlockCID, directory: directory, rootCID: carrierHeader.rawCID
         )
         let evidence = try XCTUnwrap(issued)

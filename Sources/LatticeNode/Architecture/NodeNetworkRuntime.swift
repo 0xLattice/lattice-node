@@ -807,7 +807,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         process: ChainProcess
     ) async throws -> [CandidateSeed] {
         var candidates: [CandidateSeed] = []
-        for item in try await process.parentEvidenceInbox() {
+        for item in try await process.store.parentEvidenceInbox() {
             let directHop = await item.package.package.proof.directHop()
             guard let childCID = directHop?.childCID else {
                 throw NodeStoreError.corrupt(
@@ -1687,7 +1687,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // this set; an announcement can at most re-ready an inbox entry's
         // own attempt. Offer once the admission decides or parks; the
         // drain re-arms the offer either way.
-        if let pending = try? await process.pendingHandoffChildCIDs(),
+        if let pending = try? await process.store.pendingHandoffChildCIDs(),
            pending.contains(where: { candidateAcquirer.isAwaitingAdmission($0) }) {
             candidateOfferDeferredByAdmission = true
             SyncTrace.log("candidate offer deferred: own carried candidate awaiting admission")
@@ -2006,7 +2006,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         else {
             throw NodeNetworkRuntimeError.invalidChildProof
         }
-        guard (try? await process.issuedChildEvidence(
+        guard (try? await process.store.issuedChildEvidence(
             childCID: childCID,
             directory: childDirectory,
             rootCID: proof.rootCID
@@ -2055,12 +2055,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
             childEvidencePublicationsInFlight[session, default: 0] += 1
         }
         guard let directory = childPath.last,
-            let evidence = try? await process.issuedChildEvidence(
+            let evidence = try? await process.store.issuedChildEvidence(
                 childCID: childCID,
                 directory: directory,
                 rootCID: rootCID
             ),
-            let indexed = try? await process.issuedChildEvidenceSummary(
+            let indexed = try? await process.store.issuedChildEvidenceSummary(
                 childCID: childCID,
                 directory: directory,
                 rootCID: rootCID
@@ -2789,7 +2789,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 }
             }
             guard
-                let leaves = try? await process.acceptedLeafPage(
+                let leaves = try? await process.store.acceptedLeafPage(
                     afterCID: request.afterCID,
                     snapshotSequence: request.snapshotSequence,
                     limit: AcceptedLeavesResponseMessage.maximumLeaves + 1
@@ -3291,7 +3291,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 attachmentCID: $0.attachmentCID
             )
         }
-        guard let entries = try? await process.childRootAttachmentSummaries(
+        guard let entries = try? await process.store.childRootAttachmentSummaries(
             scope: .incomingCarrier,
             directory: configuration.address.directory,
             after: after,
@@ -3337,7 +3337,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 .recoveredAuthenticatedChildPackage(for: request.childCID),
               let edge = await DirectChildEdge.derive(from: package.package.proof),
               let edgeCID = edge.edgeCID,
-              let attachmentCID = try? await process.portableEvidenceVolumeCID(
+              let attachmentCID = try? await process.store.portableEvidenceVolumeCID(
                 scope: .incomingCarrier,
                 edgeCID: edgeCID,
                 rootCID: package.package.proof.rootCID
@@ -3534,7 +3534,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         activeEvidenceVolumes.insert(lease)
         defer { activeEvidenceVolumes.remove(lease) }
-        if let evidence = try? await process.childRootAttachment(
+        if let evidence = try? await process.store.issuedChildEvidence(
             scope: .incomingCarrier,
             edgeCID: summary.edgeCID,
             rootCID: summary.rootCID
@@ -3923,7 +3923,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             switch request.fact {
             case .genesis(let childGenesisCID, let parentStateCID):
                 guard let directory = childPath.last else { return }
-                found = (try? await process.issuedParentGenesisLink(
+                found = (try? await process.store.issuedParentGenesisLink(
                     directory: directory,
                     childGenesisCID: childGenesisCID,
                     parentStateCID: parentStateCID
@@ -4115,7 +4115,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     message.payload
                 ), request.childPath == childPath
             else { return }
-            guard let head = try? await process.issuedChildEvidenceScanHead(
+            guard let head = try? await process.store.issuedChildEvidenceScanHead(
                     directory: directory
                   )
             else { return }
@@ -4125,7 +4125,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 ? (request.through ?? head.throughOrdinal)
                 : head.throughOrdinal
             guard through <= head.throughOrdinal,
-                  let summaries = try? await process.issuedChildEvidenceSummaries(
+                  let summaries = try? await process.store.issuedChildEvidenceSummaries(
                     directory: directory,
                     afterOrdinal: cursor,
                     throughOrdinal: through,
@@ -5299,7 +5299,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     from: authenticated.package.proof
                ), let edgeCID = edge.edgeCID {
                 if let portableAttachmentCID = try? await process
-                        .portableEvidenceVolumeCID(
+                        .store.portableEvidenceVolumeCID(
                             scope: .incomingCarrier,
                             edgeCID: edgeCID,
                             rootCID: authenticated.package.proof.rootCID
@@ -5437,7 +5437,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             deficientProviders: failedOverlayProviders
         )
         if outcome.decision.isAccepted, authenticatedPackage != nil,
-           (try? await process.parentEvidenceInboxHasCapacity()) == true {
+           (try? await process.store.parentEvidenceInboxHasCapacity()) == true {
             if let parent = configuredParentPeer(),
                let session = parentEvidenceSession(for: parent) {
                 parentEvidence.capacityBecameAvailable(for: session)
@@ -6853,7 +6853,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             )
         } else {
             guard let persisted = try? await fence.process
-                .parentEvidenceScanCursor()
+                .store.parentEvidenceScanCursor()
             else { return false }
             durableCursor = persisted
         }
