@@ -554,6 +554,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// carry costs one round, and a round that ends without the block
     /// releases the hold.
     private var requestedCarriedChildCID: String?
+    /// Times the offer held behind a carried block, for tests.
+    private var carriedHoldCount = 0
     /// One coalescing offer task: an input change while a build runs marks it
     /// dirty and the task runs again; nothing is queued.
     private var candidateOfferTask: Task<Void, Never>?
@@ -1670,6 +1672,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
            carried != releasedCarriedChildCID,
            !(await process.hasAcceptedBlock(carried)) {
             candidateOfferDeferredByAdmission = true
+            carriedHoldCount += 1
             SyncTrace.log("candidate offer deferred: carried \(carried.prefix(12)) not yet admitted")
             return
         }
@@ -4663,6 +4666,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
 
     func candidateOfferHeldForTesting() -> Bool {
         candidateOfferDeferredByAdmission
+    }
+
+    func carriedHoldCountForTesting() -> Int {
+        carriedHoldCount
     }
 
     func refusedChildEvidenceHintCountForTesting() -> Int {

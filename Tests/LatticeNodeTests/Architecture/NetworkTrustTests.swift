@@ -6416,14 +6416,17 @@ final class NetworkTrustTests: XCTestCase {
             }
             XCTAssertEqual(named, firstHeader.rawCID, "the context names the carried block")
             // The hold is the child's own: its offer task deferred behind the
-            // named block, which this child has not admitted.
-            var offerHeld = false
+            // named block, which this child has not admitted. (Here the
+            // admission handler throws, so the scan round that serves the
+            // block finds nothing holding an attempt for it and releases the
+            // hold again: what is pinned is that the hold happened.)
+            var holds = 0
             for _ in 0..<250 {
-                offerHeld = await fixture.childRuntime.candidateOfferHeldForTesting()
-                if offerHeld { break }
+                holds = await fixture.childRuntime.carriedHoldCountForTesting()
+                if holds > 0 { break }
                 try await Task.sleep(for: .milliseconds(20))
             }
-            XCTAssertTrue(offerHeld, "the child holds its offer until the carried block lands")
+            XCTAssertGreaterThan(holds, 0, "the child held its offer behind the carried block")
 
             // The child admits and validates its carried block, then builds
             // on it; that candidate is carried.
