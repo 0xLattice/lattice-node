@@ -173,10 +173,10 @@ extension NodeNetworkRuntime {
         await Timers.poll(every: .milliseconds(10), onCancel: false) {
             guard isCurrentRuntime(generation: generation, process: process),
                   peer.map({
-                      hierarchyRecords[$0.key]?.session?.sessionID == $0.sessionID
-                        && hierarchyRecords[$0.key]?.role == .parent
+                      hierarchyState.hierarchyRecords[$0.key]?.session?.sessionID == $0.sessionID
+                        && hierarchyState.hierarchyRecords[$0.key]?.role == .parent
                   }) ?? true else { return .done(false) }
-            return enqueueCandidate(candidate) ? .done(true) : .again
+            return enqueueCandidate(candidate, generation: generation) ? .done(true) : .again
         }
     }
 
@@ -194,16 +194,16 @@ extension NodeNetworkRuntime {
 
     private func clearRuntimeState() async {
         process = nil
-        let removedOverlayRecords = overlayRecords.removeAll()
-        let removedHierarchyRecords = hierarchyRecords.removeAll()
+        let removedOverlayRecords = overlayState.overlayRecords.removeAll()
+        let removedHierarchyRecords = hierarchyState.hierarchyRecords.removeAll()
         sessionLeases.servingReadEndpoints.removeAll()
-        readURLDiscovery.cache.removeAll()
-        for inFlight in readURLDiscovery.tasks.values {
+        overlayState.readURLDiscovery.cache.removeAll()
+        for inFlight in overlayState.readURLDiscovery.tasks.values {
             inFlight.task.cancel()
         }
-        readURLDiscovery.tasks.removeAll()
-        let readEndpointWaiters = readURLDiscovery.pendingReadEndpoints.values
-        readURLDiscovery.pendingReadEndpoints.removeAll()
+        overlayState.readURLDiscovery.tasks.removeAll()
+        let readEndpointWaiters = overlayState.readURLDiscovery.pendingReadEndpoints.values
+        overlayState.readURLDiscovery.pendingReadEndpoints.removeAll()
         for pending in readEndpointWaiters {
             pending.timeout.cancel()
             pending.continuation.resume(returning: [])
@@ -218,28 +218,28 @@ extension NodeNetworkRuntime {
         waitingCandidateRetryTask?.cancel()
         waitingCandidateRetryTask = nil
         waitingCandidateRetryGeneration = nil
-        for pending in pendingTransactionInventories.values {
+        for pending in overlayState.pendingTransactionInventories.values {
             pending.timeout.cancel()
         }
-        pendingTransactionInventories.removeAll()
+        overlayState.pendingTransactionInventories.removeAll()
         sessionLeases.activeTransactionVolumes.removeAll()
-        childProofRecoveryTask?.cancel()
-        childProofRecoveryTask = nil
+        hierarchyState.childProofRecoveryTask?.cancel()
+        hierarchyState.childProofRecoveryTask = nil
         genesisAnnounceTask?.cancel()
         genesisAnnounceTask = nil
-        adoptedGenesisTask?.cancel()
-        adoptedGenesisTask = nil
+        hierarchyState.adoptedGenesisTask?.cancel()
+        hierarchyState.adoptedGenesisTask = nil
         // Joined, not just cancelled: `Task.sleep` unwinds on cancellation but
         // an in-flight dial does not, and the search holds the ChainProcess
         // strongly, so an unjoined task can outlive stop() still holding the
         // storage lock. Actors are reentrant, so awaiting here lets the task's
         // own callbacks into this actor run to completion.
-        let peerSearch = peerSearchTask
-        peerSearchTask = nil
+        let peerSearch = overlayState.peerSearchTask
+        overlayState.peerSearchTask = nil
         peerSearch?.cancel()
         await peerSearch?.value
-        childProofRecoveryGeneration = nil
-        childProofRecoveryNeedsRefresh = false
+        hierarchyState.childProofRecoveryGeneration = nil
+        hierarchyState.childProofRecoveryNeedsRefresh = false
         sessionLeases.servingAcceptedLeaves.removeAll()
         sessionLeases.servingAncestorRange.removeAll()
         clearRangeSync()
@@ -250,57 +250,57 @@ extension NodeNetworkRuntime {
             retryWindow: planeConfigurations.overlay.requestTimeout
                 * Self.maximumCandidateWaitTicks
         )
-        pendingEvidenceIndexes.removeAll()
-        discardPendingParentChainFacts(where: { _ in true }, requeue: false)
-        for pending in pendingGenesisVerifications.values {
+        hierarchyState.pendingEvidenceIndexes.removeAll()
+        _ = discardPendingParentChainFacts(where: { _ in true })
+        for pending in hierarchyState.pendingGenesisVerifications.values {
             pending.continuation.resume(returning: false)
         }
-        pendingGenesisVerifications.removeAll()
-        for pending in pendingGenesisResolves.values {
+        hierarchyState.pendingGenesisVerifications.removeAll()
+        for pending in hierarchyState.pendingGenesisResolves.values {
             pending.continuation.resume(returning: nil)
         }
-        pendingGenesisResolves.removeAll()
+        hierarchyState.pendingGenesisResolves.removeAll()
         parentStateQueryGuard.removeAll()
-        rangeSync.reentryTask?.cancel()
-        rangeSync.reentryTask = nil
+        overlayState.rangeSync.reentryTask?.cancel()
+        overlayState.rangeSync.reentryTask = nil
         sessionLeases.activeEvidenceVolumes.removeAll()
-        portableEvidenceWorker?.cancel()
-        portableEvidenceWorker = nil
+        overlayState.portableEvidenceWorker?.cancel()
+        overlayState.portableEvidenceWorker = nil
         sessionLeases.portableEvidenceOrder.removeAll()
         sessionLeases.portableEvidenceWork.removeAll()
         parentEvidence.reset()
         // After the peer-search join, as before: a pushed sequence (recorded
         // after its send, without a session check) or anything else these
         // fields took while the join was awaited is dropped too.
-        for key in Array(hierarchyRecords.keys) {
-            hierarchyRecords.update(key) {
+        for key in Array(hierarchyState.hierarchyRecords.keys) {
+            hierarchyState.hierarchyRecords.update(key) {
                 $0.offer = nil
                 $0.pushedSequence = nil
                 $0.refusedHint = nil
             }
         }
-        runReportApplyTail?.cancel()
-        runReportApplyTail = nil
-        parentTipContext = nil
-        parentTipPushTask?.cancel()
-        parentTipPushTask = nil
-        parentTipPushDirty = false
-        descendantRewards = []
-        descendantMinimumWork = []
-        receivedParentTip = nil
-        releasedCarriedChildCID = nil
-        requestedCarriedChildCID = nil
-        candidateOfferTask?.cancel()
-        candidateOfferTask = nil
-        candidateOfferDirty = false
-        lastOfferedCandidateCID = nil
+        hierarchyState.runReportApplyTail?.cancel()
+        hierarchyState.runReportApplyTail = nil
+        hierarchyState.parentTipContext = nil
+        hierarchyState.parentTipPushTask?.cancel()
+        hierarchyState.parentTipPushTask = nil
+        hierarchyState.parentTipPushDirty = false
+        hierarchyState.descendantRewards = []
+        hierarchyState.descendantMinimumWork = []
+        hierarchyState.receivedParentTip = nil
+        hierarchyState.releasedCarriedChildCID = nil
+        hierarchyState.requestedCarriedChildCID = nil
+        hierarchyState.candidateOfferTask?.cancel()
+        hierarchyState.candidateOfferTask = nil
+        hierarchyState.candidateOfferDirty = false
+        hierarchyState.lastOfferedCandidateCID = nil
         // Sequences are per session, and a restart is a new session.
-        nextCandidateOfferSequence = 0
+        hierarchyState.nextCandidateOfferSequence = 0
         candidateOfferDeferredByAdmission = false
-        childPeerRotation.removeAll()
-        childPathRotation = 0
-        childProofPathRotation = 0
-        backfilledChildDirectories.removeAll()
+        hierarchyState.childPeerRotation.removeAll()
+        hierarchyState.childPathRotation = 0
+        hierarchyState.childProofPathRotation = 0
+        hierarchyState.backfilledChildDirectories.removeAll()
         chain = nil
     }
 }

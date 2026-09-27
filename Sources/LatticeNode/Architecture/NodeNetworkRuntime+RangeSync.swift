@@ -26,12 +26,12 @@ extension NodeNetworkRuntime {
         process: ChainProcess
     ) async {
         guard isCurrentRuntime(generation: generation, process: process),
-              rangeSync.state == nil,
-              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
+              overlayState.rangeSync.state == nil,
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
         let acquired = await process.canonicalTip()
         guard isCurrentRuntime(generation: generation, process: process),
-              rangeSync.state == nil,
-              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
+              overlayState.rangeSync.state == nil,
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
         SyncTrace.log(
             "range-sync start target=\(targetHeight) "
                 + "peer=\(peer.key.hex.prefix(8))"
@@ -40,7 +40,7 @@ extension NodeNetworkRuntime {
         // the same block — until the common-ancestor negotiation below
         // replaces it; a validated-tip CID under an acquired height would
         // re-page every held block above it.
-        rangeSync.state = RangeSync.State(
+        overlayState.rangeSync.state = RangeSync.State(
             peer: peer,
             requestID: 0,
             awaiting: false,
@@ -73,11 +73,11 @@ extension NodeNetworkRuntime {
         generation: UInt64,
         process: ChainProcess
     ) async {
-        guard let sync = rangeSync.state, sync.negotiated, !sync.awaiting, sync.hasMore,
+        guard let sync = overlayState.rangeSync.state, sync.negotiated, !sync.awaiting, sync.hasMore,
               isCurrentRuntime(generation: generation, process: process),
-              overlayRecords[sync.peer.key]?.readyPeer?.sessionID == sync.peer.sessionID else { return }
+              overlayState.overlayRecords[sync.peer.key]?.readyPeer?.sessionID == sync.peer.sessionID else { return }
         let applied = await fetchedHeight(process)
-        guard var current = rangeSync.state, current.requestID == sync.requestID,
+        guard var current = overlayState.rangeSync.state, current.requestID == sync.requestID,
               current.negotiated, !current.awaiting, current.hasMore,
               isCurrentRuntime(generation: generation, process: process) else { return }
         let window = RangeSync.maxPagesAhead
@@ -101,7 +101,7 @@ extension NodeNetworkRuntime {
             }
         )
         let peer = current.peer
-        rangeSync.state = current
+        overlayState.rangeSync.state = current
         _ = await overlay.sendMessage(
             to: peer,
             topic: NodeNetworkTopic.forwardRangeRequest,
@@ -115,7 +115,7 @@ extension NodeNetworkRuntime {
         generation: UInt64,
         process: ChainProcess
     ) async {
-        guard let sync = rangeSync.state, sync.awaiting,
+        guard let sync = overlayState.rangeSync.state, sync.awaiting,
               isCurrentRuntime(generation: generation, process: process),
               sync.peer.sessionID == peer.sessionID,
               let response = try? ForwardRangeResponseMessage.decoded(message.payload),
@@ -130,8 +130,8 @@ extension NodeNetworkRuntime {
         for cid in response.blockCIDs where CIDIdentity.isCanonical(cid) {
             await overlay.rememberProvider(rootCID: cid, peer: peer.id)
             guard isCurrentRuntime(generation: generation, process: process),
-                  rangeSync.state?.requestID == sync.requestID else { return }
-            guard overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
+                  overlayState.rangeSync.state?.requestID == sync.requestID else { return }
+            guard overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
                 // The peer we were syncing from is gone (or reconnected as a new
                 // session) mid-page — release the slot so another peer can drive
                 // catch-up instead of stranding it until the progress deadline.
@@ -147,11 +147,11 @@ extension NodeNetworkRuntime {
                 package: nil,
                 provider: candidateProvider(peer),
                 weighed: true
-            ))
+            ), generation: generation)
             lastCID = cid
             enqueued += 1
         }
-        guard var current = rangeSync.state, current.requestID == sync.requestID else { return }
+        guard var current = overlayState.rangeSync.state, current.requestID == sync.requestID else { return }
         current.settleResponse()
         current.hasMore = response.hasMore
         // Empty page: caught up, our frontier is off this peer's main chain, or
@@ -162,9 +162,9 @@ extension NodeNetworkRuntime {
         // must keep actively re-announcing to re-capture the slot).
         guard enqueued > 0, let lastCID else {
             var claimed: UInt64?
-            if let claim = overlayRecords[peer.key]?.announcedTip,
+            if let claim = overlayState.overlayRecords[peer.key]?.announcedTip,
                claim.peer.sessionID == peer.sessionID {
-                overlayRecords.update(peer.key) { $0.announcedTip = nil }
+                overlayState.overlayRecords.update(peer.key) { $0.announcedTip = nil }
                 claimed = claim.height
             }
             clearRangeSync()
@@ -189,7 +189,7 @@ extension NodeNetworkRuntime {
         // the sync (and its progress watchdog) alive until the applied tip
         // actually reaches the target — a single wedged content fetch mid-apply
         // would otherwise strand catch-up with no path to re-request the block.
-        rangeSync.state = current
+        overlayState.rangeSync.state = current
         serviceBlockFetcher()
         await pumpRangeSync(generation: generation, process: process)
     }
@@ -229,11 +229,11 @@ extension NodeNetworkRuntime {
         generation: UInt64,
         process: ChainProcess
     ) async {
-        guard let sync = rangeSync.state, !sync.awaiting,
+        guard let sync = overlayState.rangeSync.state, !sync.awaiting,
               isCurrentRuntime(generation: generation, process: process),
-              overlayRecords[sync.peer.key]?.readyPeer?.sessionID == sync.peer.sessionID else { return }
+              overlayState.overlayRecords[sync.peer.key]?.readyPeer?.sessionID == sync.peer.sessionID else { return }
         let locator = await buildBlockLocator(process: process)
-        guard var current = rangeSync.state, current.requestID == sync.requestID,
+        guard var current = overlayState.rangeSync.state, current.requestID == sync.requestID,
               !current.awaiting,
               isCurrentRuntime(generation: generation, process: process) else { return }
         let requestID = makeRequestID()
@@ -254,7 +254,7 @@ extension NodeNetworkRuntime {
             }
         )
         let peer = current.peer
-        rangeSync.state = current
+        overlayState.rangeSync.state = current
         _ = await overlay.sendMessage(
             to: peer,
             topic: NodeNetworkTopic.ancestorRangeRequest,
@@ -269,7 +269,7 @@ extension NodeNetworkRuntime {
         generation: UInt64,
         process: ChainProcess
     ) async {
-        guard let sync = rangeSync.state, sync.awaiting,
+        guard let sync = overlayState.rangeSync.state, sync.awaiting,
               isCurrentRuntime(generation: generation, process: process),
               sync.peer.sessionID == peer.sessionID,
               let response = try? AncestorRangeResponseMessage.decoded(message.payload),
@@ -290,8 +290,8 @@ extension NodeNetworkRuntime {
         // never conclude "caught up".
         guard let ancestor = response.commonAncestor else {
             SyncTrace.log("ancestor-range no-overlap peer=\(peer.key.hex.prefix(8))")
-            if overlayRecords[peer.key]?.announcedTip?.peer.sessionID == peer.sessionID {
-                overlayRecords.update(peer.key) { $0.announcedTip = nil }
+            if overlayState.overlayRecords[peer.key]?.announcedTip?.peer.sessionID == peer.sessionID {
+                overlayState.overlayRecords.update(peer.key) { $0.announcedTip = nil }
             }
             clearRangeSync()
             return
@@ -306,8 +306,8 @@ extension NodeNetworkRuntime {
         for cid in response.blockCIDs where CIDIdentity.isCanonical(cid) {
             await overlay.rememberProvider(rootCID: cid, peer: peer.id)
             guard isCurrentRuntime(generation: generation, process: process),
-                  rangeSync.state?.requestID == sync.requestID else { return }
-            guard overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
+                  overlayState.rangeSync.state?.requestID == sync.requestID else { return }
+            guard overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
                 clearRangeSync()
                 return
             }
@@ -319,7 +319,7 @@ extension NodeNetworkRuntime {
                 package: nil,
                 provider: candidateProvider(peer),
                 weighed: true
-            ))
+            ), generation: generation)
             lastCID = cid
             enqueued += 1
         }
@@ -332,9 +332,9 @@ extension NodeNetworkRuntime {
             // forever. A fresh announcement re-records it. Caught up to an
             // honest claim, this is the edge moment for its frontier pull.
             var claimed: UInt64?
-            if let claim = overlayRecords[peer.key]?.announcedTip,
+            if let claim = overlayState.overlayRecords[peer.key]?.announcedTip,
                claim.peer.sessionID == peer.sessionID {
-                overlayRecords.update(peer.key) { $0.announcedTip = nil }
+                overlayState.overlayRecords.update(peer.key) { $0.announcedTip = nil }
                 claimed = claim.height
             }
             clearRangeSync()
@@ -354,7 +354,7 @@ extension NodeNetworkRuntime {
         // stream after two pages, before the streamed main chain can outweigh
         // the sibling. Fall back to the frontier height if the lookup fails.
         let anchorHeight = await process.acceptedBlockHeight(ancestor)
-        guard var committed = rangeSync.state, committed.requestID == sync.requestID else { return }
+        guard var committed = overlayState.rangeSync.state, committed.requestID == sync.requestID else { return }
         committed.settleResponse()
         committed.negotiated = true
         let base = anchorHeight ?? committed.requestedHeight
@@ -362,7 +362,7 @@ extension NodeNetworkRuntime {
         committed.requestedHeight = base + enqueued
         committed.progressBaselineHeight = min(committed.progressBaselineHeight, base)
         committed.hasMore = response.hasMore
-        rangeSync.state = committed
+        overlayState.rangeSync.state = committed
         serviceBlockFetcher()
         await pumpRangeSync(generation: generation, process: process)
     }
@@ -382,8 +382,8 @@ extension NodeNetworkRuntime {
         generation: UInt64,
         process: ChainProcess
     ) {
-        guard var sync = rangeSync.state else { return }
-        let epoch = rangeSync.advanceProgressEpoch()
+        guard var sync = overlayState.rangeSync.state else { return }
+        let epoch = overlayState.rangeSync.advanceProgressEpoch()
         sync.progressEpoch = epoch
         sync.progressTimeout?.cancel()
         sync.progressTimeout = Timers.deadline(
@@ -396,7 +396,7 @@ extension NodeNetworkRuntime {
                 process: process
             )
         }
-        rangeSync.state = sync
+        overlayState.rangeSync.state = sync
     }
 
     private func rangeSyncProgressDeadline(
@@ -404,11 +404,11 @@ extension NodeNetworkRuntime {
         generation: UInt64,
         process: ChainProcess
     ) async {
-        guard let sync = rangeSync.state, sync.progressEpoch == epoch,
+        guard let sync = overlayState.rangeSync.state, sync.progressEpoch == epoch,
               isCurrentGeneration(generation) else { return }
         let acquired = await process.canonicalTip()
         let applied = acquired?.height ?? 0
-        guard var current = rangeSync.state, current.progressEpoch == epoch,
+        guard var current = overlayState.rangeSync.state, current.progressEpoch == epoch,
               isCurrentGeneration(generation) else { return }
         if applied >= current.targetHeight {
             // Caught up to the peer's advertised tip: release the slot so the
@@ -417,7 +417,7 @@ extension NodeNetworkRuntime {
             clearRangeSync()
             return
         }
-        guard overlayRecords[current.peer.key]?.readyPeer?.sessionID == current.peer.sessionID
+        guard overlayState.overlayRecords[current.peer.key]?.readyPeer?.sessionID == current.peer.sessionID
         else {
             // The peer went away before we caught up: release the slot so a new
             // deep peer can take over instead of re-driving into a dead session.
@@ -429,7 +429,7 @@ extension NodeNetworkRuntime {
             // enqueued pages. Re-arm and keep watching; do not re-request.
             current.progressBaselineHeight = applied
             current.redriveAttempts = 0
-            rangeSync.state = current
+            overlayState.rangeSync.state = current
             scheduleRangeSyncProgress(generation: generation, process: process)
             return
         }
@@ -438,9 +438,9 @@ extension NodeNetworkRuntime {
             // withholding a block we need. Demote its recorded claim (see the
             // empty-page site) and release the slot so a different deep
             // peer can drive catch-up instead.
-            if overlayRecords[current.peer.key]?.announcedTip?.peer.sessionID
+            if overlayState.overlayRecords[current.peer.key]?.announcedTip?.peer.sessionID
                 == current.peer.sessionID {
-                overlayRecords.update(current.peer.key) { $0.announcedTip = nil }
+                overlayState.overlayRecords.update(current.peer.key) { $0.announcedTip = nil }
             }
             clearRangeSync()
             return
@@ -459,7 +459,7 @@ extension NodeNetworkRuntime {
         current.hasMore = true
         current.negotiated = false
         current.settleResponse()
-        rangeSync.state = current
+        overlayState.rangeSync.state = current
         scheduleRangeSyncProgress(generation: generation, process: process)
         // The rewound anchor is our frontier again: negotiate the common
         // ancestor before streaming, so a frontier that sits on a losing
@@ -468,9 +468,9 @@ extension NodeNetworkRuntime {
     }
 
     private func rangeSyncTimedOut(requestID: UInt64, generation: UInt64) async {
-        guard let sync = rangeSync.state, sync.requestID == requestID, sync.awaiting,
+        guard let sync = overlayState.rangeSync.state, sync.requestID == requestID, sync.awaiting,
               isCurrentGeneration(generation), let process else { return }
-        guard overlayRecords[sync.peer.key]?.readyPeer?.sessionID == sync.peer.sessionID else {
+        guard overlayState.overlayRecords[sync.peer.key]?.readyPeer?.sessionID == sync.peer.sessionID else {
             // Peer we were paging from is gone: release the slot so another
             // deep peer's announcement can start a fresh sync.
             clearRangeSync()
@@ -484,7 +484,7 @@ extension NodeNetworkRuntime {
         // re-open the marooned-follower bug on one dropped packet.
         var current = sync
         current.settleResponse()
-        rangeSync.state = current
+        overlayState.rangeSync.state = current
         if current.negotiated {
             await pumpRangeSync(generation: generation, process: process)
         } else {
@@ -494,7 +494,7 @@ extension NodeNetworkRuntime {
 
     func clearRangeSync(from caller: String = #function) {
         SyncTrace.log("range-sync clear (\(caller))")
-        rangeSync.clear()
+        overlayState.rangeSync.clear()
         scheduleRangeSyncReentry()
     }
 
@@ -503,11 +503,11 @@ extension NodeNetworkRuntime {
     /// still far behind would idle forever. Re-entry is the receiver's own
     /// assessment, probed one request-timeout after each clear.
     private func scheduleRangeSyncReentry() {
-        guard rangeSync.reentryTask == nil, !recordedAnnouncedTips.isEmpty else {
+        guard overlayState.rangeSync.reentryTask == nil, !recordedAnnouncedTips.isEmpty else {
             return
         }
         let generation = runtimeGeneration
-        rangeSync.reentryTask = Timers.deadline(
+        overlayState.rangeSync.reentryTask = Timers.deadline(
             after: planeConfigurations.overlay.requestTimeout,
             generation: generation
         ) { [weak self] generation in
@@ -516,17 +516,17 @@ extension NodeNetworkRuntime {
     }
 
     private func maybeRestartRangeSync(generation: UInt64) async {
-        rangeSync.reentryTask = nil
+        overlayState.rangeSync.reentryTask = nil
         guard isCurrentGeneration(generation), isRunning,
-              rangeSync.state == nil, let process else { return }
+              overlayState.rangeSync.state == nil, let process else { return }
         let ourHeight = await fetchedHeight(process)
         guard isCurrentRuntime(generation: generation, process: process),
-              rangeSync.state == nil else { return }
+              overlayState.rangeSync.state == nil else { return }
         // Every recorded peer we are now at the edge with (the sync that just
         // cleared brought us there, or nothing beyond the edge remains) gets
         // its one frontier pull; the helper re-checks the edge per peer.
         for (key, claim) in recordedAnnouncedTips.sorted(by: { $0.key.hex < $1.key.hex })
-            where overlayRecords[key]?.readyPeer?.sessionID == claim.peer.sessionID {
+            where overlayState.overlayRecords[key]?.readyPeer?.sessionID == claim.peer.sessionID {
             await pullFrontierIfAtEdge(
                 from: claim.peer,
                 peerHeight: claim.height,
@@ -534,10 +534,10 @@ extension NodeNetworkRuntime {
                 process: process
             )
             guard isCurrentRuntime(generation: generation, process: process),
-                  rangeSync.state == nil else { return }
+                  overlayState.rangeSync.state == nil else { return }
         }
         let candidates = recordedAnnouncedTips.filter { key, value in
-            overlayRecords[key]?.readyPeer?.sessionID == value.peer.sessionID
+            overlayState.overlayRecords[key]?.readyPeer?.sessionID == value.peer.sessionID
                 && value.height > ourHeight + RangeSync.depthThreshold
         }
         guard let best = candidates.max(by: {

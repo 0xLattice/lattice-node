@@ -12,25 +12,25 @@ extension NodeNetworkRuntime {
     /// it discovers via the DHT. Only declared URLs; bounded, cached briefly.
     public func discoverProviderReadURLs(genesisCID: String) async -> [String] {
         guard CIDIdentity.isCanonical(genesisCID) else { return [] }
-        if let cached = readURLDiscovery.cachedURLs(for: genesisCID, now: Date()) {
+        if let cached = overlayState.readURLDiscovery.cachedURLs(for: genesisCID, now: Date()) {
             return cached
         }
         // Coalesce concurrent HTTP callers onto one discovery so a request
         // burst cannot multiply overlay asks.
-        if let inFlight = readURLDiscovery.tasks[genesisCID] {
+        if let inFlight = overlayState.readURLDiscovery.tasks[genesisCID] {
             return await inFlight.task.value
         }
         let token = makeRequestID()
         let task = Task { [weak self] in
             await self?.performReadURLDiscovery(genesisCID: genesisCID) ?? []
         }
-        readURLDiscovery.tasks[genesisCID] = (token: token, task: task)
+        overlayState.readURLDiscovery.tasks[genesisCID] = (token: token, task: task)
         let urls = await task.value
         // Only the creator un-registers, and only its own entry: a stop/start
         // cycle clears the map, and a fresh discovery registered under the
         // same key must not be evicted by this stale resume.
-        if readURLDiscovery.tasks[genesisCID]?.token == token {
-            readURLDiscovery.tasks.removeValue(forKey: genesisCID)
+        if overlayState.readURLDiscovery.tasks[genesisCID]?.token == token {
+            overlayState.readURLDiscovery.tasks.removeValue(forKey: genesisCID)
         }
         return urls
     }
@@ -85,7 +85,7 @@ extension NodeNetworkRuntime {
             var asked = 0
             for (index, key) in candidates.enumerated() {
                 guard asked < ReadURLDiscovery.maximumReadEndpointAsks,
-                      let peer = overlayRecords[key]?.readyPeer else { continue }
+                      let peer = overlayState.overlayRecords[key]?.readyPeer else { continue }
                 asked += 1
                 group.addTask { [weak self] in
                     guard let self else { return (index, []) }
@@ -112,58 +112,8 @@ extension NodeNetworkRuntime {
         }
         let bounded = Array(declared.prefix(16))
         guard isCurrentGeneration(generation) else { return bounded }
-        readURLDiscovery.store(bounded, for: genesisCID, now: Date())
+        overlayState.readURLDiscovery.store(bounded, for: genesisCID, now: Date())
         return bounded
-    }
-
-    /// This node's own self-description for `genesisCID`: its configured
-    /// public read URL when that is its own chain's genesis, plus the URLs its
-    /// wired children declared in their hierarchy hellos when the CID is one
-    /// this node anchored for a child directory. Deduped, bounded.
-    func declaredReadURLs(
-        genesisCID: String,
-        process: ChainProcess
-    ) async -> [String] {
-        var urls: [String] = []
-        if let own = configuration.publicReadURL,
-           await process.canonicalBlockCID(atHeight: 0) == genesisCID {
-            urls.append(own)
-        }
-        // One sample of the wired children, taken before the resolve suspends
-        // and iterated below: the answer then describes a single consistent
-        // moment. Reading live hierarchy roles after the suspension instead
-        // would mix a child admitted mid-resolve into a lookup that never
-        // asked for its directory, and drop it anyway. It is served from the
-        // next ask on.
-        let wiredChildren = hierarchyRoles.compactMap { key, role -> (PeerKey, String)? in
-            guard case .child(let path) = role, let directory = path.last else {
-                return nil
-            }
-            return (key, directory)
-        }
-        let anchored = await process.anchoredChildGenesisCIDs(
-            directories: Set(wiredChildren.map(\.1))
-        )
-        let directories = Set(
-            anchored.filter { $0.value == genesisCID }.map(\.key)
-        )
-        if !directories.isEmpty {
-            // Shuffled, not dictionary order: wired-child roles are
-            // permissionless, and a stable iteration order would let a batch
-            // of sybil declarants shadow the honest child's URL from every
-            // answer for the process lifetime. Random selection keeps every
-            // declarant reachable across repeated asks.
-            for (key, directory) in wiredChildren.shuffled() {
-                guard directories.contains(directory),
-                      let url = hierarchyRecords[key]?.declaredReadURL,
-                      !urls.contains(url) else { continue }
-                urls.append(url)
-                if urls.count >= ReadEndpointResponseMessage.maximumURLs {
-                    break
-                }
-            }
-        }
-        return Array(urls.prefix(ReadEndpointResponseMessage.maximumURLs))
     }
 
     /// One bounded ask against an authenticated overlay session. Registered
@@ -192,7 +142,7 @@ extension NodeNetworkRuntime {
             ) { [weak self] _ in
                 await self?.readEndpointAskTimedOut(requestID: requestID)
             }
-            readURLDiscovery.pendingReadEndpoints[requestID] = ReadURLDiscovery.PendingReadEndpoint(
+            overlayState.readURLDiscovery.pendingReadEndpoints[requestID] = ReadURLDiscovery.PendingReadEndpoint(
                 peer: peer,
                 genesisCID: genesisCID,
                 continuation: continuation,
@@ -213,7 +163,7 @@ extension NodeNetworkRuntime {
     }
 
     private func readEndpointAskTimedOut(requestID: UInt64) {
-        guard let pending = readURLDiscovery.pendingReadEndpoints.removeValue(
+        guard let pending = overlayState.readURLDiscovery.pendingReadEndpoints.removeValue(
             forKey: requestID
         ) else { return }
         pending.timeout.cancel()
