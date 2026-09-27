@@ -7,7 +7,7 @@ import cashew
 
 struct StagedAdmission: Sendable, Equatable {
     let sequence: Int64
-    let batch: ChainAdmissionBatch
+    let batch: BlockImportBatch
     let volumeRoots: [String]
 }
 
@@ -55,7 +55,7 @@ struct ConsensusRevisionRow: NodeStoreRecord {
 
 extension NodeStore {
     func stage(
-        _ batch: ChainAdmissionBatch,
+        _ batch: BlockImportBatch,
         volumeRoots: [String],
         persistence: ImportPersistence = .factsOnly
     ) async throws {
@@ -242,14 +242,14 @@ extension NodeStore {
         ).map { row in
             StagedAdmission(
                 sequence: try row.sequence,
-                batch: try Self.decode(ChainAdmissionBatch.self, from: try row.payload),
+                batch: try Self.decode(BlockImportBatch.self, from: try row.payload),
                 volumeRoots: try Self.decode([String].self, from: try row.volumeRoots)
             )
         }
     }
 
     private static func normalizedFacts(
-        in batch: ChainAdmissionBatch
+        in batch: BlockImportBatch
     ) throws -> [Data: Data] {
         var normalized: [Data: Data] = [:]
         for fact in batch.facts {

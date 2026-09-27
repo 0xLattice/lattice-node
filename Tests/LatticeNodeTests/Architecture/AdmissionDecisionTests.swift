@@ -18,7 +18,7 @@ final class AdmissionDecisionTests: XCTestCase {
     }
 
     func testTemporalAndTargetMissResultsStayNeutral() {
-        let temporal = NodeAdmissionDecision(.rejected(.notYetAdmissible))
+        let temporal = NodeAdmissionDecision(.rejected(.notYetValid))
         XCTAssertTrue(temporal.shouldRetryLater)
         XCTAssertFalse(temporal.shouldRetryWhenEvidenceChanges)
 

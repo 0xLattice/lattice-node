@@ -306,7 +306,7 @@ extension NodeNetworkRuntime {
                     )
                     return
                 }
-                if let failure = error as? ChainAdmissionFailure {
+                if let failure = error as? BlockImportError {
                     let decision = NodeAdmissionDecision(failure)
                     if decision.shouldRetryWhenEvidenceChanges {
                         completeCandidate(

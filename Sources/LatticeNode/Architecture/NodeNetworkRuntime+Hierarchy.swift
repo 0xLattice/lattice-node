@@ -2074,12 +2074,12 @@ extension NodeNetworkRuntime {
     }
 
     /// Validate-tier evidence (deferred execution): a weighed CHILD block's
-    /// `.validate` admission recovers its own proof package from the store but
+    /// `.execution` admission recovers its own proof package from the store but
     /// still needs the cross-chain fact the live path obtains from the
     /// configured parent — the parent-state continuity (or genesis) link. The
     /// walk hands the requirement here; this is the SAME request the live
     /// candidate path sends (`requestParentChainFact`), awaited, and the merged
-    /// package is returned for the `.validate` re-admit. Nil when the fact is
+    /// package is returned for the `.execution` re-admit. Nil when the fact is
     /// not obtainable now (no parent session, request budget, timeout); the
     /// walk then parks and retries. Without this, every weighed child block
     /// parks the walk on `.unavailable(.parentStateContinuity)` forever.
@@ -2387,7 +2387,7 @@ extension NodeNetworkRuntime {
             return
         }
         // The validate walk asked for this fact: hand the merged package back
-        // to its `.validate` re-admit; there is no live candidate to re-ready.
+        // to its `.execution` re-admit; there is no live candidate to re-ready.
         if let continuation = pending.continuation {
             continuation.resume(returning: merged)
             return

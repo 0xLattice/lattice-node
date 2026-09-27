@@ -94,14 +94,14 @@ public actor ChainService {
     // it, so the walk owns its own liveness retry rather than borrowing the
     // acquirer's. Cross-chain evidence for the walk comes from
     // NetworkInterface.resolveValidateEvidence: a weighed CHILD block's
-    // `.validate` needs the parent fact (state continuity / genesis link) the
+    // `.execution` needs the parent fact (state continuity / genesis link) the
     // live path obtains from the configured parent; nil parks the walk on the
     // retry timer as an availability gap.
     private let validateWalkRetryInterval: Duration
     private var validateWalkRetryTask: Task<Void, Never>?
     private var validateWalkParkedCount: UInt64 = 0
     #if DEBUG
-    // Test seam: invoked with each height about to be `.validate`-admitted, in
+    // Test seam: invoked with each height about to be `.execution`-admitted, in
     // walk order. Lets tests assert strictly-forward progress (never tip-first).
     var onValidateWalkStep: (@Sendable (UInt64) -> Void)?
     #endif
@@ -679,7 +679,7 @@ public actor ChainService {
             authenticatedChildPackage: authenticatedChildPackage,
             preparingChildDirectories: preparingChildDirectories,
             remoteSource: contentSource,
-            mode: weighed ? .weighed : .eager,
+            mode: weighed ? .header : .full,
             canonicalCommitPublisher: { [self] commit in
                 await enqueueCanonicalCommit(commit)
             }
@@ -1552,7 +1552,7 @@ public actor ChainService {
 
     /// One catch-up pass: execute canonical blocks forward from the deepest
     /// validated ancestor until the validated tier meets the canonical tier.
-    /// FORWARD (+1), never tip-first — a `.validate` on a block whose parent is
+    /// FORWARD (+1), never tip-first — a `.execution` on a block whose parent is
     /// not validated cannot form a valid pre-state. Tip and target are re-read
     /// every iteration so a mid-walk reorg or exclusion re-projection re-targets.
     /// Returns whether the pass reached the canonical tip; `false` is a park.
@@ -1591,7 +1591,7 @@ public actor ChainService {
                     header,
                     authenticatedChildPackage: package,
                     remoteSource: remoteSource,
-                    mode: .validate,
+                    mode: .execution,
                     canonicalCommitPublisher: { [self] commit in
                         await enqueueCanonicalCommit(commit)
                     }
@@ -1911,10 +1911,10 @@ public actor ChainService {
         try await prepareMempoolLocked()
 
         let addedTransactions = try await transactions(
-            inBlocks: commit.mainChainBlocksAdded.keys.sorted()
+            inBlocks: commit.canonicalBlocksAdded.keys.sorted()
         )
         let removedTransactions = try await transactions(
-            inBlocks: commit.mainChainBlocksRemoved.sorted()
+            inBlocks: commit.canonicalBlocksRemoved.sorted()
         )
         let tip = try await process.validatedTipBlock()
         let spec = try await chainSpec(for: tip)

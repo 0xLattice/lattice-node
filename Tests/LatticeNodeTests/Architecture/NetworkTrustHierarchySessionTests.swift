@@ -1114,7 +1114,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
                 admission.header,
                 authenticatedChildPackage: admission.authenticatedChildPackage,
                 remoteSource: admission.contentSource,
-                mode: admission.weighed ? .weighed : .eager
+                mode: admission.weighed ? .header : .full
             )
             await admissions.append(
                 "\(admission.header.rawCID):\(admission.weighed ? "weighed" : "eager"):\(outcome.decision.isAccepted)"

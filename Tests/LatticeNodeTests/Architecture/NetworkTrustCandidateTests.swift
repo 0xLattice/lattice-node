@@ -928,14 +928,14 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 firstHeader,
                 authenticatedChildPackage: package,
                 remoteSource: fixture.parentProcess,
-                mode: .weighed
+                mode: .header
             )
             XCTAssertTrue(weighed.decision.isAccepted, "\(weighed.decision)")
             let validated = try await fixture.childProcess.admit(
                 firstHeader,
                 authenticatedChildPackage: package,
                 remoteSource: fixture.parentProcess,
-                mode: .validate
+                mode: .execution
             )
             XCTAssertTrue(validated.decision.isAccepted, "\(validated.decision)")
             await fixture.childRuntime.chainStateChanged()
@@ -1163,7 +1163,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             weighedHeader,
             authenticatedChildPackage: package,
             remoteSource: fixture.parentProcess,
-            mode: .weighed
+            mode: .header
         )
         XCTAssertTrue(weighed.decision.isAccepted, "\(weighed.decision)")
         return (weighedHeader, package)

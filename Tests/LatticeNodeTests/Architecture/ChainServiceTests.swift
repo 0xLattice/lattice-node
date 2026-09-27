@@ -552,12 +552,12 @@ final class ChainServiceTests: XCTestCase {
         let removed = await service.enqueueCanonicalCommit(ChainCommit(
             revision: 2,
             tipHash: blockCID,
-            mainChainBlocksRemoved: [blockCID]
+            canonicalBlocksRemoved: [blockCID]
         ))
         let added = await service.enqueueCanonicalCommit(ChainCommit(
             revision: 3,
             tipHash: blockCID,
-            mainChainBlocksAdded: [blockCID: block.height]
+            canonicalBlocksAdded: [blockCID: block.height]
         ))
         await removed.wait()
         await added.wait()
@@ -581,7 +581,7 @@ final class ChainServiceTests: XCTestCase {
 
         let receipt = await service.enqueueCanonicalCommit(ChainCommit(
             tipHash: "missing-block",
-            mainChainBlocksAdded: ["missing-block": 0]
+            canonicalBlocksAdded: ["missing-block": 0]
         ))
         let laterRequestStarted = Latch()
         let laterTemplate = Task {
@@ -808,11 +808,11 @@ final class ChainServiceTests: XCTestCase {
         )
         let receipt = await service.enqueueCanonicalCommit(ChainCommit(
             tipHash: addedDescendantCID,
-            mainChainBlocksAdded: [
+            canonicalBlocksAdded: [
                 addedBlockCID: addedBlock.height,
                 addedDescendantCID: addedDescendant.height,
             ],
-            mainChainBlocksRemoved: [removedBlockCID]
+            canonicalBlocksRemoved: [removedBlockCID]
         ))
         await receipt.wait()
 
@@ -2959,7 +2959,7 @@ final class ChainServiceTests: XCTestCase {
             let outcome = try await node.admit(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(fixture.honestProducer),
-                mode: .weighed
+                mode: .header
             )
             XCTAssertTrue(outcome.decision.isAccepted)
         }
@@ -2967,14 +2967,14 @@ final class ChainServiceTests: XCTestCase {
             let outcome = try await node.admit(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(fixture.attackProducer),
-                mode: .weighed
+                mode: .header
             )
             XCTAssertTrue(outcome.decision.isAccepted)
         }
         let forged = try await node.admit(
             BlockHeader(node: fixture.forged),
             remoteSource: FetcherContentSource(fixture.attackProducer),
-            mode: .weighed
+            mode: .header
         )
         XCTAssertTrue(
             forged.decision.isAccepted,
@@ -3006,7 +3006,7 @@ final class ChainServiceTests: XCTestCase {
             let outcome = try await consumerProcess.admit(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
-                mode: .weighed
+                mode: .header
             )
             XCTAssertTrue(
                 outcome.decision.isAccepted,
@@ -3075,7 +3075,7 @@ final class ChainServiceTests: XCTestCase {
             let outcome = try await consumerProcess.admit(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
-                mode: .weighed
+                mode: .header
             )
             XCTAssertTrue(outcome.decision.isAccepted)
         }
@@ -3087,7 +3087,7 @@ final class ChainServiceTests: XCTestCase {
             let outcome = try await consumerProcess.admit(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
-                mode: .validate
+                mode: .execution
             )
             XCTAssertTrue(outcome.decision.isAccepted)
             let validated = await consumerProcess.deepestValidatedMainChainTip()
@@ -3109,7 +3109,7 @@ final class ChainServiceTests: XCTestCase {
         let producer = try await nexusProcess()
         let chain = try await mineNexusChain(on: producer, depth: depth)
         let consumerProcess = try await nexusProcess()
-        for mode in [AdmissionMode.weighed, .validate] {
+        for mode in [ImportMode.header, .execution] {
             for block in chain {
                 let outcome = try await consumerProcess.admit(
                     BlockHeader(node: block),
@@ -3161,7 +3161,7 @@ final class ChainServiceTests: XCTestCase {
                 resourcePolicy: policy
             )
         )
-        for mode in [AdmissionMode.weighed, .validate] {
+        for mode in [ImportMode.header, .execution] {
             for block in forkA {
                 let outcome = try await consumerProcess.admit(
                     BlockHeader(node: block),
@@ -3175,7 +3175,7 @@ final class ChainServiceTests: XCTestCase {
             let outcome = try await consumerProcess.admit(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producerB),
-                mode: .weighed
+                mode: .header
             )
             XCTAssertTrue(outcome.decision.isAccepted)
         }
@@ -3203,7 +3203,7 @@ final class ChainServiceTests: XCTestCase {
             let outcome = try await consumerProcess.admit(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producerC),
-                mode: .weighed
+                mode: .header
             )
             XCTAssertTrue(outcome.decision.isAccepted)
         }
@@ -3217,7 +3217,7 @@ final class ChainServiceTests: XCTestCase {
             let outcome = try await consumerProcess.admit(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producerA),
-                mode: .weighed
+                mode: .header
             )
             XCTAssertTrue(outcome.decision.isAccepted)
         }
@@ -3269,7 +3269,7 @@ final class ChainServiceTests: XCTestCase {
             )
         )
         func admitAll(
-            _ blocks: [Block], from source: ChainProcess, mode: AdmissionMode
+            _ blocks: [Block], from source: ChainProcess, mode: ImportMode
         ) async throws {
             for block in blocks {
                 let outcome = try await consumerProcess.admit(
@@ -3309,18 +3309,18 @@ final class ChainServiceTests: XCTestCase {
         // Trunk T1-T4, validated.
         let producerT = try await nexusProcess()
         let trunk = try await mineNexusChain(on: producerT, depth: 4)
-        try await admitAll(trunk, from: producerT, mode: .weighed)
-        try await admitAll(trunk, from: producerT, mode: .validate)
+        try await admitAll(trunk, from: producerT, mode: .header)
+        try await admitAll(trunk, from: producerT, mode: .execution)
         // Fork A from T4 (A5-A8), validated while main.
         let producerA = try await producer(holding: trunk, from: producerT)
         let forkA = try await mineNexusRewardChain(
             on: producerA, depth: 4, miner: CryptoUtils.generateKeyPair()
         )
-        try await admitAll(forkA, from: producerA, mode: .weighed)
-        try await admitAll(forkA, from: producerA, mode: .validate)
+        try await admitAll(forkA, from: producerA, mode: .header)
+        try await admitAll(forkA, from: producerA, mode: .execution)
         // Trunk continues T5-T12 (heavier): A is off-chain.
         let trunkMore = try await mineNexusChain(on: producerT, depth: 8)
-        try await admitAll(trunkMore, from: producerT, mode: .weighed)
+        try await admitAll(trunkMore, from: producerT, mode: .header)
         // Fork D from T8 (D9-D14) will need bodies from producerD on the walk.
         let producerD = try await producer(
             holding: trunk + Array(trunkMore.prefix(4)), from: producerT
@@ -3340,14 +3340,14 @@ final class ChainServiceTests: XCTestCase {
         let forkD = try await mineNexusRewardChain(
             on: producerD, depth: 6, miner: CryptoUtils.generateKeyPair()
         )
-        try await admitAll(forkD, from: producerD, mode: .weighed)
+        try await admitAll(forkD, from: producerD, mode: .header)
         await consumer.runValidateWalkPass()
         let onD = await consumerProcess.deepestValidatedMainChainTip()
         XCTAssertEqual(onD?.height, 14, "D9-D14 validated while main")
         // Trunk T13-T16: D is off-chain; eviction 2 demotes D9-D10 (below
         // the retention ceiling 12 - 1), leaving D11-D14 validated ABOVE.
         let trunkEven = try await mineNexusChain(on: producerT, depth: 4)
-        try await admitAll(trunkEven, from: producerT, mode: .weighed)
+        try await admitAll(trunkEven, from: producerT, mode: .header)
         let backOnTrunk = await consumerProcess.deepestValidatedMainChainTip()
         XCTAssertEqual(backOnTrunk?.height, 12)
         _ = try await consumerProcess.evictUnretainedVolumes()
@@ -3366,7 +3366,7 @@ final class ChainServiceTests: XCTestCase {
             holding: trunk + Array(trunkMore.prefix(2)), from: producerT
         )
         let forkE = try await mineNexusChain(on: producerE, depth: 18)
-        try await admitAll(forkE, from: producerE, mode: .weighed)
+        try await admitAll(forkE, from: producerE, mode: .header)
         let onE = await consumerProcess.deepestValidatedMainChainTip()
         XCTAssertEqual(onE?.height, 6, "floor parked at T6")
 
@@ -3375,7 +3375,7 @@ final class ChainServiceTests: XCTestCase {
         let forkDMore = try await mineNexusRewardChain(
             on: producerD, depth: 8, miner: CryptoUtils.generateKeyPair()
         )
-        try await admitAll(forkDMore, from: producerD, mode: .weighed)
+        try await admitAll(forkDMore, from: producerD, mode: .header)
         let canonical = await consumerProcess.canonicalTipHeight()
         XCTAssertEqual(canonical, 22)
         let probed = await consumerProcess.deepestValidatedMainChainTip()
@@ -3404,7 +3404,7 @@ final class ChainServiceTests: XCTestCase {
         )
         let producerA = try await nexusProcess()
         let forkA = try await mineNexusChain(on: producerA, depth: 6)
-        for mode in [AdmissionMode.weighed, .validate] {
+        for mode in [ImportMode.header, .execution] {
             for block in forkA {
                 let outcome = try await consumerProcess!.admit(
                     BlockHeader(node: block),
@@ -3431,7 +3431,7 @@ final class ChainServiceTests: XCTestCase {
             let outcome = try await consumerProcess!.admit(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producerF),
-                mode: .weighed
+                mode: .header
             )
             XCTAssertTrue(outcome.decision.isAccepted)
         }
@@ -3444,7 +3444,7 @@ final class ChainServiceTests: XCTestCase {
             let outcome = try await consumerProcess!.admit(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producerA),
-                mode: .weighed
+                mode: .header
             )
             XCTAssertTrue(outcome.decision.isAccepted)
         }
@@ -3466,7 +3466,7 @@ final class ChainServiceTests: XCTestCase {
         let genesisCID = try BlockHeader(
             node: await consumerProcess.canonicalTipBlock()
         ).rawCID
-        for mode in [AdmissionMode.weighed, .validate] {
+        for mode in [ImportMode.header, .execution] {
             for block in chain {
                 let outcome = try await consumerProcess.admit(
                     BlockHeader(node: block),
@@ -3490,7 +3490,7 @@ final class ChainServiceTests: XCTestCase {
             let outcome = try await consumerProcess.admit(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(rival),
-                mode: .weighed
+                mode: .header
             )
             XCTAssertTrue(outcome.decision.isAccepted)
         }
@@ -3517,7 +3517,7 @@ final class ChainServiceTests: XCTestCase {
             let outcome = try await consumerProcess.admit(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
-                mode: .weighed
+                mode: .header
             )
             XCTAssertTrue(outcome.decision.isAccepted)
         }
@@ -3556,7 +3556,7 @@ final class ChainServiceTests: XCTestCase {
             let outcome = try await consumerProcess.admit(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
-                mode: .weighed
+                mode: .header
             )
             XCTAssertTrue(outcome.decision.isAccepted)
         }
@@ -3581,7 +3581,7 @@ final class ChainServiceTests: XCTestCase {
             let outcome = try await consumerProcess.admit(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
-                mode: .weighed
+                mode: .header
             )
             XCTAssertTrue(outcome.decision.isAccepted)
         }
@@ -3636,7 +3636,7 @@ final class ChainServiceTests: XCTestCase {
             let outcome = try await consumerProcess.admit(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
-                mode: .weighed
+                mode: .header
             )
             XCTAssertTrue(outcome.decision.isAccepted, "canonical weighed admit")
             boundaryFetches += 1
@@ -3645,7 +3645,7 @@ final class ChainServiceTests: XCTestCase {
             let outcome = try await consumerProcess.admit(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(siblingProducer),
-                mode: .weighed
+                mode: .header
             )
             XCTAssertTrue(
                 outcome.decision.isAccepted, "sibling weighed admit (side block)"
@@ -3731,7 +3731,7 @@ final class ChainServiceTests: XCTestCase {
             let outcome = try await consumerProcess.admit(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
-                mode: .weighed
+                mode: .header
             )
             XCTAssertTrue(outcome.decision.isAccepted)
         }

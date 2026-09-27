@@ -53,7 +53,7 @@ final class NexusGenesisArchitectureTests: XCTestCase {
             materializedVolumeStorer: store,
             stage: { _ in }
         )
-        let tip = await bootstrap.level.chain.getMainChainTip()
+        let tip = await bootstrap.level.chain.canonicalTip
         XCTAssertEqual(tip, genesis.blockHash)
     }
 

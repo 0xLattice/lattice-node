@@ -232,7 +232,7 @@ enum BootRecovery {
     private static func migrateLegacyExecutionsAndDemote(
         _ stores: Stores,
         staged: [StagedAdmission]
-    ) async throws -> (migrated: [ChainAdmissionBatch], bootDemoted: [String]) {
+    ) async throws -> (migrated: [BlockImportBatch], bootDemoted: [String]) {
         let broker = stores.broker
         let store = stores.store
         let retentionScope = stores.retentionScope
@@ -288,7 +288,7 @@ enum BootRecovery {
             .intersection(admittedBlocks)
             .subtracting(carriedFacts)
             .sorted()
-            .map { ChainAdmissionBatch.validation(blockHash: $0) }
+            .map { BlockImportBatch.validation(blockHash: $0) }
         for batch in migrated {
             try await store.stage(batch, volumeRoots: [])
         }
@@ -348,7 +348,7 @@ enum BootRecovery {
         _ stores: Stores,
         configuration: NodeConfiguration,
         staged: [StagedAdmission],
-        migrated: [ChainAdmissionBatch]
+        migrated: [BlockImportBatch]
     ) async throws -> ChainProcess.RuntimePhase {
         let broker = stores.broker
         let localFetcher = stores.localFetcher

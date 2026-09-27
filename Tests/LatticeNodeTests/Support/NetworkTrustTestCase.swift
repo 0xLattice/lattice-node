@@ -154,7 +154,7 @@ class NetworkTrustTestCase: XCTestCase {
             let outcome = try await process.admit(
                 BlockHeader(node: parent),
                 remoteSource: FetcherContentSource(producer),
-                mode: .weighed
+                mode: .header
             )
             guard outcome.decision.isAccepted else {
                 throw NetworkTestError.failedPhase(

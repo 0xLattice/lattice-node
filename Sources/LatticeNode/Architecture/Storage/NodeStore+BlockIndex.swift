@@ -199,7 +199,7 @@ extension NodeStore {
     }
 
     static func acceptedBlocks(
-        in batch: ChainAdmissionBatch
+        in batch: BlockImportBatch
     ) throws -> [AcceptedBlockRecord] {
         var blocks: [String: AcceptedBlockRecord] = [:]
         for fact in batch.facts {
