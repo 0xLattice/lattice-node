@@ -838,8 +838,8 @@ final class DaemonHTTPTests: XCTestCase {
             privateKeyHex: String(repeating: "01", count: 32)
         )
         let process = try await ChainProcess.open(configuration: configuration)
-        let providerEntered = AsyncGate()
-        let releaseProvider = AsyncGate()
+        let providerEntered = Latch()
+        let releaseProvider = Latch()
         let service = ChainService(
             process: process,
             // Invoked from inside `buildMiningTemplate()` while `miningTemplate()`
@@ -870,7 +870,7 @@ final class DaemonHTTPTests: XCTestCase {
         }
         // Give the queued status() call a chance to actually reach (and
         // block on) the gate before we check it hasn't finished.
-        try await Task.sleep(nanoseconds: 100_000_000)
+        try await alwaysDuring(.milliseconds(100)) { !(await statusCompleted.isDone) }
         let finishedEarly = await statusCompleted.isDone
         XCTAssertFalse(finishedEarly, "status() must still be queued behind the held operation gate")
 
@@ -1015,26 +1015,6 @@ private actor MaintenanceInvocationCounter {
     func record() -> Int {
         count += 1
         return count
-    }
-}
-
-/// A one-shot async signal: `wait()` suspends until `open()` is called (from
-/// any point, before or after).
-private actor AsyncGate {
-    private var isOpen = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    func open() {
-        guard !isOpen else { return }
-        isOpen = true
-        let pending = waiters
-        waiters = []
-        for continuation in pending { continuation.resume() }
-    }
-
-    func wait() async {
-        if isOpen { return }
-        await withCheckedContinuation { waiters.append($0) }
     }
 }
 

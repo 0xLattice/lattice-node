@@ -117,7 +117,7 @@ final class MultichainInvariantTests: XCTestCase {
             seed: seed, confirmParentRecordedGenesis: { _ in true }
         )
         XCTAssertTrue(bootstrapped)
-        let childContent = MultichainContentStore()
+        let childContent = InMemoryContentStore()
         try await BlockHeader(node: childBlock).storeBlock(fetcher: parent, storer: childContent)
         let childBlockHeader = BlockHeader(rawCID: childBlockCID, node: nil, encryptionInfo: nil)
         // Through the service: admitting a block a parent block carried asks
@@ -351,7 +351,7 @@ final class MultichainInvariantTests: XCTestCase {
         let a2Evidence = try XCTUnwrap(a2Issued)
         // A2's prevState is A1's post-state: A executed A1, Nexus never did.
         // What A pulls from Nexus's node joins what A already holds.
-        let aContent = MultichainContentStore()
+        let aContent = InMemoryContentStore()
         try await BlockHeader(node: a2).storeBlock(fetcher: UnionFetcher([nexus, a]), storer: aContent)
         // The carrier package brings the committed child block along.
         try await BlockHeader(node: b1).storeBlock(fetcher: UnionFetcher([a, nexus]), storer: aContent)
@@ -374,7 +374,7 @@ final class MultichainInvariantTests: XCTestCase {
         let b1CID = try BlockHeader(node: b1).rawCID
         let b1Issued = try await a.issuedChildEvidence(childCID: b1CID, directory: "B", rootCID: n2Header.rawCID)
         let b1Evidence = try XCTUnwrap(b1Issued)
-        let bContent = MultichainContentStore()
+        let bContent = InMemoryContentStore()
         try await BlockHeader(node: b1).storeBlock(fetcher: UnionFetcher([a, nexus]), storer: bContent)
         let b1Outcome = try await b.admit(
             BlockHeader(rawCID: b1CID, node: nil, encryptionInfo: nil),
@@ -525,7 +525,7 @@ final class MultichainInvariantTests: XCTestCase {
             seed: seed, confirmParentRecordedGenesis: { _ in true }
         )
         XCTAssertTrue(bootstrapped)
-        let childContent = MultichainContentStore()
+        let childContent = InMemoryContentStore()
         try await BlockHeader(node: childBlock)
             .storeBlock(fetcher: parent, storer: childContent)
         let childBlockHeader = BlockHeader(
@@ -755,7 +755,7 @@ final class MultichainInvariantTests: XCTestCase {
             node: nil,
             encryptionInfo: nil
         )
-        let childContent = MultichainContentStore()
+        let childContent = InMemoryContentStore()
         try await childHeader.storeBlock(
             fetcher: parent!,
             storer: childContent
@@ -825,38 +825,6 @@ final class MultichainInvariantTests: XCTestCase {
             parentEndpoint: parentPublicKey.map {
                 ParentEndpoint(publicKey: $0, host: "127.0.0.1", port: 4002)
             }
-        )
-    }
-
-    private func signedGenesisAnchorTransaction(
-        directory: String,
-        childGenesisCID: String,
-        chainPath: [String] = ["Nexus"]
-    ) throws -> Transaction {
-        let key = CryptoUtils.generateKeyPair()
-        let body = TransactionBody(
-            accountActions: [],
-            actions: [],
-            depositActions: [],
-            genesisActions: [GenesisAction(
-                directory: directory,
-                blockCID: childGenesisCID
-            )],
-            receiptActions: [],
-            withdrawalActions: [],
-            signers: [CryptoUtils.createAddress(from: key.publicKey)],
-            fee: 0,
-            nonce: 0,
-            chainPath: chainPath
-        )
-        let bodyHeader = try HeaderImpl<TransactionBody>(node: body)
-        let signature = try XCTUnwrap(TransactionSigning.sign(
-            bodyHeader: bodyHeader,
-            privateKeyHex: key.privateKey
-        ))
-        return Transaction(
-            signatures: [key.publicKey: signature],
-            body: bodyHeader
         )
     }
 
@@ -930,7 +898,7 @@ final class MultichainInvariantTests: XCTestCase {
             childCID: childBlockCID, directory: directory, rootCID: carrierHeader.rawCID
         )
         let evidence = try XCTUnwrap(issued)
-        let content = MultichainContentStore()
+        let content = InMemoryContentStore()
         try await BlockHeader(node: childBlock).storeBlock(fetcher: parent, storer: content)
         let admitted = try await child.admit(
             BlockHeader(rawCID: childBlockCID, node: nil, encryptionInfo: nil),
@@ -948,19 +916,6 @@ final class MultichainInvariantTests: XCTestCase {
         return Carried(block: childBlock, carrier: carrier)
     }
 
-    /// Content a chain assembles from more than one holder, in order.
-    private struct UnionFetcher: Fetcher {
-        let sources: [any Fetcher]
-        init(_ sources: [any Fetcher]) { self.sources = sources }
-        func fetch(rawCid: String) async throws -> Data {
-            var last: any Error = DataErrors.nodeNotAvailable
-            for source in sources {
-                do { return try await source.fetch(rawCid: rawCid) } catch { last = error }
-            }
-            throw last
-        }
-    }
-
     private actor RunReportRequestSink {
         private var asks: [[String]] = []
         func record(_ committers: [String]) { asks.append(committers) }
@@ -973,24 +928,4 @@ final class MultichainInvariantTests: XCTestCase {
         func received() -> [ParentRunReport] { reports }
     }
 
-    private func temporaryDirectory() -> URL {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-multichain-invariant-\(UUID().uuidString)",
-            isDirectory: true
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
-        return directory
-    }
-}
-
-private actor MultichainContentStore: ContentSource, VolumeStorer {
-    private var entries: [String: Data] = [:]
-
-    func fetch(_ cids: Set<String>) -> [String: Data] {
-        entries.filter { cids.contains($0.key) }
-    }
-
-    func store(volume: SerializedVolume) {
-        entries.merge(volume.entries) { existing, _ in existing }
-    }
 }

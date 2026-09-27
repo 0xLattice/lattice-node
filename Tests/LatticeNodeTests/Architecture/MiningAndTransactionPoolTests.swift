@@ -6,37 +6,6 @@ import XCTest
 import cashew
 @testable import LatticeNode
 
-private actor MiningTestStore: Fetcher, Storer, VolumeStorer {
-    private var entries: [String: Data] = [:]
-
-    func fetch(rawCid: String) async throws -> Data {
-        guard let data = entries[rawCid] else {
-            throw FetcherError.notFound(rawCid)
-        }
-        return data
-    }
-
-    func store(entries newEntries: [String: Data]) async throws {
-        entries.merge(newEntries) { existing, _ in existing }
-    }
-
-    func store(volume: SerializedVolume) async throws {
-        entries.merge(volume.entries) { existing, _ in existing }
-    }
-
-    func insert(_ data: Data, for cid: String) {
-        entries[cid] = data
-    }
-
-    func allEntries() -> [String: Data] { entries }
-}
-
-private struct UnavailableMiningFetcher: Fetcher {
-    func fetch(rawCid: String) async throws -> Data {
-        throw FetcherError.notFound(rawCid)
-    }
-}
-
 final class MiningTemplateBookTests: XCTestCase {
     func testTemplateUsesChainTargetAndRejectsDuplicateChildDirectories() async throws {
         let fixture = try await chainFixture()
@@ -805,7 +774,7 @@ final class MiningTemplateBookTests: XCTestCase {
                 transactions: [transaction],
                 children: [],
                 timestamp: 1,
-                fetcher: UnavailableMiningFetcher()
+                fetcher: FailingFetcher()
             )
         ) { error in
             XCTAssertTrue(error is FetcherError)
@@ -979,11 +948,11 @@ final class MiningTemplateBookTests: XCTestCase {
         target: UInt256 = .max
     ) async throws -> (
         genesis: Block,
-        store: MiningTestStore,
+        store: InMemoryContentStore,
         key: (privateKey: String, publicKey: String),
         owner: String
     ) {
-        let store = MiningTestStore()
+        let store = InMemoryContentStore()
         let key = CryptoUtils.generateKeyPair()
         let owner = CryptoUtils.createAddress(from: key.publicKey)
         let spec = ChainSpec(
@@ -1021,7 +990,7 @@ final class MiningTemplateBookTests: XCTestCase {
 
 final class TransactionPoolArchitectureTests: XCTestCase {
     func testHistoricalBodyCIDInputSignatureIsAcceptedAtNodeIngress() async throws {
-        let store = MiningTestStore()
+        let store = InMemoryContentStore()
         let key = CryptoUtils.generateKeyPair()
         let body = transactionBody(
             key: key,
@@ -1056,7 +1025,7 @@ final class TransactionPoolArchitectureTests: XCTestCase {
     }
 
     func testPoolEnforcesResourcesButLeavesConsensusToLattice() async throws {
-        let store = MiningTestStore()
+        let store = InMemoryContentStore()
         let key = CryptoUtils.generateKeyPair()
         let wrongPathBody = transactionBody(
             key: key,
@@ -1105,7 +1074,7 @@ final class TransactionPoolArchitectureTests: XCTestCase {
             try await pool.submit(
                 oversizedSignature,
                 spec: testSpec(),
-                fetcher: UnavailableMiningFetcher()
+                fetcher: FailingFetcher()
             )
         ) { error in
             XCTAssertEqual(error as? TransactionPoolError, .tooLarge)
@@ -1127,7 +1096,7 @@ final class TransactionPoolArchitectureTests: XCTestCase {
     }
 
     func testWithinASignerNonceOrderBeatsFee() async throws {
-        let store = MiningTestStore()
+        let store = InMemoryContentStore()
         let pool = TransactionPool()
         let key = CryptoUtils.generateKeyPair()
         let owner = CryptoUtils.createAddress(from: key.publicKey)
@@ -1159,7 +1128,7 @@ final class TransactionPoolArchitectureTests: XCTestCase {
     func testFutureNonceBecomesEligibleBehindReadyPredecessor()
         async throws
     {
-        let store = MiningTestStore()
+        let store = InMemoryContentStore()
         let pool = TransactionPool()
         let key = CryptoUtils.generateKeyPair()
         let owner = CryptoUtils.createAddress(from: key.publicKey)
@@ -1222,7 +1191,7 @@ final class TransactionPoolArchitectureTests: XCTestCase {
     func testDependencyFrontierPreservesMultiSignerNonceOrder()
         async throws
     {
-        let store = MiningTestStore()
+        let store = InMemoryContentStore()
         let pool = TransactionPool()
         let firstKey = CryptoUtils.generateKeyPair()
         let secondKey = CryptoUtils.generateKeyPair()
@@ -1273,7 +1242,7 @@ final class TransactionPoolArchitectureTests: XCTestCase {
     }
 
     func testSameSignerAndNonceReplacedByHigherFee() async throws {
-        let store = MiningTestStore()
+        let store = InMemoryContentStore()
         let pool = TransactionPool()
         let key = CryptoUtils.generateKeyPair()
         let owner = CryptoUtils.createAddress(from: key.publicKey)
@@ -1324,7 +1293,7 @@ final class TransactionPoolArchitectureTests: XCTestCase {
     }
 
     func testPartialSignerOverlapAtSameNonceIsRejected() async throws {
-        let store = MiningTestStore()
+        let store = InMemoryContentStore()
         let pool = TransactionPool()
         let firstKey = CryptoUtils.generateKeyPair()
         let sharedKey = CryptoUtils.generateKeyPair()
@@ -1385,7 +1354,7 @@ final class TransactionPoolArchitectureTests: XCTestCase {
     }
 
     func testCapacityKeepsOldestReadyAtEqualFeeAndRejectsNewer() async throws {
-        let store = MiningTestStore()
+        let store = InMemoryContentStore()
         let pool = TransactionPool(maxCount: 1)
         let firstKey = CryptoUtils.generateKeyPair()
         let secondKey = CryptoUtils.generateKeyPair()
@@ -1441,7 +1410,7 @@ final class TransactionPoolArchitectureTests: XCTestCase {
     }
 
     func testReadyTransactionsOutrankNonReadyFeesAtCapacity() async throws {
-        let store = MiningTestStore()
+        let store = InMemoryContentStore()
         let ready = try signedTransaction(
             key: CryptoUtils.generateKeyPair(),
             accountActions: [],
@@ -1495,7 +1464,7 @@ final class TransactionPoolArchitectureTests: XCTestCase {
     }
 
     func testNonReadyQueueIsBoundedPerSigner() async throws {
-        let store = MiningTestStore()
+        let store = InMemoryContentStore()
         let pool = TransactionPool(maxNonReadyPerSigner: 1)
         let key = CryptoUtils.generateKeyPair()
         let first = try signedTransaction(
@@ -1530,7 +1499,7 @@ final class TransactionPoolArchitectureTests: XCTestCase {
     }
 
     func testReplaceByFeeRequiresAStrictlyHigherBid() async throws {
-        let store = MiningTestStore()
+        let store = InMemoryContentStore()
         let pool = TransactionPool()
         let key = CryptoUtils.generateKeyPair()
         let owner = CryptoUtils.createAddress(from: key.publicKey)
@@ -1594,7 +1563,7 @@ final class TransactionPoolArchitectureTests: XCTestCase {
     }
 
     func testCapacityEvictionShedsTheLowestFeeFirst() async throws {
-        let store = MiningTestStore()
+        let store = InMemoryContentStore()
         let pool = TransactionPool(maxCount: 2)
 
         // The miner fee is the debit excess, not the declared `body.fee` field.
@@ -1646,7 +1615,7 @@ final class TransactionPoolArchitectureTests: XCTestCase {
     }
 
     func testTemplateOrderingLeadsWithTheHighestFeeSigner() async throws {
-        let store = MiningTestStore()
+        let store = InMemoryContentStore()
         let pool = TransactionPool()
 
         // Rank is the real miner fee (debit excess), not the declared field.
@@ -1680,7 +1649,7 @@ final class TransactionPoolArchitectureTests: XCTestCase {
         // A non-ready entry's debits are not funding-checked, so its `minerFee`
         // is untrusted: among non-ready entries eviction is first-come-first-
         // served, and a later huge-declared-fee entry cannot displace an older one.
-        let store = MiningTestStore()
+        let store = InMemoryContentStore()
         let pool = TransactionPool(maxCount: 1)
 
         func futureTransaction(debit: Int64) throws -> Transaction {
@@ -1717,7 +1686,7 @@ final class TransactionPoolArchitectureTests: XCTestCase {
         // replace their OWN pending claim (e.g. a withdrawal queued before its
         // parent receipt commits) with a higher-value one, but an equal excess is
         // still rejected — replacement stays fee-gated, never free recency.
-        let store = MiningTestStore()
+        let store = InMemoryContentStore()
         let pool = TransactionPool()
         let key = CryptoUtils.generateKeyPair()
         let owner = CryptoUtils.createAddress(from: key.publicKey)
@@ -1766,52 +1735,6 @@ final class TransactionPoolArchitectureTests: XCTestCase {
         )
     }
 
-}
-
-private func signedTransaction(
-    key: (privateKey: String, publicKey: String),
-    accountActions: [AccountAction],
-    fee: UInt64,
-    nonce: UInt64,
-    chainPath: [String] = ["Nexus"]
-) throws -> Transaction {
-    try signedTransaction(
-        keys: [key],
-        accountActions: accountActions,
-        fee: fee,
-        nonce: nonce,
-        chainPath: chainPath
-    )
-}
-
-private func signedTransaction(
-    keys: [(privateKey: String, publicKey: String)],
-    accountActions: [AccountAction],
-    fee: UInt64,
-    nonce: UInt64,
-    chainPath: [String] = ["Nexus"]
-) throws -> Transaction {
-    let body = TransactionBody(
-        accountActions: accountActions,
-        actions: [],
-        depositActions: [],
-        genesisActions: [],
-        receiptActions: [],
-        withdrawalActions: [],
-        signers: keys.map { CryptoUtils.createAddress(from: $0.publicKey) },
-        fee: fee,
-        nonce: nonce,
-        chainPath: chainPath
-    )
-    let header = try HeaderImpl(node: body)
-    var signatures: [String: String] = [:]
-    for key in keys {
-        signatures[key.publicKey] = try XCTUnwrap(TransactionSigning.sign(
-            bodyHeader: header,
-            privateKeyHex: key.privateKey
-        ))
-    }
-    return Transaction(signatures: signatures, body: header)
 }
 
 private func transactionBody(

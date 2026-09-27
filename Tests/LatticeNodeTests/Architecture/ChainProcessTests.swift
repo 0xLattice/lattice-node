@@ -368,7 +368,7 @@ final class ChainProcessTests: XCTestCase {
         let proofEntry = try XCTUnwrap(
             fixture.package.package.proof.entries.first
         )
-        let fallback = BatchRecordingContentSource(entries: [
+        let fallback = RecordingContentSource(entries: [
             "first": Data([0x01]),
             "second": Data([0x02]),
         ])
@@ -390,7 +390,7 @@ final class ChainProcessTests: XCTestCase {
     }
 
     func testAttemptFetchersNeverShareAnAcquisitionScope() throws {
-        let fallback = BatchRecordingContentSource(entries: [:])
+        let fallback = RecordingContentSource(entries: [:])
         let first = try ChainProcess.attemptFetcher(
             package: nil,
             fallback: fallback
@@ -418,7 +418,7 @@ final class ChainProcessTests: XCTestCase {
             fetcher: producer
         )
         let header = try BlockHeader(node: candidate)
-        let remote = BatchRecordingContentSource(entries:
+        let remote = RecordingContentSource(entries:
             try await blockContentEntries(header, fetcher: producer)
         )
         let consumer = try await ChainProcess.open(
@@ -845,11 +845,17 @@ final class ChainProcessTests: XCTestCase {
         let replayed = try XCTUnwrap(inboxAfterRestart.first)
         XCTAssertEqual(replayed.package.package.proof.rootCID, proof.rootCID)
 
-        try await Task.sleep(for: .milliseconds(4_300))
-        let accepted = try await process!.admit(
-            carriedHeader, authenticatedChildPackage: replayed.package,
-            remoteSource: parentSource, mode: .weighed
-        )
+        var admitted: NodeAdmissionOutcome?
+        try await eventually("the block is admitted once its clock is no longer ahead") {
+            let outcome = try await process!.admit(
+                carriedHeader, authenticatedChildPackage: replayed.package,
+                remoteSource: parentSource, mode: .weighed
+            )
+            guard outcome.decision.isAccepted else { return false }
+            admitted = outcome
+            return true
+        }
+        let accepted = try XCTUnwrap(admitted)
         XCTAssertTrue(accepted.decision.isAccepted, "\(accepted.decision)")
         let inboxAfterAcceptance = try await process!.parentEvidenceInbox()
         XCTAssertTrue(inboxAfterAcceptance.isEmpty, "decided: consumed")
@@ -1092,7 +1098,7 @@ final class ChainProcessTests: XCTestCase {
     func testSuccessorAttachmentWaitsForChildGenesis() async throws {
         let fixture = try await childBootstrapFixture()
         let parentSource = fixture.source
-        let sameChainSource = ChainProcessTestContentStore()
+        let sameChainSource = InMemoryContentStore()
         let genesis = try XCTUnwrap(fixture.childHeader.node)
         let successor = try await BlockBuilder.buildBlock(
             previous: genesis,
@@ -1174,7 +1180,7 @@ final class ChainProcessTests: XCTestCase {
     func testSelfContainedGenesisSurvivesRestartAsValidatedAncestry() async throws {
         let fixture = try await childBootstrapFixture()
         let parentSource = fixture.source
-        let sameChainSource = ChainProcessTestContentStore()
+        let sameChainSource = InMemoryContentStore()
         let genesis = try XCTUnwrap(fixture.childHeader.node)
         let successor = try await BlockBuilder.buildBlock(
             previous: genesis,
@@ -1483,8 +1489,8 @@ final class ChainProcessTests: XCTestCase {
                 stateDiff: .empty
             )),
         ])
-        let retained = TestLatch()
-        let continueStage = TestLatch()
+        let retained = Latch()
+        let continueStage = Latch()
         let task = Task {
             try await ChainProcess.persist(
                 batch,
@@ -1495,7 +1501,7 @@ final class ChainProcessTests: XCTestCase {
                 pendingChildProofRoutes: [],
                 pendingChildProofCapacity: 1,
                 afterRetainingRoots: {
-                    await retained.signal()
+                    await retained.open()
                     await continueStage.wait()
                 }
             )
@@ -1503,7 +1509,7 @@ final class ChainProcessTests: XCTestCase {
 
         await retained.wait()
         task.cancel()
-        await continueStage.signal()
+        await continueStage.open()
         try await task.value
 
         let staged = try await store.stagedAdmissions()
@@ -1729,7 +1735,7 @@ final class ChainProcessTests: XCTestCase {
         )
         store = nil
 
-        let remote = BatchRecordingContentSource(entries: [:])
+        let remote = RecordingContentSource(entries: [:])
         process = try await ChainProcess.open(
             configuration: config
         )
@@ -1784,7 +1790,7 @@ final class ChainProcessTests: XCTestCase {
         let config = try configuration(path: ["Nexus"], storage: directory)
         _ = try await ChainProcess.open(configuration: config)
 
-        let source = ChainProcessTestContentStore()
+        let source = InMemoryContentStore()
         try await LatticeState.emptyHeader.storeRecursively(storer: source)
         let child = try await BlockBuilder.buildChildGenesis(
             spec: NexusGenesis.spec,
@@ -1895,8 +1901,8 @@ final class ChainProcessTests: XCTestCase {
     }
 
     func testRestartRetriesPendingProofForNonTipCarrier() async throws {
-        let source = ChainProcessTestContentStore()
-        let remote = ChainProcessTestContentStore()
+        let source = InMemoryContentStore()
+        let remote = InMemoryContentStore()
         let directory = temporaryDirectory()
         try FileManager.default.createDirectory(
             at: directory,
@@ -2584,7 +2590,7 @@ final class ChainProcessTests: XCTestCase {
         let rootCID: String
         let proof: ChildBlockProof
         let package: AuthenticatedChildPackage
-        let source: ChainProcessTestContentStore
+        let source: InMemoryContentStore
     }
 
     private func childBootstrapFixture() async throws -> ChildBootstrapFixture {
@@ -2592,7 +2598,7 @@ final class ChainProcessTests: XCTestCase {
             path: ["Nexus", "Payments"],
             storage: temporaryDirectory()
         )
-        let source = ChainProcessTestContentStore()
+        let source = InMemoryContentStore()
         try await LatticeState.emptyHeader.storeRecursively(storer: source)
         // A self-contained child genesis the process rebuilds from `seed` and
         // self-admits (activateSeededChildGenesis). The genesis is never carried;
@@ -2651,13 +2657,6 @@ final class ChainProcessTests: XCTestCase {
         return try! JSONDecoder().decode(VerifiedWorkContribution.self, from: json)
     }
 
-    private func temporaryDirectory() -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("lattice-chain-process-\(UUID().uuidString)")
-        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
-        return url
-    }
-
     private func decode<T: Decodable>(_ type: T.Type, json: String) throws -> T {
         try JSONDecoder().decode(type, from: Data(json.utf8))
     }
@@ -2666,184 +2665,9 @@ final class ChainProcessTests: XCTestCase {
         _ header: BlockHeader,
         fetcher: any Fetcher
     ) async throws -> [String: Data] {
-        let collector = ChainProcessTestContentStore()
+        let collector = InMemoryContentStore()
         try await header.storeBlock(fetcher: fetcher, storer: collector)
         return await collector.allEntries()
-    }
-}
-
-/// A mining reward crediting a fresh key by 1 on Nexus.
-private func signedRewardTransaction() throws -> Transaction {
-    let key = CryptoUtils.generateKeyPair()
-    let body = TransactionBody(
-        accountActions: [AccountAction(
-            owner: CryptoUtils.createAddress(from: key.publicKey),
-            delta: 1
-        )],
-        actions: [],
-        depositActions: [],
-        genesisActions: [],
-        receiptActions: [],
-        withdrawalActions: [],
-        signers: [CryptoUtils.createAddress(from: key.publicKey)],
-        fee: 0,
-        nonce: 0,
-        chainPath: ["Nexus"]
-    )
-    let bodyHeader = try HeaderImpl<TransactionBody>(node: body)
-    let signature = try XCTUnwrap(TransactionSigning.sign(
-        bodyHeader: bodyHeader,
-        privateKeyHex: key.privateKey
-    ))
-    return Transaction(
-        signatures: [key.publicKey: signature],
-        body: bodyHeader
-    )
-}
-
-private func signedGenesisAnchorTransaction(
-    directory: String,
-    childGenesisCID: String,
-    chainPath: [String] = ["Nexus"]
-) throws -> Transaction {
-    let key = CryptoUtils.generateKeyPair()
-    let body = TransactionBody(
-        accountActions: [],
-        actions: [],
-        depositActions: [],
-        genesisActions: [GenesisAction(
-            directory: directory,
-            blockCID: childGenesisCID
-        )],
-        receiptActions: [],
-        withdrawalActions: [],
-        signers: [CryptoUtils.createAddress(from: key.publicKey)],
-        fee: 0,
-        nonce: 0,
-        chainPath: chainPath
-    )
-    let bodyHeader = try HeaderImpl<TransactionBody>(node: body)
-    let signature = try XCTUnwrap(TransactionSigning.sign(
-        bodyHeader: bodyHeader,
-        privateKeyHex: key.privateKey
-    ))
-    return Transaction(
-        signatures: [key.publicKey: signature],
-        body: bodyHeader
-    )
-}
-
-private actor ChainProcessTestContentStore: ContentSource, Fetcher, Storer, VolumeStorer {
-    private var entries: [String: Data] = [:]
-
-    func fetch(rawCid: String) throws -> Data {
-        guard let data = entries[rawCid] else { throw FetcherError.notFound(rawCid) }
-        return data
-    }
-
-    func store(entries: [String: Data]) {
-        self.entries.merge(entries) { existing, _ in existing }
-    }
-
-    func store(volume: SerializedVolume) {
-        entries.merge(volume.entries) { existing, _ in existing }
-    }
-
-    func fetch(_ cids: Set<String>) -> [String: Data] {
-        entries.filter { cids.contains($0.key) }
-    }
-
-    func allEntries() -> [String: Data] {
-        entries
-    }
-}
-
-private actor BatchRecordingContentSource: ContentSource {
-    private let entries: [String: Data]
-    private var recordedRequests: [Set<String>] = []
-
-    init(entries: [String: Data]) {
-        self.entries = entries
-    }
-
-    func fetch(_ cids: Set<String>) -> [String: Data] {
-        recordedRequests.append(cids)
-        return entries.filter { cids.contains($0.key) }
-    }
-
-    func requests() -> [Set<String>] {
-        recordedRequests
-    }
-}
-
-private actor TestLatch {
-    private var isOpen = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    func signal() {
-        isOpen = true
-        let pending = waiters
-        waiters.removeAll()
-        for waiter in pending { waiter.resume() }
-    }
-
-    func wait() async {
-        guard !isOpen else { return }
-        await withCheckedContinuation { waiters.append($0) }
-    }
-}
-
-private actor BlockingContentSource: ContentSource {
-    private struct Waiter {
-        let entries: [String: Data]
-        let continuation: CheckedContinuation<[String: Data], Never>
-    }
-
-    private let blockedCID: String
-    private var entries: [String: Data] = [:]
-    private var blockedFetchStarted = false
-    private var released = false
-    private var startWaiters: [CheckedContinuation<Void, Never>] = []
-    private var blockedFetchWaiters: [Waiter] = []
-
-    init(blockedCID: String) {
-        self.blockedCID = blockedCID
-    }
-
-    func setEntries(_ entries: [String: Data]) {
-        self.entries = entries
-    }
-
-    func fetch(_ cids: Set<String>) async -> [String: Data] {
-        let found = entries.filter { cids.contains($0.key) }
-        guard cids.contains(blockedCID) else { return found }
-
-        blockedFetchStarted = true
-        let pendingStarts = startWaiters
-        startWaiters.removeAll()
-        for waiter in pendingStarts { waiter.resume() }
-        guard !released else { return found }
-
-        return await withCheckedContinuation { continuation in
-            blockedFetchWaiters.append(Waiter(
-                entries: found,
-                continuation: continuation
-            ))
-        }
-    }
-
-    func waitForBlockedFetch() async {
-        guard !blockedFetchStarted else { return }
-        await withCheckedContinuation { startWaiters.append($0) }
-    }
-
-    func releaseBlockedFetch() {
-        released = true
-        let pending = blockedFetchWaiters
-        blockedFetchWaiters.removeAll()
-        for waiter in pending {
-            waiter.continuation.resume(returning: waiter.entries)
-        }
     }
 }
 

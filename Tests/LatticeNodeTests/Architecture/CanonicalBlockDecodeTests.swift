@@ -3,23 +3,6 @@ import Lattice
 import cashew
 @testable import LatticeNode
 
-private actor CanonicalDecodeTestStore: Fetcher, Storer, VolumeStorer {
-    private var entries: [String: Data] = [:]
-
-    func fetch(rawCid: String) async throws -> Data {
-        guard let data = entries[rawCid] else { throw FetcherError.notFound(rawCid) }
-        return data
-    }
-
-    func store(entries newEntries: [String: Data]) async throws {
-        entries.merge(newEntries) { existing, _ in existing }
-    }
-
-    func store(volume: SerializedVolume) async throws {
-        entries.merge(volume.entries) { existing, _ in existing }
-    }
-}
-
 /// The anti-inflation guarantee rests on one physical grind mapping to one
 /// canonical root CID. These tests pin the choke point every network block
 /// decode goes through: a block is accepted only as its exact canonical
@@ -27,7 +10,7 @@ private actor CanonicalDecodeTestStore: Fetcher, Storer, VolumeStorer {
 /// can never mint a second countable identity.
 final class CanonicalBlockDecodeTests: XCTestCase {
     func testContentBoundBlockAcceptsOnlyCanonicalEncoding() async throws {
-        let store = CanonicalDecodeTestStore()
+        let store = InMemoryContentStore()
         let genesis = try await NexusGenesis.create(fetcher: store)
         let block = genesis.block
         let canonical = try XCTUnwrap(block.toData())
@@ -45,7 +28,7 @@ final class CanonicalBlockDecodeTests: XCTestCase {
     }
 
     func testContentBoundBlockRejectsForeignCID() async throws {
-        let store = CanonicalDecodeTestStore()
+        let store = InMemoryContentStore()
         let genesis = try await NexusGenesis.create(fetcher: store)
         let block = genesis.block
         let canonical = try XCTUnwrap(block.toData())
