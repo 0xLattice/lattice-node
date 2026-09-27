@@ -55,7 +55,7 @@ enum Timers {
         }
     }
 
-    enum Retry<T> {
+    enum Retry<T: Sendable>: Sendable {
         case value(T)
         case cancelled
         case stale
@@ -64,7 +64,7 @@ enum Timers {
     /// `attempt`; while its result is `capacityUnavailable`, sleep `every`,
     /// then re-check `stillCurrent` and attempt again. The closures run on
     /// the caller's actor.
-    static func retryWhileCapacityUnavailable<T>(
+    static func retryWhileCapacityUnavailable<T: Sendable>(
         every interval: Duration,
         isolation: isolated (any Actor)? = #isolation,
         attempt: () async -> T,
@@ -82,7 +82,7 @@ enum Timers {
         }
     }
 
-    enum Step<T> {
+    enum Step<T: Sendable>: Sendable {
         case again
         case done(T)
     }
@@ -90,7 +90,7 @@ enum Timers {
     /// `step`; while it answers `.again`, sleep `every` and step again.
     /// Returns `onCancel` when a sleep is cancelled. The step runs on the
     /// caller's actor.
-    static func poll<T>(
+    static func poll<T: Sendable>(
         every interval: Duration,
         onCancel: T,
         isolation: isolated (any Actor)? = #isolation,
