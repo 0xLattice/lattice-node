@@ -4606,6 +4606,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         receivedParentTip?.carriedChildCID
     }
 
+    func candidateOfferHeldForTesting() -> Bool {
+        candidateOfferDeferredByAdmission
+    }
+
     func refusedChildEvidenceHintCountForTesting() -> Int {
         refusedChildEvidenceHints.count
     }

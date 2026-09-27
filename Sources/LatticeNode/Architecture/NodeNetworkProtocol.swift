@@ -819,7 +819,7 @@ struct ParentTipContextMessage: Sendable {
         guard rewardBytes.count <= Self.maximumRewardBytes,
               rewardBytes.count <= Int(UInt32.max),
               minimumWorkBytes.count <= Int(UInt32.max),
-              carriedChildCID.map(_isBoundedWireAtom) ?? true else {
+              carriedChildCID.map { _isBoundedWireAtom($0) } ?? true else {
             throw NodeNetworkWireError.malformed
         }
         let carriedBytes = carriedChildCID.map { Data($0.utf8) }
