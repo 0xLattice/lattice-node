@@ -527,14 +527,15 @@ because boundary-focused testing needed the same things:
   substitute blocking, counting and recording sources. Ivy's content exchange is
   served through the `IvyContentSource` protocol, with test sources in
   `Tests/LatticeNodeTests/Support`.
-- **Service ports.** `ChainService` receives its network effects as injected
-  closures:
-  - `validateBodySource` and `validateEvidenceSource`;
-  - the child-candidate provider and reconciler;
+- **Service ports.** `ChainService` receives its network effects through one
+  injected `NetworkInterface`:
+  - the validate-walk body source and evidence source;
+  - the child-candidate provider;
   - the block, transaction and proof publishers.
 
-  Its validate-walk retry interval is a parameter. `NodeNetworkHandlers` is the
-  same kind of boundary between the runtime and the service.
+  Its validate-walk retry interval is a parameter. `ChainInterface` is the
+  same kind of boundary between the runtime and the service; tests supply
+  closure-backed implementations of both from `Tests/LatticeNodeTests/Support`.
 - **Pure reducers.** `CandidateAcquirer`, `ParentEvidenceFlow` and
   `ChildCandidateOwnership` are synchronous state machines that perform neither
   Ivy I/O nor consensus ([composable node architecture](modular-admission-pipeline.md)).

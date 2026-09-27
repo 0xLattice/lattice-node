@@ -192,7 +192,7 @@ final class NetworkTrustReadURLTests: NetworkTrustTestCase {
         do {
             try await target.runtime.start(
                 process: target.process,
-                handlers: handlers
+                chain: handlers
             )
             try await connectAndHello(
                 observer,
@@ -405,7 +405,7 @@ final class NetworkTrustReadURLTests: NetworkTrustTestCase {
         do {
             try await runtime.start(
                 process: process,
-                handlers: transactionServiceHandlers(service)
+                chain: transactionServiceHandlers(service)
             )
             for provider in providers {
                 var session: (Ivy, PayloadRecorder)?

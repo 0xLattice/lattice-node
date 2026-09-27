@@ -31,10 +31,12 @@ final class ContinuityDurabilityTests: XCTestCase {
     ) async throws -> [Block] {
         let service = ChainService(
             process: producer,
-            childCandidateProvider: { _ in [] },
-            childProofPublisher: { _ in },
-            acceptedBlockPublisher: { _ in },
-            acceptedTransactionPublisher: { _ in }
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in },
+                acceptedTransactionPublisher: { _ in }
+            )
         )
         var blocks: [Block] = []
         for index in 0..<depth {

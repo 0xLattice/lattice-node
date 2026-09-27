@@ -850,7 +850,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
         let unavailable = NetworkEventRecorder()
         let eager = NetworkEventRecorder()
         let firstAdmissionGate = CandidateBuildGate()
-        let handlers = NodeNetworkHandlers(
+        let handlers = ClosureChainInterface(
             admission: { admission in
                 if !admission.weighed {
                     await eager.append(admission.header.rawCID)
@@ -933,7 +933,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
         // genesis Volume.
         do {
             try await parent.start()
-            try await runtime.start(process: process, handlers: handlers)
+            try await runtime.start(process: process, chain: handlers)
             let childPeer = PeerID(publicKey: targetConfiguration.processPublicKey)
             for _ in 0..<100 {
                 if (await parent.connectedPeers).contains(childPeer) { break }
@@ -1101,7 +1101,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             let process = fixture.process
             try await fixture.runtime.start(
                 process: process,
-                handlers: NodeNetworkHandlers(
+                chain: ClosureChainInterface(
                     admission: { _ in
                         NodeAdmissionOutcome(
                             decision: .duplicate,
@@ -1169,7 +1169,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             try await fixture.parent.start()
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: NodeNetworkHandlers(
+                chain: ClosureChainInterface(
                     admission: { _ in
                         NodeAdmissionOutcome(
                             decision: .duplicate,
@@ -1236,7 +1236,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             try await fixture.parent.start()
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: duplicateNetworkHandlers()
+                chain: duplicateNetworkHandlers()
             )
             try await eventually("parent role granted") {
                 !(await fixture.recorder.sessionTrace()).hellos.isEmpty
@@ -1301,7 +1301,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
         do {
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: duplicateNetworkHandlers()
+                chain: duplicateNetworkHandlers()
             )
             try await fixture.child.start()
             try await waitForEvidenceIndexes(fixture, count: 1)
@@ -1367,7 +1367,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
         do {
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: duplicateNetworkHandlers()
+                chain: duplicateNetworkHandlers()
             )
             try await fixture.child.start()
             try await waitForEvidenceIndexes(fixture, count: 1)
@@ -1645,7 +1645,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
         do {
             try await target.runtime.start(
                 process: target.process,
-                handlers: duplicateNetworkHandlers()
+                chain: duplicateNetworkHandlers()
             )
             var recorders: [String: PayloadRecorder] = [:]
             for (index, directory) in children.enumerated() {

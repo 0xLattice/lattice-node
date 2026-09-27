@@ -16,20 +16,6 @@ extension NodeNetworkRuntime {
         try await enqueueStart(process: process, chain: chain).value
     }
 
-    public func start(
-        process: ChainProcess,
-        handlers: NodeNetworkHandlers
-    ) async throws {
-        try await start(process: process, chain: NodeNetworkHandlersChain(handlers))
-    }
-
-    func enqueueStart(
-        process: ChainProcess,
-        handlers: NodeNetworkHandlers
-    ) -> Task<Void, any Error> {
-        enqueueStart(process: process, chain: NodeNetworkHandlersChain(handlers))
-    }
-
     func enqueueStart(
         process: ChainProcess,
         chain: any ChainInterface

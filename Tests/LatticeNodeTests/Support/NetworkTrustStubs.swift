@@ -22,12 +22,12 @@ enum NetworkTestError: Error {
     case failedPhase(String)
 }
 
-func inertNetworkHandlers() -> NodeNetworkHandlers {
-    NodeNetworkHandlers(admission: { _ in throw CancellationError() })
+func inertNetworkHandlers() -> ClosureChainInterface {
+    ClosureChainInterface(admission: { _ in throw CancellationError() })
 }
 
-func duplicateNetworkHandlers() -> NodeNetworkHandlers {
-    NodeNetworkHandlers(admission: { _ in
+func duplicateNetworkHandlers() -> ClosureChainInterface {
+    ClosureChainInterface(admission: { _ in
         NodeAdmissionOutcome(
             decision: .duplicate,
             parentCarrierLink: nil,

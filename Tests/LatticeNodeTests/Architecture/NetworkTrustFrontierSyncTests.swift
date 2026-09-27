@@ -723,7 +723,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await target.runtime.start(
                 process: target.process,
-                handlers: handlers
+                chain: handlers
             )
             try await connectAndHello(
                 observer,
@@ -896,7 +896,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await first.runtime.start(
                 process: first.process,
-                handlers: firstHandlers
+                chain: firstHandlers
             )
             try await connectAndHello(
                 publicationObserver,
@@ -921,7 +921,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             )
             try await second.runtime.start(
                 process: second.process,
-                handlers: secondHandlers
+                chain: secondHandlers
             )
             try await waitForEvent(
                 in: secondInventoryRequests,
@@ -953,7 +953,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             await second.runtime.stop()
             try await second.runtime.start(
                 process: second.process,
-                handlers: secondHandlers
+                chain: secondHandlers
             )
 
             let joined = try await overlayRuntime(
@@ -969,7 +969,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             let lateHandlers = transactionServiceHandlers(lateService)
             try await joined.runtime.start(
                 process: joined.process,
-                handlers: lateHandlers
+                chain: lateHandlers
             )
             try await waitForMempoolCount(
                 1,
@@ -1015,7 +1015,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await node.runtime.start(
                 process: node.process,
-                handlers: handlers
+                chain: handlers
             )
             // Fill the mempool with one full wire page of known roots, so a
             // peer can serve a valid 64-root page containing nothing new.
@@ -1086,7 +1086,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await target.runtime.start(
                 process: target.process,
-                handlers: handlers
+                chain: handlers
             )
             try await connectAndHello(
                 advertiser,
@@ -1188,7 +1188,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         let delivered = expectation(
             description: "real Ivy application message reaches runtime delegate"
         )
-        let handlers = NodeNetworkHandlers(admission: { admission in
+        let handlers = ClosureChainInterface(admission: { admission in
             await admissions.append(admission.header.rawCID)
             delivered.fulfill()
             return NodeAdmissionOutcome(
@@ -1207,7 +1207,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             one: candidateVolume
         ))
         do {
-            try await runtime.start(process: process, handlers: handlers)
+            try await runtime.start(process: process, chain: handlers)
             try await client.start()
             let runtimePeer = PeerID(publicKey: configuration.processPublicKey)
             try await client.connect(to: PeerEndpoint(
@@ -1258,7 +1258,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             runtime: fixture.runtime
         )
         let decisions = NetworkEventRecorder()
-        let handlers = NodeNetworkHandlers(admission: { admission in
+        let handlers = ClosureChainInterface(admission: { admission in
             let outcome = try await service.admitNetworkCandidate(
                 admission.header,
                 authenticatedChildPackage: admission.authenticatedChildPackage,
@@ -1289,7 +1289,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: handlers
+                chain: handlers
             )
             try await connectAndHello(
                 advertiser,
@@ -1397,7 +1397,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: inertNetworkHandlers()
+                chain: inertNetworkHandlers()
             )
             try await connectAndHello(
                 peer,
@@ -1484,7 +1484,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         ))
         await honest.setContentSource(honestSource)
         let admitted = NetworkEventRecorder()
-        let handlers = NodeNetworkHandlers(admission: { admission in
+        let handlers = ClosureChainInterface(admission: { admission in
             let root = await admission.contentSource.fetch([
                 admission.header.rawCID
             ])
@@ -1510,7 +1510,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: handlers
+                chain: handlers
             )
             try await connectAndHello(
                 honest,
@@ -1574,7 +1574,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         let honestCID = volumes[2].root
         let gate = CandidateBuildGate()
         let admitted = NetworkEventRecorder()
-        let handlers = NodeNetworkHandlers(admission: { admission in
+        let handlers = ClosureChainInterface(admission: { admission in
             await admitted.append(admission.header.rawCID)
             if admission.header.rawCID == stalledCID {
                 _ = await gate.enter()
@@ -1624,7 +1624,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: handlers
+                chain: handlers
             )
             try await connectAndHello(
                 first,
@@ -1744,7 +1744,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: transactionServiceHandlers(service)
+                chain: transactionServiceHandlers(service)
             )
             try await connectAndHello(
                 client,
@@ -1861,7 +1861,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: transactionServiceHandlers(service)
+                chain: transactionServiceHandlers(service)
             )
             try await connectAndHello(
                 client,
@@ -1941,7 +1941,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: transactionServiceHandlers(service)
+                chain: transactionServiceHandlers(service)
             )
             // The at-edge peer joins first, while the node is idle: its hello
             // reply is the node its own tip, and no frontier pull can follow yet,
@@ -2068,7 +2068,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: transactionServiceHandlers(service)
+                chain: transactionServiceHandlers(service)
             )
             try await connectAndHello(
                 client,
@@ -2146,7 +2146,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: inertNetworkHandlers()
+                chain: inertNetworkHandlers()
             )
             try await connectAndHello(
                 client,
@@ -2210,7 +2210,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: inertNetworkHandlers()
+                chain: inertNetworkHandlers()
             )
             try await connectAndHello(
                 client,
@@ -2315,11 +2315,11 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await producer.runtime.start(
                 process: producer.process,
-                handlers: transactionServiceHandlers(producerService)
+                chain: transactionServiceHandlers(producerService)
             )
             try await joiner.runtime.start(
                 process: joiner.process,
-                handlers: joinerHandlers
+                chain: joinerHandlers
             )
             try await eventually("joiner validates the canonical tip") {
                 await joiner.process.status().tipCID == tipCID
@@ -2341,7 +2341,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             await joiner.runtime.stop()
             try await joiner.runtime.start(
                 process: joiner.process,
-                handlers: joinerHandlers
+                chain: joinerHandlers
             )
             try await eventually("joiner weighs the losing sibling") {
                 await joiner.process.hasAcceptedBlock(losingCID)
@@ -2439,11 +2439,11 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await producer.runtime.start(
                 process: producer.process,
-                handlers: transactionServiceHandlers(producerService)
+                chain: transactionServiceHandlers(producerService)
             )
             try await joiner.runtime.start(
                 process: joiner.process,
-                handlers: joinerHandlers
+                chain: joinerHandlers
             )
             try await eventually("joiner validates X's tip") {
                 await joiner.process.status().tipCID == xTipCID
@@ -2471,7 +2471,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             await joiner.runtime.stop()
             try await joiner.runtime.start(
                 process: joiner.process,
-                handlers: joinerHandlers
+                chain: joinerHandlers
             )
             // A leaf is accepted the moment it is fetched, while its segment
             // is still disconnected; the header graph is complete only once
@@ -2538,14 +2538,14 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await producer.runtime.start(
                 process: producer.process,
-                handlers: transactionServiceHandlers(
+                chain: transactionServiceHandlers(
                     producerService,
                     inventoryRequests: producerInventory
                 )
             )
             try await joiner.runtime.start(
                 process: joiner.process,
-                handlers: transactionServiceHandlers(
+                chain: transactionServiceHandlers(
                     joinerService,
                     inventoryRequests: joinerInventory,
                     admissions: joinerAdmissions
@@ -2624,7 +2624,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await producer.runtime.start(
                 process: producer.process,
-                handlers: transactionServiceHandlers(producerService)
+                chain: transactionServiceHandlers(producerService)
             )
             // Mined BEFORE the joiner exists: the transaction is never relayed
             // to it, so the block's body is only available over the network.
@@ -2647,7 +2647,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
 
             try await joiner.runtime.start(
                 process: joiner.process,
-                handlers: transactionServiceHandlers(
+                chain: transactionServiceHandlers(
                     joinerService,
                     admissions: joinerAdmissions
                 )
@@ -2700,7 +2700,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: inertNetworkHandlers()
+                chain: inertNetworkHandlers()
             )
             try await connectAndHello(
                 client,
@@ -2788,7 +2788,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: transactionServiceHandlers(service)
+                chain: transactionServiceHandlers(service)
             )
             try await connectAndHello(
                 liarClient,
@@ -2856,7 +2856,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: inertNetworkHandlers()
+                chain: inertNetworkHandlers()
             )
             try await connectAndHello(
                 client,
@@ -2923,7 +2923,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: inertNetworkHandlers()
+                chain: inertNetworkHandlers()
             )
             try await connectAndHello(
                 deepClient,
@@ -3025,7 +3025,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         do {
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: inertNetworkHandlers()
+                chain: inertNetworkHandlers()
             )
             try await connectAndHello(
                 client,

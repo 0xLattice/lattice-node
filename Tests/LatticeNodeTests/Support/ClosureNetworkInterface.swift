@@ -2,11 +2,43 @@ import Foundation
 import Lattice
 import VolumeBroker
 import cashew
+@testable import LatticeNode
 
 /// A `NetworkInterface` assembled from closures, one per operation. Omitted
 /// operations are no-ops; an omitted body source admits broker-only and an
 /// omitted evidence source finds nothing.
 final class ClosureNetworkInterface: NetworkInterface {
+    typealias ChildCandidateProvider = @Sendable (
+        ChildCandidateRequestContext
+    ) async throws -> [DirectChildCandidate]
+    typealias ChainStateChangePublisher = @Sendable () async -> Void
+    typealias DescendantPlanPublisher = @Sendable (
+        _ rewards: [MiningReward],
+        _ minimumWork: [MiningMinimumWork]
+    ) async -> Void
+    typealias ChildCandidateDigestProvider = @Sendable (
+        _ parentStateCID: String
+    ) async -> [String]
+    typealias ChildProofPublisher = @Sendable (
+        DirectChildProofPublication
+    ) async throws -> Void
+    typealias ParentRunReportPublisher = @Sendable (ParentRunReport) async throws -> Void
+    typealias ParentRunReportRequester = @Sendable ([String]) async -> Void
+    typealias AcceptedBlockPublisher = @Sendable (_ blockCID: String) async throws -> Void
+    typealias AcceptedTransactionPublisher = @Sendable (
+        _ volumeRootCID: String
+    ) async throws -> Void
+    /// Runs `admit` inside a body session bound to `blockCID`.
+    typealias ValidateBodyAdmission = @Sendable (
+        _ blockCID: String,
+        _ admit: @Sendable (_ remoteSource: any ContentSource) async throws
+            -> NodeAdmissionOutcome
+    ) async throws -> NodeAdmissionOutcome
+    typealias ValidateEvidenceSource = @Sendable (
+        _ blockCID: String,
+        _ requirement: CrossChainEvidenceRequirement
+    ) async -> AuthenticatedChildPackage?
+
     private let childCandidateProvider: ChildCandidateProvider
     private let chainStateChangePublisher: ChainStateChangePublisher
     private let descendantPlanPublisher: DescendantPlanPublisher
@@ -17,7 +49,7 @@ final class ClosureNetworkInterface: NetworkInterface {
     private let acceptedBlockPublisher: AcceptedBlockPublisher
     private let acceptedTransactionPublisher: AcceptedTransactionPublisher
     private let validateBodySource: ValidateBodyAdmission?
-    private let validateEvidenceSource: ChainService.ValidateEvidenceSource?
+    private let validateEvidenceSource: ValidateEvidenceSource?
 
     init(
         childCandidateProvider: @escaping ChildCandidateProvider,
@@ -30,7 +62,7 @@ final class ClosureNetworkInterface: NetworkInterface {
         acceptedBlockPublisher: @escaping AcceptedBlockPublisher,
         acceptedTransactionPublisher: @escaping AcceptedTransactionPublisher = { _ in },
         validateBodySource: ValidateBodyAdmission? = nil,
-        validateEvidenceSource: ChainService.ValidateEvidenceSource? = nil
+        validateEvidenceSource: ValidateEvidenceSource? = nil
     ) {
         self.childCandidateProvider = childCandidateProvider
         self.chainStateChangePublisher = chainStateChangePublisher

@@ -496,7 +496,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         let parentTip = try await fixture.parentProcess.validatedTipBlock()
         let parentTipCID = try BlockHeader(node: parentTip).rawCID
         let builds = NetworkEventRecorder()
-        let childHandlers = NodeNetworkHandlers(
+        let childHandlers = ClosureChainInterface(
             childCandidateBuilder: { context, parentSource in
                 // The carrier the child builds against is the parent's tip's
                 // post-state, and the tip itself is fetched from the parent.
@@ -534,11 +534,11 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         do {
             try await fixture.parentRuntime.start(
                 process: fixture.parentProcess,
-                handlers: inertNetworkHandlers()
+                chain: inertNetworkHandlers()
             )
             try await fixture.childRuntime.start(
                 process: fixture.childProcess,
-                handlers: childHandlers
+                chain: childHandlers
             )
             try await descendant.start()
             try await descendant.connect(to: PeerEndpoint(
@@ -595,7 +595,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
     func testParentPushesDescendantMinimumWorkAndTheChildBuildsWithIt() async throws {
         let fixture = try await provisionalRootFixture(keyByte: 0x96)
         let received = MinimumWorkRecorder()
-        let childHandlers = NodeNetworkHandlers(
+        let childHandlers = ClosureChainInterface(
             childCandidateBuilder: { context, _ in
                 await received.record(context.minimumWork)
                 return fixture.candidate
@@ -605,11 +605,11 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         do {
             try await fixture.parentRuntime.start(
                 process: fixture.parentProcess,
-                handlers: inertNetworkHandlers()
+                chain: inertNetworkHandlers()
             )
             try await fixture.childRuntime.start(
                 process: fixture.childProcess,
-                handlers: childHandlers
+                chain: childHandlers
             )
             try await waitForChildCandidate(fixture)
             let initialPlan = await received.last()
@@ -685,7 +685,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             process: fixture.childProcess,
             runtime: fixture.childRuntime
         )
-        let childHandlers = NodeNetworkHandlers(
+        let childHandlers = ClosureChainInterface(
             childCandidateBuilder: { [weak childService] context, parentSource in
                 guard let childService else { return nil }
                 return try await childService.miningCandidate(
@@ -698,11 +698,11 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         do {
             try await fixture.parentRuntime.start(
                 process: fixture.parentProcess,
-                handlers: inertNetworkHandlers()
+                chain: inertNetworkHandlers()
             )
             try await fixture.childRuntime.start(
                 process: fixture.childProcess,
-                handlers: childHandlers
+                chain: childHandlers
             )
             for _ in 0..<250 {
                 if await childService.status().phase == .active { break }
@@ -804,7 +804,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             process: fixture.childProcess,
             runtime: fixture.childRuntime
         )
-        let childHandlers = NodeNetworkHandlers(
+        let childHandlers = ClosureChainInterface(
             childCandidateBuilder: { [weak childService] context, parentSource in
                 guard let childService else { return nil }
                 return try await childService.miningCandidate(
@@ -817,11 +817,11 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         do {
             try await fixture.parentRuntime.start(
                 process: fixture.parentProcess,
-                handlers: inertNetworkHandlers()
+                chain: inertNetworkHandlers()
             )
             try await fixture.childRuntime.start(
                 process: fixture.childProcess,
-                handlers: childHandlers
+                chain: childHandlers
             )
             var held: [DirectChildCandidate] = []
             for _ in 0..<250 {
@@ -969,15 +969,17 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         let childRuntime = fixture.childRuntime
         let childService = ChainService(
             process: fixture.childProcess,
-            childCandidateProvider: { _ in [] },
-            chainStateChangePublisher: { [weak childRuntime] in
-                await childRuntime?.chainStateChanged()
-            },
-            childProofPublisher: { _ in },
-            acceptedBlockPublisher: { _ in },
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                chainStateChangePublisher: { [weak childRuntime] in
+                    await childRuntime?.chainStateChanged()
+                },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in }
+            ),
             validateWalkRetryInterval: .seconds(60)
         )
-        let childHandlers = NodeNetworkHandlers(
+        let childHandlers = ClosureChainInterface(
             childCandidateBuilder: { [weak childService] context, parentSource in
                 guard let childService else { return nil }
                 return try await childService.miningCandidate(
@@ -995,11 +997,11 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         do {
             try await fixture.parentRuntime.start(
                 process: fixture.parentProcess,
-                handlers: inertNetworkHandlers()
+                chain: inertNetworkHandlers()
             )
             try await fixture.childRuntime.start(
                 process: fixture.childProcess,
-                handlers: childHandlers
+                chain: childHandlers
             )
             var held: [DirectChildCandidate] = []
             for _ in 0..<250 {
@@ -1037,15 +1039,17 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         let package = weighedOnly.package
         let childService = ChainService(
             process: fixture.childProcess,
-            childCandidateProvider: { _ in [] },
-            chainStateChangePublisher: { await changes.append("change") },
-            childProofPublisher: { _ in },
-            acceptedBlockPublisher: { _ in },
-            validateBodySource: { _, admit in
-                await gate.wait()
-                return try await admit(parentProcess)
-            },
-            validateEvidenceSource: { _, _ in package }
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                chainStateChangePublisher: { await changes.append("change") },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in },
+                validateBodySource: { _, admit in
+                    await gate.wait()
+                    return try await admit(parentProcess)
+                },
+                validateEvidenceSource: { _, _ in package }
+            )
         )
         // Behind and not parked: the request itself is refused and arms the
         // walk, whose first step then holds at the gate.

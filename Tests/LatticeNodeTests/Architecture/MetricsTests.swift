@@ -226,9 +226,11 @@ final class MetricsTests: XCTestCase {
     private func service(for process: ChainProcess) -> ChainService {
         ChainService(
             process: process,
-            childCandidateProvider: { _ in [] },
-            childProofPublisher: { _ in },
-            acceptedBlockPublisher: { _ in },
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in },
+            )
         )
     }
 }

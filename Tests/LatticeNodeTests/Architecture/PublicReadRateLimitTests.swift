@@ -31,9 +31,11 @@ final class PublicReadRateLimitTests: XCTestCase {
         return (
             ChainService(
                 process: process,
-                childCandidateProvider: { _ in [] },
-                childProofPublisher: { _ in },
-                acceptedBlockPublisher: { _ in },
+                network: ClosureNetworkInterface(
+                    childCandidateProvider: { _ in [] },
+                    childProofPublisher: { _ in },
+                    acceptedBlockPublisher: { _ in },
+                )
             ),
             configuration
         )

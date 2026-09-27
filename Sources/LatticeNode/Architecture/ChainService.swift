@@ -6,53 +6,6 @@ import UInt256
 import VolumeBroker
 import cashew
 
-public typealias ChildCandidateProvider = @Sendable (
-    ChildCandidateRequestContext
-) async throws
-    -> [DirectChildCandidate]
-/// Something a template or a child candidate is a function of changed on
-/// this chain: the validated tip, the mempool, a credit. The runtime re-pushes
-/// the parent context to children and rebuilds this chain's own candidate.
-public typealias ChainStateChangePublisher = @Sendable () async -> Void
-/// The miner's reward plan and minimum work for this chain's descendants, as
-/// supplied with a template request; pushed to children with the tip.
-public typealias DescendantPlanPublisher = @Sendable (
-    _ rewards: [MiningReward],
-    _ minimumWork: [MiningMinimumWork]
-) async -> Void
-/// The child candidates a template built on the given parent state can
-/// carry, as `directory:cid` lines: one input of the template digest.
-public typealias ChildCandidateDigestProvider = @Sendable (
-    _ parentStateCID: String
-) async -> [String]
-public typealias ChildProofPublisher = @Sendable (
-    DirectChildProofPublication
-) async throws -> Void
-/// A parent pushes the run it credits to a committing block to the children
-/// of that directory (§9.10), on every change to that run.
-public typealias ParentRunReportPublisher = @Sendable (ParentRunReport) async throws -> Void
-/// Ask this chain's configured parent for the runs of the committing blocks
-/// behind one block admitted here (§9.10) — one ask per admission, so the
-/// credit for those runs never waits for a push or a reconnect.
-public typealias ParentRunReportRequester = @Sendable ([String]) async -> Void
-public typealias AcceptedBlockPublisher = @Sendable (_ blockCID: String) async throws -> Void
-public typealias AcceptedTransactionPublisher = @Sendable (
-    _ volumeRootCID: String
-) async throws -> Void
-/// Opens a network body-acquisition session bound to one block's root and runs
-/// the caller's admission inside it. A weighed admit (deferred execution) stores
-/// only the block boundary, so the validate-on-candidacy walk must pull the
-/// deferred body (tier-3: tx bodies, validation-path states, WASM modules) over
-/// the network before it can execute the block. The session composes broker-first
-/// under `admit`, so an already-local boundary is served free and only the missing
-/// body is fetched. Nil in unit contexts that admit broker-only (empty blocks,
-/// whose boundary already is the whole block).
-public typealias ValidateBodyAdmission = @Sendable (
-    _ blockCID: String,
-    _ admit: @Sendable (_ remoteSource: any ContentSource) async throws
-        -> NodeAdmissionOutcome
-) async throws -> NodeAdmissionOutcome
-
 private struct AdmissionEffects: Sendable {
     let parentGenesisLinks: [ParentGenesisLink]
 }
@@ -186,46 +139,6 @@ public actor ChainService {
             capacity: Self.templateCapacity
         )
         self.maximumChildCandidates = maximumChildCandidates
-    }
-
-    public init(
-        process: ChainProcess,
-        childCandidateProvider: @escaping ChildCandidateProvider,
-        chainStateChangePublisher: @escaping ChainStateChangePublisher = {},
-        descendantPlanPublisher: @escaping DescendantPlanPublisher = { _, _ in },
-        childCandidateDigestProvider: @escaping ChildCandidateDigestProvider = { _ in [] },
-        childProofPublisher: @escaping ChildProofPublisher,
-        parentRunReportPublisher: @escaping ParentRunReportPublisher = { _ in },
-        parentRunReportRequester: @escaping ParentRunReportRequester = { _ in },
-        acceptedBlockPublisher: @escaping AcceptedBlockPublisher,
-        acceptedTransactionPublisher: @escaping AcceptedTransactionPublisher = { _ in },
-        validateBodySource: ValidateBodyAdmission? = nil,
-        validateEvidenceSource: ValidateEvidenceSource? = nil,
-        validateWalkRetryInterval: Duration = .seconds(4),
-        mempoolMaxCount: Int = 10_000,
-        mempoolMaxNonReadyPerSigner: Int = 64,
-        maximumChildCandidates: Int = 64
-    ) {
-        self.init(
-            process: process,
-            network: ClosureNetworkInterface(
-                childCandidateProvider: childCandidateProvider,
-                chainStateChangePublisher: chainStateChangePublisher,
-                descendantPlanPublisher: descendantPlanPublisher,
-                childCandidateDigestProvider: childCandidateDigestProvider,
-                childProofPublisher: childProofPublisher,
-                parentRunReportPublisher: parentRunReportPublisher,
-                parentRunReportRequester: parentRunReportRequester,
-                acceptedBlockPublisher: acceptedBlockPublisher,
-                acceptedTransactionPublisher: acceptedTransactionPublisher,
-                validateBodySource: validateBodySource,
-                validateEvidenceSource: validateEvidenceSource
-            ),
-            validateWalkRetryInterval: validateWalkRetryInterval,
-            mempoolMaxCount: mempoolMaxCount,
-            mempoolMaxNonReadyPerSigner: mempoolMaxNonReadyPerSigner,
-            maximumChildCandidates: maximumChildCandidates
-        )
     }
 
     /// Join this service's three coalesced background workers — canonical
@@ -1581,12 +1494,6 @@ public actor ChainService {
             reserveValidateWalkWorker()
         }
     }
-
-    /// See `NetworkInterface.resolveValidateEvidence`.
-    public typealias ValidateEvidenceSource = @Sendable (
-        _ blockCID: String,
-        _ requirement: CrossChainEvidenceRequirement
-    ) async -> AuthenticatedChildPackage?
 
     /// Coalescing reserve for the validate-on-candidacy walk. Mirrors
     /// `reserveCanonicalCommitWorker`'s single-instance-Task + dirty-bit shape: a

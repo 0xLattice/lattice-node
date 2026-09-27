@@ -78,10 +78,12 @@ final class MultichainInvariantTests: XCTestCase {
         let pushed = ParentRunReportSink()
         let parentService = ChainService(
             process: parent,
-            childCandidateProvider: { _ in [] },
-            childProofPublisher: { _ in },
-            parentRunReportPublisher: { report in await pushed.record(report) },
-            acceptedBlockPublisher: { _ in }
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                parentRunReportPublisher: { report in await pushed.record(report) },
+                acceptedBlockPublisher: { _ in }
+            )
         )
         let carrierOutcome = try await parentService.admitNetworkCandidate(
             carrierHeader,
@@ -127,10 +129,12 @@ final class MultichainInvariantTests: XCTestCase {
         let asked = RunReportRequestSink()
         var childService: ChainService? = ChainService(
             process: try child(),
-            childCandidateProvider: { _ in [] },
-            childProofPublisher: { _ in },
-            parentRunReportRequester: { committers in await asked.record(committers) },
-            acceptedBlockPublisher: { _ in }
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                parentRunReportRequester: { committers in await asked.record(committers) },
+                acceptedBlockPublisher: { _ in }
+            )
         )
         let admitted = try await XCTUnwrap(childService).admitNetworkCandidate(
             childBlockHeader,
@@ -412,10 +416,12 @@ final class MultichainInvariantTests: XCTestCase {
         let pushedToB = ParentRunReportSink()
         let aService = ChainService(
             process: a,
-            childCandidateProvider: { _ in [] },
-            childProofPublisher: { _ in },
-            parentRunReportPublisher: { report in await pushedToB.record(report) },
-            acceptedBlockPublisher: { _ in }
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                parentRunReportPublisher: { report in await pushedToB.record(report) },
+                acceptedBlockPublisher: { _ in }
+            )
         )
         let aCredited = try await aService.applyParentRunReport(nexusReport)
         guard case .credited = aCredited else { return XCTFail("A must credit Nexus's run: \(aCredited)") }

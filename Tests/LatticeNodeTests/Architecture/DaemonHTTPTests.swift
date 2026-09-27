@@ -56,9 +56,11 @@ final class DaemonHTTPTests: XCTestCase {
         ))
         let service = ChainService(
             process: process,
-            childCandidateProvider: { _ in [] },
-            childProofPublisher: { _ in },
-            acceptedBlockPublisher: { _ in },
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in },
+            )
         )
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         let body = try JSONEncoder().encode(MiningTemplateRequest())
@@ -102,9 +104,11 @@ final class DaemonHTTPTests: XCTestCase {
         let process = try await ChainProcess.open(configuration: configuration)
         let service = ChainService(
             process: process,
-            childCandidateProvider: { _ in [] },
-            childProofPublisher: { _ in },
-            acceptedBlockPublisher: { _ in },
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in },
+            )
         )
         let app = makeApplication(
             service: service,
@@ -166,9 +170,11 @@ final class DaemonHTTPTests: XCTestCase {
         let process = try await ChainProcess.open(configuration: configuration)
         let service = ChainService(
             process: process,
-            childCandidateProvider: { _ in [] },
-            childProofPublisher: { _ in },
-            acceptedBlockPublisher: { _ in },
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in },
+            )
         )
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
 
@@ -253,9 +259,11 @@ final class DaemonHTTPTests: XCTestCase {
         let process = try await ChainProcess.open(configuration: configuration)
         let service = ChainService(
             process: process,
-            childCandidateProvider: { _ in [] },
-            childProofPublisher: { _ in },
-            acceptedBlockPublisher: { _ in },
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in },
+            )
         )
 
         let publicApp = makePublicReadApplication(
@@ -337,9 +345,11 @@ final class DaemonHTTPTests: XCTestCase {
         let process = try await ChainProcess.open(configuration: configuration)
         let service = ChainService(
             process: process,
-            childCandidateProvider: { _ in [] },
-            childProofPublisher: { _ in },
-            acceptedBlockPublisher: { _ in },
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in },
+            )
         )
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         let key = CryptoUtils.generateKeyPair()
@@ -461,9 +471,11 @@ final class DaemonHTTPTests: XCTestCase {
         let process = try await ChainProcess.open(configuration: configuration)
         let service = ChainService(
             process: process,
-            childCandidateProvider: { _ in [] },
-            childProofPublisher: { _ in },
-            acceptedBlockPublisher: { _ in },
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in },
+            )
         )
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
 
@@ -493,9 +505,11 @@ final class DaemonHTTPTests: XCTestCase {
         let process = try await ChainProcess.open(configuration: configuration)
         let service = ChainService(
             process: process,
-            childCandidateProvider: { _ in [] },
-            childProofPublisher: { _ in },
-            acceptedBlockPublisher: { _ in },
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in },
+            )
         )
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         // Nexus genesis premines to this fixed owner address — a known funded
@@ -579,9 +593,11 @@ final class DaemonHTTPTests: XCTestCase {
         let process = try await ChainProcess.open(configuration: configuration)
         let service = ChainService(
             process: process,
-            childCandidateProvider: { _ in [] },
-            childProofPublisher: { _ in },
-            acceptedBlockPublisher: { _ in },
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in },
+            )
         )
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         let genesisCID = configuration.nexusGenesisCID
@@ -703,9 +719,11 @@ final class DaemonHTTPTests: XCTestCase {
         let process = try await ChainProcess.open(configuration: configuration)
         let service = ChainService(
             process: process,
-            childCandidateProvider: { _ in [] },
-            childProofPublisher: { _ in },
-            acceptedBlockPublisher: { _ in },
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in },
+            )
         )
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         // Genesis carries the premine transaction, so a transactions page on
@@ -845,13 +863,15 @@ final class DaemonHTTPTests: XCTestCase {
             // Invoked from inside `buildMiningTemplate()` while `miningTemplate()`
             // still holds the operation gate — parking here lets the test hold
             // that gate open for a controlled duration.
-            childCandidateProvider: { _ in
-                await providerEntered.open()
-                await releaseProvider.wait()
-                return []
-            },
-            childProofPublisher: { _ in },
-            acceptedBlockPublisher: { _ in },
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in
+                    await providerEntered.open()
+                    await releaseProvider.wait()
+                    return []
+                },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in },
+            )
         )
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
 
@@ -915,9 +935,11 @@ final class DaemonHTTPTests: XCTestCase {
         let process = try await ChainProcess.open(configuration: configuration)
         let service = ChainService(
             process: process,
-            childCandidateProvider: { _ in [] },
-            childProofPublisher: { _ in },
-            acceptedBlockPublisher: { _ in },
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in },
+            )
         )
         let app = makeApplication(
             service: service,
