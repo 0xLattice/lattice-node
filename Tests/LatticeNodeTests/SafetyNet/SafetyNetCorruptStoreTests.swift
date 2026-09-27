@@ -293,29 +293,22 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             }
             results.append((damage, observed, survived))
         }
-        // `runActivity` is synchronous and main-actor isolated, so the async
-        // boots above are gathered first and reported here, one activity per
-        // (table, column).
-        await MainActor.run {
-            for (damage, observed, survived) in results {
-                XCTContext.runActivity(
-                    named: "\(damage.table).\(damage.column): \(damage.description)"
-                ) { _ in
-                    XCTAssertEqual(
-                        observed, expected,
-                        "\(damage.table).\(damage.column) (\(damage.description)): "
-                            + "boot observed \(observed), pinned \(expected)",
-                        file: file, line: line
-                    )
-                    if let survived {
-                        XCTAssertTrue(
-                            survived,
-                            "\(damage.table).\(damage.column): the damaged row "
-                                + "did not survive the boot unchanged",
-                            file: file, line: line
-                        )
-                    }
-                }
+        // Every failure message names the (table, column) it belongs to;
+        // `XCTContext.runActivity` is unavailable on swift-corelibs-xctest.
+        for (damage, observed, survived) in results {
+            XCTAssertEqual(
+                observed, expected,
+                "\(damage.table).\(damage.column) (\(damage.description)): "
+                    + "boot observed \(observed), pinned \(expected)",
+                file: file, line: line
+            )
+            if let survived {
+                XCTAssertTrue(
+                    survived,
+                    "\(damage.table).\(damage.column): the damaged row "
+                        + "did not survive the boot unchanged",
+                    file: file, line: line
+                )
             }
         }
     }
