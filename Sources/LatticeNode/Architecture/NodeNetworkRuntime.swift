@@ -831,20 +831,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
         generation: UInt64,
         process: ChainProcess
     ) async -> Bool {
-        while isCurrentRuntime(generation: generation, process: process),
-              peer.map({
-                  hierarchySessions[$0.key]?.sessionID == $0.sessionID
-                    && hierarchyPeers[$0.key] == .parent
-              }) ?? true {
-            if enqueueCandidate(candidate) { return true }
-            do {
-                // Not `Task.sleep(for:)`: see ChainService.scheduleValidateWalkRetry.
-                try await Task.sleep(nanoseconds: 10_000_000)
-            } catch {
-                return false
-            }
+        await Timers.poll(every: .milliseconds(10), onCancel: false) {
+            guard isCurrentRuntime(generation: generation, process: process),
+                  peer.map({
+                      hierarchySessions[$0.key]?.sessionID == $0.sessionID
+                        && hierarchyPeers[$0.key] == .parent
+                  }) ?? true else { return .done(false) }
+            return enqueueCandidate(candidate) ? .done(true) : .again
         }
-        return false
     }
 
     private func stopNow() async {
@@ -3176,25 +3170,19 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
 
         let response: AttributedVolumeResponse
-        while true {
-            let fetched = await overlay.fetchVolume(rootCID: rootCID, from: peer)
-            guard fetched.failure == .localCapacityUnavailable else {
-                response = fetched
-                break
+        switch await Timers.retryWhileCapacityUnavailable(
+            every: planeConfigurations.overlay.requestTimeout,
+            attempt: { await overlay.fetchVolume(rootCID: rootCID, from: peer) },
+            capacityUnavailable: { $0.failure == .localCapacityUnavailable },
+            stillCurrent: {
+                isCurrentRuntime(generation: generation, process: process)
+                    && overlayPeers[peer.key]?.sessionID == peer.sessionID
             }
-            do {
-                try await Task.sleep(
-                    nanoseconds: Timers.nanoseconds(
-                        planeConfigurations.overlay.requestTimeout
-                    )
-                )
-            } catch {
-                return
-            }
-            guard isCurrentRuntime(generation: generation, process: process),
-                  overlayPeers[peer.key]?.sessionID == peer.sessionID else {
-                return
-            }
+        ) {
+        case .value(let fetched):
+            response = fetched
+        case .cancelled, .stale:
+            return
         }
         let volume = SerializedVolume(
             root: response.rootCID,
@@ -3507,24 +3495,24 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // connectivity reservation, NOT validation trust — parent facts are still
         // verified and never vouch for the child transition) so overlay churn
         // cannot starve consensus-critical hierarchy evidence.
-        while activeEvidenceVolumes.count >= Self.maximumEvidenceCandidates - 1 {
-            do {
-                try await Task.sleep(
-                    nanoseconds: Timers.nanoseconds(
-                        planeConfigurations.overlay.requestTimeout
-                    )
-                )
-            } catch {
-                return false
-            }
+        // nil: a slot is free. The stale and lease checks also pass on the
+        // first step: both were just made above with no suspension between.
+        let slotWait: Bool? = await Timers.poll(
+            every: planeConfigurations.overlay.requestTimeout,
+            onCancel: false
+        ) {
             guard isCurrentRuntime(
                 generation: generation,
                 process: process
             ), overlayPeers[peer.key]?.sessionID == peer.sessionID else {
-                return true
+                return .done(true)
             }
-            if activeEvidenceVolumes.contains(lease) { return true }
+            if activeEvidenceVolumes.contains(lease) { return .done(true) }
+            return activeEvidenceVolumes.count >= Self.maximumEvidenceCandidates - 1
+                ? .again
+                : .done(nil)
         }
+        if let slotWait { return slotWait }
         activeEvidenceVolumes.insert(lease)
         defer { activeEvidenceVolumes.remove(lease) }
         if let evidence = try? await process.store.issuedChildEvidence(
@@ -3568,32 +3556,28 @@ public actor NodeNetworkRuntime: IvyDelegate {
             value: ChildEvidenceVolume?,
             attribution: IvyRootContentSource.Attribution
         )
-        while true {
-            let fetched = await source.withRootTracing(
-                summary.attachmentCID
-            ) { session in
-                await Self.resolveEvidenceVolume(
-                    summary.attachmentCID,
-                    source: session
-                )
-            }
-            guard fetched.attribution.localCapacityUnavailable else {
-                resolved = fetched
-                break
-            }
-            do {
-                try await Task.sleep(
-                    nanoseconds: Timers.nanoseconds(
-                        planeConfigurations.overlay.requestTimeout
+        switch await Timers.retryWhileCapacityUnavailable(
+            every: planeConfigurations.overlay.requestTimeout,
+            attempt: {
+                await source.withRootTracing(
+                    summary.attachmentCID
+                ) { session in
+                    await Self.resolveEvidenceVolume(
+                        summary.attachmentCID,
+                        source: session
                     )
-                )
-            } catch {
-                return true
+                }
+            },
+            capacityUnavailable: { $0.attribution.localCapacityUnavailable },
+            stillCurrent: {
+                isCurrentRuntime(generation: generation, process: process)
+                    && overlayPeers[peer.key]?.sessionID == peer.sessionID
             }
-            guard isCurrentRuntime(generation: generation, process: process),
-                  overlayPeers[peer.key]?.sessionID == peer.sessionID else {
-                return true
-            }
+        ) {
+        case .value(let fetched):
+            resolved = fetched
+        case .cancelled, .stale:
+            return true
         }
         guard let attachment = resolved.value,
               let envelope = try? ChildValidationPackageEnvelope.decode(
@@ -3758,25 +3742,25 @@ public actor NodeNetworkRuntime: IvyDelegate {
             attachmentCID: summary.attachmentCID
         )
         if activeEvidenceVolumes.contains(lease) { return .handled }
-        while activeEvidenceVolumes.count >= Self.maximumEvidenceCandidates {
-            do {
-                try await Task.sleep(
-                    nanoseconds: Timers.nanoseconds(
-                        planeConfigurations.hierarchy.requestTimeout
-                    )
-                )
-            } catch {
-                return .handled
-            }
+        // nil: a slot is free. The stale and lease checks also pass on the
+        // first step: both were just made above with no suspension between.
+        let slotWait: ParentEvidenceResult? = await Timers.poll(
+            every: planeConfigurations.hierarchy.requestTimeout,
+            onCancel: .handled
+        ) {
             guard isCurrentRuntime(
                 generation: generation,
                 process: process
             ), hierarchySessions[peer.key]?.sessionID == peer.sessionID,
                hierarchyPeers[peer.key] == .parent else {
-                return .failed
+                return .done(.failed)
             }
-            if activeEvidenceVolumes.contains(lease) { return .handled }
+            if activeEvidenceVolumes.contains(lease) { return .done(.handled) }
+            return activeEvidenceVolumes.count >= Self.maximumEvidenceCandidates
+                ? .again
+                : .done(nil)
         }
+        if let slotWait { return slotWait }
         activeEvidenceVolumes.insert(lease)
         defer { activeEvidenceVolumes.remove(lease) }
         let source = IvyRootContentSource(
@@ -3790,35 +3774,31 @@ public actor NodeNetworkRuntime: IvyDelegate {
             value: ChildEvidenceVolume?,
             attribution: IvyRootContentSource.Attribution
         )
-        while true {
-            let fetched = await source.withRootTracing(
-                summary.attachmentCID,
-                operation: { session in
-                    await Self.resolveEvidenceVolume(
-                        summary.attachmentCID,
-                        childCID: summary.childCID,
-                        source: session
-                    )
-                }
-            )
-            guard fetched.attribution.localCapacityUnavailable else {
-                resolved = fetched
-                break
-            }
-            do {
-                try await Task.sleep(
-                    nanoseconds: Timers.nanoseconds(
-                        planeConfigurations.hierarchy.requestTimeout
-                    )
+        switch await Timers.retryWhileCapacityUnavailable(
+            every: planeConfigurations.hierarchy.requestTimeout,
+            attempt: {
+                await source.withRootTracing(
+                    summary.attachmentCID,
+                    operation: { session in
+                        await Self.resolveEvidenceVolume(
+                            summary.attachmentCID,
+                            childCID: summary.childCID,
+                            source: session
+                        )
+                    }
                 )
-            } catch {
-                return .failed
+            },
+            capacityUnavailable: { $0.attribution.localCapacityUnavailable },
+            stillCurrent: {
+                isCurrentRuntime(generation: generation, process: process)
+                    && hierarchySessions[peer.key]?.sessionID == peer.sessionID
+                    && hierarchyPeers[peer.key] == .parent
             }
-            guard isCurrentRuntime(generation: generation, process: process),
-                  hierarchySessions[peer.key]?.sessionID == peer.sessionID,
-                  hierarchyPeers[peer.key] == .parent else {
-                return .failed
-            }
+        ) {
+        case .value(let fetched):
+            resolved = fetched
+        case .cancelled, .stale:
+            return .failed
         }
         guard let attachment = resolved.value else {
             // Mirror the overlay gate: only a complete response that still
