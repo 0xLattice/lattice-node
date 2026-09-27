@@ -517,12 +517,6 @@ actor NodeStore {
         return value
     }
 
-    func advanceConsensusRevisionFloor(_ floor: UInt64) throws {
-        try database.transaction {
-            try persistConsensusRevisionFloor(floor)
-        }
-    }
-
     private func persistConsensusRevisionFloor(_ floor: UInt64) throws {
         let current = try consensusRevisionFloor()
         guard floor > current else { return }
@@ -1065,19 +1059,6 @@ actor NodeStore {
             LIMIT 1
             """,
             params: [.text(blockCID)]
-        ).isEmpty
-    }
-
-    func hasIncomingCarrierEdge(_ edgeCID: String) throws -> Bool {
-        guard CIDIdentity.isCanonical(edgeCID) else {
-            throw NodeStoreError.corrupt("invalid incoming edge lookup")
-        }
-        return try !database.query(
-            "SELECT 1 FROM issued_child_proofs WHERE scope = ?1 AND edge_cid = ?2 LIMIT 1",
-            params: [
-                .text(IssuedChildProofScope.incomingCarrier.rawValue),
-                .text(edgeCID),
-            ]
         ).isEmpty
     }
 

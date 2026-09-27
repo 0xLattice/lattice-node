@@ -373,9 +373,7 @@ struct Child: AsyncParsableCommand {
             // The child's own directory now carries the seed.
             try? FileManager.default.removeItem(at: pendingURL)
             try spawnChain(childPath, topology: topology, layout: layout)
-            try await waitActive(
-                childPath, rpc: ports.2, expectedTip: genesisCID
-            )
+            try await waitActive(childPath, rpc: ports.2)
             print("\(childPath): active")
         }
     }
@@ -481,9 +479,7 @@ func parentRecordedGenesis(
     }
 }
 
-func waitActive(
-    _ path: String, rpc: UInt16, expectedTip: String
-) async throws {
+func waitActive(_ path: String, rpc: UInt16) async throws {
     for _ in 0..<120 {
         if let health = await health(rpc: rpc),
            health["phase"] as? String == "active" {

@@ -555,6 +555,12 @@ public actor ChainService {
     private static let templateCapacity = 16
     private static let maximumReadResponseBytes = Int(IvyConfig.defaultProtocolMaxFrameSize)
     public static let maximumRecentBlocksLimit = 50
+    private static let maximumExplorerPageLimit = 100
+    private static let maximumExplorerMempoolListing = 200
+
+    private static func boundedExplorerLimit(_ limit: Int) -> Int {
+        min(max(limit, 0), maximumExplorerPageLimit)
+    }
 
     private let process: ChainProcess
     private let pool: TransactionPool
@@ -930,7 +936,7 @@ public actor ChainService {
             fetcher: process
         ))?.node else { return nil }
         let total = dictionary.count
-        let boundedLimit = min(max(limit, 0), 100)
+        let boundedLimit = Self.boundedExplorerLimit(limit)
         // Short-circuit before the addition: a public caller controls `offset`,
         // and `offset + boundedLimit` would be a checked-arithmetic TRAP (an
         // uncatchable crash, not a throwable) for an offset near Int.max. With
@@ -983,7 +989,7 @@ public actor ChainService {
         guard let index = (try? await block.children.resolve(
             fetcher: process
         ))?.node else { return nil }
-        let boundedLimit = min(max(limit, 0), 100)
+        let boundedLimit = Self.boundedExplorerLimit(limit)
         guard boundedLimit > 0 else { return ExplorerBlockChildren(children: []) }
         // The index is one node: the first `limit` directories in order.
         let entries = index.entries.keys.sorted().prefix(boundedLimit).map {
@@ -1070,7 +1076,7 @@ public actor ChainService {
         let cids = await pool.snapshot().map(\.cid)
         return ExplorerMempool(
             count: await pool.count,
-            transactions: Array(cids.prefix(200))
+            transactions: Array(cids.prefix(Self.maximumExplorerMempoolListing))
         )
     }
 
@@ -1111,7 +1117,7 @@ public actor ChainService {
     /// `genesisState` subtrie, capped at 100. Each entry maps a child directory
     /// to its anchored genesisCID.
     public func explorerChainChildren(limit: Int) async -> ExplorerChainChildren {
-        let boundedLimit = min(max(limit, 0), 100)
+        let boundedLimit = Self.boundedExplorerLimit(limit)
         guard boundedLimit > 0 else { return ExplorerChainChildren(children: []) }
         let base = process.configuration.chainPath
         var seen = Set<String>()

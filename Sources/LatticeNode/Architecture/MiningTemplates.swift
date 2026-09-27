@@ -241,21 +241,6 @@ public actor MiningTemplateBook {
         order.removeAll { $0 == workID }
     }
 
-    func activeChildCandidates() -> [DirectChildCandidate] {
-        let now = ContinuousClock.now
-        let expired = order.filter {
-            templates[$0].map { now >= $0.expiresAt } ?? true
-        }
-        for workID in expired {
-            templates.removeValue(forKey: workID)
-        }
-        if !expired.isEmpty {
-            let expiredSet = Set(expired)
-            order.removeAll { expiredSet.contains($0) }
-        }
-        return order.compactMap { templates[$0] }.flatMap(\.childCandidates)
-    }
-
     /// Assembles candidate context without issuing miner work or consuming cache
     /// capacity. Used for contextual child requests before the final child set is
     /// known.

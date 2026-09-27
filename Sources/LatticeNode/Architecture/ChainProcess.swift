@@ -116,6 +116,8 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
 
     private static let maximumDirectChildRoutes = 64
     private static let preparedChildProofCapacity = 16
+    /// Page size for walking a child's incoming carrier-proof roots.
+    private static let incomingCarrierProofRootPageSize = 257
 
     /// Owner pins holding a walk-validated block's body + post-state, one
     /// owner per block: `<retentionScope>:validated:<blockCID>`.
@@ -140,7 +142,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     private let retentionScope: String
     private let durableMempoolOwner: String
     private let liveMempoolOwner: String
-    private let childIntentRetentionScope: String
     private let directoryLock: StorageDirectoryLock
     private var runtimePhase: RuntimePhase
     private var livePinnedMempoolRoots = Set<String>()
@@ -154,9 +155,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
 
     private var operationInFlight = false
     private var operationWaiters: [OperationWaiter] = []
-#if DEBUG
-    private var operationWaiterChangeWaiters: [CheckedContinuation<Void, Never>] = []
-#endif
 
     private init(
         configuration: NodeConfiguration,
@@ -166,7 +164,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         retentionScope: String,
         durableMempoolOwner: String,
         liveMempoolOwner: String,
-        childIntentRetentionScope: String,
         directoryLock: StorageDirectoryLock,
         runtimePhase: RuntimePhase,
         bootHoleCeiling: UInt64?
@@ -178,7 +175,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         self.retentionScope = retentionScope
         self.durableMempoolOwner = durableMempoolOwner
         self.liveMempoolOwner = liveMempoolOwner
-        self.childIntentRetentionScope = childIntentRetentionScope
         self.directoryLock = directoryLock
         self.runtimePhase = runtimePhase
         self.demotedHoleCeiling = bootHoleCeiling
@@ -220,7 +216,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         let durableMempoolOwner = retentionScope + ":durable-mempool"
         let liveMempoolOwner = retentionScope + ":live-mempool"
         let contextualCandidateOwner = retentionScope + ":contextual-candidates"
-        let childIntentRetentionScope = retentionScope + ":child-intents"
         let store = try NodeStore(
             databasePath: configuration.storagePath.appendingPathComponent("state.db"),
             nexusGenesisCID: configuration.nexusGenesisCID,
@@ -385,10 +380,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         // The live pool is operational cache, not restart authority. Owner
         // pins support O(changes) updates and are cleared for each process.
         try await broker.unpinAll(owner: liveMempoolOwner)
-        try await broker.advanceRetainedRoots(
-            scope: childIntentRetentionScope,
-            roots: []
-        )
 
         let context = try configuration.runtimeContext
         let runtimePhase: RuntimePhase
@@ -481,7 +472,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             retentionScope: retentionScope,
             durableMempoolOwner: durableMempoolOwner,
             liveMempoolOwner: liveMempoolOwner,
-            childIntentRetentionScope: childIntentRetentionScope,
             directoryLock: directoryLock,
             runtimePhase: runtimePhase,
             bootHoleCeiling: bootHoleCeiling
@@ -917,10 +907,11 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 childCID: childCID,
                 directory: configuration.address.directory,
                 afterRootCID: afterRootCID,
-                limit: 257
+                limit: Self.incomingCarrierProofRootPageSize
             )
             result.append(contentsOf: roots)
-            guard roots.count == 257, let last = roots.last else { return result }
+            guard roots.count == Self.incomingCarrierProofRootPageSize,
+                  let last = roots.last else { return result }
             afterRootCID = last
         }
     }
@@ -1322,12 +1313,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         return await level.chain.getMainChainBlockHash(atIndex: height)
     }
 
-    /// The current main-chain tip height, or nil when not active.
-    func highestBlockHeight() async -> UInt64? {
-        guard case .active(let level) = runtimePhase else { return nil }
-        return await level.chain.getHighestBlockHeight()
-    }
-
     /// Height of the CURRENT canonical (weighed-inclusive) main-chain tip, or nil
     /// when not active. The validate-on-candidacy walk targets this: it executes
     /// forward from the deepest validated ancestor until the validated tier meets
@@ -1597,34 +1582,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
 
 
 
-
-    /// Stores one validated child-intent closure and atomically replaces the
-    /// exact live retention set while process eviction is excluded.
-    func storeChildIntent(
-        _ header: BlockHeader,
-        fetcher: any Fetcher,
-        retaining existingRoots: Set<String>
-    ) async throws -> Set<String> {
-        try await acquireMutationOperation()
-        defer { releaseOperation() }
-        let storage = NodeAdmissionStorage(storage: broker)
-        try await header.storeBlock(fetcher: fetcher, storer: storage)
-        let storedRoots = Set(await storage.takeStoredVolumeRoots())
-        try await broker.advanceRetainedRoots(
-            scope: childIntentRetentionScope,
-            roots: Array(existingRoots.union(storedRoots)).sorted()
-        )
-        return storedRoots
-    }
-
-    func retainChildIntentRoots(_ roots: Set<String>) async throws {
-        try await acquireMutationOperation()
-        defer { releaseOperation() }
-        try await broker.advanceRetainedRoots(
-            scope: childIntentRetentionScope,
-            roots: roots.sorted()
-        )
-    }
 
     func removeLocalTransaction(_ transactionCID: String) async throws {
         try await acquireMutationOperation()
@@ -2593,9 +2550,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     id: id,
                     continuation: continuation
                 ))
-#if DEBUG
-                operationWaitersChanged()
-#endif
             }
         }
 
@@ -2605,9 +2559,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     id: id,
                     continuation: continuation
                 ))
-#if DEBUG
-                operationWaitersChanged()
-#endif
                 if Task.isCancelled {
                     cancelOperationWaiter(id)
                 }
@@ -2631,9 +2582,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             return
         }
         operationWaiters.remove(at: index).continuation.resume(returning: false)
-#if DEBUG
-        operationWaitersChanged()
-#endif
     }
 
     private func releaseOperation() {
@@ -2642,27 +2590,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             return
         }
         operationWaiters.removeFirst().continuation.resume(returning: true)
-#if DEBUG
-        operationWaitersChanged()
-#endif
     }
-
-#if DEBUG
-    /// Internal deterministic test seam for cancellation of queued mutations.
-    func waitForOperationWaiterCount(_ expectedCount: Int) async {
-        while operationWaiters.count != expectedCount {
-            await withCheckedContinuation { continuation in
-                operationWaiterChangeWaiters.append(continuation)
-            }
-        }
-    }
-
-    private func operationWaitersChanged() {
-        let waiters = operationWaiterChangeWaiters
-        operationWaiterChangeWaiters.removeAll()
-        for waiter in waiters { waiter.resume() }
-    }
-#endif
 
     private func validatedDirectChildDirectories(
         _ directories: [String]
@@ -3007,7 +2935,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 childCID: carrierCID,
                 directory: configuration.address.directory,
                 afterRootCID: afterRootCID,
-                limit: 257
+                limit: Self.incomingCarrierProofRootPageSize
             )
             for rootCID in roots {
                 let evidence = try await store.incomingCarrierEvidence(
@@ -3026,7 +2954,8 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     additional: additional
                 )
             }
-            guard roots.count == 257, let last = roots.last else { break }
+            guard roots.count == Self.incomingCarrierProofRootPageSize,
+                  let last = roots.last else { break }
             afterRootCID = last
         }
     }
