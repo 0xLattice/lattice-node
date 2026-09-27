@@ -2057,7 +2057,13 @@ public actor ChainService {
     private func scheduleValidateWalkRetry() {
         guard validateWalkRetryTask == nil else { return }
         validateWalkRetryTask = Task { [weak self, validateWalkRetryInterval] in
-            try? await Task.sleep(for: validateWalkRetryInterval)
+            // Not `Task.sleep(for:)`, and not `Clock.sleep(for:)` either: both
+            // bodies are emitted into the client and miscompile under Swift
+            // 6.3 -O (swift_task_dealloc aborts with "freed pointer was not
+            // the last allocation" on resume). The clock's `sleep(until:)`
+            // and `advanced(by:)` live in the runtime library.
+            try? await ContinuousClock.continuous
+                .sleep(until: ContinuousClock.now.advanced(by: validateWalkRetryInterval))
             guard !Task.isCancelled else { return }
             await self?.fireValidateWalkRetry()
         }
