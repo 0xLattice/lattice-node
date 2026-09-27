@@ -362,9 +362,12 @@ extension NodeNetworkRuntime {
                     initialResponse: initialResponse,
                     capture: capture
                 ) { session in
+                    // Local storage first: the chain spec is almost always
+                    // held already, and asking the supplier for it again is
+                    // one wasted request per candidate.
                     try await Self.enforceLocalImportPolicy(
                         candidateCID: candidate.blockCID,
-                        source: session,
+                        source: CompositeContentSource([process, session]),
                         configuration: configuration
                     )
                     let admitted = try await chain.importNetworkCandidate(NetworkCandidateImport(
