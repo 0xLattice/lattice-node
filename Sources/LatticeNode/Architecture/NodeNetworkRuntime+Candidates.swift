@@ -120,17 +120,24 @@ extension NodeNetworkRuntime {
     }
 
     private func startCandidateWorker() {
-        guard candidateWorker == nil else { return }
         let generation = runtimeGeneration
-        candidateWorkerGeneration = generation
-        candidateWorker = Task { [weak self] in
-            await self?.drainCandidateImports(generation: generation)
+        candidateWorker.start { token in
+            Task { [weak self] in
+                await self?.drainCandidateImports(
+                    token: token,
+                    generation: generation
+                )
+            }
         }
     }
 
-    private func drainCandidateImports(generation: UInt64) async {
-        defer { finishCandidateWorker(generation: generation) }
+    private func drainCandidateImports(
+        token: LifetimeToken,
+        generation: UInt64
+    ) async {
+        defer { finishCandidateWorker(token: token) }
         while isRunning, runtimeGeneration == generation,
+              candidateWorker.holds(token),
               let candidate = blockFetcher.next() {
             guard let process,
                   isCurrentRuntime(
@@ -154,6 +161,10 @@ extension NodeNetworkRuntime {
                     endedRound: nil,
                     generation: generation, process: process
                 )
+                guard isCurrentRuntime(
+                    generation: generation,
+                    process: process
+                ) else { return }
             }
             // An offer deferred behind an admission is owed a look whatever
             // that admission decided: an acceptance reports a state change,
@@ -167,10 +178,8 @@ extension NodeNetworkRuntime {
         }
     }
 
-    private func finishCandidateWorker(generation: UInt64) {
-        guard candidateWorkerGeneration == generation else { return }
-        candidateWorker = nil
-        candidateWorkerGeneration = nil
+    private func finishCandidateWorker(token: LifetimeToken) {
+        guard candidateWorker.clear(token) else { return }
         if isRunning, blockFetcher.hasReadyCandidate {
             startCandidateWorker()
         }
@@ -740,23 +749,27 @@ extension NodeNetworkRuntime {
     }
 
     private func scheduleWaitingCandidateRetry() {
-        guard waitingCandidateRetryTask == nil,
-              blockFetcher.hasTimedWait else { return }
+        guard blockFetcher.hasTimedWait else { return }
         let generation = runtimeGeneration
-        waitingCandidateRetryGeneration = generation
-        waitingCandidateRetryTask = Timers.deadline(
-            after: Self.futureCandidateRetryInterval,
-            generation: generation
-        ) { [weak self] generation in
-            await self?.retryWaitingCandidates(generation: generation)
+        waitingCandidateRetryTask.start { token in
+            Timers.deadline(
+                after: Self.futureCandidateRetryInterval,
+                generation: generation
+            ) { [weak self] generation in
+                await self?.retryWaitingCandidates(
+                    token: token,
+                    generation: generation
+                )
+            }
         }
     }
 
-    private func retryWaitingCandidates(generation: UInt64) {
-        guard waitingCandidateRetryGeneration == generation else { return }
-        waitingCandidateRetryTask = nil
-        waitingCandidateRetryGeneration = nil
-        guard isCurrentGeneration(generation), isRunning else { return }
+    private func retryWaitingCandidates(
+        token: LifetimeToken,
+        generation: UInt64
+    ) {
+        guard waitingCandidateRetryTask.clear(token),
+              isCurrentGeneration(generation), isRunning else { return }
         blockFetcher.retry()
         serviceBlockFetcher()
     }

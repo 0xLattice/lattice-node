@@ -53,16 +53,30 @@ final class RuntimeCallbackEpoch: @unchecked Sendable {
 }
 
 struct ParentStateQueryGuard {
-    let capacity: Int
-    private(set) var peers = Set<PeerKey>()
-
-    mutating func acquire(_ peer: PeerKey) -> Bool {
-        guard peers.count < capacity else { return false }
-        return peers.insert(peer).inserted
+    /// What one `acquire` took: releasing it frees the peer's slot only
+    /// while the slot is still the one this acquire took.
+    struct Hold {
+        let peer: PeerKey
+        fileprivate let token: LifetimeToken
     }
 
-    mutating func release(_ peer: PeerKey) {
-        peers.remove(peer)
+    let capacity: Int
+    /// Each held peer, with the token of the acquire holding it.
+    private(set) var peers: [PeerKey: LifetimeToken] = [:]
+
+    mutating func acquire(_ peer: PeerKey) -> Hold? {
+        guard peers.count < capacity, peers[peer] == nil else { return nil }
+        let token = LifetimeToken.next()
+        peers[peer] = token
+        return Hold(peer: peer, token: token)
+    }
+
+    /// A handler that suspended across a stop and restart still holds its
+    /// old token, so its release cannot free the slot a handler of the new
+    /// generation took for the same peer.
+    mutating func release(_ hold: Hold) {
+        guard peers[hold.peer] == hold.token else { return }
+        peers.removeValue(forKey: hold.peer)
     }
 
     mutating func removeAll() {
@@ -266,6 +280,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 && announcedTip == nil
         }
 
+        var liveSessionID: Data? { sessionPeer?.sessionID }
+
         /// The session whose hello was accepted.
         var readyPeer: AuthenticatedPeer? {
             guard case .ready(let peer)? = session else { return nil }
@@ -293,14 +309,20 @@ public actor NodeNetworkRuntime: IvyDelegate {
         overlayState.overlayRecords.records.values.compactMap(\.readyPeer)
     }
 
-    /// Takes the key's overlay hello deadline out of its record.
+    /// Takes the key's overlay hello deadline out of its record: any
+    /// session's (`session` nil, a connect replacing it), or only
+    /// `session`'s.
     @discardableResult
-    func removeOverlayHelloDeadline(for key: PeerKey) -> HelloDeadline? {
-        overlayState.overlayRecords.update(key) { record in
+    func removeOverlayHelloDeadline(
+        for key: PeerKey,
+        session: Data?
+    ) -> HelloDeadline? {
+        overlayState.overlayRecords.updateExisting(key) { record in
             let deadline = record.helloDeadline
+            guard session == nil || deadline?.sessionID == session else { return nil }
             record.helloDeadline = nil
             return deadline
-        }
+        } ?? nil
     }
 
     /// Every recorded announced tip with its key, as a snapshot.
@@ -327,8 +349,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// The latest candidate the child pushed; carries its own session.
         var offer: CachedChildCandidate?
         /// The context sequence the child was last sent, so the push task
-        /// sends it only what it lacks. Recorded after the send, whether or
-        /// not the session is still live; carries its own session.
+        /// sends it only what it lacks. Recorded after the send, and only
+        /// while that session is still live; carries its own session.
         var pushedSequence: SessionSequence?
         /// The latest evidence hint this node's own send budget refused
         /// for the child, re-sent on the next push run. A hint carries one
@@ -342,6 +364,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 && declaredReadURL == nil && evidence.isEmpty && offer == nil
                 && pushedSequence == nil && refusedHint == nil
         }
+
+        /// The accepted session; before its hello, the session the hello
+        /// deadline waits on.
+        var liveSessionID: Data? { session?.sessionID ?? helloDeadline?.sessionID }
     }
 
     func isChildEvidenceReady(_ key: PeerKey) -> Bool {
@@ -362,18 +388,24 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
     }
 
-    /// Takes the key's hierarchy hello deadline out of its record.
+    /// Takes the key's hierarchy hello deadline out of its record: any
+    /// session's (`session` nil, a connect replacing it), or only
+    /// `session`'s.
     @discardableResult
-    func removeHierarchyHelloDeadline(for key: PeerKey) -> HelloDeadline? {
-        hierarchyState.hierarchyRecords.update(key) { record in
+    func removeHierarchyHelloDeadline(
+        for key: PeerKey,
+        session: Data?
+    ) -> HelloDeadline? {
+        hierarchyState.hierarchyRecords.updateExisting(key) { record in
             let deadline = record.helloDeadline
+            guard session == nil || deadline?.sessionID == session else { return nil }
             record.helloDeadline = nil
             return deadline
-        }
+        } ?? nil
     }
 
     struct HelloDeadline {
-        let token: UInt64
+        let token: LifetimeToken
         let sessionID: Data
         let task: Task<Void, Never>
     }
@@ -581,10 +613,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// so an eclipsed or stalled node goes looking instead of waiting on the
         /// peers it already holds.
         /// Owner: Lifecycle.clearRuntimeState / NodeNetworkRuntime.schedulePeerSearch.
-        var peerSearchTask: Task<Void, Never>?
+        var peerSearchTask = TaskSlot()
         /// Owner: Lifecycle.clearRuntimeState / Overlay.startPortableEvidenceWorker /
         ///     Overlay.drainPortableEvidence.
-        var portableEvidenceWorker: Task<Void, Never>?
+        var portableEvidenceWorker = TaskSlot()
     }
 
     /// Hierarchy-plane state: parent/child sessions and records, their
@@ -609,15 +641,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
         var runReportApplyTail: Task<Void, Never>?
         /// Owner: Hierarchy.scheduleChildProofRecovery / Hierarchy.recoverChildProofs /
         ///     Lifecycle.clearRuntimeState.
-        var childProofRecoveryTask: Task<Void, Never>?
-        /// Owner: Hierarchy.scheduleChildProofRecovery / Hierarchy.recoverChildProofs /
-        ///     Lifecycle.clearRuntimeState.
-        var childProofRecoveryGeneration: UInt64?
+        var childProofRecoveryTask = TaskSlot()
         /// Drives a child this node ADOPTED (no local genesis seed) out of
         /// `awaitingGenesis` by resolving its recorded genesis CID off the
         /// authenticated parent and fetching+admitting the self-contained genesis.
         /// Owner: Hierarchy.scheduleAdoptedGenesisBootstrap / Lifecycle.clearRuntimeState.
-        var adoptedGenesisTask: Task<Void, Never>?
+        var adoptedGenesisTask = TaskSlot()
         /// Owner: Hierarchy.scheduleChildProofRecovery / Hierarchy.recoverChildProofs /
         ///     Lifecycle.clearRuntimeState.
         var childProofRecoveryNeedsRefresh = false
@@ -643,7 +672,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         var nextParentTipSequence: UInt64 = 0
         /// Owner: Hierarchy.scheduleParentTipPush / Hierarchy.runParentTipPushes /
         ///     Lifecycle.clearRuntimeState.
-        var parentTipPushTask: Task<Void, Never>?
+        var parentTipPushTask = TaskSlot()
         /// Owner: Hierarchy.scheduleParentTipPush / Hierarchy.runParentTipPushes /
         ///     Lifecycle.clearRuntimeState.
         var parentTipPushDirty = false
@@ -693,7 +722,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// being recovered, counted per append: until it settles, the
         /// rooted package may still arrive, so a hold on one of them is not
         /// released.
-        /// Owner: Hierarchy.appendParentEvidence / Hierarchy.parentEvidenceSettled.
+        /// Owner: Hierarchy.appendParentEvidence / Hierarchy.parentEvidenceSettled /
+        ///     Lifecycle.clearRuntimeState.
         var parentEvidenceInFlight: [String: Int] = [:]
         /// Times the offer held behind a carried block, for tests.
         /// Owner: Hierarchy.offerCandidate.
@@ -702,7 +732,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// dirty and the task runs again; nothing is queued.
         /// Owner: Hierarchy.scheduleCandidateOffer / Hierarchy.runCandidateOffers /
         ///     Lifecycle.clearRuntimeState.
-        var candidateOfferTask: Task<Void, Never>?
+        var candidateOfferTask = TaskSlot()
         /// Owner: Hierarchy.scheduleCandidateOffer / Hierarchy.runCandidateOffers /
         ///     Lifecycle.clearRuntimeState.
         var candidateOfferDirty = false
@@ -733,10 +763,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     var hierarchyState = HierarchyState()
     /// Owner: Candidates.scheduleWaitingCandidateRetry / Candidates.retryWaitingCandidates /
     ///     Lifecycle.clearRuntimeState.
-    var waitingCandidateRetryTask: Task<Void, Never>?
-    /// Owner: Candidates.scheduleWaitingCandidateRetry / Candidates.retryWaitingCandidates /
-    ///     Lifecycle.clearRuntimeState.
-    var waitingCandidateRetryGeneration: UInt64?
+    var waitingCandidateRetryTask = TaskSlot()
     /// The one frontier (accepted-leaves) pull per overlay session: sent once
     /// we are at the live edge with respect to the peer, answered by exactly
     /// the page whose requestID matches (`requestID` is cleared on receipt).
@@ -749,7 +776,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// genesis block, so other nodes (and the explorer's /api/chain/endpoints)
     /// can discover it via `findProviders(genesisCID)` with no registry.
     /// Owner: Lifecycle.clearRuntimeState / NodeNetworkRuntime.scheduleGenesisProviderAnnounce.
-    var genesisAnnounceTask: Task<Void, Never>?
+    var genesisAnnounceTask = TaskSlot()
     /// Endpoints dialled from the one provider lookup a widening performs.
     private static let maximumPeerSearchDials = 4
     /// Owner: Candidates (the planes reach it through its seams:
@@ -763,10 +790,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     var parentBackedCarriedCID: String?
     /// Owner: Candidates.startCandidateWorker / Candidates.finishCandidateWorker /
     ///     Lifecycle.clearRuntimeState.
-    var candidateWorker: Task<Void, Never>?
-    /// Owner: Candidates.startCandidateWorker / Candidates.finishCandidateWorker /
-    ///     Lifecycle.clearRuntimeState.
-    var candidateWorkerGeneration: UInt64?
+    var candidateWorker = TaskSlot()
     /// Owner: Hierarchy.handleHierarchy / Lifecycle.clearRuntimeState / Overlay.handleOverlay.
     var parentStateQueryGuard = ParentStateQueryGuard(
         capacity: NodeNetworkRuntime.maximumConcurrentParentStateQueries
@@ -836,9 +860,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// Owner: Candidates.drainCandidateImports / Candidates.offerGate /
     ///     Candidates.markOfferDeferred / Lifecycle.clearRuntimeState.
     var candidateOfferDeferredByAdmission = false
-    private var nextRequestID: UInt64 = 0
-    /// Owner: Hierarchy.scheduleHierarchyHelloDeadline / Overlay.scheduleOverlayHelloDeadline.
-    var nextHelloDeadlineToken: UInt64 = 0
 
     /// Callback work may outlive a stop/start boundary. Keep its captured
     /// process tied to the generation that began it, rather than letting an
@@ -1092,7 +1113,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard let payload = try? hello.encode() else { return }
         if ivy === hierarchy {
             // A hierarchy role belongs to one authenticated connection.
-            reReadyCandidates(clearHierarchyAuthorization(for: peer.key))
+            // The connect replaces whatever session the key held.
+            reReadyCandidates(clearHierarchyAuthorization(
+                for: peer.key,
+                removed: hierarchyState.hierarchyRecords.remove(peer.key)
+            ))
             scheduleHierarchyHelloDeadline(for: peer, generation: generation)
         }
         guard isCurrentRuntime(generation: generation, process: process) else {
@@ -1123,28 +1148,40 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard let key = try? PeerKey(peer.publicKey) else { return }
         if ivy === overlay {
             // A replacement may already be current when the old connection's
-            // asynchronous disconnect callback arrives.
-            guard !(await ivy.connectedPeers).contains(peer) else { return }
-            let disconnected = overlayState.overlayRecords[key]
-            disconnected?.helloDeadline?.task.cancel()
-            if let ready = disconnected?.readyPeer {
+            // asynchronous disconnect callback arrives; one may also connect
+            // while the check below is suspended. Only the binding sampled
+            // here ends: a record a newer session took meanwhile stays.
+            let ended = overlayState.overlayRecords[key]?.liveSessionID
+            guard !(await ivy.connectedPeers).contains(peer),
+                  let disconnected = overlayState.overlayRecords[key],
+                  disconnected.liveSessionID == ended else { return }
+            disconnected.helloDeadline?.task.cancel()
+            if let ready = disconnected.readyPeer {
                 disconnectProvider(ready)
             }
-            discardServingSessions(of: disconnected?.sessionPeer)
+            discardServingSessions(of: disconnected.sessionPeer)
             // The record goes after the range sync clears: the re-entry that
             // clear arms still counts this peer's announced tip, as before.
             if overlayState.rangeSync.state?.peer.key == key {
                 clearRangeSync()
             }
-            overlayState.overlayRecords.remove(key)
+            overlayState.overlayRecords.remove(key, ifBoundTo: ended)
             purgeOverlayRequests(for: key)
         } else if ivy === hierarchy {
             // Ivy may already have promoted a replacement session for this
             // identity before this asynchronous delegate callback reaches us.
             // In that case this is the old connection ending, not a loss of
             // the authenticated parent/child relationship.
-            guard !(await ivy.connectedPeers).contains(peer) else { return }
-            reReadyCandidates(clearHierarchyAuthorization(for: key))
+            // As on the overlay: only the binding sampled before the check
+            // ends, never a newer session's record.
+            let ended = hierarchyState.hierarchyRecords[key]?.liveSessionID
+            guard !(await ivy.connectedPeers).contains(peer),
+                  let removed = hierarchyState.hierarchyRecords.remove(
+                    key, ifBoundTo: ended
+                  ) else { return }
+            reReadyCandidates(clearHierarchyAuthorization(
+                for: key, removed: removed
+            ))
         }
     }
 
@@ -1180,10 +1217,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
         process: ChainProcess
     ) {
         guard configuration.peerSearchInterval > 0,
-              overlayState.peerSearchTask == nil else { return }
+              isCurrentRuntime(generation: generation, process: process),
+              overlayState.peerSearchTask.isEmpty else { return }
         let search = makePeerSearch(process: process)
-        overlayState.peerSearchTask = Task { [weak self] in
-            await self?.peerSearchLoop(search, generation: generation)
+        overlayState.peerSearchTask.start { _ in
+            Task { [weak self] in
+                await self?.peerSearchLoop(search, generation: generation)
+            }
         }
     }
 
@@ -1304,12 +1344,16 @@ public actor NodeNetworkRuntime: IvyDelegate {
         generation: UInt64,
         process: ChainProcess
     ) {
-        guard genesisAnnounceTask == nil else { return }
-        genesisAnnounceTask = Task { [weak self] in
-            await self?.announceGenesisProviderLoop(
-                generation: generation,
-                process: process
-            )
+        guard isCurrentRuntime(generation: generation, process: process) else {
+            return
+        }
+        genesisAnnounceTask.start { _ in
+            Task { [weak self] in
+                await self?.announceGenesisProviderLoop(
+                    generation: generation,
+                    process: process
+                )
+            }
         }
     }
 
@@ -1378,6 +1422,18 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
 
     #if DEBUG
+    /// Test seam: awaited after a hierarchy send whose result a per-peer
+    /// write follows, before that write, so a test can end the session
+    /// while the sending task is suspended.
+    var hierarchySendReturnedForTesting:
+        (@Sendable (String, SendMessageResult) async -> Void)?
+
+    func setHierarchySendReturnedForTesting(
+        _ hook: (@Sendable (String, SendMessageResult) async -> Void)?
+    ) {
+        hierarchySendReturnedForTesting = hook
+    }
+
     /// The carried-hold bookkeeping, for tests.
     struct CarriedHoldSnapshot: Sendable {
         let named: String?
@@ -1415,7 +1471,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         keys.formUnion(hierarchyState.pendingParentChainFacts.values.map(\.peer.key))
         keys.formUnion(hierarchyState.pendingGenesisVerifications.values.map(\.peer.key))
         keys.formUnion(hierarchyState.pendingGenesisResolves.values.map(\.peer.key))
-        keys.formUnion(parentStateQueryGuard.peers)
+        keys.formUnion(parentStateQueryGuard.peers.keys)
         keys.formUnion(sessionLeases.portableEvidenceWork.values.map(\.peer.key))
         if let receivedParentTip = hierarchyState.receivedParentTip { keys.insert(receivedParentTip.peer.key) }
         for hex in blockFetcher.debugSnapshot().providerKeys
@@ -1530,9 +1586,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
         return hierarchyState.hierarchyRecords[key]?.session
     }
 
+    /// A request ID is a lifetime token: never zero, never issued twice in
+    /// this process. Every table keyed by one (pending requests, their
+    /// timeouts, the range-sync slot) can therefore only be answered or
+    /// expired by the request that registered the entry, never by a late
+    /// response or timer from an earlier generation.
     func makeRequestID() -> UInt64 {
-        repeat { nextRequestID &+= 1 } while nextRequestID == 0
-        return nextRequestID
+        LifetimeToken.next().rawValue
     }
 
     static func hierarchyRole(

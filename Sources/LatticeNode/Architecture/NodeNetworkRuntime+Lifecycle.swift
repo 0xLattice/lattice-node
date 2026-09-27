@@ -216,37 +216,28 @@ extension NodeNetworkRuntime {
         }
         for record in removedOverlayRecords { record.helloDeadline?.task.cancel() }
         for record in removedHierarchyRecords { record.helloDeadline?.task.cancel() }
-        waitingCandidateRetryTask?.cancel()
-        waitingCandidateRetryTask = nil
-        waitingCandidateRetryGeneration = nil
+        waitingCandidateRetryTask.cancel()
         for pending in overlayState.pendingTransactionInventories.values {
             pending.timeout.cancel()
         }
         overlayState.pendingTransactionInventories.removeAll()
         sessionLeases.activeTransactionVolumes.removeAll()
-        hierarchyState.childProofRecoveryTask?.cancel()
-        hierarchyState.childProofRecoveryTask = nil
-        genesisAnnounceTask?.cancel()
-        genesisAnnounceTask = nil
-        hierarchyState.adoptedGenesisTask?.cancel()
-        hierarchyState.adoptedGenesisTask = nil
+        hierarchyState.childProofRecoveryTask.cancel()
+        genesisAnnounceTask.cancel()
+        hierarchyState.adoptedGenesisTask.cancel()
         // Joined, not just cancelled: `Task.sleep` unwinds on cancellation but
         // an in-flight dial does not, and the search holds the ChainProcess
         // strongly, so an unjoined task can outlive stop() still holding the
         // storage lock. Actors are reentrant, so awaiting here lets the task's
         // own callbacks into this actor run to completion.
-        let peerSearch = overlayState.peerSearchTask
-        overlayState.peerSearchTask = nil
+        let peerSearch = overlayState.peerSearchTask.take()
         peerSearch?.cancel()
         await peerSearch?.value
-        hierarchyState.childProofRecoveryGeneration = nil
         hierarchyState.childProofRecoveryNeedsRefresh = false
         sessionLeases.servingAcceptedLeaves.removeAll()
         sessionLeases.servingAncestorRange.removeAll()
         clearRangeSync()
-        candidateWorker?.cancel()
-        candidateWorker = nil
-        candidateWorkerGeneration = nil
+        candidateWorker.cancel()
         blockFetcher.reset(
             retryWindow: planeConfigurations.overlay.requestTimeout
                 * Self.maximumCandidateWaitTicks
@@ -262,29 +253,16 @@ extension NodeNetworkRuntime {
         }
         hierarchyState.pendingGenesisResolves.removeAll()
         parentStateQueryGuard.removeAll()
-        overlayState.rangeSync.reentryTask?.cancel()
-        overlayState.rangeSync.reentryTask = nil
+        overlayState.rangeSync.reentryTask.cancel()
         sessionLeases.activeEvidenceVolumes.removeAll()
-        overlayState.portableEvidenceWorker?.cancel()
-        overlayState.portableEvidenceWorker = nil
+        overlayState.portableEvidenceWorker.cancel()
         sessionLeases.portableEvidenceOrder.removeAll()
         sessionLeases.portableEvidenceWork.removeAll()
         parentEvidence.reset()
-        // After the peer-search join, as before: a pushed sequence (recorded
-        // after its send, without a session check) or anything else these
-        // fields took while the join was awaited is dropped too.
-        for key in Array(hierarchyState.hierarchyRecords.keys) {
-            hierarchyState.hierarchyRecords.update(key) {
-                $0.offer = nil
-                $0.pushedSequence = nil
-                $0.refusedHint = nil
-            }
-        }
         hierarchyState.runReportApplyTail?.cancel()
         hierarchyState.runReportApplyTail = nil
         hierarchyState.parentTipContext = nil
-        hierarchyState.parentTipPushTask?.cancel()
-        hierarchyState.parentTipPushTask = nil
+        hierarchyState.parentTipPushTask.cancel()
         hierarchyState.parentTipPushDirty = false
         hierarchyState.descendantRewards = []
         hierarchyState.descendantMinimumWork = []
@@ -294,8 +272,8 @@ extension NodeNetworkRuntime {
         hierarchyState.requestedCarriedRound = nil
         hierarchyState.carriedRoundEndedCID = nil
         hierarchyState.evidenceRoundStarting = false
-        hierarchyState.candidateOfferTask?.cancel()
-        hierarchyState.candidateOfferTask = nil
+        hierarchyState.parentEvidenceInFlight.removeAll()
+        hierarchyState.candidateOfferTask.cancel()
         hierarchyState.candidateOfferDirty = false
         hierarchyState.lastOfferedCandidateCID = nil
         // Sequences are per session, and a restart is a new session.

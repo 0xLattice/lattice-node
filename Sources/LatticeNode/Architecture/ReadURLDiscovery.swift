@@ -25,7 +25,7 @@ struct ReadURLDiscovery {
     static let readEndpointAskTimeout: Duration = .seconds(2)
 
     var cache: [String: CacheEntry] = [:]
-    var tasks: [String: (token: UInt64, task: Task<[String], Never>)] = [:]
+    var tasks: [String: (token: LifetimeToken, task: Task<[String], Never>)] = [:]
     var pendingReadEndpoints: [UInt64: PendingReadEndpoint] = [:]
 
     /// The cached answer for `genesisCID`, if it has not expired by `now`.

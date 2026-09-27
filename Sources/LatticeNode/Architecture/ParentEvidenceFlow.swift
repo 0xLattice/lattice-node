@@ -20,7 +20,7 @@ struct ParentEvidenceFlow {
     }
 
     struct Append {
-        let token: UInt64
+        let token: LifetimeToken
         let predecessor: Task<Result, Never>?
     }
 
@@ -29,7 +29,7 @@ struct ParentEvidenceFlow {
     }
 
     private struct Tail {
-        let token: UInt64
+        let token: LifetimeToken
         let task: Task<Result, Never>
     }
 
@@ -38,7 +38,6 @@ struct ParentEvidenceFlow {
     private var backpressured: Set<Session> = []
     private var activeReservations: Set<Session> = []
     private var operationCount = 0
-    private var nextToken: UInt64 = 0
 
     var activeOperationCount: Int { operationCount }
 
@@ -58,17 +57,16 @@ struct ParentEvidenceFlow {
             backpressured.insert(session)
             return nil
         }
-        nextToken &+= 1
         operationCount += 1
         return Append(
-            token: nextToken,
+            token: LifetimeToken.next(),
             predecessor: tails[session]?.task
         )
     }
 
     mutating func install(
         _ task: Task<Result, Never>,
-        token: UInt64,
+        token: LifetimeToken,
         for session: Session
     ) {
         tails[session] = Tail(token: token, task: task)
@@ -76,7 +74,7 @@ struct ParentEvidenceFlow {
 
     /// Returns whether the session must be recycled.
     mutating func finish(
-        token: UInt64,
+        token: LifetimeToken,
         result: Result,
         for session: Session
     ) -> Bool {
