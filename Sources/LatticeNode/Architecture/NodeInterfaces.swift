@@ -62,7 +62,7 @@ public protocol NetworkInterface: AnyObject, Sendable {
     /// Ask this chain's configured parent for the runs of the committing
     /// blocks behind one block admitted here (§9.10) — one ask per admission,
     /// so the credit for those runs never waits for a push or a reconnect.
-    func requestParentRunReports(committers: [String]) async
+    func requestParentRunReports(carriers: [String]) async
     func publishAcceptedBlock(_ blockCID: String) async throws
     func publishTransaction(_ volumeRootCID: String) async throws
     /// Opens a network body-acquisition session bound to one block's root and
@@ -106,11 +106,11 @@ public struct ChainNetworkCapabilities: OptionSet, Sendable {
     public static let transactionInventory = ChainNetworkCapabilities(rawValue: 1 << 2)
     public static let parentRunReports = ChainNetworkCapabilities(rawValue: 1 << 3)
     public static let runReportServing = ChainNetworkCapabilities(rawValue: 1 << 4)
-    public static let recentCommitters = ChainNetworkCapabilities(rawValue: 1 << 5)
+    public static let recentCarriers = ChainNetworkCapabilities(rawValue: 1 << 5)
 
     public static let all: ChainNetworkCapabilities = [
         .childCandidates, .transactions, .transactionInventory,
-        .parentRunReports, .runReportServing, .recentCommitters,
+        .parentRunReports, .runReportServing, .recentCarriers,
     ]
 }
 
@@ -136,7 +136,7 @@ public protocol ChainInterface: AnyObject, Sendable {
     func serveRuns(for directory: String) async
     /// The committers this chain asks its parent to re-serve after each
     /// evidence catch-up round.
-    func recentCommitters() async -> [String]
+    func recentCarriers() async -> [String]
 }
 
 /// The service's view of the runtime. Holds the runtime weakly, so the
@@ -191,8 +191,8 @@ final class WeakNetwork: @unchecked Sendable, NetworkInterface {
         await runtime.announceParentRunReport(report)
     }
 
-    func requestParentRunReports(committers: [String]) async {
-        await runtime?.requestParentRunReports(committers: committers)
+    func requestParentRunReports(carriers: [String]) async {
+        await runtime?.requestParentRunReports(carriers: carriers)
     }
 
     func publishAcceptedBlock(_ blockCID: String) async throws {
@@ -291,8 +291,8 @@ final class WeakChain: @unchecked Sendable, ChainInterface {
         await service?.serveRuns(for: directory)
     }
 
-    func recentCommitters() async -> [String] {
+    func recentCarriers() async -> [String] {
         guard let service else { return [] }
-        return (try? await service.recentCommitters()) ?? []
+        return (try? await service.recentCarriers()) ?? []
     }
 }

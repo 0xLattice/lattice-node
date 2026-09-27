@@ -1305,7 +1305,7 @@ extension NodeNetworkRuntime {
             // for a directory already served, one anchored-genesis lookup
             // for one that is not, like the genesis-anchor arm; each named
             // committer is then one O(1) read, at most
-            // `maximumParentRunReportRequestCommitters` of them. A committer
+            // `maximumParentRunReportRequestCarriers` of them. A committer
             // this node does not serve is silence, never a claim.
             guard let request = try?
                     ParentRunReportRequestMessage.decoded(message.payload),
@@ -1322,19 +1322,19 @@ extension NodeNetworkRuntime {
                chain.networkCapabilities.contains(.runReportServing) {
                 await chain.serveRuns(for: directory)
             }
-            SyncTrace.log("run-report request from child dir=\(directory) committers=\(request.committerCIDs.count)")
-            for committer in request.committerCIDs {
+            SyncTrace.log("run-report request from child dir=\(directory) committers=\(request.carrierCIDs.count)")
+            for carrier in request.carrierCIDs {
                 guard isCurrentRuntime(generation: generation, process: process),
                       hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID,
                       let report = await process.runReport(
-                          committer: committer, directory: directory
+                          carrier: carrier, directory: directory
                       ),
                       let payload = try? ParentRunReportMessage(report).encoded()
                 else {
-                    SyncTrace.log("run-report request committer=\(committer.prefix(16)) silence")
+                    SyncTrace.log("run-report request committer=\(carrier.prefix(16)) silence")
                     continue
                 }
-                SyncTrace.log("run-report answer committer=\(committer.prefix(16)) run=\(report.runWork) own=\(report.ownWork)")
+                SyncTrace.log("run-report answer committer=\(carrier.prefix(16)) run=\(report.runWork) own=\(report.ownWork)")
                 _ = await hierarchy.sendMessage(
                     to: peer,
                     topic: NodeNetworkTopic.parentRunReport,
@@ -2212,36 +2212,36 @@ extension NodeNetworkRuntime {
         process: ChainProcess
     ) async {
         guard let chain,
-              chain.networkCapabilities.contains(.recentCommitters)
+              chain.networkCapabilities.contains(.recentCarriers)
         else { return }
-        let committers = await chain.recentCommitters()
+        let carriers = await chain.recentCarriers()
         await requestParentRunReports(
-            committers: committers, generation: generation, process: process
+            carriers: carriers, generation: generation, process: process
         )
     }
 
     /// Ask the parent for the runs of the committers of a block just
     /// admitted here (§9.10) — one message for all of them. Public for the
     /// service's admission effects.
-    public func requestParentRunReports(committers: [String]) async {
+    public func requestParentRunReports(carriers: [String]) async {
         guard isRunning, let process else { return }
         await requestParentRunReports(
-            committers: committers, generation: runtimeGeneration, process: process
+            carriers: carriers, generation: runtimeGeneration, process: process
         )
     }
 
     private func requestParentRunReports(
-        committers: [String],
+        carriers: [String],
         generation: UInt64,
         process: ChainProcess
     ) async {
         guard !configuration.address.isNexus,
               isCurrentRuntime(generation: generation, process: process),
               let parent = configuredParentPeer(),
-              !committers.isEmpty,
+              !carriers.isEmpty,
               let payload = try? ParentRunReportRequestMessage(
                   requestID: makeRequestID(),
-                  committerCIDs: committers
+                  carrierCIDs: carriers
               ).encoded()
         else { return }
         let sent = await hierarchy.sendMessage(
@@ -2249,7 +2249,7 @@ extension NodeNetworkRuntime {
             topic: NodeNetworkTopic.parentRunReportRequest,
             payload: payload
         )
-        SyncTrace.log("run-report request committers=\(committers.count) sent=\(sent)")
+        SyncTrace.log("run-report request committers=\(carriers.count) sent=\(sent)")
     }
 
     /// Push one run report to every authenticated child of its directory

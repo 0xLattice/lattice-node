@@ -127,18 +127,18 @@ private final class ChildEvidencePeer: IvyDelegate, Sendable {
     private let childPath: [String]
     /// Committers to ask the parent to re-serve once the evidence index has
     /// answered (i.e. once this child is evidence-ready on the parent).
-    private let runReportCommitters: [String]
+    private let runReportCarriers: [String]
 
     init(
         recorder: ChildEvidenceRecorder,
         hello: Data,
         childPath: [String],
-        runReportCommitters: [String] = []
+        runReportCarriers: [String] = []
     ) {
         self.recorder = recorder
         self.hello = hello
         self.childPath = childPath
-        self.runReportCommitters = runReportCommitters
+        self.runReportCarriers = runReportCarriers
     }
 
     func ivy(
@@ -172,10 +172,10 @@ private final class ChildEvidencePeer: IvyDelegate, Sendable {
                 message.payload
             ) else { return }
             await recorder.record(response)
-            guard !runReportCommitters.isEmpty,
+            guard !runReportCarriers.isEmpty,
                   let payload = try? ParentRunReportRequestMessage(
                     requestID: await recorder.nextRunReportRequestID(),
-                    committerCIDs: runReportCommitters
+                    carrierCIDs: runReportCarriers
                   ).encoded() else { return }
             _ = await ivy.sendMessage(
                 to: peer,
@@ -1090,7 +1090,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
     /// one — with the successor's work in it — and is silent about the other,
     /// exactly once each; and the directory was served only because this
     /// chain anchored the child's genesis, not because a peer named it.
-    func testParentServesRunReportsForTheCommittersAChildNamesAndOnlyThose()
+    func testParentServesRunReportsForTheCarriersAChildNamesAndOnlyThose()
         async throws
     {
         let fixture = try await runReportServeFixture(keyByte: 0x68)
@@ -1133,7 +1133,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             XCTAssertTrue(strangerSaw.isEmpty, "a directory this node never anchored is served nothing")
             XCTAssertEqual(served.count, 1, "one report for the one committer; silence for the stranger")
             let report = try XCTUnwrap(served.first)
-            XCTAssertEqual(report.committerCID, fixture.carrierCID)
+            XCTAssertEqual(report.carrierCID, fixture.carrierCID)
             XCTAssertEqual(report.childBlockCID, fixture.childCID)
             XCTAssertEqual(report.directory, "Payments")
             XCTAssertGreaterThan(report.runWork, report.ownWork,
@@ -1163,7 +1163,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
         addTeardownBlock {
             try? FileManager.default.removeItem(at: fixture.storage)
         }
-        let committer = testCID("run-report-committer")
+        let carrier = testCID("run-report-committer")
         let sink = ParentRunReportSink()
         do {
             try await fixture.parent.start()
@@ -1178,7 +1178,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                         )
                     },
                     parentRunReport: { report in await sink.record(report) },
-                    recentCommitters: { [committer] }
+                    recentCarriers: { [carrier] }
                 )
             )
             try await eventually("parent role granted") {
@@ -1188,17 +1188,17 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                 !(await fixture.recorder.runReportRequestsSeen()).isEmpty
             }
             let requests = await fixture.recorder.runReportRequestsSeen()
-            XCTAssertEqual(requests.map(\.committerCIDs), [[committer]],
+            XCTAssertEqual(requests.map(\.carrierCIDs), [[carrier]],
                            "exactly the committers this chain knows, once per session")
             try await eventually("the parent's report reached the handler") {
                 !(await sink.received()).isEmpty
             }
             let received = await sink.received()
             let report = try XCTUnwrap(received.first)
-            XCTAssertEqual(report.blockHash, committer)
+            XCTAssertEqual(report.blockHash, carrier)
             XCTAssertEqual(report.directory, "Retry")
             XCTAssertEqual(report.childBlock, testCID("run-report-child-block"))
-            XCTAssertEqual(report.grinds, [committer])
+            XCTAssertEqual(report.grinds, [carrier])
             XCTAssertEqual(report.runWork, WorkSum(UInt256(9)))
             XCTAssertEqual(report.ownWork, WorkSum(UInt256(4)))
             XCTAssertEqual(report.revision, 7)
@@ -1900,7 +1900,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                 chainPath: childPath
             ).encode(),
             childPath: childPath,
-            runReportCommitters: [carrierHeader.rawCID, successorHeader.rawCID]
+            runReportCarriers: [carrierHeader.rawCID, successorHeader.rawCID]
         )
         let child = Ivy(config: IvyConfig(
             signingKey: childKey,
@@ -1926,7 +1926,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                 chainPath: strangerPath
             ).encode(),
             childPath: strangerPath,
-            runReportCommitters: [carrierHeader.rawCID]
+            runReportCarriers: [carrierHeader.rawCID]
         )
         let stranger = Ivy(config: IvyConfig(
             signingKey: signingKey(keyByte &+ 2),

@@ -766,7 +766,7 @@ extension NodeStore {
     /// evidence table also records carriers of blocks this chain refused —
     /// every merged-mining round whose root missed this chain's target — and
     /// those are not committers of anything here.
-    func incomingCarrierCommitters(limit: Int) throws -> [String] {
+    func incomingCarriers(limit: Int) throws -> [String] {
         let rows = try database.rows(
             ProofEdgeJoinRow.self,
             "SELECT e.parent_carrier_cid \(Self.proofEdgeJoinSQL) INNER JOIN accepted_blocks AS a ON a.block_cid = e.child_cid WHERE p.scope = ?1 GROUP BY e.parent_carrier_cid ORDER BY MAX(p.rowid) DESC LIMIT ?2",
@@ -779,11 +779,11 @@ extension NodeStore {
     /// carrier proof verified at that block's admission — the edge was derived
     /// from the sparse proof, never taken from the wire — or nil for a
     /// committer of nothing this chain accepted.
-    func incomingCarrierChildBlock(committer: String) throws -> String? {
+    func incomingCarrierChildBlock(carrier: String) throws -> String? {
         try database.row(
             ProofEdgeJoinRow.self,
             "SELECT e.child_cid \(Self.proofEdgeJoinSQL) INNER JOIN accepted_blocks AS a ON a.block_cid = e.child_cid WHERE p.scope = ?1 AND e.parent_carrier_cid = ?2 LIMIT 1",
-            params: [.text(IssuedChildProofScope.incomingCarrier.rawValue), .text(committer)]
+            params: [.text(IssuedChildProofScope.incomingCarrier.rawValue), .text(carrier)]
         )?.childCID
     }
 

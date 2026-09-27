@@ -1276,7 +1276,7 @@ final class NodeStoreTests: XCTestCase {
     /// for a block that was never accepted — a merged-mining round whose root
     /// missed this chain's target — names no committer here, and one committer
     /// is listed once, newest first.
-    func testIncomingCarrierCommittersCoverOnlyAcceptedBlocks() async throws {
+    func testIncomingCarriersCoverOnlyAcceptedBlocks() async throws {
         let store = try makeStore(chainPath: ["Nexus", "Child"])
         let fixture = try await childProofFixture()
         for proof in [fixture.first, fixture.second] {
@@ -1299,9 +1299,9 @@ final class NodeStoreTests: XCTestCase {
         let secondEdge = try XCTUnwrap(derivedSecond)
 
         // Evidence recorded, block not accepted: nothing to re-ask, no location.
-        let before = try await store.incomingCarrierCommitters(limit: 256)
+        let before = try await store.incomingCarriers(limit: 256)
         XCTAssertEqual(before, [], "a carrier of a block this chain did not accept commits nothing here")
-        let unbound = try await store.incomingCarrierChildBlock(committer: firstEdge.parentCarrierCID)
+        let unbound = try await store.incomingCarrierChildBlock(carrier: firstEdge.parentCarrierCID)
         XCTAssertNil(unbound)
 
         // The block is accepted: both carriers are committers, newest edge first,
@@ -1310,12 +1310,12 @@ final class NodeStoreTests: XCTestCase {
             blockBatch(postStateCID: "child-state", blockHash: fixture.childCID),
             volumeRoots: []
         )
-        let after = try await store.incomingCarrierCommitters(limit: 256)
+        let after = try await store.incomingCarriers(limit: 256)
         XCTAssertEqual(after, [secondEdge.parentCarrierCID, firstEdge.parentCarrierCID])
         XCTAssertEqual(Set(after).count, after.count, "distinct")
-        let bound = try await store.incomingCarrierChildBlock(committer: firstEdge.parentCarrierCID)
+        let bound = try await store.incomingCarrierChildBlock(carrier: firstEdge.parentCarrierCID)
         XCTAssertEqual(bound, fixture.childCID)
-        let limited = try await store.incomingCarrierCommitters(limit: 1)
+        let limited = try await store.incomingCarriers(limit: 1)
         XCTAssertEqual(limited, [secondEdge.parentCarrierCID], "the bound counts committers, newest first")
     }
 

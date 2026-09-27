@@ -106,8 +106,8 @@ final class ClosureNetworkInterface: NetworkInterface {
         try await parentRunReportPublisher(report)
     }
 
-    func requestParentRunReports(committers: [String]) async {
-        await parentRunReportRequester(committers)
+    func requestParentRunReports(carriers: [String]) async {
+        await parentRunReportRequester(carriers)
     }
 
     func publishAcceptedBlock(_ blockCID: String) async throws {

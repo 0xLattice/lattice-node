@@ -1887,11 +1887,11 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         else { return [] }
         var reports: [ParentRunReport] = []
         for directory in servedRunDirectories.sorted() {
-            guard let committer = await level.chain.nearestCarrier(
+            guard let carrier = await level.chain.nearestCarrier(
                       of: blockHash, directory: directory
                   ),
                   let report = await level.chain.parentRunReport(
-                      at: committer, directory: directory
+                      at: carrier, directory: directory
                   ) else { continue }
             reports.append(report)
         }
@@ -1901,10 +1901,10 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// One committer's run report, for a child's re-serve request. Nil when
     /// the directory is not served here or the block is not a committer into
     /// it — silence, never a claim.
-    func runReport(committer: String, directory: String) async -> ParentRunReport? {
+    func runReport(carrier: String, directory: String) async -> ParentRunReport? {
         guard case .active(let level) = runtimePhase,
               servedRunDirectories.contains(directory) else { return nil }
-        return await level.chain.parentRunReport(at: committer, directory: directory)
+        return await level.chain.parentRunReport(at: carrier, directory: directory)
     }
 
     /// Per directory, the child block the branch through `tipCID` last
@@ -1920,15 +1920,15 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
               await level.chain.getConsensusBlock(hash: tipCID) != nil
         else { return [:] }
         var carried: [String: String] = [:]
-        var committers: [String: BlockMeta?] = [:]
+        var carriers: [String: BlockMeta?] = [:]
         for directory in directories {
-            guard let committer = await level.chain.nearestCarrier(
+            guard let carrier = await level.chain.nearestCarrier(
                 of: tipCID, directory: directory
             ) else { continue }
-            if committers[committer] == nil {
-                committers[committer] = await level.chain.getConsensusBlock(hash: committer)
+            if carriers[carrier] == nil {
+                carriers[carrier] = await level.chain.getConsensusBlock(hash: carrier)
             }
-            if let child = committers[committer]??.childCommitments?[directory] {
+            if let child = carriers[carrier]??.childCommitments?[directory] {
                 carried[directory] = child
             }
         }
@@ -1942,8 +1942,8 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// joined on acceptance (a carrier of a block this chain refused commits
     /// nothing here), so a child restarted while its parent was down still
     /// asks, and asks only about its own blocks.
-    func recentCommitters() async throws -> [String] {
-        try await store.incomingCarrierCommitters(limit: Self.recentCommitterCapacity)
+    func recentCarriers() async throws -> [String] {
+        try await store.incomingCarriers(limit: Self.recentCarrierCapacity)
     }
 
     /// The committing parent blocks behind one block accepted here with a
@@ -1952,14 +1952,14 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// edge fails the whole ask closed (the round re-ask still covers it).
     /// Bounded at the source to what one request may name, so a block
     /// carried by more parent forks than that never builds an unsendable ask.
-    func incomingCarrierCommitters(of childBlock: String) async throws -> [String] {
+    func incomingCarriers(of childBlock: String) async throws -> [String] {
         Array(
             try await store.incomingParentCarrierBlockCIDs(forChildBlockCID: childBlock)
-                .sorted().prefix(Self.recentCommitterCapacity)
+                .sorted().prefix(Self.recentCarrierCapacity)
         )
     }
 
-    static let recentCommitterCapacity = maximumParentRunReportRequestCommitters
+    static let recentCarrierCapacity = maximumParentRunReportRequestCarriers
 
     public enum ParentReportApplication: Sendable {
         /// The attributed batch is durable and applied; the commit, if the
@@ -1992,8 +1992,9 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         // at that block's admission. A committer this chain never admitted a
         // block from names nothing here.
         guard let childBlock = try await store.incomingCarrierChildBlock(
-            committer: report.blockHash
+            carrier: report.blockHash
         ) else {
+            // The label predates the carrier naming; dashboards read it.
             parentReportRefusalCounts["unknownCommitter", default: 0] += 1
             return .refused(.notCarrierOfChild)
         }
@@ -2025,9 +2026,19 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         (parentReportsAppliedCount, parentReportRefusalCounts)
     }
 
+    /// The `/metrics` refusal label. Spelled out rather than derived from the
+    /// Lattice case name, so a rename there cannot silently change a label a
+    /// dashboard reads.
     static func refusalName(_ outcome: ParentReportStrengthening) -> String {
-        let description = String(describing: outcome)
-        return String(description.prefix { $0 != "(" })
+        switch outcome {
+        case .strengthened: "strengthened"
+        case .notCarrierOfChild: "notCarrierOfChild"
+        case .wrongDirectory: "wrongDirectory"
+        case .locationConflict: "locationConflict"
+        case .malformedReport: "malformedReport"
+        case .unrepresentable: "unrepresentable"
+        case .notStronger: "notStronger"
+        }
     }
 
     /// Ungated tip heights for `/metrics`, from ONE validated-tip walk: the

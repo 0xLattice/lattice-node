@@ -132,7 +132,7 @@ final class PortableEvidenceProtocolTests: XCTestCase {
     func testParentRunReportsRoundTripAndRefuseWhatNoParentCouldSend() throws {
         let report = ParentRunReportMessage(
             directory: "Payments",
-            committerCID: protocolCID("committer"),
+            carrierCID: protocolCID("committer"),
             childBlockCID: protocolCID("child-block"),
             grinds: [protocolCID("grind-a"), protocolCID("grind-b")],
             runWork: WorkSum(UInt256(17)),
@@ -140,6 +140,14 @@ final class PortableEvidenceProtocolTests: XCTestCase {
             revision: 9
         )
         XCTAssertEqual(try ParentRunReportMessage.decoded(report.encoded()), report)
+        // The JSON keys are wire bytes: the Swift names changed, the keys did not.
+        let reportKeys = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: report.encoded()) as? [String: Any]
+        ).keys
+        XCTAssertEqual(
+            Set(reportKeys),
+            ["directory", "committerCID", "childBlockCID", "grinds", "runWork", "ownWork", "revision"]
+        )
         XCTAssertEqual(NodeNetworkTopic.plane(for: NodeNetworkTopic.parentRunReport), .hierarchy)
         XCTAssertEqual(NodeNetworkTopic.plane(for: NodeNetworkTopic.parentRunReportRequest), .hierarchy)
 
@@ -149,41 +157,45 @@ final class PortableEvidenceProtocolTests: XCTestCase {
             }
         }
         malformed(ParentRunReportMessage(
-            directory: "", committerCID: report.committerCID, childBlockCID: report.childBlockCID,
+            directory: "", carrierCID: report.carrierCID, childBlockCID: report.childBlockCID,
             grinds: report.grinds, runWork: report.runWork, ownWork: report.ownWork, revision: 9
         ), "empty directory")
         malformed(ParentRunReportMessage(
-            directory: "Payments", committerCID: "not-a-cid", childBlockCID: report.childBlockCID,
+            directory: "Payments", carrierCID: "not-a-cid", childBlockCID: report.childBlockCID,
             grinds: report.grinds, runWork: report.runWork, ownWork: report.ownWork, revision: 9
         ), "non-canonical committer")
         malformed(ParentRunReportMessage(
-            directory: "Payments", committerCID: report.committerCID, childBlockCID: report.childBlockCID,
+            directory: "Payments", carrierCID: report.carrierCID, childBlockCID: report.childBlockCID,
             grinds: [], runWork: report.runWork, ownWork: report.ownWork, revision: 9
         ), "no grinds")
         malformed(ParentRunReportMessage(
-            directory: "Payments", committerCID: report.committerCID, childBlockCID: report.childBlockCID,
+            directory: "Payments", carrierCID: report.carrierCID, childBlockCID: report.childBlockCID,
             grinds: [protocolCID("grind-a"), protocolCID("grind-a")], runWork: report.runWork,
             ownWork: report.ownWork, revision: 9
         ), "duplicate grind")
         malformed(ParentRunReportMessage(
-            directory: "Payments", committerCID: report.committerCID, childBlockCID: report.childBlockCID,
+            directory: "Payments", carrierCID: report.carrierCID, childBlockCID: report.childBlockCID,
             grinds: report.grinds, runWork: WorkSum(UInt256(4)), ownWork: WorkSum(UInt256(5)), revision: 9
         ), "own exceeds run: no honest run does that")
 
         let request = ParentRunReportRequestMessage(
-            requestID: 3, committerCIDs: [protocolCID("committer"), protocolCID("committer-2")]
+            requestID: 3, carrierCIDs: [protocolCID("committer"), protocolCID("committer-2")]
         )
         XCTAssertEqual(try ParentRunReportRequestMessage.decoded(request.encoded()), request)
-        XCTAssertThrowsError(try ParentRunReportRequestMessage(requestID: 0, committerCIDs: [protocolCID("c")]).encoded())
-        XCTAssertThrowsError(try ParentRunReportRequestMessage(requestID: 3, committerCIDs: []).encoded())
+        let requestKeys = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: request.encoded()) as? [String: Any]
+        ).keys
+        XCTAssertEqual(Set(requestKeys), ["requestID", "committerCIDs"])
+        XCTAssertThrowsError(try ParentRunReportRequestMessage(requestID: 0, carrierCIDs: [protocolCID("c")]).encoded())
+        XCTAssertThrowsError(try ParentRunReportRequestMessage(requestID: 3, carrierCIDs: []).encoded())
         XCTAssertThrowsError(try ParentRunReportRequestMessage(
-            requestID: 3, committerCIDs: [protocolCID("c"), protocolCID("c")]
+            requestID: 3, carrierCIDs: [protocolCID("c"), protocolCID("c")]
         ).encoded())
         // Bounded by what a correct child can ask: one more is malformed, not slow.
-        let atBound = (0..<maximumParentRunReportRequestCommitters).map { protocolCID("bound-\($0)") }
-        XCTAssertNoThrow(try ParentRunReportRequestMessage(requestID: 4, committerCIDs: atBound).encoded())
+        let atBound = (0..<maximumParentRunReportRequestCarriers).map { protocolCID("bound-\($0)") }
+        XCTAssertNoThrow(try ParentRunReportRequestMessage(requestID: 4, carrierCIDs: atBound).encoded())
         XCTAssertThrowsError(try ParentRunReportRequestMessage(
-            requestID: 5, committerCIDs: atBound + [protocolCID("one-too-many")]
+            requestID: 5, carrierCIDs: atBound + [protocolCID("one-too-many")]
         ).encoded())
     }
 

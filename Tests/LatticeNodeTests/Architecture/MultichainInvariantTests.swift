@@ -132,7 +132,7 @@ final class MultichainInvariantTests: XCTestCase {
             network: ClosureNetworkInterface(
                 childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
-                parentRunReportRequester: { committers in await asked.record(committers) },
+                parentRunReportRequester: { carriers in await asked.record(carriers) },
                 acceptedBlockPublisher: { _ in }
             )
         )
@@ -153,7 +153,7 @@ final class MultichainInvariantTests: XCTestCase {
         XCTAssertTrue(admitted.decision.isAccepted)
         let askedFor = await asked.received()
         XCTAssertEqual(askedFor, [[carrierHeader.rawCID]], "one ask, naming the admitted block's carrier")
-        let remembered = try await child().recentCommitters()
+        let remembered = try await child().recentCarriers()
         XCTAssertEqual(remembered, [carrierHeader.rawCID], "the child remembers whom to re-ask")
         // A directory this chain never anchored a child genesis for is not
         // served, whoever names it.
@@ -191,9 +191,9 @@ final class MultichainInvariantTests: XCTestCase {
         let grown = try XCTUnwrap(successorReports.first)
         XCTAssertEqual(grown.blockHash, carrierHeader.rawCID, "credited to the nearest committer")
         XCTAssertGreaterThan(grown.runWork, grown.ownWork)
-        let byRequest = await parent.runReport(committer: carrierHeader.rawCID, directory: "Payments")
+        let byRequest = await parent.runReport(carrier: carrierHeader.rawCID, directory: "Payments")
         XCTAssertEqual(byRequest, grown, "the re-serve request answers with the same report")
-        let unserved = await parent.runReport(committer: carrierHeader.rawCID, directory: "Markets")
+        let unserved = await parent.runReport(carrier: carrierHeader.rawCID, directory: "Markets")
         XCTAssertNil(unserved)
 
         // The child credits it — once.
@@ -279,7 +279,7 @@ final class MultichainInvariantTests: XCTestCase {
             return XCTFail("the attributed credit must survive a restart, got \(afterRestart)")
         }
         // ... and so does whom to re-ask: the fallback works after a restart.
-        let rememberedAfterRestart = try await reopened.recentCommitters()
+        let rememberedAfterRestart = try await reopened.recentCarriers()
         XCTAssertEqual(rememberedAfterRestart, [carrierHeader.rawCID])
     }
 
@@ -397,7 +397,7 @@ final class MultichainInvariantTests: XCTestCase {
         await a.serveRuns(for: "B")
         let servedOnA = await a.servedRunDirectoryList()
         XCTAssertEqual(servedOnA, ["B"], "A anchored B, so A serves it")
-        let runBeforeValue = await a.runReport(committer: a2CID, directory: "B")
+        let runBeforeValue = await a.runReport(carrier: a2CID, directory: "B")
         let runBefore = try XCTUnwrap(runBeforeValue)
         XCTAssertEqual(runBefore.childBlock, b1CID)
         XCTAssertEqual(runBefore.runWork, runBefore.ownWork)
@@ -430,7 +430,7 @@ final class MultichainInvariantTests: XCTestCase {
         // serves B grew by exactly what Nexus attributed, while A2's own
         // grinds — what B already holds — did not change. B credits the
         // difference: two levels down, undiminished.
-        let runAfterValue = await a.runReport(committer: a2CID, directory: "B")
+        let runAfterValue = await a.runReport(carrier: a2CID, directory: "B")
         let runAfter = try XCTUnwrap(runAfterValue)
         XCTAssertEqual(runAfter.ownWork, runBefore.ownWork, "an attributed run is no grind of A2")
         XCTAssertEqual(runAfter.grinds, runBefore.grinds)
@@ -924,7 +924,7 @@ final class MultichainInvariantTests: XCTestCase {
 
     private actor RunReportRequestSink {
         private var asks: [[String]] = []
-        func record(_ committers: [String]) { asks.append(committers) }
+        func record(_ carriers: [String]) { asks.append(carriers) }
         func received() -> [[String]] { asks }
     }
 

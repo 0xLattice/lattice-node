@@ -140,7 +140,7 @@ final class WireProtocolFuzzTests: XCTestCase {
             )),
             try seed(ParentRunReportMessage(
                 directory: "Payments",
-                committerCID: cids[0],
+                carrierCID: cids[0],
                 childBlockCID: cids[1],
                 grinds: [cids[2], cids[3]],
                 runWork: WorkSum(UInt256(17)),
@@ -149,7 +149,7 @@ final class WireProtocolFuzzTests: XCTestCase {
             )),
             try seed(ParentRunReportRequestMessage(
                 requestID: 31,
-                committerCIDs: [cids[0], cids[4]]
+                carrierCIDs: [cids[0], cids[4]]
             )),
         ]
     }

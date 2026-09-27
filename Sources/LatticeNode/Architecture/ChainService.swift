@@ -1696,14 +1696,14 @@ public actor ChainService {
     }
 
     /// One committer's run report for a child's re-serve request.
-    public func runReport(committer: String, directory: String) async -> ParentRunReport? {
-        await process.runReport(committer: committer, directory: directory)
+    public func runReport(carrier: String, directory: String) async -> ParentRunReport? {
+        await process.runReport(carrier: carrier, directory: directory)
     }
 
     /// The committers this chain asks its parent to re-serve after each
     /// evidence catch-up round.
-    public func recentCommitters() async throws -> [String] {
-        try await process.recentCommitters()
+    public func recentCarriers() async throws -> [String] {
+        try await process.recentCarriers()
     }
 
     /// Credit a parent's run report at the child block it names. The commit,
@@ -1837,10 +1837,10 @@ public actor ChainService {
         if outcome.decision.isAccepted {
             await pushChangedRuns(of: header.rawCID)
             if outcome.parentCarrierLink != nil,
-               let committers = try? await process.incomingCarrierCommitters(
+               let carriers = try? await process.incomingCarriers(
                    of: header.rawCID
-               ), !committers.isEmpty {
-                await network.requestParentRunReports(committers: committers)
+               ), !carriers.isEmpty {
+                await network.requestParentRunReports(carriers: carriers)
             }
         }
         if outcome.decision.isAccepted {
