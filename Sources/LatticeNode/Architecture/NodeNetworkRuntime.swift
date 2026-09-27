@@ -407,10 +407,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
         var evidence = ChildEvidenceState()
         /// The latest candidate the child pushed; carries its own session.
         var offer: CachedChildCandidate?
+        /// The context sequence the child was last sent, so the push task
+        /// sends it only what it lacks. Recorded after the send, whether or
+        /// not the session is still live; carries its own session.
+        var pushedSequence: SessionSequence?
 
         var isEmpty: Bool {
             helloDeadline == nil && session == nil && role == nil
                 && declaredReadURL == nil && evidence.isEmpty && offer == nil
+                && pushedSequence == nil
         }
     }
 
@@ -677,9 +682,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
     private var parentTipContext: ParentTipContext?
     private var nextParentTipSequence: UInt64 = 0
-    /// The context sequence each ready child was last sent, so the push
-    /// task sends a child only what it lacks.
-    private var pushedParentTipSequence: [PeerKey: SessionSequence] = [:]
     private var parentTipPushTask: Task<Void, Never>?
     private var parentTipPushDirty = false
     private var descendantRewards: [MiningReward] = []
@@ -1108,7 +1110,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
         runReportApplyTail?.cancel()
         runReportApplyTail = nil
         parentTipContext = nil
-        pushedParentTipSequence.removeAll()
+        for key in Array(hierarchyRecords.keys) {
+            hierarchyRecords.update(key) { $0.pushedSequence = nil }
+        }
         refusedChildEvidenceHints.removeAll()
         parentTipPushTask?.cancel()
         parentTipPushTask = nil
@@ -1693,7 +1697,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 guard case .child(let childPath) = role,
                       isChildEvidenceReady(key),
                       let peer = hierarchyRecords[key]?.session,
-                      sequence(pushedParentTipSequence[key], on: peer) != context.sequence
+                      sequence(hierarchyRecords[key]?.pushedSequence, on: peer) != context.sequence
                 else { continue }
                 await pushParentTipContext(context, to: peer, childPath: childPath)
             }
@@ -1768,9 +1772,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
             payload: payload
         )
         if case .enqueued = sent {
-            pushedParentTipSequence[peer.key] = SessionSequence(
-                sessionID: peer.sessionID, sequence: context.sequence
-            )
+            hierarchyRecords.update(peer.key) {
+                $0.pushedSequence = SessionSequence(
+                    sessionID: peer.sessionID, sequence: context.sequence
+                )
+            }
         } else {
             SyncTrace.log("parent tip push to \(childPath.joined(separator: "/")) not sent: \(sent)")
         }
@@ -2610,7 +2616,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         hierarchyRecords.update(key) { $0.evidence.ready = false }
         cancelChildEvidenceReadyWaiters(for: key)
         hierarchyRecords.update(key) { $0.offer = nil }
-        pushedParentTipSequence.removeValue(forKey: key)
+        hierarchyRecords.update(key) { $0.pushedSequence = nil }
         refusedChildEvidenceHints.removeValue(forKey: key)
         Self.pruneChildPeerRotations(
             &childPeerRotation,
@@ -4826,7 +4832,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         keys.formUnion(pendingGenesisResolves.values.map(\.peer.key))
         keys.formUnion(parentStateQueryGuard.peers)
         keys.formUnion(portableEvidenceWork.values.map(\.peer.key))
-        keys.formUnion(pushedParentTipSequence.keys)
         if let receivedParentTip { keys.insert(receivedParentTip.peer.key) }
         for hex in candidateAcquirer.debugSnapshot().providerKeys
             .union(parentEvidence.debugSnapshot().peerIDs) {
@@ -4851,7 +4856,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         let hierarchyKeys = Set(hierarchyRecords.keys)
             .union(hierarchyRecords.keys)
-            .union(pushedParentTipSequence.keys)
             .union(refusedChildEvidenceHints.keys)
         var hierarchySnapshot: [PeerKey: NetworkDebugSnapshot.HierarchyPeer] = [:]
         for key in hierarchyKeys {
