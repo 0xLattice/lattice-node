@@ -1123,7 +1123,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                 !(await fixture.strangerRecorder.snapshot()).indexEntries.isEmpty
             }
             // Let a second (wrong) answer arrive if one were ever going to.
-            try await alwaysDuring(.milliseconds(300)) {
+            try await alwaysDuring("the stranger stays unserved, one report only", .milliseconds(300)) {
                 let strangerSaw = await fixture.strangerRecorder.runReportsSeen()
                 let served = await fixture.recorder.runReportsSeen()
                 return strangerSaw.isEmpty && served.count == 1

@@ -34,8 +34,8 @@ import cashew
 ///   before any hello, so the key appearing is not proof of the role);
 /// - only then must both disconnects clear everything.
 ///
-/// `overlayRuntime` / `connectAndHello` are copies of the private helpers in
-/// `NetworkTrustTests`; `NetworkTransportTestPorts` is shared with that file.
+/// `overlayRuntime` / `connectAndHello` and the keys come from
+/// `NetworkTrustTestCase`, the base the NetworkTrust suites share.
 final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
 
     func testDisconnectedPeersLeaveNoPerPeerRecordOnEitherPlane() async throws {

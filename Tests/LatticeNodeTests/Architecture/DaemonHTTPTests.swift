@@ -870,7 +870,7 @@ final class DaemonHTTPTests: XCTestCase {
         }
         // Give the queued status() call a chance to actually reach (and
         // block on) the gate before we check it hasn't finished.
-        try await alwaysDuring(.milliseconds(100)) { !(await statusCompleted.isDone) }
+        try await alwaysDuring("status() stays queued behind the held gate", .milliseconds(100)) { !(await statusCompleted.isDone) }
         let finishedEarly = await statusCompleted.isDone
         XCTAssertFalse(finishedEarly, "status() must still be queued behind the held operation gate")
 

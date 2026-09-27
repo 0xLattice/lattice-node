@@ -247,7 +247,7 @@ jobs:
         run: swift package resolve
 
       - name: Run hierarchy regressions under ASan + UBSan
-        run: swift test --sanitize address --sanitize undefined --filter NetworkTrustTests
+        run: swift test --sanitize address --sanitize undefined --filter NetworkTrust
 
   static-analysis:
     runs-on: macos-15

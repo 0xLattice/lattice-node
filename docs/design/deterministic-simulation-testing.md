@@ -19,7 +19,7 @@ CI adds:
 
 - strict concurrency checking;
 - ThreadSanitizer, ASan and UBSan, each run over the hierarchy regressions
-  (`NetworkTrustTests`);
+  (the `NetworkTrust*Tests` suites);
 - reproducible release builds;
 - seeded fuzzing of the wire decoders (`WireProtocolFuzzTests`);
 - an edge-case matrix over every parametered public read route
@@ -460,7 +460,7 @@ hard to recover. This section states what is achievable and what is not.
   - The runtime waits with `Task.sleep` in roughly two dozen places.
   - Tally's admission bookkeeping and VolumeBroker's `MemoryBroker` also read the
     clock directly.
-  - Even the test helper `TestBlockClock` in `NetworkTrustTests` is anchored to
+  - Even the test helper `TestBlockClock` in `NetworkTrustTestCase` is anchored to
     real wall time, because admission compares block timestamps with the real
     clock.
 - **The network is real sockets.** Ivy builds SwiftNIO client, server and
@@ -526,7 +526,7 @@ because boundary-focused testing needed the same things:
   `FetcherContentSource`, `OverlayContentSource`). Component tests already
   substitute blocking, counting and recording sources. Ivy's content exchange is
   served through the `IvyContentSource` protocol, with test sources in
-  `NetworkTrustTests`.
+  `Tests/LatticeNodeTests/Support`.
 - **Service ports.** `ChainService` receives its network effects as injected
   closures:
   - `validateBodySource` and `validateEvidenceSource`;
@@ -589,7 +589,7 @@ answers a question simulation cannot, and simulation answers one they cannot.
 |---|---|---|
 | Reducer and unit tests (`CandidateAcquirerTests`, `AdmissionDecisionTests`) | Exact contracts of small state machines | Unchanged. The reducers run inside simulated nodes as they are. |
 | Component tests with latches and blocking sources (`ChainProcessTests`, `ChainServiceTests`, `NodeStoreTests`) | One named interleaving, pinned forever | Complemented. Simulation searches for interleavings. A failing seed, once understood, can become a pinned component test. Purpose-built DEBUG ordering hooks become less necessary for discovery. |
-| Real-network integration (`NetworkTrustTests`) | Ivy sessions, framing, authentication and delegate delivery over real sockets | Complemented. Simulation replaces the transport, so it cannot vouch for it. |
+| Real-network integration (the `NetworkTrust*Tests` suites) | Ivy sessions, framing, authentication and delegate delivery over real sockets | Complemented. Simulation replaces the transport, so it cannot vouch for it. |
 | Black-box E2E with real binaries (`LatticeNodeE2ETests`, `LatticeCtlE2ETests`, release smoke) | The shipped artifact: daemon startup, configuration, HTTP, real disk, real processes, real load | Complemented. These stay the gate for the thing users run. Two things move to simulation: their role as the main place ordering bugs surface, and the scaled deadlines and opt-in gates used to absorb those bugs. |
 | Sanitizers and strict concurrency | Memory safety and true data races | Complemented. A simulation driven by the seed rather than by hardware parallelism cannot see this class, and these tools cannot see logical interleavings. |
 | Wire fuzzing and the read-router edge-case matrix | Hostile single inputs at the unauthenticated surfaces | Complemented. They vary one input; simulation varies sequences, timing and faults. Simulation keeps the wire fuzzers' seed-and-replay discipline. |

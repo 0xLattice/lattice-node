@@ -650,7 +650,9 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                     childEntry,
                 ]
             )
-            try await alwaysDuring(.milliseconds(300)) { await received.count() == builds }
+            try await alwaysDuring("a repeated plan builds nothing new", .milliseconds(300)) {
+                await received.count() == builds
+            }
             let buildsAfterRepeat = await received.count()
             XCTAssertEqual(buildsAfterRepeat, builds)
             let candidates = await fixture.parentRuntime.directChildCandidates(

@@ -48,6 +48,7 @@ func eventually(
 /// the settle wait for a NEGATIVE assertion ("nothing more happened"). A
 /// break is reported at the call site; the caller's own assertions follow.
 func alwaysDuring(
+    _ phase: String,
     _ window: Duration,
     poll: Duration = .milliseconds(10),
     file: StaticString = #filePath,
@@ -57,7 +58,7 @@ func alwaysDuring(
     let deadline = ContinuousClock.now + window * testTimeScale
     repeat {
         guard try await invariant() else {
-            XCTFail("invariant broken inside the settle window", file: file, line: line)
+            XCTFail("broken inside the settle window: \(phase)", file: file, line: line)
             return
         }
         try await Task.sleep(nanoseconds: nanoseconds(poll))

@@ -752,7 +752,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
                     volumeRootCID: invalidVolume.root
                 ).encoded()
             ) else { throw NetworkTestError.failedSend }
-            try await alwaysDuring(.milliseconds(300)) {
+            try await alwaysDuring("the advertised volume is neither pooled nor relayed", .milliseconds(300)) {
                 let pooled = await service.status().mempoolCount
                 let relayed = await observerTopics.contains(
                     NodeNetworkTopic.transactionAvailable
@@ -786,7 +786,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
                     volumeRootCID: validVolume.root
                 ).encoded()
             ) else { throw NetworkTestError.failedSend }
-            try await alwaysDuring(.milliseconds(300)) {
+            try await alwaysDuring("the advertised volume is neither pooled nor relayed", .milliseconds(300)) {
                 let pooled = await service.status().mempoolCount
                 let relayed = await observerTopics.contains(
                     NodeNetworkTopic.transactionAvailable
@@ -1752,7 +1752,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             )
             try await waitForTopic(NodeNetworkTopic.blockAnnouncement, in: topics)
             // Settle: the hello reply alone knows no peer height.
-            try await alwaysDuring(.milliseconds(300)) {
+            try await alwaysDuring("hello alone pulls no frontier", .milliseconds(300)) {
                 await topics.count(of: NodeNetworkTopic.acceptedLeavesRequest) == 0
             }
             let atHello = await topics.count(
@@ -1786,7 +1786,11 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             ) else {
                 throw NetworkTestError.failedSend
             }
-            try await Task.sleep(nanoseconds: scaledNanoseconds(.milliseconds(300)))
+            try await alwaysDuring("same session at the edge: no second pull", .milliseconds(300)) {
+                let pulls = await topics.count(of: NodeNetworkTopic.acceptedLeavesRequest)
+                let announcements = await topics.count(of: NodeNetworkTopic.blockAnnouncement)
+                return pulls == 1 && announcements == 1
+            }
             let frontierRequests = await topics.count(
                 of: NodeNetworkTopic.acceptedLeavesRequest
             )
@@ -1870,7 +1874,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
                 !(await scripted.frontierRequests()).isEmpty
             }
             // Settle: nothing after the edge pulls again.
-            try await alwaysDuring(.milliseconds(300)) {
+            try await alwaysDuring("nothing after the edge pulls again", .milliseconds(300)) {
                 (await scripted.frontierRequests()).count == 1
             }
             let pulls = await scripted.frontierRequests()
@@ -2089,7 +2093,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
 
             // Mismatched requestID: seeds nothing.
             try await sendPage(requestID: requestID &+ 1, leaves: [siblingCID])
-            try await alwaysDuring(.milliseconds(300)) {
+            try await alwaysDuring("an uncorrelated page seeds nothing", .milliseconds(300)) {
                 !(await fixture.process.hasAcceptedBlock(siblingCID))
             }
             let unsolicited = await fixture.process.hasAcceptedBlock(siblingCID)
@@ -2103,7 +2107,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
 
             // A second matching page: the request is consumed.
             try await sendPage(requestID: requestID, leaves: [siblingCID])
-            try await alwaysDuring(.milliseconds(300)) {
+            try await alwaysDuring("a repeated page seeds nothing", .milliseconds(300)) {
                 !(await fixture.process.hasAcceptedBlock(siblingCID))
             }
             let repeated = await fixture.process.hasAcceptedBlock(siblingCID)
@@ -2226,7 +2230,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             ) else {
                 throw NetworkTestError.failedSend
             }
-            try await alwaysDuring(.milliseconds(300)) {
+            try await alwaysDuring("one past the tip is the edge, not a gap", .milliseconds(300)) {
                 await topics.count(of: NodeNetworkTopic.ancestorRangeRequest) == 0
             }
             let atEdge = await topics.count(
@@ -2794,7 +2798,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
                 await liar.ancestorRequestCount() >= 1
             }
             // Four re-entry windows: a retained claim would be re-picked.
-            try await alwaysDuring(reentryInterval * 4) {
+            try await alwaysDuring("a demoted claim is not re-picked", reentryInterval * 4) {
                 await liar.ancestorRequestCount() == 1
             }
             let negotiations = await liar.ancestorRequestCount()
@@ -2947,7 +2951,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             ) else {
                 throw NetworkTestError.failedSend
             }
-            try await alwaysDuring(.milliseconds(400)) {
+            try await alwaysDuring("a peer above our edge is not pulled", .milliseconds(400)) {
                 await aboveEdge.count(of: NodeNetworkTopic.acceptedLeavesRequest) == 0
             }
             let duringSync = await aboveEdge.count(
@@ -2959,7 +2963,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             // because it was this peer own height — not the slot — that put it
             // out of reach of the edge test.
             await deepClient.stop()
-            try await alwaysDuring(.milliseconds(400)) {
+            try await alwaysDuring("above the edge, slot or no slot", .milliseconds(400)) {
                 await aboveEdge.count(of: NodeNetworkTopic.acceptedLeavesRequest) == 0
             }
             let afterClear = await aboveEdge.count(

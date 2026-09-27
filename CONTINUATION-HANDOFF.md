@@ -172,7 +172,7 @@ At Lattice 26.0.8, 151 focused architecture tests passed:
 
 - `CandidateAcquirerTests`
 - `ChainProcessTests`
-- `NetworkTrustTests`
+- `NetworkTrust*Tests` (five suites over `NetworkTrustTestCase`)
 - `NodeStoreTests`
 - `PortableEvidenceProtocolTests`
 
@@ -352,7 +352,7 @@ rg -n 'DEBUG |certificate|authority|ParentProcessKey|is_portable' \
 
 # Focused node architecture tests
 swift test --filter \
-  'CandidateAcquirerTests|ChainProcessTests|NetworkTrustTests|NodeStoreTests|PortableEvidenceProtocolTests'
+  'CandidateAcquirerTests|ChainProcessTests|NetworkTrust|NodeStoreTests|PortableEvidenceProtocolTests'
 
 # High-value parent/child E2Es
 swift test --filter \

@@ -406,7 +406,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             ) else {
                 throw NetworkTestError.failedSend
             }
-            try await alwaysDuring(.milliseconds(300)) {
+            try await alwaysDuring("a second hello opens no second session", .milliseconds(300)) {
                 await authorizedDelegate.authorizedSessionCount() == 1
             }
             let finalRequests = await authorizedDelegate.authorizedSessionCount()

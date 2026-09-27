@@ -2649,14 +2649,6 @@ final class ChainProcessTests: XCTestCase {
         )
     }
 
-    private func contribution(id: String, work: UInt64) -> VerifiedWorkContribution {
-        let json = Data(
-            "{\"id\":\"\(id)\",\"work\":\"0x\(String(work, radix: 16))\"}"
-                .utf8
-        )
-        return try! JSONDecoder().decode(VerifiedWorkContribution.self, from: json)
-    }
-
     private func decode<T: Decodable>(_ type: T.Type, json: String) throws -> T {
         try JSONDecoder().decode(type, from: Data(json.utf8))
     }
