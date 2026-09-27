@@ -27,18 +27,24 @@ import XCTest
 /// malformed row, which is the only row boot can then read.
 ///
 /// Summary of CURRENT behaviour, as pinned by the three tests below
-/// (`// TODO(refactor)` marks the cases the refactor should flip to a typed
-/// error naming table and column):
+/// (`// TODO(refactor)` marks the case the refactor should still flip to a
+/// typed error naming table and column):
 ///
 /// - node_metadata: refused with `NodeStoreError.wipeRequired` (an untyped
 ///   reason string; the column is not named).
-/// - consensus_revision, admission_batches, admission_facts, accepted_blocks
-///   (parent / sequence), issued_parent_fact_sources, issued_parent_facts,
-///   issued_child_edges, issued_child_proofs, parent_evidence_scan,
-///   parent_evidence_inbox, local_mempool_transactions, prepared_child_proofs,
-///   contextual_candidates, contextual_candidate_roots,
-///   contextual_candidate_children: refused with `NodeStoreError.corrupt`
-///   (a free-text reason; neither table nor column is named).
+/// - A column that cannot be read as its table declares it (consensus_revision
+///   text that is not an integer, an empty accepted_blocks parent or a
+///   non-positive sequence, a non-canonical CID in issued_child_proofs,
+///   parent_evidence_inbox, local_mempool_transactions or
+///   prepared_child_proofs, a non-UUID parent_evidence_scan source): refused
+///   with `NodeStoreError.malformedRow(table:column:)` naming exactly the
+///   damaged table and column.
+/// - Semantic damage the row layer cannot see (admission_batches and
+///   issued_parent_fact_sources JSON that fails to decode, admission_facts and
+///   issued_parent_facts that disagree with their sources, an orphaned
+///   issued_child_edges row, contextual_candidates / contextual_candidate_roots
+///   / contextual_candidate_children rows that break the index's SQL
+///   consistency): refused with `NodeStoreError.corrupt` (a free-text reason).
 /// - accepted_blocks.validated out of range: read at boot and silently
 ///   tolerated — boot succeeds and the row keeps its out-of-range tier (TODO).
 /// - child_genesis_volume_roots (orphan row), pending_child_proof_routes: not
@@ -54,6 +60,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
     /// What `ChainProcess.open` did with the damaged store.
     private enum Observed: Equatable, CustomStringConvertible {
         case corrupt
+        case malformedRow(table: String, column: String)
         case wipeRequired
         case missingMaterializedVolume
         case opened
@@ -62,6 +69,8 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         var description: String {
             switch self {
             case .corrupt: "NodeStoreError.corrupt"
+            case .malformedRow(let table, let column):
+                "NodeStoreError.malformedRow(\(table).\(column))"
             case .wipeRequired: "NodeStoreError.wipeRequired"
             case .missingMaterializedVolume: "ChainProcessError.missingMaterializedVolume"
             case .opened: "opened (damage tolerated)"
@@ -95,11 +104,6 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
     /// Refused with `NodeStoreError.corrupt`.
     private static let refusedAsCorrupt: [Damage] = [
         Damage(
-            table: "consensus_revision", column: "revision",
-            description: "non-numeric text",
-            sql: ["UPDATE consensus_revision SET revision = 'not-a-number' WHERE singleton = 1"]
-        ),
-        Damage(
             table: "admission_batches", column: "payload",
             description: "malformed JSON in the newest batch",
             sql: ["UPDATE admission_batches SET payload = X'00' WHERE seq = (SELECT MAX(seq) FROM admission_batches)"]
@@ -115,16 +119,6 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             sql: ["UPDATE admission_facts SET payload = X'00' WHERE fact_id = (SELECT MIN(fact_id) FROM admission_facts)"]
         ),
         Damage(
-            table: "accepted_blocks", column: "parent_cid",
-            description: "empty parent CID on a non-genesis block",
-            sql: ["UPDATE accepted_blocks SET parent_cid = '' WHERE block_cid = (SELECT MIN(block_cid) FROM accepted_blocks WHERE parent_cid IS NOT NULL)"]
-        ),
-        Damage(
-            table: "accepted_blocks", column: "admission_seq",
-            description: "zero admission sequence",
-            sql: ["UPDATE accepted_blocks SET admission_seq = 0 WHERE block_cid = (SELECT MIN(block_cid) FROM accepted_blocks)"]
-        ),
-        Damage(
             table: "issued_parent_fact_sources", column: "payload",
             description: "inserted malformed JSON source",
             sql: ["INSERT INTO issued_parent_fact_sources (payload) VALUES (X'00')"]
@@ -138,6 +132,41 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             table: "issued_child_edges", column: "edge_cid",
             description: "inserted edge without an attachment",
             sql: ["INSERT INTO issued_child_edges (edge_cid, parent_carrier_cid, directory, child_cid) VALUES ('not-a-cid', 'carrier', 'Payments', 'child')"]
+        ),
+        Damage(
+            table: "contextual_candidates", column: "candidate_cid",
+            description: "inserted candidate without roots",
+            sql: ["INSERT INTO contextual_candidates (candidate_cid, offer_seq, issued, handoff, handoff_seq) VALUES ('not-a-cid', 1, 0, 0, NULL)"]
+        ),
+        Damage(
+            table: "contextual_candidate_roots", column: "root_cid",
+            description: "inserted root without a candidate",
+            sql: ["INSERT INTO contextual_candidate_roots (candidate_cid, root_cid) VALUES ('orphan', 'not-a-cid')"]
+        ),
+        Damage(
+            table: "contextual_candidate_children", column: "child_peer_key",
+            description: "inserted child without a candidate",
+            sql: ["INSERT INTO contextual_candidate_children (candidate_cid, child_peer_key, child_cid) VALUES ('orphan', 'not-a-peer-key', 'child')"]
+        ),
+    ]
+
+    /// Refused with `NodeStoreError.malformedRow(table:column:)` naming the
+    /// damaged table and column.
+    private static let refusedAsMalformedRow: [Damage] = [
+        Damage(
+            table: "consensus_revision", column: "revision",
+            description: "non-numeric text",
+            sql: ["UPDATE consensus_revision SET revision = 'not-a-number' WHERE singleton = 1"]
+        ),
+        Damage(
+            table: "accepted_blocks", column: "parent_cid",
+            description: "empty parent CID on a non-genesis block",
+            sql: ["UPDATE accepted_blocks SET parent_cid = '' WHERE block_cid = (SELECT MIN(block_cid) FROM accepted_blocks WHERE parent_cid IS NOT NULL)"]
+        ),
+        Damage(
+            table: "accepted_blocks", column: "admission_seq",
+            description: "zero admission sequence",
+            sql: ["UPDATE accepted_blocks SET admission_seq = 0 WHERE block_cid = (SELECT MIN(block_cid) FROM accepted_blocks)"]
         ),
         Damage(
             table: "issued_child_proofs", column: "root_cid",
@@ -163,21 +192,6 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             table: "prepared_child_proofs", column: "attachment_cid",
             description: "inserted proof with malformed CID text",
             sql: ["INSERT INTO prepared_child_proofs (carrier_cid, batch_seq, directory, child_cid, is_child_genesis, attachment_cid) VALUES ('carrier', 1, 'Payments', 'child', 0, 'not-a-cid')"]
-        ),
-        Damage(
-            table: "contextual_candidates", column: "candidate_cid",
-            description: "inserted candidate without roots",
-            sql: ["INSERT INTO contextual_candidates (candidate_cid, offer_seq, issued, handoff, handoff_seq) VALUES ('not-a-cid', 1, 0, 0, NULL)"]
-        ),
-        Damage(
-            table: "contextual_candidate_roots", column: "root_cid",
-            description: "inserted root without a candidate",
-            sql: ["INSERT INTO contextual_candidate_roots (candidate_cid, root_cid) VALUES ('orphan', 'not-a-cid')"]
-        ),
-        Damage(
-            table: "contextual_candidate_children", column: "child_peer_key",
-            description: "inserted child without a candidate",
-            sql: ["INSERT INTO contextual_candidate_children (candidate_cid, child_peer_key, child_cid) VALUES ('orphan', 'not-a-peer-key', 'child')"]
         ),
     ]
 
@@ -231,8 +245,13 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
 
     // MARK: - Tests
 
-    func testBootRefusesDamagedRowsWithNodeStoreErrorCorrupt() async throws {
+    /// `refusedAsCorrupt` observes the untyped `.corrupt`; `refusedAsMalformedRow`
+    /// observes `.malformedRow` naming exactly the damaged table and column.
+    func testBootRefusesDamagedRowsWithTypedErrors() async throws {
         try await assertBoot(Self.refusedAsCorrupt, observes: .corrupt)
+        try await assertBoot(Self.refusedAsMalformedRow) { damage in
+            .malformedRow(table: damage.table, column: damage.column)
+        }
     }
 
     func testBootRefusesDamagedMetadataWithWipeRequired() async throws {
@@ -252,24 +271,31 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
     /// and is REPAIRED at boot, not refused.
     func testBootRepairsDisagreeingLeafFlag() async throws {
         let fixture = try await buildFixture()
-        let root = try damagedCopy(of: fixture, applying: [
+        // A flipped flag and an out-of-range flag are both a derived index to
+        // repair, never a refusal.
+        for damage in [
             "UPDATE accepted_blocks SET leaf = 1 - leaf",
-        ])
-        let flipped = try leafFlags(at: root)
-        XCTAssertTrue(
-            flipped.values.contains(true) && flipped.values.contains(false),
-            "fixture guard: the flip must leave both leaf values present"
-        )
-        let observed = await observeBoot(at: root)
-        XCTAssertEqual(observed, .opened, "accepted_blocks.leaf")
-        let repaired = try leafFlags(at: root)
-        let parents = try parentLinks(at: root)
-        for (cid, leaf) in repaired {
-            let hasChildren = parents.values.contains(cid)
-            XCTAssertEqual(
-                leaf, !hasChildren,
-                "accepted_blocks.leaf for \(cid) was not repaired from the parent links"
-            )
+            "UPDATE accepted_blocks SET leaf = 2",
+        ] {
+            let root = try damagedCopy(of: fixture, applying: [damage])
+            if damage.hasSuffix("1 - leaf") {
+                let flipped = try leafFlags(at: root)
+                XCTAssertTrue(
+                    flipped.values.contains(true) && flipped.values.contains(false),
+                    "fixture guard: the flip must leave both leaf values present"
+                )
+            }
+            let observed = await observeBoot(at: root)
+            XCTAssertEqual(observed, .opened, "accepted_blocks.leaf after \(damage)")
+            let repaired = try leafFlags(at: root)
+            let parents = try parentLinks(at: root)
+            for (cid, leaf) in repaired {
+                let hasChildren = parents.values.contains(cid)
+                XCTAssertEqual(
+                    leaf, !hasChildren,
+                    "accepted_blocks.leaf for \(cid) was not repaired from the parent links after \(damage)"
+                )
+            }
         }
     }
 
@@ -280,6 +306,15 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         observes expected: Observed,
         file: StaticString = #filePath,
         line: UInt = #line
+    ) async throws {
+        try await assertBoot(damages, file: file, line: line) { _ in expected }
+    }
+
+    private func assertBoot(
+        _ damages: [Damage],
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        observes expected: (Damage) -> Observed
     ) async throws {
         let fixture = try await buildFixture()
         var results: [(Damage, Observed, survived: Bool?)] = []
@@ -296,6 +331,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         // Every failure message names the (table, column) it belongs to;
         // `XCTContext.runActivity` is unavailable on swift-corelibs-xctest.
         for (damage, observed, survived) in results {
+            let expected = expected(damage)
             XCTAssertEqual(
                 observed, expected,
                 "\(damage.table).\(damage.column) (\(damage.description)): "
@@ -322,6 +358,8 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             return .opened
         } catch NodeStoreError.corrupt {
             return .corrupt
+        } catch NodeStoreError.malformedRow(let table, let column) {
+            return .malformedRow(table: table, column: column)
         } catch NodeStoreError.wipeRequired {
             return .wipeRequired
         } catch ChainProcessError.missingMaterializedVolume {

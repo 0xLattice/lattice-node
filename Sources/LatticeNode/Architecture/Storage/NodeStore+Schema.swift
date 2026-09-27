@@ -5,6 +5,19 @@ import UInt256
 import VolumeBroker
 import cashew
 
+/// `node_metadata`: the store's identity singleton.
+struct NodeMetadataRow: NodeStoreRecord {
+    static let table = "node_metadata"
+    private let row: Row
+
+    init(_ row: Row) { self.row = row }
+
+    var schemaEpoch: Int64 { get throws { try row.int("schema_epoch") } }
+    var nexusGenesisCID: String { get throws { try row.text("nexus_genesis_cid") } }
+    var chainPath: Data { get throws { try row.blob("chain_path") } }
+    var syncSourceID: String { get throws { try row.uuid("sync_source_id") } }
+}
+
 extension NodeStore {
     /// Epoch 38 makes issued and handed-off contextual candidates mutually
     /// exclusive and gives each handoff an age for budgeted eviction.
@@ -17,13 +30,13 @@ extension NodeStore {
     static let currentSchemaEpoch: Int64 = 40
 
     func syncSourceID() throws -> String {
-        guard let sourceID = try database.query(
+        guard let metadata = try database.row(
+            NodeMetadataRow.self,
             "SELECT sync_source_id FROM node_metadata WHERE singleton = 1"
-        ).first?["sync_source_id"]?.textValue,
-              UUID(uuidString: sourceID) != nil else {
+        ) else {
             throw NodeStoreError.corrupt("malformed sync source identifier")
         }
-        return sourceID
+        return try metadata.syncSourceID
     }
 
     static func validateMetadata(
@@ -36,23 +49,30 @@ extension NodeStore {
         guard tableNames.contains("node_metadata") else {
             throw NodeStoreError.wipeRequired("missing schema metadata")
         }
-        let rows: [[String: NodeSQLiteValue]]
+        let rows: [NodeMetadataRow]
         do {
-            rows = try database.query(
+            rows = try database.rows(
+                NodeMetadataRow.self,
                 "SELECT schema_epoch, nexus_genesis_cid, chain_path, sync_source_id FROM node_metadata WHERE singleton = 1"
             )
         } catch {
             throw NodeStoreError.wipeRequired("unreadable schema metadata")
         }
-        guard rows.count == 1,
-              rows[0]["schema_epoch"]?.intValue == schemaEpoch,
-              rows[0]["nexus_genesis_cid"]?.textValue == nexusGenesisCID,
-              rows[0]["chain_path"]?.blobValue == chainPath,
-              let syncSourceID = rows[0]["sync_source_id"]?.textValue,
-              UUID(uuidString: syncSourceID) != nil else {
-            throw NodeStoreError.wipeRequired(
-                "schema epoch, Nexus genesis, or chain path changed"
-            )
+        // A malformed metadata column is a wipe, not a typed refusal: the
+        // store is not this node's to repair.
+        let changed = NodeStoreError.wipeRequired(
+            "schema epoch, Nexus genesis, or chain path changed"
+        )
+        guard rows.count == 1 else { throw changed }
+        do {
+            guard try rows[0].schemaEpoch == schemaEpoch,
+                  try rows[0].nexusGenesisCID == nexusGenesisCID,
+                  try rows[0].chainPath == chainPath else {
+                throw changed
+            }
+            _ = try rows[0].syncSourceID
+        } catch NodeStoreError.malformedRow {
+            throw changed
         }
     }
 

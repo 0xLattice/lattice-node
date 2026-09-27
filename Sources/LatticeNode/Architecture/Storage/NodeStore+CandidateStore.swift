@@ -32,6 +32,87 @@ struct PendingChildProofRoute: Sendable, Hashable {
     let directory: String
 }
 
+/// `child_genesis_volume_roots`: one bootstrap Volume root of a child
+/// genesis; `child_cid` is whatever the proof named, so it stays text.
+struct ChildGenesisVolumeRootRow: NodeStoreRecord {
+    static let table = "child_genesis_volume_roots"
+    private let row: Row
+
+    init(_ row: Row) { self.row = row }
+
+    var childCID: String { get throws { try row.text("child_cid") } }
+    var rootCID: String { get throws { try row.cid("root_cid") } }
+}
+
+/// `prepared_child_proofs`: one bounded direct-hop proof prepared before
+/// its carrier is admitted. `carrier_cid` and `child_cid` are the proof's
+/// own root and hop, compared at use rather than validated here.
+struct PreparedChildProofRow: NodeStoreRecord {
+    static let table = "prepared_child_proofs"
+    private let row: Row
+
+    init(_ row: Row) { self.row = row }
+
+    var carrierCID: String { get throws { try row.text("carrier_cid") } }
+    var batchSequence: Int64 { get throws { try row.int("batch_seq") } }
+    var directory: String { get throws { try row.text("directory") } }
+    var childCID: String { get throws { try row.text("child_cid") } }
+    var isChildGenesis: Bool { get throws { try row.bool("is_child_genesis") } }
+    var attachmentCID: String { get throws { try row.cid("attachment_cid") } }
+}
+
+/// `pending_child_proof_routes`: one (carrier, directory) still owed a
+/// child proof.
+struct PendingChildProofRouteRow: NodeStoreRecord {
+    static let table = "pending_child_proof_routes"
+    private let row: Row
+
+    init(_ row: Row) { self.row = row }
+
+    var carrierCID: String { get throws { try row.nonEmptyText("carrier_cid") } }
+    /// The stored key as-is, for deleting stale rows (an empty carrier is
+    /// evicted, not refused).
+    var carrierKey: String { get throws { try row.text("carrier_cid") } }
+    var batchSequence: Int64 { get throws { try row.int("batch_seq") } }
+    var directory: String { get throws { try row.nonEmptyText("directory") } }
+}
+
+/// `contextual_candidates`: one locally built candidate and its
+/// offer / issued / handoff state (the table's CHECKs keep them exclusive).
+struct ContextualCandidateRow: NodeStoreRecord {
+    static let table = "contextual_candidates"
+    private let row: Row
+
+    init(_ row: Row) { self.row = row }
+
+    var candidateCID: String { get throws { try row.text("candidate_cid") } }
+    var offerSequence: Int64? { get throws { try row.optionalInt("offer_seq") } }
+    var issued: Bool { get throws { try row.bool("issued") } }
+    var handoff: Bool { get throws { try row.bool("handoff") } }
+}
+
+/// `contextual_candidate_roots`: one pinned Volume root of a candidate.
+struct ContextualCandidateRootRow: NodeStoreRecord {
+    static let table = "contextual_candidate_roots"
+    private let row: Row
+
+    init(_ row: Row) { self.row = row }
+
+    var candidateCID: String { get throws { try row.text("candidate_cid") } }
+    var rootCID: String { get throws { try row.cid("root_cid") } }
+}
+
+/// `contextual_candidate_children`: unused rows kept until the next schema
+/// epoch; the audit parses `child_peer_key` as a `PeerKey` itself.
+struct ContextualCandidateChildRow: NodeStoreRecord {
+    static let table = "contextual_candidate_children"
+    private let row: Row
+
+    init(_ row: Row) { self.row = row }
+
+    var childPeerKey: String { get throws { try row.text("child_peer_key") } }
+}
+
 extension NodeStore {
     func persistContextualCandidateRoots(
         candidateCID: String,
@@ -49,21 +130,19 @@ extension NodeStore {
         }
         await acquirePreparedMutation()
         defer { releasePreparedMutation() }
-        let candidateRows = try database.query(
+        let candidate = try database.row(
+            ContextualCandidateRow.self,
             "SELECT issued, handoff FROM contextual_candidates WHERE candidate_cid = ?1",
             params: [.text(candidateCID)]
         )
-        if let candidate = candidateRows.first {
-            guard candidate["issued"]?.intValue != nil,
-                  candidate["handoff"]?.intValue != nil else {
-                throw NodeStoreError.corrupt(
-                    "contextual candidate state is malformed"
-                )
-            }
-            let existing = try database.query(
-            "SELECT root_cid FROM contextual_candidate_roots WHERE candidate_cid = ?1 ORDER BY root_cid",
-            params: [.text(candidateCID)]
-            ).compactMap { $0["root_cid"]?.textValue }
+        if let candidate {
+            _ = try candidate.issued
+            _ = try candidate.handoff
+            let existing = try database.rows(
+                ContextualCandidateRootRow.self,
+                "SELECT root_cid FROM contextual_candidate_roots WHERE candidate_cid = ?1 ORDER BY root_cid",
+                params: [.text(candidateCID)]
+            ).map { try $0.rootCID }
             guard existing.isEmpty || existing == canonicalRoots else {
                 throw NodeStoreError.corrupt(
                     "contextual candidate roots changed"
@@ -80,27 +159,26 @@ extension NodeStore {
         var evictedRoots: [String] = []
         do {
             try database.transaction {
-                let latestSequence = try database.query(
+                let latestSequence = try database.row(
+                    ContextualCandidateRow.self,
                     "SELECT MAX(offer_seq) AS offer_seq FROM contextual_candidates"
-                ).first?["offer_seq"]?.intValue ?? 0
+                )?.offerSequence ?? 0
                 let (sequence, overflow) = latestSequence.addingReportingOverflow(1)
                 guard !overflow else {
                     throw NodeStoreError.corrupt(
                         "contextual candidate retention sequence overflow"
                     )
                 }
-                let candidates = try database.query(
+                let candidates = try database.rows(
+                    ContextualCandidateRow.self,
                     "SELECT candidate_cid FROM contextual_candidates WHERE issued = 0 AND handoff = 0 ORDER BY offer_seq, candidate_cid"
                 )
                 for candidate in candidates.prefix(
                     max(0, candidates.count - capacity + 1)
                 ) {
-                    guard let oldest = candidate["candidate_cid"]?.textValue else {
-                        throw NodeStoreError.corrupt(
-                            "contextual candidate retention index is malformed"
-                        )
-                    }
-                    evictedRoots += try deleteContextualCandidateRows(candidateCID: oldest)
+                    evictedRoots += try deleteContextualCandidateRows(
+                        candidateCID: try candidate.candidateCID
+                    )
                 }
                 try database.execute(
                     "INSERT INTO contextual_candidates (candidate_cid, offer_seq, issued, handoff) VALUES (?1, ?2, 0, 0)",
@@ -148,20 +226,20 @@ extension NodeStore {
         _ candidateCID: String
     ) throws {
         try database.transaction {
-            let row = try database.query(
+            guard let row = try database.row(
+                ContextualCandidateRow.self,
                 "SELECT issued, handoff FROM contextual_candidates WHERE candidate_cid = ?1",
                 params: [.text(candidateCID)]
-            ).first
-            guard let issued = row?["issued"]?.intValue,
-                  let handoff = row?["handoff"]?.intValue else {
+            ) else {
                 throw NodeStoreError.corrupt(
                     "contextual candidate state is missing"
                 )
             }
-            guard issued == 0, handoff == 0 else { return }
-            let latestSequence = try database.query(
+            guard try !row.issued, try !row.handoff else { return }
+            let latestSequence = try database.row(
+                ContextualCandidateRow.self,
                 "SELECT MAX(offer_seq) AS offer_seq FROM contextual_candidates"
-            ).first?["offer_seq"]?.intValue ?? 0
+            )?.offerSequence ?? 0
             let (sequence, overflow) = latestSequence.addingReportingOverflow(1)
             guard !overflow else {
                 throw NodeStoreError.corrupt(
@@ -182,10 +260,11 @@ extension NodeStore {
     private func deleteContextualCandidateRows(
         candidateCID: String
     ) throws -> [String] {
-        let roots = try database.query(
+        let roots = try database.rows(
+            ContextualCandidateRootRow.self,
             "SELECT root_cid FROM contextual_candidate_roots WHERE candidate_cid = ?1",
             params: [.text(candidateCID)]
-        ).compactMap { $0["root_cid"]?.textValue }
+        ).map { try $0.rootCID }
         try database.execute(
             "DELETE FROM contextual_candidate_roots WHERE candidate_cid = ?1",
             params: [.text(candidateCID)]
@@ -229,20 +308,22 @@ extension NodeStore {
         }
         await acquirePreparedMutation()
         defer { releasePreparedMutation() }
-        let candidateRows = try database.query(
+        guard let candidate = try database.row(
+            ContextualCandidateRow.self,
             "SELECT issued, handoff FROM contextual_candidates WHERE candidate_cid = ?1",
             params: [.text(candidateCID)]
-        )
-        guard !candidateRows.isEmpty else { return false }
-        let candidateRoots = try database.query(
+        ) else { return false }
+        let candidateRoots = try database.rows(
+                ContextualCandidateRootRow.self,
                 "SELECT root_cid FROM contextual_candidate_roots WHERE candidate_cid = ?1 ORDER BY root_cid",
                 params: [.text(candidateCID)]
-            ).compactMap { $0["root_cid"]?.textValue }
+            ).map { try $0.rootCID }
         guard !candidateRoots.isEmpty else { return false }
-        guard let rootsPayload = try database.query(
+        guard let rootsPayload = try database.row(
+                AdmissionBatchRow.self,
                 "SELECT batch.volume_roots FROM accepted_blocks AS block INNER JOIN admission_batches AS batch ON batch.seq = block.admission_seq WHERE block.block_cid = ?1",
                 params: [.text(candidateCID)]
-            ).first?["volume_roots"]?.blobValue else { return false }
+            )?.volumeRoots else { return false }
         let admissionRoots = Set(
             try Self.decode([String].self, from: rootsPayload)
         )
@@ -254,7 +335,7 @@ extension NodeStore {
                 "DELETE FROM contextual_candidate_roots WHERE candidate_cid = ?1",
                 params: [.text(candidateCID)]
             )
-            if candidateRows.first?["issued"]?.intValue == 0 {
+            if try !candidate.issued {
                 try database.execute(
                     "DELETE FROM contextual_candidate_children WHERE candidate_cid = ?1",
                     params: [.text(candidateCID)]
@@ -270,9 +351,10 @@ extension NodeStore {
     }
 
     func pruneAdmittedContextualCandidates() async throws {
-        let candidates = try database.query(
+        let candidates = try database.rows(
+            ContextualCandidateRow.self,
             "SELECT candidate_cid FROM contextual_candidates ORDER BY candidate_cid"
-        ).compactMap { $0["candidate_cid"]?.textValue }
+        ).map { try $0.candidateCID }
         for candidate in candidates {
             _ = try await removeContextualCandidateIfAdmitted(
                 candidateCID: candidate
@@ -286,9 +368,10 @@ extension NodeStore {
     /// row costs at most one sibling offer or one extra deferral, and the
     /// next admission or push corrects either.
     func pendingHandoffChildCIDs() throws -> [String] {
-        try database.query(
+        try database.rows(
+            ContextualCandidateRow.self,
             "SELECT DISTINCT c.candidate_cid FROM contextual_candidates AS c INNER JOIN parent_evidence_inbox AS i ON i.child_cid = c.candidate_cid WHERE c.handoff = 1"
-        ).compactMap { $0["candidate_cid"]?.textValue }
+        ).map { try $0.candidateCID }
     }
 
     /// Enforces the local storage budget on handed-off candidates. Losing a
@@ -305,9 +388,10 @@ extension NodeStore {
     }
 
     private func evictExcessHandoffCandidates() async throws {
-        let stranded = try database.query(
+        let stranded = try database.rows(
+            ContextualCandidateRow.self,
             "SELECT candidate_cid FROM contextual_candidates WHERE handoff = 1 ORDER BY handoff_seq"
-        ).compactMap { $0["candidate_cid"]?.textValue }
+        ).map { try $0.candidateCID }
         let excess = stranded.count - handoffCandidateCapacity
         guard excess > 0 else { return }
         var releasedRoots: [String] = []
@@ -341,18 +425,11 @@ extension NodeStore {
     func childGenesisVolumeRoots(
         childCID: String
     ) throws -> [String] {
-        try database.query(
+        try database.rows(
+            ChildGenesisVolumeRootRow.self,
             "SELECT root_cid FROM child_genesis_volume_roots WHERE child_cid = ?1 ORDER BY root_cid",
             params: [.text(childCID)]
-        ).map { row in
-            guard let root = row["root_cid"]?.textValue,
-                  CIDIdentity.isCanonical(root) else {
-                throw NodeStoreError.corrupt(
-                    "malformed child genesis Volume root"
-                )
-            }
-            return root
-        }
+        ).map { try $0.rootCID }
     }
 
     /// A contextual candidate's child-link trie exists before that candidate is
@@ -430,27 +507,21 @@ extension NodeStore {
                         roots: entry.bootstrapRoots
                     )
                 }
-                let existing = try database.query(
+                let existing = try database.rows(
+                    PreparedChildProofRow.self,
                     "SELECT batch_seq, directory, child_cid, is_child_genesis, attachment_cid FROM prepared_child_proofs WHERE carrier_cid = ?1 ORDER BY directory",
                     params: [.text(carrierCID)]
                 )
                 let existingByDirectory = Dictionary(
                     uniqueKeysWithValues: try existing.map { row in
-                        guard let directory = row["directory"]?.textValue else {
-                            throw NodeStoreError.corrupt(
-                                "malformed prepared child-proof directory"
-                            )
-                        }
-                        return (directory, row)
+                        (try row.directory, row)
                     }
                 )
                 for expected in canonical {
                     if let row = existingByDirectory[expected.directory] {
-                        guard row["child_cid"]?.textValue == expected.childCID,
-                              row["is_child_genesis"]?.intValue
-                                == (expected.isChildGenesis ? 1 : 0),
-                              row["attachment_cid"]?.textValue
-                                == expected.attachment.rawCID else {
+                        guard try row.childCID == expected.childCID,
+                              try row.isChildGenesis == expected.isChildGenesis,
+                              try row.attachmentCID == expected.attachment.rawCID else {
                             throw NodeStoreError.conflictingIssuedChildProof
                         }
                     }
@@ -458,19 +529,20 @@ extension NodeStore {
 
                 let batchSequence: Int64
                 if let first = existing.first {
-                    guard let sequence = first["batch_seq"]?.intValue,
-                          existing.allSatisfy({
-                              $0["batch_seq"]?.intValue == sequence
-                          }) else {
+                    let sequence = try first.batchSequence
+                    guard try existing.allSatisfy({
+                        try $0.batchSequence == sequence
+                    }) else {
                         throw NodeStoreError.corrupt(
                             "malformed prepared child-proof sequence"
                         )
                     }
                     batchSequence = sequence
                 } else {
-                    let sequence = try database.query(
+                    let sequence = try database.row(
+                        from: PreparedChildProofRow.table,
                         "SELECT COALESCE(MAX(batch_seq), 0) AS max_seq FROM prepared_child_proofs"
-                    ).first?["max_seq"]?.intValue ?? 0
+                    )?.int("max_seq") ?? 0
                     guard sequence < Int64.max else {
                         throw NodeStoreError.corrupt(
                             "prepared child-proof sequence overflow"
@@ -496,21 +568,20 @@ extension NodeStore {
                         throw NodeStoreError.conflictingIssuedChildProof
                     }
                 }
-                let pinnedCount = try database.query(
+                let pinnedCount = try database.row(
+                    from: PreparedChildProofRow.table,
                     "SELECT COUNT(DISTINCT p.carrier_cid) AS carrier_count FROM prepared_child_proofs AS p INNER JOIN contextual_candidate_roots AS c ON c.candidate_cid = p.carrier_cid"
-                ).first?["carrier_count"]?.intValue ?? 0
+                )?.int("carrier_count") ?? 0
                 let speculativeCapacity = max(0, sqlCapacity - pinnedCount)
-                let stale = try database.query(
+                let stale = try database.rows(
+                    PreparedChildProofRow.self,
                     "SELECT p.carrier_cid FROM prepared_child_proofs AS p WHERE NOT EXISTS (SELECT 1 FROM contextual_candidate_roots AS c WHERE c.candidate_cid = p.carrier_cid) AND NOT EXISTS (SELECT 1 FROM pending_child_proof_routes AS route WHERE route.carrier_cid = p.carrier_cid) AND NOT EXISTS (SELECT 1 FROM accepted_blocks AS block WHERE block.block_cid = p.carrier_cid) GROUP BY p.carrier_cid ORDER BY MIN(p.batch_seq) DESC, p.carrier_cid DESC LIMIT -1 OFFSET ?1",
                     params: [.int(speculativeCapacity)]
                 )
                 for row in stale {
-                    guard let staleCID = row["carrier_cid"]?.textValue else {
-                        throw NodeStoreError.corrupt("malformed prepared child-proof index")
-                    }
                     try database.execute(
                         "DELETE FROM prepared_child_proofs WHERE carrier_cid = ?1",
-                        params: [.text(staleCID)]
+                        params: [.text(try row.carrierCID)]
                     )
                 }
                 try pruneUnreferencedChildGenesisVolumeRoots()
@@ -561,17 +632,19 @@ extension NodeStore {
             grouping: routes,
             by: \.carrierCID
         ) {
-            let existing = try database.query(
+            let existing = try database.row(
+                PendingChildProofRouteRow.self,
                 "SELECT batch_seq FROM pending_child_proof_routes WHERE carrier_cid = ?1 LIMIT 1",
                 params: [.text(carrierCID)]
-            ).first?["batch_seq"]?.intValue
+            )?.batchSequence
             let batchSequence: Int64
             if let existing {
                 batchSequence = existing
             } else {
-                let maximum = try database.query(
+                let maximum = try database.row(
+                    from: PendingChildProofRouteRow.table,
                     "SELECT COALESCE(MAX(batch_seq), 0) AS max_seq FROM pending_child_proof_routes"
-                ).first?["max_seq"]?.intValue ?? 0
+                )?.int("max_seq") ?? 0
                 guard maximum < Int64.max else {
                     throw NodeStoreError.corrupt(
                         "pending child-proof sequence overflow"
@@ -590,19 +663,15 @@ extension NodeStore {
                 )
             }
         }
-        let stale = try database.query(
+        let stale = try database.rows(
+            PendingChildProofRouteRow.self,
             "SELECT route.carrier_cid FROM pending_child_proof_routes AS route WHERE NOT EXISTS (SELECT 1 FROM accepted_blocks AS block WHERE block.block_cid = route.carrier_cid) AND NOT EXISTS (SELECT 1 FROM issued_parent_facts AS fact WHERE fact.kind = 'carrier' AND fact.key_a = route.carrier_cid) GROUP BY route.carrier_cid ORDER BY MIN(route.batch_seq) DESC, route.carrier_cid DESC LIMIT -1 OFFSET ?1",
             params: [.int(sqlCapacity)]
         )
         for row in stale {
-            guard let staleCID = row["carrier_cid"]?.textValue else {
-                throw NodeStoreError.corrupt(
-                    "malformed pending child-proof index"
-                )
-            }
             try database.execute(
                 "DELETE FROM pending_child_proof_routes WHERE carrier_cid = ?1",
-                params: [.text(staleCID)]
+                params: [.text(try row.carrierKey)]
             )
         }
     }
@@ -614,18 +683,14 @@ extension NodeStore {
     ) throws -> [PendingChildProofRoute] {
         var result = Set(routes)
         for carrierCID in carrierCIDs {
-            for row in try database.query(
+            for row in try database.rows(
+                PreparedChildProofRow.self,
                 "SELECT directory FROM prepared_child_proofs WHERE carrier_cid = ?1",
                 params: [.text(carrierCID)]
             ) {
-                guard let directory = row["directory"]?.textValue else {
-                    throw NodeStoreError.corrupt(
-                        "malformed prepared child-proof directory"
-                    )
-                }
                 result.insert(PendingChildProofRoute(
                     carrierCID: carrierCID,
-                    directory: directory
+                    directory: try row.directory
                 ))
             }
         }
@@ -647,39 +712,30 @@ extension NodeStore {
     }
 
     func pendingChildProofRoutes() throws -> [PendingChildProofRoute] {
-        try database.query(
+        try database.rows(
+            PendingChildProofRouteRow.self,
             "SELECT carrier_cid, directory FROM pending_child_proof_routes ORDER BY batch_seq, carrier_cid, directory"
         ).map { row in
-            guard let carrierCID = row["carrier_cid"]?.textValue,
-                  let directory = row["directory"]?.textValue,
-                  !carrierCID.isEmpty,
-                  !directory.isEmpty else {
-                throw NodeStoreError.corrupt(
-                    "malformed pending child-proof route"
-                )
-            }
-            return PendingChildProofRoute(
-                carrierCID: carrierCID,
-                directory: directory
+            PendingChildProofRoute(
+                carrierCID: try row.carrierCID,
+                directory: try row.directory
             )
         }
     }
 
     func preparedChildProofs(carrierCID: String) async throws -> [PreparedChildProof] {
-        let rows = try database.query(
+        let rows = try database.rows(
+            PreparedChildProofRow.self,
             "SELECT directory, child_cid, is_child_genesis, attachment_cid FROM prepared_child_proofs WHERE carrier_cid = ?1 ORDER BY directory",
             params: [.text(carrierCID)]
         )
         var proofs: [PreparedChildProof] = []
         proofs.reserveCapacity(rows.count)
         for row in rows {
-            guard let directory = row["directory"]?.textValue,
-                  let childCID = row["child_cid"]?.textValue,
-                  let isChildGenesis = row["is_child_genesis"]?.intValue,
-                  isChildGenesis == 0 || isChildGenesis == 1,
-                  let attachmentCID = row["attachment_cid"]?.textValue else {
-                throw NodeStoreError.corrupt("malformed prepared child proof")
-            }
+            let directory = try row.directory
+            let childCID = try row.childCID
+            let isChildGenesis = try row.isChildGenesis
+            let attachmentCID = try row.attachmentCID
             let attachment = try await recoveryVolume(
                 attachmentCID: attachmentCID,
                 childCID: childCID
@@ -697,7 +753,7 @@ extension NodeStore {
             proofs.append(try PreparedChildProof(
                 directory: directory,
                 childCID: childCID,
-                isChildGenesis: isChildGenesis == 1,
+                isChildGenesis: isChildGenesis,
                 bootstrapRoots: try childGenesisVolumeRoots(
                     childCID: childCID
                 ),
@@ -708,14 +764,10 @@ extension NodeStore {
     }
 
     func preparedChildProofCarrierCIDs() async throws -> [String] {
-        try database.query(
+        try database.rows(
+            PreparedChildProofRow.self,
             "SELECT carrier_cid FROM prepared_child_proofs GROUP BY carrier_cid ORDER BY MIN(batch_seq), carrier_cid"
-        ).map { row in
-            guard let carrierCID = row["carrier_cid"]?.textValue else {
-                throw NodeStoreError.corrupt("malformed prepared child-proof carrier index")
-            }
-            return carrierCID
-        }
+        ).map { try $0.carrierCID }
     }
 
     func removePreparedChildProof(
@@ -795,11 +847,12 @@ extension NodeStore {
                 "contextual candidate handoff state is inconsistent"
             )
         }
-        for row in try database.query(
+        for row in try database.rows(
+            ContextualCandidateChildRow.self,
             "SELECT DISTINCT child_peer_key FROM contextual_candidate_children"
         ) {
-            guard let rawPeerKey = row["child_peer_key"]?.textValue,
-                  (try? PeerKey(rawPeerKey)) != nil else {
+            let rawPeerKey = try row.childPeerKey
+            guard (try? PeerKey(rawPeerKey)) != nil else {
                 throw NodeStoreError.corrupt(
                     "contextual candidate child peer key is malformed"
                 )

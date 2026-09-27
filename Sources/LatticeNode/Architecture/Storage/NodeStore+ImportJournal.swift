@@ -11,6 +11,48 @@ struct StagedAdmission: Sendable, Equatable {
     let volumeRoots: [String]
 }
 
+/// `admission_batches`: one immutable admission batch; `payload` and
+/// `volumeRoots` are the JSON bytes, decoded by the caller so a decode
+/// failure stays `corrupt`.
+struct AdmissionBatchRow: NodeStoreRecord {
+    static let table = "admission_batches"
+    private let row: Row
+
+    init(_ row: Row) { self.row = row }
+
+    var sequence: Int64 { get throws { try row.int("seq") } }
+    var payload: Data { get throws { try row.blob("payload") } }
+    var volumeRoots: Data { get throws { try row.blob("volume_roots") } }
+}
+
+/// `admission_facts`: one normalized fact of an admission batch.
+struct AdmissionFactRow: NodeStoreRecord {
+    static let table = "admission_facts"
+    private let row: Row
+
+    init(_ row: Row) { self.row = row }
+
+    var factID: Data { get throws { try row.blob("fact_id") } }
+    var payload: Data { get throws { try row.blob("payload") } }
+}
+
+/// `consensus_revision`: the durable revision floor, stored as decimal text.
+struct ConsensusRevisionRow: NodeStoreRecord {
+    static let table = "consensus_revision"
+    private let row: Row
+
+    init(_ row: Row) { self.row = row }
+
+    var revision: UInt64 {
+        get throws {
+            guard let value = UInt64(try row.text("revision")) else {
+                throw NodeStoreError.malformedRow(table: Self.table, column: "revision")
+            }
+            return value
+        }
+    }
+}
+
 extension NodeStore {
     func stage(
         _ batch: ChainAdmissionBatch,
@@ -80,33 +122,35 @@ extension NodeStore {
         )
         try database.transaction {
                 for fact in facts {
-                    let rows = try database.query(
+                    let existing = try database.row(
+                        AdmissionFactRow.self,
                         "SELECT payload FROM admission_facts WHERE fact_id = ?1",
                         params: [.blob(fact.key)]
                     )
-                    if let existing = rows.first?["payload"]?.blobValue {
-                        guard existing == fact.value else {
+                    if let existing {
+                        guard try existing.payload == fact.value else {
                             throw NodeStoreError.conflictingAdmissionFact
                         }
                     }
                 }
 
-                let replay = try database.query(
+                let replay = try database.row(
+                    AdmissionBatchRow.self,
                     "SELECT seq, volume_roots FROM admission_batches WHERE payload = ?1",
                     params: [.blob(payload)]
                 )
-                if let existing = replay.first,
-                   let existingSequence = existing["seq"]?.intValue,
-                   let existingRoots = existing["volume_roots"]?.blobValue {
-                    guard existingRoots == rootsPayload else {
+                if let existing = replay {
+                    let existingSequence = try existing.sequence
+                    guard try existing.volumeRoots == rootsPayload else {
                         throw NodeStoreError.conflictingAdmissionBatch
                     }
                     for fact in facts {
-                        let rows = try database.query(
+                        let existing = try database.row(
+                            AdmissionFactRow.self,
                             "SELECT payload FROM admission_facts WHERE fact_id = ?1",
                             params: [.blob(fact.key)]
                         )
-                        guard rows.first?["payload"]?.blobValue == fact.value else {
+                        guard try existing?.payload == fact.value else {
                             throw NodeStoreError.corrupt(
                                 "an admission batch is missing its normalized fact"
                             )
@@ -121,10 +165,11 @@ extension NodeStore {
                         "INSERT INTO admission_batches (payload, volume_roots) VALUES (?1, ?2)",
                         params: [.blob(payload), .blob(rootsPayload)]
                     )
-                    guard let admissionSequence = try database.query(
+                    guard let admissionSequence = try database.row(
+                        AdmissionBatchRow.self,
                         "SELECT seq FROM admission_batches WHERE payload = ?1",
                         params: [.blob(payload)]
-                    ).first?["seq"]?.intValue else {
+                    )?.sequence else {
                         throw NodeStoreError.corrupt("missing newly staged admission batch")
                     }
                     for fact in facts {
@@ -176,15 +221,14 @@ extension NodeStore {
     }
 
     func consensusRevisionFloor() throws -> UInt64 {
-        let rows = try database.query(
+        let rows = try database.rows(
+            ConsensusRevisionRow.self,
             "SELECT revision FROM consensus_revision WHERE singleton = 1"
         )
-        guard rows.count == 1,
-              let revision = rows[0]["revision"]?.textValue,
-              let value = UInt64(revision) else {
+        guard rows.count == 1 else {
             throw NodeStoreError.corrupt("malformed consensus revision floor")
         }
-        return value
+        return try rows[0].revision
     }
 
     private func persistConsensusRevisionFloor(_ floor: UInt64) throws {
@@ -197,18 +241,14 @@ extension NodeStore {
     }
 
     func loadStagedAdmissions() throws -> [StagedAdmission] {
-        try database.query(
+        try database.rows(
+            AdmissionBatchRow.self,
             "SELECT seq, payload, volume_roots FROM admission_batches ORDER BY seq ASC"
         ).map { row in
-            guard let sequence = row["seq"]?.intValue,
-                  let payload = row["payload"]?.blobValue,
-                  let rootsPayload = row["volume_roots"]?.blobValue else {
-                throw NodeStoreError.corrupt("malformed admission batch row")
-            }
-            return StagedAdmission(
-                sequence: sequence,
-                batch: try Self.decode(ChainAdmissionBatch.self, from: payload),
-                volumeRoots: try Self.decode([String].self, from: rootsPayload)
+            StagedAdmission(
+                sequence: try row.sequence,
+                batch: try Self.decode(ChainAdmissionBatch.self, from: try row.payload),
+                volumeRoots: try Self.decode([String].self, from: try row.volumeRoots)
             )
         }
     }
@@ -242,12 +282,10 @@ extension NodeStore {
         }
 
         var actualFacts: [Data: Data] = [:]
-        for row in try database.query("SELECT fact_id, payload FROM admission_facts") {
-            guard let id = row["fact_id"]?.blobValue,
-                  let payload = row["payload"]?.blobValue else {
-                throw NodeStoreError.corrupt("malformed normalized admission fact")
-            }
-            actualFacts[id] = payload
+        for row in try database.rows(
+            AdmissionFactRow.self, "SELECT fact_id, payload FROM admission_facts"
+        ) {
+            actualFacts[try row.factID] = try row.payload
         }
         guard actualFacts == expectedFacts else {
             throw NodeStoreError.corrupt(

@@ -10,6 +10,16 @@ struct LocalMempoolTransactionRecord: Sendable, Equatable {
     let addedAt: Int64
 }
 
+/// `local_mempool_transactions`: one locally submitted transaction reference.
+extension LocalMempoolTransactionRecord: NodeStoreRecord {
+    static let table = "local_mempool_transactions"
+
+    init(_ row: Row) throws {
+        transactionCID = try row.cid("transaction_cid")
+        addedAt = try row.nonNegativeInt("added_at")
+    }
+}
+
 extension NodeStore {
     func persistLocalMempoolTransaction(
         transactionCID: String,
@@ -39,21 +49,9 @@ extension NodeStore {
     }
 
     func localMempoolTransactions() throws -> [LocalMempoolTransactionRecord] {
-        try database.query(
+        try database.rows(
+            LocalMempoolTransactionRecord.self,
             "SELECT transaction_cid, added_at FROM local_mempool_transactions ORDER BY added_at, transaction_cid"
-        ).map { row in
-            guard let transactionCID = row["transaction_cid"]?.textValue,
-                  let addedAt = row["added_at"]?.intValue,
-                  CIDIdentity.isCanonical(transactionCID),
-                  addedAt >= 0 else {
-                throw NodeStoreError.corrupt(
-                    "malformed local mempool transaction reference"
-                )
-            }
-            return LocalMempoolTransactionRecord(
-                transactionCID: transactionCID,
-                addedAt: addedAt
-            )
-        }
+        )
     }
 }

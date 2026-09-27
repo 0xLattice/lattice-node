@@ -65,7 +65,9 @@ extension NodeStore {
     }
 
     func issuedRecoveryVolumeRoots() throws -> [String] {
-        try canonicalRecoveryRoots(sql: """
+        try canonicalRecoveryRoots(
+            from: "\(IssuedChildProofRow.table)∪\(ChildGenesisVolumeRootRow.table)",
+            sql: """
             SELECT attachment_cid AS cid FROM issued_child_proofs
             UNION
             SELECT roots.root_cid AS cid
@@ -79,7 +81,7 @@ extension NodeStore {
     }
 
     func parentEvidenceInboxRoots() throws -> [String] {
-        try canonicalRecoveryRoots(sql: """
+        try canonicalRecoveryRoots(from: ParentEvidenceInboxRow.table, sql: """
             SELECT DISTINCT attachment_cid AS cid
             FROM parent_evidence_inbox
             ORDER BY cid
@@ -87,7 +89,9 @@ extension NodeStore {
     }
 
     func preparedRecoveryVolumeRoots() throws -> [String] {
-        try canonicalRecoveryRoots(sql: """
+        try canonicalRecoveryRoots(
+            from: "\(PreparedChildProofRow.table)∪\(ChildGenesisVolumeRootRow.table)",
+            sql: """
             SELECT attachment_cid AS cid FROM prepared_child_proofs
             UNION
             SELECT roots.root_cid AS cid
@@ -103,29 +107,20 @@ extension NodeStore {
     /// Preserves one entry per candidate/root pair so shared roots rebuild the
     /// exact owner count after a crash.
     func contextualCandidateVolumeRoots() throws -> [String] {
-        try database.query("""
+        try database.rows(ContextualCandidateRootRow.self, """
             SELECT root_cid
             FROM contextual_candidate_roots
             ORDER BY candidate_cid, root_cid
-            """).map { row in
-            guard let root = row["root_cid"]?.textValue,
-                  CIDIdentity.isCanonical(root) else {
-                throw NodeStoreError.corrupt(
-                    "contextual candidate root index is malformed"
-                )
-            }
-            return root
-        }
+            """).map { try $0.rootCID }
     }
 
-    private func canonicalRecoveryRoots(sql: String) throws -> [String] {
-        try database.query(sql).map { row in
-            guard let cid = row["cid"]?.textValue,
-                  CIDIdentity.isCanonical(cid) else {
-                throw NodeStoreError.corrupt("malformed recovery attachment index")
-            }
-            return cid
-        }
+    /// `sql` projects one canonical-CID column named `cid`; `table` labels
+    /// the tables it unions for the error.
+    private func canonicalRecoveryRoots(
+        from table: String,
+        sql: String
+    ) throws -> [String] {
+        try database.rows(from: table, sql).map { try $0.cid("cid") }
     }
 
     func retainChildGenesisVolumes(

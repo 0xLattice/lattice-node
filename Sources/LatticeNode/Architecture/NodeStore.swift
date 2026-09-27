@@ -15,6 +15,12 @@ enum NodeStoreError: Error, Equatable, LocalizedError {
     case invalidIssuedChildProof(String)
     case parentEvidenceInboxFull
     case corrupt(String)
+    /// A column of one row could not be read as the type its table declares
+    /// for it (missing, NULL where required, wrong storage class, or outside
+    /// the accessor's domain). Semantic corruption (index and batch disagree,
+    /// a JSON payload fails to decode, an attachment is missing) stays
+    /// `corrupt`.
+    case malformedRow(table: String, column: String)
 
     var errorDescription: String? {
         switch self {
@@ -36,6 +42,8 @@ enum NodeStoreError: Error, Equatable, LocalizedError {
             "The pending parent-evidence inbox is full."
         case .corrupt(let reason):
             "The node store is corrupt: \(reason)"
+        case .malformedRow(let table, let column):
+            "The node store is corrupt: \(table).\(column) is malformed"
         }
     }
 }
@@ -91,10 +99,10 @@ actor NodeStore {
         }
         let database = try NodeSQLite(path: databasePath.path)
         let pathData = try Self.encode(chainPath)
-        let tables = try database.query(
+        let tableNames = Set(try database.rows(
+            from: "sqlite_master",
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-        )
-        let tableNames = Set(tables.compactMap { $0["name"]?.textValue })
+        ).map { try $0.text("name") })
 
         if tableNames.isEmpty {
             try Self.createSchema(
