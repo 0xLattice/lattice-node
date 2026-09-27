@@ -823,11 +823,13 @@ struct ParentTipContextMessage: Sendable {
             throw NodeNetworkWireError.malformed
         }
         let carriedBytes = carriedChildCID.map { Data($0.utf8) }
-        let size = 8 + 2 + pathBytes.reduce(0) { $0 + 2 + $1.count }
-            + 2 + tipBytes.count + 4 + rewardBytes.count
-            + 4 + tipData.count
-            + (minimumWorkBytes.isEmpty ? 0 : 1 + 4 + minimumWorkBytes.count)
-            + (carriedBytes.map { 1 + 2 + $0.count } ?? 0)
+        let pathSize: Int = pathBytes.reduce(0) { $0 + 2 + $1.count }
+        let minimumWorkSize: Int = minimumWorkBytes.isEmpty ? 0 : 1 + 4 + minimumWorkBytes.count
+        let carriedSize: Int = carriedBytes.map { 1 + 2 + $0.count } ?? 0
+        var size = 8 + 2 + pathSize
+        size += 2 + tipBytes.count + 4 + rewardBytes.count
+        size += 4 + tipData.count
+        size += minimumWorkSize + carriedSize
         guard size <= Self.maximumEncodedBytes else {
             throw NodeNetworkWireError.oversized
         }
