@@ -1,42 +1,64 @@
 import Foundation
 import XCTest
 
-/// Structural gate over the network runtime (`NodeNetworkRuntime*.swift`,
-/// `RangeSync.swift`, `ReadURLDiscovery.swift`): state written after a
-/// suspension cannot outlive the session or generation that owned it.
+/// Structural gate: state written after a suspension cannot outlive the
+/// session or generation that owned it.
 ///
-/// - A task handle the runtime stores is a `TaskSlot` (`Lifetime.swift`),
-///   whose clear compares the token the task was started with, so a task
-///   that outlived a stop cannot empty the handle a restart stored. No type
-///   there stores an optional `Task` except the allowlisted ones, none of
-///   which is ever emptied by its own task: the lifecycle and run-report
-///   tails (replaced, never cleared by a task), and a range sync's two
-///   timeouts (owned by the sync state, cleared by the code that replaces
-///   it, their fires matched by request ID / progress epoch).
-/// - A per-peer record is created only where a session is established:
-///   the creating `PeerSet.update(_:_:)` on `overlayRecords` /
-///   `hierarchyRecords` appears only in the allowlisted members. Every
-///   other write uses `update(session:_:)` or `updateExisting(_:_:)`,
-///   which never create a record, so a write that resumes after its
-///   session ended cannot bring the peer's key back.
+/// - Every task handle a type in `Sources/LatticeNode` stores is a
+///   `TaskSlot` (`Lifetime.swift`), whose clear compares the token the task
+///   was started with, so a task that outlived a stop cannot empty the
+///   handle a restart stored. The scan finds stored properties whose
+///   declared type or initializer names a task in any spelling it knows
+///   (`Task<…>`, `Optional<Task<…>>`, a collection or tuple of tasks, a
+///   typealias of one, `= Task {…}`, `= Task.detached`, a
+///   `Timers.deadline(…)` initializer), across lines. The allowlist names
+///   each other stored task and why no stale task can clobber it.
+/// - In the network runtime (`NodeNetworkRuntime*.swift`) a per-peer record
+///   is created only where a session is established, and removed by key
+///   only where a connect replaces the key's session or teardown empties
+///   the set. Every other write uses `update(session:_:)` or
+///   `updateExisting(_:_:)`, and every other removal `remove(_:ifBoundTo:)`:
+///   work that resumes after its session ended can neither bring the key
+///   back nor remove a newer session's record.
 ///
-/// Comment lines and string literal text are skipped. Plain `XCTAssert`
-/// only (`XCTContext` is unavailable on corelibs XCTest).
+/// Comments and string literal text are skipped. Plain `XCTAssert` only
+/// (`XCTContext` is unavailable on corelibs XCTest).
 final class SafetyNetLifetimeGateTests: XCTestCase {
 
-    private static let architectureRoot = URL(fileURLWithPath: #filePath)
+    private static let packageRoot = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()  // SafetyNet
         .deletingLastPathComponent()  // LatticeNodeTests
         .deletingLastPathComponent()  // Tests
         .deletingLastPathComponent()  // package root
-        .appendingPathComponent("Sources/LatticeNode/Architecture")
 
-    /// Stored optional task handles allowed outside a `TaskSlot`.
-    private static let taskAllowlist: Set<String> = [
-        "lifecycleTail",
-        "runReportApplyTail",
-        "responseTimeout",
-        "progressTimeout",
+    /// `Type.property` stored tasks allowed outside a `TaskSlot`.
+    private static let taskAllowlist: [String: String] = [
+        "TaskSlot.current": "the primitive itself",
+        "NodeNetworkRuntime.lifecycleTail":
+            "a tail each lifecycle operation replaces; never cleared by a task",
+        "HierarchyState.runReportApplyTail":
+            "a tail each run report replaces; teardown cancels it, no task clears it",
+        "HelloDeadline.task": "held with its lifetime token; fires compare the token",
+        "PendingTransactionInventory.timeout":
+            "an entry keyed by a process-unique request ID, removed by its owner",
+        "PendingReadEndpoint.timeout":
+            "an entry keyed by a process-unique request ID, removed by its owner",
+        "ReadURLDiscovery.tasks": "each entry holds its lifetime token; removal compares it",
+        "State.responseTimeout":
+            "owned by the range-sync state; fires are matched by request ID",
+        "State.progressTimeout":
+            "owned by the range-sync state; fires are matched by progress epoch",
+        "Append.predecessor": "a value handed to the appending task, not a stored handle",
+        "Reservation.evidenceTail": "a value handed to the reserving task, not a stored handle",
+        "Tail.task": "held with its lifetime token; finish compares the token",
+        "ChainService.canonicalCommitWorker":
+            "the service never restarts; shutdown joins the worker",
+        "ChainService.executionWalkWorker":
+            "the service never restarts; shutdown joins the worker",
+        "ChainService.executionWalkRetryTask":
+            "the service never restarts; shutdown cancels it before joining the workers",
+        "ChainService.transactionPublicationWorker":
+            "the service never restarts; shutdown joins the worker",
     ]
 
     /// Members that establish a session and so may create its record.
@@ -49,150 +71,366 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
         "handleHierarchyHello",
     ]
 
-    /// A stored `var` holding an optional `Task`, annotated or inferred.
-    private static let taskPattern =
-        #"^\s*(?:[\w()]+\s+)*var\s+(\w+)\s*(?::\s*Task<.*>\?|=\s*Task\b)"#
+    /// Members that may remove a record by key: a connect replacing the
+    /// key's session, and teardown.
+    private static let keyedRemovalAllowlist: Set<String> = [
+        "didConnect",
+        "clearRuntimeState",
+    ]
 
-    /// A creating update on a plane's peer set (not `update(session:`).
-    private static let creatingUpdatePattern =
-        #"\b(?:overlayRecords|hierarchyRecords)\.update\((?!\s*session:)"#
+    // MARK: - Source
 
-    private static let functionPattern = #"\bfunc\s+(\w+)"#
-
-    private func sources() throws -> [(path: String, text: String)] {
-        let root = Self.architectureRoot.standardizedFileURL
-        let names = try FileManager.default.contentsOfDirectory(atPath: root.path)
-            .filter {
-                ($0.hasPrefix("NodeNetworkRuntime") && $0.hasSuffix(".swift"))
-                    || $0 == "RangeSync.swift" || $0 == "ReadURLDiscovery.swift"
-            }
+    private func files(under path: String) throws -> [(path: String, text: String)] {
+        let root = Self.packageRoot.appendingPathComponent(path).standardizedFileURL
+        guard let enumerator = FileManager.default.enumerator(atPath: root.path) else {
+            XCTFail("no sources under \(root.path)")
+            return []
+        }
+        let names = enumerator.compactMap { $0 as? String }
+            .filter { $0.hasSuffix(".swift") }
             .sorted()
-        XCTAssertGreaterThan(names.count, 3, "runtime sources not found under \(root.path)")
+        XCTAssertFalse(names.isEmpty, "no sources under \(root.path)")
         return try names.map {
             ($0, try String(contentsOf: root.appendingPathComponent($0), encoding: .utf8))
         }
     }
 
-    /// Every stored optional-task `var`, by name, as `file:line: name`.
-    private func storedTaskHandles(
+    private func runtimeFiles() throws -> [(path: String, text: String)] {
+        try files(under: "Sources/LatticeNode").filter {
+            ($0.path as NSString).lastPathComponent.hasPrefix("NodeNetworkRuntime")
+        }
+    }
+
+    /// The text as code: comments, string literal text (single and
+    /// triple-quoted) removed, line structure kept.
+    private static func code(of text: String) -> String {
+        var lines: [String] = []
+        var inBlockString = false
+        var inBlockComment = false
+        for raw in text.components(separatedBy: "\n") {
+            if raw.trimmingCharacters(in: .whitespaces).hasSuffix("\"\"\"")
+                || raw.trimmingCharacters(in: .whitespaces).hasPrefix("\"\"\"") {
+                let count = raw.components(separatedBy: "\"\"\"").count - 1
+                if count % 2 == 1 { inBlockString.toggle() }
+                lines.append("")
+                continue
+            }
+            if inBlockString {
+                lines.append("")
+                continue
+            }
+            var result = ""
+            var inString = false
+            var escaped = false
+            var previous: Character?
+            for character in raw {
+                if inBlockComment {
+                    if previous == "*" && character == "/" { inBlockComment = false }
+                    previous = character
+                    continue
+                }
+                if inString {
+                    if escaped {
+                        escaped = false
+                    } else if character == "\\" {
+                        escaped = true
+                    } else if character == "\"" {
+                        inString = false
+                        result.append(character)
+                    }
+                } else if character == "\"" {
+                    inString = true
+                    result.append(character)
+                } else if character == "/" && previous == "/" {
+                    result.removeLast()
+                    break
+                } else if character == "*" && previous == "/" {
+                    result.removeLast()
+                    inBlockComment = true
+                } else {
+                    result.append(character)
+                }
+                previous = character
+            }
+            lines.append(result)
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    // MARK: - Stored tasks
+
+    /// Names typealiased to a task type, through chains of aliases.
+    private static func taskAliases(in codes: [String]) throws -> Set<String> {
+        let alias = try NSRegularExpression(
+            pattern: #"\btypealias\s+(\w+)\s*(?:<[^=]*>)?\s*=\s*([^\n]+)"#
+        )
+        var definitions: [(String, String)] = []
+        for code in codes {
+            for match in alias.matches(in: code, range: NSRange(code.startIndex..., in: code)) {
+                guard let name = Range(match.range(at: 1), in: code),
+                      let body = Range(match.range(at: 2), in: code) else { continue }
+                definitions.append((String(code[name]), String(code[body])))
+            }
+        }
+        var aliases = Set<String>()
+        var changed = true
+        while changed {
+            changed = false
+            for (name, body) in definitions where !aliases.contains(name) {
+                if try mentionsTask(body, aliases: aliases) {
+                    aliases.insert(name)
+                    changed = true
+                }
+            }
+        }
+        return aliases
+    }
+
+    private static func mentionsTask(_ text: String, aliases: Set<String>) throws -> Bool {
+        let range = NSRange(text.startIndex..., in: text)
+        let task = try NSRegularExpression(
+            pattern: #"(?<![\w.])Task\s*(?:<|\{|\.detached\b|\?|\]|,|\)|$)|\bTimers\.deadline\s*\("#,
+            options: [.anchorsMatchLines]
+        )
+        if task.firstMatch(in: text, range: range) != nil { return true }
+        guard !aliases.isEmpty else { return false }
+        let alias = try NSRegularExpression(
+            pattern: #"(?<![\w.])(?:\#(aliases.sorted().joined(separator: "|")))\b"#
+        )
+        return alias.firstMatch(in: text, range: range) != nil
+    }
+
+    private static let typeOpener = #"\b(?:struct|class|actor|enum|extension)\s+(\w+)[^{]*\{"#
+    private static let declaration =
+        #"^\s*(?:@\w+(?:\([^)]*\))?\s+)*(?:[\w()]+\s+)*(?:var|let)\s+(\w+)"#
+
+    /// `Type.property` for every stored property directly in a type body
+    /// whose declared type or initializer names a task. A declaration runs
+    /// across lines while its brackets are open or its line ends in `:`,
+    /// `=` or `,`; one whose annotation is followed by a body without `=`
+    /// is computed, not stored.
+    private func storedTasks(
         in files: [(path: String, text: String)]
     ) throws -> [(name: String, site: String)] {
-        let pattern = try NSRegularExpression(pattern: Self.taskPattern)
+        let codes = files.map { Self.code(of: $0.text) }
+        let aliases = try Self.taskAliases(in: codes)
+        let opener = try NSRegularExpression(pattern: Self.typeOpener)
+        let declaration = try NSRegularExpression(pattern: Self.declaration)
         var found: [(String, String)] = []
-        for file in files {
-            for (index, raw) in file.text.components(separatedBy: "\n").enumerated() {
-                let line = Self.code(of: raw)
+        for (file, code) in zip(files, codes) {
+            let lines = code.components(separatedBy: "\n")
+            var scopes: [String?] = []
+            var index = 0
+            while index < lines.count {
+                let line = lines[index]
                 let range = NSRange(line.startIndex..., in: line)
-                guard let match = pattern.firstMatch(in: line, range: range),
-                      let name = Range(match.range(at: 1), in: line) else { continue }
-                found.append((String(line[name]), "\(file.path):\(index + 1)"))
+                var consumed = 1
+                if let enclosing = scopes.last, let typeName = enclosing,
+                   let match = declaration.firstMatch(in: line, range: range),
+                   let nameRange = Range(match.range(at: 1), in: line) {
+                    var text = line
+                    while index + consumed < lines.count, Self.continues(text) {
+                        text += "\n" + lines[index + consumed]
+                        consumed += 1
+                    }
+                    if !Self.isComputed(text), try Self.mentionsTask(text, aliases: aliases) {
+                        found.append(("\(typeName).\(line[nameRange])", "\(file.path):\(index + 1)"))
+                    }
+                }
+                for offset in 0..<consumed {
+                    let scanned = lines[index + offset]
+                    let scannedRange = NSRange(scanned.startIndex..., in: scanned)
+                    var openedType: String?
+                    if let match = opener.firstMatch(in: scanned, range: scannedRange),
+                       let nameRange = Range(match.range(at: 1), in: scanned) {
+                        openedType = String(scanned[nameRange])
+                    }
+                    for character in scanned {
+                        if character == "{" {
+                            scopes.append(openedType)
+                            openedType = nil
+                        } else if character == "}" {
+                            _ = scopes.popLast()
+                        }
+                    }
+                }
+                index += consumed
             }
+            XCTAssertTrue(scopes.isEmpty, "\(file.path): braces do not balance; the scan drifted")
         }
         return found
     }
 
-    /// Every creating peer-set update with the function it sits in.
-    private func creatingUpdates(
+    private static func continues(_ text: String) -> Bool {
+        var depth = 0
+        for character in text {
+            if "([<".contains(character) { depth += 1 }
+            if ")]>".contains(character) { depth -= 1 }
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        return depth > 0 || trimmed.hasSuffix(":") || trimmed.hasSuffix("=")
+            || trimmed.hasSuffix(",")
+    }
+
+    private static func isComputed(_ text: String) -> Bool {
+        guard let brace = text.firstIndex(of: "{") else { return false }
+        return !text[..<brace].contains("=") && text[..<brace].contains(":")
+    }
+
+    // MARK: - Peer-set creation and removal
+
+    /// Every match of `pattern` in the files, with the function it sits in.
+    private func calls(
+        matching pattern: String,
         in files: [(path: String, text: String)]
     ) throws -> [(function: String, site: String)] {
-        let update = try NSRegularExpression(pattern: Self.creatingUpdatePattern)
-        let function = try NSRegularExpression(pattern: Self.functionPattern)
+        let call = try NSRegularExpression(pattern: pattern)
+        let function = try NSRegularExpression(pattern: #"\bfunc\s+(\w+)"#)
         var found: [(String, String)] = []
         for file in files {
-            var current = "<file scope>"
-            for (index, raw) in file.text.components(separatedBy: "\n").enumerated() {
-                let line = Self.code(of: raw)
-                let range = NSRange(line.startIndex..., in: line)
-                if let match = function.firstMatch(in: line, range: range),
-                   let name = Range(match.range(at: 1), in: line) {
-                    current = String(line[name])
-                }
-                if update.firstMatch(in: line, range: range) != nil {
-                    found.append((current, "\(file.path):\(index + 1)"))
-                }
+            let code = Self.code(of: file.text)
+            let whole = NSRange(code.startIndex..., in: code)
+            let functions = function.matches(in: code, range: whole)
+            for match in call.matches(in: code, range: whole) {
+                let enclosing = functions.last { $0.range.location < match.range.location }
+                let name = enclosing
+                    .flatMap { Range($0.range(at: 1), in: code) }
+                    .map { String(code[$0]) } ?? "<file scope>"
+                let line = code[..<(Range(match.range, in: code)!.lowerBound)]
+                    .filter { $0 == "\n" }.count + 1
+                found.append((name, "\(file.path):\(line)"))
             }
         }
         return found
     }
 
-    /// The line without its `//` comment and string literal text.
-    private static func code(of line: String) -> String {
-        var result = ""
-        var inString = false
-        var previous: Character?
-        for character in line {
-            if inString {
-                if character == "\"" && previous != "\\" { inString = false }
-            } else if character == "\"" {
-                inString = true
-            } else if character == "/" && previous == "/" {
-                result.removeLast()
-                break
-            } else {
-                result.append(character)
-            }
-            previous = character
-        }
-        return result
-    }
+    private static let creatingUpdate =
+        #"\b(?:overlayRecords|hierarchyRecords)\s*\.\s*update\s*\((?!\s*session\s*:)"#
+    /// A removal by key: `remove(key)` without `ifBoundTo:`, or `removeAll`.
+    private static let keyedRemoval =
+        #"\b(?:overlayRecords|hierarchyRecords)\s*\.\s*(?:remove\s*\((?![^()]*ifBoundTo\s*:)|removeAll\s*\()"#
 
-    func testScanFindsStoredTaskHandlesAndCreatingUpdates() throws {
+    // MARK: - Self-tests
+
+    func testTaskScanFindsEverySpelling() throws {
         let sample = """
+        typealias Handle = Task<Void, Never>
+        typealias Handles = [Handle]
         struct Sample {
-            var worker: Task<Void, Never>?
-            private var tail = Task { }
-            var slot = TaskSlot()
-            // var commented: Task<Void, Never>?
+            var plain: Task<Void, Never>?
             let fixed: Task<Void, Never>
-            func connect() {
-                overlayRecords.update(peer.key) { $0.session = nil }
-            }
-            func late() async {
-                hierarchyRecords.update(session: peer) { $0.offer = nil }
-                hierarchyRecords.updateExisting(key) { $0.offer = nil }
-                hierarchyRecords.update(key) { $0.offer = nil }
+            var wrapped: Optional<Task<Void, Never>>
+            var byKey: [String: Task<Int, Never>] = [:]
+            var list: [Task<Void, Never>] = []
+            var pair: (token: Int, task: Task<Void, Never>)?
+            var aliased: Handle?
+            var aliasedList: Handles = []
+            var split:
+                Task<Void, Never>?
+            var spread: [
+                String: Task<Void, Never>
+            ] = [:]
+            private var inferred = Task { }
+            var detached = Task.detached { }
+            var timer = Timers.deadline(after: .seconds(1), generation: 0) { _ in }
+            var slot = TaskSlot()
+            var group: TaskGroup<Int>?
+            var computed: Task<Void, Never>? { nil }
+            // var commented: Task<Void, Never>?
+            var text = "Task<Void, Never>"
+            func work() {
+                var local: Task<Void, Never>?
+                let other = Task { }
             }
         }
         """
         XCTAssertEqual(
-            try storedTaskHandles(in: [("sample", sample)]).map(\.name),
-            ["worker", "tail"]
-        )
-        XCTAssertEqual(
-            try creatingUpdates(in: [("sample", sample)]).map(\.function),
-            ["connect", "late"]
+            try storedTasks(in: [("sample", sample)]).map(\.name),
+            [
+                "Sample.plain", "Sample.fixed", "Sample.wrapped", "Sample.byKey",
+                "Sample.list", "Sample.pair", "Sample.aliased", "Sample.aliasedList",
+                "Sample.split", "Sample.spread", "Sample.inferred", "Sample.detached",
+                "Sample.timer",
+            ]
         )
     }
 
-    func testGateSeesTheAllowlistedSites() throws {
-        let files = try sources()
+    func testPeerSetScanFindsCreatingUpdatesAndKeyedRemovals() throws {
+        let sample = """
+        func connect() {
+            overlayRecords.update(peer.key) { $0.session = nil }
+            hierarchyRecords.remove(peer.key)
+        }
+        func late() async {
+            hierarchyRecords.update(session: peer) { $0.offer = nil }
+            hierarchyRecords.updateExisting(key) { $0.offer = nil }
+            hierarchyRecords.update(key) { $0.offer = nil }
+            hierarchyRecords.remove(
+                key, ifBoundTo: ended
+            )
+            hierarchyRecords.remove(
+                key
+            )
+            // hierarchyRecords.remove(key)
+            overlayRecords.removeAll()
+        }
+        """
         XCTAssertEqual(
-            Set(try storedTaskHandles(in: files).map(\.name)),
-            Self.taskAllowlist,
-            "an allowlisted handle is gone: shrink the allowlist"
+            try calls(matching: Self.creatingUpdate, in: [("sample", sample)]).map(\.function),
+            ["connect", "late"]
         )
         XCTAssertEqual(
-            Set(try creatingUpdates(in: files).map(\.function)),
+            try calls(matching: Self.keyedRemoval, in: [("sample", sample)]).map(\.site),
+            ["sample:3", "sample:12", "sample:16"]
+        )
+    }
+
+    // MARK: - Gates
+
+    func testGateSeesTheAllowlistedSites() throws {
+        let sources = try files(under: "Sources/LatticeNode")
+        XCTAssertEqual(
+            Set(try storedTasks(in: sources).map(\.name)),
+            Set(Self.taskAllowlist.keys),
+            "an allowlisted task is gone: shrink the allowlist"
+        )
+        let runtime = try runtimeFiles()
+        XCTAssertEqual(
+            Set(try calls(matching: Self.creatingUpdate, in: runtime).map(\.function)),
             Self.creatingAllowlist,
             "an allowlisted creating site is gone: shrink the allowlist"
         )
+        XCTAssertEqual(
+            Set(try calls(matching: Self.keyedRemoval, in: runtime).map(\.function)),
+            Self.keyedRemovalAllowlist,
+            "an allowlisted keyed removal is gone: shrink the allowlist"
+        )
     }
 
-    func testRuntimeTaskHandlesAreTaskSlots() throws {
-        let found = try storedTaskHandles(in: sources())
-            .filter { !Self.taskAllowlist.contains($0.name) }
+    func testStoredTaskHandlesAreTaskSlots() throws {
+        let found = try storedTasks(in: files(under: "Sources/LatticeNode"))
+            .filter { Self.taskAllowlist[$0.name] == nil }
         XCTAssertEqual(
             found.map { "\($0.site): \($0.name)" }, [],
-            "store a runtime task handle in a TaskSlot (Lifetime.swift)"
+            "store a task handle in a TaskSlot (Lifetime.swift)"
         )
     }
 
     func testOnlySessionEstablishmentCreatesAPeerRecord() throws {
-        let found = try creatingUpdates(in: sources())
+        let found = try calls(matching: Self.creatingUpdate, in: runtimeFiles())
             .filter { !Self.creatingAllowlist.contains($0.function) }
         XCTAssertEqual(
             found.map { "\($0.site): \($0.function)" }, [],
             "write per-peer state with update(session:) or updateExisting (PeerSet.swift)"
+        )
+    }
+
+    func testOnlyAConnectOrTeardownRemovesAPeerRecordByKey() throws {
+        let found = try calls(matching: Self.keyedRemoval, in: runtimeFiles())
+            .filter { !Self.keyedRemovalAllowlist.contains($0.function) }
+        XCTAssertEqual(
+            found.map { "\($0.site): \($0.function)" }, [],
+            "end a session with remove(_:ifBoundTo:) (PeerSet.swift)"
         )
     }
 }
