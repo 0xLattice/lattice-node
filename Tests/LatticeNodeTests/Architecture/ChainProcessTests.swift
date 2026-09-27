@@ -2497,11 +2497,10 @@ final class ChainProcessTests: XCTestCase {
                     transaction: try signedRewardTransaction()
                 )])
             )
-            let outcome = try await producer.admit(
-                BlockHeader(node: template.block)
-            )
+            let block = template.block.replacingNonce(solvedNonce(for: template))
+            let outcome = try await producer.admit(BlockHeader(node: block))
             XCTAssertTrue(outcome.decision.isAccepted)
-            chain.append(template.block)
+            chain.append(block)
         }
         return (producer, chain)
     }
