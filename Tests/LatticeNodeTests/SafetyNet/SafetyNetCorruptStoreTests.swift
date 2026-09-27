@@ -14,7 +14,9 @@ import XCTest
 /// child_genesis_volume_roots, contextual_candidates, contextual_candidate_roots,
 /// contextual_candidate_children), the local mempool (local_mempool_transactions),
 /// the consensus revision floor (consensus_revision) and the prepared-proof
-/// recovery (prepared_child_proofs, pending_child_proof_routes).
+/// recovery (prepared_child_proofs). `pending_child_proof_routes` is NOT read
+/// on that path today, and `child_genesis_volume_roots` only through joins
+/// that an orphan row never satisfies.
 ///
 /// Every case starts from one valid fixture (Nexus, two mined blocks), damages
 /// exactly one row through SQL, reopens, and records what boot did. The
@@ -36,9 +38,11 @@ import XCTest
 ///   contextual_candidates, contextual_candidate_roots,
 ///   contextual_candidate_children: refused with `NodeStoreError.corrupt`
 ///   (a free-text reason; neither table nor column is named).
-/// - accepted_blocks.validated out of range, child_genesis_volume_roots,
-///   pending_child_proof_routes: silently tolerated — boot succeeds with the
-///   damaged row in place (TODO).
+/// - accepted_blocks.validated out of range: read at boot and silently
+///   tolerated — boot succeeds and the row keeps its out-of-range tier (TODO).
+/// - child_genesis_volume_roots (orphan row), pending_child_proof_routes: not
+///   read at boot today — boot succeeds and the damaged row is still there
+///   afterwards. Pinned as "unread", not as a tolerance.
 /// - accepted_blocks.leaf disagreeing with the parent links: repaired at boot
 ///   (documented behaviour, pinned as such).
 ///
@@ -71,6 +75,17 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         /// Executed one statement at a time (`sqlite3_prepare` compiles only
         /// the first statement of a string).
         let sql: [String]
+        /// For a boot that succeeds: a COUNT query that must still return 1
+        /// afterwards, proving the damaged row survived the boot untouched.
+        let stillPresent: String?
+
+        init(table: String, column: String, description: String, sql: [String], stillPresent: String? = nil) {
+            self.table = table
+            self.column = column
+            self.description = description
+            self.sql = sql
+            self.stillPresent = stillPresent
+        }
     }
 
     // MARK: - Cases
@@ -178,23 +193,35 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         ),
     ]
 
-    /// Boot succeeds with the damaged row still in place.
+    /// Read at boot (`executedBlockCIDs` / `walkValidatedBlockCIDs`), yet boot
+    /// succeeds and the row keeps its out-of-range tier.
     // TODO(refactor): should be a typed error naming table and column.
     private static let silentlyTolerated: [Damage] = [
         Damage(
             table: "accepted_blocks", column: "validated",
             description: "tier 7 (neither weighed, eager nor walk-validated)",
-            sql: ["UPDATE accepted_blocks SET validated = 7 WHERE block_cid = (SELECT MIN(block_cid) FROM accepted_blocks WHERE parent_cid IS NOT NULL)"]
+            sql: ["UPDATE accepted_blocks SET validated = 7 WHERE block_cid = (SELECT MIN(block_cid) FROM accepted_blocks WHERE parent_cid IS NOT NULL)"],
+            stillPresent: "SELECT COUNT(*) AS n FROM accepted_blocks WHERE validated = 7"
         ),
+    ]
+
+    /// Not read at boot today: `pending_child_proof_routes` is not on the
+    /// `ChainProcess.open` path at all (only `pendingChildProofRoutes()` reads
+    /// it, later), and `child_genesis_volume_roots` is read only through
+    /// `WHERE EXISTS` joins on issued edges / prepared proofs that an orphan
+    /// row never satisfies. Boot succeeds and the row is still there.
+    private static let unreadAtBoot: [Damage] = [
         Damage(
             table: "child_genesis_volume_roots", column: "root_cid",
             description: "inserted malformed CID text for an unknown child",
-            sql: ["INSERT INTO child_genesis_volume_roots (child_cid, root_cid) VALUES ('child', 'not-a-cid')"]
+            sql: ["INSERT INTO child_genesis_volume_roots (child_cid, root_cid) VALUES ('child', 'not-a-cid')"],
+            stillPresent: "SELECT COUNT(*) AS n FROM child_genesis_volume_roots WHERE child_cid = 'child' AND root_cid = 'not-a-cid'"
         ),
         Damage(
             table: "pending_child_proof_routes", column: "carrier_cid",
             description: "inserted route with an empty carrier",
-            sql: ["INSERT INTO pending_child_proof_routes (carrier_cid, batch_seq, directory) VALUES ('', 1, 'Payments')"]
+            sql: ["INSERT INTO pending_child_proof_routes (carrier_cid, batch_seq, directory) VALUES ('', 1, 'Payments')"],
+            stillPresent: "SELECT COUNT(*) AS n FROM pending_child_proof_routes WHERE carrier_cid = ''"
         ),
     ]
 
@@ -211,6 +238,10 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
     // TODO(refactor): should be a typed error naming table and column.
     func testBootSilentlyToleratesDamagedRowsTODO() async throws {
         try await assertBoot(Self.silentlyTolerated, observes: .opened)
+    }
+
+    func testBootDoesNotReadTheseTablesAndTheDamagedRowSurvives() async throws {
+        try await assertBoot(Self.unreadAtBoot, observes: .opened)
     }
 
     /// A leaf flag that disagrees with the parent links is a derived index
@@ -247,16 +278,22 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         line: UInt = #line
     ) async throws {
         let fixture = try await buildFixture()
-        var results: [(Damage, Observed)] = []
+        var results: [(Damage, Observed, survived: Bool?)] = []
         for damage in damages {
             let root = try damagedCopy(of: fixture, applying: damage.sql)
-            results.append((damage, await observeBoot(at: root)))
+            let observed = await observeBoot(at: root)
+            var survived: Bool?
+            if let query = damage.stillPresent {
+                survived = try NodeSQLite(path: root.appendingPathComponent("state.db").path)
+                    .query(query).first?["n"]?.intValue == 1
+            }
+            results.append((damage, observed, survived))
         }
         // `runActivity` is synchronous and main-actor isolated, so the async
         // boots above are gathered first and reported here, one activity per
         // (table, column).
         await MainActor.run {
-            for (damage, observed) in results {
+            for (damage, observed, survived) in results {
                 XCTContext.runActivity(
                     named: "\(damage.table).\(damage.column): \(damage.description)"
                 ) { _ in
@@ -266,6 +303,14 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
                             + "boot observed \(observed), pinned \(expected)",
                         file: file, line: line
                     )
+                    if let survived {
+                        XCTAssertTrue(
+                            survived,
+                            "\(damage.table).\(damage.column): the damaged row "
+                                + "did not survive the boot unchanged",
+                            file: file, line: line
+                        )
+                    }
                 }
             }
         }
