@@ -75,7 +75,7 @@ public protocol NetworkInterface: AnyObject, Sendable {
     /// interface with no network body source runs `admit(nil)`: broker-only,
     /// as unit contexts that admit empty blocks (whose boundary already is the
     /// whole block) do.
-    func withValidateBodySource(
+    func withExecutionBodySource(
         blockCID: String,
         _ admit: @Sendable (
             _ remoteSource: (any ContentSource)?
@@ -85,7 +85,7 @@ public protocol NetworkInterface: AnyObject, Sendable {
     /// `.execution` needs the parent fact (state continuity / genesis link) the
     /// live path obtains from the configured parent. Nil is an availability
     /// gap; the walk parks on its retry timer.
-    func resolveValidateEvidence(
+    func resolveExecutionEvidence(
         for blockCID: String,
         requirement: CrossChainEvidenceRequirement
     ) async -> AuthenticatedChildPackage?
@@ -205,7 +205,7 @@ final class WeakNetwork: @unchecked Sendable, NetworkInterface {
         try await runtime.publishTransaction(volumeRootCID)
     }
 
-    func withValidateBodySource(
+    func withExecutionBodySource(
         blockCID: String,
         _ admit: @Sendable (
             _ remoteSource: (any ContentSource)?
@@ -223,14 +223,14 @@ final class WeakNetwork: @unchecked Sendable, NetworkInterface {
             }
     }
 
-    func resolveValidateEvidence(
+    func resolveExecutionEvidence(
         for blockCID: String,
         requirement: CrossChainEvidenceRequirement
     ) async -> AuthenticatedChildPackage? {
         // A weighed child block's validate tier needs the parent fact (state
         // continuity / genesis link) the live path requests from the
         // configured parent; the same request, awaited.
-        await runtime?.resolveValidateEvidence(
+        await runtime?.resolveExecutionEvidence(
             for: blockCID,
             requirement: requirement
         )

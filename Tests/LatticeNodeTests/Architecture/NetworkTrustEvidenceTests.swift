@@ -1215,7 +1215,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
     /// resolve nil (the walk parks and retries) — never stay suspended: an
     /// unresumed continuation would leave the walk worker alive and every
     /// later reserve a no-op for the process lifetime.
-    func testValidateEvidenceRequestResolvesNilWhenTheParentSessionDrops()
+    func testExecutionEvidenceRequestResolvesNilWhenTheParentSessionDrops()
         async throws
     {
         let fixture = try await hierarchyRetryFixture(
@@ -1243,7 +1243,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             }
             // In flight: the parent never answers.
             let resolved = Task { [runtime = fixture.runtime] in
-                await runtime.resolveValidateEvidenceForTesting(
+                await runtime.resolveExecutionEvidenceForTesting(
                     for: testCID("child-block"),
                     requirement: .parentStateContinuity(
                         parentPath: ["Nexus"],

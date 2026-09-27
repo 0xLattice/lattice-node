@@ -29,7 +29,7 @@ final class ClosureNetworkInterface: NetworkInterface {
         _ volumeRootCID: String
     ) async throws -> Void
     /// Runs `admit` inside a body session bound to `blockCID`.
-    typealias ValidateBodyImport = @Sendable (
+    typealias ExecutionBodyImport = @Sendable (
         _ blockCID: String,
         _ admit: @Sendable (_ remoteSource: any ContentSource) async throws
             -> NodeImportOutcome
@@ -48,7 +48,7 @@ final class ClosureNetworkInterface: NetworkInterface {
     private let parentRunReportRequester: ParentRunReportRequester
     private let acceptedBlockPublisher: AcceptedBlockPublisher
     private let acceptedTransactionPublisher: AcceptedTransactionPublisher
-    private let validateBodySource: ValidateBodyImport?
+    private let executionBodySource: ExecutionBodyImport?
     private let validateEvidenceSource: ValidateEvidenceSource?
 
     init(
@@ -61,7 +61,7 @@ final class ClosureNetworkInterface: NetworkInterface {
         parentRunReportRequester: @escaping ParentRunReportRequester = { _ in },
         acceptedBlockPublisher: @escaping AcceptedBlockPublisher,
         acceptedTransactionPublisher: @escaping AcceptedTransactionPublisher = { _ in },
-        validateBodySource: ValidateBodyImport? = nil,
+        executionBodySource: ExecutionBodyImport? = nil,
         validateEvidenceSource: ValidateEvidenceSource? = nil
     ) {
         self.childCandidateProvider = childCandidateProvider
@@ -73,7 +73,7 @@ final class ClosureNetworkInterface: NetworkInterface {
         self.parentRunReportRequester = parentRunReportRequester
         self.acceptedBlockPublisher = acceptedBlockPublisher
         self.acceptedTransactionPublisher = acceptedTransactionPublisher
-        self.validateBodySource = validateBodySource
+        self.executionBodySource = executionBodySource
         self.validateEvidenceSource = validateEvidenceSource
     }
 
@@ -118,19 +118,19 @@ final class ClosureNetworkInterface: NetworkInterface {
         try await acceptedTransactionPublisher(volumeRootCID)
     }
 
-    func withValidateBodySource(
+    func withExecutionBodySource(
         blockCID: String,
         _ admit: @Sendable (
             _ remoteSource: (any ContentSource)?
         ) async throws -> NodeImportOutcome
     ) async throws -> NodeImportOutcome {
-        guard let validateBodySource else { return try await admit(nil) }
-        return try await validateBodySource(blockCID) { remoteSource in
+        guard let executionBodySource else { return try await admit(nil) }
+        return try await executionBodySource(blockCID) { remoteSource in
             try await admit(remoteSource)
         }
     }
 
-    func resolveValidateEvidence(
+    func resolveExecutionEvidence(
         for blockCID: String,
         requirement: CrossChainEvidenceRequirement
     ) async -> AuthenticatedChildPackage? {

@@ -2213,7 +2213,7 @@ final class ChainProcessTests: XCTestCase {
                 acceptedBlockPublisher: { _ in }
             )
         )
-        await service.runValidateWalkPass()
+        await service.runExecutionWalkPass()
         let repromoted = await process.deepestValidatedMainChainTip()
         XCTAssertEqual(repromoted?.cid, tipCID)
         owners = await broker.pinnedOwners(prefix: owner)

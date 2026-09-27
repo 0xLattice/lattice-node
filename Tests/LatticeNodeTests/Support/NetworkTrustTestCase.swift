@@ -302,7 +302,7 @@ class NetworkTrustTestCase: XCTestCase {
                 },
                 // Mirror the daemon: a weighed admit stored only the boundary, so the
                 // validate walk pulls the deferred body over the network.
-                validateBodySource: { [weak runtime] blockCID, admit in
+                executionBodySource: { [weak runtime] blockCID, admit in
                     guard let runtime else { throw CancellationError() }
                     return try await runtime.remoteContentSource
                         .withRoot(blockCID) { session in
@@ -310,7 +310,7 @@ class NetworkTrustTestCase: XCTestCase {
                         }
                 },
                 validateEvidenceSource: { [weak runtime] blockCID, requirement in
-                    await runtime?.resolveValidateEvidence(
+                    await runtime?.resolveExecutionEvidence(
                         for: blockCID,
                         requirement: requirement
                     )

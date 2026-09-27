@@ -2083,7 +2083,7 @@ extension NodeNetworkRuntime {
     /// not obtainable now (no parent session, request budget, timeout); the
     /// walk then parks and retries. Without this, every weighed child block
     /// parks the walk on `.unavailable(.parentStateContinuity)` forever.
-    public func resolveValidateEvidence(
+    public func resolveExecutionEvidence(
         for blockCID: String,
         requirement: CrossChainEvidenceRequirement
     ) async -> AuthenticatedChildPackage? {
@@ -2107,10 +2107,10 @@ extension NodeNetworkRuntime {
     }
 
     #if DEBUG
-    /// Test seam: `resolveValidateEvidence` with the block's package supplied
+    /// Test seam: `resolveExecutionEvidence` with the block's package supplied
     /// instead of recovered from the store — the request, await and every
     /// resumption path are the production ones.
-    public func resolveValidateEvidenceForTesting(
+    public func resolveExecutionEvidenceForTesting(
         for blockCID: String,
         requirement: CrossChainEvidenceRequirement,
         package: AuthenticatedChildPackage

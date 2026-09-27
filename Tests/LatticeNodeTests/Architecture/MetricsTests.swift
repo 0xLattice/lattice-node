@@ -107,7 +107,7 @@ final class MetricsTests: XCTestCase {
         }
     }
 
-    func testMetricsExposeParentReportAndValidateWalkCounters() throws {
+    func testMetricsExposeParentReportAndExecutionWalkCounters() throws {
         let rendered = renderNodeMetrics(NodeMetricsSample(
             chainPath: ["Nexus", "Payments"],
             validatedTipHeight: 1,
@@ -117,7 +117,7 @@ final class MetricsTests: XCTestCase {
             processStartTime: Date(timeIntervalSince1970: 0),
             parentReportsApplied: 3,
             parentReportRefusals: ["notStronger": 2, "locationConflict": 1],
-            validateWalkParked: 4
+            executionWalkParked: 4
         ))
         let samples = try parseExposition(rendered)
         let chain = "chain=\"Nexus/Payments\""

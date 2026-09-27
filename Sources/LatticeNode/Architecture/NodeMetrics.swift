@@ -19,7 +19,7 @@ struct NodeMetricsSample: Sendable {
     let parentReportRefusals: [String: UInt64]
     /// Validate-walk passes parked on a non-verdict (§9.9): a stall the
     /// operator must be able to see, since nothing re-arms it on its own.
-    let validateWalkParked: UInt64
+    let executionWalkParked: UInt64
 
     init(
         chainPath: [String],
@@ -30,7 +30,7 @@ struct NodeMetricsSample: Sendable {
         processStartTime: Date,
         parentReportsApplied: UInt64 = 0,
         parentReportRefusals: [String: UInt64] = [:],
-        validateWalkParked: UInt64 = 0
+        executionWalkParked: UInt64 = 0
     ) {
         self.chainPath = chainPath
         self.validatedTipHeight = validatedTipHeight
@@ -40,7 +40,7 @@ struct NodeMetricsSample: Sendable {
         self.processStartTime = processStartTime
         self.parentReportsApplied = parentReportsApplied
         self.parentReportRefusals = parentReportRefusals
-        self.validateWalkParked = validateWalkParked
+        self.executionWalkParked = executionWalkParked
     }
 }
 
@@ -88,7 +88,7 @@ func renderNodeMetrics(_ sample: NodeMetricsSample) -> String {
     family(
         "lattice_validate_walk_parked_total",
         "Validate-walk passes parked on a non-verdict (a stall nothing re-arms on its own).",
-        [(chain, String(sample.validateWalkParked))],
+        [(chain, String(sample.executionWalkParked))],
         type: "counter"
     )
     family(

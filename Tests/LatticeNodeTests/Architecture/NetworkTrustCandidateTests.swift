@@ -962,7 +962,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
     /// parked on a fact it cannot get, or never armed — does not withhold
     /// the child's candidate: the child builds on its validated tip, since
     /// that is how a chain outweighs a branch it cannot validate.
-    func testAParkedValidateWalkDoesNotWithholdTheChildsCandidate() async throws {
+    func testAParkedExecutionWalkDoesNotWithholdTheChildsCandidate() async throws {
         let fixture = try await provisionalRootFixture(keyByte: 0x9c)
         // No evidence source: the walk the deferral arms parks on the
         // continuity fact it cannot get, and the retry is out of the way.
@@ -977,7 +977,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in }
             ),
-            validateWalkRetryInterval: .seconds(60)
+            executionWalkRetryInterval: .seconds(60)
         )
         let childHandlers = ClosureChainInterface(
             childCandidateBuilder: { [weak childService] context, parentSource in
@@ -1030,7 +1030,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
     /// built either. When the walk stops, the service reports a state
     /// change so the deferred candidate is offered, built on the tip the
     /// walk reached.
-    func testChildCandidateWaitsWhileTheValidateWalkSteps() async throws {
+    func testChildCandidateWaitsWhileTheExecutionWalkSteps() async throws {
         let fixture = try await provisionalRootFixture(keyByte: 0x9d)
         let weighedOnly = try await weighedOnlyChildBlock(fixture)
         let gate = Latch()
@@ -1044,7 +1044,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 chainStateChangePublisher: { await changes.append("change") },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
-                validateBodySource: { _, admit in
+                executionBodySource: { _, admit in
                     await gate.wait()
                     return try await admit(parentProcess)
                 },
