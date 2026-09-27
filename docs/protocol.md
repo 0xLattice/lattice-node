@@ -242,9 +242,11 @@ so that offer still fits; carried again it would only be credited once
 more). Nothing is requested at
 template time and no child can stall parent consensus. A child builds no
 candidate while the block its parent's context names as carried is not yet
-admitted here (it asks for the parent's evidence index at once; a decision
-against that block releases the hold, so no offer waits on a block that
-will never land), while its validate walk is stepping, while its validated
+admitted here (it asks for the parent's evidence index once per named
+block, and again when a scan round ends without it; a decision against that
+block, or a round sent for it that ends without it while nothing holds an
+attempt for it, releases the hold, so no offer waits on a block that will
+never land), while its validate walk is stepping, while its validated
 tip is behind its weighed tip and the walk can still step (the request arms
 the walk), or while a candidate it built that the parent's evidence has
 named and still holds in its inbox is ready for or in its admission; it

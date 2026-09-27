@@ -501,6 +501,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// child is told it was carried, and what a template does not
         /// carry again.
         let carriedChildren: [String: String]
+        /// The child directories the context was minted for: a directory
+        /// that connects later is owed a fresh context on the same tip.
+        let directories: Set<String>
     }
     private var parentTipContext: ParentTipContext?
     private var nextParentTipSequence: UInt64 = 0
@@ -540,12 +543,16 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let carriedChildCID: String?
     }
     private var receivedParentTip: ReceivedParentTipContext?
-    /// A carried block the parent named whose admission here decided
-    /// against it: the offer hold on it is released, or no offer would
-    /// ever follow. One at a time, like the context that names it.
-    private var rejectedCarriedChildCID: String?
-    /// The carried block an evidence scan was last requested for, so one
-    /// carry costs one request, not one per context push.
+    /// A carried block the parent named that this chain will not wait for:
+    /// its admission decided against it, or a scan round asked for after
+    /// the naming ended without it and nothing tracks it. The hold on it is
+    /// released, or no offer would ever follow. One at a time, like the
+    /// context that names it.
+    private var releasedCarriedChildCID: String?
+    /// The carried block an evidence scan was sent for (not merely asked
+    /// for: a request while a round is in flight sends nothing), so one
+    /// carry costs one round, and a round that ends without the block
+    /// releases the hold.
     private var requestedCarriedChildCID: String?
     /// One coalescing offer task: an input change while a build runs marks it
     /// dirty and the task runs again; nothing is queued.
@@ -951,7 +958,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         descendantRewards = []
         descendantMinimumWork = []
         receivedParentTip = nil
-        rejectedCarriedChildCID = nil
+        releasedCarriedChildCID = nil
         requestedCarriedChildCID = nil
         candidateOfferTask?.cancel()
         candidateOfferTask = nil
@@ -1364,11 +1371,24 @@ public actor NodeNetworkRuntime: IvyDelegate {
     public func directChildCandidates(
         _ context: ChildCandidateRequestContext
     ) async -> [DirectChildCandidate] {
-        guard isRunning, process != nil else { return [] }
+        guard isRunning, let process else { return [] }
         let wantedParentState = context.parentCarrier.prevState.rawCID
         let children = selectedChildPeers().filter {
             guard let directory = $0.2.last else { return false }
             return !context.excludedDirectories.contains(directory)
+        }
+        // Read from the template's own tip, not the pushed context: the push
+        // task re-mints after the tip validates, and a template built in
+        // that window on a children-only carrier (same post-state) would
+        // otherwise carry the block the tip just carried once more.
+        let carriedChildren: [String: String]
+        if let tipCID = context.parentCarrier.parent?.rawCID {
+            carriedChildren = await process.carriedChildBlocks(
+                on: tipCID,
+                directories: children.compactMap { $0.2.last }
+            )
+        } else {
+            carriedChildren = parentTipContext?.carriedChildren ?? [:]
         }
         var candidates: [(Int, DirectChildCandidate)] = []
         var stale = 0
@@ -1385,7 +1405,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // the offer still fits the tip, and carrying it again would
             // only credit the same block once more.
             if let directory = path.last,
-               offer.childCID == parentTipContext?.carriedChildren[directory] {
+               offer.childCID == carriedChildren[directory] {
                 carried += 1
                 continue
             }
@@ -1431,9 +1451,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // A walk step publishes a state change per block, and this must
         // not cost the process gate three times per step when nothing the
         // children build against changed.
+        let directories = Set(hierarchyPeers.values.compactMap { role -> String? in
+            guard case .child(let path) = role else { return nil }
+            return path.last
+        })
         if let current = parentTipContext,
            let cheapTip = await process.deepestValidatedMainChainTip()?.cid,
            cheapTip == current.tipCID,
+           current.directories == directories,
            Self.sameRewardPlan(current.rewards, rewards),
            current.minimumWork == minimumWork {
             return
@@ -1445,14 +1470,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         else { return }
         if let current = parentTipContext,
            current.tipCID == tipCID,
+           current.directories == directories,
            Self.sameRewardPlan(current.rewards, rewards),
            current.minimumWork == minimumWork {
             return
         }
-        let directories = Set(hierarchyPeers.values.compactMap { role -> String? in
-            guard case .child(let path) = role else { return nil }
-            return path.last
-        })
         let carriedChildren = await process.carriedChildBlocks(
             on: tipCID, directories: directories.sorted()
         )
@@ -1464,7 +1486,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
             tipData: tipData,
             rewards: rewards,
             minimumWork: minimumWork,
-            carriedChildren: carriedChildren
+            carriedChildren: carriedChildren,
+            directories: directories
         )
         parentTipContext = context
         SyncTrace.log("parent tip context \(context.sequence): h=\(tip.height) tip=\(tipCID.prefix(12)) carried=\(carriedChildren.keys.sorted())")
@@ -1637,10 +1660,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // context names it, that this chain has not admitted: a candidate
         // built now would only be its sibling. Hold until the admission
         // decides: an acceptance publishes a state change, and a decision
-        // against the block releases the hold (`rejectedCarriedChildCID`),
-        // so no offer waits on a block that will never land.
+        // against the block, or a scan round that ends without it, releases
+        // the hold (`releasedCarriedChildCID`), so no offer waits on a block
+        // that will never land.
         if let carried = receivedParentTip?.carriedChildCID,
-           carried != rejectedCarriedChildCID,
+           carried != releasedCarriedChildCID,
            !(await process.hasAcceptedBlock(carried)) {
             candidateOfferDeferredByAdmission = true
             SyncTrace.log("candidate offer deferred: carried \(carried.prefix(12)) not yet admitted")
@@ -2441,7 +2465,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         if receivedParentTip?.peer.key == key {
             receivedParentTip = nil
-            rejectedCarriedChildCID = nil
+            releasedCarriedChildCID = nil
             requestedCarriedChildCID = nil
             lastOfferedCandidateCID = nil
         }
@@ -3688,7 +3712,35 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 await self.requestParentRunReports(
                     generation: generation, process: process
                 )
+                await self.reviewCarriedChildHold(
+                    generation: generation, process: process
+                )
             }
+        }
+    }
+
+    /// After a scan round: the block the parent's context names as carried
+    /// is either here, in the acquirer (its admission will decide), asked
+    /// for now (the request this chain made while a round was in flight
+    /// sent nothing), or, when a round sent for it ended without it, let
+    /// go: the offer hold is released and the child builds on the tip it
+    /// has, its own choice from here. No timer, no count: the scan's own
+    /// round trip paces every step.
+    private func reviewCarriedChildHold(
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        guard isCurrentRuntime(generation: generation, process: process),
+              let carried = receivedParentTip?.carriedChildCID,
+              carried != releasedCarriedChildCID,
+              !(await process.hasAcceptedBlock(carried)),
+              !candidateAcquirer.tracks(carried) else { return }
+        if requestedCarriedChildCID == carried {
+            releasedCarriedChildCID = carried
+            SyncTrace.log("carried \(carried.prefix(12)) not served by a scan round: offer hold released")
+            scheduleCandidateOffer(generation: generation, process: process)
+        } else if await requestEvidenceIndex(generation: generation, process: process) {
+            requestedCarriedChildCID = carried
         }
     }
 
@@ -4164,9 +4216,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // have been refused, and no admission follows a held offer.
             if let carried = context.carriedChildCID,
                carried != requestedCarriedChildCID,
-               !(await process.hasAcceptedBlock(carried)) {
+               !(await process.hasAcceptedBlock(carried)),
+               await requestEvidenceIndex(generation: generation, process: process) {
                 requestedCarriedChildCID = carried
-                await requestEvidenceIndex(generation: generation, process: process)
             }
             scheduleCandidateOffer(generation: generation, process: process)
 
@@ -5200,7 +5252,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
            !outcome.decision.isAccepted,
            !outcome.decision.shouldRetryWhenEvidenceChanges,
            !outcome.decision.shouldRetryLater {
-            rejectedCarriedChildCID = candidate.blockCID
+            releasedCarriedChildCID = candidate.blockCID
         }
         if outcome.decision == .invalid {
             if attempt.attribution.allResponsesComplete,
@@ -6702,13 +6754,16 @@ public actor NodeNetworkRuntime: IvyDelegate {
         serviceCandidateAcquirer()
     }
 
+    /// Returns whether a request was sent: none is while a round is in
+    /// flight, before a parent session exists, or on a root chain.
+    @discardableResult
     private func requestEvidenceIndex(
         sourceID: String? = nil,
         cursor: UInt64? = nil,
         through: UInt64? = nil,
         generation: UInt64? = nil,
         process expectedProcess: ChainProcess? = nil
-    ) async {
+    ) async -> Bool {
         guard
             isRunning,
             let fence = resolvedRuntimeFence(
@@ -6717,7 +6772,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             ), !configuration.address.isNexus,
               pendingEvidenceIndexes.isEmpty,
             let parent = configuredParentPeer()
-        else { return }
+        else { return false }
         let durableCursor: ParentEvidenceScanCursor
         if let sourceID, let cursor {
             durableCursor = ParentEvidenceScanCursor(
@@ -6727,7 +6782,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         } else {
             guard let persisted = try? await fence.process
                 .parentEvidenceScanCursor()
-            else { return }
+            else { return false }
             durableCursor = persisted
         }
         let request = ChildEvidenceIndexRequestMessage(
@@ -6737,7 +6792,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             cursor: durableCursor.ordinal,
             through: through
         )
-        guard let payload = try? request.encoded() else { return }
+        guard let payload = try? request.encoded() else { return false }
         pendingEvidenceIndexes[request.requestID] = .init(
             peer: parent,
             request: request
@@ -6754,7 +6809,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             )
         else {
             pendingEvidenceIndexes.removeValue(forKey: request.requestID)
-            return
+            return false
         }
         if result != .notConnected {
             if pendingEvidenceIndexes[request.requestID] != nil {
@@ -6763,8 +6818,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     generation: fence.generation
                 )
             }
+            return true
         } else {
             pendingEvidenceIndexes.removeValue(forKey: request.requestID)
+            return false
         }
     }
 

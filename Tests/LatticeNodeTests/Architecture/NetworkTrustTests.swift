@@ -2919,11 +2919,16 @@ final class NetworkTrustTests: XCTestCase {
         XCTAssertThrowsError(
             try ParentTipContextMessage.decoded(legacy + Data([1]))
         )
+        // An empty minimum-work trailer (tag 1, length 4, "[]") and an empty
+        // carried-child trailer (tag 2, length 0) are refused alike.
         var emptyTrailer = legacy
-        emptyTrailer.append(contentsOf: [2, 0, 0, 0])
+        emptyTrailer.append(contentsOf: [1, 2, 0, 0, 0])
         emptyTrailer.append(Data("[]".utf8))
         XCTAssertThrowsError(
             try ParentTipContextMessage.decoded(emptyTrailer)
+        )
+        XCTAssertThrowsError(
+            try ParentTipContextMessage.decoded(legacy + Data([2, 0, 0]))
         )
     }
 

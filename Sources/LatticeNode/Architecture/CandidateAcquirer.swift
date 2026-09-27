@@ -157,6 +157,11 @@ struct CandidateAcquirer {
     }
 
     var hasReadyCandidate: Bool { !readySet.isEmpty }
+    /// Whether any attempt for the block is held, in whatever state.
+    func tracks(_ blockCID: String) -> Bool {
+        records[blockCID].map { !$0.attempts.isEmpty } ?? false
+    }
+
     /// Whether the block is ready for, or in, an admission attempt — not
     /// parked on evidence, content, time or a missing predecessor.
     func isAwaitingAdmission(_ blockCID: String) -> Bool {
