@@ -128,11 +128,6 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             sql: ["INSERT INTO issued_child_edges (edge_cid, parent_carrier_cid, directory, child_cid) VALUES ('not-a-cid', 'carrier', 'Payments', 'child')"]
         ),
         Damage(
-            table: "prepared_child_proofs", column: "attachment_cid",
-            description: "inserted proof with malformed CID text",
-            sql: ["INSERT INTO prepared_child_proofs (carrier_cid, batch_seq, directory, child_cid, is_child_genesis, attachment_cid) VALUES ('carrier', 1, 'Payments', 'child', 0, 'not-a-cid')"]
-        ),
-        Damage(
             table: "contextual_candidates", column: "candidate_cid",
             description: "inserted candidate without roots",
             sql: ["INSERT INTO contextual_candidates (candidate_cid, offer_seq, issued, handoff, handoff_seq) VALUES ('not-a-cid', 1, 0, 0, NULL)"]
@@ -186,6 +181,11 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             table: "local_mempool_transactions", column: "transaction_cid",
             description: "inserted malformed CID text",
             sql: ["INSERT INTO local_mempool_transactions (transaction_cid, added_at) VALUES ('not-a-cid', 0)"]
+        ),
+        Damage(
+            table: "prepared_child_proofs", column: "attachment_cid",
+            description: "inserted proof with malformed CID text",
+            sql: ["INSERT INTO prepared_child_proofs (carrier_cid, batch_seq, directory, child_cid, is_child_genesis, attachment_cid) VALUES ('carrier', 1, 'Payments', 'child', 0, 'not-a-cid')"]
         ),
     ]
 
