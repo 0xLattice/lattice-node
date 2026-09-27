@@ -1196,7 +1196,7 @@ extension NodeNetworkRuntime {
             SyncTrace.log("parent evidence for \(summary.childCID.prefix(12)) already admitted: not re-entered")
             return .handled
         }
-        return await enqueueRetainedParentCandidate(
+        return await enqueueInboxParentCandidate(
             // Weighed, like every network-sourced block: the verified proof is
             // all the weighed tier needs, so the block enters fork choice with
             // its work at once and is executed when the chain would step into

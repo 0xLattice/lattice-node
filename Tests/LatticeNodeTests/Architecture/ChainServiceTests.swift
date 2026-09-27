@@ -3190,7 +3190,7 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertEqual(onB?.height, 8, "B validated to its tip")
         // Eviction: A's validated blocks are off-chain and deeper than the
         // retention depth below the validated head — all but one demoted.
-        _ = try await consumerProcess.evictUnretainedVolumes()
+        _ = try await consumerProcess.pruneUnpinnedVolumes()
 
         // A third fork C from genesis, heavier than B and weighed only: the
         // probe falls back (B's floor left the main chain) and parks the
@@ -3335,7 +3335,7 @@ final class ChainServiceTests: XCTestCase {
         let onTrunk = await consumerProcess.deepestValidatedMainChainTip()
         XCTAssertEqual(onTrunk?.height, 12)
         // Eviction 1: A5-A8 demoted (holes 5-8 on fork A).
-        _ = try await consumerProcess.evictUnretainedVolumes()
+        _ = try await consumerProcess.pruneUnpinnedVolumes()
 
         let forkD = try await mineNexusRewardChain(
             on: producerD, depth: 6, miner: CryptoUtils.generateKeyPair()
@@ -3350,7 +3350,7 @@ final class ChainServiceTests: XCTestCase {
         try await admitAll(trunkEven, from: producerT, mode: .header)
         let backOnTrunk = await consumerProcess.deepestValidatedMainChainTip()
         XCTAssertEqual(backOnTrunk?.height, 12)
-        _ = try await consumerProcess.evictUnretainedVolumes()
+        _ = try await consumerProcess.pruneUnpinnedVolumes()
         let d9 = try BlockHeader(node: forkD[0]).rawCID
         let d11 = try BlockHeader(node: forkD[2]).rawCID
         let d9Validated = await consumerProcess.blockValidated(d9)

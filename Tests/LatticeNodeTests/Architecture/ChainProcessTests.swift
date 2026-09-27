@@ -2317,7 +2317,7 @@ final class ChainProcessTests: XCTestCase {
         )
         let factsBefore = try admissionFactCount(in: directory)
 
-        _ = try await process!.evictUnretainedVolumes()
+        _ = try await process!.pruneUnpinnedVolumes()
         process = nil
 
         XCTAssertEqual(
@@ -2429,7 +2429,7 @@ final class ChainProcessTests: XCTestCase {
             try validatedTiers(for: config),
             Dictionary(uniqueKeysWithValues: (losers + winners).map { ($0, 2) })
         )
-        _ = try await process.evictUnretainedVolumes()
+        _ = try await process.pruneUnpinnedVolumes()
         return OffChainValidatedFixture(
             configuration: config, losers: losers, winners: winners
         )

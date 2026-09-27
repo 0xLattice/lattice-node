@@ -1652,7 +1652,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             try Task.checkCancellation()
             let available = Set(try await store.preparedChildProofs(
                 carrierCID: carrier.rawCID
-            ).map(\.directory)).union(try await store.retainedDirectChildProofs(
+            ).map(\.directory)).union(try await store.publishedDirectChildProofs(
                 carrierCID: carrier.rawCID
             ).map(\.directory))
             directories.removeAll { available.contains($0) }
@@ -1751,7 +1751,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         directories: Set<String>? = nil
     ) async throws -> [DurableDirectChildProof] {
         var durable: [DurableDirectChildProof] = []
-        let retained = try await store.retainedDirectChildProofs(
+        let retained = try await store.publishedDirectChildProofs(
             carrierCID: carrierCID
         )
         for edge in retained
@@ -2049,7 +2049,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         return await level.chain.unresolvedSameChainPredecessors()
     }
 
-    public func evictUnretainedVolumes() async throws -> Int {
+    public func pruneUnpinnedVolumes() async throws -> Int {
         try await acquireMutationOperation()
         defer { releaseOperation() }
         try Task.checkCancellation()
@@ -2239,7 +2239,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 .map(\.directory)
         )
         let retainedDirectories = Set(
-            try await store.retainedDirectChildProofs(carrierCID: carrier.rawCID)
+            try await store.publishedDirectChildProofs(carrierCID: carrier.rawCID)
                 .map(\.directory)
         )
         let availableDirectories = preparedDirectories.union(retainedDirectories)
@@ -2282,7 +2282,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             carrierCID: carrier.rawCID
         )
         try Task.checkCancellation()
-        let retained = Set(try await store.retainedDirectChildProofs(
+        let retained = Set(try await store.publishedDirectChildProofs(
             carrierCID: carrier.rawCID
         ).map(\.directory))
         let completed = Array(active.intersection(
@@ -2373,7 +2373,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         upstreamProof: ChildBlockProof?,
         additional: [PreparedChildProof] = []
     ) async throws {
-        let retained = try await store.retainedDirectChildProofs(
+        let retained = try await store.publishedDirectChildProofs(
             carrierCID: carrierCID
         )
         let newlyPrepared = try await store.preparedChildProofs(

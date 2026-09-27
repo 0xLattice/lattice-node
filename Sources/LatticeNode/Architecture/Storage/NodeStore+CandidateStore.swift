@@ -494,7 +494,7 @@ extension NodeStore {
                     storer: recoveryVolumeBroker
                 )
             }
-            try await mergeRecoveryRetention(
+            try await mergeRecoveryPruningProtection(
                 scope: preparedRecoveryRetentionScope,
                 roots: canonical.flatMap(\.bootstrapRoots)
                     + canonical.map(\.attachment.rawCID)
@@ -586,9 +586,9 @@ extension NodeStore {
                 }
                 try pruneUnreferencedChildGenesisVolumeRoots()
             }
-            try await reconcilePreparedRecoveryRetention()
+            try await reconcilePreparedRecoveryPruningProtection()
         } catch {
-            try? await reconcilePreparedRecoveryRetention()
+            try? await reconcilePreparedRecoveryPruningProtection()
             throw error
         }
     }
@@ -784,9 +784,9 @@ extension NodeStore {
                 )
                 try pruneUnreferencedChildGenesisVolumeRoots()
             }
-            try await reconcilePreparedRecoveryRetention()
+            try await reconcilePreparedRecoveryPruningProtection()
         } catch {
-            try? await reconcilePreparedRecoveryRetention()
+            try? await reconcilePreparedRecoveryPruningProtection()
             throw error
         }
     }

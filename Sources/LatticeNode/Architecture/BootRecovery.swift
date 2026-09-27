@@ -182,7 +182,7 @@ enum BootRecovery {
         try await store.auditNormalizedIndexes()
         try await store.pruneAdmittedContextualCandidates()
         try await store.enforceHandoffCandidateBudget()
-        let retainedRoots = durableRetainedRoots(
+        let retainedRoots = durableProtectedRoots(
             staged: staged,
             additionalRoots: constantRoots
         )
@@ -443,7 +443,7 @@ enum BootRecovery {
         return bootHoleCeiling
     }
 
-    private nonisolated static func durableRetainedRoots(
+    private nonisolated static func durableProtectedRoots(
         staged: [StagedImport],
         additionalRoots: [String] = []
     ) -> [String] {

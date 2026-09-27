@@ -7,7 +7,7 @@ import cashew
 
 extension NodeStore {
     /// Owner: ImportJournal.stage / EvidenceIndex.persistIssuedHierarchyArtifacts / EvidenceIndex.persistIssuedChildProof / EvidenceIndex.storeParentEvidenceInbox / CandidateStore.persistPreparedChildProofs — recovery-broker retention write, outside any database transaction.
-    func mergeRecoveryRetention(
+    func mergeRecoveryPruningProtection(
         scope: String,
         roots: [String]
     ) async throws {
@@ -19,7 +19,7 @@ extension NodeStore {
     }
 
     /// Owner: CandidateStore.persistPreparedChildProofs / CandidateStore.removePreparedChildProof — recovery-broker retention write, outside any database transaction.
-    func reconcilePreparedRecoveryRetention() async throws {
+    func reconcilePreparedRecoveryPruningProtection() async throws {
         try await recoveryVolumeBroker.advanceRetainedRoots(
             scope: preparedRecoveryRetentionScope,
             roots: preparedRecoveryVolumeRoots()
@@ -142,7 +142,7 @@ extension NodeStore {
     }
 
     /// Owner: ImportJournal.stage / EvidenceIndex.persistIssuedHierarchyArtifacts / EvidenceIndex.storeParentEvidenceInbox / EvidenceIndex.consumeParentEvidence — recovery-broker retention write, outside any database transaction.
-    func reconcileParentEvidenceInboxRetention() async {
+    func reconcileParentEvidenceInboxPruningProtection() async {
         try? await recoveryVolumeBroker.advanceRetainedRoots(
             scope: parentEvidenceInboxRetentionScope,
             roots: parentEvidenceInboxRoots()

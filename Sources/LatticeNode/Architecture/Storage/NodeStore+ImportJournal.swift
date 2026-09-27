@@ -111,7 +111,7 @@ extension NodeStore {
         )
         let rootsPayload = try Self.encode(Array(Set(volumeRoots)).sorted())
 
-        try await mergeRecoveryRetention(
+        try await mergeRecoveryPruningProtection(
             scope: issuedRecoveryRetentionScope,
             roots: recoveryRoots
         )
@@ -207,7 +207,7 @@ extension NodeStore {
         if preparedHierarchyArtifacts?.carrierEvidence != nil
             || preparedIncomingCarrierEvidence != nil
         {
-            await reconcileParentEvidenceInboxRetention()
+            await reconcileParentEvidenceInboxPruningProtection()
         }
     }
 

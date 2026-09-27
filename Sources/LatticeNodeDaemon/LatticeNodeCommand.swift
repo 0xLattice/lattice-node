@@ -243,7 +243,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
 
         let volumeMaintenance = Task {
             await runVolumeMaintenance {
-                _ = try await process.evictUnretainedVolumes()
+                _ = try await process.pruneUnpinnedVolumes()
             }
         }
         do {

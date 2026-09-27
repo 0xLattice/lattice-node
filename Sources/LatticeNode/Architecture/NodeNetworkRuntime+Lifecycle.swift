@@ -88,7 +88,7 @@ extension NodeNetworkRuntime {
             )
             isRunning = true
             for candidate in recoveredParentCandidates {
-                guard await enqueueRetainedParentCandidate(
+                guard await enqueueInboxParentCandidate(
                     candidate,
                     generation: runtimeGeneration,
                     process: process
@@ -164,7 +164,7 @@ extension NodeNetworkRuntime {
         return candidates
     }
 
-    func enqueueRetainedParentCandidate(
+    func enqueueInboxParentCandidate(
         _ candidate: CandidateSeed,
         peer: AuthenticatedPeer? = nil,
         generation: UInt64,

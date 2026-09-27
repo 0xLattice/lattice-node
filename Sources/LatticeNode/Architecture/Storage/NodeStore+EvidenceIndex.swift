@@ -499,7 +499,7 @@ extension NodeStore {
         let recoveryRoots = try await storeRecoveryEvidence(
             [prepared.carrierEvidence].compactMap { $0 }
         )
-        try await mergeRecoveryRetention(
+        try await mergeRecoveryPruningProtection(
             scope: issuedRecoveryRetentionScope,
             roots: recoveryRoots
         )
@@ -519,7 +519,7 @@ extension NodeStore {
             )
         }
         if prepared.carrierEvidence != nil {
-            await reconcileParentEvidenceInboxRetention()
+            await reconcileParentEvidenceInboxPruningProtection()
         }
     }
 
@@ -610,7 +610,7 @@ extension NodeStore {
         try await proofAttachment.store(storer: recoveryVolumeBroker)
         let recoveryRoots = bootstrapRoots
             + [proofAttachment.rawCID]
-        try await mergeRecoveryRetention(
+        try await mergeRecoveryPruningProtection(
             scope: issuedRecoveryRetentionScope,
             roots: recoveryRoots
         )
@@ -1190,7 +1190,7 @@ extension NodeStore {
         }
         try await attachment.store(storer: recoveryVolumeBroker)
         if !alreadyAdmitted {
-            try await mergeRecoveryRetention(
+            try await mergeRecoveryPruningProtection(
                 scope: parentEvidenceInboxRetentionScope,
                 roots: [attachment.rawCID]
             )
@@ -1250,12 +1250,12 @@ extension NodeStore {
             }
         } catch {
             if !alreadyAdmitted {
-                await reconcileParentEvidenceInboxRetention()
+                await reconcileParentEvidenceInboxPruningProtection()
             }
             throw error
         }
         if admittedDuringStore {
-            await reconcileParentEvidenceInboxRetention()
+            await reconcileParentEvidenceInboxPruningProtection()
         }
         return admittedDuringStore
     }
@@ -1316,7 +1316,7 @@ extension NodeStore {
             "DELETE FROM parent_evidence_inbox WHERE child_cid = ?1 AND root_cid = ?2",
             params: [.text(childCID), .text(rootCID)]
         )
-        await reconcileParentEvidenceInboxRetention()
+        await reconcileParentEvidenceInboxPruningProtection()
     }
 
     func parentEvidenceInboxHasCapacity() throws -> Bool {
@@ -1400,7 +1400,7 @@ extension NodeStore {
     /// Permanent root-independent hops already published by this parent.
     /// They outlive the bounded pre-publication recovery buffer and can be
     /// recomposed whenever this carrier gains another authenticated root.
-    func retainedDirectChildProofs(
+    func publishedDirectChildProofs(
         carrierCID: String
     ) async throws -> [PreparedChildProof] {
         let rows = try database.rows(
