@@ -230,6 +230,95 @@ private final class IndexWithholdingDelegate: IvyDelegate, @unchecked Sendable {
     }
 }
 
+/// Forwards everything to `inner` and records the parent tip contexts it
+/// receives: each one's tip and the carried block it names.
+private final class ParentTipRecordingDelegate: IvyDelegate, @unchecked Sendable {
+    struct Received: Equatable {
+        let tipCID: String
+        let carried: String?
+    }
+
+    private let inner: NodeNetworkRuntime
+    private let lock = NSLock()
+    private var received: [Received] = []
+
+    init(forwardingTo inner: NodeNetworkRuntime) {
+        self.inner = inner
+    }
+
+    var contexts: [Received] { lock.withLock { received } }
+
+    func contexts(forTip tipCID: String) -> [Received] {
+        contexts.filter { $0.tipCID == tipCID }
+    }
+
+    func reset() { lock.withLock { received.removeAll() } }
+
+    func ivy(_ ivy: Ivy, didConnect peer: AuthenticatedPeer) async {
+        await inner.ivy(ivy, didConnect: peer)
+    }
+
+    func ivy(_ ivy: Ivy, didDisconnect peer: PeerID) {
+        inner.ivy(ivy, didDisconnect: peer)
+    }
+
+    func ivy(_ ivy: Ivy, didDiscoverPublicAddress address: ObservedAddress) {
+        inner.ivy(ivy, didDiscoverPublicAddress: address)
+    }
+
+    func ivy(
+        _ ivy: Ivy,
+        didReceiveMessage message: PeerMessage,
+        from peer: AuthenticatedPeer
+    ) async {
+        if message.topic == NodeNetworkTopic.parentTipAvailable,
+           let context = try? ParentTipContextMessage.decoded(message.payload) {
+            lock.withLock {
+                received.append(Received(
+                    tipCID: context.tipCID, carried: context.carriedChildCID
+                ))
+            }
+        }
+        await inner.ivy(ivy, didReceiveMessage: message, from: peer)
+    }
+}
+
+/// Names the child block whose evidence attachment the parent will not
+/// serve.
+private actor EvidenceAttachmentGate {
+    private(set) var refusedChild: String?
+
+    func refuse(_ childCID: String) { refusedChild = childCID }
+}
+
+/// Serves the parent's content, except the attachment Volume of the
+/// evidence it issued for the gate's child block: that request is answered
+/// with nothing (content unavailable), so the child's recovery of that
+/// evidence ends `.unavailable` and the session is kept.
+private struct EvidenceRefusingContentSource: IvyContentSource {
+    let parent: ChainProcess
+    let gate: EvidenceAttachmentGate
+
+    private var inner: ChainProcessIvyContentSource {
+        ChainProcessIvyContentSource(process: parent)
+    }
+
+    func content(rootCID: String, cids: [String], maxDataBytes: Int) async -> [ContentEntry] {
+        await inner.content(rootCID: rootCID, cids: cids, maxDataBytes: maxDataBytes)
+    }
+
+    func volume(rootCID: String, maxDataBytes: Int) async -> [ContentEntry] {
+        if let child = await gate.refusedChild,
+           let issued = try? await parent.store.issuedChildEvidenceSummary(
+               childCID: child, directory: "Payments"
+           ),
+           issued.summary.attachmentCID == rootCID {
+            return []
+        }
+        return await inner.volume(rootCID: rootCID, maxDataBytes: maxDataBytes)
+    }
+}
+
 /// A one-way switch a test flips and an admission closure reads.
 private actor DecisionSwitch {
     private(set) var isOn = false
@@ -1220,10 +1309,16 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             await fixture.childRuntime.stop()
             await fixture.parentRuntime.stop()
         }
+        let evidenceGate = EvidenceAttachmentGate()
         do {
             try await fixture.parentRuntime.start(
                 process: fixture.parentProcess,
                 chain: inertNetworkHandlers()
+            )
+            await fixture.parentRuntime.hierarchy.setContentSource(
+                EvidenceRefusingContentSource(
+                    parent: fixture.parentProcess, gate: evidenceGate
+                )
             )
             try await fixture.childRuntime.start(
                 process: fixture.childProcess,
@@ -1250,10 +1345,12 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 }
             }
             let buildsBeforeCarry = await builds.snapshot().count
-            // The parent names the block but has no evidence for it: the
-            // round that asks for it ends without it.
+            // The parent names the block with its evidence, but never
+            // serves the evidence's attachment: the parent's word on the
+            // block comes to nothing here.
+            await evidenceGate.refuse(firstCID)
             let carrier = try await storeCarrier(
-                of: first, fixture: fixture, withEvidence: false
+                of: first, fixture: fixture, withEvidence: true
             )
             if fabricatedAttachment {
                 try await relayFabricatedAttachment(
@@ -1261,7 +1358,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 )
             }
             try await admitCarrier(
-                carrier, service: parentService, fixture: fixture, withEvidence: false
+                carrier, service: parentService, fixture: fixture, withEvidence: true
             )
             try await eventually("the context names the carried block") {
                 await fixture.childRuntime.debugSnapshot().receivedCarriedChildCID
@@ -1438,6 +1535,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             admission: { _ in throw CancellationError() }
         )
         let withholding = IndexWithholdingDelegate(forwardingTo: fixture.parentRuntime)
+        let evidenceGate = EvidenceAttachmentGate()
         func stopAll() async {
             await withholding.release()
             await fixture.childRuntime.stop()
@@ -1449,6 +1547,11 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 chain: inertNetworkHandlers()
             )
             await fixture.parentRuntime.hierarchy.installTestDelegate(withholding)
+            await fixture.parentRuntime.hierarchy.setContentSource(
+                EvidenceRefusingContentSource(
+                    parent: fixture.parentProcess, gate: evidenceGate
+                )
+            )
             try await fixture.childRuntime.start(
                 process: fixture.childProcess,
                 chain: childHandlers
@@ -1461,11 +1564,14 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             // The parent answers no index request from here: the round sent
             // for the carried block stays in flight.
             withholding.withhold()
+            // The parent names the block with evidence whose attachment it
+            // never serves: nothing the parent sends lands the block.
+            await evidenceGate.refuse(firstCID)
             let carrier = try await storeCarrier(
-                of: first, fixture: fixture, withEvidence: false
+                of: first, fixture: fixture, withEvidence: true
             )
             try await admitCarrier(
-                carrier, service: parentService, fixture: fixture, withEvidence: false
+                carrier, service: parentService, fixture: fixture, withEvidence: true
             )
             try await eventually("the round for the carried block is in flight") {
                 let requested = await fixture.childRuntime.debugCarriedHold().requested
@@ -1773,6 +1879,404 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         }
     }
 
+    // MARK: - #200: a context names a carried block only with its evidence
+
+    /// A child built from `fixture` whose builds are recorded (the height
+    /// of each candidate built), admitting through its own service or not
+    /// at all.
+    private func recordingChildHandlers(
+        _ fixture: ProvisionalRootFixture,
+        builds: NetworkEventRecorder,
+        admits: Bool
+    ) -> ClosureChainInterface {
+        let childService = networkService(
+            process: fixture.childProcess,
+            runtime: fixture.childRuntime
+        )
+        return ClosureChainInterface(
+            childCandidateBuilder: { context, parentSource in
+                let built = try await childService.miningCandidate(
+                    for: context,
+                    parentContentSource: parentSource
+                )
+                await builds.append("\(built.block.height)")
+                return built
+            },
+            admission: { admission in
+                guard admits else { throw CancellationError() }
+                return try await childService.importNetworkCandidate(
+                    admission.header,
+                    authenticatedChildPackage: admission.authenticatedChildPackage,
+                    preparingChildDirectories: admission.preparingChildDirectories,
+                    contentSource: admission.contentSource,
+                    weighed: admission.weighed
+                )
+            }
+        )
+    }
+
+    /// Admits the stored carrier through the parent's service, preparing
+    /// the child's directory, as a mined or relayed carrier is admitted.
+    private func admitCarrierThroughService(
+        _ carrier: Block,
+        service: ChainService,
+        fixture: ProvisionalRootFixture
+    ) async throws {
+        let admitted = try await service.importNetworkCandidate(
+            try BlockHeader(node: carrier),
+            authenticatedChildPackage: nil,
+            preparingChildDirectories: ["Payments"],
+            contentSource: fixture.parentProcess
+        )
+        XCTAssertTrue(admitted.decision.isAccepted, "\(admitted.decision)")
+    }
+
+    private func scheduleChildProofRecovery(
+        _ fixture: ProvisionalRootFixture
+    ) async {
+        let generation = await fixture.parentRuntime.runtimeGeneration
+        await fixture.parentRuntime.scheduleChildProofRecovery(
+            generation: generation, process: fixture.parentProcess
+        )
+    }
+
+    /// The parent admits a carrier while the child block's content is
+    /// withheld (the proof cannot be built): its push to the child waits
+    /// for the recovery pass, then goes out on the carrier's tip without
+    /// naming the block. Once the content is there (the proof prepared)
+    /// and a pass issues the evidence, the next context names the block.
+    /// Before #200 the context named the block at once.
+    func testTheContextNamesACarriedBlockOnlyOnceItsEvidenceIsIndexed() async throws {
+        let fixture = try await provisionalRootFixture(keyByte: 0xca)
+        let parentService = networkService(
+            process: fixture.parentProcess,
+            runtime: fixture.parentRuntime
+        )
+        let builds = NetworkEventRecorder()
+        let recorder = ParentTipRecordingDelegate(forwardingTo: fixture.childRuntime)
+        func stopAll() async {
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+        }
+        do {
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess,
+                chain: inertNetworkHandlers()
+            )
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess,
+                chain: recordingChildHandlers(fixture, builds: builds, admits: false)
+            )
+            await fixture.childRuntime.hierarchy.installTestDelegate(recorder)
+            let first = try await firstHeldCandidate(fixture)
+            let firstCID = try BlockHeader(node: first.block).rawCID
+            let heldBefore = await fixture.parentRuntime.debugParentTipNaming().heldBackCount
+
+            let carrier = try await storeCarrierBlock(
+                of: first, fixture: fixture, withEvidence: false
+            )
+            let carrierCID = try BlockHeader(node: carrier).rawCID
+            try await admitCarrierThroughService(
+                carrier, service: parentService, fixture: fixture
+            )
+            try await eventually("the carrier's context reaches the child") {
+                !recorder.contexts(forTip: carrierCID).isEmpty
+            }
+            XCTAssertEqual(
+                recorder.contexts(forTip: carrierCID).map(\.carried), [nil],
+                "no evidence issued: the carried block is not named"
+            )
+            let naming = await fixture.parentRuntime.debugParentTipNaming()
+            XCTAssertGreaterThan(
+                naming.heldBackCount, heldBefore,
+                "the push waited for the recovery pass first"
+            )
+            XCTAssertEqual(naming.named, [:])
+            XCTAssertEqual(naming.heldBack, [], "the pass ended: nothing waits")
+
+            // The content arrives: the proof is prepared, a pass issues it.
+            _ = try await fixture.parentProcess.prepareChildProofs(
+                for: carrier, children: [first], capacity: 16
+            )
+            await scheduleChildProofRecovery(fixture)
+            try await eventually("the next context names the carried block") {
+                recorder.contexts(forTip: carrierCID).last?.carried == firstCID
+            }
+            let issued = try await fixture.parentProcess.store
+                .issuedChildEvidenceSummary(childCID: firstCID, directory: "Payments")
+            XCTAssertNotNil(issued, "named only with its evidence indexed")
+            await stopAll()
+        } catch {
+            await stopAll()
+            throw error
+        }
+    }
+
+    /// #200: the parent names the carried block, the child admits it, and
+    /// in between the child builds nothing on the tip before it (a sibling
+    /// of the carried block). Before, the context named the block before
+    /// its evidence was issued, the child's scan came back empty and
+    /// released the hold, and one sibling was built. No push is held back
+    /// here: the context and the evidence race as they do in production.
+    func testNoSiblingIsBuiltBetweenTheCarryAndItsAdmission() async throws {
+        let fixture = try await provisionalRootFixture(keyByte: 0xce)
+        let parentService = networkService(
+            process: fixture.parentProcess,
+            runtime: fixture.parentRuntime
+        )
+        let builds = NetworkEventRecorder()
+        func stopAll() async {
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+        }
+        do {
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess,
+                chain: inertNetworkHandlers()
+            )
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess,
+                chain: recordingChildHandlers(fixture, builds: builds, admits: true)
+            )
+            let first = try await firstHeldCandidate(fixture)
+            let firstCID = try BlockHeader(node: first.block).rawCID
+            let buildsBeforeCarry = await builds.snapshot().count
+
+            let carrier = try await storeCarrier(
+                of: first, fixture: fixture, withEvidence: true
+            )
+            try await admitCarrier(
+                carrier, service: parentService, fixture: fixture, withEvidence: true
+            )
+            try await eventually("the carried block is admitted") {
+                await fixture.childProcess.hasAcceptedBlock(firstCID)
+            }
+            try await eventually("the child builds on the carried block") {
+                await builds.snapshot().dropFirst(buildsBeforeCarry).contains("2")
+            }
+            let afterCarry = Array(await builds.snapshot().dropFirst(buildsBeforeCarry))
+            XCTAssertFalse(
+                afterCarry.contains("1"),
+                "a sibling of the carried block was built: \(afterCarry)"
+            )
+            await stopAll()
+        } catch {
+            await stopAll()
+            throw error
+        }
+    }
+
+    /// A parent that cannot issue the carried block's evidence (its child
+    /// content never arrives; for a parent below the root, the root that
+    /// would secure the proof never arrives) does not wedge the child: once
+    /// its recovery pass has done what it can, its context goes out without
+    /// naming the block, and the child offers on it.
+    func testAParentThatCannotIssueTheEvidenceDoesNotWedgeTheChild() async throws {
+        let fixture = try await provisionalRootFixture(keyByte: 0xd2)
+        let parentService = networkService(
+            process: fixture.parentProcess,
+            runtime: fixture.parentRuntime
+        )
+        let builds = NetworkEventRecorder()
+        let recorder = ParentTipRecordingDelegate(forwardingTo: fixture.childRuntime)
+        func stopAll() async {
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+        }
+        do {
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess,
+                chain: inertNetworkHandlers()
+            )
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess,
+                chain: recordingChildHandlers(fixture, builds: builds, admits: false)
+            )
+            await fixture.childRuntime.hierarchy.installTestDelegate(recorder)
+            let first = try await firstHeldCandidate(fixture)
+            let buildsBeforeCarry = await builds.snapshot().count
+            let carrier = try await storeCarrierBlock(
+                of: first, fixture: fixture, withEvidence: false
+            )
+            let carrierCID = try BlockHeader(node: carrier).rawCID
+            try await admitCarrierThroughService(
+                carrier, service: parentService, fixture: fixture
+            )
+            try await eventually("the child offers on the carrier's tip") {
+                await builds.snapshot().count > buildsBeforeCarry
+            }
+            XCTAssertEqual(
+                recorder.contexts(forTip: carrierCID).map(\.carried), [nil],
+                "the context never named the block"
+            )
+            let hold = await fixture.childRuntime.debugSnapshot().carriedHoldCount
+            XCTAssertEqual(hold, 0, "nothing named: the child never held")
+            await stopAll()
+        } catch {
+            await stopAll()
+            throw error
+        }
+    }
+
+    /// The parent restarts with a carried block's route still owed: after
+    /// the child reconnects, the push waits for the recovery pass, and the
+    /// first context the child gets on that tip names the block, with its
+    /// evidence issued. Without the wait it would go out unnamed.
+    func testAfterARestartThePushWaitsForTheRecoveryPass() async throws {
+        let fixture = try await provisionalRootFixture(keyByte: 0xd6)
+        let parentService = networkService(
+            process: fixture.parentProcess,
+            runtime: fixture.parentRuntime
+        )
+        let builds = NetworkEventRecorder()
+        let recorder = ParentTipRecordingDelegate(forwardingTo: fixture.childRuntime)
+        let passes = Latch()
+        func stopAll() async {
+            await passes.open()
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+        }
+        do {
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess,
+                chain: inertNetworkHandlers()
+            )
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess,
+                chain: recordingChildHandlers(fixture, builds: builds, admits: false)
+            )
+            await fixture.childRuntime.hierarchy.installTestDelegate(recorder)
+            let first = try await firstHeldCandidate(fixture)
+            let firstCID = try BlockHeader(node: first.block).rawCID
+            let carrier = try await storeCarrierBlock(
+                of: first, fixture: fixture, withEvidence: false
+            )
+            let carrierCID = try BlockHeader(node: carrier).rawCID
+            try await admitCarrierThroughService(
+                carrier, service: parentService, fixture: fixture
+            )
+            try await eventually("the carrier's context went out unnamed") {
+                recorder.contexts(forTip: carrierCID).map(\.carried) == [nil]
+            }
+
+            // Down, the proof becomes buildable; the route is still owed.
+            await fixture.parentRuntime.stop()
+            _ = try await fixture.parentProcess.prepareChildProofs(
+                for: carrier, children: [first], capacity: 16
+            )
+            let owed = try await fixture.parentProcess.pendingChildProofCarrierCIDs()
+            XCTAssertTrue(owed.contains(carrierCID), "\(owed)")
+            recorder.reset()
+            // Every pass waits until the test lets it through.
+            await fixture.parentRuntime.setChildProofRecoveryIterationForTesting {
+                await passes.wait()
+            }
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess,
+                chain: inertNetworkHandlers()
+            )
+            try await eventually("the reconnected child's push is held back") {
+                await fixture.parentRuntime.debugParentTipNaming().heldBack == ["Payments"]
+            }
+            let early = recorder.contexts(forTip: carrierCID)
+            XCTAssertEqual(early, [], "nothing on the carrier's tip before the pass")
+            await passes.open()
+            try await eventually("the context names the carried block") {
+                !recorder.contexts(forTip: carrierCID).isEmpty
+            }
+            XCTAssertEqual(
+                recorder.contexts(forTip: carrierCID).first?.carried, firstCID,
+                "the first context on the tip after the restart names the block"
+            )
+            await stopAll()
+        } catch {
+            await stopAll()
+            throw error
+        }
+    }
+
+    /// The parent reorgs off the carrier while the child's push is held
+    /// back behind the carried block's evidence (the recovery pass kept
+    /// running): the new tip carries nothing into the child, so its
+    /// context goes out at once, without waiting for the pass.
+    func testAReorgWhileThePushIsHeldBackSendsTheNewTip() async throws {
+        let fixture = try await provisionalRootFixture(keyByte: 0xda)
+        let parentService = networkService(
+            process: fixture.parentProcess,
+            runtime: fixture.parentRuntime
+        )
+        let builds = NetworkEventRecorder()
+        let recorder = ParentTipRecordingDelegate(forwardingTo: fixture.childRuntime)
+        let passes = Latch()
+        func stopAll() async {
+            await passes.open()
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+        }
+        do {
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess,
+                chain: inertNetworkHandlers()
+            )
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess,
+                chain: recordingChildHandlers(fixture, builds: builds, admits: false)
+            )
+            await fixture.childRuntime.hierarchy.installTestDelegate(recorder)
+            let first = try await firstHeldCandidate(fixture)
+            let base = try await fixture.parentProcess.validatedTipBlock()
+            await fixture.parentRuntime.setChildProofRecoveryIterationForTesting {
+                await passes.wait()
+            }
+            let carrier = try await storeCarrierBlock(
+                of: first, fixture: fixture, withEvidence: false
+            )
+            let carrierCID = try BlockHeader(node: carrier).rawCID
+            try await admitCarrierThroughService(
+                carrier, service: parentService, fixture: fixture
+            )
+            try await eventually("the push is held back behind the evidence") {
+                await fixture.parentRuntime.debugParentTipNaming().heldBack == ["Payments"]
+            }
+            let passesBefore = await fixture.parentRuntime.debugParentTipNaming().recoveryEnds
+
+            // A heavier branch on the carrier's parent, carrying nothing.
+            var tip = base
+            for step in 1...2 {
+                let unmined = try await BlockBuilder.buildBlock(
+                    previous: tip,
+                    timestamp: base.timestamp + 2_000 * Int64(step),
+                    nonce: 0,
+                    fetcher: fixture.parentProcess
+                )
+                let mined = try XCTUnwrap(BlockBuilder.mine(
+                    block: unmined, target: tip.nextTarget
+                ))
+                let admitted = try await fixture.parentProcess.importBlock(
+                    try BlockHeader(node: mined)
+                )
+                XCTAssertTrue(admitted.decision.isAccepted, "\(admitted.decision)")
+                tip = mined
+            }
+            let reorgCID = try BlockHeader(node: tip).rawCID
+            await fixture.parentRuntime.chainStateChanged()
+            try await eventually("the new tip's context reaches the child") {
+                !recorder.contexts(forTip: reorgCID).isEmpty
+            }
+            XCTAssertEqual(recorder.contexts(forTip: reorgCID).map(\.carried), [nil])
+            XCTAssertEqual(
+                recorder.contexts(forTip: carrierCID), [],
+                "the held-back context never went out"
+            )
+            let passesAfter = await fixture.parentRuntime.debugParentTipNaming().recoveryEnds
+            XCTAssertEqual(passesAfter, passesBefore, "sent before the pass ended")
+            await stopAll()
+        } catch {
+            await stopAll()
+            throw error
+        }
+    }
+
     /// A parent service whose tip push waits for `tipPush`: the test orders
     /// the parent's context after its evidence push (both follow a carrier's
     /// admission), so the round sent for the carried block serves it.
@@ -2003,6 +2507,20 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         fixture: ProvisionalRootFixture,
         withEvidence: Bool
     ) async throws -> BlockHeader {
+        try BlockHeader(node: try await storeCarrierBlock(
+            of: candidate, fixture: fixture, withEvidence: withEvidence
+        ))
+    }
+
+    /// `storeCarrier`, returning the block. Stored without its evidence,
+    /// the parent holds the carrier but not the child block it commits
+    /// (a block's content excludes its child blocks), so it cannot build
+    /// the child's proof until one is prepared from the block.
+    private func storeCarrierBlock(
+        of candidate: DirectChildCandidate,
+        fixture: ProvisionalRootFixture,
+        withEvidence: Bool
+    ) async throws -> Block {
         let parentTip = try await fixture.parentProcess.validatedTipBlock()
         let carrier = try await BlockBuilder.buildBlock(
             previous: parentTip,
@@ -2027,7 +2545,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 capacity: 16
             )
         }
-        return carrierHeader
+        return carrier
     }
 
     /// Admits the carrier on the parent. With `withEvidence`, through the

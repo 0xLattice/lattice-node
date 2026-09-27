@@ -768,6 +768,15 @@ struct ChildEvidenceIndexResponseMessage: NodeJSONMessage, Equatable, Sendable {
     }
 }
 
+/// The evidence a parent issued for a child block it carries: where in its
+/// evidence index it sits and what the child fetches to verify it.
+struct CarriedChildEvidence: Equatable, Sendable {
+    let sourceID: String
+    let summary: IssuedChildEvidenceSummary
+
+    var childCID: String { summary.childCID }
+}
+
 /// The parent's template context, pushed to its immediate child whenever it
 /// changes: the parent's validated tip block and the miner's reward plan and
 /// minimum work for the child's subtree. A child candidate is a function of

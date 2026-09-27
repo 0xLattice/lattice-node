@@ -1068,6 +1068,34 @@ extension NodeStore {
         )
     }
 
+    /// The first evidence issued for `childCID` into `directory`, under
+    /// any root: what a tip context names the carried block with. Nil
+    /// until the evidence is durably indexed.
+    func issuedChildEvidenceSummary(
+        childCID: String,
+        directory: String
+    ) throws -> (sourceID: String, summary: IssuedChildEvidenceSummary)? {
+        guard let row = try database.row(
+            ProofEdgeJoinRow.self,
+            "SELECT p.ordinal, p.root_cid, p.attachment_cid \(Self.proofEdgeJoinSQL) WHERE p.scope = ?1 AND e.child_cid = ?2 AND e.directory = ?3 AND p.ordinal IS NOT NULL ORDER BY p.ordinal LIMIT 1",
+            params: [
+                .text(IssuedChildProofScope.outgoingDirectChild.rawValue),
+                .text(childCID), .text(directory),
+            ]
+        ), let ordinal = try row.ordinal else {
+            return nil
+        }
+        return (
+            try issuedChildEvidenceScanHead(directory: directory).sourceID,
+            IssuedChildEvidenceSummary(
+                ordinal: ordinal,
+                childCID: childCID,
+                rootCID: try row.rootCID,
+                attachmentCID: try row.attachmentCID
+            )
+        )
+    }
+
     func childRootAttachmentSummaries(
         scope: IssuedChildProofScope,
         directory: String,

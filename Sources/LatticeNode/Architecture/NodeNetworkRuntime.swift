@@ -676,6 +676,18 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// Owner: Hierarchy.scheduleParentTipPush / Hierarchy.runParentTipPushes /
         ///     Lifecycle.clearRuntimeState.
         var parentTipPushDirty = false
+        /// Evidence for a carried block may have been issued, or a recovery
+        /// pass ended: the context re-reads its carried blocks' evidence on
+        /// the same tip. Nothing else can change what it names.
+        /// Owner: Hierarchy.carriedEvidenceMayHaveChanged /
+        ///     Hierarchy.refreshParentTipContext / Lifecycle.clearRuntimeState.
+        var carriedEvidenceDirty = false
+        /// Child-proof recovery passes ended this generation.
+        /// Owner: Hierarchy.recoverChildProofs / Lifecycle.clearRuntimeState.
+        var childProofRecoveryEnds: UInt64 = 0
+        /// Pushes held back behind a carried block's evidence, for tests.
+        /// Owner: Hierarchy.runParentTipPushes.
+        var parentTipHeldBackCount = 0
         /// Owner: Hierarchy.updateDescendantPlan / Lifecycle.clearRuntimeState.
         var descendantRewards: [MiningReward] = []
         /// Owner: Hierarchy.updateDescendantPlan / Lifecycle.clearRuntimeState.
@@ -820,13 +832,36 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let rewards: [MiningReward]
         let minimumWork: [MiningMinimumWork]
         /// Per child directory, the child block the tip's branch last
-        /// committed into it (the nearest committer's commitment): what a
-        /// child is told it was carried, and what a template does not
-        /// carry again.
-        let carriedChildren: [String: String]
+        /// committed into it (the nearest committer's commitment) and that
+        /// committer: what a template does not carry again.
+        let carried: [String: ChainProcess.CarriedChildBlock]
+        /// Per child directory, the evidence the context names its carried
+        /// block with: only evidence durably issued here, so a child told
+        /// it was carried can fetch the block at once. A carried block
+        /// without it is not named.
+        let named: [String: CarriedChildEvidence]
+        /// Directories whose push waits for the carried block's evidence:
+        /// not issued yet, its route owed, and no child-proof recovery
+        /// pass has ended since the wait began.
+        let heldBack: Set<String>
+        /// Per child directory, the wait on the carried block's evidence.
+        let evidenceWaits: [String: CarriedEvidenceWait]
         /// The child directories the context was minted for: a directory
         /// that connects later is owed a fresh context on the same tip.
         let directories: Set<String>
+
+        /// Per child directory, the child block the branch carries.
+        var carriedChildren: [String: String] { carried.mapValues(\.childCID) }
+    }
+    /// A wait on a carried block's evidence, per directory. `recoveryEnds`
+    /// is the child-proof recovery pass count when the wait began: the
+    /// first pass to end after it has done what this node can for the
+    /// evidence, so the wait is over. Nil when no route is owed (the proof
+    /// is published without evidence: a parent without the root yet), so
+    /// nothing is waited for.
+    struct CarriedEvidenceWait: Equatable {
+        let childCID: String
+        let recoveryEnds: UInt64?
     }
     /// The latest candidate each child peer pushed for this chain's tip. A
     /// template reads it; nothing is requested at template time.
@@ -1427,6 +1462,36 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// while the sending task is suspended.
     var hierarchySendReturnedForTesting:
         (@Sendable (String, SendMessageResult) async -> Void)?
+
+    /// Test seam: awaited at the start of each child-proof recovery
+    /// iteration, so a test can keep a pass running.
+    var childProofRecoveryIterationForTesting: (@Sendable () async -> Void)?
+
+    func setChildProofRecoveryIterationForTesting(
+        _ hook: (@Sendable () async -> Void)?
+    ) {
+        childProofRecoveryIterationForTesting = hook
+    }
+
+    /// What the parent's tip context names and holds back, for tests.
+    struct ParentTipNamingSnapshot: Sendable {
+        let tipCID: String?
+        let named: [String: String]
+        let heldBack: Set<String>
+        let heldBackCount: Int
+        let recoveryEnds: UInt64
+    }
+
+    func debugParentTipNaming() -> ParentTipNamingSnapshot {
+        let context = hierarchyState.parentTipContext
+        return ParentTipNamingSnapshot(
+            tipCID: context?.tipCID,
+            named: context?.named.mapValues(\.childCID) ?? [:],
+            heldBack: context?.heldBack ?? [],
+            heldBackCount: hierarchyState.parentTipHeldBackCount,
+            recoveryEnds: hierarchyState.childProofRecoveryEnds
+        )
+    }
 
     func setHierarchySendReturnedForTesting(
         _ hook: (@Sendable (String, SendMessageResult) async -> Void)?
