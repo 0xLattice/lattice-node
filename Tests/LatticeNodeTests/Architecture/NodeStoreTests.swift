@@ -7,10 +7,6 @@ import cashew
 @testable import Lattice
 @testable import LatticeNode
 
-private func testCID(_ seed: String) -> String {
-    try! HeaderImpl<PublicKey>(node: PublicKey(key: seed)).rawCID
-}
-
 final class NodeStoreTests: XCTestCase {
     private let genesisCID = NexusGenesis.expectedBlockHash
     private let parentProcessKey = String(repeating: "a", count: 64)

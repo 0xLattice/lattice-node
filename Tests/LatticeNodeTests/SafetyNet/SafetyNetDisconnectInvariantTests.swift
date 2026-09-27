@@ -36,13 +36,18 @@ import cashew
 ///
 /// `overlayRuntime` / `connectAndHello` are copies of the private helpers in
 /// `NetworkTrustTests`; `NetworkTransportTestPorts` is shared with that file.
-final class SafetyNetDisconnectInvariantTests: XCTestCase {
+final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
 
     func testDisconnectedPeersLeaveNoPerPeerRecordOnEitherPlane() async throws {
         // Long enough that neither the withheld volume fetch nor the range
         // sync can time out on its own during the test: every release below
         // must be attributable to the disconnect, not to a timer.
         let target = try await overlayRuntime(keyByte: 0xd1, requestTimeout: .seconds(60))
+        let hierarchyEndpoint = PeerEndpoint(
+            publicKey: target.process.configuration.processPublicKey,
+            host: "127.0.0.1",
+            port: target.process.configuration.factListenPort
+        )
         let overlayKey = signingKey(0xd2)
         let overlayPeer = Ivy(config: IvyConfig(
             signingKey: overlayKey,
@@ -126,7 +131,7 @@ final class SafetyNetDisconnectInvariantTests: XCTestCase {
 
             // Hierarchy: an immediate-child hello must earn the child role.
             try await childPeer.start()
-            try await childPeer.connect(to: target.hierarchyEndpoint)
+            try await childPeer.connect(to: hierarchyEndpoint)
             try await waitUntil("child peer connected on the hierarchy plane") {
                 (await childPeer.connectedPeers).contains(target.peerID)
             }
@@ -192,19 +197,7 @@ final class SafetyNetDisconnectInvariantTests: XCTestCase {
         await withholding.release()
     }
 
-    // MARK: - Helpers (copied from NetworkTrustTests, which keeps them private)
-
-    private func testCID(_ seed: String) -> String {
-        try! HeaderImpl<PublicKey>(node: PublicKey(key: seed)).rawCID
-    }
-
-    private func signingKey(_ byte: UInt8) -> Curve25519.Signing.PrivateKey {
-        try! Curve25519.Signing.PrivateKey(rawRepresentation: Data(repeating: byte, count: 32))
-    }
-
-    private func peerKey(_ key: Curve25519.Signing.PrivateKey) -> PeerKey {
-        try! PeerKey(rawRepresentation: key.publicKey.rawRepresentation)
-    }
+    // MARK: - Helpers (the runtime, keys and hello come from NetworkTrustTestCase)
 
     private func send(
         _ peer: Ivy, to peerID: PeerID, topic: String, payload: Data
@@ -231,93 +224,6 @@ final class SafetyNetDisconnectInvariantTests: XCTestCase {
         throw SafetyNetNetworkError.failedPhase(what)
     }
 
-    private func overlayRuntime(
-        keyByte: UInt8,
-        requestTimeout: Duration
-    ) async throws -> (
-        runtime: NodeNetworkRuntime,
-        process: ChainProcess,
-        peerID: PeerID,
-        endpoint: PeerEndpoint,
-        hierarchyEndpoint: PeerEndpoint,
-        hello: Data
-    ) {
-        let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-safety-net-disconnect-\(UUID().uuidString)",
-            isDirectory: true
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: storage) }
-        let overlayPort = NetworkTransportTestPorts.allocate()
-        let hierarchyPort = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: storage,
-            privateKeyHex: String(
-                repeating: String(format: "%02x", keyByte),
-                count: 32
-            ),
-            listenPort: overlayPort,
-            factListenPort: hierarchyPort,
-            rpcPort: NetworkTransportTestPorts.allocate()
-        )
-        let runtime = try NodeNetworkRuntime(
-            configuration: configuration,
-            planeConfigurations: try NodeNetworkPlaneConfigurations(
-                overlay: IvyConfig(
-                    signingKey: configuration.signingKey,
-                    listenPort: overlayPort,
-                    requestTimeout: requestTimeout,
-                    stunServers: [],
-                    healthConfig: PeerHealthConfig(enabled: false),
-                    mode: .overlay
-                ),
-                hierarchy: IvyConfig(
-                    signingKey: configuration.signingKey,
-                    listenPort: hierarchyPort,
-                    stunServers: [],
-                    maxConnections: IvyConfig.defaultMaxConnections,
-                    maxConnectionsPerNetgroup: IvyConfig.defaultMaxConnections,
-                    relayEnabled: false,
-                    carriers: [],
-                    mode: .privateNetwork
-                )
-            )
-        )
-        let process = try await ChainProcess.open(configuration: configuration)
-        return (
-            runtime,
-            process,
-            PeerID(publicKey: configuration.processPublicKey),
-            PeerEndpoint(
-                publicKey: configuration.processPublicKey,
-                host: "127.0.0.1",
-                port: overlayPort
-            ),
-            PeerEndpoint(
-                publicKey: configuration.processPublicKey,
-                host: "127.0.0.1",
-                port: hierarchyPort
-            ),
-            try ChainHello(
-                nexusGenesisCID: configuration.nexusGenesisCID,
-                chainPath: configuration.chainPath
-            ).encode()
-        )
-    }
-
-    private func connectAndHello(
-        _ peer: Ivy,
-        peerID: PeerID,
-        endpoint: PeerEndpoint,
-        hello: Data
-    ) async throws {
-        try await peer.start()
-        try await peer.connect(to: endpoint)
-        try await waitUntil("overlay peer connected") {
-            (await peer.connectedPeers).contains(peerID)
-        }
-        try await send(peer, to: peerID, topic: NodeNetworkTopic.overlayHello, payload: hello)
-    }
 }
 
 private enum SafetyNetNetworkError: Error {
