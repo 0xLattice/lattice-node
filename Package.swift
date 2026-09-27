@@ -169,7 +169,8 @@ let package = Package(
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "HummingbirdTesting", package: "hummingbird"),
             ],
-            path: "Tests/LatticeNodeTests/Architecture"),
+            path: "Tests/LatticeNodeTests",
+            exclude: ["SafetyNet/Goldens"]),
         .testTarget(
             name: "LatticeNodeE2ETests",
             dependencies: [
