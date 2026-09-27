@@ -338,9 +338,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
         var helloDeadline: HelloDeadline?
         /// Carries its own session ID (see `FrontierPull`).
         var frontierPull: FrontierPull?
+        /// The tallest tip the peer announced, with the session it came on.
+        /// Kept across a reconnect: every reader compares its session.
+        var announcedTip: (height: UInt64, peer: AuthenticatedPeer)?
 
         var isEmpty: Bool {
             session == nil && helloDeadline == nil && frontierPull == nil
+                && announcedTip == nil
         }
 
         /// The session whose hello was accepted.
@@ -377,6 +381,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
             let deadline = record.helloDeadline
             record.helloDeadline = nil
             return deadline
+        }
+    }
+
+    /// Every recorded announced tip with its key, as a snapshot.
+    private var recordedAnnouncedTips: [
+        (key: PeerKey, value: (height: UInt64, peer: AuthenticatedPeer))
+    ] {
+        overlayRecords.records.compactMap { key, record in
+            record.announcedTip.map { (key: key, value: $0) }
         }
     }
 
@@ -529,7 +542,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private var parentStateQueryGuard = ParentStateQueryGuard(
         capacity: NodeNetworkRuntime.maximumConcurrentParentStateQueries
     )
-    private var announcedTips: [PeerKey: (height: UInt64, peer: AuthenticatedPeer)] = [:]
     private var rangeSyncReentryTask: Task<Void, Never>?
     private var activeEvidenceVolumes = Set<EvidenceVolumeLease>()
     private var portableEvidenceOrder: [EvidenceVolumeLease] = []
@@ -984,7 +996,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         pendingGenesisResolves.removeAll()
         parentStateQueryGuard.removeAll()
-        announcedTips.removeAll()
         rangeSyncReentryTask?.cancel()
         rangeSyncReentryTask = nil
         activeEvidenceVolumes.removeAll()
@@ -2438,7 +2449,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 clearRangeSync()
             }
             overlayRecords.update(key) { $0.session = nil }
-            announcedTips.removeValue(forKey: key)
+            overlayRecords.update(key) { $0.announcedTip = nil }
             let disconnectedInventories = pendingTransactionInventories.filter {
                 $0.value.peer.key == key
             }
@@ -2763,11 +2774,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     // Remember the claim so a cleared range sync can re-enter
                     // on the receiver's own initiative: on a quiet network no
                     // further announcement ever arrives to restart it.
-                    let known = announcedTips[peer.key]?.height ?? 0
+                    let known = overlayRecords[peer.key]?.announcedTip?.height ?? 0
                     if announced > known
-                        || announcedTips[peer.key]?.peer.sessionID
+                        || overlayRecords[peer.key]?.announcedTip?.peer.sessionID
                             != peer.sessionID {
-                        announcedTips[peer.key] = (announced, peer)
+                        overlayRecords.update(peer.key) {
+                            $0.announcedTip = (announced, peer)
+                        }
                     }
                 }
                 if let announced = announcement.height,
@@ -2788,7 +2801,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // recorded one), so a losing-sibling announcement below its tip
             // cannot read as "at edge" while we are still deep.
             if let announced = announcement.height {
-                let recorded = announcedTips[peer.key]
+                let recorded = overlayRecords[peer.key]?.announcedTip
                 let peerHeight = recorded?.peer.sessionID == peer.sessionID
                     ? max(announced, recorded?.height ?? 0)
                     : announced
@@ -4698,7 +4711,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         keys.formUnion(pendingGenesisVerifications.values.map(\.peer.key))
         keys.formUnion(pendingGenesisResolves.values.map(\.peer.key))
         keys.formUnion(parentStateQueryGuard.peers)
-        keys.formUnion(announcedTips.keys)
         keys.formUnion(portableEvidenceWork.values.map(\.peer.key))
         keys.formUnion(pushedParentTipSequence.keys)
         keys.formUnion(childCandidateOffers.keys)
@@ -4717,7 +4729,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         sessions.formUnion(portableEvidenceOrder.map(\.sessionID))
 
         let overlayKeys = Set(overlayRecords.keys)
-            .union(announcedTips.keys)
         var overlaySnapshot: [PeerKey: NetworkDebugSnapshot.OverlayPeer] = [:]
         for key in overlayKeys {
             overlaySnapshot[key] = NetworkDebugSnapshot.OverlayPeer(
@@ -5800,9 +5811,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // must keep actively re-announcing to re-capture the slot).
         guard enqueued > 0, let lastCID else {
             var claimed: UInt64?
-            if let claim = announcedTips[peer.key],
+            if let claim = overlayRecords[peer.key]?.announcedTip,
                claim.peer.sessionID == peer.sessionID {
-                announcedTips.removeValue(forKey: peer.key)
+                overlayRecords.update(peer.key) { $0.announcedTip = nil }
                 claimed = claim.height
             }
             clearRangeSync()
@@ -5927,8 +5938,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // never conclude "caught up".
         guard let ancestor = response.commonAncestor else {
             SyncTrace.log("ancestor-range no-overlap peer=\(peer.key.hex.prefix(8))")
-            if announcedTips[peer.key]?.peer.sessionID == peer.sessionID {
-                announcedTips.removeValue(forKey: peer.key)
+            if overlayRecords[peer.key]?.announcedTip?.peer.sessionID == peer.sessionID {
+                overlayRecords.update(peer.key) { $0.announcedTip = nil }
             }
             clearRangeSync()
             return
@@ -5969,9 +5980,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // forever. A fresh announcement re-records it. Caught up to an
             // honest claim, this is the edge moment for its frontier pull.
             var claimed: UInt64?
-            if let claim = announcedTips[peer.key],
+            if let claim = overlayRecords[peer.key]?.announcedTip,
                claim.peer.sessionID == peer.sessionID {
-                announcedTips.removeValue(forKey: peer.key)
+                overlayRecords.update(peer.key) { $0.announcedTip = nil }
                 claimed = claim.height
             }
             clearRangeSync()
@@ -6078,9 +6089,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // withholding a block we need. Demote its recorded claim (see the
             // empty-page site) and release the slot so a different deep
             // peer can drive catch-up instead.
-            if announcedTips[current.peer.key]?.peer.sessionID
+            if overlayRecords[current.peer.key]?.announcedTip?.peer.sessionID
                 == current.peer.sessionID {
-                announcedTips.removeValue(forKey: current.peer.key)
+                overlayRecords.update(current.peer.key) { $0.announcedTip = nil }
             }
             clearRangeSync()
             return
@@ -6149,7 +6160,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// still far behind would idle forever. Re-entry is the receiver's own
     /// assessment, probed one request-timeout after each clear.
     private func scheduleRangeSyncReentry() {
-        guard rangeSyncReentryTask == nil, !announcedTips.isEmpty else {
+        guard rangeSyncReentryTask == nil, !recordedAnnouncedTips.isEmpty else {
             return
         }
         let generation = runtimeGeneration
@@ -6171,7 +6182,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // Every recorded peer we are now at the edge with (the sync that just
         // cleared brought us there, or nothing beyond the edge remains) gets
         // its one frontier pull; the helper re-checks the edge per peer.
-        for (key, claim) in announcedTips.sorted(by: { $0.key.hex < $1.key.hex })
+        for (key, claim) in recordedAnnouncedTips.sorted(by: { $0.key.hex < $1.key.hex })
             where overlayRecords[key]?.readyPeer?.sessionID == claim.peer.sessionID {
             await pullFrontierIfAtEdge(
                 from: claim.peer,
@@ -6182,7 +6193,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard isCurrentRuntime(generation: generation, process: process),
                   rangeSync == nil else { return }
         }
-        let candidates = announcedTips.filter { key, value in
+        let candidates = recordedAnnouncedTips.filter { key, value in
             overlayRecords[key]?.readyPeer?.sessionID == value.peer.sessionID
                 && value.height > ourHeight + Self.rangeSyncDepthThreshold
         }
