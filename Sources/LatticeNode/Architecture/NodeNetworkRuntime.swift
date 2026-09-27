@@ -283,13 +283,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// The overlay sessions whose hello was accepted, as a snapshot (a
     /// send loop over it is unaffected by a record removed mid-loop).
     var readyOverlayPeers: [AuthenticatedPeer] {
-        overlayRecords.records.values.compactMap(\.readyPeer)
+        overlayState.overlayRecords.records.values.compactMap(\.readyPeer)
     }
 
     /// Takes the key's overlay hello deadline out of its record.
     @discardableResult
     func removeOverlayHelloDeadline(for key: PeerKey) -> HelloDeadline? {
-        overlayRecords.update(key) { record in
+        overlayState.overlayRecords.update(key) { record in
             let deadline = record.helloDeadline
             record.helloDeadline = nil
             return deadline
@@ -300,7 +300,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     var recordedAnnouncedTips: [
         (key: PeerKey, value: (height: UInt64, peer: AuthenticatedPeer))
     ] {
-        overlayRecords.records.compactMap { key, record in
+        overlayState.overlayRecords.records.compactMap { key, record in
             record.announcedTip.map { (key: key, value: $0) }
         }
     }
@@ -338,24 +338,24 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
 
     func isChildEvidenceReady(_ key: PeerKey) -> Bool {
-        hierarchyRecords[key]?.evidence.ready == true
+        hierarchyState.hierarchyRecords[key]?.evidence.ready == true
     }
 
     /// Every refused evidence hint with its key, as a snapshot.
     var recordedRefusedHints: [(key: PeerKey, value: Data)] {
-        hierarchyRecords.records.compactMap { key, record in
+        hierarchyState.hierarchyRecords.records.compactMap { key, record in
             record.refusedHint.map { (key: key, value: $0) }
         }
     }
 
     /// Whether any wired child declared a public read URL.
     var anyChildDeclaredReadURL: Bool {
-        hierarchyRecords.records.values.contains { $0.declaredReadURL != nil }
+        hierarchyState.hierarchyRecords.records.values.contains { $0.declaredReadURL != nil }
     }
 
     /// Every hierarchy peer's role with its key, as a snapshot.
     var hierarchyRoles: [(key: PeerKey, value: HierarchyPeer)] {
-        hierarchyRecords.records.compactMap { key, record in
+        hierarchyState.hierarchyRecords.records.compactMap { key, record in
             record.role.map { (key: key, value: $0) }
         }
     }
@@ -363,7 +363,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// Takes the key's hierarchy hello deadline out of its record.
     @discardableResult
     func removeHierarchyHelloDeadline(for key: PeerKey) -> HelloDeadline? {
-        hierarchyRecords.update(key) { record in
+        hierarchyState.hierarchyRecords.update(key) { record in
             let deadline = record.helloDeadline
             record.helloDeadline = nil
             return deadline
@@ -545,40 +545,170 @@ public actor NodeNetworkRuntime: IvyDelegate {
     var process: ChainProcess?
     /// Owner: Lifecycle.startNow / Lifecycle.stopNow.
     var isRunning = false
-    /// Per overlay peer key: the one authenticated session (pre- or
-    /// post-hello) and the state bound to it.
-    /// Owner: Lifecycle.clearRuntimeState / Overlay.handleOverlay /
-    ///     Overlay.scheduleOverlayHelloDeadline / Overlay.overlayHelloTimedOut /
-    ///     Overlay.pullFrontierIfAtEdge / RangeSync.handleForwardRangeResponse /
-    ///     RangeSync.handleAncestorRangeResponse / RangeSync.rangeSyncProgressDeadline /
-    ///     NodeNetworkRuntime.removeOverlayHelloDeadline / NodeNetworkRuntime.didConnect /
-    ///     NodeNetworkRuntime.didDisconnect.
-    var overlayRecords = PeerSet<OverlayPeerRecord>()
-    /// Per hierarchy peer key: the state bound to its connection.
-    /// Owner: Hierarchy.resendRefusedChildEvidenceHints / Hierarchy.pushParentTipContext /
-    ///     Hierarchy.waitForChildEvidenceReady / Hierarchy.markChildEvidenceReady /
-    ///     Hierarchy.cancelChildEvidenceReadyWaiters /
-    ///     Hierarchy.announceChildEvidenceAvailability /
-    ///     Hierarchy.finishChildEvidencePublication / Hierarchy.completeChildEvidenceIndex /
-    ///     Hierarchy.clearHierarchyAuthorization / Hierarchy.handleHierarchy /
-    ///     Hierarchy.handleHierarchyHello / Hierarchy.scheduleHierarchyHelloDeadline /
-    ///     Lifecycle.clearRuntimeState / NodeNetworkRuntime.removeHierarchyHelloDeadline.
-    var hierarchyRecords = PeerSet<HierarchyPeerRecord>()
-    /// Run reports apply one after another off the delivery path; one
-    /// handle, cancelled with the runtime.
-    /// Owner: Hierarchy.handleHierarchy / Lifecycle.clearRuntimeState.
-    var runReportApplyTail: Task<Void, Never>?
+    /// Overlay-plane state: sessions and records of the public overlay,
+    /// its request tables, range sync, read-URL discovery, peer search and
+    /// the portable-evidence worker. Only overlay code touches it; the
+    /// hierarchy side reaches it through the named seams.
+    struct OverlayState {
+        /// Per overlay peer key: the one authenticated session (pre- or
+        /// post-hello) and the state bound to it.
+        /// Owner: Lifecycle.clearRuntimeState / Overlay.handleOverlay /
+        ///     Overlay.scheduleOverlayHelloDeadline / Overlay.overlayHelloTimedOut /
+        ///     Overlay.pullFrontierIfAtEdge / RangeSync.handleForwardRangeResponse /
+        ///     RangeSync.handleAncestorRangeResponse / RangeSync.rangeSyncProgressDeadline /
+        ///     NodeNetworkRuntime.removeOverlayHelloDeadline / NodeNetworkRuntime.didConnect /
+        ///     NodeNetworkRuntime.didDisconnect.
+        var overlayRecords = PeerSet<OverlayPeerRecord>()
+        /// Owner: Lifecycle.clearRuntimeState / Overlay.requestTransactionInventory /
+        ///     Overlay.transactionInventoryTimedOut / Overlay.scheduleTransactionInventory /
+        ///     NodeNetworkRuntime.purgeRequests.
+        var pendingTransactionInventories:
+            [UInt64: PendingTransactionInventory] = [:]
+        /// Owner: Lifecycle.clearRuntimeState / Overlay.handleOverlay /
+        ///     ReadURL.discoverProviderReadURLs / ReadURL.performReadURLDiscovery /
+        ///     ReadURL.readEndpointAskTimedOut / NodeNetworkRuntime.purgeRequests.
+        var readURLDiscovery = ReadURLDiscovery()
+        /// Owner: Lifecycle.clearRuntimeState / RangeSync.startRangeSync /
+        ///     RangeSync.pumpRangeSync / RangeSync.handleForwardRangeResponse /
+        ///     RangeSync.sendAncestorRangeRequest / RangeSync.handleAncestorRangeResponse /
+        ///     RangeSync.scheduleRangeSyncProgress / RangeSync.rangeSyncProgressDeadline /
+        ///     RangeSync.rangeSyncTimedOut / RangeSync.clearRangeSync /
+        ///     RangeSync.scheduleRangeSyncReentry / RangeSync.maybeRestartRangeSync.
+        var rangeSync = RangeSync()
+        /// Widens the peer search while this node's own acquired tip stands still,
+        /// so an eclipsed or stalled node goes looking instead of waiting on the
+        /// peers it already holds.
+        /// Owner: Lifecycle.clearRuntimeState / NodeNetworkRuntime.schedulePeerSearch.
+        var peerSearchTask: Task<Void, Never>?
+        /// Owner: Lifecycle.clearRuntimeState / Overlay.startPortableEvidenceWorker /
+        ///     Overlay.drainPortableEvidence.
+        var portableEvidenceWorker: Task<Void, Never>?
+    }
+
+    /// Hierarchy-plane state: parent/child sessions and records, their
+    /// request tables, the parent tip context pushed down and the one
+    /// received from the parent, the child candidate offer and the carried
+    /// hold, and the child rotations. Only hierarchy code touches it; the
+    /// overlay side reaches it through the named seams.
+    struct HierarchyState {
+        /// Per hierarchy peer key: the state bound to its connection.
+        /// Owner: Hierarchy.resendRefusedChildEvidenceHints / Hierarchy.pushParentTipContext /
+        ///     Hierarchy.waitForChildEvidenceReady / Hierarchy.markChildEvidenceReady /
+        ///     Hierarchy.cancelChildEvidenceReadyWaiters /
+        ///     Hierarchy.announceChildEvidenceAvailability /
+        ///     Hierarchy.finishChildEvidencePublication / Hierarchy.completeChildEvidenceIndex /
+        ///     Hierarchy.clearHierarchyAuthorization / Hierarchy.handleHierarchy /
+        ///     Hierarchy.handleHierarchyHello / Hierarchy.scheduleHierarchyHelloDeadline /
+        ///     Lifecycle.clearRuntimeState / NodeNetworkRuntime.removeHierarchyHelloDeadline.
+        var hierarchyRecords = PeerSet<HierarchyPeerRecord>()
+        /// Run reports apply one after another off the delivery path; one
+        /// handle, cancelled with the runtime.
+        /// Owner: Hierarchy.handleHierarchy / Lifecycle.clearRuntimeState.
+        var runReportApplyTail: Task<Void, Never>?
+        /// Owner: Hierarchy.scheduleChildProofRecovery / Hierarchy.recoverChildProofs /
+        ///     Lifecycle.clearRuntimeState.
+        var childProofRecoveryTask: Task<Void, Never>?
+        /// Owner: Hierarchy.scheduleChildProofRecovery / Hierarchy.recoverChildProofs /
+        ///     Lifecycle.clearRuntimeState.
+        var childProofRecoveryGeneration: UInt64?
+        /// Drives a child this node ADOPTED (no local genesis seed) out of
+        /// `awaitingGenesis` by resolving its recorded genesis CID off the
+        /// authenticated parent and fetching+admitting the self-contained genesis.
+        /// Owner: Hierarchy.scheduleAdoptedGenesisBootstrap / Lifecycle.clearRuntimeState.
+        var adoptedGenesisTask: Task<Void, Never>?
+        /// Owner: Hierarchy.scheduleChildProofRecovery / Hierarchy.recoverChildProofs /
+        ///     Lifecycle.clearRuntimeState.
+        var childProofRecoveryNeedsRefresh = false
+        /// Owner: Hierarchy.handleHierarchy / Hierarchy.requestEvidenceIndex /
+        ///     Hierarchy.evidenceIndexRequestTimedOut / Lifecycle.clearRuntimeState /
+        ///     NodeNetworkRuntime.purgeRequests.
+        var pendingEvidenceIndexes: [UInt64: PendingChildEvidenceIndex] = [:]
+        /// Owner: Hierarchy.handleHierarchy / Hierarchy.discardPendingParentChainFacts /
+        ///     Hierarchy.requestParentChainFact / Hierarchy.parentChainFactRequestTimedOut.
+        var pendingParentChainFacts:
+            [UInt64: PendingParentChainFact] = [:]
+        /// Owner: Hierarchy.confirmParentRecordedChildGenesis /
+        ///     Hierarchy.resolveGenesisVerification / Lifecycle.clearRuntimeState.
+        var pendingGenesisVerifications:
+            [UInt64: PendingGenesisVerification] = [:]
+        /// Owner: Hierarchy.resolveParentAnchoredGenesis / Hierarchy.resolveGenesisAnchor /
+        ///     Lifecycle.clearRuntimeState.
+        var pendingGenesisResolves:
+            [UInt64: PendingGenesisResolve] = [:]
+        /// Owner: Hierarchy.refreshParentTipContext / Lifecycle.clearRuntimeState.
+        var parentTipContext: ParentTipContext?
+        /// Owner: Hierarchy.refreshParentTipContext.
+        var nextParentTipSequence: UInt64 = 0
+        /// Owner: Hierarchy.scheduleParentTipPush / Hierarchy.runParentTipPushes /
+        ///     Lifecycle.clearRuntimeState.
+        var parentTipPushTask: Task<Void, Never>?
+        /// Owner: Hierarchy.scheduleParentTipPush / Hierarchy.runParentTipPushes /
+        ///     Lifecycle.clearRuntimeState.
+        var parentTipPushDirty = false
+        /// Owner: Hierarchy.updateDescendantPlan / Lifecycle.clearRuntimeState.
+        var descendantRewards: [MiningReward] = []
+        /// Owner: Hierarchy.updateDescendantPlan / Lifecycle.clearRuntimeState.
+        var descendantMinimumWork: [MiningMinimumWork] = []
+        /// Owner: Hierarchy.clearHierarchyAuthorization / Hierarchy.handleHierarchy /
+        ///     Lifecycle.clearRuntimeState.
+        var receivedParentTip: ReceivedParentTipContext?
+        /// A carried block the parent named that this chain will not wait for:
+        /// its admission decided against it, or a scan round asked for after
+        /// the naming ended without it and nothing tracks it. The hold on it is
+        /// released, or no offer would ever follow. One at a time, like the
+        /// context that names it.
+        /// Owner: Candidates.importCandidate / Hierarchy.clearHierarchyAuthorization /
+        ///     Hierarchy.reviewCarriedChildHold / Lifecycle.clearRuntimeState.
+        var releasedCarriedChildCID: String?
+        /// The carried block an evidence scan was sent for (not merely asked
+        /// for: a request while a round is in flight sends nothing), so one
+        /// carry costs one round, and a round that ends without the block
+        /// releases the hold.
+        /// Owner: Hierarchy.clearHierarchyAuthorization / Hierarchy.reviewCarriedChildHold /
+        ///     Hierarchy.handleHierarchy / Lifecycle.clearRuntimeState.
+        var requestedCarriedChildCID: String?
+        /// Times the offer held behind a carried block, for tests.
+        /// Owner: Hierarchy.offerCandidate.
+        var carriedHoldCount = 0
+        /// One coalescing offer task: an input change while a build runs marks it
+        /// dirty and the task runs again; nothing is queued.
+        /// Owner: Hierarchy.scheduleCandidateOffer / Hierarchy.runCandidateOffers /
+        ///     Lifecycle.clearRuntimeState.
+        var candidateOfferTask: Task<Void, Never>?
+        /// Owner: Hierarchy.scheduleCandidateOffer / Hierarchy.runCandidateOffers /
+        ///     Lifecycle.clearRuntimeState.
+        var candidateOfferDirty = false
+        /// Owner: Hierarchy.offerCandidate / Lifecycle.clearRuntimeState.
+        var nextCandidateOfferSequence: UInt64 = 0
+        /// Owner: Hierarchy.offerCandidate / Hierarchy.clearHierarchyAuthorization /
+        ///     Lifecycle.clearRuntimeState.
+        var lastOfferedCandidateCID: String?
+        /// Owner: Hierarchy.clearHierarchyAuthorization / Hierarchy.selectedChildPeers /
+        ///     Lifecycle.clearRuntimeState.
+        var childPeerRotation: [String: Int] = [:]
+        /// Owner: Hierarchy.selectedChildPeers / Lifecycle.clearRuntimeState.
+        var childPathRotation = 0
+        /// Owner: Hierarchy.authenticatedChildDirectories / Lifecycle.clearRuntimeState.
+        var childProofPathRotation = 0
+        /// Directories already backfilled this generation, so the late-child
+        /// evidence backfill runs once per connection instead of on every recovery
+        /// pass (which would churn routes for non-committing carriers). Cleared when
+        /// a directory's last child peer disconnects and on generation reset.
+        /// Owner: Hierarchy.clearHierarchyAuthorization / Hierarchy.recoverChildProofs /
+        ///     Lifecycle.clearRuntimeState.
+        var backfilledChildDirectories: Set<String> = []
+    }
+
+    /// Owner: overlay code (+Overlay, +RangeSync, overlay +ReadURL).
+    var overlayState = OverlayState()
+    /// Owner: hierarchy code (+Hierarchy, hierarchy +ReadURL).
+    var hierarchyState = HierarchyState()
     /// Owner: Candidates.scheduleWaitingCandidateRetry / Candidates.retryWaitingCandidates /
     ///     Lifecycle.clearRuntimeState.
     var waitingCandidateRetryTask: Task<Void, Never>?
     /// Owner: Candidates.scheduleWaitingCandidateRetry / Candidates.retryWaitingCandidates /
     ///     Lifecycle.clearRuntimeState.
     var waitingCandidateRetryGeneration: UInt64?
-    /// Owner: Lifecycle.clearRuntimeState / Overlay.requestTransactionInventory /
-    ///     Overlay.transactionInventoryTimedOut / Overlay.scheduleTransactionInventory /
-    ///     NodeNetworkRuntime.purgeRequests.
-    var pendingTransactionInventories:
-        [UInt64: PendingTransactionInventory] = [:]
     /// The one frontier (accepted-leaves) pull per overlay session: sent once
     /// we are at the live edge with respect to the peer, answered by exactly
     /// the page whose requestID matches (`requestID` is cleared on receipt).
@@ -587,43 +717,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let sessionID: Data
         var requestID: UInt64?
     }
-    /// Owner: Lifecycle.clearRuntimeState / Overlay.handleOverlay /
-    ///     ReadURL.discoverProviderReadURLs / ReadURL.performReadURLDiscovery /
-    ///     ReadURL.readEndpointAskTimedOut / NodeNetworkRuntime.purgeRequests.
-    var readURLDiscovery = ReadURLDiscovery()
-    /// Owner: Lifecycle.clearRuntimeState / RangeSync.startRangeSync /
-    ///     RangeSync.pumpRangeSync / RangeSync.handleForwardRangeResponse /
-    ///     RangeSync.sendAncestorRangeRequest / RangeSync.handleAncestorRangeResponse /
-    ///     RangeSync.scheduleRangeSyncProgress / RangeSync.rangeSyncProgressDeadline /
-    ///     RangeSync.rangeSyncTimedOut / RangeSync.clearRangeSync /
-    ///     RangeSync.scheduleRangeSyncReentry / RangeSync.maybeRestartRangeSync.
-    var rangeSync = RangeSync()
-    /// Owner: Hierarchy.scheduleChildProofRecovery / Hierarchy.recoverChildProofs /
-    ///     Lifecycle.clearRuntimeState.
-    var childProofRecoveryTask: Task<Void, Never>?
-    /// Owner: Hierarchy.scheduleChildProofRecovery / Hierarchy.recoverChildProofs /
-    ///     Lifecycle.clearRuntimeState.
-    var childProofRecoveryGeneration: UInt64?
     /// Periodically re-announces this node as a DHT provider of its chain's
     /// genesis block, so other nodes (and the explorer's /api/chain/endpoints)
     /// can discover it via `findProviders(genesisCID)` with no registry.
     /// Owner: Lifecycle.clearRuntimeState / NodeNetworkRuntime.scheduleGenesisProviderAnnounce.
     var genesisAnnounceTask: Task<Void, Never>?
-    /// Drives a child this node ADOPTED (no local genesis seed) out of
-    /// `awaitingGenesis` by resolving its recorded genesis CID off the
-    /// authenticated parent and fetching+admitting the self-contained genesis.
-    /// Owner: Hierarchy.scheduleAdoptedGenesisBootstrap / Lifecycle.clearRuntimeState.
-    var adoptedGenesisTask: Task<Void, Never>?
-    /// Widens the peer search while this node's own acquired tip stands still,
-    /// so an eclipsed or stalled node goes looking instead of waiting on the
-    /// peers it already holds.
-    /// Owner: Lifecycle.clearRuntimeState / NodeNetworkRuntime.schedulePeerSearch.
-    var peerSearchTask: Task<Void, Never>?
     /// Endpoints dialled from the one provider lookup a widening performs.
     private static let maximumPeerSearchDials = 4
-    /// Owner: Hierarchy.scheduleChildProofRecovery / Hierarchy.recoverChildProofs /
-    ///     Lifecycle.clearRuntimeState.
-    var childProofRecoveryNeedsRefresh = false
     /// Owner: Candidates.enqueueCandidate / Candidates.completeCandidate /
     ///     Candidates.retryWaitingCandidates / Hierarchy.offerCandidate /
     ///     Hierarchy.reviewCarriedChildHold / Hierarchy.adoptedGenesisBootstrapLoop /
@@ -637,22 +737,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// Owner: Candidates.startCandidateWorker / Candidates.finishCandidateWorker /
     ///     Lifecycle.clearRuntimeState.
     var candidateWorkerGeneration: UInt64?
-    /// Owner: Hierarchy.handleHierarchy / Hierarchy.requestEvidenceIndex /
-    ///     Hierarchy.evidenceIndexRequestTimedOut / Lifecycle.clearRuntimeState /
-    ///     NodeNetworkRuntime.purgeRequests.
-    var pendingEvidenceIndexes: [UInt64: PendingChildEvidenceIndex] = [:]
-    /// Owner: Hierarchy.handleHierarchy / Hierarchy.discardPendingParentChainFacts /
-    ///     Hierarchy.requestParentChainFact / Hierarchy.parentChainFactRequestTimedOut.
-    var pendingParentChainFacts:
-        [UInt64: PendingParentChainFact] = [:]
-    /// Owner: Hierarchy.confirmParentRecordedChildGenesis /
-    ///     Hierarchy.resolveGenesisVerification / Lifecycle.clearRuntimeState.
-    var pendingGenesisVerifications:
-        [UInt64: PendingGenesisVerification] = [:]
-    /// Owner: Hierarchy.resolveParentAnchoredGenesis / Hierarchy.resolveGenesisAnchor /
-    ///     Lifecycle.clearRuntimeState.
-    var pendingGenesisResolves:
-        [UInt64: PendingGenesisResolve] = [:]
     /// Owner: Hierarchy.handleHierarchy / Lifecycle.clearRuntimeState / Overlay.handleOverlay.
     var parentStateQueryGuard = ParentStateQueryGuard(
         capacity: NodeNetworkRuntime.maximumConcurrentParentStateQueries
@@ -663,9 +747,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ///     Overlay.drainPortableEvidence / Overlay.recoverPortableAttachment /
     ///     Overlay.discardServingSessions.
     var sessionLeases = SessionLeases()
-    /// Owner: Lifecycle.clearRuntimeState / Overlay.startPortableEvidenceWorker /
-    ///     Overlay.drainPortableEvidence.
-    var portableEvidenceWorker: Task<Void, Never>?
     /// Orders parent evidence and reservation transfer within one authenticated
     /// session. Transport effects remain in this actor.
     /// Owner: Candidates.importCandidate / Hierarchy.appendParentEvidence /
@@ -693,20 +774,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// that connects later is owed a fresh context on the same tip.
         let directories: Set<String>
     }
-    /// Owner: Hierarchy.refreshParentTipContext / Lifecycle.clearRuntimeState.
-    var parentTipContext: ParentTipContext?
-    /// Owner: Hierarchy.refreshParentTipContext.
-    var nextParentTipSequence: UInt64 = 0
-    /// Owner: Hierarchy.scheduleParentTipPush / Hierarchy.runParentTipPushes /
-    ///     Lifecycle.clearRuntimeState.
-    var parentTipPushTask: Task<Void, Never>?
-    /// Owner: Hierarchy.scheduleParentTipPush / Hierarchy.runParentTipPushes /
-    ///     Lifecycle.clearRuntimeState.
-    var parentTipPushDirty = false
-    /// Owner: Hierarchy.updateDescendantPlan / Lifecycle.clearRuntimeState.
-    var descendantRewards: [MiningReward] = []
-    /// Owner: Hierarchy.updateDescendantPlan / Lifecycle.clearRuntimeState.
-    var descendantMinimumWork: [MiningMinimumWork] = []
     /// The latest candidate each child peer pushed for this chain's tip. A
     /// template reads it; nothing is requested at template time.
     struct CachedChildCandidate {
@@ -734,59 +801,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// chain, as the parent named it; nil when it named none.
         let carriedChildCID: String?
     }
-    /// Owner: Hierarchy.clearHierarchyAuthorization / Hierarchy.handleHierarchy /
-    ///     Lifecycle.clearRuntimeState.
-    var receivedParentTip: ReceivedParentTipContext?
-    /// A carried block the parent named that this chain will not wait for:
-    /// its admission decided against it, or a scan round asked for after
-    /// the naming ended without it and nothing tracks it. The hold on it is
-    /// released, or no offer would ever follow. One at a time, like the
-    /// context that names it.
-    /// Owner: Candidates.importCandidate / Hierarchy.clearHierarchyAuthorization /
-    ///     Hierarchy.reviewCarriedChildHold / Lifecycle.clearRuntimeState.
-    var releasedCarriedChildCID: String?
-    /// The carried block an evidence scan was sent for (not merely asked
-    /// for: a request while a round is in flight sends nothing), so one
-    /// carry costs one round, and a round that ends without the block
-    /// releases the hold.
-    /// Owner: Hierarchy.clearHierarchyAuthorization / Hierarchy.reviewCarriedChildHold /
-    ///     Hierarchy.handleHierarchy / Lifecycle.clearRuntimeState.
-    var requestedCarriedChildCID: String?
-    /// Times the offer held behind a carried block, for tests.
-    /// Owner: Hierarchy.offerCandidate.
-    var carriedHoldCount = 0
-    /// One coalescing offer task: an input change while a build runs marks it
-    /// dirty and the task runs again; nothing is queued.
-    /// Owner: Hierarchy.scheduleCandidateOffer / Hierarchy.runCandidateOffers /
-    ///     Lifecycle.clearRuntimeState.
-    var candidateOfferTask: Task<Void, Never>?
-    /// Owner: Hierarchy.scheduleCandidateOffer / Hierarchy.runCandidateOffers /
-    ///     Lifecycle.clearRuntimeState.
-    var candidateOfferDirty = false
-    /// Owner: Hierarchy.offerCandidate / Lifecycle.clearRuntimeState.
-    var nextCandidateOfferSequence: UInt64 = 0
     /// Set when the offer gate deferred behind an own carried candidate's
     /// admission; the admission drain then re-arms the offer.
     /// Owner: Candidates.drainCandidateImports / Hierarchy.offerCandidate /
     ///     Lifecycle.clearRuntimeState.
     var candidateOfferDeferredByAdmission = false
-    /// Owner: Hierarchy.offerCandidate / Hierarchy.clearHierarchyAuthorization /
-    ///     Lifecycle.clearRuntimeState.
-    var lastOfferedCandidateCID: String?
-    /// Owner: Hierarchy.clearHierarchyAuthorization / Hierarchy.selectedChildPeers /
-    ///     Lifecycle.clearRuntimeState.
-    var childPeerRotation: [String: Int] = [:]
-    /// Owner: Hierarchy.selectedChildPeers / Lifecycle.clearRuntimeState.
-    var childPathRotation = 0
-    /// Owner: Hierarchy.authenticatedChildDirectories / Lifecycle.clearRuntimeState.
-    var childProofPathRotation = 0
-    /// Directories already backfilled this generation, so the late-child
-    /// evidence backfill runs once per connection instead of on every recovery
-    /// pass (which would churn routes for non-committing carriers). Cleared when
-    /// a directory's last child peer disconnects and on generation reset.
-    /// Owner: Hierarchy.clearHierarchyAuthorization / Hierarchy.recoverChildProofs /
-    ///     Lifecycle.clearRuntimeState.
-    var backfilledChildDirectories: Set<String> = []
     private var nextRequestID: UInt64 = 0
     /// Owner: Hierarchy.scheduleHierarchyHelloDeadline / Overlay.scheduleOverlayHelloDeadline.
     var nextHelloDeadlineToken: UInt64 = 0
@@ -1019,12 +1038,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // (every reader compares its session). Only a still-awaiting
             // previous session's serves are discarded here, as before; a
             // ready one's are released by their own tasks.
-            let previous = overlayRecords[peer.key]
+            let previous = overlayState.overlayRecords[peer.key]
             if let previous = previous?.readyPeer {
                 blockFetcher.disconnect(candidateProvider(previous))
             }
             discardServingSessions(of: previous?.awaitingHelloPeer)
-            overlayRecords.update(peer.key) {
+            overlayState.overlayRecords.update(peer.key) {
                 $0.session = .awaitingHello(peer)
                 $0.frontierPull = nil
             }
@@ -1076,7 +1095,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // A replacement may already be current when the old connection's
             // asynchronous disconnect callback arrives.
             guard !(await ivy.connectedPeers).contains(peer) else { return }
-            let disconnected = overlayRecords[key]
+            let disconnected = overlayState.overlayRecords[key]
             disconnected?.helloDeadline?.task.cancel()
             if let ready = disconnected?.readyPeer {
                 blockFetcher.disconnect(candidateProvider(ready))
@@ -1084,10 +1103,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             discardServingSessions(of: disconnected?.sessionPeer)
             // The record goes after the range sync clears: the re-entry that
             // clear arms still counts this peer's announced tip, as before.
-            if rangeSync.state?.peer.key == key {
+            if overlayState.rangeSync.state?.peer.key == key {
                 clearRangeSync()
             }
-            overlayRecords.remove(key)
+            overlayState.overlayRecords.remove(key)
             purgeRequests(for: key, plane: .overlay)
         } else if ivy === hierarchy {
             // Ivy may already have promoted a replacement session for this
@@ -1106,26 +1125,26 @@ public actor NodeNetworkRuntime: IvyDelegate {
     func purgeRequests(for key: PeerKey, plane: CandidateSourcePlane) {
         switch plane {
         case .overlay:
-            let disconnectedInventories = pendingTransactionInventories.filter {
+            let disconnectedInventories = overlayState.pendingTransactionInventories.filter {
                 $0.value.peer.key == key
             }
             for pending in disconnectedInventories.values {
                 pending.timeout.cancel()
             }
-            pendingTransactionInventories = pendingTransactionInventories.filter {
+            overlayState.pendingTransactionInventories = overlayState.pendingTransactionInventories.filter {
                 $0.value.peer.key != key
             }
             // A response can never arrive on a gone session (a reconnect gets
             // a fresh sessionID the response guard rejects), so resolve the
             // ask empty now instead of burning its timeout.
-            let disconnectedReadEndpoints = readURLDiscovery.removePendingReadEndpoints(of: key)
+            let disconnectedReadEndpoints = overlayState.readURLDiscovery.removePendingReadEndpoints(of: key)
             for pending in disconnectedReadEndpoints.values {
                 pending.timeout.cancel()
                 pending.continuation.resume(returning: [])
             }
         case .hierarchy:
             // Only the parent sends these requests' answers.
-            pendingEvidenceIndexes.removeAll()
+            hierarchyState.pendingEvidenceIndexes.removeAll()
             // A response can never arrive on the gone session: requeue the
             // live candidates now, and resolve a validate walk's request nil
             // (it is not a candidate — re-seeding an accepted main-chain block
@@ -1170,9 +1189,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
         process: ChainProcess
     ) {
         guard configuration.peerSearchInterval > 0,
-              peerSearchTask == nil else { return }
+              overlayState.peerSearchTask == nil else { return }
         let search = makePeerSearch(process: process)
-        peerSearchTask = Task { [weak self] in
+        overlayState.peerSearchTask = Task { [weak self] in
             await self?.peerSearchLoop(search, generation: generation)
         }
     }
@@ -1264,7 +1283,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ) -> [PeerEndpoint] {
         endpoints.filter { endpoint in
             guard let key = try? PeerKey(endpoint.publicKey) else { return false }
-            return overlayRecords[key]?.readyPeer == nil
+            return overlayState.overlayRecords[key]?.readyPeer == nil
         }
     }
 
@@ -1373,18 +1392,18 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// peer's key is absent from `heldPeerKeys`.
     func debugSnapshot() -> NetworkDebugSnapshot {
         var keys = Set<PeerKey>()
-        keys.formUnion(overlayRecords.keys)
-        keys.formUnion(hierarchyRecords.keys)
-        keys.formUnion(pendingTransactionInventories.values.map(\.peer.key))
-        keys.formUnion(readURLDiscovery.pendingReadEndpoints.values.map(\.peer.key))
-        if let sync = rangeSync.state { keys.insert(sync.peer.key) }
-        keys.formUnion(pendingEvidenceIndexes.values.map(\.peer.key))
-        keys.formUnion(pendingParentChainFacts.values.map(\.peer.key))
-        keys.formUnion(pendingGenesisVerifications.values.map(\.peer.key))
-        keys.formUnion(pendingGenesisResolves.values.map(\.peer.key))
+        keys.formUnion(overlayState.overlayRecords.keys)
+        keys.formUnion(hierarchyState.hierarchyRecords.keys)
+        keys.formUnion(overlayState.pendingTransactionInventories.values.map(\.peer.key))
+        keys.formUnion(overlayState.readURLDiscovery.pendingReadEndpoints.values.map(\.peer.key))
+        if let sync = overlayState.rangeSync.state { keys.insert(sync.peer.key) }
+        keys.formUnion(hierarchyState.pendingEvidenceIndexes.values.map(\.peer.key))
+        keys.formUnion(hierarchyState.pendingParentChainFacts.values.map(\.peer.key))
+        keys.formUnion(hierarchyState.pendingGenesisVerifications.values.map(\.peer.key))
+        keys.formUnion(hierarchyState.pendingGenesisResolves.values.map(\.peer.key))
         keys.formUnion(parentStateQueryGuard.peers)
         keys.formUnion(sessionLeases.portableEvidenceWork.values.map(\.peer.key))
-        if let receivedParentTip { keys.insert(receivedParentTip.peer.key) }
+        if let receivedParentTip = hierarchyState.receivedParentTip { keys.insert(receivedParentTip.peer.key) }
         for hex in blockFetcher.debugSnapshot().providerKeys
             .union(parentEvidence.debugSnapshot().peerIDs) {
             if let key = try? PeerKey(hex) { keys.insert(key) }
@@ -1399,13 +1418,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
         sessions.formUnion(sessionLeases.portableEvidenceOrder.map(\.sessionID))
 
         return NetworkDebugSnapshot(
-            overlay: overlayRecords.records.mapValues {
+            overlay: overlayState.overlayRecords.records.mapValues {
                 NetworkDebugSnapshot.OverlayPeer(
                     helloAccepted: $0.readyPeer != nil,
                     hasHelloDeadline: $0.helloDeadline != nil
                 )
             },
-            hierarchy: hierarchyRecords.records.mapValues {
+            hierarchy: hierarchyState.hierarchyRecords.records.mapValues {
                 NetworkDebugSnapshot.HierarchyPeer(
                     role: $0.role,
                     hasHelloDeadline: $0.helloDeadline != nil
@@ -1414,15 +1433,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
             heldPeerKeys: keys,
             heldSessionIDs: sessions,
             liveSessionIDs: Set(
-                overlayRecords.records.values.compactMap(\.sessionPeer?.sessionID)
-                    + hierarchyRecords.records.values.compactMap(\.session?.sessionID)
+                overlayState.overlayRecords.records.values.compactMap(\.sessionPeer?.sessionID)
+                    + hierarchyState.hierarchyRecords.records.values.compactMap(\.session?.sessionID)
             ),
-            rangeSyncAnchor: rangeSync.state.map {
+            rangeSyncAnchor: overlayState.rangeSync.state.map {
                 ($0.requestedAfterCID, $0.requestedHeight)
             },
-            receivedCarriedChildCID: receivedParentTip?.carriedChildCID,
+            receivedCarriedChildCID: hierarchyState.receivedParentTip?.carriedChildCID,
             candidateOfferHeld: candidateOfferDeferredByAdmission,
-            carriedHoldCount: carriedHoldCount,
+            carriedHoldCount: hierarchyState.carriedHoldCount,
             refusedChildEvidenceHintCount: recordedRefusedHints.count
         )
     }
@@ -1447,7 +1466,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let (total, additionOverflow) = scaled.addingReportingOverflow(milliseconds)
         return additionOverflow ? UInt64.max : total
     }
-
 
     static func rotatedPeerIndices(
         peerCount: Int,
@@ -1493,9 +1511,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
     func configuredParentPeer() -> AuthenticatedPeer? {
         guard let parentKey = configuration.parentEndpoint?.publicKey,
               let key = try? PeerKey(parentKey),
-              case .parent? = hierarchyRecords[key]?.role
+              case .parent? = hierarchyState.hierarchyRecords[key]?.role
         else { return nil }
-        return hierarchyRecords[key]?.session
+        return hierarchyState.hierarchyRecords[key]?.session
     }
 
     func makeRequestID() -> UInt64 {

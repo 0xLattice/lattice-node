@@ -28,7 +28,7 @@ extension NodeNetworkRuntime {
         for provider: CandidateProvider
     ) -> AuthenticatedPeer? {
         guard let key = try? PeerKey(provider.publicKey),
-              let peer = overlayRecords[key]?.readyPeer,
+              let peer = overlayState.overlayRecords[key]?.readyPeer,
               peer.sessionID == provider.sessionID else { return nil }
         return peer
     }
@@ -251,7 +251,7 @@ extension NodeNetworkRuntime {
                 ) else { return }
                 switch plane {
                 case .overlay:
-                    guard overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
+                    guard overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
                         continue
                     }
                 case .hierarchy:
@@ -405,17 +405,17 @@ extension NodeNetworkRuntime {
         // authenticates only parent facts and never vouches for the child
         // transition. "Blame" is a per-root routing suppression, never a ban.
         SyncTrace.log("admit \(candidate.blockCID.prefix(12)) weighed=\(candidate.weighed) decision=\(outcome.decision)")
-        if candidate.blockCID == receivedParentTip?.carriedChildCID,
+        if candidate.blockCID == hierarchyState.receivedParentTip?.carriedChildCID,
            !outcome.decision.isAccepted,
            !outcome.decision.shouldRetryWhenEvidenceChanges,
            !outcome.decision.shouldRetryLater {
-            releasedCarriedChildCID = candidate.blockCID
+            hierarchyState.releasedCarriedChildCID = candidate.blockCID
         }
         if outcome.decision == .invalid {
             if attempt.attribution.allResponsesComplete,
                let supplierKey = attempt.attribution.soleRemoteSupplierPublicKey,
                let supplier = try? PeerKey(supplierKey),
-               overlayRecords[supplier]?.readyPeer != nil,
+               overlayState.overlayRecords[supplier]?.readyPeer != nil,
                configuration.address.isNexus || outcome.parentCarrierLink != nil {
                 await overlay.reportDeficientContent(
                     rootCID: candidate.blockCID,

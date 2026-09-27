@@ -112,7 +112,7 @@ extension NodeNetworkRuntime {
             guard isCurrentRuntime(generation: generation, process: process),
                   expectsOverlayHello(from: peer) else { return }
             removeOverlayHelloDeadline(for: peer.key)?.task.cancel()
-            overlayRecords.update(peer.key) { $0.session = .ready(peer) }
+            overlayState.overlayRecords.update(peer.key) { $0.session = .ready(peer) }
             // Advertise the ACQUIRED (canonical, weighed-inclusive) tip: every
             // receiver measures its gap, its range-sync target and its edge
             // against acquired heights, so advertising the validated tip would
@@ -126,7 +126,7 @@ extension NodeNetworkRuntime {
                 ).encoded()
             {
                 guard isCurrentRuntime(generation: generation, process: process),
-                      overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
+                      overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
                     return
                 }
                 let sent = await overlay.sendMessage(
@@ -158,7 +158,7 @@ extension NodeNetworkRuntime {
             return
         }
 
-        guard overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
+        guard overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
         switch message.topic {
         case NodeNetworkTopic.transactionAvailable:
             guard let available = try? TransactionAvailableMessage.decoded(
@@ -272,12 +272,12 @@ extension NodeNetworkRuntime {
             guard let response = try? ReadEndpointResponseMessage.decoded(
                     message.payload
                 ),
-                let pending = readURLDiscovery.pendingReadEndpoints[response.requestID],
+                let pending = overlayState.readURLDiscovery.pendingReadEndpoints[response.requestID],
                 pending.peer.key == peer.key,
                 pending.peer.sessionID == peer.sessionID,
                 pending.genesisCID == response.genesisCID
             else { return }
-            readURLDiscovery.pendingReadEndpoints.removeValue(forKey: response.requestID)
+            overlayState.readURLDiscovery.pendingReadEndpoints.removeValue(forKey: response.requestID)
             pending.timeout.cancel()
             pending.continuation.resume(returning: response.readURLs)
         case NodeNetworkTopic.blockAnnouncement:
@@ -289,7 +289,7 @@ extension NodeNetworkRuntime {
                 peer: peer.id
             )
             guard isCurrentRuntime(generation: generation, process: process),
-                  overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
+                  overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
             // Only a genuinely deep gap — far more than a predecessor pull should
             // bridge — starts a forward-apply range sync; shallow and
             // steady-state propagation and child-chain rounds keep the fast
@@ -298,19 +298,19 @@ extension NodeNetworkRuntime {
             // then just use the direct path).
             if await process.hasAcceptedBlock(announcement.blockCID) == false {
                 guard isCurrentRuntime(generation: generation, process: process),
-                      overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
+                      overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
                 let ourHeight = await fetchedHeight(process)
                 guard isCurrentRuntime(generation: generation, process: process),
-                      overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
+                      overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
                 if let announced = announcement.height {
                     // Remember the claim so a cleared range sync can re-enter
                     // on the receiver's own initiative: on a quiet network no
                     // further announcement ever arrives to restart it.
-                    let known = overlayRecords[peer.key]?.announcedTip?.height ?? 0
+                    let known = overlayState.overlayRecords[peer.key]?.announcedTip?.height ?? 0
                     if announced > known
-                        || overlayRecords[peer.key]?.announcedTip?.peer.sessionID
+                        || overlayState.overlayRecords[peer.key]?.announcedTip?.peer.sessionID
                             != peer.sessionID {
-                        overlayRecords.update(peer.key) {
+                        overlayState.overlayRecords.update(peer.key) {
                             $0.announcedTip = (announced, peer)
                         }
                     }
@@ -324,7 +324,7 @@ extension NodeNetworkRuntime {
                         process: process
                     )
                     guard isCurrentRuntime(generation: generation, process: process),
-                          overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
+                          overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
                 }
             }
             // At-edge evaluation happens whether or not we hold the block:
@@ -333,7 +333,7 @@ extension NodeNetworkRuntime {
             // recorded one), so a losing-sibling announcement below its tip
             // cannot read as "at edge" while we are still deep.
             if let announced = announcement.height {
-                let recorded = overlayRecords[peer.key]?.announcedTip
+                let recorded = overlayState.overlayRecords[peer.key]?.announcedTip
                 let peerHeight = recorded?.peer.sessionID == peer.sessionID
                     ? max(announced, recorded?.height ?? 0)
                     : announced
@@ -344,7 +344,7 @@ extension NodeNetworkRuntime {
                     process: process
                 )
                 guard isCurrentRuntime(generation: generation, process: process),
-                      overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
+                      overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
             }
             // Network-sourced: weighed. It ranks on verified work and the
             // validate-on-candidacy walk executes it exactly when canonical.
@@ -419,7 +419,7 @@ extension NodeNetworkRuntime {
             guard let response = try? AcceptedLeavesResponseMessage.decoded(
                 message.payload
             ) else { return }
-            guard var pull = overlayRecords[peer.key]?.frontierPull,
+            guard var pull = overlayState.overlayRecords[peer.key]?.frontierPull,
                   pull.sessionID == peer.sessionID,
                   pull.requestID == response.requestID else {
                 SyncTrace.log(
@@ -429,7 +429,7 @@ extension NodeNetworkRuntime {
                 return
             }
             pull.requestID = nil
-            overlayRecords.update(peer.key) { $0.frontierPull = pull }
+            overlayState.overlayRecords.update(peer.key) { $0.frontierPull = pull }
             SyncTrace.log(
                 "frontier page peer=\(peer.key.hex.prefix(8)) "
                     + "leaves=\(response.blockCIDs.count)"
@@ -437,10 +437,10 @@ extension NodeNetworkRuntime {
             for cid in response.blockCIDs where CIDIdentity.isCanonical(cid) {
                 await overlay.rememberProvider(rootCID: cid, peer: peer.id)
                 guard isCurrentRuntime(generation: generation, process: process),
-                      overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
+                      overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
                 if await process.hasAcceptedBlock(cid) { continue }
                 guard isCurrentRuntime(generation: generation, process: process),
-                      overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
+                      overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
                 _ = enqueueCandidate(CandidateSeed(
                     blockCID: cid,
                     package: nil,
@@ -546,8 +546,8 @@ extension NodeNetworkRuntime {
         guard remainingRoots > 0,
               chain?.networkCapabilities.contains(.transactions) == true,
               isCurrentRuntime(generation: generation, process: process),
-              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
-              !pendingTransactionInventories.values.contains(where: {
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
+              !overlayState.pendingTransactionInventories.values.contains(where: {
                   $0.peer.sessionID == peer.sessionID
               }) else { return }
         let request = TransactionInventoryRequestMessage(
@@ -564,7 +564,7 @@ extension NodeNetworkRuntime {
                 generation: generation
             )
         }
-        pendingTransactionInventories[request.requestID] = .init(
+        overlayState.pendingTransactionInventories[request.requestID] = .init(
             peer: peer,
             request: request,
             remainingRoots: remainingRoots,
@@ -580,7 +580,7 @@ extension NodeNetworkRuntime {
         case .enqueued:
             break
         case .backpressured, .locallyRejected, .notConnected:
-            pendingTransactionInventories.removeValue(
+            overlayState.pendingTransactionInventories.removeValue(
                 forKey: request.requestID
             )?.timeout.cancel()
         }
@@ -591,7 +591,7 @@ extension NodeNetworkRuntime {
         generation: UInt64
     ) async {
         guard isCurrentGeneration(generation),
-              let pending = pendingTransactionInventories.removeValue(
+              let pending = overlayState.pendingTransactionInventories.removeValue(
                 forKey: requestID
               ) else { return }
         await overlay.recycleSession(ifCurrent: pending.peer)
@@ -606,7 +606,7 @@ extension NodeNetworkRuntime {
         guard let chain,
               chain.networkCapabilities.contains(.transactionInventory),
               isCurrentRuntime(generation: generation, process: process),
-              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
         let roots = Array(Set(await chain.transactionInventoryRoots())).sorted()
             .filter { root in
                 request.afterRootCID.map { root > $0 } ?? true
@@ -633,10 +633,10 @@ extension NodeNetworkRuntime {
         generation: UInt64,
         process: ChainProcess
     ) {
-        guard let pending = pendingTransactionInventories[response.requestID],
+        guard let pending = overlayState.pendingTransactionInventories[response.requestID],
               pending.peer.sessionID == peer.sessionID,
               pending.request.afterRootCID == response.afterRootCID else { return }
-        pendingTransactionInventories.removeValue(
+        overlayState.pendingTransactionInventories.removeValue(
             forKey: response.requestID
         )?.timeout.cancel()
         Task { [weak self] in
@@ -660,7 +660,7 @@ extension NodeNetworkRuntime {
         guard let chain,
               chain.networkCapabilities.contains(.transactionInventory),
               isCurrentRuntime(generation: generation, process: process),
-              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
         let knownRoots = Set(await chain.transactionInventoryRoots())
         let roots = response.volumeRootCIDs.filter {
             !knownRoots.contains($0) && !pending.seenRoots.contains($0)
@@ -739,7 +739,7 @@ extension NodeNetworkRuntime {
         guard let chain,
               chain.networkCapabilities.contains(.transactions),
               isCurrentRuntime(generation: generation, process: process),
-              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return nil }
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return nil }
         let lease = TransactionVolumeLease(
             sessionID: peer.sessionID,
             rootCID: rootCID
@@ -761,7 +761,7 @@ extension NodeNetworkRuntime {
     ) async {
         defer { sessionLeases.activeTransactionVolumes.remove(lease) }
         guard isCurrentRuntime(generation: generation, process: process),
-              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
         if let chain = self.chain,
            chain.networkCapabilities.contains(.transactionInventory),
            await chain.transactionInventoryRoots().contains(rootCID) {
@@ -775,7 +775,7 @@ extension NodeNetworkRuntime {
             capacityUnavailable: { $0.failure == .localCapacityUnavailable },
             stillCurrent: {
                 isCurrentRuntime(generation: generation, process: process)
-                    && overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID
+                    && overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID
             }
         ) {
         case .value(let fetched):
@@ -807,14 +807,14 @@ extension NodeNetworkRuntime {
             return
         }
         guard isCurrentRuntime(generation: generation, process: process),
-              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
         do {
             guard try await chain.submitNetworkTransaction(transaction) else { return }
         } catch {
             return
         }
         guard isCurrentRuntime(generation: generation, process: process),
-              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
         guard let payload = try? TransactionAvailableMessage(
             volumeRootCID: rootCID
         ).encoded() else { return }
@@ -930,7 +930,7 @@ extension NodeNetworkRuntime {
         }
         SyncTrace.log("locate-serve \(request.childCID) hit")
         guard isCurrentRuntime(generation: generation, process: process),
-              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
               let payload = try? PortableAttachmentAvailableMessage(
                 edgeCID: edgeCID,
                 rootCID: package.package.proof.rootCID,
@@ -960,7 +960,7 @@ extension NodeNetworkRuntime {
         var peers: [AuthenticatedPeer] = candidate.providers
             .compactMap(overlayPeer(for:))
         if let supplierPublicKey, let key = try? PeerKey(supplierPublicKey),
-           let peer = overlayRecords[key]?.readyPeer,
+           let peer = overlayState.overlayRecords[key]?.readyPeer,
            !peers.contains(where: { $0.key == key }) {
             peers.append(peer)
         }
@@ -1001,7 +1001,7 @@ extension NodeNetworkRuntime {
     ) -> Bool {
         guard !configuration.address.isNexus,
               isCurrentRuntime(generation: generation, process: process),
-              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
             return false
         }
         let lease = EvidenceVolumeLease(
@@ -1040,15 +1040,15 @@ extension NodeNetworkRuntime {
     }
 
     private func startPortableEvidenceWorker() {
-        guard portableEvidenceWorker == nil else { return }
-        portableEvidenceWorker = Task { [weak self] in
+        guard overlayState.portableEvidenceWorker == nil else { return }
+        overlayState.portableEvidenceWorker = Task { [weak self] in
             await self?.drainPortableEvidence()
         }
     }
 
     private func drainPortableEvidence() async {
         defer {
-            portableEvidenceWorker = nil
+            overlayState.portableEvidenceWorker = nil
             if !sessionLeases.portableEvidenceOrder.isEmpty {
                 startPortableEvidenceWorker()
             }
@@ -1081,7 +1081,7 @@ extension NodeNetworkRuntime {
     ) async -> Bool {
         guard !configuration.address.isNexus,
               isCurrentRuntime(generation: generation, process: process),
-              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
             return false
         }
         let lease = EvidenceVolumeLease(
@@ -1103,7 +1103,7 @@ extension NodeNetworkRuntime {
             guard isCurrentRuntime(
                 generation: generation,
                 process: process
-            ), overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
+            ), overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
                 return .done(true)
             }
             if sessionLeases.activeEvidenceVolumes.contains(lease) { return .done(true) }
@@ -1122,7 +1122,7 @@ extension NodeNetworkRuntime {
             guard isCurrentRuntime(
                 generation: generation,
                 process: process
-            ), overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
+            ), overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
                 return true
             }
             // A rejected enqueue is LOCAL congestion (ready pool full), not
@@ -1170,7 +1170,7 @@ extension NodeNetworkRuntime {
             capacityUnavailable: { $0.attribution.localCapacityUnavailable },
             stillCurrent: {
                 isCurrentRuntime(generation: generation, process: process)
-                    && overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID
+                    && overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID
             }
         ) {
         case .value(let fetched):
@@ -1189,7 +1189,7 @@ extension NodeNetworkRuntime {
               let edge = await DirectChildEdge.derive(from: package.proof),
               edge.edgeCID == summary.edgeCID,
               isCurrentRuntime(generation: generation, process: process),
-              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
             if resolved.attribution.allResponsesComplete,
                let supplier = resolved.attribution.soleRemoteSupplierPublicKey {
                 await overlay.reportDeficientContent(
@@ -1241,7 +1241,7 @@ extension NodeNetworkRuntime {
                 token: token
             )
         }
-        overlayRecords.update(peer.key) {
+        overlayState.overlayRecords.update(peer.key) {
             $0.helloDeadline = HelloDeadline(
                 token: token,
                 sessionID: peer.sessionID,
@@ -1251,8 +1251,8 @@ extension NodeNetworkRuntime {
     }
 
     private func expectsOverlayHello(from peer: AuthenticatedPeer) -> Bool {
-        overlayRecords[peer.key]?.awaitingHelloPeer?.sessionID == peer.sessionID
-            && overlayRecords[peer.key]?.helloDeadline?.sessionID == peer.sessionID
+        overlayState.overlayRecords[peer.key]?.awaitingHelloPeer?.sessionID == peer.sessionID
+            && overlayState.overlayRecords[peer.key]?.helloDeadline?.sessionID == peer.sessionID
     }
 
     private func overlayHelloTimedOut(
@@ -1261,11 +1261,11 @@ extension NodeNetworkRuntime {
         token: UInt64
     ) async {
         guard isCurrentGeneration(generation), isRunning,
-              overlayRecords[peer.key]?.helloDeadline?.token == token,
-              overlayRecords[peer.key]?.helloDeadline?.sessionID == peer.sessionID,
-              overlayRecords[peer.key]?.readyPeer?.sessionID != peer.sessionID else { return }
+              overlayState.overlayRecords[peer.key]?.helloDeadline?.token == token,
+              overlayState.overlayRecords[peer.key]?.helloDeadline?.sessionID == peer.sessionID,
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID != peer.sessionID else { return }
         removeOverlayHelloDeadline(for: peer.key)
-        overlayRecords.update(peer.key) { record in
+        overlayState.overlayRecords.update(peer.key) { record in
             if case .awaitingHello? = record.session { record.session = nil }
         }
         await overlay.recycleSession(ifCurrent: peer)
@@ -1299,19 +1299,19 @@ extension NodeNetworkRuntime {
         // whole gap; keying on the single shared range-sync slot instead let
         // one peer's unverified height claim silence every OTHER peer's
         // frontier for as long as it held the slot.
-        guard overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
-              overlayRecords[peer.key]?.frontierPull?.sessionID != peer.sessionID else { return }
+        guard overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
+              overlayState.overlayRecords[peer.key]?.frontierPull?.sessionID != peer.sessionID else { return }
         let ourHeight = await fetchedHeight(process)
         guard isCurrentRuntime(generation: generation, process: process),
-              overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
-              overlayRecords[peer.key]?.frontierPull?.sessionID != peer.sessionID,
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
+              overlayState.overlayRecords[peer.key]?.frontierPull?.sessionID != peer.sessionID,
               peerHeight <= ourHeight + RangeSync.depthThreshold else { return }
         let requestID = makeRequestID()
         guard let payload = try? AcceptedLeavesRequestMessage(
             requestID: requestID,
             afterCID: nil
         ).encoded() else { return }
-        overlayRecords.update(peer.key) {
+        overlayState.overlayRecords.update(peer.key) {
             $0.frontierPull = FrontierPull(
                 sessionID: peer.sessionID,
                 requestID: requestID
