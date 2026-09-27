@@ -88,7 +88,7 @@ target, such evidence costs almost nothing.
   provider. Work is not among them and cannot be, because the root has not been
   fetched yet.
 - **A claimed height decides what gets synced.** An announcement's height is
-  an unverified claim. A claim more than `rangeSyncDepthThreshold` above the
+  an unverified claim. A claim more than `RangeSync.depthThreshold` above the
   node's acquired height starts range sync with that peer, and re-entry picks
   the tallest recorded claim (`maybeRestartRangeSync`). The single range-sync
   slot then pages that peer's main chain forward from the negotiated common
@@ -96,7 +96,7 @@ target, such evidence costs almost nothing.
   canonical height. The slot is also freed on an empty page, when there is no
   common ancestor, when the peer disconnects, or when the target is reached.
   But a peer actually serving a low-work branch never advances canonical height,
-  so the slot is held until `rangeSyncMaxRedrives` windows pass without
+  so the slot is held until `RangeSync.maxRedrives` windows pass without
   progress. Announcing any CID the node does not hold then takes the slot back.
   Height misleads in the honest case too. A heavier chain can be shorter, and
   then it never triggers range sync; the node reaches it only through the
