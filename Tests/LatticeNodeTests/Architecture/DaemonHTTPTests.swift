@@ -210,7 +210,7 @@ final class DaemonHTTPTests: XCTestCase {
                 method: .post,
                 headers: [.contentType: "application/json"],
                 body: ByteBuffer(bytes: try JSONEncoder().encode(
-                    SubmitWorkRequest(workID: issued.workID, nonce: 0)
+                    SubmitWorkRequest(workID: issued.workID, nonce: solvedNonce(for: issued))
                 ))
             ) { response in
                 let submitted = try JSONDecoder().decode(
@@ -972,8 +972,7 @@ final class DaemonHTTPTests: XCTestCase {
 }
 
 /// Mines exactly one block atop the current tip via the public template/work
-/// routes (target is genesis-max, so nonce 0 always satisfies it) and returns
-/// the new tip's CID.
+/// routes, solving the issued template, and returns the new tip's CID.
 private func mineOneBlock(client: some TestClientProtocol) async throws -> String {
     var template: MiningTemplateResponse?
     try await client.execute(
@@ -994,7 +993,7 @@ private func mineOneBlock(client: some TestClientProtocol) async throws -> Strin
         method: .post,
         headers: [.contentType: "application/json"],
         body: ByteBuffer(bytes: try JSONEncoder().encode(
-            SubmitWorkRequest(workID: issued.workID, nonce: 0)
+            SubmitWorkRequest(workID: issued.workID, nonce: solvedNonce(for: issued))
         ))
     ) { response in
         let submitted = try JSONDecoder().decode(

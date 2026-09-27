@@ -798,7 +798,7 @@ final class ChainServiceTests: XCTestCase {
         )
         _ = try await service.submitWork(SubmitWorkRequest(
             workID: descendantTemplate.workID,
-            nonce: 0
+            nonce: solvedNonce(for: descendantTemplate)
         ))
         let addedDescendant = try await process.canonicalTipBlock()
         let addedDescendantCID = try BlockHeader(node: addedDescendant).rawCID
@@ -817,7 +817,10 @@ final class ChainServiceTests: XCTestCase {
         await receipt.wait()
 
         let outstandingSubmission = try await service.submitWork(
-            SubmitWorkRequest(workID: outstanding.workID, nonce: 0)
+            SubmitWorkRequest(
+                workID: outstanding.workID,
+                nonce: solvedNonce(for: outstanding)
+            )
         )
         XCTAssertTrue(outstandingSubmission.accepted)
 
@@ -2461,7 +2464,10 @@ final class ChainServiceTests: XCTestCase {
         for _ in 0..<3 {
             let template = try await service.miningTemplate(MiningTemplateRequest())
             let submitted = try await service.submitWork(
-                SubmitWorkRequest(workID: template.workID, nonce: 0)
+                SubmitWorkRequest(
+                    workID: template.workID,
+                    nonce: solvedNonce(for: template)
+                )
             )
             XCTAssertTrue(submitted.accepted)
             mainCIDs.append(try XCTUnwrap(submitted.tipCID))
@@ -2470,14 +2476,16 @@ final class ChainServiceTests: XCTestCase {
         // other is the off-chain sibling a marooned receiver would sit on.
         let templateA = try await service.miningTemplate(MiningTemplateRequest())
         let templateB = try await service.miningTemplate(MiningTemplateRequest())
-        let cidA = try BlockHeader(node: templateA.block).rawCID
-        let cidB = try BlockHeader(node: templateB.block).rawCID
+        let nonceA = solvedNonce(for: templateA)
+        let nonceB = solvedNonce(for: templateB)
+        let cidA = try BlockHeader(node: templateA.block.replacingNonce(nonceA)).rawCID
+        let cidB = try BlockHeader(node: templateB.block.replacingNonce(nonceB)).rawCID
         let submittedA = try await service.submitWork(
-            SubmitWorkRequest(workID: templateA.workID, nonce: 0)
+            SubmitWorkRequest(workID: templateA.workID, nonce: nonceA)
         )
         XCTAssertTrue(submittedA.accepted)
         let submittedB = try await service.submitWork(
-            SubmitWorkRequest(workID: templateB.workID, nonce: 0)
+            SubmitWorkRequest(workID: templateB.workID, nonce: nonceB)
         )
         XCTAssertTrue(submittedB.accepted)
         let canonical4Opt = await process.mainChainBlockCID(atHeight: 4)
@@ -4136,56 +4144,6 @@ private func XCTAssertThrowsErrorAsync<T>(
         XCTFail("expected error", file: file, line: line)
     } catch {
         handler(error)
-    }
-}
-
-/// Nonce scan over the consensus PoW preimage midstate.
-private func firstNonce(
-    of block: Block,
-    from start: UInt64,
-    maxAttempts: UInt64 = 1 << 24,
-    file: StaticString = #filePath,
-    line: UInt = #line,
-    where accepts: (UInt256) -> Bool
-) -> UInt64 {
-    let midstate = ProofOfWork.midstate(for: block)
-    var nonce = start
-    // Bounded on purpose. A predicate can be UNSATISFIABLE rather than merely
-    // unlikely -- searching for a hash strictly above a target that is the
-    // maximum can never succeed, because no hash exceeds the maximum -- and an
-    // unbounded scan turns that into a hang instead of a failure. One such
-    // search spun for over two hours before it was noticed.
-    while nonce - start < maxAttempts {
-        if accepts(ProofOfWork.hash(midstate: midstate, nonce: nonce)) {
-            return nonce
-        }
-        nonce += 1
-    }
-    XCTFail(
-        "no nonce satisfied the predicate in \(maxAttempts) attempts; "
-            + "the search is probably unsatisfiable (target \(block.target.toHexString()))",
-        file: file, line: line
-    )
-    return start
-}
-
-private extension Block {
-    func replacingNonce(_ nonce: UInt64) -> Block {
-        Block(
-            version: version,
-            parent: parent,
-            transactions: transactions,
-            target: target,
-            nextTarget: nextTarget,
-            spec: spec,
-            parentState: parentState,
-            prevState: prevState,
-            postState: postState,
-            children: children,
-            height: height,
-            timestamp: timestamp,
-            nonce: nonce
-        )
     }
 }
 
