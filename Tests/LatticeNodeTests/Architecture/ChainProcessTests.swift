@@ -2531,22 +2531,25 @@ final class ChainProcessTests: XCTestCase {
         nonce: UInt64,
         on process: ChainProcess
     ) async throws -> Block {
-        let candidate = try await BlockBuilder.buildBlock(
-            previous: previous,
-            timestamp: timestamp,
-            nonce: nonce,
-            fetcher: process
-        )
-        let mined = try XCTUnwrap(BlockBuilder.mine(
-            block: candidate,
-            target: candidate.target,
-            maxAttempts: 4_096
-        ))
-        try await BlockHeader(node: mined).storeBlock(
-            fetcher: process,
-            storer: process
-        )
-        return mined
+        // `BlockBuilder.mine` restarts its search at nonce 0, which would
+        // discard the requested nonce; search upward from it instead so a
+        // caller choosing nonces (the fork-choice tie-break test) gets the
+        // block it asked for.
+        for attempt in nonce..<(nonce + 4_096) {
+            let candidate = try await BlockBuilder.buildBlock(
+                previous: previous,
+                timestamp: timestamp,
+                nonce: attempt,
+                fetcher: process
+            )
+            guard candidate.proofOfWorkHash() <= candidate.target else { continue }
+            try await BlockHeader(node: candidate).storeBlock(
+                fetcher: process,
+                storer: process
+            )
+            return candidate
+        }
+        throw XCTSkip("no nonce in \(nonce)..<\(nonce + 4_096) mined a block")
     }
 
     private func configuration(
