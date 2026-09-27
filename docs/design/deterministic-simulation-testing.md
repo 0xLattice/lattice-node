@@ -340,7 +340,7 @@ node's observable behaviour against it; it does not restate it.
      correct.
    - A recovered head that differs from the one its durable facts determine is
      not correct.
-   - A pruning setting never changes the selected head.
+   - A retention setting never changes the selected head.
 
    Sources: spec §9.8; "Eviction is weight-preserving" in operator finality.
 10. **Chain structure holds.**
