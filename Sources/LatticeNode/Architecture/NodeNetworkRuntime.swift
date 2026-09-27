@@ -3665,11 +3665,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 // The evidence lane is momentarily full. Keep the session and
                 // retry THIS page after a beat — the scan must make progress
                 // through congestion, not restart from a fresh reconnect.
-                Task { [weak self] in
-                    try? await Task.sleep(nanoseconds: Timers.nanoseconds(
-                        self?.planeConfigurations.hierarchy.requestTimeout
-                            ?? .seconds(15)
-                    ))
+                Timers.deadline(
+                    after: planeConfigurations.hierarchy.requestTimeout,
+                    generation: generation
+                ) { [weak self] generation in
                     await self?.requestEvidenceIndex(
                         sourceID: response.sourceID,
                         cursor: response.cursor,
@@ -5559,13 +5558,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
               candidateAcquirer.hasTimedWait else { return }
         let generation = runtimeGeneration
         waitingCandidateRetryGeneration = generation
-        let delay = Timers.nanoseconds(Self.futureCandidateRetryInterval)
-        waitingCandidateRetryTask = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: delay)
-            } catch {
-                return
-            }
+        waitingCandidateRetryTask = Timers.deadline(
+            after: Self.futureCandidateRetryInterval,
+            generation: generation
+        ) { [weak self] generation in
             await self?.retryWaitingCandidates(generation: generation)
         }
     }
@@ -6127,9 +6123,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             return
         }
         let generation = runtimeGeneration
-        let delay = Timers.nanoseconds(planeConfigurations.overlay.requestTimeout)
-        rangeSyncReentryTask = Task { [weak self] in
-            do { try await Task.sleep(nanoseconds: delay) } catch { return }
+        rangeSyncReentryTask = Timers.deadline(
+            after: planeConfigurations.overlay.requestTimeout,
+            generation: generation
+        ) { [weak self] generation in
             await self?.maybeRestartRangeSync(generation: generation)
         }
     }
@@ -6297,7 +6294,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     topic: NodeNetworkTopic.parentChainFactRequest,
                     payload: payload
                 )
-                try? await Task.sleep(nanoseconds: delay)
+                _ = await Timers.sleep(nanoseconds: delay)
                 await self?.resolveGenesisVerification(
                     request.requestID,
                     confirmed: false
@@ -6345,7 +6342,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     topic: NodeNetworkTopic.childGenesisAnchorRequest,
                     payload: payload
                 )
-                try? await Task.sleep(nanoseconds: delay)
+                _ = await Timers.sleep(nanoseconds: delay)
                 await self?.resolveGenesisAnchor(requestID, genesisCID: nil)
             }
         }
@@ -6685,11 +6682,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // enqueue is transient — the same timeout used for an unanswered
         // parent response requeues the candidate (or resolves the walk's
         // request nil); a disconnect does so sooner.
-        let delay = Timers.nanoseconds(
-            planeConfigurations.hierarchy.requestTimeout
-        )
-        Task { [weak self] in
-            try? await Task.sleep(nanoseconds: delay)
+        Timers.deadline(
+            after: planeConfigurations.hierarchy.requestTimeout,
+            generation: generation
+        ) { [weak self] generation in
             await self?.parentChainFactRequestTimedOut(
                 request.requestID,
                 generation: generation
