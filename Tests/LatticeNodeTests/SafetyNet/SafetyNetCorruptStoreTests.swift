@@ -128,21 +128,6 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             sql: ["INSERT INTO issued_child_edges (edge_cid, parent_carrier_cid, directory, child_cid) VALUES ('not-a-cid', 'carrier', 'Payments', 'child')"]
         ),
         Damage(
-            table: "issued_child_proofs", column: "root_cid",
-            description: "inserted proof with malformed CID text",
-            sql: ["INSERT INTO issued_child_proofs (scope, edge_cid, root_cid, attachment_cid, ordinal) VALUES ('outgoing_direct_child', 'edge', 'not-a-cid', 'not-a-cid', 1)"]
-        ),
-        Damage(
-            table: "parent_evidence_scan", column: "source_id",
-            description: "non-UUID source",
-            sql: ["UPDATE parent_evidence_scan SET source_id = 'not-a-uuid' WHERE singleton = 1"]
-        ),
-        Damage(
-            table: "parent_evidence_inbox", column: "attachment_cid",
-            description: "inserted entry with malformed CID text",
-            sql: ["INSERT INTO parent_evidence_inbox (source_id, ordinal, child_cid, root_cid, attachment_cid) VALUES ('00000000-0000-4000-8000-000000000001', 1, 'child', 'root', 'not-a-cid')"]
-        ),
-        Damage(
             table: "prepared_child_proofs", column: "attachment_cid",
             description: "inserted proof with malformed CID text",
             sql: ["INSERT INTO prepared_child_proofs (carrier_cid, batch_seq, directory, child_cid, is_child_genesis, attachment_cid) VALUES ('carrier', 1, 'Payments', 'child', 0, 'not-a-cid')"]
@@ -181,6 +166,21 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             table: "accepted_blocks", column: "admission_seq",
             description: "zero admission sequence",
             sql: ["UPDATE accepted_blocks SET admission_seq = 0 WHERE block_cid = (SELECT MIN(block_cid) FROM accepted_blocks)"]
+        ),
+        Damage(
+            table: "issued_child_proofs", column: "root_cid",
+            description: "inserted proof with malformed CID text",
+            sql: ["INSERT INTO issued_child_proofs (scope, edge_cid, root_cid, attachment_cid, ordinal) VALUES ('outgoing_direct_child', 'edge', 'not-a-cid', 'not-a-cid', 1)"]
+        ),
+        Damage(
+            table: "parent_evidence_scan", column: "source_id",
+            description: "non-UUID source",
+            sql: ["UPDATE parent_evidence_scan SET source_id = 'not-a-uuid' WHERE singleton = 1"]
+        ),
+        Damage(
+            table: "parent_evidence_inbox", column: "attachment_cid",
+            description: "inserted entry with malformed CID text",
+            sql: ["INSERT INTO parent_evidence_inbox (source_id, ordinal, child_cid, root_cid, attachment_cid) VALUES ('00000000-0000-4000-8000-000000000001', 1, 'child', 'root', 'not-a-cid')"]
         ),
         Damage(
             table: "local_mempool_transactions", column: "transaction_cid",
