@@ -1323,7 +1323,7 @@ private struct ProvisionalRootFixture {
     let candidate: DirectChildCandidate
 }
 
-private enum NetworkTransportTestPorts {
+enum NetworkTransportTestPorts {
     private static let lock = NSLock()
     private nonisolated(unsafe) static var allocated = Set<UInt16>()
 
