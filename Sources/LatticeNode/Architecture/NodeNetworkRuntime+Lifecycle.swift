@@ -59,7 +59,7 @@ extension NodeNetworkRuntime {
         runtimeGeneration = callbackEpoch.advance()
         self.process = process
         self.chain = chain
-        candidateAcquirer.reset(
+        blockFetcher.reset(
             retryWindow: planeConfigurations.overlay.requestTimeout
                 * Self.maximumCandidateWaitTicks,
             durableDescendants: recoveredDescendants
@@ -246,7 +246,7 @@ extension NodeNetworkRuntime {
         candidateWorker?.cancel()
         candidateWorker = nil
         candidateWorkerGeneration = nil
-        candidateAcquirer.reset(
+        blockFetcher.reset(
             retryWindow: planeConfigurations.overlay.requestTimeout
                 * Self.maximumCandidateWaitTicks
         )

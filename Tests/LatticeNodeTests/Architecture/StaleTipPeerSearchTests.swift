@@ -65,7 +65,7 @@ final class StaleTipPeerSearchTests: XCTestCase {
             interval: interval,
             maximumDiscoveredDials: Self.maximumDiscoveredDials,
             clock: { await clock.read() },
-            acquiredHeight: { await tip.read() },
+            fetchedHeight: { await tip.read() },
             configuredPeersWithoutSession: { configured },
             discoveredPeersWithoutSession: { discovered },
             dial: { await recorder.record($0) }

@@ -213,7 +213,7 @@ final class WeakNetwork: @unchecked Sendable, NetworkInterface {
     ) async throws -> NodeImportOutcome {
         // A weighed admit stored only the boundary; pull the deferred body
         // over the network by opening a root session on the block CID (the
-        // same public-pin resolution the candidate acquirer falls back to),
+        // same public-pin resolution the candidate fetcher falls back to),
         // and admit `.execution` inside it so [broker, session] serves the
         // local boundary free and fetches only the missing body.
         guard let runtime else { throw CancellationError() }

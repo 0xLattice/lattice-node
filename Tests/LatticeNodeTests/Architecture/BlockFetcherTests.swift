@@ -3,7 +3,7 @@ import Lattice
 import XCTest
 @testable import LatticeNode
 
-final class CandidateAcquirerTests: XCTestCase {
+final class BlockFetcherTests: XCTestCase {
     /// A candidate ready for, or in, its admission is awaiting admission;
     /// one parked on evidence, or unknown, is not. The child's offer gate
     /// asks this for its own carried candidates: while one is in flight the
@@ -11,49 +11,49 @@ final class CandidateAcquirerTests: XCTestCase {
     func testAwaitingAdmissionIsReadyOrActiveNeverParked() throws {
         let blockCID = "awaiting-admission"
         let rootCID = "awaiting-root"
-        var acquirer = CandidateAcquirer()
-        XCTAssertFalse(acquirer.isAwaitingAdmission(blockCID))
-        XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher()
+        XCTAssertFalse(fetcher.isAwaitingAdmission(blockCID))
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: blockCID,
             package: nil,
             recoveryRootCID: rootCID
         )).accepted)
-        XCTAssertTrue(acquirer.isAwaitingAdmission(blockCID), "ready")
-        let ticket = try XCTUnwrap(acquirer.next())
-        XCTAssertTrue(acquirer.isAwaitingAdmission(blockCID), "active")
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.isAwaitingAdmission(blockCID), "ready")
+        let ticket = try XCTUnwrap(fetcher.next())
+        XCTAssertTrue(fetcher.isAwaitingAdmission(blockCID), "active")
+        XCTAssertTrue(fetcher.complete(
             ticket.ticket,
             resolution: .wait(.evidence)
         ))
-        XCTAssertFalse(acquirer.isAwaitingAdmission(blockCID), "parked")
-        acquirer.retryExternalDependency(blockCID: blockCID, rootCID: rootCID)
-        XCTAssertTrue(acquirer.isAwaitingAdmission(blockCID), "ready again")
-        let again = try XCTUnwrap(acquirer.next())
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertFalse(fetcher.isAwaitingAdmission(blockCID), "parked")
+        fetcher.retryExternalDependency(blockCID: blockCID, rootCID: rootCID)
+        XCTAssertTrue(fetcher.isAwaitingAdmission(blockCID), "ready again")
+        let again = try XCTUnwrap(fetcher.next())
+        XCTAssertTrue(fetcher.complete(
             again.ticket,
             resolution: .predecessor("awaiting-predecessor")
         ))
-        XCTAssertFalse(acquirer.isAwaitingAdmission(blockCID), "parked on a predecessor")
+        XCTAssertFalse(fetcher.isAwaitingAdmission(blockCID), "parked on a predecessor")
     }
 
     func testParentFactTimeoutRetriesExactUnchangedEvidence() throws {
         let blockCID = "parent-fact-timeout"
         let rootCID = "parent-fact-root"
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: blockCID,
             package: nil,
             recoveryRootCID: rootCID
         )).accepted)
-        let ticket = try XCTUnwrap(acquirer.next())
-        XCTAssertTrue(acquirer.complete(
+        let ticket = try XCTUnwrap(fetcher.next())
+        XCTAssertTrue(fetcher.complete(
             ticket.ticket,
             resolution: .wait(.evidence)
         ))
 
-        acquirer.retryExternalDependency(blockCID: blockCID, rootCID: rootCID)
+        fetcher.retryExternalDependency(blockCID: blockCID, rootCID: rootCID)
 
-        XCTAssertEqual(acquirer.next()?.blockCID, blockCID)
+        XCTAssertEqual(fetcher.next()?.blockCID, blockCID)
     }
 
     func testLaterWaitIsReadiedByRetryNotByObserveAlone() throws {
@@ -64,26 +64,26 @@ final class CandidateAcquirerTests: XCTestCase {
         // as acceptParentChainFact now does — otherwise it wedges until the poll.
         let blockCID = "later-wait"
         let rootCID = "later-root"
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: blockCID,
             package: nil,
             recoveryRootCID: rootCID
         )).accepted)
-        let ticket = try XCTUnwrap(acquirer.next())
-        XCTAssertTrue(acquirer.complete(ticket.ticket, resolution: .wait(.later)))
+        let ticket = try XCTUnwrap(fetcher.next())
+        XCTAssertTrue(fetcher.complete(ticket.ticket, resolution: .wait(.later)))
 
         // observe() with the (now available) package does NOT re-ready a .later wait.
-        _ = acquirer.observe(.init(
+        _ = fetcher.observe(.init(
             blockCID: blockCID,
             package: try childPackage(rootCID: rootCID),
             recoveryRootCID: rootCID
         ))
-        XCTAssertNil(acquirer.next(), "observe alone must not re-ready a .later wait")
+        XCTAssertNil(fetcher.next(), "observe alone must not re-ready a .later wait")
 
         // retryExternalDependency (the call the fix adds) re-readies it.
-        acquirer.retryExternalDependency(blockCID: blockCID, rootCID: rootCID)
-        XCTAssertEqual(acquirer.next()?.blockCID, blockCID)
+        fetcher.retryExternalDependency(blockCID: blockCID, rootCID: rootCID)
+        XCTAssertEqual(fetcher.next()?.blockCID, blockCID)
     }
 
     private func provider(
@@ -126,7 +126,7 @@ final class CandidateAcquirerTests: XCTestCase {
         let exact = provider("provider", session: 1)
         let evidence = try childPackage(rootCID: "root")
 
-        var evidenceFirst = CandidateAcquirer()
+        var evidenceFirst = BlockFetcher()
         XCTAssertTrue(evidenceFirst.observe(.init(
             blockCID: "block",
             package: evidence
@@ -141,7 +141,7 @@ final class CandidateAcquirerTests: XCTestCase {
             package: nil,
             provider: exact
         )).accepted)
-        var evidenceFirstResult: CandidateAcquirer.Candidate?
+        var evidenceFirstResult: BlockFetcher.Candidate?
         while let candidate = evidenceFirst.next() {
             if candidate.recoveryRootCID == "root" {
                 evidenceFirstResult = candidate
@@ -153,7 +153,7 @@ final class CandidateAcquirerTests: XCTestCase {
             ))
         }
 
-        var providerFirst = CandidateAcquirer()
+        var providerFirst = BlockFetcher()
         XCTAssertTrue(providerFirst.observe(.init(
             blockCID: "block",
             package: nil,
@@ -182,49 +182,49 @@ final class CandidateAcquirerTests: XCTestCase {
         throws
     {
         let exact = provider("provider", session: 1)
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "block",
             package: nil,
             provider: exact
         )).accepted)
-        let rootless = try XCTUnwrap(acquirer.next())
-        XCTAssertTrue(acquirer.complete(
+        let rootless = try XCTUnwrap(fetcher.next())
+        XCTAssertTrue(fetcher.complete(
             rootless.ticket,
             resolution: .wait(.evidence)
         ))
-        XCTAssertTrue(acquirer.hasTimedWait)
+        XCTAssertTrue(fetcher.hasTimedWait)
 
-        XCTAssertTrue(acquirer.observe(.init(
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "block",
             package: try childPackage(rootCID: "root")
         )).accepted)
-        let authenticated = try XCTUnwrap(acquirer.next())
+        let authenticated = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(authenticated.recoveryRootCID, "root")
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             authenticated.ticket,
             resolution: .connected
         ))
-        XCTAssertFalse(acquirer.hasTimedWait)
-        XCTAssertNil(acquirer.next())
+        XCTAssertFalse(fetcher.hasTimedWait)
+        XCTAssertNil(fetcher.next())
     }
 
     func testInterruptedExternalDependencyRequeuesActiveAttempt() throws {
         let package = try childPackage(rootCID: "root")
-        let seed = CandidateAcquirer.Seed(
+        let seed = BlockFetcher.Seed(
             blockCID: "block",
             package: package
         )
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(seed).accepted)
-        let active = try XCTUnwrap(acquirer.next())
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(seed).accepted)
+        let active = try XCTUnwrap(fetcher.next())
 
-        XCTAssertTrue(acquirer.requeue(seed))
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.requeue(seed))
+        XCTAssertTrue(fetcher.complete(
             active.ticket,
             resolution: .wait(.evidence)
         ))
-        let retry = try XCTUnwrap(acquirer.next())
+        let retry = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(retry.blockCID, "block")
         XCTAssertEqual(retry.recoveryRootCID, "root")
     }
@@ -232,134 +232,134 @@ final class CandidateAcquirerTests: XCTestCase {
     func testEvidenceEnrichmentDuringAdmissionSchedulesMergedFollowUp()
         throws
     {
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "block",
             package: try childPackage(
                 rootCID: "root"
             )
         )).accepted)
-        let active = try XCTUnwrap(acquirer.next())
-        XCTAssertTrue(acquirer.observe(.init(
+        let active = try XCTUnwrap(fetcher.next())
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "block",
             package: try childPackage(
                 rootCID: "root",
                 genesis: true
             )
         )).accepted)
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             active.ticket,
             resolution: .connected
         ))
 
-        let enriched = try XCTUnwrap(acquirer.next())
+        let enriched = try XCTUnwrap(fetcher.next())
         XCTAssertNotNil(enriched.package?.package.parentGenesisLink)
     }
 
     func testProviderArrivingDuringAdmissionSchedulesImmediateRetry() throws {
         let first = provider("provider-a", session: 1)
         let replacement = provider("provider-b", session: 2)
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "block",
             package: nil,
             provider: first
         )).accepted)
-        let active = try XCTUnwrap(acquirer.next())
+        let active = try XCTUnwrap(fetcher.next())
 
-        acquirer.disconnect(first)
-        XCTAssertTrue(acquirer.observe(.init(
+        fetcher.disconnect(first)
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "block",
             package: nil,
             provider: replacement
         )).accepted)
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             active.ticket,
             resolution: .wait(.content)
         ))
 
-        let retry = try XCTUnwrap(acquirer.next())
+        let retry = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(retry.providers, [replacement])
     }
 
     func testProviderArrivingDuringOneRootRemainsForTheNextRoot() throws {
         let first = provider("provider-a", session: 1)
         let replacement = provider("provider-b", session: 2)
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "block",
             package: nil,
             recoveryRootCID: "root-a",
             provider: first
         )).accepted)
-        XCTAssertTrue(acquirer.observe(.init(
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "block",
             package: nil,
             recoveryRootCID: "root-b"
         )).accepted)
-        let active = try XCTUnwrap(acquirer.next())
+        let active = try XCTUnwrap(fetcher.next())
 
-        acquirer.disconnect(first)
-        XCTAssertTrue(acquirer.observe(.init(
+        fetcher.disconnect(first)
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "block",
             package: nil,
             provider: replacement
         )).accepted)
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             active.ticket,
             resolution: .connected
         ))
 
-        let nextRoot = try XCTUnwrap(acquirer.next())
+        let nextRoot = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(nextRoot.providers, [replacement])
     }
 
     func testProviderLossDoesNotCreateAFalseImmediateRetry() throws {
         let exact = provider("provider", session: 1)
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "block",
             package: nil,
             provider: exact
         )).accepted)
-        let active = try XCTUnwrap(acquirer.next())
+        let active = try XCTUnwrap(fetcher.next())
 
-        acquirer.disconnect(exact)
-        XCTAssertTrue(acquirer.complete(
+        fetcher.disconnect(exact)
+        XCTAssertTrue(fetcher.complete(
             active.ticket,
             resolution: .wait(.content)
         ))
 
-        XCTAssertNil(acquirer.next())
-        XCTAssertTrue(acquirer.hasTimedWait)
+        XCTAssertNil(fetcher.next())
+        XCTAssertTrue(fetcher.hasTimedWait)
     }
 
     func testEvidenceRootsRemainDistinctWhileSharingProviders() throws {
         let exact = provider("provider", session: 1)
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "block",
             package: nil,
             provider: exact
         )).accepted)
-        XCTAssertTrue(acquirer.observe(.init(
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "block",
             package: nil,
             recoveryRootCID: "root-a"
         )).accepted)
-        XCTAssertTrue(acquirer.observe(.init(
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "block",
             package: nil,
             recoveryRootCID: "root-b"
         )).accepted)
 
         var roots: [String] = []
-        while let candidate = acquirer.next() {
+        while let candidate = fetcher.next() {
             if let root = candidate.recoveryRootCID {
                 roots.append(root)
                 XCTAssertEqual(candidate.providers, [exact])
             }
-            XCTAssertTrue(acquirer.complete(
+            XCTAssertTrue(fetcher.complete(
                 candidate.ticket,
                 resolution: .terminal
             ))
@@ -369,93 +369,93 @@ final class CandidateAcquirerTests: XCTestCase {
 
     func testRecursivePredecessorsUnwindOnlyAfterConnection() throws {
         let exact = provider("provider", session: 1)
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "D",
             package: nil,
             provider: exact
         )).accepted)
 
-        let descendant = try XCTUnwrap(acquirer.next())
+        let descendant = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(descendant.blockCID, "D")
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             descendant.ticket,
             resolution: .predecessor("P")
         ))
 
-        let predecessor = try XCTUnwrap(acquirer.next())
+        let predecessor = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(predecessor.blockCID, "P")
         XCTAssertEqual(predecessor.providers, [exact])
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             predecessor.ticket,
             resolution: .predecessor("Q")
         ))
 
-        let ancestor = try XCTUnwrap(acquirer.next())
+        let ancestor = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(ancestor.blockCID, "Q")
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             ancestor.ticket,
             resolution: .connected
         ))
 
-        let predecessorRetry = try XCTUnwrap(acquirer.next())
+        let predecessorRetry = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(predecessorRetry.blockCID, "P")
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             predecessorRetry.ticket,
             resolution: .connected
         ))
 
-        let descendantRetry = try XCTUnwrap(acquirer.next())
+        let descendantRetry = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(descendantRetry.blockCID, "D")
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             descendantRetry.ticket,
             resolution: .connected
         ))
-        XCTAssertNil(acquirer.next())
+        XCTAssertNil(fetcher.next())
     }
 
     func testPredecessorObligationSurvivesReadyQueueBackpressure() throws {
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "descendant",
             package: nil
         )).accepted)
-        let descendant = try XCTUnwrap(acquirer.next())
-        for index in 0..<CandidateAcquirer.readyCapacity {
-            XCTAssertTrue(acquirer.observe(.init(
+        let descendant = try XCTUnwrap(fetcher.next())
+        for index in 0..<BlockFetcher.readyCapacity {
+            XCTAssertTrue(fetcher.observe(.init(
                 blockCID: "queued-\(index)",
                 package: nil
             )).accepted)
         }
 
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             descendant.ticket,
             resolution: .predecessor("predecessor")
         ))
-        for _ in 0..<CandidateAcquirer.readyCapacity {
-            let queued = try XCTUnwrap(acquirer.next())
-            XCTAssertTrue(acquirer.complete(
+        for _ in 0..<BlockFetcher.readyCapacity {
+            let queued = try XCTUnwrap(fetcher.next())
+            XCTAssertTrue(fetcher.complete(
                 queued.ticket,
                 resolution: .terminal
             ))
         }
-        XCTAssertEqual(acquirer.next()?.blockCID, "predecessor")
+        XCTAssertEqual(fetcher.next()?.blockCID, "predecessor")
     }
 
     func testResetRejectsOldAdmissionCompletion() throws {
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "block",
             package: nil
         )).accepted)
-        let stale = try XCTUnwrap(acquirer.next())
+        let stale = try XCTUnwrap(fetcher.next())
 
-        acquirer.reset(retryWindow: .seconds(1))
-        XCTAssertFalse(acquirer.complete(
+        fetcher.reset(retryWindow: .seconds(1))
+        XCTAssertFalse(fetcher.complete(
             stale.ticket,
             resolution: .connected
         ))
-        XCTAssertNil(acquirer.next())
+        XCTAssertNil(fetcher.next())
     }
 
     /// Restart seeding is network history on both sides of the missing
@@ -463,124 +463,124 @@ final class CandidateAcquirerTests: XCTestCase {
     /// are weighed. Eager-wins is monotone, so an eager boot seed would pin a
     /// losing-fork descendant to execution for the process lifetime.
     func testResetSeedsDurableDescendantsWeighed() throws {
-        var acquirer = CandidateAcquirer()
-        acquirer.reset(
+        var fetcher = BlockFetcher()
+        fetcher.reset(
             retryWindow: .seconds(1),
             durableDescendants: ["P": [.init(blockCID: "O", rootCID: nil)]]
         )
-        let predecessor = try XCTUnwrap(acquirer.next())
+        let predecessor = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(predecessor.blockCID, "P")
         XCTAssertTrue(predecessor.weighed, "restart frontier is weighed")
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             predecessor.ticket,
             resolution: .connected
         ))
-        let descendant = try XCTUnwrap(acquirer.next())
+        let descendant = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(descendant.blockCID, "O")
         XCTAssertTrue(descendant.weighed, "durable descendant is weighed")
     }
 
     func testDurableOrphansStartAtTheMissingFrontier() throws {
-        var acquirer = CandidateAcquirer()
-        acquirer.reset(
+        var fetcher = BlockFetcher()
+        fetcher.reset(
             retryWindow: .seconds(1),
             durableDescendants: [
                 "P": [.init(blockCID: "O", rootCID: nil)],
                 "O": [.init(blockCID: "D", rootCID: nil)],
             ]
         )
-        let predecessor = try XCTUnwrap(acquirer.next())
+        let predecessor = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(predecessor.blockCID, "P")
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             predecessor.ticket,
             resolution: .connected
         ))
 
-        let orphan = try XCTUnwrap(acquirer.next())
+        let orphan = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(orphan.blockCID, "O")
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             orphan.ticket,
             resolution: .connected
         ))
-        XCTAssertEqual(acquirer.next()?.blockCID, "D")
+        XCTAssertEqual(fetcher.next()?.blockCID, "D")
     }
 
     func testLivePredecessorParkEvictsOldestRetainedInsteadOfDropping() throws {
         // Retention is an operator-budget cache: with the budget full of
         // stale waits, a live predecessor walk must still be able to park —
         // the oldest retained entry is evicted, never the fresh park.
-        var acquirer = CandidateAcquirer()
-        for index in 0..<CandidateAcquirer.retainedCapacity {
-            XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher()
+        for index in 0..<BlockFetcher.parkedCapacity {
+            XCTAssertTrue(fetcher.observe(.init(
                 blockCID: "stale-\(index)",
                 package: nil
             )).accepted)
-            let candidate = try XCTUnwrap(acquirer.next())
-            XCTAssertTrue(acquirer.complete(
+            let candidate = try XCTUnwrap(fetcher.next())
+            XCTAssertTrue(fetcher.complete(
                 candidate.ticket,
                 resolution: .wait(.evidence)
             ))
         }
-        XCTAssertTrue(acquirer.observe(.init(
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "descendant",
             package: nil
         )).accepted)
-        let descendant = try XCTUnwrap(acquirer.next())
-        XCTAssertTrue(acquirer.complete(
+        let descendant = try XCTUnwrap(fetcher.next())
+        XCTAssertTrue(fetcher.complete(
             descendant.ticket,
             resolution: .predecessor("missing-ancestor")
         ))
         // The park is live: the seeded predecessor is next, and its
         // connection wakes the parked descendant.
-        let predecessor = try XCTUnwrap(acquirer.next())
+        let predecessor = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(predecessor.blockCID, "missing-ancestor")
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             predecessor.ticket,
             resolution: .connected
         ))
-        XCTAssertEqual(acquirer.next()?.blockCID, "descendant")
+        XCTAssertEqual(fetcher.next()?.blockCID, "descendant")
     }
 
     func testRecoverySeedingRespectsTheRetainedBudget() throws {
         // A history-heavy store can carry thousands of stale unresolved side
         // edges; seeding them all would exhaust the retained budget from
         // second zero and starve live walks.
-        var durable: [String: Set<CandidateAcquirer.DurableDescendant>] = [:]
-        for index in 0..<(CandidateAcquirer.retainedCapacity * 3) {
+        var durable: [String: Set<BlockFetcher.DurableDescendant>] = [:]
+        for index in 0..<(BlockFetcher.parkedCapacity * 3) {
             durable["pred-\(index)"] = [
                 .init(blockCID: "desc-\(index)", rootCID: nil)
             ]
         }
-        var acquirer = CandidateAcquirer()
-        acquirer.reset(retryWindow: .seconds(1), durableDescendants: durable)
+        var fetcher = BlockFetcher()
+        fetcher.reset(retryWindow: .seconds(1), durableDescendants: durable)
         // A live park still succeeds immediately (evicting if needed).
-        XCTAssertTrue(acquirer.observe(.init(
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "live-descendant",
             package: nil
         )).accepted)
-        var live: CandidateAcquirer.Candidate?
-        while let candidate = acquirer.next() {
+        var live: BlockFetcher.Candidate?
+        while let candidate = fetcher.next() {
             if candidate.blockCID == "live-descendant" {
                 live = candidate
                 break
             }
-            XCTAssertTrue(acquirer.complete(
+            XCTAssertTrue(fetcher.complete(
                 candidate.ticket,
                 resolution: .terminal
             ))
         }
         let ticket = try XCTUnwrap(live).ticket
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             ticket,
             resolution: .predecessor("live-missing")
         ))
         var sawLivePredecessor = false
-        while let candidate = acquirer.next() {
+        while let candidate = fetcher.next() {
             if candidate.blockCID == "live-missing" {
                 sawLivePredecessor = true
                 break
             }
-            XCTAssertTrue(acquirer.complete(
+            XCTAssertTrue(fetcher.complete(
                 candidate.ticket,
                 resolution: .terminal
             ))
@@ -594,36 +594,36 @@ final class CandidateAcquirerTests: XCTestCase {
         // wait window expires must become ready again (re-firing the
         // solicitation on its next admission) — fossilizing it wedges the
         // whole successor chain behind one lost message.
-        var acquirer = CandidateAcquirer(
+        var fetcher = BlockFetcher(
             retryWindow: .seconds(1),
             evidenceRetryWindow: .seconds(1)
         )
-        XCTAssertTrue(acquirer.observe(.init(
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "hole",
             package: nil
         )).accepted)
         let start = ContinuousClock.now
-        let hole = try XCTUnwrap(acquirer.next())
-        XCTAssertTrue(acquirer.complete(
+        let hole = try XCTUnwrap(fetcher.next())
+        XCTAssertTrue(fetcher.complete(
             hole.ticket,
             resolution: .wait(.evidence),
             now: start
         ))
         // A successor parks on the hole, making it depended-upon.
-        XCTAssertTrue(acquirer.observe(.init(
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "successor",
             package: nil
         )).accepted)
-        while let next = acquirer.next() {
+        while let next = fetcher.next() {
             if next.blockCID == "successor" {
-                XCTAssertTrue(acquirer.complete(
+                XCTAssertTrue(fetcher.complete(
                     next.ticket,
                     resolution: .predecessor("hole"),
                     now: start
                 ))
                 break
             }
-            XCTAssertTrue(acquirer.complete(
+            XCTAssertTrue(fetcher.complete(
                 next.ticket,
                 resolution: .wait(.evidence),
                 now: start
@@ -631,21 +631,21 @@ final class CandidateAcquirerTests: XCTestCase {
         }
         // Window expires: the depended-upon evidence wait re-readies instead
         // of fossilizing.
-        acquirer.retry(now: start.advanced(by: .seconds(2)))
+        fetcher.retry(now: start.advanced(by: .seconds(2)))
         let retried = try XCTUnwrap(
-            acquirer.next(),
+            fetcher.next(),
             "expired depended-upon evidence wait must re-enter admission"
         )
         XCTAssertEqual(retried.blockCID, "hole")
         // The renewed park arms a FRESH window, so the cycle is unbounded:
         // park again, expire again, re-ready again.
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             retried.ticket,
             resolution: .wait(.evidence),
             now: start.advanced(by: .seconds(2))
         ))
-        acquirer.retry(now: start.advanced(by: .seconds(4)))
-        XCTAssertEqual(acquirer.next()?.blockCID, "hole")
+        fetcher.retry(now: start.advanced(by: .seconds(4)))
+        XCTAssertEqual(fetcher.next()?.blockCID, "hole")
     }
 
     func testPredecessorSeedInheritsDescendantProviders() throws {
@@ -654,18 +654,18 @@ final class CandidateAcquirerTests: XCTestCase {
         // predecessor walk must carry the descendant's providers onto the
         // seed it creates.
         let supplier = provider("descendant-supplier", session: 7)
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "descendant",
             package: nil,
             provider: supplier
         )).accepted)
-        let descendant = try XCTUnwrap(acquirer.next())
-        XCTAssertTrue(acquirer.complete(
+        let descendant = try XCTUnwrap(fetcher.next())
+        XCTAssertTrue(fetcher.complete(
             descendant.ticket,
             resolution: .predecessor("hole")
         ))
-        let hole = try XCTUnwrap(acquirer.next())
+        let hole = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(hole.blockCID, "hole")
         XCTAssertEqual(
             hole.providers,
@@ -680,24 +680,24 @@ final class CandidateAcquirerTests: XCTestCase {
         // revived on the descendant and copied onto the predecessor seed.
         let good = provider("good-supplier", session: 1)
         let bad = provider("bad-supplier", session: 2)
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "descendant",
             package: nil,
             provider: good
         )).accepted)
-        _ = acquirer.observe(.init(
+        _ = fetcher.observe(.init(
             blockCID: "descendant",
             package: nil,
             provider: bad
         ))
-        let descendant = try XCTUnwrap(acquirer.next())
-        XCTAssertTrue(acquirer.complete(
+        let descendant = try XCTUnwrap(fetcher.next())
+        XCTAssertTrue(fetcher.complete(
             descendant.ticket,
             resolution: .predecessor("hole"),
             deficientProviders: [bad]
         ))
-        let hole = try XCTUnwrap(acquirer.next())
+        let hole = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(hole.blockCID, "hole")
         XCTAssertEqual(hole.providers, [good])
     }
@@ -707,35 +707,35 @@ final class CandidateAcquirerTests: XCTestCase {
         // not cycle the single admission slot every tick — a content wait
         // re-readies at most once per retryWindow/64.
         let exact = provider("provider", session: 1)
-        var acquirer = CandidateAcquirer(retryWindow: .seconds(64))
-        XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher(retryWindow: .seconds(64))
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "block",
             package: nil,
             provider: exact
         )).accepted)
         let start = ContinuousClock.now
-        let first = try XCTUnwrap(acquirer.next())
-        XCTAssertTrue(acquirer.complete(
+        let first = try XCTUnwrap(fetcher.next())
+        XCTAssertTrue(fetcher.complete(
             first.ticket,
             resolution: .wait(.content),
             now: start
         ))
         // Immediately after the park the wait is paced, not ready.
-        acquirer.retry(now: start.advanced(by: .milliseconds(100)))
-        XCTAssertNil(acquirer.next(), "a fresh content wait must not re-ready on the next tick")
+        fetcher.retry(now: start.advanced(by: .milliseconds(100)))
+        XCTAssertNil(fetcher.next(), "a fresh content wait must not re-ready on the next tick")
         // One pace interval later it re-readies.
-        acquirer.retry(now: start.advanced(by: .seconds(2)))
-        XCTAssertEqual(acquirer.next()?.blockCID, "block")
+        fetcher.retry(now: start.advanced(by: .seconds(2)))
+        XCTAssertEqual(fetcher.next()?.blockCID, "block")
     }
 
     func testWeighedSeedPromotesOntoCandidate() throws {
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "weighed-block",
             package: nil,
             weighed: true
         )).accepted)
-        let candidate = try XCTUnwrap(acquirer.next())
+        let candidate = try XCTUnwrap(fetcher.next())
         XCTAssertTrue(
             candidate.weighed,
             "a weighed seed must produce a weighed candidate"
@@ -743,12 +743,12 @@ final class CandidateAcquirerTests: XCTestCase {
     }
 
     func testDefaultSeedIsEager() throws {
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "eager-block",
             package: nil
         )).accepted)
-        let candidate = try XCTUnwrap(acquirer.next())
+        let candidate = try XCTUnwrap(fetcher.next())
         XCTAssertFalse(
             candidate.weighed,
             "the default seed must stay on the eager tier"
@@ -757,7 +757,7 @@ final class CandidateAcquirerTests: XCTestCase {
 
     func testEagerSeedDowngradesAWeighedAttemptMonotonically() throws {
         // Order 1: weighed first, then an eager seed for the same CID.
-        var weighedFirst = CandidateAcquirer()
+        var weighedFirst = BlockFetcher()
         XCTAssertTrue(weighedFirst.observe(.init(
             blockCID: "block", package: nil, weighed: true
         )).accepted)
@@ -768,7 +768,7 @@ final class CandidateAcquirerTests: XCTestCase {
         )
 
         // Order 2: eager first, then weighed — still eager (never upgrades).
-        var eagerFirst = CandidateAcquirer()
+        var eagerFirst = BlockFetcher()
         XCTAssertTrue(eagerFirst.observe(.init(
             blockCID: "block", package: nil
         )).accepted)
@@ -788,24 +788,24 @@ final class CandidateAcquirerTests: XCTestCase {
         // attachment then seeds the same CID with its package (rooted, default
         // flag). The package supersedes the rootless attempt and must inherit
         // its tier — otherwise every below-tip child block executes eagerly.
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "block", package: nil, weighed: true
         )).accepted)
-        _ = acquirer.observe(.init(
+        _ = fetcher.observe(.init(
             blockCID: "block", package: try childPackage(rootCID: "root")
         ))
-        let candidate = try XCTUnwrap(acquirer.next())
+        let candidate = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(candidate.recoveryRootCID, "root")
         XCTAssertTrue(
             candidate.weighed,
             "a package seed superseding a weighed attempt must stay weighed"
         )
-        XCTAssertNil(acquirer.next(), "the rootless attempt was superseded")
+        XCTAssertNil(fetcher.next(), "the rootless attempt was superseded")
 
         // Eager-wins still holds: a package seed never UPGRADES an eager
         // rootless attempt to weighed.
-        var eagerRootless = CandidateAcquirer()
+        var eagerRootless = BlockFetcher()
         XCTAssertTrue(eagerRootless.observe(.init(
             blockCID: "block", package: nil
         )).accepted)
@@ -824,24 +824,24 @@ final class CandidateAcquirerTests: XCTestCase {
         // creation branch). A package seed carries no tier of its own, so it
         // must not re-eager the weighed block — otherwise every below-tip child
         // block seen from more than one peer executes eagerly.
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "block", package: nil, weighed: true
         )).accepted)
-        _ = acquirer.observe(.init(
+        _ = fetcher.observe(.init(
             blockCID: "block", package: try childPackage(rootCID: "root")
         ))
-        _ = acquirer.observe(.init(
+        _ = fetcher.observe(.init(
             blockCID: "block", package: try childPackage(rootCID: "root")
         ))
         XCTAssertEqual(
-            acquirer.next()?.weighed, true,
+            fetcher.next()?.weighed, true,
             "a second package seed must not downgrade a weighed rooted attempt"
         )
 
         // Eager-wins is intact where it belongs: a genuinely eager (rootless,
         // package-less) seed still downgrades a weighed rootless attempt.
-        var rootless = CandidateAcquirer()
+        var rootless = BlockFetcher()
         XCTAssertTrue(rootless.observe(.init(
             blockCID: "block", package: nil, weighed: true
         )).accepted)
@@ -859,22 +859,22 @@ final class CandidateAcquirerTests: XCTestCase {
         // on expiry, which fossilized a child cold-sync one block short of the
         // tip — the only path to that block's securing proof once the legacy
         // sweeps were retired.
-        var acquirer = CandidateAcquirer(
+        var fetcher = BlockFetcher(
             retryWindow: .seconds(64),
             evidenceRetryWindow: .seconds(1)
         )
-        XCTAssertTrue(acquirer.observe(.init(
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "tip", package: nil
         )).accepted)
         let start = ContinuousClock.now
-        let tip = try XCTUnwrap(acquirer.next())
-        XCTAssertTrue(acquirer.complete(
+        let tip = try XCTUnwrap(fetcher.next())
+        XCTAssertTrue(fetcher.complete(
             tip.ticket, resolution: .wait(.evidence), now: start
         ))
-        XCTAssertNil(acquirer.next(), "parked until the evidence window expires")
-        acquirer.retry(now: start.advanced(by: .seconds(2)))
+        XCTAssertNil(fetcher.next(), "parked until the evidence window expires")
+        fetcher.retry(now: start.advanced(by: .seconds(2)))
         XCTAssertEqual(
-            acquirer.next()?.blockCID, "tip",
+            fetcher.next()?.blockCID, "tip",
             "a dependent-less evidence park must re-enter admission, not be dropped"
         )
     }
@@ -882,23 +882,23 @@ final class CandidateAcquirerTests: XCTestCase {
     func testEvidenceParkExpiresOnItsOwnShortWindow() throws {
         // A lost locate must re-fire in seconds: evidence parks expire on the
         // dedicated evidence window, not the 64 s content window.
-        var acquirer = CandidateAcquirer(
+        var fetcher = BlockFetcher(
             retryWindow: .seconds(64),
             evidenceRetryWindow: .seconds(4)
         )
-        XCTAssertTrue(acquirer.observe(.init(
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "ev", package: nil
         )).accepted)
         let start = ContinuousClock.now
-        let ev = try XCTUnwrap(acquirer.next())
-        XCTAssertTrue(acquirer.complete(
+        let ev = try XCTUnwrap(fetcher.next())
+        XCTAssertTrue(fetcher.complete(
             ev.ticket, resolution: .wait(.evidence), now: start
         ))
-        acquirer.retry(now: start.advanced(by: .seconds(2)))
-        XCTAssertNil(acquirer.next(), "still inside the 4 s evidence window")
-        acquirer.retry(now: start.advanced(by: .seconds(5)))
+        fetcher.retry(now: start.advanced(by: .seconds(2)))
+        XCTAssertNil(fetcher.next(), "still inside the 4 s evidence window")
+        fetcher.retry(now: start.advanced(by: .seconds(5)))
         XCTAssertEqual(
-            acquirer.next()?.blockCID, "ev",
+            fetcher.next()?.blockCID, "ev",
             "re-fires after the evidence window, long before the content window"
         )
     }
@@ -908,32 +908,32 @@ final class CandidateAcquirerTests: XCTestCase {
         // enough to survive a lost locate on the head the node syncs toward —
         // and is then reclaimed, so an unresolvable losing-sibling park cannot
         // cycle through the single admission slot forever and starve it.
-        var acquirer = CandidateAcquirer(
+        var fetcher = BlockFetcher(
             retryWindow: .seconds(64),
             evidenceRetryWindow: .seconds(1)
         )
-        XCTAssertTrue(acquirer.observe(.init(
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "dead", package: nil
         )).accepted)
         let start = ContinuousClock.now
-        let first = try XCTUnwrap(acquirer.next())
-        XCTAssertTrue(acquirer.complete(
+        let first = try XCTUnwrap(fetcher.next())
+        XCTAssertTrue(fetcher.complete(
             first.ticket, resolution: .wait(.evidence), now: start
         ))
         for i in 1...5 {
             let now = start.advanced(by: .seconds(2 * i))
-            acquirer.retry(now: now)
+            fetcher.retry(now: now)
             let refired = try XCTUnwrap(
-                acquirer.next(), "re-fire \(i) is within the budget"
+                fetcher.next(), "re-fire \(i) is within the budget"
             )
             XCTAssertEqual(refired.blockCID, "dead")
-            XCTAssertTrue(acquirer.complete(
+            XCTAssertTrue(fetcher.complete(
                 refired.ticket, resolution: .wait(.evidence), now: now
             ))
         }
-        acquirer.retry(now: start.advanced(by: .seconds(12)))
+        fetcher.retry(now: start.advanced(by: .seconds(12)))
         XCTAssertNil(
-            acquirer.next(),
+            fetcher.next(),
             "past the budget a dependent-less evidence park is reclaimed"
         )
     }
@@ -953,31 +953,31 @@ final class CandidateAcquirerTests: XCTestCase {
         // all, so an unanswered query is the EXPECTED steady state for the
         // length of a roll, and a roll can outlast two hours.
         let ceiling = Duration.seconds(2 * 60 * 60)
-        var acquirer = CandidateAcquirer(
+        var fetcher = BlockFetcher(
             retryWindow: .seconds(64),
             evidenceRetryWindow: .seconds(4)
         )
-        XCTAssertTrue(acquirer.observe(.init(
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "needs-parent-fact", package: nil
         )).accepted)
         let start = ContinuousClock.now
-        let blocked = try XCTUnwrap(acquirer.next())
+        let blocked = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(blocked.blockCID, "needs-parent-fact")
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             blocked.ticket, resolution: .wait(.later), now: start
         ))
 
         // A successor parks on it, making it depended-upon — the branch that
         // fossilizes rather than being reclaimed.
-        XCTAssertTrue(acquirer.observe(.init(
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "successor", package: nil
         )).accepted)
-        let successor = try XCTUnwrap(acquirer.next())
+        let successor = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(
             successor.blockCID, "successor",
             "the parked predecessor must not be offered again here"
         )
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             successor.ticket,
             resolution: .predecessor("needs-parent-fact"),
             now: start
@@ -985,9 +985,9 @@ final class CandidateAcquirerTests: XCTestCase {
 
         // Cross the ceiling. Anything short of it takes the ordinary paced
         // retry and proves nothing about expiry.
-        acquirer.retry(now: start.advanced(by: ceiling + .seconds(1)))
+        fetcher.retry(now: start.advanced(by: ceiling + .seconds(1)))
         let retried = try XCTUnwrap(
-            acquirer.next(),
+            fetcher.next(),
             """
             An expired depended-upon `.later` park must re-enter admission and \
             re-fire its parent query. Fossilizing it strands this block and \
@@ -999,26 +999,26 @@ final class CandidateAcquirerTests: XCTestCase {
         // The renewed park arms a FRESH ceiling, so the child keeps asking for
         // as long as the parent stays stale and heals itself once it rolls.
         let second = start.advanced(by: ceiling + .seconds(1))
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             retried.ticket, resolution: .wait(.later), now: second
         ))
-        acquirer.retry(now: second.advanced(by: ceiling + .seconds(1)))
+        fetcher.retry(now: second.advanced(by: ceiling + .seconds(1)))
         XCTAssertEqual(
-            acquirer.next()?.blockCID, "needs-parent-fact",
+            fetcher.next()?.blockCID, "needs-parent-fact",
             "the retry cycle must not decay after one renewal"
         )
     }
 
     func testWeighedSurvivesRepeatedWeighedObserves() throws {
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "block", package: nil, weighed: true
         )).accepted)
-        _ = acquirer.observe(.init(
+        _ = fetcher.observe(.init(
             blockCID: "block", package: nil, weighed: true
         ))
         XCTAssertEqual(
-            acquirer.next()?.weighed, true,
+            fetcher.next()?.weighed, true,
             "weighed && weighed stays weighed"
         )
     }

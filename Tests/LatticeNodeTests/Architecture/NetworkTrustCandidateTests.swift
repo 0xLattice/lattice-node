@@ -414,41 +414,41 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         XCTAssertTrue(slots.allSatisfy { $0.peer == 0 })
     }
 
-    func testCandidateAcquirerIsBoundedFIFOAndDeduplicated() throws {
-        var acquirer = CandidateAcquirer()
-        XCTAssertTrue(acquirer.observe(.init(
+    func testCandidateFetcherIsBoundedFIFOAndDeduplicated() throws {
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "first",
             package: nil
         )).accepted)
-        XCTAssertTrue(acquirer.observe(.init(
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "second",
             package: nil
         )).accepted)
-        XCTAssertTrue(acquirer.observe(.init(
+        XCTAssertTrue(fetcher.observe(.init(
             blockCID: "first",
             package: nil
         )).accepted)
-        let first = try XCTUnwrap(acquirer.next())
+        let first = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(first.blockCID, "first")
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             first.ticket,
             resolution: .terminal
         ))
-        let second = try XCTUnwrap(acquirer.next())
+        let second = try XCTUnwrap(fetcher.next())
         XCTAssertEqual(second.blockCID, "second")
-        XCTAssertTrue(acquirer.complete(
+        XCTAssertTrue(fetcher.complete(
             second.ticket,
             resolution: .terminal
         ))
-        XCTAssertNil(acquirer.next())
+        XCTAssertNil(fetcher.next())
 
-        for index in 0..<CandidateAcquirer.readyCapacity {
-            XCTAssertTrue(acquirer.observe(.init(
+        for index in 0..<BlockFetcher.readyCapacity {
+            XCTAssertTrue(fetcher.observe(.init(
                 blockCID: "cid-\(index)",
                 package: nil
             )).accepted)
         }
-        XCTAssertFalse(acquirer.observe(.init(
+        XCTAssertFalse(fetcher.observe(.init(
             blockCID: "overflow",
             package: nil
         )).accepted)

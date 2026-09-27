@@ -180,10 +180,10 @@ struct NodeNetworkPlaneConfigurations {
 /// The public overlay carries same-chain candidates and CAS content. The
 /// private hierarchy plane carries only direct parent/child facts.
 public actor NodeNetworkRuntime: IvyDelegate {
-    typealias Candidate = CandidateAcquirer.Candidate
-    typealias CandidateSeed = CandidateAcquirer.Seed
-    private typealias CandidateWaitReason = CandidateAcquirer.WaitReason
-    typealias DurableDescendant = CandidateAcquirer.DurableDescendant
+    typealias Candidate = BlockFetcher.Candidate
+    typealias CandidateSeed = BlockFetcher.Seed
+    private typealias CandidateWaitReason = BlockFetcher.WaitReason
+    typealias DurableDescendant = BlockFetcher.DurableDescendant
     typealias ParentEvidenceResult = ParentEvidenceFlow.Result
     typealias ParentEvidenceSession = ParentEvidenceFlow.Session
 
@@ -630,7 +630,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ///     Hierarchy.acceptParentChainFact / Hierarchy.retryParentFactCandidate /
     ///     Lifecycle.startNow / Lifecycle.clearRuntimeState / NodeNetworkRuntime.didConnect /
     ///     NodeNetworkRuntime.didDisconnect.
-    var candidateAcquirer = CandidateAcquirer()
+    var blockFetcher = BlockFetcher()
     /// Owner: Candidates.startCandidateWorker / Candidates.finishCandidateWorker /
     ///     Lifecycle.clearRuntimeState.
     var candidateWorker: Task<Void, Never>?
@@ -1021,7 +1021,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // ready one's are released by their own tasks.
             let previous = overlayRecords[peer.key]
             if let previous = previous?.readyPeer {
-                candidateAcquirer.disconnect(candidateProvider(previous))
+                blockFetcher.disconnect(candidateProvider(previous))
             }
             discardServingSessions(of: previous?.awaitingHelloPeer)
             overlayRecords.update(peer.key) {
@@ -1079,7 +1079,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             let disconnected = overlayRecords[key]
             disconnected?.helloDeadline?.task.cancel()
             if let ready = disconnected?.readyPeer {
-                candidateAcquirer.disconnect(candidateProvider(ready))
+                blockFetcher.disconnect(candidateProvider(ready))
             }
             discardServingSessions(of: disconnected?.sessionPeer)
             // The record goes after the range sync clears: the re-entry that
@@ -1242,7 +1242,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // The acquired (weighed-inclusive) tip: it advances only on work
             // this node verified itself. The validated tip lags behind it under
             // deferred execution and would read as staleness that is not there.
-            acquiredHeight: { await process.canonicalTipHeight() },
+            fetchedHeight: { await process.canonicalTipHeight() },
             configuredPeersWithoutSession: { [weak self] in
                 await self?.peersWithoutSession(configured) ?? []
             },
@@ -1385,7 +1385,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         keys.formUnion(parentStateQueryGuard.peers)
         keys.formUnion(sessionLeases.portableEvidenceWork.values.map(\.peer.key))
         if let receivedParentTip { keys.insert(receivedParentTip.peer.key) }
-        for hex in candidateAcquirer.debugSnapshot().providerKeys
+        for hex in blockFetcher.debugSnapshot().providerKeys
             .union(parentEvidence.debugSnapshot().peerIDs) {
             if let key = try? PeerKey(hex) { keys.insert(key) }
         }
@@ -1534,7 +1534,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         _ current: AuthenticatedChildPackage?,
         with received: AuthenticatedChildPackage
     ) -> AuthenticatedChildPackage? {
-        CandidateAcquirer.mergePackages(current, received)
+        BlockFetcher.mergePackages(current, received)
     }
 
 }

@@ -997,11 +997,11 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertTrue(inboxAfterRestart.isEmpty, "not re-admitted on restart")
     }
 
-    /// Decided is exactly the set the candidate acquirer never retries: an
+    /// Decided is exactly the set the candidate fetcher never retries: an
     /// inbox entry goes when, and only when, no retry is coming for it. A
     /// refusal that is final for this node but kept — a malformed proof, a
     /// local failure — would sit in the inbox until capacity closed it.
-    func testDecidedIsExactlyWhatTheAcquirerNeverRetries() {
+    func testDecidedIsExactlyWhatTheFetcherNeverRetries() {
         let verdicts: [(failure: BlockImportError, decided: Bool)] = [
             (.unavailableEvidence, false),
             (.crossChainEvidenceRequired(.childProof(chainPath: ["Nexus", "Payments"], childCID: "b")), false),
@@ -1017,7 +1017,7 @@ final class ChainProcessTests: XCTestCase {
             XCTAssertEqual(ChainProcess.isDecided(result), verdict.decided, "\(verdict.failure)")
             let decision = NodeImportDecision(result)
             let retried = decision.shouldRetryWhenEvidenceChanges || decision.shouldRetryLater
-            XCTAssertEqual(retried, !verdict.decided, "the acquirer retries exactly the undecided: \(verdict.failure)")
+            XCTAssertEqual(retried, !verdict.decided, "the fetcher retries exactly the undecided: \(verdict.failure)")
         }
         let link = ParentCarrierLink(parentPath: ["Nexus"], carrierCID: "c", rootCID: "r")
         XCTAssertTrue(ChainProcess.isDecided(.carrier(link, sameChainPredecessor: nil)))

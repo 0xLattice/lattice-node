@@ -377,13 +377,13 @@ extension NodeNetworkRuntime {
         // own attempt. Offer once the admission decides or parks; the
         // drain re-arms the offer either way.
         if let pending = try? await process.store.pendingHandoffChildCIDs(),
-           pending.contains(where: { candidateAcquirer.isAwaitingAdmission($0) }) {
+           pending.contains(where: { blockFetcher.isAwaitingAdmission($0) }) {
             candidateOfferDeferredByAdmission = true
             SyncTrace.log("candidate offer deferred: own carried candidate awaiting admission")
             return
         }
         // The gate is open: a deferral the drain never got to read (its
-        // attempt left the acquirer without an admission) is moot now.
+        // attempt left the fetcher without an admission) is moot now.
         candidateOfferDeferredByAdmission = false
         guard let context = receivedParentTip,
               hierarchyRecords[context.peer.key]?.session?.sessionID
@@ -1044,7 +1044,7 @@ extension NodeNetworkRuntime {
     }
 
     /// After a scan round: the block the parent's context names as carried
-    /// is either here, in the acquirer (its admission will decide), asked
+    /// is either here, in the fetcher (its admission will decide), asked
     /// for now (the request this chain made while a round was in flight
     /// sent nothing), or, when a round sent for it ended without it, let
     /// go: the offer hold is released and the child builds on the tip it
@@ -1058,7 +1058,7 @@ extension NodeNetworkRuntime {
               let carried = receivedParentTip?.carriedChildCID,
               carried != releasedCarriedChildCID,
               !(await process.hasAcceptedBlock(carried)),
-              !candidateAcquirer.tracks(carried) else { return }
+              !blockFetcher.tracks(carried) else { return }
         if requestedCarriedChildCID == carried {
             releasedCarriedChildCID = carried
             SyncTrace.log("carried \(carried.prefix(12)) not served by a scan round: offer hold released")
@@ -2058,8 +2058,8 @@ extension NodeNetworkRuntime {
                     // signal. Wake the successors that parked behind it while
                     // awaitingGenesis, or the whole chain above the genesis stays
                     // orphaned and the child never canonicalizes past height 0.
-                    candidateAcquirer.predecessorConnectedOutOfBand(genesisCID)
-                    serviceCandidateAcquirer()
+                    blockFetcher.predecessorConnectedOutOfBand(genesisCID)
+                    serviceBlockFetcher()
                     await requestEvidenceIndex(
                         generation: generation,
                         process: process
@@ -2379,7 +2379,7 @@ extension NodeNetworkRuntime {
                 )
             ))
         }
-        guard let merged = CandidateAcquirer.mergePackages(
+        guard let merged = BlockFetcher.mergePackages(
             pending.package,
             localFact
         ) else {
@@ -2398,15 +2398,15 @@ extension NodeNetworkRuntime {
         // one, so without retryExternalDependency the candidate would wedge until
         // the wall-clock poll (or 2h expiry). Mirror the timeout path
         // (retryParentFactCandidate) so the fact's arrival is itself the trigger.
-        _ = candidateAcquirer.observe(CandidateSeed(
+        _ = blockFetcher.observe(CandidateSeed(
             blockCID: pending.blockCID,
             package: merged
         ))
-        candidateAcquirer.retryExternalDependency(
+        blockFetcher.retryExternalDependency(
             blockCID: pending.blockCID,
             rootCID: pending.package.package.proof.rootCID
         )
-        serviceCandidateAcquirer()
+        serviceBlockFetcher()
     }
 
     private func parentChainFactRequestTimedOut(
@@ -2426,15 +2426,15 @@ extension NodeNetworkRuntime {
     }
 
     private func retryParentFactCandidate(_ pending: PendingParentChainFact) {
-        _ = candidateAcquirer.observe(CandidateSeed(
+        _ = blockFetcher.observe(CandidateSeed(
             blockCID: pending.blockCID,
             package: pending.package
         ))
-        candidateAcquirer.retryExternalDependency(
+        blockFetcher.retryExternalDependency(
             blockCID: pending.blockCID,
             rootCID: pending.package.package.proof.rootCID
         )
-        serviceCandidateAcquirer()
+        serviceBlockFetcher()
     }
 
     /// Returns whether a request was sent: none is while a round is in

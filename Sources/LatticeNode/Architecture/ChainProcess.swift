@@ -591,7 +591,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// carrier for deeper chains only, which merged mining produces every
     /// round it clears only a deeper target), the block or its evidence is
     /// invalid, or this node could not verify it. Decided is exactly the set
-    /// the candidate acquirer never retries, by the same predicate: what it
+    /// the candidate fetcher never retries, by the same predicate: what it
     /// would retry (evidence not yet held, a rule not yet met) is a deferral.
     /// A deferral persists nothing; the block's evidence stays in the
     /// parent-evidence inbox and is replayed on restart, so no stop or crash
@@ -1663,7 +1663,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 capacity: Self.preparedChildProofCapacity
             )
         }
-        _ = try await acquirePendingChildProofs(
+        _ = try await fetchPendingChildProofs(
             carrier: carrier,
             directories: directories,
             fetcher: CoalescingFetcher(remoteSource.map {
@@ -1732,7 +1732,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 .sorted()
         }
         guard !directories.isEmpty else { return [] }
-        return try await acquirePendingChildProofs(
+        return try await fetchPendingChildProofs(
             carrier: BlockHeader(
                 rawCID: carrierCID,
                 node: nil,
@@ -2228,7 +2228,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         )
     }
 
-    private func acquirePendingChildProofs(
+    private func fetchPendingChildProofs(
         carrier: BlockHeader,
         directories: [String],
         fetcher: any Fetcher

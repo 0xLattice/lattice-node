@@ -990,7 +990,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         await runtime.stop()
     }
 
-    /// The restart the three-node smoke found, through the real acquirer and
+    /// The restart the three-node smoke found, through the real fetcher and
     /// the real merged-mining shape: the parent carried a block that commits
     /// parent state — admitted eagerly it would first wait on a continuity
     /// fact the parent had not served, the deferral whose only memory was

@@ -90,9 +90,9 @@ public actor ChainService {
     // source the walk pulls a weighed block's deferred body over it; when the
     // body is temporarily unavailable the walk parks and a single delayed
     // retry re-arms it — there is no push signal on body arrival, and once
-    // weighed sync completes the acquirer may hold no timed wait to re-drive
+    // weighed sync completes the fetcher may hold no timed wait to re-drive
     // it, so the walk owns its own liveness retry rather than borrowing the
-    // acquirer's. Cross-chain evidence for the walk comes from
+    // fetcher's. Cross-chain evidence for the walk comes from
     // NetworkInterface.resolveValidateEvidence: a weighed CHILD block's
     // `.execution` needs the parent fact (state continuity / genesis link) the
     // live path obtains from the configured parent; nil parks the walk on the
