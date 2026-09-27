@@ -172,7 +172,7 @@ final class MetricsTests: XCTestCase {
         let weighed = try await consumer.admit(
             BlockHeader(node: template.block),
             remoteSource: FetcherContentSource(producer),
-            mode: .weighed
+            mode: .header
         )
         XCTAssertTrue(weighed.decision.isAccepted)
 

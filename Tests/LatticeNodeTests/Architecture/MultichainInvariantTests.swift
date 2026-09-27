@@ -217,11 +217,11 @@ final class MultichainInvariantTests: XCTestCase {
             revision: grown.revision
         )
         let misnamedOutcome = try await child().applyParentRunReport(misnamed)
-        guard case .refused(.notCommitterOfChild) = misnamedOutcome else {
+        guard case .refused(.notCarrierOfChild) = misnamedOutcome else {
             return XCTFail("a report naming a block the committer does not commit is refused, got \(misnamedOutcome)")
         }
         counters = try await child().parentReportCounters()
-        XCTAssertEqual(counters.refusals["notCommitterOfChild"], 1)
+        XCTAssertEqual(counters.refusals["notCarrierOfChild"], 1)
         // A committer this chain never admitted a block from names nothing:
         // the location is local knowledge, never the report's.
         let stranger = ParentRunReport(
@@ -230,7 +230,7 @@ final class MultichainInvariantTests: XCTestCase {
             runWork: grown.runWork, ownWork: grown.ownWork, revision: grown.revision
         )
         let strangerOutcome = try await child().applyParentRunReport(stranger)
-        guard case .refused(.notCommitterOfChild) = strangerOutcome else {
+        guard case .refused(.notCarrierOfChild) = strangerOutcome else {
             return XCTFail("an unknown committer must be refused, got \(strangerOutcome)")
         }
         counters = try await child().parentReportCounters()

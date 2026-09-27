@@ -1301,7 +1301,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             let parent = try await fixture.process.canonicalTipBlock()
             // Admission is strict (`timestamp <= now`) — Lattice 27.0.0 removed the
             // central future-drift tolerance. A block 5s ahead is briefly deferred
-            // (notYetAdmissible), then admits once real time reaches its timestamp.
+            // (notYetValid), then admits once real time reaches its timestamp.
             let timestamp = Int64(Date().timeIntervalSince1970 * 1_000)
                 + 5_000
             var nonce: UInt64 = 0

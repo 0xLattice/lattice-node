@@ -199,7 +199,7 @@ final class SafetyNetBootRecoveryGoldenTests: XCTestCase {
             "SELECT payload FROM admission_batches ORDER BY seq ASC"
         ) {
             let batch = try JSONDecoder().decode(
-                ChainAdmissionBatch.self,
+                BlockImportBatch.self,
                 from: try XCTUnwrap(row["payload"]?.blobValue)
             )
             batchFactKinds.append(batch.facts.map { fact in
@@ -272,7 +272,7 @@ final class SafetyNetBootRecoveryGoldenTests: XCTestCase {
             configuration: configuration
         )
         let chain = [a, b, c, e, d]
-        for mode in [AdmissionMode.weighed, .validate] {
+        for mode in [ImportMode.header, .execution] {
             for block in chain {
                 let outcome = try await consumer!.admit(
                     BlockHeader(node: block),

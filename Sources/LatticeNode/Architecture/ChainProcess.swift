@@ -349,7 +349,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             AuthenticatedChildPackage? = nil,
         preparingChildDirectories: [String] = [],
         remoteSource: (any ContentSource)? = nil,
-        mode: AdmissionMode = .eager,
+        mode: ImportMode = .full,
         canonicalCommitPublisher: CanonicalCommitPublisher? = nil
     ) async throws -> NodeAdmissionOutcome {
         let authenticatedChildPackage: AuthenticatedChildPackage?
@@ -474,7 +474,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             authenticatedPackage: authenticatedChildPackage,
             fetcher: attemptFetcher
         )
-        let stage: @Sendable (ChainAdmissionStagingContext) async throws -> Void = {
+        let stage: @Sendable (BlockImportStagingContext) async throws -> Void = {
             context in
             let hierarchyArtifacts: AdmissionHierarchyArtifacts?
             if let link = context.issuedCarrierLink {
@@ -599,7 +599,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// decision consumes the entry, relay or no relay: an entry no retry is
     /// coming for would be re-admitted at every start and, at capacity,
     /// refuse every later parent-carried block.
-    static func isDecided(_ result: ChainLocalBlockResult) -> Bool {
+    static func isDecided(_ result: BlockImportResult) -> Bool {
         let decision = NodeAdmissionDecision(result)
         return !(decision.shouldRetryWhenEvidenceChanges || decision.shouldRetryLater)
     }
@@ -648,12 +648,12 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         attemptFetcher: any Fetcher,
         directChildDirectories: [String],
         pendingChildProofRoutes: [PendingChildProofRoute],
-        mode: AdmissionMode = .eager,
+        mode: ImportMode = .full,
         canonicalCommitPublisher: CanonicalCommitPublisher?
     ) async throws -> NodeAdmissionOutcome {
         let package = authenticatedPackage?.package
         let admissionStorage = NodeAdmissionStorage(storage: broker)
-        let preflight = try await level.preflightBlockHeaderChainLocal(
+        let preflight = try await level.preflightBlockImport(
             blockHeader,
             fetcher: attemptFetcher,
             childPackage: package,
@@ -685,7 +685,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         if case .terminal(_, let parentGenesisLinks) = preflight {
             directParentGenesisLinks = parentGenesisLinks
         }
-        let stage: @Sendable (ChainAdmissionStagingContext) async throws -> Void = {
+        let stage: @Sendable (BlockImportStagingContext) async throws -> Void = {
             context in
             try Task.checkCancellation()
             // Validated tier (deferred execution): the block was already weighed,
@@ -699,7 +699,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             // execution would be forgotten on every restart and the chain would
             // attest nothing. A validate EXCLUSION is a brand-new fact and stages
             // normally.
-            if case .validate = mode {
+            if case .execution = mode {
                 let isExclusion = context.batch.facts.contains {
                     if case .exclusion = $0 { return true }
                     return false
@@ -724,7 +724,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     // executed the transition, and inferring "this mode means
                     // executed" would silently become a forged-attestation
                     // primitive the day any non-executing outcome is added under
-                    // `.validate`.
+                    // `.execution`.
                     //
                     // Checked FIRST, before the pin and before any hierarchy
                     // artifact is written. Those artifacts are exactly what this
@@ -793,7 +793,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     // would push it past a revision the replayed chain never
                     // reaches.
                     try await self.store.stage(
-                        ChainAdmissionBatch.validation(
+                        BlockImportBatch.validation(
                             blockHash: blockHeader.rawCID
                         ),
                         volumeRoots: []
@@ -823,7 +823,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     // so the validate-on-candidacy walk (and every act-on
                     // read) knows to execute it before building on it.
                     status: {
-                        if case .weighed = mode { return .weighed }
+                        if case .header = mode { return .weighed }
                         return .eager
                     }(),
                     pendingChildProofRoutes: hierarchyArtifacts == nil
@@ -852,7 +852,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 releaseOperation()
             }
         }
-        let result: ChainLocalBlockResult
+        let result: BlockImportResult
         switch preflight {
         case .terminal(let terminal, _):
             result = terminal
@@ -967,7 +967,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             return ([], false)
         }
         guard let meta = await level.chain.getConsensusBlock(hash: afterCID),
-              await level.chain.getMainChainBlockHash(atIndex: meta.blockHeight) == afterCID
+              await level.chain.canonicalBlockHash(atHeight: meta.blockHeight) == afterCID
         else {
             return ([], false)
         }
@@ -975,7 +975,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         var blockCIDs: [String] = []
         var height = meta.blockHeight + 1
         while blockCIDs.count < limit, height <= highest {
-            guard let cid = await level.chain.getMainChainBlockHash(atIndex: height) else {
+            guard let cid = await level.chain.canonicalBlockHash(atHeight: height) else {
                 break
             }
             blockCIDs.append(cid)
@@ -1003,7 +1003,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         }
         for cid in locator {
             guard let meta = await level.chain.getConsensusBlock(hash: cid),
-                  await level.chain.getMainChainBlockHash(atIndex: meta.blockHeight) == cid
+                  await level.chain.canonicalBlockHash(atHeight: meta.blockHeight) == cid
             else { continue }
             let page = await forwardMainChainRange(afterCID: cid, limit: limit)
             return (cid, page.blockCIDs, page.hasMore)
@@ -1026,7 +1026,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// lookup never walks parents or touches the operation gate.
     func mainChainBlockCID(atHeight height: UInt64) async -> String? {
         guard case .active(let level) = runtimePhase else { return nil }
-        return await level.chain.getMainChainBlockHash(atIndex: height)
+        return await level.chain.canonicalBlockHash(atHeight: height)
     }
 
     /// Height of the CURRENT canonical (weighed-inclusive) main-chain tip, or nil
@@ -1058,7 +1058,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// `status()` / the validated tip.
     func canonicalTip() async -> (cid: String, height: UInt64)? {
         guard case .active(let level) = runtimePhase else { return nil }
-        let tip = await level.chain.getMainChainTip()
+        let tip = await level.chain.canonicalTip
         guard let height = await level.chain.getConsensusBlock(hash: tip)?
             .blockHeight else { return nil }
         return (tip, height)
@@ -1337,7 +1337,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         guard case .active(let level) = runtimePhase else {
             throw ChainProcessError.chainNotBootstrapped
         }
-        let tip = await level.chain.getMainChainTip()
+        let tip = await level.chain.canonicalTip
         let header = BlockHeader(rawCID: tip, node: nil, encryptionInfo: nil)
         guard let block = try await header.resolve(fetcher: localFetcher).node else {
             throw ChainProcessError.unresolvedCanonicalTip(tip)
@@ -1426,7 +1426,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     private func validatedTipWalk(
         level: ChainLevel
     ) async -> (tipHeight: UInt64, validated: (cid: String, height: UInt64)?)? {
-        let tip = await level.chain.getMainChainTip()
+        let tip = await level.chain.canonicalTip
         guard let tipHeight = await level.chain
             .getConsensusBlock(hash: tip)?.blockHeight
         else { return nil }
@@ -1436,7 +1436,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         // still validated.
         if let cached = validatedTipCache, cached.height <= tipHeight,
            demotedHoleCeiling.map({ cached.height >= $0 }) ?? true,
-           await level.chain.getMainChainBlockHash(atIndex: cached.height)
+           await level.chain.canonicalBlockHash(atHeight: cached.height)
             == cached.cid,
            await storeBlockValidated(cached.cid) {
             // Walk UP from the cached floor while the next main-chain block
@@ -1444,8 +1444,8 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             var best = cached
             while best.height < tipHeight {
                 let next = best.height + 1
-                guard let cid = await level.chain.getMainChainBlockHash(
-                    atIndex: next
+                guard let cid = await level.chain.canonicalBlockHash(
+                    atHeight: next
                 ), await storeBlockValidated(cid) else { break }
                 best = (cid, next)
             }
@@ -1455,7 +1455,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         // Full downward walk: the first validated block from the top.
         var height = tipHeight
         while true {
-            if let cid = await level.chain.getMainChainBlockHash(atIndex: height),
+            if let cid = await level.chain.canonicalBlockHash(atHeight: height),
                await storeBlockValidated(cid) {
                 validatedTipCache = (cid, height)
                 return (tipHeight, (cid, height))
@@ -1466,7 +1466,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 // holds it even when the store's marker was demoted. Without
                 // this the walk would target height 0 forever, and on the
                 // root chain that verdict is parked (§9.9), never staged.
-                if let cid = await level.chain.getMainChainBlockHash(atIndex: 0),
+                if let cid = await level.chain.canonicalBlockHash(atHeight: 0),
                    await level.chain.hasExecutedAncestry(blockHash: cid) {
                     validatedTipCache = (cid, 0)
                     return (tipHeight, (cid, 0))
@@ -1883,11 +1883,13 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     func runReports(changedBy blockHash: String) async -> [ParentRunReport] {
         guard case .active(let level) = runtimePhase,
               !servedRunDirectories.isEmpty,
-              let meta = await level.chain.getConsensusBlock(hash: blockHash)
+              await level.chain.getConsensusBlock(hash: blockHash) != nil
         else { return [] }
         var reports: [ParentRunReport] = []
         for directory in servedRunDirectories.sorted() {
-            guard let committer = meta.nearestCommitter[directory],
+            guard let committer = await level.chain.nearestCarrier(
+                      of: blockHash, directory: directory
+                  ),
                   let report = await level.chain.parentRunReport(
                       at: committer, directory: directory
                   ) else { continue }
@@ -1915,12 +1917,14 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         directories: [String]
     ) async -> [String: String] {
         guard case .active(let level) = runtimePhase, !directories.isEmpty,
-              let tip = await level.chain.getConsensusBlock(hash: tipCID)
+              await level.chain.getConsensusBlock(hash: tipCID) != nil
         else { return [:] }
         var carried: [String: String] = [:]
         var committers: [String: BlockMeta?] = [:]
         for directory in directories {
-            guard let committer = tip.nearestCommitter[directory] else { continue }
+            guard let committer = await level.chain.nearestCarrier(
+                of: tipCID, directory: directory
+            ) else { continue }
             if committers[committer] == nil {
                 committers[committer] = await level.chain.getConsensusBlock(hash: committer)
             }
@@ -1991,7 +1995,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             committer: report.blockHash
         ) else {
             parentReportRefusalCounts["unknownCommitter", default: 0] += 1
-            return .refused(.notCommitterOfChild)
+            return .refused(.notCarrierOfChild)
         }
         let outcome = await level.chain.strengthenFromParentReport(
             child: childBlock, directory: directory, report: report
@@ -2078,7 +2082,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             guard let height = await level.chain
                 .getConsensusBlock(hash: blockCID)?.blockHeight,
                   height < candidateCeiling,
-                  await level.chain.getMainChainBlockHash(atIndex: height)
+                  await level.chain.canonicalBlockHash(atHeight: height)
                     != blockCID
             else { continue }
             candidates.append((blockCID, height))
@@ -2586,7 +2590,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     }
 
     nonisolated static func persist(
-        _ batch: ChainAdmissionBatch,
+        _ batch: BlockImportBatch,
         admissionStorage: NodeAdmissionStorage,
         store: NodeStore,
         broker: DiskBroker,

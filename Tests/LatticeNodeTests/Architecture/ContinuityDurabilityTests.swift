@@ -116,7 +116,7 @@ final class ContinuityDurabilityTests: XCTestCase {
         let dir = directory()
         let config = try configuration(dir)
         var consumer: ChainProcess? = try await ChainProcess.open(configuration: config)
-        for mode in [AdmissionMode.weighed, .validate] {
+        for mode in [ImportMode.header, .execution] {
             for block in chain {
                 let outcome = try await consumer!.admit(
                     BlockHeader(node: block),
@@ -154,7 +154,7 @@ final class ContinuityDurabilityTests: XCTestCase {
             let outcome = try await consumer!.admit(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
-                mode: .weighed
+                mode: .header
             )
             XCTAssertTrue(outcome.decision.isAccepted)
         }
@@ -194,7 +194,7 @@ final class ContinuityDurabilityTests: XCTestCase {
         let dir = directory()
         let config = try configuration(dir)
         var consumer: ChainProcess? = try await ChainProcess.open(configuration: config)
-        for mode in [AdmissionMode.weighed, .validate] {
+        for mode in [ImportMode.header, .execution] {
             for block in chain {
                 _ = try await consumer!.admit(
                     BlockHeader(node: block),
@@ -286,7 +286,7 @@ final class ContinuityDurabilityTests: XCTestCase {
         let dir = directory()
         let config = try configuration(dir)
         var consumer: ChainProcess? = try await ChainProcess.open(configuration: config)
-        for mode in [AdmissionMode.weighed, .validate] {
+        for mode in [ImportMode.header, .execution] {
             for block in chain {
                 _ = try await consumer!.admit(
                     BlockHeader(node: block),

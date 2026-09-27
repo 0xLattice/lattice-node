@@ -30,7 +30,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/adalinxx/Lattice.git",
-            exact: "36.0.0"
+            exact: "37.0.0"
         ),
         .package(
             url: "https://github.com/adalinxx/cashew.git",
@@ -161,6 +161,8 @@ let package = Package(
                 "LatticeMinerCore",
                 "CSQLite",
                 .product(name: "Lattice", package: "lattice"),
+                .product(name: "LatticeBlockTree", package: "lattice"),
+                .product(name: "LatticeProofs", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy"),
                 .product(name: "Tally", package: "Tally"),
                 .product(name: "VolumeBroker", package: "VolumeBroker"),

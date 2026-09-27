@@ -82,7 +82,7 @@ public protocol NetworkInterface: AnyObject, Sendable {
         ) async throws -> NodeAdmissionOutcome
     ) async throws -> NodeAdmissionOutcome
     /// Cross-chain evidence for the validate walk: a weighed CHILD block's
-    /// `.validate` needs the parent fact (state continuity / genesis link) the
+    /// `.execution` needs the parent fact (state continuity / genesis link) the
     /// live path obtains from the configured parent. Nil is an availability
     /// gap; the walk parks on its retry timer.
     func resolveValidateEvidence(
@@ -214,7 +214,7 @@ final class WeakNetwork: @unchecked Sendable, NetworkInterface {
         // A weighed admit stored only the boundary; pull the deferred body
         // over the network by opening a root session on the block CID (the
         // same public-pin resolution the candidate acquirer falls back to),
-        // and admit `.validate` inside it so [broker, session] serves the
+        // and admit `.execution` inside it so [broker, session] serves the
         // local boundary free and fetches only the missing body.
         guard let runtime else { throw CancellationError() }
         return try await runtime.remoteContentSource

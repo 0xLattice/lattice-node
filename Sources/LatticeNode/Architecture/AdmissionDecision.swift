@@ -11,7 +11,7 @@ public enum NodeAdmissionDecision: Sendable, Equatable {
     case invalid
     case localFailure
 
-    init(_ result: ChainLocalBlockResult) {
+    init(_ result: BlockImportResult) {
         switch result {
         case .accepted(let acceptance):
             self = acceptance.commit.canonicalChanged
@@ -30,13 +30,13 @@ public enum NodeAdmissionDecision: Sendable, Equatable {
         }
     }
 
-    init(_ failure: ChainAdmissionFailure) {
+    init(_ failure: BlockImportError) {
         switch failure {
         case .unavailableEvidence:
             self = .unavailable(nil)
         case .crossChainEvidenceRequired(let requirement):
             self = .unavailable(requirement)
-        case .notYetAdmissible:
+        case .notYetValid:
             self = .temporarilyInvalid
         case .notAcceptedAtCurrentChain:
             self = .carrier

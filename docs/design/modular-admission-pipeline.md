@@ -88,7 +88,7 @@ input only when its child block is accepted and connected.
 
 ```text
 preflight
-  -> reserve exact ChainAdmissionBatch
+  -> reserve exact BlockImportBatch
   -> persist batch in state.db
   -> apply the same batch to ChainState
   -> publish the resulting effects asynchronously

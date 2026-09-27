@@ -1,6 +1,8 @@
 import Crypto
 import Ivy
 @testable import Lattice
+@testable import LatticeBlockTree
+@testable import LatticeProofs
 import UInt256
 import VolumeBroker
 import XCTest
@@ -551,7 +553,7 @@ final class ChainProcessTests: XCTestCase {
         let weighed = try await consumer.admit(
             carrierHeader,
             remoteSource: FetcherContentSource(producer),
-            mode: .weighed
+            mode: .header
         )
         XCTAssertTrue(weighed.decision.isAccepted)
         let weighedGenesisLink = try await consumer.store.issuedParentGenesisLink(
@@ -567,7 +569,7 @@ final class ChainProcessTests: XCTestCase {
         let validated = try await consumer.admit(
             carrierHeader,
             remoteSource: FetcherContentSource(producer),
-            mode: .validate
+            mode: .execution
         )
         XCTAssertTrue(validated.decision.isAccepted)
         let validatedGenesisLink = try await consumer.store.issuedParentGenesisLink(
@@ -787,7 +789,7 @@ final class ChainProcessTests: XCTestCase {
     /// deferral persists nothing: the inbox entry — the one durable record of
     /// a block still to be admitted — survives the restart, and the same
     /// block is accepted once the rule is met. Deferred deterministically:
-    /// the block's clock is ahead of now, the same `notYetAdmissible` class.
+    /// the block's clock is ahead of now, the same `notYetValid` class.
     func testDeferredCarriedBlockKeepsItsEvidenceInTheInboxAcrossRestart() async throws {
         let fixture = try await childBootstrapFixture()
         let parentSource = fixture.source
@@ -825,7 +827,7 @@ final class ChainProcessTests: XCTestCase {
 
         let deferred = try await process!.admit(
             carriedHeader, authenticatedChildPackage: package,
-            remoteSource: parentSource, mode: .weighed
+            remoteSource: parentSource, mode: .header
         )
         guard case .temporarilyInvalid = deferred.decision else {
             return XCTFail("a block from the future is deferred, got \(deferred.decision)")
@@ -849,7 +851,7 @@ final class ChainProcessTests: XCTestCase {
         try await eventually("the block is admitted once its clock is no longer ahead") {
             let outcome = try await process!.admit(
                 carriedHeader, authenticatedChildPackage: replayed.package,
-                remoteSource: parentSource, mode: .weighed
+                remoteSource: parentSource, mode: .header
             )
             guard outcome.decision.isAccepted else { return false }
             admitted = outcome
@@ -922,7 +924,7 @@ final class ChainProcessTests: XCTestCase {
         )
         let refused = try await process!.admit(
             carriedHeader, authenticatedChildPackage: package,
-            remoteSource: parentSource, mode: .weighed
+            remoteSource: parentSource, mode: .header
         )
         guard case .carrier = refused.decision else {
             return XCTFail("a grind that misses this chain's target is a carrier, got \(refused.decision)")
@@ -979,7 +981,7 @@ final class ChainProcessTests: XCTestCase {
         )
         let refused = try await process!.admit(
             rivalHeader, authenticatedChildPackage: package,
-            remoteSource: parentSource, mode: .weighed
+            remoteSource: parentSource, mode: .header
         )
         XCTAssertEqual(refused.decision, .invalid)
         XCTAssertNil(refused.parentCarrierLink, "refused before a carrier link exists")
@@ -1000,10 +1002,10 @@ final class ChainProcessTests: XCTestCase {
     /// refusal that is final for this node but kept — a malformed proof, a
     /// local failure — would sit in the inbox until capacity closed it.
     func testDecidedIsExactlyWhatTheAcquirerNeverRetries() {
-        let verdicts: [(failure: ChainAdmissionFailure, decided: Bool)] = [
+        let verdicts: [(failure: BlockImportError, decided: Bool)] = [
             (.unavailableEvidence, false),
             (.crossChainEvidenceRequired(.childProof(chainPath: ["Nexus", "Payments"], childCID: "b")), false),
-            (.notYetAdmissible, false),
+            (.notYetValid, false),
             (.providerMalformedEvidence, true),
             (.protocolInvalid, true),
             (.localVerificationFailure, true),
@@ -1011,7 +1013,7 @@ final class ChainProcessTests: XCTestCase {
             (.notAcceptedAtCurrentChain, true),
         ]
         for verdict in verdicts {
-            let result = ChainLocalBlockResult.rejected(verdict.failure)
+            let result = BlockImportResult.rejected(verdict.failure)
             XCTAssertEqual(ChainProcess.isDecided(result), verdict.decided, "\(verdict.failure)")
             let decision = NodeAdmissionDecision(result)
             let retried = decision.shouldRetryWhenEvidenceChanges || decision.shouldRetryLater
@@ -1074,14 +1076,14 @@ final class ChainProcessTests: XCTestCase {
         // this chain does not hold yet.
         let early = try await process.admit(
             secondHeader, authenticatedChildPackage: secondPackage,
-            remoteSource: parentSource, mode: .weighed
+            remoteSource: parentSource, mode: .header
         )
         XCTAssertTrue(early.decision.isAccepted, "a side block awaiting B1, got \(early.decision)")
         XCTAssertEqual(early.sameChainPredecessor?.predecessorCID, firstHeader.rawCID)
         // B1 arrives: accepted, and B2 connects behind it.
         let late = try await process.admit(
             firstHeader, authenticatedChildPackage: firstPackage,
-            remoteSource: parentSource, mode: .weighed
+            remoteSource: parentSource, mode: .header
         )
         XCTAssertTrue(late.decision.isAccepted, "\(late.decision)")
         let firstWeightValue = await process.subtreeWeight(of: firstHeader.rawCID)
@@ -1294,7 +1296,7 @@ final class ChainProcessTests: XCTestCase {
             issuingAuthorityKey: config.processPublicKey
         )
         try await store.stage(
-            ChainAdmissionBatch(facts: [.block(ChainBlockFact(
+            BlockImportBatch(facts: [.block(ChainBlockFact(
                 blockHash: NexusGenesis.expectedBlockHash,
                 parentBlockHash: nil,
                 blockHeight: 0,
@@ -1339,7 +1341,7 @@ final class ChainProcessTests: XCTestCase {
         ))
         try await volume.store(storer: broker)
         let root = volume.rawCID
-        func genesis(_ hash: String) -> ChainAdmissionFact {
+        func genesis(_ hash: String) -> ChainFact {
             .block(ChainBlockFact(
                 blockHash: hash,
                 parentBlockHash: nil,
@@ -1354,7 +1356,7 @@ final class ChainProcessTests: XCTestCase {
             ))
         }
         try await store.stage(
-            ChainAdmissionBatch(facts: [
+            BlockImportBatch(facts: [
                 genesis(NexusGenesis.expectedBlockHash),
                 genesis("forged-nexus-genesis"),
             ]),
@@ -1475,7 +1477,7 @@ final class ChainProcessTests: XCTestCase {
         let volume = try VolumeImpl<Transaction>(node: transaction)
         try await volume.store(storer: admissionStorage)
         let root = volume.rawCID
-        let batch = ChainAdmissionBatch(facts: [
+        let batch = BlockImportBatch(facts: [
             .block(ChainBlockFact(
                 blockHash: root,
                 parentBlockHash: nil,
@@ -1548,8 +1550,8 @@ final class ChainProcessTests: XCTestCase {
         let admissionStorage = NodeAdmissionStorage(
             storage: broker
         )
-        func batch(for root: String) -> ChainAdmissionBatch {
-            ChainAdmissionBatch(facts: [
+        func batch(for root: String) -> BlockImportBatch {
+            BlockImportBatch(facts: [
                 .block(ChainBlockFact(
                     blockHash: root,
                     parentBlockHash: nil,
@@ -2250,7 +2252,7 @@ final class ChainProcessTests: XCTestCase {
         let weighed = try await process!.admit(
             BlockHeader(node: block),
             remoteSource: FetcherContentSource(producer),
-            mode: .weighed
+            mode: .header
         )
         XCTAssertTrue(weighed.decision.isAccepted)
         process = nil
@@ -2526,7 +2528,7 @@ final class ChainProcessTests: XCTestCase {
             let weighed = try await consumer.admit(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
-                mode: .weighed
+                mode: .header
             )
             XCTAssertTrue(weighed.decision.isAccepted)
         }
@@ -2534,7 +2536,7 @@ final class ChainProcessTests: XCTestCase {
             let validated = try await consumer.admit(
                 BlockHeader(node: block),
                 remoteSource: FetcherContentSource(producer),
-                mode: .validate
+                mode: .execution
             )
             XCTAssertTrue(validated.decision.isAccepted)
         }

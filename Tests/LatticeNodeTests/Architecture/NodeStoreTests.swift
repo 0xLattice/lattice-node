@@ -5,6 +5,7 @@ import UInt256
 import VolumeBroker
 import cashew
 @testable import Lattice
+@testable import LatticeBlockTree
 @testable import LatticeNode
 
 final class NodeStoreTests: XCTestCase {
@@ -328,7 +329,7 @@ final class NodeStoreTests: XCTestCase {
             """)
 
         try await store.stage(
-            ChainAdmissionBatch(facts: [
+            BlockImportBatch(facts: [
                 .work(ChainWorkFact(
                     blockHash: "carrier",
                     contribution: contribution(id: "grind", work: 7)
@@ -2994,8 +2995,8 @@ final class NodeStoreTests: XCTestCase {
         blockHash: String = "same-block",
         parentBlockHash: String? = nil,
         blockHeight: UInt64 = 0
-    ) -> ChainAdmissionBatch {
-        ChainAdmissionBatch(facts: [
+    ) -> BlockImportBatch {
+        BlockImportBatch(facts: [
             .block(ChainBlockFact(
                 blockHash: blockHash,
                 parentBlockHash: parentBlockHash,
