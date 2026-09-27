@@ -17,7 +17,9 @@ import cashew
 /// (`ParentTipContextMessage` with its `minimumWorkTrailer` /
 /// `carriedChildTrailer`, `ChildCandidateAvailableMessage` with its search
 /// witness), `ChainHello`, `ChildValidationPackageEnvelope`,
-/// `ChildEvidenceVolume` and the RPC `ContentBoundTransaction`.
+/// `ChildEvidenceVolume`, and the RPC types with a custom Codable
+/// (`ContentBoundTransaction`, `ContentBoundWasmPolicyModule`,
+/// `SubmitTransactionRequest`, `MiningTemplateRequest`, `MiningReward`).
 ///
 /// Deterministic: one fixed SplitMix64 seed per codec (the generator is a
 /// copy of the private one in `WireProtocolFuzzTests`), so a failure names the
@@ -740,6 +742,101 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
             XCTAssertEqual(
                 decoded.serialized.entries, volume.serialized.entries,
                 "\(provenance): the re-read volume differs from the stored one"
+            )
+        }
+    }
+
+    func testContentBoundWasmPolicyModuleIsCanonical() throws {
+        var generator = SplitMix64(state: 0x1e)
+        for iteration in 0..<Self.messagesPerCodec {
+            // `WasmPolicyModule` validates nothing about the bytes; the codec
+            // binds them to their root CID, which is what is checked here.
+            let bytes = Data((0..<randomInt(&generator, 1...64)).map { _ in
+                UInt8.random(in: 0...255, using: &generator)
+            })
+            let module = try ContentBoundWasmPolicyModule(bytes: bytes)
+            let encoded = try _canonicalJSONEncode(module)
+            let decoded = try JSONDecoder().decode(ContentBoundWasmPolicyModule.self, from: encoded)
+            let provenance = "ContentBoundWasmPolicyModule #\(iteration)"
+            XCTAssertEqual(decoded.rootCID, module.rootCID, provenance)
+            XCTAssertEqual(decoded.bytes, bytes, provenance)
+            XCTAssertEqual(
+                try _canonicalJSONEncode(decoded), encoded,
+                "\(provenance): encode(decode(bytes)) != bytes"
+            )
+        }
+    }
+
+    func testSubmitTransactionRequestIsCanonical() throws {
+        var generator = SplitMix64(state: 0x1f)
+        for iteration in 0..<Self.messagesPerCodec {
+            let request = SubmitTransactionRequest(transaction: try rewardTransaction(
+                chainPath: randomChainPath(&generator, minimumCount: 1),
+                generator: &generator
+            ))
+            let encoded = try _canonicalJSONEncode(request)
+            let decoded = try JSONDecoder().decode(SubmitTransactionRequest.self, from: encoded)
+            let provenance = "SubmitTransactionRequest #\(iteration)"
+            XCTAssertEqual(decoded.transaction.body.rawCID, request.transaction.body.rawCID, provenance)
+            XCTAssertEqual(decoded.transaction.signatures, request.transaction.signatures, provenance)
+            XCTAssertEqual(
+                try _canonicalJSONEncode(decoded), encoded,
+                "\(provenance): encode(decode(bytes)) != bytes"
+            )
+        }
+    }
+
+    func testMiningRewardIsCanonical() throws {
+        var generator = SplitMix64(state: 0x20)
+        for iteration in 0..<Self.messagesPerCodec {
+            let path = randomChainPath(&generator, minimumCount: 1)
+            let reward = MiningReward(
+                chainPath: path,
+                transaction: try rewardTransaction(chainPath: path, generator: &generator)
+            )
+            let encoded = try _canonicalJSONEncode(reward)
+            let decoded = try JSONDecoder().decode(MiningReward.self, from: encoded)
+            let provenance = "MiningReward #\(iteration)"
+            XCTAssertEqual(decoded.chainPath, reward.chainPath, provenance)
+            XCTAssertEqual(decoded.transaction.body.rawCID, reward.transaction.body.rawCID, provenance)
+            XCTAssertEqual(decoded.transaction.signatures, reward.transaction.signatures, provenance)
+            XCTAssertEqual(
+                try _canonicalJSONEncode(decoded), encoded,
+                "\(provenance): encode(decode(bytes)) != bytes"
+            )
+        }
+    }
+
+    func testMiningTemplateRequestIsCanonical() throws {
+        var generator = SplitMix64(state: 0x21)
+        for iteration in 0..<Self.messagesPerCodec {
+            let rewards = try (0..<randomInt(&generator, 0...3)).map { _ -> MiningReward in
+                let path = randomChainPath(&generator, minimumCount: 1)
+                return MiningReward(
+                    chainPath: path,
+                    transaction: try rewardTransaction(chainPath: path, generator: &generator)
+                )
+            }
+            // `minimumWork` is omitted from the wire when empty, so both
+            // shapes are exercised.
+            let minimumWork = randomBool(&generator) ? [] : [MiningMinimumWork(
+                chainPath: randomChainPath(&generator, minimumCount: 1),
+                work: UInt256(UInt64.random(in: 1...UInt64.max, using: &generator))
+            )]
+            let request = MiningTemplateRequest(rewards: rewards, minimumWork: minimumWork)
+            let encoded = try _canonicalJSONEncode(request)
+            let decoded = try JSONDecoder().decode(MiningTemplateRequest.self, from: encoded)
+            let provenance = "MiningTemplateRequest #\(iteration)"
+            XCTAssertEqual(decoded.minimumWork, request.minimumWork, provenance)
+            XCTAssertEqual(decoded.rewards.map(\.chainPath), request.rewards.map(\.chainPath), provenance)
+            XCTAssertEqual(
+                decoded.rewards.map(\.transaction.body.rawCID),
+                request.rewards.map(\.transaction.body.rawCID),
+                provenance
+            )
+            XCTAssertEqual(
+                try _canonicalJSONEncode(decoded), encoded,
+                "\(provenance): encode(decode(bytes)) != bytes"
             )
         }
     }
