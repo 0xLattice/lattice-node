@@ -6,11 +6,6 @@ import UInt256
 import VolumeBroker
 import cashew
 
-public typealias ContextualChildCandidateBuilder = @Sendable (
-    _ context: ChildCandidateRequestContext,
-    _ parentContentSource: any ContentSource
-) async throws -> DirectChildCandidate?
-
 public struct NetworkCandidateAdmission: Sendable {
     public let header: BlockHeader
     public let authenticatedChildPackage: AuthenticatedChildPackage?
@@ -34,59 +29,6 @@ public struct NetworkCandidateAdmission: Sendable {
         self.preparingChildDirectories = preparingChildDirectories
         self.contentSource = contentSource
         self.weighed = weighed
-    }
-}
-
-public typealias NetworkAdmissionHandler = @Sendable (
-    _ admission: NetworkCandidateAdmission
-) async throws -> NodeAdmissionOutcome
-
-public typealias NetworkTransactionHandler = @Sendable (
-    _ transaction: Transaction
-) async throws -> Bool
-
-public typealias TransactionInventoryProvider = @Sendable () async -> [String]
-/// A run report from the configured parent, to be credited at the child block
-/// it names (§9.10). The service derives the credit under its own lease.
-public typealias NetworkParentRunReportHandler = @Sendable (
-    _ report: ParentRunReport
-) async throws -> Void
-/// A child wired in for `directory`: start serving its runs.
-public typealias NetworkRunReportServingHandler = @Sendable (
-    _ directory: String
-) async -> Void
-/// The committers this chain asks its parent to re-serve after each
-/// evidence catch-up round.
-public typealias NetworkRecentCommitterProvider = @Sendable () async -> [String]
-
-/// All service callbacks used by one network-runtime generation. Supplying the
-/// complete value at startup prevents a live runtime from being partially
-/// wired or changing behavior beneath authenticated sessions.
-public struct NodeNetworkHandlers: Sendable {
-    public let childCandidateBuilder: ContextualChildCandidateBuilder?
-    public let admission: NetworkAdmissionHandler
-    public let transaction: NetworkTransactionHandler?
-    public let transactionInventory: TransactionInventoryProvider?
-    public let parentRunReport: NetworkParentRunReportHandler?
-    public let runReportServing: NetworkRunReportServingHandler?
-    public let recentCommitters: NetworkRecentCommitterProvider?
-
-    public init(
-        childCandidateBuilder: ContextualChildCandidateBuilder? = nil,
-        admission: @escaping NetworkAdmissionHandler,
-        transaction: NetworkTransactionHandler? = nil,
-        transactionInventory: TransactionInventoryProvider? = nil,
-        parentRunReport: NetworkParentRunReportHandler? = nil,
-        runReportServing: NetworkRunReportServingHandler? = nil,
-        recentCommitters: NetworkRecentCommitterProvider? = nil
-    ) {
-        self.childCandidateBuilder = childCandidateBuilder
-        self.admission = admission
-        self.transaction = transaction
-        self.transactionInventory = transactionInventory
-        self.parentRunReport = parentRunReport
-        self.runReportServing = runReportServing
-        self.recentCommitters = recentCommitters
     }
 }
 
@@ -729,8 +671,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// Owner: Candidates.admitCandidate / Hierarchy.appendParentEvidence /
     ///     Hierarchy.finishParentEvidence / Lifecycle.clearRuntimeState.
     var parentEvidence = ParentEvidenceFlow()
+    /// The service this generation calls into; `Node.build` passes a
+    /// `WeakChain`, so the runtime never keeps the service alive.
     /// Owner: Lifecycle.startNow / Lifecycle.clearRuntimeState.
-    var handlers: NodeNetworkHandlers?
+    var chain: (any ChainInterface)?
     /// The template context this chain last pushed to its children: its
     /// validated tip and the miner's plan for the subtree. Re-pushed whenever
     /// any of it changes; a child builds its candidate against it.

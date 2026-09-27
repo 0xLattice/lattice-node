@@ -11,20 +11,20 @@ extension NodeNetworkRuntime {
     /// before either listener becomes visible. The private plane starts first.
     public func start(
         process: ChainProcess,
-        handlers: NodeNetworkHandlers
+        chain: any ChainInterface
     ) async throws {
-        try await enqueueStart(process: process, handlers: handlers).value
+        try await enqueueStart(process: process, chain: chain).value
     }
 
     func enqueueStart(
         process: ChainProcess,
-        handlers: NodeNetworkHandlers
+        chain: any ChainInterface
     ) -> Task<Void, any Error> {
         let previous = lifecycleTail
         let operation = Task { [weak self] in
             await previous?.value
             guard let self else { throw CancellationError() }
-            try await self.startNow(process: process, handlers: handlers)
+            try await self.startNow(process: process, chain: chain)
         }
         lifecycleTail = Task { _ = try? await operation.value }
         return operation
@@ -32,7 +32,7 @@ extension NodeNetworkRuntime {
 
     private func startNow(
         process: ChainProcess,
-        handlers: NodeNetworkHandlers
+        chain: any ChainInterface
     ) async throws {
         guard !isRunning else { throw NodeNetworkRuntimeError.alreadyRunning }
         var recoveredDescendants: [String: Set<DurableDescendant>] = [:]
@@ -58,7 +58,7 @@ extension NodeNetworkRuntime {
         }
         runtimeGeneration = callbackEpoch.advance()
         self.process = process
-        self.handlers = handlers
+        self.chain = chain
         candidateAcquirer.reset(
             retryWindow: planeConfigurations.overlay.requestTimeout
                 * Self.maximumCandidateWaitTicks,
@@ -301,7 +301,7 @@ extension NodeNetworkRuntime {
         childPathRotation = 0
         childProofPathRotation = 0
         backfilledChildDirectories.removeAll()
-        handlers = nil
+        chain = nil
     }
 }
 

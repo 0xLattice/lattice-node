@@ -275,45 +275,47 @@ class NetworkTrustTestCase: XCTestCase {
     ) -> ChainService {
         ChainService(
             process: process,
-            childCandidateProvider: { [weak runtime] context in
-                guard let runtime else { return [] }
-                return await runtime.directChildCandidates(context)
-            },
-            chainStateChangePublisher: { [weak runtime] in
-                await runtime?.chainStateChanged()
-            },
-            childProofPublisher: { [weak runtime] publication in
-                guard let runtime else { throw CancellationError() }
-                _ = try await runtime.publishChildProof(
-                    publication.proof,
-                    childDirectory: publication.directory,
-                    childCID: publication.childCID
-                )
-            },
-            acceptedBlockPublisher: { [weak runtime] blockCID in
-                await acceptedBlockRecorder?.append(blockCID)
-                guard let runtime else { throw CancellationError() }
-                try await runtime.publishAcceptedBlock(blockCID)
-            },
-            acceptedTransactionPublisher: { [weak runtime] rootCID in
-                guard let runtime else { throw CancellationError() }
-                try await runtime.publishTransaction(rootCID)
-            },
-            // Mirror the daemon: a weighed admit stored only the boundary, so the
-            // validate walk pulls the deferred body over the network.
-            validateBodySource: { [weak runtime] blockCID, admit in
-                guard let runtime else { throw CancellationError() }
-                return try await runtime.remoteContentSource
-                    .withRoot(blockCID) { session in
-                        try await admit(session)
-                    }
-            },
-            validateEvidenceSource: { [weak runtime] blockCID, requirement in
-                await runtime?.resolveValidateEvidence(
-                    for: blockCID,
-                    requirement: requirement
-                )
-            }
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { [weak runtime] context in
+                    guard let runtime else { return [] }
+                    return await runtime.directChildCandidates(context)
+                },
+                chainStateChangePublisher: { [weak runtime] in
+                    await runtime?.chainStateChanged()
+                },
+                childProofPublisher: { [weak runtime] publication in
+                    guard let runtime else { throw CancellationError() }
+                    _ = try await runtime.publishChildProof(
+                        publication.proof,
+                        childDirectory: publication.directory,
+                        childCID: publication.childCID
+                    )
+                },
+                acceptedBlockPublisher: { [weak runtime] blockCID in
+                    await acceptedBlockRecorder?.append(blockCID)
+                    guard let runtime else { throw CancellationError() }
+                    try await runtime.publishAcceptedBlock(blockCID)
+                },
+                acceptedTransactionPublisher: { [weak runtime] rootCID in
+                    guard let runtime else { throw CancellationError() }
+                    try await runtime.publishTransaction(rootCID)
+                },
+                // Mirror the daemon: a weighed admit stored only the boundary, so the
+                // validate walk pulls the deferred body over the network.
+                validateBodySource: { [weak runtime] blockCID, admit in
+                    guard let runtime else { throw CancellationError() }
+                    return try await runtime.remoteContentSource
+                        .withRoot(blockCID) { session in
+                            try await admit(session)
+                        }
+                },
+                validateEvidenceSource: { [weak runtime] blockCID, requirement in
+                    await runtime?.resolveValidateEvidence(
+                        for: blockCID,
+                        requirement: requirement
+                    )
+                }
+            )
         )
     }
 
@@ -325,8 +327,8 @@ class NetworkTrustTestCase: XCTestCase {
         inventoryRequests: NetworkEventRecorder? = nil,
         transactions: NetworkEventRecorder? = nil,
         admissions: NetworkEventRecorder? = nil
-    ) -> NodeNetworkHandlers {
-        NodeNetworkHandlers(
+    ) -> ClosureChainInterface {
+        ClosureChainInterface(
             admission: { [weak service] admission in
                 guard let service else { throw CancellationError() }
                 await admissions?.append(

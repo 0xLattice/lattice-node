@@ -2205,9 +2205,11 @@ final class ChainProcessTests: XCTestCase {
 
         let service = ChainService(
             process: process,
-            childCandidateProvider: { _ in [] },
-            childProofPublisher: { _ in },
-            acceptedBlockPublisher: { _ in }
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in }
+            )
         )
         await service.runValidateWalkPass()
         let repromoted = await process.deepestValidatedMainChainTip()
@@ -2491,9 +2493,11 @@ final class ChainProcessTests: XCTestCase {
         )
         let producerService = ChainService(
             process: producer,
-            childCandidateProvider: { _ in [] },
-            childProofPublisher: { _ in },
-            acceptedBlockPublisher: { _ in }
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in }
+            )
         )
         var chain: [Block] = []
         for _ in 0..<depth {

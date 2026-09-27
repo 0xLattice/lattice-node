@@ -116,7 +116,7 @@ extension NodeNetworkRuntime {
         guard isCurrentRuntime(generation: generation, process: process) else {
             return
         }
-        guard let admissionHandler = handlers?.admission else { return }
+        guard let chain else { return }
         let authenticatedPackage: AuthenticatedChildPackage?
         if let package = candidate.package {
             authenticatedPackage = package
@@ -275,7 +275,7 @@ extension NodeNetworkRuntime {
                         source: session,
                         configuration: configuration
                     )
-                    let admitted = try await admissionHandler(NetworkCandidateAdmission(
+                    let admitted = try await chain.admitNetworkCandidate(NetworkCandidateAdmission(
                         header: header,
                         authenticatedChildPackage: authenticatedPackage,
                         preparingChildDirectories: childDirectories,

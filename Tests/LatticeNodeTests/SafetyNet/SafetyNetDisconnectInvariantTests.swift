@@ -75,7 +75,7 @@ final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
 
         try await target.runtime.start(
             process: target.process,
-            handlers: NodeNetworkHandlers(
+            chain: ClosureChainInterface(
                 admission: { _ in throw CancellationError() },
                 // Present so an advertised transaction volume is fetched;
                 // never reached, because the volume is withheld.

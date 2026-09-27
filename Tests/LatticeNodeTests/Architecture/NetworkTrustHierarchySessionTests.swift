@@ -366,7 +366,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         do {
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: inertNetworkHandlers()
+                chain: inertNetworkHandlers()
             )
             try await silent.start()
             try await silent.connect(to: fixture.endpoint)
@@ -512,7 +512,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             try await parentPair!.0.start()
             try await runtime.start(
                 process: process,
-                handlers: inertNetworkHandlers()
+                chain: inertNetworkHandlers()
             )
             try await waitForRuntimeHello(firstRecorder)
             let beforeFirstHello = await parentPair!.0.fetchVolume(rootCID: rootCID)
@@ -684,7 +684,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             }
         )
 
-        let handlers = NodeNetworkHandlers(admission: { admission in
+        let handlers = ClosureChainInterface(admission: { admission in
             try await recoveredProcess.admit(
                 admission.header,
                 authenticatedChildPackage:
@@ -709,7 +709,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         do {
             try await runtime.start(
                 process: recoveredProcess,
-                handlers: handlers
+                chain: handlers
             )
             try await client.start()
             let runtimePeer = PeerID(publicKey: configuration.processPublicKey)
@@ -911,7 +911,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             configuration: configuration
         )
         let admissions = NetworkEventRecorder()
-        let handlers = NodeNetworkHandlers(admission: { [weak recovered] admission in
+        let handlers = ClosureChainInterface(admission: { [weak recovered] admission in
             guard let recovered else { throw CancellationError() }
             let outcome = try await recovered.admit(
                 admission.header,
@@ -932,7 +932,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         await client.setContentSource(remoteContent)
         let runtimePeer = PeerID(publicKey: configuration.processPublicKey)
         do {
-            try await runtime.start(process: recovered, handlers: handlers)
+            try await runtime.start(process: recovered, chain: handlers)
             try await connectAndHello(
                 client,
                 peerID: runtimePeer,
@@ -1108,7 +1108,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         )
         let recovered = try await ChainProcess.open(configuration: configuration)
         let admissions = NetworkEventRecorder()
-        let handlers = NodeNetworkHandlers(admission: { [weak recovered] admission in
+        let handlers = ClosureChainInterface(admission: { [weak recovered] admission in
             guard let recovered else { throw CancellationError() }
             let outcome = try await recovered.admit(
                 admission.header,
@@ -1137,7 +1137,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         await parent.setContentSource(source)
         do {
             try await parent.start()
-            try await runtime.start(process: recovered, handlers: handlers)
+            try await runtime.start(process: recovered, chain: handlers)
             try await eventually("the inbox block admitted weighed after restart") {
                 (await admissions.snapshot()).contains("\(carriedHeader.rawCID):weighed:true")
             }
@@ -1175,7 +1175,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             try await fixture.parent.start()
             try await fixture.runtime.start(
                 process: fixture.process,
-                handlers: duplicateNetworkHandlers()
+                chain: duplicateNetworkHandlers()
             )
             for _ in 0..<400 {
                 let trace = await fixture.recorder.sessionTrace()
@@ -1254,7 +1254,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
                         do {
                             try await runtime.start(
                                 process: process,
-                                handlers: handlers
+                                chain: handlers
                             )
                             return .started
                         } catch let error as NodeNetworkRuntimeError {
@@ -1282,13 +1282,13 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             }
             await runtime.stop()
 
-            try await runtime.start(process: process, handlers: handlers)
+            try await runtime.start(process: process, chain: handlers)
             try await runtime.canonicalTipDidChange()
             await runtime.stop()
 
             let starting = await runtime.enqueueStart(
                 process: process,
-                handlers: handlers
+                chain: handlers
             )
             await runtime.stop()
             try await starting.value

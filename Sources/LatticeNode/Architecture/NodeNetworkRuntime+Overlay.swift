@@ -544,7 +544,7 @@ extension NodeNetworkRuntime {
         let remainingRoots = requestedRemainingRoots
             ?? Self.maximumTransactionInventoryRootsPerSync
         guard remainingRoots > 0,
-              handlers?.transaction != nil,
+              chain?.networkCapabilities.contains(.transactions) == true,
               isCurrentRuntime(generation: generation, process: process),
               overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
               !pendingTransactionInventories.values.contains(where: {
@@ -603,10 +603,11 @@ extension NodeNetworkRuntime {
         generation: UInt64,
         process: ChainProcess
     ) async {
-        guard let transactionInventoryProvider = handlers?.transactionInventory,
+        guard let chain,
+              chain.networkCapabilities.contains(.transactionInventory),
               isCurrentRuntime(generation: generation, process: process),
               overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
-        let roots = Array(Set(await transactionInventoryProvider())).sorted()
+        let roots = Array(Set(await chain.transactionInventoryRoots())).sorted()
             .filter { root in
                 request.afterRootCID.map { root > $0 } ?? true
             }
@@ -656,10 +657,11 @@ extension NodeNetworkRuntime {
         generation: UInt64,
         process: ChainProcess
     ) async {
-        guard let transactionInventoryProvider = handlers?.transactionInventory,
+        guard let chain,
+              chain.networkCapabilities.contains(.transactionInventory),
               isCurrentRuntime(generation: generation, process: process),
               overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
-        let knownRoots = Set(await transactionInventoryProvider())
+        let knownRoots = Set(await chain.transactionInventoryRoots())
         let roots = response.volumeRootCIDs.filter {
             !knownRoots.contains($0) && !pending.seenRoots.contains($0)
         }
@@ -676,7 +678,7 @@ extension NodeNetworkRuntime {
                 from: peer,
                 generation: generation,
                 process: process,
-                transactionHandler: work.handler,
+                chain: work.chain,
                 lease: work.lease
             )
             guard isCurrentRuntime(generation: generation, process: process) else {
@@ -722,7 +724,7 @@ extension NodeNetworkRuntime {
                 from: peer,
                 generation: generation,
                 process: process,
-                transactionHandler: work.handler,
+                chain: work.chain,
                 lease: work.lease
             )
         }
@@ -733,8 +735,9 @@ extension NodeNetworkRuntime {
         from peer: AuthenticatedPeer,
         generation: UInt64,
         process: ChainProcess
-    ) -> (handler: NetworkTransactionHandler, lease: TransactionVolumeLease)? {
-        guard let transactionHandler = handlers?.transaction,
+    ) -> (chain: any ChainInterface, lease: TransactionVolumeLease)? {
+        guard let chain,
+              chain.networkCapabilities.contains(.transactions),
               isCurrentRuntime(generation: generation, process: process),
               overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return nil }
         let lease = TransactionVolumeLease(
@@ -745,7 +748,7 @@ extension NodeNetworkRuntime {
               sessionLeases.activeTransactionVolumes.count
                   < Self.maximumConcurrentTransactionVolumes,
               sessionLeases.activeTransactionVolumes.insert(lease).inserted else { return nil }
-        return (transactionHandler, lease)
+        return (chain, lease)
     }
 
     private func receiveTransactionVolume(
@@ -753,14 +756,15 @@ extension NodeNetworkRuntime {
         from peer: AuthenticatedPeer,
         generation: UInt64,
         process: ChainProcess,
-        transactionHandler: @escaping NetworkTransactionHandler,
+        chain: any ChainInterface,
         lease: TransactionVolumeLease
     ) async {
         defer { sessionLeases.activeTransactionVolumes.remove(lease) }
         guard isCurrentRuntime(generation: generation, process: process),
               overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
-        if let transactionInventoryProvider = handlers?.transactionInventory,
-           await transactionInventoryProvider().contains(rootCID) {
+        if let chain = self.chain,
+           chain.networkCapabilities.contains(.transactionInventory),
+           await chain.transactionInventoryRoots().contains(rootCID) {
             return
         }
 
@@ -805,7 +809,7 @@ extension NodeNetworkRuntime {
         guard isCurrentRuntime(generation: generation, process: process),
               overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
         do {
-            guard try await transactionHandler(transaction) else { return }
+            guard try await chain.submitNetworkTransaction(transaction) else { return }
         } catch {
             return
         }

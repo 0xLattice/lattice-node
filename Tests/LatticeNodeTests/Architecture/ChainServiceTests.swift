@@ -651,7 +651,7 @@ final class ChainServiceTests: XCTestCase {
 
         // This is the daemon's runtime-to-service injection. Local work must
         // still reconcile while that runtime is stopped.
-        let handlers = NodeNetworkHandlers(admission: { admission in
+        let handlers = ClosureChainInterface(admission: { admission in
             try await service.admitNetworkCandidate(
                 admission.header,
                 authenticatedChildPackage: admission.authenticatedChildPackage,
@@ -660,7 +660,7 @@ final class ChainServiceTests: XCTestCase {
             )
         })
         do {
-            try await runtime.start(process: process, handlers: handlers)
+            try await runtime.start(process: process, chain: handlers)
             await runtime.stop()
 
             _ = try await service.submitTransaction(SubmitTransactionRequest(
@@ -688,7 +688,7 @@ final class ChainServiceTests: XCTestCase {
             )
             XCTAssertTrue(competingSubmission.accepted)
 
-            try await runtime.start(process: process, handlers: handlers)
+            try await runtime.start(process: process, chain: handlers)
             await runtime.stop()
         } catch {
             await runtime.stop()
@@ -2167,16 +2167,18 @@ final class ChainServiceTests: XCTestCase {
         )
         let service = ChainService(
             process: process,
-            childCandidateProvider: { _ in
-                ["A", "B"].map {
-                    DirectChildCandidate(
-                        directory: $0,
-                        block: child
-                    )
-                }
-            },
-            childProofPublisher: { _ in },
-            acceptedBlockPublisher: { _ in },
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in
+                    ["A", "B"].map {
+                        DirectChildCandidate(
+                            directory: $0,
+                            block: child
+                        )
+                    }
+                },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in }
+            ),
             maximumChildCandidates: 1
         )
 
@@ -3799,7 +3801,7 @@ final class ChainServiceTests: XCTestCase {
             lock.withLock { _ = _withheld.remove(blockCID) }
         }
 
-        func admission() -> ValidateBodyAdmission {
+        func admission() -> ClosureNetworkInterface.ValidateBodyAdmission {
             { [self] blockCID, admit in
                 lock.withLock { _fetched.append(blockCID) }
                 let withheld = lock.withLock { _withheld.contains(blockCID) }
@@ -3874,27 +3876,29 @@ final class ChainServiceTests: XCTestCase {
 
     private func makeService(
         process: ChainProcess,
-        childCandidateProvider: @escaping ChildCandidateProvider = { _ in [] },
-        chainStateChangePublisher: @escaping ChainStateChangePublisher = {},
+        childCandidateProvider: @escaping ClosureNetworkInterface.ChildCandidateProvider = { _ in [] },
+        chainStateChangePublisher: @escaping ClosureNetworkInterface.ChainStateChangePublisher = {},
         childCandidateDigestProvider:
-            @escaping ChildCandidateDigestProvider = { _ in [] },
-        childProofPublisher: @escaping ChildProofPublisher = { _ in },
-        acceptedBlockPublisher: @escaping AcceptedBlockPublisher = { _ in },
+            @escaping ClosureNetworkInterface.ChildCandidateDigestProvider = { _ in [] },
+        childProofPublisher: @escaping ClosureNetworkInterface.ChildProofPublisher = { _ in },
+        acceptedBlockPublisher: @escaping ClosureNetworkInterface.AcceptedBlockPublisher = { _ in },
         acceptedTransactionPublisher:
-            @escaping AcceptedTransactionPublisher = { _ in },
-        validateBodySource: ValidateBodyAdmission? = nil,
+            @escaping ClosureNetworkInterface.AcceptedTransactionPublisher = { _ in },
+        validateBodySource: ClosureNetworkInterface.ValidateBodyAdmission? = nil,
         validateWalkRetryInterval: Duration = .seconds(4),
         mempoolMaxCount: Int = 10_000
     ) -> ChainService {
         ChainService(
             process: process,
-            childCandidateProvider: childCandidateProvider,
-            chainStateChangePublisher: chainStateChangePublisher,
-            childCandidateDigestProvider: childCandidateDigestProvider,
-            childProofPublisher: childProofPublisher,
-            acceptedBlockPublisher: acceptedBlockPublisher,
-            acceptedTransactionPublisher: acceptedTransactionPublisher,
-            validateBodySource: validateBodySource,
+            network: ClosureNetworkInterface(
+                childCandidateProvider: childCandidateProvider,
+                chainStateChangePublisher: chainStateChangePublisher,
+                childCandidateDigestProvider: childCandidateDigestProvider,
+                childProofPublisher: childProofPublisher,
+                acceptedBlockPublisher: acceptedBlockPublisher,
+                acceptedTransactionPublisher: acceptedTransactionPublisher,
+                validateBodySource: validateBodySource
+            ),
             validateWalkRetryInterval: validateWalkRetryInterval,
             mempoolMaxCount: mempoolMaxCount
         )

@@ -72,10 +72,12 @@ final class MiningRewardSequenceTests: XCTestCase {
         )
         let service = ChainService(
             process: process,
-            childCandidateProvider: { _ in [] },
-            childProofPublisher: { _ in },
-            acceptedBlockPublisher: { _ in },
-            acceptedTransactionPublisher: { _ in }
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in },
+                acceptedTransactionPublisher: { _ in }
+            )
         )
 
         let first = try await mineOnce(service, rewardRequest(
