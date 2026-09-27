@@ -149,7 +149,7 @@ extension NodeNetworkRuntime {
             return path.last
         })
         if let current = parentTipContext,
-           let cheapTip = await process.deepestValidatedMainChainTip()?.cid,
+           let cheapTip = await process.deepestValidatedCanonicalTip()?.cid,
            cheapTip == current.tipCID,
            current.directories == directories,
            Self.sameRewardPlan(current.rewards, rewards),

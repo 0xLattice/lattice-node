@@ -217,7 +217,7 @@ extension NodeNetworkRuntime {
         if heights.last != 0 { heights.append(0) }
         var locator: [String] = []
         for height in heights {
-            if let cid = await process.mainChainBlockCID(atHeight: height) {
+            if let cid = await process.canonicalBlockCID(atHeight: height) {
                 locator.append(cid)
             }
         }

@@ -2078,7 +2078,7 @@ final class ChainProcessTests: XCTestCase {
         }
 
         // All-eager: the deepest validated tip IS the reorged canonical tip.
-        let reorgedTip = await process!.deepestValidatedMainChainTip()
+        let reorgedTip = await process!.deepestValidatedCanonicalTip()
         let tip = try XCTUnwrap(reorgedTip)
         XCTAssertEqual(tip.cid, cCID)
         XCTAssertEqual(tip.height, 2)
@@ -2107,7 +2107,7 @@ final class ChainProcessTests: XCTestCase {
         // C is now merely weighed: every act-on read must DEGRADE to B — the
         // deepest validated ancestor of the CURRENT (reorged) main chain —
         // never the weighed tip C and never A (off the main chain).
-        let degradedTip = await process!.deepestValidatedMainChainTip()
+        let degradedTip = await process!.deepestValidatedCanonicalTip()
         let degraded = try XCTUnwrap(degradedTip)
         XCTAssertEqual(degraded.cid, bCID)
         XCTAssertEqual(degraded.height, 1)
@@ -2149,7 +2149,7 @@ final class ChainProcessTests: XCTestCase {
         _ = try await broker.evictUnpinned(graceSeconds: 0)
 
         process = try await ChainProcess.open(configuration: config)
-        let validated = await process!.deepestValidatedMainChainTip()
+        let validated = await process!.deepestValidatedCanonicalTip()
         XCTAssertEqual(validated?.cid, tipCID)
         XCTAssertEqual(validated?.height, 4)
         let tip: Block
@@ -2199,7 +2199,7 @@ final class ChainProcessTests: XCTestCase {
         try await broker.unpinAll(owner: owner)
 
         let process = try await ChainProcess.open(configuration: config)
-        let degraded = await process.deepestValidatedMainChainTip()
+        let degraded = await process.deepestValidatedCanonicalTip()
         XCTAssertEqual(degraded?.cid, parentCID)
         XCTAssertEqual(degraded?.height, 3)
         let canonicalHeight = await process.canonicalTipHeight()
@@ -2214,7 +2214,7 @@ final class ChainProcessTests: XCTestCase {
             )
         )
         await service.runExecutionWalkPass()
-        let repromoted = await process.deepestValidatedMainChainTip()
+        let repromoted = await process.deepestValidatedCanonicalTip()
         XCTAssertEqual(repromoted?.cid, tipCID)
         owners = await broker.pinnedOwners(prefix: owner)
         XCTAssertEqual(
@@ -2273,7 +2273,7 @@ final class ChainProcessTests: XCTestCase {
         process = try await ChainProcess.open(configuration: config)
         owners = await broker.pinnedOwners(prefix: owner)
         XCTAssertTrue(owners.isEmpty, "an orphan owner pin must be released")
-        let validated = await process!.deepestValidatedMainChainTip()
+        let validated = await process!.deepestValidatedCanonicalTip()
         XCTAssertEqual(validated?.height, 0, "the block stays weighed")
     }
 
@@ -2308,7 +2308,7 @@ final class ChainProcessTests: XCTestCase {
         )
         try await weighThenValidate(aChain, from: producerA, into: process!)
         try await weighThenValidate(bChain, from: producerB, into: process!)
-        var tip = await process!.deepestValidatedMainChainTip()
+        var tip = await process!.deepestValidatedCanonicalTip()
         XCTAssertEqual(tip?.cid, cCID)
         XCTAssertEqual(tip?.height, 2)
         XCTAssertEqual(
@@ -2344,7 +2344,7 @@ final class ChainProcessTests: XCTestCase {
         // Boot reconciliation agrees with the demotion: same head, same
         // validated set, and A is still accepted with a serving boundary.
         process = try await ChainProcess.open(configuration: config)
-        tip = await process!.deepestValidatedMainChainTip()
+        tip = await process!.deepestValidatedCanonicalTip()
         XCTAssertEqual(tip?.cid, cCID)
         XCTAssertEqual(tip?.height, 2)
         XCTAssertEqual(
@@ -2421,7 +2421,7 @@ final class ChainProcessTests: XCTestCase {
         let process = try await ChainProcess.open(configuration: config)
         try await weighThenValidate(aChain, from: producerA, into: process)
         try await weighThenValidate(bChain, from: producerB, into: process)
-        let tip = await process.deepestValidatedMainChainTip()
+        let tip = await process.deepestValidatedCanonicalTip()
         XCTAssertEqual(tip?.height, 4)
         let losers = try aChain.map { try BlockHeader(node: $0).rawCID }
         let winners = try bChain.map { try BlockHeader(node: $0).rawCID }
@@ -2477,7 +2477,7 @@ final class ChainProcessTests: XCTestCase {
         let (producer, chain) = try await minedRewardChain(depth: depth)
         let consumer = try await ChainProcess.open(configuration: config)
         try await weighThenValidate(chain, from: producer, into: consumer)
-        let validatedTip = await consumer.deepestValidatedMainChainTip()
+        let validatedTip = await consumer.deepestValidatedCanonicalTip()
         XCTAssertEqual(validatedTip?.height, UInt64(depth))
         return chain
     }

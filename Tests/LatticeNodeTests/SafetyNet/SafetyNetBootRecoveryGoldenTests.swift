@@ -164,7 +164,7 @@ final class SafetyNetBootRecoveryGoldenTests: XCTestCase {
         var canonicalCIDs = Set<String>()
         if let canonical {
             for height in 0...canonical.height {
-                if let cid = await process.mainChainBlockCID(atHeight: height) {
+                if let cid = await process.canonicalBlockCID(atHeight: height) {
                     canonicalCIDs.insert(cid)
                 }
             }

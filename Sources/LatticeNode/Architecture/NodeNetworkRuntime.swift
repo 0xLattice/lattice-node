@@ -1275,7 +1275,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private func discoveredPeersWithoutSession(
         process: ChainProcess
     ) async -> [PeerEndpoint] {
-        guard let genesis = await process.mainChainBlockCID(atHeight: 0) else {
+        guard let genesis = await process.canonicalBlockCID(atHeight: 0) else {
             return []
         }
         let ownKey = try? PeerKey(configuration.processPublicKey)
@@ -1335,7 +1335,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ) async {
         // (1) This node's own chain genesis, on its own overlay — peers of
         // this chain can find providers of it.
-        if let ownGenesis = await process.mainChainBlockCID(atHeight: 0) {
+        if let ownGenesis = await process.canonicalBlockCID(atHeight: 0) {
             await overlay.announceProvider(
                 rootCID: ownGenesis,
                 expiresAt: expiresAt

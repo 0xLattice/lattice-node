@@ -126,7 +126,7 @@ extension NodeNetworkRuntime {
     ) async -> [String] {
         var urls: [String] = []
         if let own = configuration.publicReadURL,
-           await process.mainChainBlockCID(atHeight: 0) == genesisCID {
+           await process.canonicalBlockCID(atHeight: 0) == genesisCID {
             urls.append(own)
         }
         // One sample of the wired children, taken before the resolve suspends

@@ -2490,7 +2490,7 @@ final class ChainServiceTests: XCTestCase {
             SubmitWorkRequest(workID: templateB.workID, nonce: nonceB)
         )
         XCTAssertTrue(submittedB.accepted)
-        let canonical4Opt = await process.mainChainBlockCID(atHeight: 4)
+        let canonical4Opt = await process.canonicalBlockCID(atHeight: 4)
         let canonical4 = try XCTUnwrap(canonical4Opt)
         let sibling4 = canonical4 == cidA ? cidB : cidA
         let deepAncestor = mainCIDs[2] // canonical height-3 block
@@ -2676,7 +2676,7 @@ final class ChainServiceTests: XCTestCase {
         )
         await starved!.runExecutionWalkPass()
         starved = nil
-        let starvedValidated = await node!.deepestValidatedMainChainTip()
+        let starvedValidated = await node!.deepestValidatedCanonicalTip()
         XCTAssertEqual(
             starvedValidated?.cid, lastValidCID,
             "the walk really did execute the branch and stop at the withheld block"
@@ -2722,7 +2722,7 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertNotNil(
             honestServed[honestTip], "and still be servable"
         )
-        let validated = await node!.deepestValidatedMainChainTip()
+        let validated = await node!.deepestValidatedCanonicalTip()
         XCTAssertEqual(validated?.cid, lastValidCID)
         XCTAssertEqual(validated?.height, lastValid.height)
 
@@ -3019,7 +3019,7 @@ final class ChainServiceTests: XCTestCase {
         let weighedTipHeight = await consumerProcess.canonicalTipHeight()
         XCTAssertEqual(weighedTipHeight, UInt64(depth))
         let intermediateValidated = await consumerProcess
-            .deepestValidatedMainChainTip()
+            .deepestValidatedCanonicalTip()
         XCTAssertEqual(intermediateValidated?.height, 0)
         XCTAssertEqual(intermediateValidated?.cid, genesisCID)
         let intermediateStatus = await consumer.status()
@@ -3045,7 +3045,7 @@ final class ChainServiceTests: XCTestCase {
 
         // OPERABILITY: the validated tier now meets the canonical tier.
         let operableValidated = await consumerProcess
-            .deepestValidatedMainChainTip()
+            .deepestValidatedCanonicalTip()
         let canonicalTipCID = try BlockHeader(
             node: await consumerProcess.canonicalTipBlock()
         ).rawCID
@@ -3062,7 +3062,7 @@ final class ChainServiceTests: XCTestCase {
         )
     }
 
-    /// `deepestValidatedMainChainTip` is read on every walk iteration and every
+    /// `deepestValidatedCanonicalTip` is read on every walk iteration and every
     /// gated `status()`. Validated main-chain blocks form a prefix, so each
     /// read after the first must cost O(delta) store reads (the blocks
     /// validated since), never O(gap) — draining a backlog was O(gap²).
@@ -3081,7 +3081,7 @@ final class ChainServiceTests: XCTestCase {
         }
         // Prime once (the full downward walk), then count only the reads the
         // per-block probes make while the tier advances one block at a time.
-        _ = await consumerProcess.deepestValidatedMainChainTip()
+        _ = await consumerProcess.deepestValidatedCanonicalTip()
         await consumerProcess.resetValidatedTipStoreReadsForTesting()
         for (index, block) in chain.enumerated() {
             let outcome = try await consumerProcess.importBlock(
@@ -3090,7 +3090,7 @@ final class ChainServiceTests: XCTestCase {
                 mode: .execution
             )
             XCTAssertTrue(outcome.decision.isAccepted)
-            let validated = await consumerProcess.deepestValidatedMainChainTip()
+            let validated = await consumerProcess.deepestValidatedCanonicalTip()
             XCTAssertEqual(validated?.height, UInt64(index + 1))
         }
         let reads = await consumerProcess.validatedTipStoreReadsForTesting()
@@ -3119,12 +3119,12 @@ final class ChainServiceTests: XCTestCase {
                 XCTAssertTrue(outcome.decision.isAccepted)
             }
         }
-        let cached = await consumerProcess.deepestValidatedMainChainTip()
+        let cached = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(cached?.height, UInt64(depth))
         // Demote the cached tip behind the probe's back (the race).
         let tipCID = try BlockHeader(node: try XCTUnwrap(chain.last)).rawCID
         try await consumerProcess.demoteValidatedForTesting(tipCID)
-        let probed = await consumerProcess.deepestValidatedMainChainTip()
+        let probed = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(probed?.height, UInt64(depth - 1))
         XCTAssertNotEqual(probed?.cid, tipCID, "a demoted floor is never validated")
     }
@@ -3186,7 +3186,7 @@ final class ChainServiceTests: XCTestCase {
             }
         )
         await consumer.runExecutionWalkPass()
-        let onB = await consumerProcess.deepestValidatedMainChainTip()
+        let onB = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(onB?.height, 8, "B validated to its tip")
         // Eviction: A's validated blocks are off-chain and deeper than the
         // retention depth below the validated head — all but one demoted.
@@ -3207,7 +3207,7 @@ final class ChainServiceTests: XCTestCase {
             )
             XCTAssertTrue(outcome.decision.isAccepted)
         }
-        let onC = await consumerProcess.deepestValidatedMainChainTip()
+        let onC = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(onC?.height, 0, "nothing on C above genesis is validated")
 
         // Reorg back to A: extend it past C. The main chain is A with
@@ -3223,12 +3223,12 @@ final class ChainServiceTests: XCTestCase {
         }
         let canonical = await consumerProcess.canonicalTipHeight()
         XCTAssertEqual(canonical, 14, "A must win again")
-        let probed = await consumerProcess.deepestValidatedMainChainTip()
+        let probed = await consumerProcess.deepestValidatedCanonicalTip()
         // The full downward walk from the tip, computed independently.
         var expected: (cid: String, height: UInt64)?
         var height: UInt64 = 14
         while true {
-            if let cid = await consumerProcess.mainChainBlockCID(atHeight: height),
+            if let cid = await consumerProcess.canonicalBlockCID(atHeight: height),
                await consumerProcess.blockValidated(cid) {
                 expected = (cid, height)
                 break
@@ -3240,7 +3240,7 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertEqual(probed?.height, expected?.height)
         XCTAssertEqual(probed?.cid, expected?.cid)
         // And it keeps agreeing on a second probe (the fast path).
-        let again = await consumerProcess.deepestValidatedMainChainTip()
+        let again = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(again?.height, expected?.height)
     }
 
@@ -3297,7 +3297,7 @@ final class ChainServiceTests: XCTestCase {
         func downwardWalk(from height: UInt64) async -> (cid: String, height: UInt64)? {
             var height = height
             while true {
-                if let cid = await consumerProcess.mainChainBlockCID(atHeight: height),
+                if let cid = await consumerProcess.canonicalBlockCID(atHeight: height),
                    await consumerProcess.blockValidated(cid) {
                     return (cid, height)
                 }
@@ -3332,7 +3332,7 @@ final class ChainServiceTests: XCTestCase {
             }
         )
         await consumer.runExecutionWalkPass()
-        let onTrunk = await consumerProcess.deepestValidatedMainChainTip()
+        let onTrunk = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(onTrunk?.height, 12)
         // Eviction 1: A5-A8 demoted (holes 5-8 on fork A).
         _ = try await consumerProcess.pruneUnpinnedVolumes()
@@ -3342,13 +3342,13 @@ final class ChainServiceTests: XCTestCase {
         )
         try await admitAll(forkD, from: producerD, mode: .header)
         await consumer.runExecutionWalkPass()
-        let onD = await consumerProcess.deepestValidatedMainChainTip()
+        let onD = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(onD?.height, 14, "D9-D14 validated while main")
         // Trunk T13-T16: D is off-chain; eviction 2 demotes D9-D10 (below
         // the retention ceiling 12 - 1), leaving D11-D14 validated ABOVE.
         let trunkEven = try await mineNexusChain(on: producerT, depth: 4)
         try await admitAll(trunkEven, from: producerT, mode: .header)
-        let backOnTrunk = await consumerProcess.deepestValidatedMainChainTip()
+        let backOnTrunk = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(backOnTrunk?.height, 12)
         _ = try await consumerProcess.pruneUnpinnedVolumes()
         let d9 = try BlockHeader(node: forkD[0]).rawCID
@@ -3367,7 +3367,7 @@ final class ChainServiceTests: XCTestCase {
         )
         let forkE = try await mineNexusChain(on: producerE, depth: 18)
         try await admitAll(forkE, from: producerE, mode: .header)
-        let onE = await consumerProcess.deepestValidatedMainChainTip()
+        let onE = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(onE?.height, 6, "floor parked at T6")
 
         // D returns, heavier than E: T1-T8 validated, D9-D10 holes, D11-D14
@@ -3378,7 +3378,7 @@ final class ChainServiceTests: XCTestCase {
         try await admitAll(forkDMore, from: producerD, mode: .header)
         let canonical = await consumerProcess.canonicalTipHeight()
         XCTAssertEqual(canonical, 22)
-        let probed = await consumerProcess.deepestValidatedMainChainTip()
+        let probed = await consumerProcess.deepestValidatedCanonicalTip()
         let expected = await downwardWalk(from: 22)
         XCTAssertEqual(expected?.height, 14, "D14 is the true validated top")
         XCTAssertEqual(probed?.height, expected?.height)
@@ -3435,7 +3435,7 @@ final class ChainServiceTests: XCTestCase {
             )
             XCTAssertTrue(outcome.decision.isAccepted)
         }
-        let onF = await consumerProcess!.deepestValidatedMainChainTip()
+        let onF = await consumerProcess!.deepestValidatedCanonicalTip()
         XCTAssertEqual(onF?.height, 0)
 
         // A returns: A1 validated, A2 a hole, A3-A6 validated above it.
@@ -3450,7 +3450,7 @@ final class ChainServiceTests: XCTestCase {
         }
         let canonical = await consumerProcess!.canonicalTipHeight()
         XCTAssertEqual(canonical, 10, "A must win again")
-        let probed = await consumerProcess!.deepestValidatedMainChainTip()
+        let probed = await consumerProcess!.deepestValidatedCanonicalTip()
         XCTAssertEqual(probed?.height, 6, "the downward walk's A6, not A1")
         let a6 = try BlockHeader(node: forkA[5]).rawCID
         XCTAssertEqual(probed?.cid, a6)
@@ -3476,7 +3476,7 @@ final class ChainServiceTests: XCTestCase {
                 XCTAssertTrue(outcome.decision.isAccepted)
             }
         }
-        let cached = await consumerProcess.deepestValidatedMainChainTip()
+        let cached = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(cached?.height, 4)
 
         // A heavier competing fork from genesis (reward blocks, so its CIDs
@@ -3496,7 +3496,7 @@ final class ChainServiceTests: XCTestCase {
         }
         let canonical = await consumerProcess.canonicalTipHeight()
         XCTAssertEqual(canonical, 6, "the fork must win")
-        let reorged = await consumerProcess.deepestValidatedMainChainTip()
+        let reorged = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(reorged?.height, 0)
         XCTAssertEqual(reorged?.cid, genesisCID)
     }
@@ -3522,14 +3522,14 @@ final class ChainServiceTests: XCTestCase {
             XCTAssertTrue(outcome.decision.isAccepted)
         }
         let consumer = makeService(process: consumerProcess)
-        let before = await consumerProcess.deepestValidatedMainChainTip()
+        let before = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(before?.height, 0, "restart state: validated lags")
 
         try await consumer.restoreLocalTransactions()
 
         var validated: UInt64?
         for _ in 0..<500 {
-            validated = await consumerProcess.deepestValidatedMainChainTip()?.height
+            validated = await consumerProcess.deepestValidatedCanonicalTip()?.height
             if validated == UInt64(depth) { break }
             try await Task.sleep(for: .milliseconds(10))
         }
@@ -3563,7 +3563,7 @@ final class ChainServiceTests: XCTestCase {
 
         // The walk validates up to the last contiguous weighed block and parks.
         await consumer.runExecutionWalkPass()
-        let parked = await consumerProcess.deepestValidatedMainChainTip()
+        let parked = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(
             parked?.height, UInt64(gapAt - 1),
             "the walk must park one block below the gap"
@@ -3588,7 +3588,7 @@ final class ChainServiceTests: XCTestCase {
 
         // The walk resumes and reaches the tip.
         await consumer.runExecutionWalkPass()
-        let resumed = await consumerProcess.deepestValidatedMainChainTip()
+        let resumed = await consumerProcess.deepestValidatedCanonicalTip()
         XCTAssertEqual(resumed?.height, UInt64(depth))
         let resumedTipCID = try BlockHeader(
             node: await consumerProcess.validatedTipBlock()
@@ -3657,7 +3657,7 @@ final class ChainServiceTests: XCTestCase {
         let preWalkCanonical = await consumerProcess.canonicalTipHeight()
         XCTAssertEqual(preWalkCanonical, UInt64(depth))
         let preWalkValidated = await consumerProcess
-            .deepestValidatedMainChainTip()?.height
+            .deepestValidatedCanonicalTip()?.height
         XCTAssertEqual(preWalkValidated, 0)
 
         // Run the walk. It fetches ONLY canonical bodies, strictly forward.
@@ -3692,7 +3692,7 @@ final class ChainServiceTests: XCTestCase {
             node: await consumerProcess.canonicalTipBlock()
         ).rawCID
         let operableValidated = await consumerProcess
-            .deepestValidatedMainChainTip()?.height
+            .deepestValidatedCanonicalTip()?.height
         XCTAssertEqual(operableValidated, UInt64(depth))
         let template = try await consumer
             .miningTemplate(MiningTemplateRequest())
@@ -3739,7 +3739,7 @@ final class ChainServiceTests: XCTestCase {
         // Walk parks one block below the withheld body; still operable there.
         await consumer.runExecutionWalkPass()
         let parkedHeight = await consumerProcess
-            .deepestValidatedMainChainTip()?.height
+            .deepestValidatedCanonicalTip()?.height
         XCTAssertEqual(
             parkedHeight, gapAt - 1,
             "the walk parks one block below the withheld body"
@@ -3759,11 +3759,11 @@ final class ChainServiceTests: XCTestCase {
         bodySource.release(gapCID)
         let deadline = ContinuousClock.now.advanced(by: .seconds(10))
         var resumed = await consumerProcess
-            .deepestValidatedMainChainTip()?.height
+            .deepestValidatedCanonicalTip()?.height
         while resumed != UInt64(depth), ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(25))
             resumed = await consumerProcess
-                .deepestValidatedMainChainTip()?.height
+                .deepestValidatedCanonicalTip()?.height
         }
         XCTAssertEqual(
             resumed, UInt64(depth),

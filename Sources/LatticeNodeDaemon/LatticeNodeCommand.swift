@@ -624,7 +624,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
         let byCID: Bool
         switch explorerBlockID(id) {
         case .height(let height):
-            guard let resolved = await service.explorerMainChainBlockCID(
+            guard let resolved = await service.explorerCanonicalBlockCID(
                 atHeight: height
             ) else {
                 throw HTTPError(.notFound)

@@ -461,7 +461,7 @@ extension NodeNetworkRuntime {
                     sessionLeases.servingAncestorRange.remove(peer.sessionID)
                 }
             }
-            let page = await process.forwardMainChainRange(
+            let page = await process.forwardCanonicalRange(
                 afterCID: request.afterCID,
                 limit: ForwardRangeResponseMessage.maximumBlocks
             )

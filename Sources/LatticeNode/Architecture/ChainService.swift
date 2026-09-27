@@ -349,8 +349,8 @@ public actor ChainService {
 
     /// Main-chain block CID at `height` (ungated height-index lookup), so the
     /// daemon can resolve a numeric `:id` to a CID before reading.
-    public func explorerMainChainBlockCID(atHeight height: UInt64) async -> String? {
-        await process.mainChainBlockCID(atHeight: height)
+    public func explorerCanonicalBlockCID(atHeight height: UInt64) async -> String? {
+        await process.canonicalBlockCID(atHeight: height)
     }
 
     public func explorerLatestBlock() async -> ExplorerLatestBlock? {
@@ -553,7 +553,7 @@ public actor ChainService {
     public func explorerChainInfo() async -> ExplorerChainInfo {
         let snapshot = await process.readSnapshot()
         return ExplorerChainInfo(
-            genesisHash: await process.mainChainBlockCID(atHeight: 0),
+            genesisHash: await process.canonicalBlockCID(atHeight: 0),
             height: snapshot.height,
             tipCID: snapshot.tipCID,
             chain: process.configuration.chainPath
@@ -1038,7 +1038,7 @@ public actor ChainService {
         // the reorgs — so the walk is armed here if nothing armed it, and
         // its stop reports the change that builds the next candidate.
         if !executionWalkParked {
-            let validated = await process.deepestValidatedMainChainTip()?.height
+            let validated = await process.deepestValidatedCanonicalTip()?.height
             if let target = await process.canonicalTipHeight(),
                (validated.map { Int64($0) } ?? -1) < Int64(target) {
                 SyncTrace.log("child candidate deferred: validated \(validated.map(String.init) ?? "none") behind weighed \(target)")
@@ -1488,7 +1488,7 @@ public actor ChainService {
     /// height means nothing on the main chain is validated yet (below
     /// genesis), so treat it as strictly behind any canonical tip.
     private func reserveExecutionWalkIfBehind() async {
-        let validatedHeight = await process.deepestValidatedMainChainTip()?.height
+        let validatedHeight = await process.deepestValidatedCanonicalTip()?.height
         if let target = await process.canonicalTipHeight(),
            (validatedHeight.map { Int64($0) } ?? -1) < Int64(target) {
             reserveExecutionWalkWorker()
@@ -1564,7 +1564,7 @@ public actor ChainService {
         // no-progress case (an exclusion that re-projects re-arms a fresh pass).
         var lastAdmittedHeight: UInt64?
         while true {
-            let validated = await process.deepestValidatedMainChainTip()
+            let validated = await process.deepestValidatedCanonicalTip()
             guard let target = await process.canonicalTipHeight() else { return true }
             let validatedHeight = validated.map { Int64($0.height) } ?? -1
             if let lastAdmittedHeight, validatedHeight < Int64(lastAdmittedHeight) {
@@ -1578,7 +1578,7 @@ public actor ChainService {
             // session], so the local boundary is served free and only the missing
             // body is fetched. With no source wired (empty-block unit contexts whose
             // boundary already is the whole block), admit broker-only as before.
-            guard let next = await process.mainChainBlockCID(atHeight: nextHeight)
+            guard let next = await process.canonicalBlockCID(atHeight: nextHeight)
             else { return false }
             #if DEBUG
             onExecutionWalkStep?(nextHeight)

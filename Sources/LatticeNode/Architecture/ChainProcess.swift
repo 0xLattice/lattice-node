@@ -959,7 +959,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// forward-apply sync so a receiver can apply a bounded page and page again,
     /// never buffering the whole gap. Empty when `afterCID` is not on our main
     /// chain or we have nothing after it.
-    func forwardMainChainRange(
+    func forwardCanonicalRange(
         afterCID: String,
         limit: Int
     ) async -> (blockCIDs: [String], hasMore: Bool) {
@@ -993,7 +993,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// retention) — distinct from a present ancestor with an empty page, which
     /// is "the receiver is caught up to us." The start is one of the receiver's
     /// own accepted CIDs by construction, so this never rewinds it past its own
-    /// verified history. Same main-chain test as `forwardMainChainRange`.
+    /// verified history. Same main-chain test as `forwardCanonicalRange`.
     func commonAncestorRange(
         locator: [String],
         limit: Int
@@ -1005,7 +1005,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             guard let meta = await level.chain.getConsensusBlock(hash: cid),
                   await level.chain.canonicalBlockHash(atHeight: meta.blockHeight) == cid
             else { continue }
-            let page = await forwardMainChainRange(afterCID: cid, limit: limit)
+            let page = await forwardCanonicalRange(afterCID: cid, limit: limit)
             return (cid, page.blockCIDs, page.hasMore)
         }
         return (nil, [], false)
@@ -1022,9 +1022,9 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
 
     /// Main-chain block CID at `height`, or nil when the process is not active
     /// or the height is past the tip. Ungated explorer read over the in-memory
-    /// height index (same source as `forwardMainChainRange`), so a by-height
+    /// height index (same source as `forwardCanonicalRange`), so a by-height
     /// lookup never walks parents or touches the operation gate.
-    func mainChainBlockCID(atHeight height: UInt64) async -> String? {
+    func canonicalBlockCID(atHeight height: UInt64) async -> String? {
         guard case .active(let level) = runtimePhase else { return nil }
         return await level.chain.canonicalBlockHash(atHeight: height)
     }
@@ -1074,7 +1074,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         directories: Set<String>
     ) async -> [String: String] {
         guard case .active(let level) = runtimePhase, !directories.isEmpty,
-              let tip = await deepestValidatedMainChainTip(level: level)?.cid
+              let tip = await deepestValidatedCanonicalTip(level: level)?.cid
         else { return [:] }
         let header = BlockHeader(rawCID: tip, node: nil, encryptionInfo: nil)
         guard let block = try? await header.resolve(fetcher: localFetcher).node,
@@ -1357,12 +1357,12 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// Under all-eager admission every accepted block is validated, so this is
     /// the canonical tip. Nil only when the process is inactive or (impossible
     /// while genesis is eager) no main-chain block is validated.
-    func deepestValidatedMainChainTip() async -> (cid: String, height: UInt64)? {
+    func deepestValidatedCanonicalTip() async -> (cid: String, height: UInt64)? {
         guard case .active(let level) = runtimePhase else { return nil }
-        return await deepestValidatedMainChainTip(level: level)
+        return await deepestValidatedCanonicalTip(level: level)
     }
 
-    /// The last answer of `deepestValidatedMainChainTip`. Validated main-chain
+    /// The last answer of `deepestValidatedCanonicalTip`. Validated main-chain
     /// blocks form a PREFIX (the walk validates forward from validated+1,
     /// self-mined blocks attach on the validated tip, a reorg leaves a
     /// validated prefix below the fork point), so the last answer is a floor:
@@ -1415,13 +1415,13 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         return (try? await store.blockValidated(cid)) == true
     }
 
-    private func deepestValidatedMainChainTip(
+    private func deepestValidatedCanonicalTip(
         level: ChainLevel
     ) async -> (cid: String, height: UInt64)? {
         await validatedTipWalk(level: level)?.validated
     }
 
-    /// `deepestValidatedMainChainTip` together with the canonical tip height
+    /// `deepestValidatedCanonicalTip` together with the canonical tip height
     /// the walk started from, which the validated height never exceeds.
     private func validatedTipWalk(
         level: ChainLevel
@@ -1487,7 +1487,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         await acquireOperation()
         defer { releaseOperation() }
         guard case .active(let level) = runtimePhase,
-              let validated = await deepestValidatedMainChainTip(level: level)
+              let validated = await deepestValidatedCanonicalTip(level: level)
         else {
             throw ChainProcessError.chainNotBootstrapped
         }
@@ -1810,7 +1810,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 revision: nil
             )
         }
-        let validated = await deepestValidatedMainChainTip(level: level)
+        let validated = await deepestValidatedCanonicalTip(level: level)
         return ChainProcessStatus(
             phase: .active,
             chainPath: configuration.chainPath,
@@ -1835,7 +1835,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 revision: nil
             )
         }
-        let validated = await deepestValidatedMainChainTip(level: level)
+        let validated = await deepestValidatedCanonicalTip(level: level)
         return ChainProcessStatus(
             phase: .active,
             chainPath: configuration.chainPath,
@@ -2082,7 +2082,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// demoted here.
     private func evictDemotableValidatedBlocks() async throws {
         guard case .active(let level) = runtimePhase,
-              let validatedTip = await deepestValidatedMainChainTip(level: level)
+              let validatedTip = await deepestValidatedCanonicalTip(level: level)
         else { return }
         let policy = configuration.resourcePolicy
         let depth = UInt64(policy.offChainValidatedRetentionDepth)
