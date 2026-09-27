@@ -1734,11 +1734,10 @@ extension NodeNetworkRuntime {
             // A child wired in: serve its runs from now on. The service
             // refuses a directory this chain never anchored a child genesis
             // for, so a hello alone names nothing (idempotent otherwise).
-            if let directory = childPath.last {
-                if let chain,
+            if let directory = childPath.last,
+               let chain,
                chain.networkCapabilities.contains(.runReportServing) {
                 await chain.serveRuns(for: directory)
-            }
             }
             // A child wired in builds against this chain's current context:
             // the push task sends it to every ready child that lacks it.

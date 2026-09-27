@@ -671,7 +671,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// Owner: Candidates.admitCandidate / Hierarchy.appendParentEvidence /
     ///     Hierarchy.finishParentEvidence / Lifecycle.clearRuntimeState.
     var parentEvidence = ParentEvidenceFlow()
-    /// The service this generation calls into; the daemon passes a
+    /// The service this generation calls into; `Node.build` passes a
     /// `WeakChain`, so the runtime never keeps the service alive.
     /// Owner: Lifecycle.startNow / Lifecycle.clearRuntimeState.
     var chain: (any ChainInterface)?
