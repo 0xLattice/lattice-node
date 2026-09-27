@@ -2041,7 +2041,7 @@ final class ChainProcessTests: XCTestCase {
             of: genesis, timestamp: 3_600_001, nonce: bNonce, on: process!
         )
         while forkChoicePrefersBlock(try BlockHeader(node: b).rawCID, over: aCID) {
-            bNonce += 1
+            bNonce = b.nonce + 1
             b = try await mineChild(
                 of: genesis, timestamp: 3_600_001, nonce: bNonce, on: process!
             )
@@ -2549,7 +2549,8 @@ final class ChainProcessTests: XCTestCase {
             )
             return candidate
         }
-        throw XCTSkip("no nonce in \(nonce)..<\(nonce + 4_096) mined a block")
+        XCTFail("no nonce in \(nonce)..<\(nonce + 4_096) mined a block")
+        throw ChainProcessTestError.nonceSearchExhausted
     }
 
     private func configuration(
@@ -2844,4 +2845,8 @@ private actor BlockingContentSource: ContentSource {
             waiter.continuation.resume(returning: waiter.entries)
         }
     }
+}
+
+private enum ChainProcessTestError: Error {
+    case nonceSearchExhausted
 }

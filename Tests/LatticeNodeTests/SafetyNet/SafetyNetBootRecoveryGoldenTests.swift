@@ -348,7 +348,8 @@ final class SafetyNetBootRecoveryGoldenTests: XCTestCase {
             )
             return candidate
         }
-        throw XCTSkip("fixture: no nonce below 2^16 mined a block at timestamp \(timestamp)")
+        XCTFail("fixture: no nonce below 2^16 mined a block at timestamp \(timestamp)")
+        throw FixtureError.nonceSearchExhausted
     }
 
     private func configuration(_ storage: URL) throws -> NodeConfiguration {
@@ -365,4 +366,8 @@ final class SafetyNetBootRecoveryGoldenTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         return url
     }
+}
+
+private enum FixtureError: Error {
+    case nonceSearchExhausted
 }
