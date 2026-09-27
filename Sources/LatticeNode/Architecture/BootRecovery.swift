@@ -57,6 +57,7 @@ enum BootRecovery {
             staged: staged,
             migrated: migrated
         )
+        // Stage 8: prepared child proofs recovered.
         try await ChainProcess.recoverPreparedChildProofs(
             store: stores.store,
             configuration: configuration
