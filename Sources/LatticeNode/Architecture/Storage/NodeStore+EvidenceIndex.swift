@@ -394,10 +394,7 @@ extension NodeStore {
             )
         }
         if prepared.carrierEvidence != nil {
-            try? await recoveryVolumeBroker.advanceRetainedRoots(
-                scope: parentEvidenceInboxRetentionScope,
-                roots: parentEvidenceInboxRoots()
-            )
+            await reconcileParentEvidenceInboxRetention()
         }
     }
 
@@ -1163,18 +1160,12 @@ extension NodeStore {
             }
         } catch {
             if !alreadyAdmitted {
-                try? await recoveryVolumeBroker.advanceRetainedRoots(
-                    scope: parentEvidenceInboxRetentionScope,
-                    roots: parentEvidenceInboxRoots()
-                )
+                await reconcileParentEvidenceInboxRetention()
             }
             throw error
         }
         if admittedDuringStore {
-            try? await recoveryVolumeBroker.advanceRetainedRoots(
-                scope: parentEvidenceInboxRetentionScope,
-                roots: parentEvidenceInboxRoots()
-            )
+            await reconcileParentEvidenceInboxRetention()
         }
         return admittedDuringStore
     }
@@ -1245,10 +1236,7 @@ extension NodeStore {
             "DELETE FROM parent_evidence_inbox WHERE child_cid = ?1 AND root_cid = ?2",
             params: [.text(childCID), .text(rootCID)]
         )
-        try? await recoveryVolumeBroker.advanceRetainedRoots(
-            scope: parentEvidenceInboxRetentionScope,
-            roots: parentEvidenceInboxRoots()
-        )
+        await reconcileParentEvidenceInboxRetention()
     }
 
     func parentEvidenceInboxHasCapacity() throws -> Bool {

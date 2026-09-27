@@ -167,10 +167,7 @@ extension NodeStore {
         if preparedHierarchyArtifacts?.carrierEvidence != nil
             || preparedIncomingCarrierEvidence != nil
         {
-            try? await recoveryVolumeBroker.advanceRetainedRoots(
-                scope: parentEvidenceInboxRetentionScope,
-                roots: parentEvidenceInboxRoots()
-            )
+            await reconcileParentEvidenceInboxRetention()
         }
     }
 

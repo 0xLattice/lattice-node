@@ -114,18 +114,10 @@ extension NodeStore {
                 }
             }
         } catch {
-            try? await recoveryVolumeBroker.unpinBatch(
-                items: canonicalRoots.map {
-                    (root: $0, owner: contextualCandidateOwner, count: 1)
-                }
-            )
+            await releaseContextualCandidatePins(canonicalRoots)
             throw error
         }
-        try? await recoveryVolumeBroker.unpinBatch(
-            items: evictedRoots.map {
-                (root: $0, owner: contextualCandidateOwner, count: 1)
-            }
-        )
+        await releaseContextualCandidatePins(evictedRoots)
         // Handoffs are exempt from the offer budget above, so their own
         // budget runs on the same cadence: every offer this chain stores.
         try await evictExcessHandoffCandidates()
@@ -273,11 +265,7 @@ extension NodeStore {
                 )
             }
         }
-        try? await recoveryVolumeBroker.unpinBatch(
-            items: candidateRoots.map {
-                (root: $0, owner: contextualCandidateOwner, count: 1)
-            }
-        )
+        await releaseContextualCandidatePins(candidateRoots)
         return true
     }
 
@@ -330,11 +318,7 @@ extension NodeStore {
                 )
             }
         }
-        try? await recoveryVolumeBroker.unpinBatch(
-            items: releasedRoots.map {
-                (root: $0, owner: contextualCandidateOwner, count: 1)
-            }
-        )
+        await releaseContextualCandidatePins(releasedRoots)
     }
 
     /// Owner: EvidenceIndex.persistIssuedChildProof / CandidateStore.persistPreparedChildProofs — caller holds the transaction.
