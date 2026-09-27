@@ -79,6 +79,12 @@ struct Row: Sendable {
         return value
     }
 
+    func nonNegativeInt(_ column: String) throws -> Int64 {
+        let value = try int(column)
+        guard value >= 0 else { throw malformed(column) }
+        return value
+    }
+
     func uint64(_ column: String) throws -> UInt64 {
         guard let value = UInt64(exactly: try int(column)) else {
             throw malformed(column)
@@ -114,13 +120,13 @@ struct Row: Sendable {
 }
 
 /// A typed view over one row of one table (or one fixed join): the only
-/// place that spells that table's column names. Accessors are lazy so a
-/// statement projecting a subset of the columns still reads through the
-/// record.
+/// place that spells that table's column names. A record either reads its
+/// columns lazily (so a statement projecting a subset still reads through
+/// it) or validates them all in `init` and throws.
 protocol NodeStoreRecord {
     /// The `Row.table` label every statement over this table uses.
     static var table: String { get }
-    init(_ row: Row)
+    init(_ row: Row) throws
 }
 
 extension NodeSQLite {

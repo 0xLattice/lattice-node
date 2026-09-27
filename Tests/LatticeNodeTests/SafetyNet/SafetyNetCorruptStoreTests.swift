@@ -158,11 +158,6 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             sql: ["INSERT INTO parent_evidence_inbox (source_id, ordinal, child_cid, root_cid, attachment_cid) VALUES ('00000000-0000-4000-8000-000000000001', 1, 'child', 'root', 'not-a-cid')"]
         ),
         Damage(
-            table: "local_mempool_transactions", column: "transaction_cid",
-            description: "inserted malformed CID text",
-            sql: ["INSERT INTO local_mempool_transactions (transaction_cid, added_at) VALUES ('not-a-cid', 0)"]
-        ),
-        Damage(
             table: "prepared_child_proofs", column: "attachment_cid",
             description: "inserted proof with malformed CID text",
             sql: ["INSERT INTO prepared_child_proofs (carrier_cid, batch_seq, directory, child_cid, is_child_genesis, attachment_cid) VALUES ('carrier', 1, 'Payments', 'child', 0, 'not-a-cid')"]
@@ -186,7 +181,13 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
 
     /// Refused with `NodeStoreError.malformedRow(table:column:)` naming the
     /// damaged table and column.
-    private static let refusedAsMalformedRow: [Damage] = []
+    private static let refusedAsMalformedRow: [Damage] = [
+        Damage(
+            table: "local_mempool_transactions", column: "transaction_cid",
+            description: "inserted malformed CID text",
+            sql: ["INSERT INTO local_mempool_transactions (transaction_cid, added_at) VALUES ('not-a-cid', 0)"]
+        ),
+    ]
 
     /// Refused with `NodeStoreError.wipeRequired`.
     private static let refusedAsWipeRequired: [Damage] = [
