@@ -271,24 +271,31 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
     /// and is REPAIRED at boot, not refused.
     func testBootRepairsDisagreeingLeafFlag() async throws {
         let fixture = try await buildFixture()
-        let root = try damagedCopy(of: fixture, applying: [
+        // A flipped flag and an out-of-range flag are both a derived index to
+        // repair, never a refusal.
+        for damage in [
             "UPDATE accepted_blocks SET leaf = 1 - leaf",
-        ])
-        let flipped = try leafFlags(at: root)
-        XCTAssertTrue(
-            flipped.values.contains(true) && flipped.values.contains(false),
-            "fixture guard: the flip must leave both leaf values present"
-        )
-        let observed = await observeBoot(at: root)
-        XCTAssertEqual(observed, .opened, "accepted_blocks.leaf")
-        let repaired = try leafFlags(at: root)
-        let parents = try parentLinks(at: root)
-        for (cid, leaf) in repaired {
-            let hasChildren = parents.values.contains(cid)
-            XCTAssertEqual(
-                leaf, !hasChildren,
-                "accepted_blocks.leaf for \(cid) was not repaired from the parent links"
-            )
+            "UPDATE accepted_blocks SET leaf = 2",
+        ] {
+            let root = try damagedCopy(of: fixture, applying: [damage])
+            if damage.hasSuffix("1 - leaf") {
+                let flipped = try leafFlags(at: root)
+                XCTAssertTrue(
+                    flipped.values.contains(true) && flipped.values.contains(false),
+                    "fixture guard: the flip must leave both leaf values present"
+                )
+            }
+            let observed = await observeBoot(at: root)
+            XCTAssertEqual(observed, .opened, "accepted_blocks.leaf after \(damage)")
+            let repaired = try leafFlags(at: root)
+            let parents = try parentLinks(at: root)
+            for (cid, leaf) in repaired {
+                let hasChildren = parents.values.contains(cid)
+                XCTAssertEqual(
+                    leaf, !hasChildren,
+                    "accepted_blocks.leaf for \(cid) was not repaired from the parent links after \(damage)"
+                )
+            }
         }
     }
 

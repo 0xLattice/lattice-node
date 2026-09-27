@@ -60,7 +60,9 @@ struct AcceptedBlockRow: NodeStoreRecord {
     var admissionSequence: Int64 { get throws { try row.positiveInt("admission_seq") } }
     /// The raw execution tier (`0` weighed, `1` eager, `2` walk-validated).
     var validatedTier: Int64 { get throws { try row.int("validated") } }
-    var leaf: Bool { get throws { try row.bool("leaf") } }
+    /// A derived index repaired from the parent links at boot, so any stored
+    /// integer is read (only 1 means leaf) rather than refused.
+    var leaf: Bool { get throws { try row.int("leaf") == 1 } }
 }
 
 extension NodeStore {

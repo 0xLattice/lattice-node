@@ -70,6 +70,9 @@ struct PendingChildProofRouteRow: NodeStoreRecord {
     init(_ row: Row) { self.row = row }
 
     var carrierCID: String { get throws { try row.nonEmptyText("carrier_cid") } }
+    /// The stored key as-is, for deleting stale rows (an empty carrier is
+    /// evicted, not refused).
+    var carrierKey: String { get throws { try row.text("carrier_cid") } }
     var batchSequence: Int64 { get throws { try row.int("batch_seq") } }
     var directory: String { get throws { try row.nonEmptyText("directory") } }
 }
@@ -86,7 +89,6 @@ struct ContextualCandidateRow: NodeStoreRecord {
     var offerSequence: Int64? { get throws { try row.optionalInt("offer_seq") } }
     var issued: Bool { get throws { try row.bool("issued") } }
     var handoff: Bool { get throws { try row.bool("handoff") } }
-    var handoffSequence: Int64? { get throws { try row.optionalInt("handoff_seq") } }
 }
 
 /// `contextual_candidate_roots`: one pinned Volume root of a candidate.
@@ -669,7 +671,7 @@ extension NodeStore {
         for row in stale {
             try database.execute(
                 "DELETE FROM pending_child_proof_routes WHERE carrier_cid = ?1",
-                params: [.text(try row.carrierCID)]
+                params: [.text(try row.carrierKey)]
             )
         }
     }

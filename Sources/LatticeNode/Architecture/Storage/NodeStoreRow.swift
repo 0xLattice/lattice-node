@@ -108,12 +108,6 @@ struct Row: Sendable {
         return value
     }
 
-    /// A blob decoded as JSON. A decode failure is semantic corruption and
-    /// stays `NodeStoreError.corrupt` (via `NodeStore.decode`).
-    func decoded<T: Decodable>(_ type: T.Type, _ column: String) throws -> T {
-        try NodeStore.decode(type, from: try blob(column))
-    }
-
     private func malformed(_ column: String) -> NodeStoreError {
         .malformedRow(table: table, column: column)
     }
