@@ -513,7 +513,7 @@ private func healthHeight(_ client: some TestClientProtocol) async throws -> UIn
 }
 
 /// Mines exactly one block atop the current tip through the loopback
-/// template/work routes; genesis is at max target, so nonce 0 always solves it.
+/// template/work routes, solving the issued template.
 private func mineOneBlock(client: some TestClientProtocol) async throws -> String {
     var template: MiningTemplateResponse?
     try await client.execute(
@@ -534,7 +534,7 @@ private func mineOneBlock(client: some TestClientProtocol) async throws -> Strin
         method: .post,
         headers: [.contentType: "application/json"],
         body: ByteBuffer(bytes: try JSONEncoder().encode(
-            SubmitWorkRequest(workID: issued.workID, nonce: 0)
+            SubmitWorkRequest(workID: issued.workID, nonce: solvedNonce(for: issued))
         ))
     ) { response in
         let submitted = try JSONDecoder().decode(

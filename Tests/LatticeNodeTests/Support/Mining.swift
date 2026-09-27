@@ -59,16 +59,20 @@ func solveNonce(
     )
 }
 
-/// The first nonce at or above `start` that solves an issued mining
-/// template: its hash meets `searchTarget`, which is never easier than the block's own.
+/// The first nonce at or above `start` that mines an issued template's own
+/// block: its hash meets both the search target and the block's committed
+/// target. With child candidates and no binding filter the search target is
+/// the EASIEST threshold, so a hash clearing it alone can be a carrier
+/// (`accepted == false`); the parent's target is what this node canonicalizes.
 func solvedNonce(
     for template: MiningTemplateResponse,
     startingAt start: UInt64 = 0,
     file: StaticString = #filePath,
     line: UInt = #line
 ) -> UInt64 {
-    firstNonce(of: template.block, from: start, file: file, line: line) {
-        $0 <= template.searchTarget
+    let target = min(template.searchTarget, template.block.target)
+    return firstNonce(of: template.block, from: start, file: file, line: line) {
+        $0 <= target
     }
 }
 
