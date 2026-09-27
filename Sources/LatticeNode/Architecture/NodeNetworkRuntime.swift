@@ -90,6 +90,61 @@ public struct NodeNetworkHandlers: Sendable {
     }
 }
 
+/// `NodeNetworkHandlers` as a `ChainInterface`: each optional handler that
+/// is present grants its capability.
+final class NodeNetworkHandlersChain: ChainInterface {
+    private let handlers: NodeNetworkHandlers
+    let networkCapabilities: ChainNetworkCapabilities
+
+    init(_ handlers: NodeNetworkHandlers) {
+        self.handlers = handlers
+        var capabilities: ChainNetworkCapabilities = []
+        if handlers.childCandidateBuilder != nil { capabilities.insert(.childCandidates) }
+        if handlers.transaction != nil { capabilities.insert(.transactions) }
+        if handlers.transactionInventory != nil { capabilities.insert(.transactionInventory) }
+        if handlers.parentRunReport != nil { capabilities.insert(.parentRunReports) }
+        if handlers.runReportServing != nil { capabilities.insert(.runReportServing) }
+        if handlers.recentCommitters != nil { capabilities.insert(.recentCommitters) }
+        networkCapabilities = capabilities
+    }
+
+    func miningCandidate(
+        for context: ChildCandidateRequestContext,
+        parentContentSource: any ContentSource
+    ) async throws -> DirectChildCandidate? {
+        guard let builder = handlers.childCandidateBuilder else { return nil }
+        return try await builder(context, parentContentSource)
+    }
+
+    func admitNetworkCandidate(
+        _ admission: NetworkCandidateAdmission
+    ) async throws -> NodeAdmissionOutcome {
+        try await handlers.admission(admission)
+    }
+
+    func submitNetworkTransaction(_ transaction: Transaction) async throws -> Bool {
+        guard let handler = handlers.transaction else { throw CancellationError() }
+        return try await handler(transaction)
+    }
+
+    func transactionInventoryRoots() async -> [String] {
+        await handlers.transactionInventory?() ?? []
+    }
+
+    func applyParentRunReport(_ report: ParentRunReport) async throws {
+        guard let handler = handlers.parentRunReport else { throw CancellationError() }
+        try await handler(report)
+    }
+
+    func serveRuns(for directory: String) async {
+        await handlers.runReportServing?(directory)
+    }
+
+    func recentCommitters() async -> [String] {
+        await handlers.recentCommitters?() ?? []
+    }
+}
+
 enum ChildCandidateBudget {
     @TaskLocal static var deadline: ContinuousClock.Instant?
 }
@@ -729,8 +784,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// Owner: Candidates.admitCandidate / Hierarchy.appendParentEvidence /
     ///     Hierarchy.finishParentEvidence / Lifecycle.clearRuntimeState.
     var parentEvidence = ParentEvidenceFlow()
+    /// The service this generation calls into; the daemon passes a
+    /// `WeakChain`, so the runtime never keeps the service alive.
     /// Owner: Lifecycle.startNow / Lifecycle.clearRuntimeState.
-    var handlers: NodeNetworkHandlers?
+    var chain: (any ChainInterface)?
     /// The template context this chain last pushed to its children: its
     /// validated tip and the miner's plan for the subtree. Re-pushed whenever
     /// any of it changes; a child builds its candidate against it.

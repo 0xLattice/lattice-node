@@ -321,7 +321,8 @@ extension NodeNetworkRuntime {
         process: ChainProcess
     ) {
         guard receivedParentTip != nil,
-              handlers?.childCandidateBuilder != nil else { return }
+              chain?.networkCapabilities.contains(.childCandidates) == true
+        else { return }
         candidateOfferDirty = true
         guard candidateOfferTask == nil else { return }
         candidateOfferTask = Task { [weak self] in
@@ -388,7 +389,8 @@ extension NodeNetworkRuntime {
               hierarchyRecords[context.peer.key]?.session?.sessionID
                 == context.peer.sessionID,
               hierarchyRecords[context.peer.key]?.role == .parent,
-              let builder = handlers?.childCandidateBuilder,
+              let chain,
+              chain.networkCapabilities.contains(.childCandidates),
               let carrier = Self.provisionalCarrier(
                 on: context.tip,
                 tipCID: context.tipCID
@@ -406,13 +408,13 @@ extension NodeNetworkRuntime {
                 context.tipCID,
                 operation: { session in
                     try await ChildCandidateBudget.$deadline.withValue(deadline) {
-                        try await builder(
-                            ChildCandidateRequestContext(
+                        try await chain.miningCandidate(
+                            for: ChildCandidateRequestContext(
                                 parentCarrier: carrier,
                                 rewards: context.rewards,
                                 minimumWork: context.minimumWork
                             ),
-                            session
+                            parentContentSource: session
                         )
                     }
                 }
@@ -1316,7 +1318,10 @@ extension NodeNetworkRuntime {
             // hello path this does not wait for evidence-ready: that gate
             // sequences what this node publishes, not who may ask.
             guard isCurrentRuntime(generation: generation, process: process) else { return }
-            await handlers?.runReportServing?(directory)
+            if let chain,
+               chain.networkCapabilities.contains(.runReportServing) {
+                await chain.serveRuns(for: directory)
+            }
             SyncTrace.log("run-report request from child dir=\(directory) committers=\(request.committerCIDs.count)")
             for committer in request.committerCIDs {
                 guard isCurrentRuntime(generation: generation, process: process),
@@ -1342,7 +1347,9 @@ extension NodeNetworkRuntime {
             // (§9.10). The service binds it and derives the credit under its
             // own lease; a refusal is counted there, never acted on here.
             guard let report = try? ParentRunReportMessage.decoded(message.payload),
-                  let handler = handlers?.parentRunReport else { return }
+                  let chain,
+                  chain.networkCapabilities.contains(.parentRunReports)
+            else { return }
             SyncTrace.log("run-report received committer=\(report.report.blockHash.prefix(16)) run=\(report.report.runWork) own=\(report.report.ownWork)")
             // Applied under the process gate, which an admission may hold
             // while it waits for a fact from this very session. Awaited here
@@ -1357,7 +1364,7 @@ extension NodeNetworkRuntime {
                       await self.isCurrentRuntime(
                         generation: generation, process: process
                       ) else { return }
-                try? await handler(report.report)
+                try? await chain.applyParentRunReport(report.report)
             }
 
         case (NodeNetworkTopic.childGenesisAnchorRequest,
@@ -1728,7 +1735,10 @@ extension NodeNetworkRuntime {
             // refuses a directory this chain never anchored a child genesis
             // for, so a hello alone names nothing (idempotent otherwise).
             if let directory = childPath.last {
-                await handlers?.runReportServing?(directory)
+                if let chain,
+               chain.networkCapabilities.contains(.runReportServing) {
+                await chain.serveRuns(for: directory)
+            }
             }
             // A child wired in builds against this chain's current context:
             // the push task sends it to every ready child that lacks it.
@@ -2202,7 +2212,10 @@ extension NodeNetworkRuntime {
         generation: UInt64,
         process: ChainProcess
     ) async {
-        guard let committers = await handlers?.recentCommitters?() else { return }
+        guard let chain,
+              chain.networkCapabilities.contains(.recentCommitters)
+        else { return }
+        let committers = await chain.recentCommitters()
         await requestParentRunReports(
             committers: committers, generation: generation, process: process
         )
