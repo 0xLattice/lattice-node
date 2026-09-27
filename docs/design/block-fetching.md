@@ -1,4 +1,4 @@
-# Candidate Acquisition
+# Block Fetching
 
 ## Goal
 
@@ -34,7 +34,9 @@ The fetcher does not own:
 - accepted-block or proof publication.
 
 Evidence is authenticated before entering the fetcher. Consensus remains the
-only authority that decides whether a complete candidate is accepted.
+only authority that decides whether a complete candidate is accepted. The
+fetcher references no Ivy type, and the network runtime keeps no candidate
+state of its own beyond the fetcher it drives.
 
 ## Invariants
 
@@ -78,9 +80,11 @@ the edge. Queues schedule work; they are not semantic state.
 
 The fetcher accepts:
 
-- a block Volume announcement and exact provider;
+- a block Volume announcement and exact provider, whether from a live
+  announcement, a range-sync page, or a frontier pull;
 - an authenticated evidence package;
 - provider connection and disconnection;
+- parent evidence and portable evidence;
 - a recovered durable predecessor obligation;
 - a fetch completion;
 - an import completion;
@@ -124,81 +128,3 @@ This gives three rules:
 2. expensive work runs asynchronously outside the actor;
 3. results mutate state only when their active-attempt ticket and runtime
    generation remain current.
-
-## Implementation plan
-
-### 1. Freeze observable behavior
-
-Add deterministic characterization tests for:
-
-- evidence before provider;
-- provider before evidence;
-- provider arriving during import;
-- recursive `D -> P -> Q` predecessor recovery;
-- multiple evidence roots for one block;
-- frontier backpressure;
-- malformed or incomplete Volumes followed by reacquisition;
-- disconnect and restart at each suspended state.
-
-### 2. Define the black-box contract
-
-Introduce import tickets, immutable import inputs/results, provider
-identities, and the narrow Volume-fetching protocol. The acquisition core must
-not import or reference concrete Ivy types.
-
-### 3. Implement the state reducer
-
-Implement the per-chain actor and its idempotent event reducer. Prove bounded
-state, root-specific evidence preservation, iterative dependency traversal,
-and stale revision rejection with deterministic tests.
-
-### 4. Add asynchronous execution
-
-Run Volume fetches and block import through injected ports. Feed their
-revision-bound results back through the reducer.
-
-### 5. Build production adapters
-
-Adapt Ivy sessions and provider discovery to the Volume-fetching protocol.
-Use VolumeBroker for all verified local materialization and pruning protection.
-
-### 6. Integrate the runtime
-
-Route block announcements, range-sync pages, portable evidence, parent
-evidence, provider disconnects, and recovered predecessor obligations into the
-fetcher. (The accepted-leaf inventory and portable-attachment index walks
-that once fed it are receiver-retired; both stay served for older peers.)
-Inject `ChainService` import without moving consensus into the module.
-
-### 7. Delete legacy orchestration
-
-Remove candidate semantic state from `NodeNetworkRuntime`, including its
-candidate inbox, queued/active/waiting candidates, descendant wait maps, route
-sharing, and acquisition retry tasks. Retain only bounded network ingress and
-transport-request state.
-
-### 8. Verify
-
-Run reducer permutation tests, real VolumeBroker/component tests, real-Ivy
-tests, daemon multichain E2Es, `swift build`, `swift test`, and
-`git diff --check`.
-
-### 9. Review and simplify
-
-Adversarially review authority boundaries, arrival-order independence,
-backpressure, crash safety, attribution, memory bounds, and unnecessary
-abstractions. Resolve concrete counterexamples and repeat until no findings
-remain. The extraction must materially reduce `NodeNetworkRuntime`.
-
-## Acceptance criteria
-
-- No candidate obligation is lost through ordering or backpressure.
-- Multiple roots committing to one block remain distinct.
-- Any valid Volume can be reused across machines.
-- Inherited work remains completely orthogonal to acquisition.
-- The runtime contains no candidate-acquisition state machine.
-- Acquisition can be tested as an independent black box.
-- Full realistic multichain tests pass without inflated timing allowances.
-
-Reservation reconciliation is a separate per-peer
-desired/in-flight/acknowledged state machine and is not part of this module.

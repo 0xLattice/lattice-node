@@ -1,7 +1,7 @@
 # Composable Node Architecture
 
-> **Status: implemented foundation.** The consensus details and migration gates
-> live in the [work-proof collapse north star](work-proof-collapse-north-star.md).
+The consensus details of proof-derived work and parent-state continuity live in
+[proof-derived child work](proof-derived-work.md).
 
 ## Mental model
 
@@ -33,14 +33,29 @@ machines remain small reducers:
 - `BlockFetcher` owns candidate/provider/dependency scheduling.
 - `ParentEvidenceFlow` owns session-local evidence ordering, backpressure, and
   reservation fencing.
-- `ChildCandidateOwnership` derives one disjoint reservation/handoff transfer
-  from all outstanding templates.
+- `RangeSync` owns the single forward-apply range-sync slot and the bounds
+  that shape its paging.
 
 These reducers perform neither Ivy I/O nor Lattice consensus. The parent
 evidence inbox row and scan watermark intentionally remain one NodeStore
 transaction: splitting that durability boundary would permit a crash to skip
-evidence. Reservation and handoff likewise remain distinct phases because the
-handoff is the atomic transfer from speculative to durable ownership.
+evidence.
+
+Child candidates need no reducer, because nothing is reserved. Each child
+pushes its candidate whenever one of its inputs changes; the parent keeps only
+the latest candidate per child peer, and a template takes every held candidate
+whose parent state is the current tip's post-state. The child keeps what it
+built in its own budgeted offer store, oldest offer evicted first. When the
+configured parent's evidence names one of those candidates carried, its row
+becomes a handoff: newer offers no longer evict it, a separate handoff budget
+bounds it, and the carried block's import takes over its roots.
+
+While the parent's tip context names a carried child block that this chain has
+not imported, the child holds its candidate offers, since a candidate built
+then would only be that block's sibling. The hold ends when the block is
+imported, when an import decides against it, or when an evidence scan round
+sent for it ends without it. Only the configured parent's state can keep the
+hold; nothing an overlay peer announces or relays does.
 
 ## Content boundary
 

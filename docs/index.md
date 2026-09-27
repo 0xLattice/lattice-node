@@ -29,10 +29,10 @@ Start here, then follow the path that matches what you're doing.
 | Understand the node's internals | [Architecture](architecture.md) |
 | Understand recursive commitments and process boundaries | [Node consequences](design/fractal-structure.md) |
 | Understand chain paths and directories | [Chain addressing model](design/chain-addressing.md) |
-| Understand candidate data acquisition | [Candidate acquisition](design/candidate-acquisition.md) |
-| Review the proposed composable node architecture | [Composable node architecture](design/modular-admission-pipeline.md) |
+| Understand how blocks are fetched for import | [Block fetching](design/block-fetching.md) |
+| Understand the composable node architecture | [Composable node architecture](design/modular-import-pipeline.md) |
 | Understand parent authority and process boundaries | [Process trust model](design/process-trust-model.md) |
-| Follow the work-proof collapse implementation | [Work-proof collapse north star](design/work-proof-collapse-north-star.md) |
+| Understand proof-derived child work and parent-state continuity | [Proof-derived child work](design/proof-derived-work.md) |
 | Understand mining roles and worker boundaries | [Mining role boundaries](design/mining-role-boundaries.md) |
 | Build an external (GPU/remote) mining worker | [Mining workers](mining-workers.md) |
 | Build, test, or reproduce CI locally | [Development](development.md) |
@@ -52,10 +52,10 @@ Background on *why* things are shaped the way they are — design notes, not API
 
 - [design/fractal-structure.md](design/fractal-structure.md) — node consequences of recursive commitments and independent processes.
 - [design/chain-addressing.md](design/chain-addressing.md) — the chain path / directory mental model.
-- [design/candidate-acquisition.md](design/candidate-acquisition.md) — the event-order-independent boundary between Volume availability and block import.
-- [design/modular-admission-pipeline.md](design/modular-admission-pipeline.md) — orthogonal node capabilities, atomic Lattice semantics, and asynchronous selected-Volume persistence.
+- [design/block-fetching.md](design/block-fetching.md) — the event-order-independent boundary between Volume availability and block import.
+- [design/modular-import-pipeline.md](design/modular-import-pipeline.md) — orthogonal node capabilities, atomic Lattice semantics, and asynchronous selected-Volume persistence.
 - [design/process-trust-model.md](design/process-trust-model.md) — configured parent authority, separate hierarchy facts, and independent content verification.
-- [design/mining-role-boundaries.md](design/mining-role-boundaries.md) — the E15 node/coordinator/worker mining contract.
+- [design/mining-role-boundaries.md](design/mining-role-boundaries.md) — the node/coordinator/worker mining contract.
 - [design/consensus-fork-choice.md](design/consensus-fork-choice.md) — the node's operational duties around Lattice-owned consensus.
-- [design/work-proof-collapse-north-star.md](design/work-proof-collapse-north-star.md) — the implemented proof-derived work and parent-continuity north star.
+- [design/proof-derived-work.md](design/proof-derived-work.md) — proof-derived child work, run attribution, and parent-state continuity.
 - [design/deterministic-simulation-testing.md](design/deterministic-simulation-testing.md) — the ordering, crash, partition, skew and peer-misbehaviour failures existing tiers cannot control, and the seeded simulation concept that would.

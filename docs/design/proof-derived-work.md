@@ -1,9 +1,8 @@
-# Work-Proof Collapse North Star
+# Proof-Derived Child Work
 
-Status: implemented north star. The normative consensus rules belong in
-Lattice's specification; this document fixes the motivation, invariants,
-delivery order, and verification gate for the coordinated Lattice and
-lattice-node changes.
+The normative consensus rules belong in Lattice's specification. This document
+explains how a child chain's work and its parent-state continuity fit together
+across Lattice and lattice-node, and the invariants both keep.
 
 ## Motivation
 
@@ -17,11 +16,10 @@ therefore receives ordinary, immutable work facts: proof-derived contributions
 for its grinds, and one attributed-run contribution per carrier. Once
 imported, normal same-chain GHOST is sufficient.
 
-This removes the exceptional live inherited-work projection — the trusted feed
-that pushed a snapshot of the parent's weight, with revisions and completion
-markers, into a separate inherited branch of GHOST. Run attribution is a
-different mechanism, not that feed under another name: there is no snapshot
-and no projection. The child binds each report to its own directory, the
+There is no live inherited-work projection: nothing pushes a snapshot of the
+parent's weight, with revisions and completion markers, into a separate
+inherited branch of GHOST. Run attribution is not such a feed: there is no
+snapshot and no projection. The child binds each report to its own directory, the
 named child block, and a grind already credited there; derives the credit
 itself; and stages it as an ordinary durable work fact under its own identity,
 `AttributedRunIdentity(carrier, directory)`. It also preserves
@@ -38,7 +36,7 @@ Never use one graph as evidence for another:
 2. The immediate parent's accepted state-transition graph proves that a
    child's parent-state reference moves forward along a connected, valid
    parent history.
-3. The child's accepted-block graph routes imported work through segment GHOST.
+3. The child's accepted-block graph routes imported work through same-chain GHOST.
 
 Directory descent is not parent-chain descent. A root may descend through
 several child directories in one proof. A later block in the parent's own chain
@@ -130,8 +128,7 @@ The binding still gates **work**, not only import: it is enforced inside
 `ChildBlockProof.verifySecuringWork`, which returns `.protocolInvalid` before
 any `VerifiedWorkContribution` is minted, so a failure withholds the work
 contribution and the import together. Work crediting and the vertical
-binding are therefore NOT separated today — separating them is a proposed
-change, not current behaviour.
+binding are therefore one check.
 
 Each chain process durably records every connected block after
 semantic validation. That recovered `ChainBlockFact` graph is the transition
@@ -189,62 +186,27 @@ design forbids; the protection is running your own parent recursively.
 - A child advances its parent-evidence scan cursor only through evidence it
   has imported or durably retained. Its node-local inbox capacity applies
   backpressure without eviction, cursor advance, or peer punishment.
-- Committing a reserved child candidate atomically transfers that exact
-  candidate from reservation to durable handoff ownership. Other outstanding
-  templates cannot reserve the handed-off candidate in the same update.
+- Nothing reserves a child candidate. When the configured parent's evidence
+  names a candidate this chain built as carried, that candidate becomes a
+  handoff under its own storage budget, and the carried block's import takes
+  over its roots.
 
 Unknown-child proofs are bounded per peer and globally. Triggered sync is
 rate- and concurrency-limited. A valid proof for a child that has not yet
 arrived is not punishable; lying about advertised availability or returning
 malformed bytes is.
 
-## Reuse and deletion
+## What the design leaves out
 
-Reuse:
+There is no generic forest, accumulator, light-client protocol, quorum, second
+CAS, or second fork-choice implementation. No wire topic carries securing or
+inherited work, and no store keeps inherited-work snapshots, parent-work facts
+or cursors, or parent-work readiness. The §9.10 run-report topics
+`lattice.hierarchy.parent-run-report.v1` and
+`lattice.hierarchy.parent-run-report.request.v1` carry a report the child
+binds and derives into a work fact, never a weight snapshot.
 
-- `ChildBlockProof`, `DirectChildHop`, proof composition
-- `VerifiedChildEvidence`, `VerifiedWorkContribution`
-- `WorkMeasure`, `WorkSum`, segment GHOST
-- `ChildEvidenceVolume`, `ChildValidationPackageEnvelope`
-- `BlockFetcher`, fixed-cut inventory, NodeStore atomic batches
-- Ivy routing and VolumeBroker storage
-
-Do not add a generic forest, accumulator, light-client protocol, quorum,
-second CAS, or second fork-choice implementation.
-
-Delete only after the gate below passes:
-
-- securing/inherited-work request and push topics — not the §9.10 run-report
-  topics `lattice.hierarchy.parent-run-report.v1` and
-  `lattice.hierarchy.parent-run-report.request.v1`, which carry a report the
-  child binds and derives into a work fact, never a weight snapshot
-- inherited-work snapshots, revisions, completion markers, and projections
-- parent-work SQL facts and cursors
-- parent-work readiness and `awaitingParent`
-- the inherited-work branch in GHOST
-
-## Verification gates
-
-### Exact reference gate
-
-The old trusted feed is not a valid oracle: it credited later parent work that
-did not necessarily commit to the child, which is the behavior this design
-removes. Compare the optimized implementation instead with a frozen reference
-model containing only accepted child blocks, proof-derived grind locations,
-connectivity, exact `WorkMeasure`, and straightforward GHOST. Exact measures
-and selected tips must match across randomized mutation order and replay.
-
-### Adversarial security gate
-
-Freeze a reference model before running the optimized implementation. The
-model contains only a child block tree, proof-derived grind locations,
-connectivity, exact `WorkMeasure`, and straightforward GHOST.
-
-Exercise withholding and batched release, old-block targeting, balanced forks,
-subscription subsets, sibling co-commitment, eclipse and delay, equal-work
-ties, invalid carriers, reordering, duplication, and restart.
-
-The replacement passes only when:
+## Properties
 
 1. A verified observation of a root whose root hash clears the terminal
    child's target credits exactly `workForTarget` of the root-most target it
@@ -254,48 +216,14 @@ The replacement passes only when:
    at all — no work fact, and the block is not imported; a location holds the
    strongest such observation.
 2. No root is counted twice at one chain-local location.
-3. Optimized and reference totals and tips match exactly.
-4. No branch gains weight without equivalent physical work.
-5. The predeclared upper confidence bound for reorganization probability stays
-   below the deployment safety target at the required confirmation margin.
-6. No tested strategy beats the explicit-PoW-vote reference attacker outside
-   statistical error.
-7. Honest nodes converge after connectivity returns.
-8. Results are invariant to arrival order and restart.
+3. No branch gains weight without equivalent physical work.
+4. Honest nodes converge after connectivity returns.
+5. Results are invariant to arrival order and restart.
 
-The threat envelope, parameter sweep, safety target, margin, sample count, and
-confidence method must be committed before results are generated. Failure
-keeps the trusted feed in place.
-
-## Delivery order
-
-1. Finish and verify the already-open validity, storage, transport, and CI
-   corrections.
-2. In Lattice, extract one shared proof traversal, add work-only verification,
-   add the transitive parent-state continuity value, flatten contributions, and
-   add reference/differential tests.
-3. In lattice-node, add the proof-only Volume constructor, independent work and
-   recursive ancestor-validity import, source-agnostic path acquisition, and
-   atomic durability.
-4. Add same-chain proof distribution, bounded pending acquisition, replay, and
-   exact comparison with the independent reference model.
-5. Run the quantitative adversarial gate.
-6. Delete the trusted feed and all orphaned projections, revisions,
-   persistence, readiness, and fork-choice branches.
-7. Run clean-build unit, integration, realistic multi-process, restart,
-   sanitizer, coverage, and performance suites. Update dependency tags, exact
-   pins, documentation, and the existing PRs with the verified results.
-
-## Completion definition
-
-The work is complete when a clean node can create and follow parent, child, and
-grandchild chains; accept proof-derived work from any honest Volume provider;
-enforce transitive immediate-parent state continuity through the exact parent
-process boundary; reproduce the same tip and transition graph after restart;
-recover from malformed or unavailable providers; resist bounded unknown-child
-floods; match the reference model; pass the declared security gate; and run
-with no inherited-work feed, portable validity certificate, recursive
-child-side parent validator, or duplicate validated-delta store. The §9.10 run
-report is the one exception, and not a feed: the parent serves it for the
-directories it hosts, and the child binds it and derives an ordinary durable
-work fact from it under its own identity.
+Lattice checks the fork-choice side of these against an independent reference:
+`ForkChoiceOracle`, written from the specification alone and sharing nothing
+with the production descent, weight index, or arithmetic, must agree with
+`ChainState` on the golden, differential, and replay fixtures. Its
+`LatticeSim` harness quantifies the deterministic tie-break and no-finality
+tradeoffs under deep-reorg, selfish-mining, and balancing strategies (see the
+[consensus simulator](https://github.com/adalinxx/Lattice/blob/37.0.0/docs/consensus-simulator.md)).

@@ -24,8 +24,9 @@ after its terminal child is accepted and connected. Parent import and
 canonicity do not create or remove that physical work; later parent blocks
 descending from the carrier add their own work to the child block through
 the carrier's run (spec §9.10), never to a grind's contribution.
-Exact work ties use Lattice's deterministic segment-base CID rule, never
-arrival order or an incumbent preference.
+Exact work ties prefer the lexicographically smaller canonical CID of the
+competing child blocks (Lattice spec §9.4), never arrival order or an incumbent
+preference.
 
 The node must not implement a second fork-choice metric, recursively choose
 descendant tips, or send parent canonical-tip commands across the hierarchy

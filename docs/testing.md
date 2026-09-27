@@ -32,7 +32,7 @@ The suites are grouped by the boundary they actually cross:
   retry across disconnect, reopen with every source offline, three-level proof
   traversal, a suspended
   non-responsive authenticated sibling, durable side-branch bootstrap after a
-  reorg, same-path higher-work and segment-base-tie convergence, and a live competing-genesis
+  reorg, same-path higher-work and equal-work CID-tie convergence, and a live competing-genesis
   reorg followed by noncanonical parent descendants that must remain at their
   own locations instead of flowing through an ancestor carrier; a second
   same-path replica reconnects late and reaches the same result from its

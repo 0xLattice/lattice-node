@@ -209,14 +209,15 @@ Both planes currently require node protocol version 4. Parent-fact
 request/response semantics are versioned, so mixed-version peers refuse the
 session and must be upgraded together.
 
-Two overlay request topics are legacy-served only: the accepted-leaves page
-and the portable-attachment index. A node keeps answering both so an older
-peer still syncs from it, but no longer sends either — header-graph range sync
-(common-ancestor negotiation plus forward pages), live announcements and the
-predecessor walk replaced the accepted-leaves descent, and per-block locate
-requests replaced the index walk. The four message types, both server
-handlers and the accepted-leaf page store are scheduled for deletion the
-release after the fleet upgrades past this one.
+Two overlay request topics are answered in their full form so older peers
+still sync from this node: the accepted-leaves page and the portable-attachment
+index. A node sends the accepted-leaves request only as a one-shot, cursor-less
+frontier pull, when a peer's announced height is within the range-sync depth
+threshold of its own fetched tip; the cursored descent it answers is never
+sent. It never sends the portable-attachment index request: header-graph range
+sync (common-ancestor negotiation plus forward pages), live announcements and
+the predecessor walk carry sync, and a never-validated carrier's proof is
+solicited per block through a locate request.
 
 Peer content exchange is Volume-native. An announcer names one complete Volume
 by its root CID and must serve that Volume from the exact authenticated session

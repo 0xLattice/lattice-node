@@ -498,7 +498,7 @@ comparison those rules use is a node that retained B:
   function of their pruning policy". That comparison node keeps the *weight
   facts*, not the bytes, and it "may select a head it has not yet re-acquired",
   so the loss of a provider does not excuse the gating node.
-- modular-admission-pipeline rules out work floors because "two nodes with
+- modular-import-pipeline rules out work floors because "two nodes with
   different floors could select different tips". Two nodes with different tally
   budgets could too.
 - protocol.md treats any filter on work that can reach fork choice as
@@ -565,15 +565,7 @@ accepts in exchange for how much storage:
 Between those ends the operator trades storage against how much verified work
 the node may forget. No protocol constant sits anywhere on the dial: like every
 other limit here, it is a node-local decision with a sane default. A node at any
-setting is fully conforming in consensus terms, and fully conforming under the
-three documents named below once they are reworded.
-
-**Rewording three documents is a prerequisite to building this.**
-operator-finality's weight-preservation rule, protocol.md's work-floor sentence
-and modular-admission-pipeline's floor sentence each state an unconditional rule
-today. Accepting a bounded deviation as an operator setting makes that rule
-operator-selected, and those documents have to say so before this is built. This
-document does not reword them.
+setting is fully conforming in consensus terms.
 
 ## Stranding
 
