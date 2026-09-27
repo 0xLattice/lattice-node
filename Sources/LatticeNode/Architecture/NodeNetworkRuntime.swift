@@ -4432,16 +4432,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
         _ search: StaleTipPeerSearch,
         generation: UInt64
     ) async {
-        let delay = Self.peerSearchPollSeconds(
-            configuration.peerSearchInterval
-        ) &* 1_000_000_000
-        while isRunning, runtimeGeneration == generation {
+        await Timers.repeating(
+            every: .seconds(Self.peerSearchPollSeconds(
+                configuration.peerSearchInterval
+            )),
+            while: { isRunning && runtimeGeneration == generation }
+        ) {
             await search.tick()
-            do {
-                try await Task.sleep(nanoseconds: delay)
-            } catch {
-                return
-            }
         }
     }
 
@@ -4569,16 +4566,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // Re-announce well within the TTL, and often enough to pick up a
         // newly-wired child within a minute (records are small).
         let interval = max(UInt64(30), min(ttl / 2, UInt64(60)))
-        while isRunning, runtimeGeneration == generation {
+        await Timers.repeating(
+            every: .seconds(interval),
+            while: { isRunning && runtimeGeneration == generation }
+        ) {
             await announceGenesisProviders(
                 expiresAt: UInt64(Date().timeIntervalSince1970) + ttl,
                 process: process
             )
-            do {
-                try await Task.sleep(nanoseconds: interval &* 1_000_000_000)
-            } catch {
-                return
-            }
         }
     }
 
@@ -6370,8 +6365,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
             lastTraced = outcome
             SyncTrace.log("adopt-genesis \(outcome)")
         }
-        while isRunning, runtimeGeneration == generation {
-            if await process.status().phase != .awaitingGenesis { return }
+        await Timers.poll(every: .seconds(1), onCancel: ()) {
+            guard isRunning, runtimeGeneration == generation else {
+                return .done(())
+            }
+            if await process.status().phase != .awaitingGenesis { return .done(()) }
             if let genesisCID = await resolveParentAnchoredGenesis() {
                 traceOnce("resolved \(genesisCID)")
                 let activated = (try? await remoteContentSource.withRoot(
@@ -6392,7 +6390,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     : "fetch-or-confirm failed \(genesisCID)")
                 guard isCurrentRuntime(
                     generation: generation, process: process
-                ) else { return }
+                ) else { return .done(()) }
                 if activated {
                     // The genesis just bootstrapped to active OUT OF BAND (not via
                     // candidate admission), so it never fired its one-shot connect
@@ -6405,16 +6403,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
                         generation: generation,
                         process: process
                     )
-                    return
+                    return .done(())
                 }
             } else {
                 traceOnce("parent record unresolved")
             }
-            do {
-                try await Task.sleep(nanoseconds: 1_000_000_000)
-            } catch {
-                return
-            }
+            return .again
         }
     }
 
