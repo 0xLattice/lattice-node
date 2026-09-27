@@ -722,7 +722,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// being recovered, counted per append: until it settles, the
         /// rooted package may still arrive, so a hold on one of them is not
         /// released.
-        /// Owner: Hierarchy.appendParentEvidence / Hierarchy.parentEvidenceSettled.
+        /// Owner: Hierarchy.appendParentEvidence / Hierarchy.parentEvidenceSettled /
+        ///     Lifecycle.clearRuntimeState.
         var parentEvidenceInFlight: [String: Int] = [:]
         /// Times the offer held behind a carried block, for tests.
         /// Owner: Hierarchy.offerCandidate.

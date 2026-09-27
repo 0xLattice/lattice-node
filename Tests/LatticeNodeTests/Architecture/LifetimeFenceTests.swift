@@ -147,6 +147,34 @@ final class LifetimeFenceTests: NetworkTrustTestCase {
         XCTAssertNil(releasedMeanwhile)
     }
 
+    // MARK: - Parent evidence in flight
+
+    /// The in-flight counts are per generation: a restart starts from zero,
+    /// and a settle from the ended generation counts nothing down, so the
+    /// new generation's count stays exact.
+    func testParentEvidenceInFlightIsCountedPerGeneration() async throws {
+        let target = try await overlayRuntime(keyByte: 0xe9, requestTimeout: .seconds(5))
+        let runtime = target.runtime
+        let child = testCID("in-flight-child")
+        try await runtime.start(process: target.process, chain: inertNetworkHandlers())
+        let stale = await runtime.runtimeGeneration
+        await runtime.debugCountParentEvidenceInFlight(child)
+        await runtime.stop()
+        let afterStop = await runtime.debugParentEvidenceInFlight(child)
+        XCTAssertNil(afterStop, "teardown zeroes the ended generation's counts")
+
+        try await runtime.start(process: target.process, chain: inertNetworkHandlers())
+        let current = await runtime.runtimeGeneration
+        await runtime.debugCountParentEvidenceInFlight(child)
+        await runtime.parentEvidenceSettled([child], generation: stale, process: target.process)
+        let afterStaleSettle = await runtime.debugParentEvidenceInFlight(child)
+        XCTAssertEqual(afterStaleSettle, 1, "a stale settle counts nothing down")
+        await runtime.parentEvidenceSettled([child], generation: current, process: target.process)
+        let afterSettle = await runtime.debugParentEvidenceInFlight(child)
+        XCTAssertNil(afterSettle)
+        await runtime.stop()
+    }
+
     /// A new context naming another unadmitted block lands while the read
     /// is suspended: the hold that stands now (on the new block) holds.
     func testANewCarriedBlockNamedDuringTheAcceptanceReadStillHolds() async throws {
@@ -236,6 +264,15 @@ extension NodeNetworkRuntime {
             }
             return false
         })
+    }
+
+    /// One append's count, as `appendParentEvidence` takes it.
+    fileprivate func debugCountParentEvidenceInFlight(_ childCID: String) {
+        hierarchyState.parentEvidenceInFlight[childCID, default: 0] += 1
+    }
+
+    fileprivate func debugParentEvidenceInFlight(_ childCID: String) -> Int? {
+        hierarchyState.parentEvidenceInFlight[childCID]
     }
 
     fileprivate func carriedHoldDecisions() async -> (

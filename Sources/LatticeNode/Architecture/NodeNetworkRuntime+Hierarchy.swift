@@ -649,12 +649,16 @@ extension NodeNetworkRuntime {
 
     /// The parent's evidence for these child blocks has been recovered (its
     /// rooted package queued) or given up on: a hold on one of them is
-    /// reviewed now.
-    private func parentEvidenceSettled(
+    /// reviewed now. The counts are per generation (teardown zeroes them),
+    /// so a settle from an ended generation counts nothing down.
+    func parentEvidenceSettled(
         _ childCIDs: [String],
         generation: UInt64,
         process: ChainProcess
     ) async {
+        guard isCurrentRuntime(generation: generation, process: process) else {
+            return
+        }
         for childCID in childCIDs {
             let remaining = (hierarchyState.parentEvidenceInFlight[childCID] ?? 1) - 1
             hierarchyState.parentEvidenceInFlight[childCID] = remaining > 0 ? remaining : nil

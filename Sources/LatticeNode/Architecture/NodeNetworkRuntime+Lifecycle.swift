@@ -272,6 +272,7 @@ extension NodeNetworkRuntime {
         hierarchyState.requestedCarriedRound = nil
         hierarchyState.carriedRoundEndedCID = nil
         hierarchyState.evidenceRoundStarting = false
+        hierarchyState.parentEvidenceInFlight.removeAll()
         hierarchyState.candidateOfferTask.cancel()
         hierarchyState.candidateOfferDirty = false
         hierarchyState.lastOfferedCandidateCID = nil
