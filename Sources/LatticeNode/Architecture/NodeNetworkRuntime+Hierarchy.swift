@@ -230,6 +230,11 @@ extension NodeNetworkRuntime {
                   isCurrentRuntime(generation: generation, process: process),
                   let context = hierarchyState.parentTipContext else { return }
             for (key, role) in hierarchyRoles {
+                // Each push suspends: the next child is pushed only while
+                // this run still owns the slot and its generation runs.
+                guard hierarchyState.parentTipPushTask.holds(token),
+                      isCurrentRuntime(generation: generation, process: process)
+                else { return }
                 guard case .child(let childPath) = role,
                       isChildEvidenceReady(key),
                       let peer = hierarchyState.hierarchyRecords[key]?.session,
