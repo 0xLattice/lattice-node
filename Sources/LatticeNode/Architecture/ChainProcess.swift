@@ -315,7 +315,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         //
         // Staged BEFORE the demotion loop below, not merely read before it.
         // Demotion commits per block while this writes its own transactions, so
-        // a crash in between would leave a legacy row demoted to `validated=0`
+        // a crash in between would leave a legacy row demoted to `.weighed`
         // with no durable fact — `executedBlockCIDs()` would never return it
         // again and no later boot could carry it. Ordering the writes closes
         // that window; the migration needs nothing the demotion produces.

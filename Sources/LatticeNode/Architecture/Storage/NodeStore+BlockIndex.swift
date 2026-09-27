@@ -58,8 +58,15 @@ struct AcceptedBlockRow: NodeStoreRecord {
         }
     }
     var admissionSequence: Int64 { get throws { try row.positiveInt("admission_seq") } }
-    /// The raw execution tier (`0` weighed, `1` eager, `2` walk-validated).
-    var validatedTier: Int64 { get throws { try row.int("validated") } }
+    /// The execution tier; an integer outside `BlockStatus` is malformed.
+    var status: BlockStatus {
+        get throws {
+            guard let status = BlockStatus(rawValue: try row.int("validated")) else {
+                throw NodeStoreError.malformedRow(table: Self.table, column: "validated")
+            }
+            return status
+        }
+    }
     /// A derived index repaired from the parent links at boot, so any stored
     /// integer is read (only 1 means leaf) rather than refused.
     var leaf: Bool { get throws { try row.int("leaf") == 1 } }
@@ -237,7 +244,7 @@ extension NodeStore {
     func persistAcceptedBlockRows(
         _ blocks: [AcceptedBlockRecord],
         admissionSequence: Int64,
-        validated: Bool
+        status: BlockStatus
     ) throws {
         for block in blocks {
             let row = try database.row(
@@ -263,7 +270,7 @@ extension NodeStore {
                     .text(block.blockCID),
                     block.parentCID.map(NodeSQLiteValue.text) ?? .null,
                     .int(admissionSequence),
-                    .int(validated ? 1 : 0),
+                    status.sqlValue,
                 ]
             )
             if let parentCID = block.parentCID {
@@ -286,11 +293,11 @@ extension NodeStore {
     /// validated (body + state under the block's owner pin). A downgrade that
     /// only knows `1` reads `2` as "not validated" — the safe direction.
     func blockValidated(_ blockCID: String) throws -> Bool {
-        (try database.row(
+        try database.row(
             AcceptedBlockRow.self,
             "SELECT validated FROM accepted_blocks WHERE block_cid = ?1 LIMIT 1",
             params: [.text(blockCID)]
-        )?.validatedTier ?? 0) >= 1
+        )?.status.isExecuted ?? false
     }
 
     /// Flip an already-weighed accepted block's durable marker to the walk-
@@ -310,8 +317,8 @@ extension NodeStore {
     func promoteValidated(blockCID: String) throws {
         try database.transaction {
             _ = try database.execute(
-                "UPDATE accepted_blocks SET validated = 2 WHERE block_cid = ?1",
-                params: [.text(blockCID)]
+                "UPDATE accepted_blocks SET validated = ?2 WHERE block_cid = ?1",
+                params: [.text(blockCID), BlockStatus.walkValidated.sqlValue]
             )
         }
     }
@@ -321,7 +328,8 @@ extension NodeStore {
     func walkValidatedBlockCIDs() throws -> Set<String> {
         Set(try database.rows(
             AcceptedBlockRow.self,
-            "SELECT block_cid FROM accepted_blocks WHERE validated = 2"
+            "SELECT block_cid FROM accepted_blocks WHERE validated = ?1",
+            params: [BlockStatus.walkValidated.sqlValue]
         ).map { try $0.blockCID })
     }
 
@@ -331,16 +339,18 @@ extension NodeStore {
     /// fact existed carry no fact, and without them a chain would come back
     /// having forgotten every execution and would attest nothing.
     ///
-    /// `>= 1` and not `== 1` so the walk-validated tier (`2`) counts too. The
-    /// column's DEFAULT of `1` is not what makes legacy rows qualify — every
-    /// row is inserted with an explicit `validated ? 1 : 0`, and the schema
+    /// "Not weighed" and not "eager" so the walk-validated tier counts too.
+    /// The column's DEFAULT (eager) is not what makes legacy rows qualify —
+    /// every row is inserted with an explicit `BlockStatus`, and the schema
     /// epoch wipes any store old enough to predate the column, so the default
-    /// never fires. What makes them qualify is that they were written `1` or
-    /// `2` by an image that really did execute them.
+    /// never fires. What makes them qualify is that they were written eager or
+    /// walk-validated by an image that really did execute them. A tier outside
+    /// `BlockStatus` never reaches here: the boot audit refuses it.
     func executedBlockCIDs() throws -> Set<String> {
         Set(try database.rows(
             AcceptedBlockRow.self,
-            "SELECT block_cid FROM accepted_blocks WHERE validated >= 1"
+            "SELECT block_cid FROM accepted_blocks WHERE validated != ?1",
+            params: [BlockStatus.weighed.sqlValue]
         ).map { try $0.blockCID })
     }
 
@@ -357,8 +367,8 @@ extension NodeStore {
     func demoteValidated(blockCID: String) throws {
         try database.transaction {
             _ = try database.execute(
-                "UPDATE accepted_blocks SET validated = 0 WHERE block_cid = ?1",
-                params: [.text(blockCID)]
+                "UPDATE accepted_blocks SET validated = ?2 WHERE block_cid = ?1",
+                params: [.text(blockCID), BlockStatus.weighed.sqlValue]
             )
         }
     }
@@ -387,9 +397,10 @@ extension NodeStore {
         var leafFlags: [String: Bool] = [:]
         for row in try database.rows(
             AcceptedBlockRow.self,
-            "SELECT block_cid, parent_cid, admission_seq, leaf FROM accepted_blocks"
+            "SELECT block_cid, parent_cid, admission_seq, validated, leaf FROM accepted_blocks"
         ) {
             let block = try PersistedAcceptedBlock(row)
+            _ = try row.status
             actualAcceptedBlocks[block.blockCID] = block
             leafFlags[block.blockCID] = try row.leaf
         }

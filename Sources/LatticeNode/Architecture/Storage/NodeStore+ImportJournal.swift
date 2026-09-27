@@ -181,7 +181,7 @@ extension NodeStore {
                     try persistAcceptedBlockRows(
                         acceptedBlocks,
                         admissionSequence: admissionSequence,
-                        validated: validated
+                        status: validated ? .eager : .weighed
                     )
                 }
                 if let preparedHierarchyArtifacts {
