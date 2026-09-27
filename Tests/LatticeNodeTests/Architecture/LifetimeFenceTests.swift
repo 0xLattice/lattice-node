@@ -146,6 +146,21 @@ final class LifetimeFenceTests: NetworkTrustTestCase {
         let releasedMeanwhile = decisions.releasedDuringRead
         XCTAssertNil(releasedMeanwhile)
     }
+
+    /// A new context naming another unadmitted block lands while the read
+    /// is suspended: the hold that stands now (on the new block) holds.
+    func testANewCarriedBlockNamedDuringTheAcceptanceReadStillHolds() async throws {
+        let target = try await overlayRuntime(keyByte: 0xe7, requestTimeout: .seconds(5))
+        let tip = try await canonicalNetworkBlock()
+        let parent = authenticatedPeer(signingKey(0xe8), role: .endpoint)
+        let first = testCID("carried-first")
+        let second = testCID("carried-second")
+        await target.runtime.nameCarriedBlock(first, tip: tip, parent: parent)
+        let held = await target.runtime.heldCarriedBlockRenamedDuringRead(
+            to: second, tip: tip, parent: parent
+        )
+        XCTAssertEqual(held, second)
+    }
 }
 
 extension NodeNetworkRuntime {
@@ -207,6 +222,22 @@ extension NodeNetworkRuntime {
     /// The hold decision for the named block: not accepted, accepted, and
     /// released by an admission's decision while the acceptance read is
     /// suspended (last, since it releases).
+    /// The first acceptance read installs a context naming `renamed`.
+    fileprivate func heldCarriedBlockRenamedDuringRead(
+        to renamed: String,
+        tip: Block,
+        parent: AuthenticatedPeer
+    ) async -> String? {
+        var swapped = false
+        return await heldCarriedBlock(accepted: { _ in
+            if !swapped {
+                swapped = true
+                self.nameCarriedBlock(renamed, tip: tip, parent: parent)
+            }
+            return false
+        })
+    }
+
     fileprivate func carriedHoldDecisions() async -> (
         notAccepted: String?, accepted: String?, releasedDuringRead: String?
     ) {

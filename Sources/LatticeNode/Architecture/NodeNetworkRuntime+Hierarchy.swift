@@ -504,14 +504,18 @@ extension NodeNetworkRuntime {
 
     /// The carried block the offer waits on, if any, decided on the state
     /// that stands after the acceptance read: a release (an admission that
-    /// decided against the block) or a new context that lands while the
-    /// read is suspended is seen here, not lost until the next admission.
+    /// decided against the block) that lands while the read is suspended is
+    /// seen here, not lost until the next admission; a new context naming
+    /// another block is read again, so a hold that stands is never dropped.
     func heldCarriedBlock(
         accepted: (String) async -> Bool
     ) async -> String? {
-        guard let carried = carriedHoldBlockCID(),
-              !(await accepted(carried)) else { return nil }
-        return carriedHoldBlockCID() == carried ? carried : nil
+        while let carried = carriedHoldBlockCID() {
+            let isAccepted = await accepted(carried)
+            let now = carriedHoldBlockCID()
+            if now == carried { return isAccepted ? nil : carried }
+        }
+        return nil
     }
 
     /// The carrier a child builds against without a parent template: a block
