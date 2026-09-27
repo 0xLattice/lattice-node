@@ -54,6 +54,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
     /// What `ChainProcess.open` did with the damaged store.
     private enum Observed: Equatable, CustomStringConvertible {
         case corrupt
+        case malformedRow(table: String, column: String)
         case wipeRequired
         case missingMaterializedVolume
         case opened
@@ -62,6 +63,8 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         var description: String {
             switch self {
             case .corrupt: "NodeStoreError.corrupt"
+            case .malformedRow(let table, let column):
+                "NodeStoreError.malformedRow(\(table).\(column))"
             case .wipeRequired: "NodeStoreError.wipeRequired"
             case .missingMaterializedVolume: "ChainProcessError.missingMaterializedVolume"
             case .opened: "opened (damage tolerated)"
@@ -181,6 +184,10 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         ),
     ]
 
+    /// Refused with `NodeStoreError.malformedRow(table:column:)` naming the
+    /// damaged table and column.
+    private static let refusedAsMalformedRow: [Damage] = []
+
     /// Refused with `NodeStoreError.wipeRequired`.
     private static let refusedAsWipeRequired: [Damage] = [
         Damage(
@@ -231,8 +238,13 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
 
     // MARK: - Tests
 
-    func testBootRefusesDamagedRowsWithNodeStoreErrorCorrupt() async throws {
+    /// `refusedAsCorrupt` observes the untyped `.corrupt`; `refusedAsMalformedRow`
+    /// observes `.malformedRow` naming exactly the damaged table and column.
+    func testBootRefusesDamagedRowsWithTypedErrors() async throws {
         try await assertBoot(Self.refusedAsCorrupt, observes: .corrupt)
+        try await assertBoot(Self.refusedAsMalformedRow) { damage in
+            .malformedRow(table: damage.table, column: damage.column)
+        }
     }
 
     func testBootRefusesDamagedMetadataWithWipeRequired() async throws {
@@ -281,6 +293,15 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) async throws {
+        try await assertBoot(damages, file: file, line: line) { _ in expected }
+    }
+
+    private func assertBoot(
+        _ damages: [Damage],
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        observes expected: (Damage) -> Observed
+    ) async throws {
         let fixture = try await buildFixture()
         var results: [(Damage, Observed, survived: Bool?)] = []
         for damage in damages {
@@ -296,6 +317,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         // Every failure message names the (table, column) it belongs to;
         // `XCTContext.runActivity` is unavailable on swift-corelibs-xctest.
         for (damage, observed, survived) in results {
+            let expected = expected(damage)
             XCTAssertEqual(
                 observed, expected,
                 "\(damage.table).\(damage.column) (\(damage.description)): "
@@ -322,6 +344,8 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             return .opened
         } catch NodeStoreError.corrupt {
             return .corrupt
+        } catch NodeStoreError.malformedRow(let table, let column) {
+            return .malformedRow(table: table, column: column)
         } catch NodeStoreError.wipeRequired {
             return .wipeRequired
         } catch ChainProcessError.missingMaterializedVolume {
