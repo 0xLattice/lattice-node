@@ -75,12 +75,12 @@ struct PreparedAdmissionHierarchyArtifacts {
     let parentGenesisLinks: [(link: ParentGenesisLink, payload: Data)]
 }
 
-struct PersistedParentFactSource: Codable {
+private struct PersistedParentFactSource: Codable {
     let carrierLink: ParentCarrierLink
     let parentGenesisLinks: [ParentGenesisLink]
 }
 
-struct IssuedParentFactKey: Hashable {
+private struct IssuedParentFactKey: Hashable {
     let kind: String
     let keyA: String
     let keyB: String
@@ -232,7 +232,7 @@ extension NodeStore {
     static let proofEdgeJoinSQL =
         "FROM issued_child_proofs AS p INNER JOIN issued_child_edges AS e ON e.edge_cid = p.edge_cid"
 
-    static func parentGenesisFactKey(
+    private static func parentGenesisFactKey(
         _ link: ParentGenesisLink
     ) -> String {
         parentGenesisFactKey(
@@ -241,7 +241,7 @@ extension NodeStore {
         )
     }
 
-    static func parentGenesisFactKey(
+    private static func parentGenesisFactKey(
         childGenesisCID: String,
         parentStateCID: String
     ) -> String {
@@ -1514,7 +1514,7 @@ extension NodeStore {
         )?.payload
     }
 
-    static func addExpectedParentFact(
+    private static func addExpectedParentFact(
         key: IssuedParentFactKey,
         payload: Data,
         to facts: inout [IssuedParentFactKey: Data]

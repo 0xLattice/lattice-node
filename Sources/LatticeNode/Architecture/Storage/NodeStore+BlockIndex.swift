@@ -15,7 +15,7 @@ struct AcceptedBlockRecord: Hashable {
     let parentCID: String?
 }
 
-struct PersistedAcceptedBlock: Hashable {
+private struct PersistedAcceptedBlock: Hashable {
     let blockCID: String
     let parentCID: String?
     let admissionSequence: Int64

@@ -248,7 +248,7 @@ extension NodeStore {
         }
     }
 
-    static func normalizedFacts(
+    private static func normalizedFacts(
         in batch: ChainAdmissionBatch
     ) throws -> [Data: Data] {
         var normalized: [Data: Data] = [:]

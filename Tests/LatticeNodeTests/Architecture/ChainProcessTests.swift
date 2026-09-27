@@ -483,11 +483,11 @@ final class ChainProcessTests: XCTestCase {
         process = nil
 
         process = try await ChainProcess.open(configuration: config)
-        let persistedCarrier = try await process!.issuedParentCarrierLink(
+        let persistedCarrier = try await process!.store.issuedParentCarrierLink(
             carrierCID: carrierHeader.rawCID,
             rootCID: carrierLink.rootCID
         )
-        let persistedGenesis = try await process!.issuedParentGenesisLink(
+        let persistedGenesis = try await process!.store.issuedParentGenesisLink(
             directory: "Payments",
             childGenesisCID: childCID,
             // A self-contained genesis's recorded link binds to the empty parent
@@ -535,7 +535,7 @@ final class ChainProcessTests: XCTestCase {
         // EAGER baseline: admission issues and persists the parent-genesis link.
         let eagerOutcome = try await producer.admit(carrierHeader)
         XCTAssertTrue(eagerOutcome.decision.isAccepted)
-        let eagerGenesisLink = try await producer.issuedParentGenesisLink(
+        let eagerGenesisLink = try await producer.store.issuedParentGenesisLink(
             directory: "Payments",
             childGenesisCID: childCID,
             parentStateCID: LatticeState.emptyHeader.rawCID
@@ -554,7 +554,7 @@ final class ChainProcessTests: XCTestCase {
             mode: .weighed
         )
         XCTAssertTrue(weighed.decision.isAccepted)
-        let weighedGenesisLink = try await consumer.issuedParentGenesisLink(
+        let weighedGenesisLink = try await consumer.store.issuedParentGenesisLink(
             directory: "Payments",
             childGenesisCID: childCID,
             parentStateCID: LatticeState.emptyHeader.rawCID
@@ -570,7 +570,7 @@ final class ChainProcessTests: XCTestCase {
             mode: .validate
         )
         XCTAssertTrue(validated.decision.isAccepted)
-        let validatedGenesisLink = try await consumer.issuedParentGenesisLink(
+        let validatedGenesisLink = try await consumer.store.issuedParentGenesisLink(
             directory: "Payments",
             childGenesisCID: childCID,
             parentStateCID: LatticeState.emptyHeader.rawCID
@@ -580,7 +580,7 @@ final class ChainProcessTests: XCTestCase {
             "validate-on-candidacy must persist the same genesis link as eager"
         )
         let carrierLink = try XCTUnwrap(validated.parentCarrierLink)
-        let persistedCarrier = try await consumer.issuedParentCarrierLink(
+        let persistedCarrier = try await consumer.store.issuedParentCarrierLink(
             carrierCID: carrierHeader.rawCID,
             rootCID: carrierLink.rootCID
         )
@@ -655,7 +655,7 @@ final class ChainProcessTests: XCTestCase {
             )
         )
         let relay = try XCTUnwrap(first.parentCarrierLink)
-        let earlyGenesis = try await process!.issuedParentGenesisLink(
+        let earlyGenesis = try await process!.store.issuedParentGenesisLink(
             directory: "Payments",
             childGenesisCID: childCID,
             parentStateCID: LatticeState.emptyHeader.rawCID
@@ -664,7 +664,7 @@ final class ChainProcessTests: XCTestCase {
         process = nil
 
         process = try await ChainProcess.open(configuration: config)
-        let recoveredRelay = try await process!.issuedParentCarrierLink(
+        let recoveredRelay = try await process!.store.issuedParentCarrierLink(
             carrierCID: orphanHeader.rawCID,
             rootCID: relay.rootCID
         )
@@ -672,7 +672,7 @@ final class ChainProcessTests: XCTestCase {
             recoveredRelay,
             relay
         )
-        let recoveredGenesis = try await process!.issuedParentGenesisLink(
+        let recoveredGenesis = try await process!.store.issuedParentGenesisLink(
             directory: "Payments",
             childGenesisCID: childCID,
             parentStateCID: LatticeState.emptyHeader.rawCID
@@ -687,7 +687,7 @@ final class ChainProcessTests: XCTestCase {
         )
         XCTAssertTrue(promoted.decision.isAccepted)
         XCTAssertNil(promoted.sameChainPredecessor)
-        let promotedGenesis = try await process!.issuedParentGenesisLink(
+        let promotedGenesis = try await process!.store.issuedParentGenesisLink(
             directory: "Payments",
             childGenesisCID: childCID,
             parentStateCID: LatticeState.emptyHeader.rawCID
@@ -703,13 +703,13 @@ final class ChainProcessTests: XCTestCase {
             )
         )
 
-        let page = try await process.acceptedLeafPage(
+        let page = try await process.store.acceptedLeafPage(
             afterCID: nil,
             snapshotSequence: nil,
             limit: 1
         )
         XCTAssertEqual(page.blockCIDs, [NexusGenesis.expectedBlockHash])
-        let continuation = try await process.acceptedLeafPage(
+        let continuation = try await process.store.acceptedLeafPage(
             afterCID: NexusGenesis.expectedBlockHash,
             snapshotSequence: page.snapshotSequence,
             limit: 1
@@ -830,7 +830,7 @@ final class ChainProcessTests: XCTestCase {
         guard case .temporarilyInvalid = deferred.decision else {
             return XCTFail("a block from the future is deferred, got \(deferred.decision)")
         }
-        let inboxAfterDeferral = try await process!.parentEvidenceInbox()
+        let inboxAfterDeferral = try await process!.store.parentEvidenceInbox()
         XCTAssertEqual(inboxAfterDeferral.map(\.attachment.rawCID), [attachment.rawCID], "still to be admitted")
         let relayAfterDeferral = try await process!.recoveredAuthenticatedChildPackage(
             for: carriedHeader.rawCID, rootCID: proof.rootCID
@@ -840,7 +840,7 @@ final class ChainProcessTests: XCTestCase {
         // The restart that used to lose it.
         process = nil
         process = try await ChainProcess.open(configuration: fixture.configuration)
-        let inboxAfterRestart = try await process!.parentEvidenceInbox()
+        let inboxAfterRestart = try await process!.store.parentEvidenceInbox()
         XCTAssertEqual(inboxAfterRestart.map(\.attachment.rawCID), [attachment.rawCID], "the inbox is durable")
         let replayed = try XCTUnwrap(inboxAfterRestart.first)
         XCTAssertEqual(replayed.package.package.proof.rootCID, proof.rootCID)
@@ -857,7 +857,7 @@ final class ChainProcessTests: XCTestCase {
         }
         let accepted = try XCTUnwrap(admitted)
         XCTAssertTrue(accepted.decision.isAccepted, "\(accepted.decision)")
-        let inboxAfterAcceptance = try await process!.parentEvidenceInbox()
+        let inboxAfterAcceptance = try await process!.store.parentEvidenceInbox()
         XCTAssertTrue(inboxAfterAcceptance.isEmpty, "decided: consumed")
         let relayAfterAcceptance = try await process!.recoveredAuthenticatedChildPackage(
             for: carriedHeader.rawCID, rootCID: proof.rootCID
@@ -868,7 +868,7 @@ final class ChainProcessTests: XCTestCase {
         // child-proof recovery composes from that evidence and reads the link
         // beside it (a link it does not find is skipped, never fatal), and
         // deeper chains are owed the relay regardless of execution.
-        let relayLink = try await process!.issuedParentCarrierLink(
+        let relayLink = try await process!.store.issuedParentCarrierLink(
             carrierCID: carriedHeader.rawCID, rootCID: proof.rootCID
         )
         XCTAssertNotNil(relayLink, "a weighed acceptance issues its relay link")
@@ -876,7 +876,7 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertEqual(tiers.validated, 0, "still weighed, not executed")
         process = nil
         process = try await ChainProcess.open(configuration: fixture.configuration)
-        let relayLinkAfterReopen = try await process!.issuedParentCarrierLink(
+        let relayLinkAfterReopen = try await process!.store.issuedParentCarrierLink(
             carrierCID: carriedHeader.rawCID, rootCID: proof.rootCID
         )
         XCTAssertNotNil(relayLinkAfterReopen)
@@ -927,7 +927,7 @@ final class ChainProcessTests: XCTestCase {
         guard case .carrier = refused.decision else {
             return XCTFail("a grind that misses this chain's target is a carrier, got \(refused.decision)")
         }
-        let inbox = try await process!.parentEvidenceInbox()
+        let inbox = try await process!.store.parentEvidenceInbox()
         XCTAssertTrue(inbox.isEmpty, "decided: consumed")
         let relay = try await process!.recoveredAuthenticatedChildPackage(
             for: carriedHeader.rawCID, rootCID: proof.rootCID
@@ -935,7 +935,7 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertNotNil(relay, "decided: relayed for deeper chains")
         process = nil
         process = try await ChainProcess.open(configuration: fixture.configuration)
-        let inboxAfterRestart = try await process!.parentEvidenceInbox()
+        let inboxAfterRestart = try await process!.store.parentEvidenceInbox()
         XCTAssertTrue(inboxAfterRestart.isEmpty, "not re-admitted on restart")
     }
 
@@ -983,7 +983,7 @@ final class ChainProcessTests: XCTestCase {
         )
         XCTAssertEqual(refused.decision, .invalid)
         XCTAssertNil(refused.parentCarrierLink, "refused before a carrier link exists")
-        let inbox = try await process!.parentEvidenceInbox()
+        let inbox = try await process!.store.parentEvidenceInbox()
         XCTAssertTrue(inbox.isEmpty, "decided: consumed, with nothing to relay")
         let relay = try await process!.recoveredAuthenticatedChildPackage(
             for: rivalHeader.rawCID, rootCID: proof.rootCID
@@ -991,7 +991,7 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertNil(relay)
         process = nil
         process = try await ChainProcess.open(configuration: fixture.configuration)
-        let inboxAfterRestart = try await process!.parentEvidenceInbox()
+        let inboxAfterRestart = try await process!.store.parentEvidenceInbox()
         XCTAssertTrue(inboxAfterRestart.isEmpty, "not re-admitted on restart")
     }
 
@@ -1091,7 +1091,7 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertGreaterThan(firstWeight, secondWeight, "B1 weighs its own work plus B2's, which committed to it")
         let tips = await process.metricsTipHeights()
         XCTAssertEqual(tips.weighed, 2, "fork choice sees both, in order, whatever order they came")
-        let inbox = try await process.parentEvidenceInbox()
+        let inbox = try await process.store.parentEvidenceInbox()
         XCTAssertTrue(inbox.isEmpty, "both decided: consumed")
     }
 
@@ -1885,7 +1885,7 @@ final class ChainProcessTests: XCTestCase {
 
         let completed = try await retry.value
         let pending = try await liveProcess.pendingChildProofCarrierCIDs()
-        let issued = try await liveProcess.issuedChildEvidenceSummaries(
+        let issued = try await liveProcess.store.issuedChildEvidenceSummaries(
             directory: "Prepared",
             afterOrdinal: 0,
             throughOrdinal: UInt64(Int64.max),

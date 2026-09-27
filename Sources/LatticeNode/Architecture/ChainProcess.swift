@@ -136,7 +136,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
 
     public nonisolated let configuration: NodeConfiguration
 
-    private let store: NodeStore
+    let store: NodeStore
     private let broker: DiskBroker
     private let localFetcher: CoalescingFetcher
     private let retentionScope: String
@@ -1232,18 +1232,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         )
     }
 
-    func acceptedLeafPage(
-        afterCID: String?,
-        snapshotSequence: Int64?,
-        limit: Int
-    ) async throws -> AcceptedLeafPage {
-        return try await store.acceptedLeafPage(
-            afterCID: afterCID,
-            snapshotSequence: snapshotSequence,
-            limit: limit
-        )
-    }
-
     /// One page of this node's MAIN chain going forward from `afterCID` (a block
     /// the caller already holds): `[child(afterCID), …]`, genesis-ward first,
     /// with `hasMore` when the canonical chain extends past the page. Serves
@@ -1398,18 +1386,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             }
         }
         return anchored
-    }
-
-    func portableEvidenceVolumeCID(
-        scope: IssuedChildProofScope,
-        edgeCID: String,
-        rootCID: String
-    ) async throws -> String? {
-        try await store.portableEvidenceVolumeCID(
-            scope: scope,
-            edgeCID: edgeCID,
-            rootCID: rootCID
-        )
     }
 
     /// Same-chain content serving reads only this process's durable local tiers.
@@ -1824,16 +1800,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         )
     }
 
-    public func issuedParentCarrierLink(
-        carrierCID: String,
-        rootCID: String
-    ) async throws -> ParentCarrierLink? {
-        try await store.issuedParentCarrierLink(
-            carrierCID: carrierCID,
-            rootCID: rootCID
-        )
-    }
-
     /// Did this chain PRODUCE this state? — the one continuity question the
     /// protocol asks, and the only one this node answers for a peer.
     ///
@@ -1890,18 +1856,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             directory: configuration.address.directory,
             afterRootCID: afterRootCID,
             limit: limit
-        )
-    }
-
-    public func issuedParentGenesisLink(
-        directory: String,
-        childGenesisCID: String,
-        parentStateCID: String
-    ) async throws -> ParentGenesisLink? {
-        try await store.issuedParentGenesisLink(
-            directory: directory,
-            childGenesisCID: childGenesisCID,
-            parentStateCID: parentStateCID
         )
     }
 
@@ -2033,11 +1987,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         }
     }
 
-    /// Ungated: see `NodeStore.pendingHandoffChildCIDs`.
-    func pendingHandoffChildCIDs() async throws -> [String] {
-        try await store.pendingHandoffChildCIDs()
-    }
-
     func pendingChildProofCarrierCIDs() async throws -> [String] {
         await acquireOperation()
         defer { releaseOperation() }
@@ -2100,102 +2049,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             ))
         }
         return durable
-    }
-
-    func issuedChildEvidence(
-        childCID: String,
-        directory: String,
-        rootCID: String? = nil
-    ) async throws -> IssuedChildEvidence? {
-        try await store.issuedChildEvidence(
-            childCID: childCID,
-            directory: directory,
-            rootCID: rootCID
-        )
-    }
-
-    func childRootAttachment(
-        scope: IssuedChildProofScope,
-        edgeCID: String,
-        rootCID: String
-    ) async throws -> IssuedChildEvidence? {
-        try await store.issuedChildEvidence(
-            scope: scope,
-            edgeCID: edgeCID,
-            rootCID: rootCID
-        )
-    }
-
-    func childRootAttachmentSummaries(
-        scope: IssuedChildProofScope,
-        directory: String,
-        after: ChildRootAttachmentSummary?,
-        limit: Int
-    ) async throws -> [ChildRootAttachmentSummary] {
-        try await store.childRootAttachmentSummaries(
-            scope: scope,
-            directory: directory,
-            after: after,
-            limit: limit
-        )
-    }
-
-    func issuedChildProofRoots(
-        childCID: String,
-        directory: String,
-        afterRootCID: String?,
-        limit: Int
-    ) async throws -> [String] {
-        try await store.issuedChildProofRoots(
-            childCID: childCID,
-            directory: directory,
-            afterRootCID: afterRootCID,
-            limit: limit
-        )
-    }
-
-    func issuedChildEvidenceSummaries(
-        directory: String,
-        afterOrdinal: UInt64,
-        throughOrdinal: UInt64,
-        limit: Int
-    ) async throws -> [IssuedChildEvidenceSummary] {
-        try await store.issuedChildEvidenceSummaries(
-            directory: directory,
-            afterOrdinal: afterOrdinal,
-            throughOrdinal: throughOrdinal,
-            limit: limit
-        )
-    }
-
-    func issuedChildEvidenceScanHead(directory: String) async throws
-        -> (sourceID: String, throughOrdinal: UInt64)
-    {
-        try await store.issuedChildEvidenceScanHead(directory: directory)
-    }
-
-    func issuedChildEvidenceSummary(
-        childCID: String,
-        directory: String,
-        rootCID: String
-    ) async throws -> (sourceID: String, summary: IssuedChildEvidenceSummary)? {
-        try await store.issuedChildEvidenceSummary(
-            childCID: childCID,
-            directory: directory,
-            rootCID: rootCID
-        )
-    }
-
-    func parentEvidenceScanCursor() async throws -> ParentEvidenceScanCursor {
-        try await store.parentEvidenceScanCursor()
-    }
-
-    func parentEvidenceInbox() async throws -> [ParentEvidenceInboxItem] {
-        try await store.parentEvidenceInbox()
-    }
-
-    func parentEvidenceInboxHasCapacity() async throws -> Bool {
-        try await store.parentEvidenceInboxHasCapacity()
     }
 
     /// Returns whether this carrier's evidence was admitted before: then the

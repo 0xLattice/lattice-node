@@ -6,6 +6,7 @@ import VolumeBroker
 import cashew
 
 extension NodeStore {
+    /// Owner: ImportJournal.stage / EvidenceIndex.persistIssuedHierarchyArtifacts / EvidenceIndex.persistIssuedChildProof / EvidenceIndex.storeParentEvidenceInbox / CandidateStore.persistPreparedChildProofs — recovery-broker retention write, outside any database transaction.
     func mergeRecoveryRetention(
         scope: String,
         roots: [String]
@@ -17,6 +18,7 @@ extension NodeStore {
         )
     }
 
+    /// Owner: CandidateStore.persistPreparedChildProofs / CandidateStore.removePreparedChildProof — recovery-broker retention write, outside any database transaction.
     func reconcilePreparedRecoveryRetention() async throws {
         try await recoveryVolumeBroker.advanceRetainedRoots(
             scope: preparedRecoveryRetentionScope,
@@ -24,6 +26,7 @@ extension NodeStore {
         )
     }
 
+    /// Owner: ImportJournal.stage / EvidenceIndex.persistIssuedHierarchyArtifacts — recovery-broker volume write, outside any database transaction.
     func storeRecoveryEvidence(
         _ evidence: [PreparedAdmissionCarrierEvidence]
     ) async throws -> [String] {
@@ -123,6 +126,7 @@ extension NodeStore {
         try database.rows(from: table, sql).map { try $0.cid("cid") }
     }
 
+    /// Owner: EvidenceIndex.persistIssuedChildProof / CandidateStore.persistPreparedChildProofs — volume write to the caller's storer, outside any database transaction.
     func retainChildGenesisVolumes(
         _ roots: [String],
         storer: any VolumeStorer
@@ -137,6 +141,7 @@ extension NodeStore {
         }
     }
 
+    /// Owner: ImportJournal.stage / EvidenceIndex.persistIssuedHierarchyArtifacts / EvidenceIndex.storeParentEvidenceInbox / EvidenceIndex.consumeParentEvidence — recovery-broker retention write, outside any database transaction.
     func reconcileParentEvidenceInboxRetention() async {
         try? await recoveryVolumeBroker.advanceRetainedRoots(
             scope: parentEvidenceInboxRetentionScope,
@@ -144,6 +149,7 @@ extension NodeStore {
         )
     }
 
+    /// Owner: CandidateStore.persistContextualCandidateRoots / CandidateStore.removeContextualCandidateIfAdmitted / CandidateStore.evictExcessHandoffCandidates — recovery-broker retention write, outside any database transaction.
     func releaseContextualCandidatePins(_ roots: [String]) async {
         try? await recoveryVolumeBroker.unpinBatch(
             items: roots.map {

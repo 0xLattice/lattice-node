@@ -2456,7 +2456,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             XCTAssertEqual(producerTip, xTipCID, "X must still win on the producer")
             // The producer's frontier page carries both new leaves (most
             // recently admitted first), which is all the joiner needs.
-            let producerFrontier = try await producer.process.acceptedLeafPage(
+            let producerFrontier = try await producer.process.store.acceptedLeafPage(
                 afterCID: nil,
                 snapshotSequence: nil,
                 limit: AcceptedLeavesResponseMessage.maximumLeaves
