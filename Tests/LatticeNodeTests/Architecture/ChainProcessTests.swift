@@ -2033,13 +2033,14 @@ final class ChainProcessTests: XCTestCase {
             return XCTFail("expected A to canonicalize on genesis")
         }
 
-        // Equal work ties break by the smaller CID: pick a nonce whose block
-        // sorts after A, so B is the side block whatever the encoding.
+        // Equal work ties break by Lattice's CID comparator: pick a nonce
+        // whose block the comparator does not prefer over A, so B is the
+        // side block under the consensus rule itself, not textual order.
         var bNonce: UInt64 = 2
         var b = try await mineChild(
             of: genesis, timestamp: 3_600_001, nonce: bNonce, on: process!
         )
-        while try BlockHeader(node: b).rawCID < aCID {
+        while forkChoicePrefersBlock(try BlockHeader(node: b).rawCID, over: aCID) {
             bNonce += 1
             b = try await mineChild(
                 of: genesis, timestamp: 3_600_001, nonce: bNonce, on: process!
