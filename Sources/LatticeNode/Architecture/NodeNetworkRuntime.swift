@@ -404,11 +404,16 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// unverified — a browser verifies the served genesis against the
         /// parent's anchor.
         var declaredReadURL: String?
+        var evidence = ChildEvidenceState()
 
         var isEmpty: Bool {
             helloDeadline == nil && session == nil && role == nil
-                && declaredReadURL == nil
+                && declaredReadURL == nil && evidence.isEmpty
         }
+    }
+
+    private func isChildEvidenceReady(_ key: PeerKey) -> Bool {
+        hierarchyRecords[key]?.evidence.ready == true
     }
 
     /// Whether any wired child declared a public read URL.
@@ -444,9 +449,82 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let continuation: CheckedContinuation<Bool, Never>
     }
 
-    private struct ChildEvidenceSession: Hashable {
-        let peerKey: PeerKey
-        let sessionID: Data
+    /// A child peer's evidence readiness. `ready` and the waiters belong
+    /// to the peer key; the three publication fences belong to one session,
+    /// the one `sessionID` stamps.
+    ///
+    /// A final index page permits reservation cleanup only after every live
+    /// publication that began before it has been ordered into the same Ivy
+    /// session. The fences are session-scoped so reconnect cannot inherit
+    /// one: a fence is read only under its own session's stamp, and the
+    /// stamp clears with the last fence.
+    private struct ChildEvidenceState {
+        var ready = false
+        var waiters: [ChildEvidenceReadyWaiter] = []
+        private(set) var sessionID: Data?
+        private var indexComplete = false
+        private var publicationFailed = false
+        private var publicationsInFlight = 0
+
+        var isEmpty: Bool {
+            !ready && waiters.isEmpty && sessionID == nil
+        }
+
+        func publicationsInFlight(for sessionID: Data) -> Int? {
+            self.sessionID == sessionID && publicationsInFlight > 0
+                ? publicationsInFlight
+                : nil
+        }
+
+        func indexComplete(for sessionID: Data) -> Bool {
+            self.sessionID == sessionID && indexComplete
+        }
+
+        func publicationFailed(for sessionID: Data) -> Bool {
+            self.sessionID == sessionID && publicationFailed
+        }
+
+        /// Sets the session's in-flight count; zero removes it.
+        mutating func setPublicationsInFlight(_ count: Int, for sessionID: Data) {
+            guard stamp(sessionID) else { return }
+            publicationsInFlight = count
+            unstampIfClear()
+        }
+
+        mutating func markIndexComplete(for sessionID: Data) {
+            guard stamp(sessionID) else { return }
+            indexComplete = true
+        }
+
+        mutating func markPublicationFailed(for sessionID: Data) {
+            guard stamp(sessionID) else { return }
+            publicationFailed = true
+        }
+
+        /// Drops every fence, whatever session holds them.
+        mutating func clearFences() {
+            sessionID = nil
+            indexComplete = false
+            publicationFailed = false
+            publicationsInFlight = 0
+        }
+
+        /// Only the current session writes a fence, and a session change
+        /// clears the fences first, so a live stamp is always the writer's.
+        private mutating func stamp(_ sessionID: Data) -> Bool {
+            if self.sessionID == nil { self.sessionID = sessionID }
+            guard self.sessionID == sessionID else {
+                assertionFailure("child evidence fence written for a stale session")
+                return false
+            }
+            return true
+        }
+
+        private mutating func unstampIfClear() {
+            if !indexComplete, !publicationFailed, publicationsInFlight == 0 {
+                sessionID = nil
+            }
+        }
     }
 
     private struct PortableEvidenceWork: Sendable {
@@ -501,14 +579,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private var overlayRecords = PeerSet<OverlayPeerRecord>()
     /// Per hierarchy peer key: the state bound to its connection.
     private var hierarchyRecords = PeerSet<HierarchyPeerRecord>()
-    private var childEvidenceReadyPeers: Set<PeerKey> = []
-    private var childEvidenceReadyWaiters:
-        [PeerKey: [ChildEvidenceReadyWaiter]] = [:]
-    /// A final index page permits reservation cleanup only after every live
-    /// publication that began before it has been ordered into the same Ivy
-    /// session. Counts are session-scoped so reconnect cannot inherit a fence.
-    private var childEvidenceIndexCompleteSessions: Set<ChildEvidenceSession> = []
-    private var childEvidencePublicationFailedSessions: Set<ChildEvidenceSession> = []
     /// The latest evidence hint this node's own send budget refused, per
     /// child peer, re-sent on the next push run. A hint carries one index
     /// entry; the admission it triggers scans the index from the child's
@@ -517,8 +587,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// Run reports apply one after another off the delivery path; one
     /// handle, cancelled with the runtime.
     private var runReportApplyTail: Task<Void, Never>?
-    private var childEvidencePublicationsInFlight:
-        [ChildEvidenceSession: Int] = [:]
     private var waitingCandidateRetryTask: Task<Void, Never>?
     private var waitingCandidateRetryGeneration: UInt64?
     private var pendingTransactionInventories:
@@ -969,14 +1037,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
             pending.timeout.cancel()
             pending.continuation.resume(returning: [])
         }
-        childEvidenceReadyPeers.removeAll()
-        childEvidenceIndexCompleteSessions.removeAll()
-        childEvidencePublicationFailedSessions.removeAll()
-        childEvidencePublicationsInFlight.removeAll()
-        let evidenceReadyWaiters = childEvidenceReadyWaiters.values.flatMap {
-            $0
+        let evidenceReadyWaiters = removedHierarchyRecords.flatMap {
+            $0.evidence.waiters
         }
-        childEvidenceReadyWaiters.removeAll()
         for waiter in evidenceReadyWaiters {
             waiter.continuation.resume(returning: false)
         }
@@ -1440,7 +1503,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         var byDirectory: [String: [String]] = [:]
         for (key, role) in hierarchyRoles {
             guard case .child(let path) = role, let directory = path.last,
-                  childEvidenceReadyPeers.contains(key),
+                  isChildEvidenceReady(key),
                   let offer = childCandidateOffers[key],
                   offer.candidate.block.parentState.rawCID == parentStateCID,
                   offer.childCID != parentTipContext?.carriedChildren[directory]
@@ -1623,7 +1686,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                   let context = parentTipContext else { return }
             for (key, role) in hierarchyRoles {
                 guard case .child(let childPath) = role,
-                      childEvidenceReadyPeers.contains(key),
+                      isChildEvidenceReady(key),
                       let peer = hierarchyRecords[key]?.session,
                       sequence(pushedParentTipSequence[key], on: peer) != context.sequence
                 else { continue }
@@ -1639,7 +1702,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         for (key, payload) in refusedChildEvidenceHints {
             guard isCurrentRuntime(generation: generation, process: process),
                   let peer = hierarchyRecords[key]?.session,
-                  childEvidenceReadyPeers.contains(key) else { continue }
+                  isChildEvidenceReady(key) else { continue }
             let sent = await hierarchy.sendMessage(
                 to: peer,
                 topic: NodeNetworkTopic.childEvidenceAvailable,
@@ -2016,14 +2079,16 @@ public actor NodeNetworkRuntime: IvyDelegate {
     private func waitForChildEvidenceReady(
         peer: AuthenticatedPeer
     ) async -> Bool {
-        guard !childEvidenceReadyPeers.contains(peer.key) else { return true }
+        guard !isChildEvidenceReady(peer.key) else { return true }
         return await withCheckedContinuation { continuation in
-            childEvidenceReadyWaiters[peer.key, default: []].append(
-                ChildEvidenceReadyWaiter(
-                    sessionID: peer.sessionID,
-                    continuation: continuation
+            hierarchyRecords.update(peer.key) {
+                $0.evidence.waiters.append(
+                    ChildEvidenceReadyWaiter(
+                        sessionID: peer.sessionID,
+                        continuation: continuation
+                    )
                 )
-            )
+            }
         }
     }
 
@@ -2031,10 +2096,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID else {
             return
         }
-        childEvidenceReadyPeers.insert(peer.key)
-        let waiters = childEvidenceReadyWaiters.removeValue(
-            forKey: peer.key
-        ) ?? []
+        let waiters = hierarchyRecords.update(peer.key) {
+            record -> [ChildEvidenceReadyWaiter] in
+            record.evidence.ready = true
+            let waiters = record.evidence.waiters
+            record.evidence.waiters = []
+            return waiters
+        }
         for waiter in waiters {
             waiter.continuation.resume(
                 returning: waiter.sessionID == peer.sessionID
@@ -2043,21 +2111,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
 
     private func cancelChildEvidenceReadyWaiters(for peerKey: PeerKey) {
-        childEvidenceIndexCompleteSessions =
-            childEvidenceIndexCompleteSessions.filter {
-                $0.peerKey != peerKey
-            }
-        childEvidencePublicationFailedSessions =
-            childEvidencePublicationFailedSessions.filter {
-                $0.peerKey != peerKey
-            }
-        childEvidencePublicationsInFlight =
-            childEvidencePublicationsInFlight.filter {
-                $0.key.peerKey != peerKey
-            }
-        let waiters = childEvidenceReadyWaiters.removeValue(
-            forKey: peerKey
-        ) ?? []
+        let waiters = hierarchyRecords.update(peerKey) {
+            record -> [ChildEvidenceReadyWaiter] in
+            record.evidence.clearFences()
+            let waiters = record.evidence.waiters
+            record.evidence.waiters = []
+            return waiters
+        }
         for waiter in waiters {
             waiter.continuation.resume(returning: false)
         }
@@ -2129,15 +2189,19 @@ public actor NodeNetworkRuntime: IvyDelegate {
             key, role -> AuthenticatedPeer? in
             guard case .child(let path) = role,
                   path == childPath,
-                  !childEvidenceReadyPeers.contains(key) else { return nil }
+                  !isChildEvidenceReady(key) else { return nil }
             return hierarchyRecords[key]?.session
         }
         for peer in bootstrappingPeers {
-            let session = ChildEvidenceSession(
-                peerKey: peer.key,
-                sessionID: peer.sessionID
-            )
-            childEvidencePublicationsInFlight[session, default: 0] += 1
+            hierarchyRecords.update(peer.key) { record in
+                let count = record.evidence.publicationsInFlight(
+                    for: peer.sessionID
+                ) ?? 0
+                record.evidence.setPublicationsInFlight(
+                    count + 1,
+                    for: peer.sessionID
+                )
+            }
         }
         guard let directory = childPath.last,
             let evidence = try? await process.store.issuedChildEvidence(
@@ -2173,13 +2237,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
             key, role -> AuthenticatedPeer? in
             guard case .child(let path) = role,
                   path == childPath,
-                  childEvidenceReadyPeers.contains(key) else { return nil }
+                  isChildEvidenceReady(key) else { return nil }
             return hierarchyRecords[key]?.session
         }
         for peer in bootstrappingPeers + readyPeers {
             guard isCurrentRuntime(generation: generation, process: process),
                   hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID else {
-                if !childEvidenceReadyPeers.contains(peer.key) {
+                if !isChildEvidenceReady(peer.key) {
                     finishChildEvidencePublication(
                         to: peer,
                         permitsCleanup: false
@@ -2195,7 +2259,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard isCurrentRuntime(generation: generation, process: process) else {
                 return false
             }
-            let bootstrapping = !childEvidenceReadyPeers.contains(peer.key)
+            let bootstrapping = !isChildEvidenceReady(peer.key)
             switch result {
             case .enqueued:
                 // A newer hint delivered supersedes an older one refused:
@@ -2242,38 +2306,51 @@ public actor NodeNetworkRuntime: IvyDelegate {
         to peer: AuthenticatedPeer,
         permitsCleanup: Bool
     ) {
-        let session = ChildEvidenceSession(
-            peerKey: peer.key,
-            sessionID: peer.sessionID
-        )
-        guard let count = childEvidencePublicationsInFlight[session] else {
+        let sessionID = peer.sessionID
+        guard let count = hierarchyRecords[peer.key]?.evidence
+            .publicationsInFlight(for: sessionID) else {
             return
         }
         if !permitsCleanup {
             SyncTrace.log("child evidence publication to \(peer.key.hex.prefix(8)) failed: session no longer becomes ready")
-            childEvidencePublicationFailedSessions.insert(session)
+            hierarchyRecords.update(peer.key) {
+                $0.evidence.markPublicationFailed(for: sessionID)
+            }
         }
         if count == 1 {
-            childEvidencePublicationsInFlight.removeValue(forKey: session)
+            hierarchyRecords.update(peer.key) {
+                $0.evidence.setPublicationsInFlight(0, for: sessionID)
+            }
             if permitsCleanup,
-               !childEvidencePublicationFailedSessions.contains(session),
-               childEvidenceIndexCompleteSessions.contains(session),
+               hierarchyRecords[peer.key]?.evidence
+                .publicationFailed(for: sessionID) != true,
+               hierarchyRecords[peer.key]?.evidence
+                .indexComplete(for: sessionID) == true,
                hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID {
                 markChildEvidenceReady(peer)
             }
         } else {
-            childEvidencePublicationsInFlight[session] = count - 1
+            hierarchyRecords.update(peer.key) {
+                $0.evidence.setPublicationsInFlight(count - 1, for: sessionID)
+            }
         }
     }
 
     private func completeChildEvidenceIndex(for peer: AuthenticatedPeer) {
-        let session = ChildEvidenceSession(
-            peerKey: peer.key,
-            sessionID: peer.sessionID
-        )
-        childEvidenceIndexCompleteSessions.insert(session)
-        if childEvidencePublicationsInFlight[session] == nil,
-           !childEvidencePublicationFailedSessions.contains(session) {
+        // Only the live session's fence: this runs after the index serve's
+        // suspensions, and a fence for an ended session could never be
+        // read again (nor could it mark anything ready).
+        guard hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID else {
+            return
+        }
+        let sessionID = peer.sessionID
+        hierarchyRecords.update(peer.key) {
+            $0.evidence.markIndexComplete(for: sessionID)
+        }
+        if hierarchyRecords[peer.key]?.evidence
+            .publicationsInFlight(for: sessionID) == nil,
+           hierarchyRecords[peer.key]?.evidence
+            .publicationFailed(for: sessionID) != true {
             markChildEvidenceReady(peer)
         }
     }
@@ -2525,7 +2602,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             return role
         }
         hierarchyRecords.update(key) { $0.declaredReadURL = nil }
-        childEvidenceReadyPeers.remove(key)
+        hierarchyRecords.update(key) { $0.evidence.ready = false }
         cancelChildEvidenceReadyWaiters(for: key)
         childCandidateOffers.removeValue(forKey: key)
         pushedParentTipSequence.removeValue(forKey: key)
@@ -4300,7 +4377,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // Only a child this chain has wired in, and only once there is a
             // context to build against: a legitimate child pushes for a
             // context it received. Nothing is decoded for anyone else.
-            guard childEvidenceReadyPeers.contains(peer.key),
+            guard isChildEvidenceReady(peer.key),
                   parentTipContext != nil else {
                 SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: not ready or no context")
                 return
@@ -4415,7 +4492,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             }
         }
         if hierarchyRecords[peer.key]?.session?.sessionID != peer.sessionID {
-            childEvidenceReadyPeers.remove(peer.key)
+            hierarchyRecords.update(peer.key) { $0.evidence.ready = false }
             cancelChildEvidenceReadyWaiters(for: peer.key)
         }
         hierarchyRecords.update(peer.key) {
@@ -4731,11 +4808,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     func debugSnapshot() -> NetworkDebugSnapshot {
         var keys = Set<PeerKey>()
         keys.formUnion(overlayRecords.keys)
-        keys.formUnion(childEvidenceReadyPeers)
-        keys.formUnion(childEvidenceReadyWaiters.keys)
-        keys.formUnion(childEvidenceIndexCompleteSessions.map(\.peerKey))
-        keys.formUnion(childEvidencePublicationFailedSessions.map(\.peerKey))
-        keys.formUnion(childEvidencePublicationsInFlight.keys.map(\.peerKey))
         keys.formUnion(refusedChildEvidenceHints.keys)
         keys.formUnion(hierarchyRecords.keys)
         keys.formUnion(pendingTransactionInventories.values.map(\.peer.key))
@@ -4773,11 +4845,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
         let hierarchyKeys = Set(hierarchyRecords.keys)
             .union(hierarchyRecords.keys)
-            .union(childEvidenceReadyPeers)
-            .union(childEvidenceReadyWaiters.keys)
-            .union(childEvidenceIndexCompleteSessions.map(\.peerKey))
-            .union(childEvidencePublicationFailedSessions.map(\.peerKey))
-            .union(childEvidencePublicationsInFlight.keys.map(\.peerKey))
             .union(childCandidateOffers.keys)
             .union(pushedParentTipSequence.keys)
             .union(refusedChildEvidenceHints.keys)
@@ -7012,7 +7079,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         var peers: [String: [PeerKey]] = [:]
         for (key, role) in hierarchyRoles {
             guard case .child(let path) = role,
-                  childEvidenceReadyPeers.contains(key) else {
+                  isChildEvidenceReady(key) else {
                 continue
             }
             let pathKey = path.joined(separator: "/")
