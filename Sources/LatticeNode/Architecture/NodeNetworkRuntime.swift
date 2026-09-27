@@ -831,20 +831,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
         generation: UInt64,
         process: ChainProcess
     ) async -> Bool {
-        while isCurrentRuntime(generation: generation, process: process),
-              peer.map({
-                  hierarchySessions[$0.key]?.sessionID == $0.sessionID
-                    && hierarchyPeers[$0.key] == .parent
-              }) ?? true {
-            if enqueueCandidate(candidate) { return true }
-            do {
-                // Not `Task.sleep(for:)`: see ChainService.scheduleValidateWalkRetry.
-                try await Task.sleep(nanoseconds: 10_000_000)
-            } catch {
-                return false
-            }
+        await Timers.poll(every: .milliseconds(10), onCancel: false) {
+            guard isCurrentRuntime(generation: generation, process: process),
+                  peer.map({
+                      hierarchySessions[$0.key]?.sessionID == $0.sessionID
+                        && hierarchyPeers[$0.key] == .parent
+                  }) ?? true else { return .done(false) }
+            return enqueueCandidate(candidate) ? .done(true) : .again
         }
-        return false
     }
 
     private func stopNow() async {
@@ -1231,14 +1225,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // A dedicated short deadline, NOT the overlay's content-pull timeout:
         // a legacy peer never answers, and this wait sits on the public
         // explorer route's critical path.
-        let timeoutNanoseconds = Self.nanoseconds(Self.readEndpointAskTimeout)
+        let timeout = Self.readEndpointAskTimeout
         return await withCheckedContinuation { continuation in
-            let timeoutTask = Task { [weak self] in
-                do {
-                    try await Task.sleep(nanoseconds: timeoutNanoseconds)
-                } catch {
-                    return
-                }
+            let timeoutTask = Timers.deadline(
+                after: timeout,
+                generation: generation
+            ) { [weak self] _ in
                 await self?.readEndpointAskTimedOut(requestID: requestID)
             }
             pendingReadEndpoints[requestID] = PendingReadEndpoint(
@@ -2968,15 +2960,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             afterRootCID: after
         )
         guard let payload = try? request.encoded() else { return }
-        let timeoutNanoseconds = Self.nanoseconds(
-            planeConfigurations.overlay.requestTimeout
-        )
-        let timeout = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: timeoutNanoseconds)
-            } catch {
-                return
-            }
+        let timeout = Timers.deadline(
+            after: planeConfigurations.overlay.requestTimeout,
+            generation: generation
+        ) { [weak self] generation in
             await self?.transactionInventoryTimedOut(
                 requestID: request.requestID,
                 generation: generation
@@ -3183,25 +3170,19 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
 
         let response: AttributedVolumeResponse
-        while true {
-            let fetched = await overlay.fetchVolume(rootCID: rootCID, from: peer)
-            guard fetched.failure == .localCapacityUnavailable else {
-                response = fetched
-                break
+        switch await Timers.retryWhileCapacityUnavailable(
+            every: planeConfigurations.overlay.requestTimeout,
+            attempt: { await overlay.fetchVolume(rootCID: rootCID, from: peer) },
+            capacityUnavailable: { $0.failure == .localCapacityUnavailable },
+            stillCurrent: {
+                isCurrentRuntime(generation: generation, process: process)
+                    && overlayPeers[peer.key]?.sessionID == peer.sessionID
             }
-            do {
-                try await Task.sleep(
-                    nanoseconds: Self.nanoseconds(
-                        planeConfigurations.overlay.requestTimeout
-                    )
-                )
-            } catch {
-                return
-            }
-            guard isCurrentRuntime(generation: generation, process: process),
-                  overlayPeers[peer.key]?.sessionID == peer.sessionID else {
-                return
-            }
+        ) {
+        case .value(let fetched):
+            response = fetched
+        case .cancelled, .stale:
+            return
         }
         let volume = SerializedVolume(
             root: response.rootCID,
@@ -3514,24 +3495,24 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // connectivity reservation, NOT validation trust — parent facts are still
         // verified and never vouch for the child transition) so overlay churn
         // cannot starve consensus-critical hierarchy evidence.
-        while activeEvidenceVolumes.count >= Self.maximumEvidenceCandidates - 1 {
-            do {
-                try await Task.sleep(
-                    nanoseconds: Self.nanoseconds(
-                        planeConfigurations.overlay.requestTimeout
-                    )
-                )
-            } catch {
-                return false
-            }
+        // nil: a slot is free. The stale and lease checks also pass on the
+        // first step: both were just made above with no suspension between.
+        let slotWait: Bool? = await Timers.poll(
+            every: planeConfigurations.overlay.requestTimeout,
+            onCancel: false
+        ) {
             guard isCurrentRuntime(
                 generation: generation,
                 process: process
             ), overlayPeers[peer.key]?.sessionID == peer.sessionID else {
-                return true
+                return .done(true)
             }
-            if activeEvidenceVolumes.contains(lease) { return true }
+            if activeEvidenceVolumes.contains(lease) { return .done(true) }
+            return activeEvidenceVolumes.count >= Self.maximumEvidenceCandidates - 1
+                ? .again
+                : .done(nil)
         }
+        if let slotWait { return slotWait }
         activeEvidenceVolumes.insert(lease)
         defer { activeEvidenceVolumes.remove(lease) }
         if let evidence = try? await process.store.issuedChildEvidence(
@@ -3575,32 +3556,28 @@ public actor NodeNetworkRuntime: IvyDelegate {
             value: ChildEvidenceVolume?,
             attribution: IvyRootContentSource.Attribution
         )
-        while true {
-            let fetched = await source.withRootTracing(
-                summary.attachmentCID
-            ) { session in
-                await Self.resolveEvidenceVolume(
-                    summary.attachmentCID,
-                    source: session
-                )
-            }
-            guard fetched.attribution.localCapacityUnavailable else {
-                resolved = fetched
-                break
-            }
-            do {
-                try await Task.sleep(
-                    nanoseconds: Self.nanoseconds(
-                        planeConfigurations.overlay.requestTimeout
+        switch await Timers.retryWhileCapacityUnavailable(
+            every: planeConfigurations.overlay.requestTimeout,
+            attempt: {
+                await source.withRootTracing(
+                    summary.attachmentCID
+                ) { session in
+                    await Self.resolveEvidenceVolume(
+                        summary.attachmentCID,
+                        source: session
                     )
-                )
-            } catch {
-                return true
+                }
+            },
+            capacityUnavailable: { $0.attribution.localCapacityUnavailable },
+            stillCurrent: {
+                isCurrentRuntime(generation: generation, process: process)
+                    && overlayPeers[peer.key]?.sessionID == peer.sessionID
             }
-            guard isCurrentRuntime(generation: generation, process: process),
-                  overlayPeers[peer.key]?.sessionID == peer.sessionID else {
-                return true
-            }
+        ) {
+        case .value(let fetched):
+            resolved = fetched
+        case .cancelled, .stale:
+            return true
         }
         guard let attachment = resolved.value,
               let envelope = try? ChildValidationPackageEnvelope.decode(
@@ -3672,11 +3649,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 // The evidence lane is momentarily full. Keep the session and
                 // retry THIS page after a beat — the scan must make progress
                 // through congestion, not restart from a fresh reconnect.
-                Task { [weak self] in
-                    try? await Task.sleep(nanoseconds: Self.nanoseconds(
-                        self?.planeConfigurations.hierarchy.requestTimeout
-                            ?? .seconds(15)
-                    ))
+                Timers.deadline(
+                    after: planeConfigurations.hierarchy.requestTimeout,
+                    generation: generation
+                ) { [weak self] generation in
                     await self?.requestEvidenceIndex(
                         sourceID: response.sourceID,
                         cursor: response.cursor,
@@ -3766,25 +3742,25 @@ public actor NodeNetworkRuntime: IvyDelegate {
             attachmentCID: summary.attachmentCID
         )
         if activeEvidenceVolumes.contains(lease) { return .handled }
-        while activeEvidenceVolumes.count >= Self.maximumEvidenceCandidates {
-            do {
-                try await Task.sleep(
-                    nanoseconds: Self.nanoseconds(
-                        planeConfigurations.hierarchy.requestTimeout
-                    )
-                )
-            } catch {
-                return .handled
-            }
+        // nil: a slot is free. The stale and lease checks also pass on the
+        // first step: both were just made above with no suspension between.
+        let slotWait: ParentEvidenceResult? = await Timers.poll(
+            every: planeConfigurations.hierarchy.requestTimeout,
+            onCancel: .handled
+        ) {
             guard isCurrentRuntime(
                 generation: generation,
                 process: process
             ), hierarchySessions[peer.key]?.sessionID == peer.sessionID,
                hierarchyPeers[peer.key] == .parent else {
-                return .failed
+                return .done(.failed)
             }
-            if activeEvidenceVolumes.contains(lease) { return .handled }
+            if activeEvidenceVolumes.contains(lease) { return .done(.handled) }
+            return activeEvidenceVolumes.count >= Self.maximumEvidenceCandidates
+                ? .again
+                : .done(nil)
         }
+        if let slotWait { return slotWait }
         activeEvidenceVolumes.insert(lease)
         defer { activeEvidenceVolumes.remove(lease) }
         let source = IvyRootContentSource(
@@ -3798,35 +3774,31 @@ public actor NodeNetworkRuntime: IvyDelegate {
             value: ChildEvidenceVolume?,
             attribution: IvyRootContentSource.Attribution
         )
-        while true {
-            let fetched = await source.withRootTracing(
-                summary.attachmentCID,
-                operation: { session in
-                    await Self.resolveEvidenceVolume(
-                        summary.attachmentCID,
-                        childCID: summary.childCID,
-                        source: session
-                    )
-                }
-            )
-            guard fetched.attribution.localCapacityUnavailable else {
-                resolved = fetched
-                break
-            }
-            do {
-                try await Task.sleep(
-                    nanoseconds: Self.nanoseconds(
-                        planeConfigurations.hierarchy.requestTimeout
-                    )
+        switch await Timers.retryWhileCapacityUnavailable(
+            every: planeConfigurations.hierarchy.requestTimeout,
+            attempt: {
+                await source.withRootTracing(
+                    summary.attachmentCID,
+                    operation: { session in
+                        await Self.resolveEvidenceVolume(
+                            summary.attachmentCID,
+                            childCID: summary.childCID,
+                            source: session
+                        )
+                    }
                 )
-            } catch {
-                return .failed
+            },
+            capacityUnavailable: { $0.attribution.localCapacityUnavailable },
+            stillCurrent: {
+                isCurrentRuntime(generation: generation, process: process)
+                    && hierarchySessions[peer.key]?.sessionID == peer.sessionID
+                    && hierarchyPeers[peer.key] == .parent
             }
-            guard isCurrentRuntime(generation: generation, process: process),
-                  hierarchySessions[peer.key]?.sessionID == peer.sessionID,
-                  hierarchyPeers[peer.key] == .parent else {
-                return .failed
-            }
+        ) {
+        case .value(let fetched):
+            resolved = fetched
+        case .cancelled, .stale:
+            return .failed
         }
         guard let attachment = resolved.value else {
             // Mirror the overlay gate: only a complete response that still
@@ -4460,16 +4432,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
         _ search: StaleTipPeerSearch,
         generation: UInt64
     ) async {
-        let delay = Self.peerSearchPollSeconds(
-            configuration.peerSearchInterval
-        ) &* 1_000_000_000
-        while isRunning, runtimeGeneration == generation {
+        await Timers.repeating(
+            every: .seconds(Self.peerSearchPollSeconds(
+                configuration.peerSearchInterval
+            )),
+            while: { isRunning && runtimeGeneration == generation }
+        ) {
             await search.tick()
-            do {
-                try await Task.sleep(nanoseconds: delay)
-            } catch {
-                return
-            }
         }
     }
 
@@ -4597,16 +4566,14 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // Re-announce well within the TTL, and often enough to pick up a
         // newly-wired child within a minute (records are small).
         let interval = max(UInt64(30), min(ttl / 2, UInt64(60)))
-        while isRunning, runtimeGeneration == generation {
+        await Timers.repeating(
+            every: .seconds(interval),
+            while: { isRunning && runtimeGeneration == generation }
+        ) {
             await announceGenesisProviders(
                 expiresAt: UInt64(Date().timeIntervalSince1970) + ttl,
                 process: process
             )
-            do {
-                try await Task.sleep(nanoseconds: interval &* 1_000_000_000)
-            } catch {
-                return
-            }
         }
     }
 
@@ -4822,15 +4789,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         hierarchyHelloDeadlines.removeValue(forKey: peer.key)?.task.cancel()
         nextHelloDeadlineToken &+= 1
         let token = nextHelloDeadlineToken
-        let timeoutNanoseconds = Self.nanoseconds(
-            planeConfigurations.hierarchy.requestTimeout
-        )
-        let task = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: timeoutNanoseconds)
-            } catch {
-                return
-            }
+        let task = Timers.deadline(
+            after: planeConfigurations.hierarchy.requestTimeout,
+            generation: generation
+        ) { [weak self] generation in
             await self?.hierarchyHelloTimedOut(
                 peer: peer,
                 generation: generation,
@@ -4851,15 +4813,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         overlayHelloDeadlines.removeValue(forKey: peer.key)?.task.cancel()
         nextHelloDeadlineToken &+= 1
         let token = nextHelloDeadlineToken
-        let timeoutNanoseconds = Self.nanoseconds(
-            planeConfigurations.overlay.requestTimeout
-        )
-        let task = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: timeoutNanoseconds)
-            } catch {
-                return
-            }
+        let task = Timers.deadline(
+            after: planeConfigurations.overlay.requestTimeout,
+            generation: generation
+        ) { [weak self] generation in
             await self?.overlayHelloTimedOut(
                 peer: peer,
                 generation: generation,
@@ -5576,13 +5533,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
               candidateAcquirer.hasTimedWait else { return }
         let generation = runtimeGeneration
         waitingCandidateRetryGeneration = generation
-        let delay = Self.nanoseconds(Self.futureCandidateRetryInterval)
-        waitingCandidateRetryTask = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: delay)
-            } catch {
-                return
-            }
+        waitingCandidateRetryTask = Timers.deadline(
+            after: Self.futureCandidateRetryInterval,
+            generation: generation
+        ) { [weak self] generation in
             await self?.retryWaitingCandidates(generation: generation)
         }
     }
@@ -5719,14 +5673,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
             clearRangeSync()
             return
         }
-        let timeoutNanoseconds = Self.nanoseconds(
-            planeConfigurations.overlay.requestTimeout
-        )
         current.requestID = requestID
         current.awaiting = true
-        current.responseTimeout = Task { [weak self] in
-            do { try await Task.sleep(nanoseconds: timeoutNanoseconds) }
-            catch { return }
+        current.responseTimeout = Timers.deadline(
+            after: planeConfigurations.overlay.requestTimeout,
+            generation: generation
+        ) { [weak self] generation in
             await self?.rangeSyncTimedOut(requestID: requestID, generation: generation)
         }
         let peer = current.peer
@@ -5875,14 +5827,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
             clearRangeSync()
             return
         }
-        let timeoutNanoseconds = Self.nanoseconds(
-            planeConfigurations.overlay.requestTimeout
-        )
         current.requestID = requestID
         current.awaiting = true
-        current.responseTimeout = Task { [weak self] in
-            do { try await Task.sleep(nanoseconds: timeoutNanoseconds) }
-            catch { return }
+        current.responseTimeout = Timers.deadline(
+            after: planeConfigurations.overlay.requestTimeout,
+            generation: generation
+        ) { [weak self] generation in
             await self?.rangeSyncTimedOut(requestID: requestID, generation: generation)
         }
         let peer = current.peer
@@ -6021,12 +5971,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let epoch = nextRangeSyncProgressEpoch
         sync.progressEpoch = epoch
         sync.progressTimeout?.cancel()
-        let deadlineNanoseconds = Self.nanoseconds(
-            planeConfigurations.overlay.requestTimeout
-        ) &* 3
-        sync.progressTimeout = Task { [weak self] in
-            do { try await Task.sleep(nanoseconds: deadlineNanoseconds) }
-            catch { return }
+        sync.progressTimeout = Timers.deadline(
+            after: planeConfigurations.overlay.requestTimeout * 3,
+            generation: generation
+        ) { [weak self] generation in
             await self?.rangeSyncProgressDeadline(
                 epoch: epoch,
                 generation: generation,
@@ -6150,9 +6098,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
             return
         }
         let generation = runtimeGeneration
-        let delay = Self.nanoseconds(planeConfigurations.overlay.requestTimeout)
-        rangeSyncReentryTask = Task { [weak self] in
-            do { try await Task.sleep(nanoseconds: delay) } catch { return }
+        rangeSyncReentryTask = Timers.deadline(
+            after: planeConfigurations.overlay.requestTimeout,
+            generation: generation
+        ) { [weak self] generation in
             await self?.maybeRestartRangeSync(generation: generation)
         }
     }
@@ -6304,7 +6253,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             )
         )
         guard let payload = try? request.encoded() else { return false }
-        let delay = Self.nanoseconds(
+        let delay = Timers.nanoseconds(
             planeConfigurations.hierarchy.requestTimeout
         )
         return await withCheckedContinuation { continuation in
@@ -6320,7 +6269,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     topic: NodeNetworkTopic.parentChainFactRequest,
                     payload: payload
                 )
-                try? await Task.sleep(nanoseconds: delay)
+                _ = await Timers.sleep(nanoseconds: delay)
                 await self?.resolveGenesisVerification(
                     request.requestID,
                     confirmed: false
@@ -6354,7 +6303,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         guard let payload = try? ChildGenesisAnchorRequestMessage(
             requestID: requestID
         ).encoded() else { return nil }
-        let delay = Self.nanoseconds(
+        let delay = Timers.nanoseconds(
             planeConfigurations.hierarchy.requestTimeout
         )
         return await withCheckedContinuation { continuation in
@@ -6368,7 +6317,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     topic: NodeNetworkTopic.childGenesisAnchorRequest,
                     payload: payload
                 )
-                try? await Task.sleep(nanoseconds: delay)
+                _ = await Timers.sleep(nanoseconds: delay)
                 await self?.resolveGenesisAnchor(requestID, genesisCID: nil)
             }
         }
@@ -6416,8 +6365,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
             lastTraced = outcome
             SyncTrace.log("adopt-genesis \(outcome)")
         }
-        while isRunning, runtimeGeneration == generation {
-            if await process.status().phase != .awaitingGenesis { return }
+        await Timers.poll(every: .seconds(1), onCancel: ()) {
+            guard isRunning, runtimeGeneration == generation else {
+                return .done(())
+            }
+            if await process.status().phase != .awaitingGenesis { return .done(()) }
             if let genesisCID = await resolveParentAnchoredGenesis() {
                 traceOnce("resolved \(genesisCID)")
                 let activated = (try? await remoteContentSource.withRoot(
@@ -6438,7 +6390,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                     : "fetch-or-confirm failed \(genesisCID)")
                 guard isCurrentRuntime(
                     generation: generation, process: process
-                ) else { return }
+                ) else { return .done(()) }
                 if activated {
                     // The genesis just bootstrapped to active OUT OF BAND (not via
                     // candidate admission), so it never fired its one-shot connect
@@ -6451,16 +6403,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
                         generation: generation,
                         process: process
                     )
-                    return
+                    return .done(())
                 }
             } else {
                 traceOnce("parent record unresolved")
             }
-            do {
-                try await Task.sleep(nanoseconds: 1_000_000_000)
-            } catch {
-                return
-            }
+            return .again
         }
     }
 
@@ -6708,11 +6656,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // enqueue is transient — the same timeout used for an unanswered
         // parent response requeues the candidate (or resolves the walk's
         // request nil); a disconnect does so sooner.
-        let delay = Self.nanoseconds(
-            planeConfigurations.hierarchy.requestTimeout
-        )
-        Task { [weak self] in
-            try? await Task.sleep(nanoseconds: delay)
+        Timers.deadline(
+            after: planeConfigurations.hierarchy.requestTimeout,
+            generation: generation
+        ) { [weak self] generation in
             await self?.parentChainFactRequestTimedOut(
                 request.requestID,
                 generation: generation
@@ -6902,13 +6849,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         generation: UInt64
     ) {
         let timeout = planeConfigurations.hierarchy.requestTimeout
-        let timeoutNanoseconds = Self.nanoseconds(timeout)
-        Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: timeoutNanoseconds)
-            } catch {
-                return
-            }
+        Timers.deadline(
+            after: timeout,
+            generation: generation
+        ) { [weak self] generation in
             await self?.evidenceIndexRequestTimedOut(
                 requestID,
                 generation: generation
@@ -7151,19 +7095,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let (scaled, overflow) = seconds.multipliedReportingOverflow(by: 1_000)
         if overflow { return UInt64.max }
         let (total, additionOverflow) = scaled.addingReportingOverflow(milliseconds)
-        return additionOverflow ? UInt64.max : total
-    }
-
-    private static func nanoseconds(_ duration: Duration) -> UInt64 {
-        // Keep Duration out of optimized async task frames: the generic Clock
-        // sleep overload can trip Swift's task allocator during teardown.
-        let components = duration.components
-        guard components.seconds >= 0, components.attoseconds >= 0 else { return 0 }
-        let seconds = UInt64(components.seconds)
-        let nanoseconds = UInt64(components.attoseconds / 1_000_000_000)
-        let (scaled, overflow) = seconds.multipliedReportingOverflow(by: 1_000_000_000)
-        if overflow { return UInt64.max }
-        let (total, additionOverflow) = scaled.addingReportingOverflow(nanoseconds)
         return additionOverflow ? UInt64.max : total
     }
 
