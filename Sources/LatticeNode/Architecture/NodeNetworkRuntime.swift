@@ -283,18 +283,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let attachmentCID: String
     }
 
-    private struct PendingReadEndpoint {
-        let peer: AuthenticatedPeer
-        let genesisCID: String
-        let continuation: CheckedContinuation<[String], Never>
-        let timeout: Task<Void, Never>
-    }
-
-    private struct ReadURLDiscovery {
-        let urls: [String]
-        let expires: Date
-    }
-
     private struct PendingTransactionInventory: Sendable {
         let peer: AuthenticatedPeer
         let request: TransactionInventoryRequestMessage
@@ -617,10 +605,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let sessionID: Data
         var requestID: UInt64?
     }
-    private var pendingReadEndpoints: [UInt64: PendingReadEndpoint] = [:]
-    private var readURLDiscoveries: [String: ReadURLDiscovery] = [:]
-    private var readURLDiscoveryTasks:
-        [String: (token: UInt64, task: Task<[String], Never>)] = [:]
+    private var readURLDiscovery = ReadURLDiscovery()
     private var rangeSync = RangeSync()
     private var childProofRecoveryTask: Task<Void, Never>?
     private var childProofRecoveryGeneration: UInt64?
@@ -1025,13 +1010,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let removedOverlayRecords = overlayRecords.removeAll()
         let removedHierarchyRecords = hierarchyRecords.removeAll()
         sessionLeases.servingReadEndpoints.removeAll()
-        readURLDiscoveries.removeAll()
-        for inFlight in readURLDiscoveryTasks.values {
+        readURLDiscovery.cache.removeAll()
+        for inFlight in readURLDiscovery.tasks.values {
             inFlight.task.cancel()
         }
-        readURLDiscoveryTasks.removeAll()
-        let readEndpointWaiters = pendingReadEndpoints.values
-        pendingReadEndpoints.removeAll()
+        readURLDiscovery.tasks.removeAll()
+        let readEndpointWaiters = readURLDiscovery.pendingReadEndpoints.values
+        readURLDiscovery.pendingReadEndpoints.removeAll()
         for pending in readEndpointWaiters {
             pending.timeout.cancel()
             pending.continuation.resume(returning: [])
@@ -1199,26 +1184,25 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// it discovers via the DHT. Only declared URLs; bounded, cached briefly.
     public func discoverProviderReadURLs(genesisCID: String) async -> [String] {
         guard CIDIdentity.isCanonical(genesisCID) else { return [] }
-        if let cached = readURLDiscoveries[genesisCID],
-           cached.expires > Date() {
-            return cached.urls
+        if let cached = readURLDiscovery.cachedURLs(for: genesisCID, now: Date()) {
+            return cached
         }
         // Coalesce concurrent HTTP callers onto one discovery so a request
         // burst cannot multiply overlay asks.
-        if let inFlight = readURLDiscoveryTasks[genesisCID] {
+        if let inFlight = readURLDiscovery.tasks[genesisCID] {
             return await inFlight.task.value
         }
         let token = makeRequestID()
         let task = Task { [weak self] in
             await self?.performReadURLDiscovery(genesisCID: genesisCID) ?? []
         }
-        readURLDiscoveryTasks[genesisCID] = (token: token, task: task)
+        readURLDiscovery.tasks[genesisCID] = (token: token, task: task)
         let urls = await task.value
         // Only the creator un-registers, and only its own entry: a stop/start
         // cycle clears the map, and a fresh discovery registered under the
         // same key must not be evicted by this stale resume.
-        if readURLDiscoveryTasks[genesisCID]?.token == token {
-            readURLDiscoveryTasks.removeValue(forKey: genesisCID)
+        if readURLDiscovery.tasks[genesisCID]?.token == token {
+            readURLDiscovery.tasks.removeValue(forKey: genesisCID)
         }
         return urls
     }
@@ -1272,7 +1256,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         await withTaskGroup(of: (Int, [String]).self) { group in
             var asked = 0
             for (index, key) in candidates.enumerated() {
-                guard asked < Self.maximumReadEndpointAsks,
+                guard asked < ReadURLDiscovery.maximumReadEndpointAsks,
                       let peer = overlayRecords[key]?.readyPeer else { continue }
                 asked += 1
                 group.addTask { [weak self] in
@@ -1293,30 +1277,18 @@ public actor NodeNetworkRuntime: IvyDelegate {
         for urls in [own] + urlsByCandidate {
             // Per-responder cap: a declaration is self-described hint data,
             // so one responder must not be able to flood the merged answer.
-            for url in urls.prefix(Self.maximumDeclaredURLsPerResponder)
+            for url in urls.prefix(ReadURLDiscovery.maximumDeclaredURLsPerResponder)
             where seenURLs.insert(url).inserted {
                 declared.append(url)
             }
         }
         let bounded = Array(declared.prefix(16))
         guard isCurrentGeneration(generation) else { return bounded }
-        let now = Date()
-        readURLDiscoveries = readURLDiscoveries.filter { $0.value.expires > now }
-        if readURLDiscoveries.count < Self.maximumReadURLDiscoveryCacheEntries {
-            readURLDiscoveries[genesisCID] = ReadURLDiscovery(
-                urls: bounded,
-                expires: now.addingTimeInterval(Self.readURLDiscoveryCacheSeconds)
-            )
-        }
+        readURLDiscovery.store(bounded, for: genesisCID, now: Date())
         return bounded
     }
 
-    private static let maximumReadEndpointAsks = 8
     private static let maximumExplorerPeerSummaries = 200
-    private static let maximumDeclaredURLsPerResponder = 2
-    private static let maximumReadURLDiscoveryCacheEntries = 64
-    private static let readURLDiscoveryCacheSeconds: TimeInterval = 30
-    private static let readEndpointAskTimeout: Duration = .seconds(2)
 
     /// This node's own self-description for `genesisCID`: its configured
     /// public read URL when that is its own chain's genesis, plus the URLs its
@@ -1386,7 +1358,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         // A dedicated short deadline, NOT the overlay's content-pull timeout:
         // a legacy peer never answers, and this wait sits on the public
         // explorer route's critical path.
-        let timeout = Self.readEndpointAskTimeout
+        let timeout = ReadURLDiscovery.readEndpointAskTimeout
         return await withCheckedContinuation { continuation in
             let timeoutTask = Timers.deadline(
                 after: timeout,
@@ -1394,7 +1366,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             ) { [weak self] _ in
                 await self?.readEndpointAskTimedOut(requestID: requestID)
             }
-            pendingReadEndpoints[requestID] = PendingReadEndpoint(
+            readURLDiscovery.pendingReadEndpoints[requestID] = ReadURLDiscovery.PendingReadEndpoint(
                 peer: peer,
                 genesisCID: genesisCID,
                 continuation: continuation,
@@ -1415,7 +1387,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
 
     private func readEndpointAskTimedOut(requestID: UInt64) {
-        guard let pending = pendingReadEndpoints.removeValue(
+        guard let pending = readURLDiscovery.pendingReadEndpoints.removeValue(
             forKey: requestID
         ) else { return }
         pending.timeout.cancel()
@@ -2636,12 +2608,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             // A response can never arrive on a gone session (a reconnect gets
             // a fresh sessionID the response guard rejects), so resolve the
             // ask empty now instead of burning its timeout.
-            let disconnectedReadEndpoints = pendingReadEndpoints.filter {
-                $0.value.peer.key == key
-            }
-            pendingReadEndpoints = pendingReadEndpoints.filter {
-                $0.value.peer.key != key
-            }
+            let disconnectedReadEndpoints = readURLDiscovery.removePendingReadEndpoints(of: key)
             for pending in disconnectedReadEndpoints.values {
                 pending.timeout.cancel()
                 pending.continuation.resume(returning: [])
@@ -2872,12 +2839,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
             guard let response = try? ReadEndpointResponseMessage.decoded(
                     message.payload
                 ),
-                let pending = pendingReadEndpoints[response.requestID],
+                let pending = readURLDiscovery.pendingReadEndpoints[response.requestID],
                 pending.peer.key == peer.key,
                 pending.peer.sessionID == peer.sessionID,
                 pending.genesisCID == response.genesisCID
             else { return }
-            pendingReadEndpoints.removeValue(forKey: response.requestID)
+            readURLDiscovery.pendingReadEndpoints.removeValue(forKey: response.requestID)
             pending.timeout.cancel()
             pending.continuation.resume(returning: response.readURLs)
         case NodeNetworkTopic.blockAnnouncement:
@@ -4831,7 +4798,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         keys.formUnion(overlayRecords.keys)
         keys.formUnion(hierarchyRecords.keys)
         keys.formUnion(pendingTransactionInventories.values.map(\.peer.key))
-        keys.formUnion(pendingReadEndpoints.values.map(\.peer.key))
+        keys.formUnion(readURLDiscovery.pendingReadEndpoints.values.map(\.peer.key))
         if let sync = rangeSync.state { keys.insert(sync.peer.key) }
         keys.formUnion(pendingEvidenceIndexes.values.map(\.peer.key))
         keys.formUnion(pendingParentChainFacts.values.map(\.peer.key))
