@@ -1249,7 +1249,9 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
     func testOnceAnnouncedFutureBlockRetriesUntilAdmissible() async throws {
         let fixture = try await overlayRuntime(
             keyByte: 0xb1,
-            requestTimeout: .milliseconds(25)
+            // Short enough for the retry cadence, long enough that a stalled
+            // sanitizer run still delivers the hello inside the deadline.
+            requestTimeout: .milliseconds(250)
         )
         let service = networkService(
             process: fixture.process,

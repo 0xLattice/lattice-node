@@ -999,6 +999,19 @@ final class LatticeCtlE2ETests: XCTestCase {
             if isAlive(pid) { kill(pid, SIGKILL) }
         }
         try await waitFor("\(path) stopped", seconds: 30) { !self.isAlive(pid) }
+        // A SIGKILLed multithreaded node reads as a zombie ("Zl") once its
+        // main thread exits while its other threads can still hold the
+        // descriptor table, and with it the storage flock the next start
+        // takes (it would exit with storageInUse). Wait for the lock too.
+        let lock = host.root.appendingPathComponent("chains")
+            .appendingPathComponent(path)
+            .appendingPathComponent(".lattice-node.lock")
+        try await waitFor("\(path) released its storage", seconds: 30) {
+            let descriptor = open(lock.path, O_RDWR)
+            guard descriptor >= 0 else { return true }
+            defer { close(descriptor) }
+            return flock(descriptor, LOCK_EX | LOCK_NB) == 0
+        }
         try? FileManager.default.removeItem(at: pidFile)
     }
 
