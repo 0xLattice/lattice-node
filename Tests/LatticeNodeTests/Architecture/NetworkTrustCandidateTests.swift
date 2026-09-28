@@ -3344,7 +3344,12 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             )
             step = "admit B1 through B4"
             let all = cids + [try BlockHeader(node: b4).rawCID]
-            try await eventually("B1 through B4 are admitted") {
+            // Recovery is serial: B1, then B4 parks on B3, and each evicted
+            // block is asked of the parent in turn (one getdata each, each
+            // answered at once). Traced, this step is ~3 s plain and ~16 s
+            // under ASan + UBSan locally — work, not a timer — and a CI
+            // sanitizer runner is ~2x slower again.
+            try await eventually("B1 through B4 are admitted", within: .seconds(60)) {
                 var admitted = true
                 for cid in all where await !fixture.childProcess.hasAcceptedBlock(cid) {
                     admitted = false
