@@ -3240,9 +3240,13 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             let b3Ordinal = try XCTUnwrap(b3Issued).summary.ordinal
             // The live hints got here first; a scan re-reads them once the
             // fetcher's own attempts are gone, and its cursor passes them.
+            // A scan skips a block the fetcher holds on the parent's word
+            // without moving its cursor, and a hint or the named carried
+            // evidence queued before a drop can land after it and hold B3
+            // again: each round starts with the attempts gone.
             step = "the scan cursor passes B2 and B3"
-            await fixture.childRuntime.dropFetcherAttemptsForTesting()
             try await eventually("the scan cursor passes B2 and B3") {
+                await fixture.childRuntime.dropFetcherAttemptsForTesting()
                 await fixture.childRuntime.requestEvidenceIndexForTesting()
                 let cursor = try await fixture.childProcess.store.parentEvidenceScanCursor()
                 return cursor.ordinal >= b3Ordinal
