@@ -1956,26 +1956,19 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         return await level.chain.parentRunReport(at: carrier, directory: directory)
     }
 
-    /// A child block the branch carries, and the parent block (the
-    /// carrier) that commits it.
-    struct CarriedChildBlock: Sendable, Equatable {
-        let carrierCID: String
-        let childCID: String
-    }
-
     /// Per directory, the child block the branch through `tipCID` last
-    /// committed into it, with its committer: the nearest committer's
-    /// commitment, read from the durable block facts, so it follows the
-    /// branch under a reorg. Only directories this chain serves runs for
-    /// are answered; the rest are absent, never "none".
+    /// committed into it: the nearest committer's commitment, read from
+    /// the durable block facts, so it follows the branch under a reorg.
+    /// Only directories this chain serves runs for are answered; the rest
+    /// are absent, never "none".
     func carriedChildBlocks(
         on tipCID: String,
         directories: [String]
-    ) async -> [String: CarriedChildBlock] {
+    ) async -> [String: String] {
         guard case .active(let level) = runtimePhase, !directories.isEmpty,
               await level.chain.getConsensusBlock(hash: tipCID) != nil
         else { return [:] }
-        var carried: [String: CarriedChildBlock] = [:]
+        var carried: [String: String] = [:]
         var carriers: [String: BlockMeta?] = [:]
         for directory in directories {
             guard let carrier = await level.chain.nearestCarrier(
@@ -1985,48 +1978,10 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 carriers[carrier] = await level.chain.getConsensusBlock(hash: carrier)
             }
             if let child = carriers[carrier]??.childCommitments?[directory] {
-                carried[directory] = CarriedChildBlock(
-                    carrierCID: carrier, childCID: child
-                )
+                carried[directory] = child
             }
         }
         return carried
-    }
-
-    /// Makes sure the route (carrier, directory) is owed a child proof
-    /// unless its proof is already prepared or published here, and answers
-    /// whether it is owed now. An admission records the routes of the
-    /// directories it was told to prepare, but not every path that makes a
-    /// carrier the validated tip does (the validate walk prepares none),
-    /// so the child-proof recovery iteration a tip context waits on
-    /// records the route of the carried block first.
-    func ensurePendingChildProofRoute(
-        carrierCID: String,
-        directory: String
-    ) async throws -> Bool {
-        let directories = try validatedDirectChildDirectories([directory])
-        try await acquireMutationOperation()
-        defer { releaseOperation() }
-        try Task.checkCancellation()
-        let route = PendingChildProofRoute(
-            carrierCID: carrierCID, directory: directory
-        )
-        if try await store.pendingChildProofRoutes().contains(route) {
-            return true
-        }
-        let prepared = try await store.preparedChildProofs(carrierCID: carrierCID)
-        let published = try await store.publishedDirectChildProofs(
-            carrierCID: carrierCID
-        )
-        guard !(prepared + published).contains(where: {
-            $0.directory == directory
-        }) else { return false }
-        try await store.persistPendingChildProofRoutes(
-            carrierCID: carrierCID,
-            directories: directories,
-            capacity: Self.preparedChildProofCapacity
-        )
-        return try await store.pendingChildProofRoutes().contains(route)
     }
 
     /// The committing parent blocks of the blocks this chain ACCEPTED with a

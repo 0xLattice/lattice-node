@@ -51,14 +51,6 @@ configured parent's evidence names one of those candidates carried, its row
 becomes a handoff: newer offers no longer evict it, a separate handoff budget
 bounds it, and the carried block's import takes over its roots.
 
-While the parent's tip context names a carried child block that this chain has
-not imported, the child holds its candidate offers, since a candidate built
-then would only be that block's sibling. The hold ends when the block is
-imported, when an import of the parent's evidence for it decides against it, or
-when an evidence scan round sent for it ends without it while no parent-backed
-attempt for it is pending. Only the configured parent's state can keep the
-hold; nothing an overlay peer announces or relays does.
-
 ## Content boundary
 
 Ivy and VolumeBroker form the IPFS-like boundary for Lattice:
