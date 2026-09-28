@@ -700,6 +700,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
         ///     Hierarchy.recoverParentEvidence /
         ///     Lifecycle.clearRuntimeState.
         var refetchedOrphans: Set<ParentEvidenceOrphans.Key> = []
+        /// The parent session whose hello last released the orphan pool:
+        /// a refetch cut short by its predecessor's end finds that hello
+        /// already past (`refetchReleasedOrphans`).
+        /// Owner: Hierarchy.parentEvidenceRetryTrigger /
+        ///     Lifecycle.clearRuntimeState.
+        var parentHelloReleaseSession: Data?
         /// Owner: Hierarchy.scheduleParentTipPush / Hierarchy.runParentTipPushes /
         ///     Lifecycle.clearRuntimeState.
         var parentTipPushDirty = false

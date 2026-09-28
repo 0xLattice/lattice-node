@@ -2984,6 +2984,65 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         }
     }
 
+    /// The mirror of a blip: the refetch is held on the old session until
+    /// the reconnect's hello has released the pool (which found these
+    /// orphans out of it), then fails on the ended session. The orphans are
+    /// fetched from the new session at once, with no further hello or
+    /// acceptance. Before, they went back to the pool with their own
+    /// retries (a predecessor already accepted) and waited for a hello that
+    /// had already come.
+    func testARefetchCutShortAfterTheReconnectsHelloFetchesFromTheNewSession() async throws {
+        let fixture = try await provisionalRootFixture(keyByte: 0xf4)
+        let scenario = try await orphanScenario(late: 2, withheld: 0, fixture: fixture)
+        let lateCID = scenario.lateHeader.rawCID
+        func tries(_ cid: String) async -> Int {
+            await scenario.admissions.snapshot().filter { $0 == cid }.count
+        }
+        func stopAll() async {
+            await fixture.childRuntime.freeEvidenceLaneForTesting()
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+        }
+        do {
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess, chain: inertNetworkHandlers()
+            )
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess, chain: scenario.handlers
+            )
+            try await eventually("both entries are orphans") {
+                await self.orphaned(fixture) == scenario.behindLate
+            }
+            try await acceptLateBlock(scenario, fixture: fixture)
+            await fixture.childRuntime.dropFetcherAttemptsForTesting()
+            // The refetch waits for an evidence slot on the old session.
+            await fixture.childRuntime.fillEvidenceLaneForTesting()
+            await fixture.childRuntime.triggerParentEvidenceRetryForTesting(accepted: lateCID)
+            try await eventually("the refetch holds the released orphans") {
+                await self.orphaned(fixture).isEmpty
+            }
+            let blipped = await fixture.childRuntime.parentSessionIDForTesting()
+            await fixture.childRuntime.recycleParentSessionForTesting()
+            try await eventually("the reconnect's hello has released the pool") {
+                await fixture.childRuntime.parentHelloReleasedForTesting(after: blipped)
+            }
+            for cid in scenario.behindLate {
+                let before = await tries(cid)
+                XCTAssertEqual(before, 1, "not fetched again yet")
+            }
+            // The held refetch resumes on the ended session.
+            await fixture.childRuntime.freeEvidenceLaneForTesting()
+            try await eventually("the new session fetches them") {
+                for cid in scenario.behindLate where await tries(cid) < 2 { return false }
+                return true
+            }
+            await stopAll()
+        } catch {
+            await stopAll()
+            throw error
+        }
+    }
+
     /// More released orphans than the inbox has room for: the refetch
     /// stops at the full inbox and resumes as room frees. The room each
     /// refetched orphan's decision frees resumes exactly the orphans the
@@ -4830,6 +4889,17 @@ extension NodeNetworkRuntime {
     fileprivate func requestEvidenceIndexForTesting() async {
         guard let process else { return }
         await requestEvidenceIndex(generation: runtimeGeneration, process: process)
+    }
+
+    fileprivate func parentSessionIDForTesting() -> Data? {
+        configuredParentPeer()?.sessionID
+    }
+
+    /// A parent session other than `blipped` said hello and released the
+    /// orphan pool.
+    fileprivate func parentHelloReleasedForTesting(after blipped: Data?) -> Bool {
+        guard let current = configuredParentPeer()?.sessionID else { return false }
+        return current != blipped && hierarchyState.parentHelloReleaseSession == current
     }
 
     fileprivate func recycleParentSessionForTesting() async {

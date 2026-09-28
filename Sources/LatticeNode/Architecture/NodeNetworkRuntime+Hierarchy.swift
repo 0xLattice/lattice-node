@@ -1520,6 +1520,9 @@ extension NodeNetworkRuntime {
               let parent = configuredParentPeer() else { return }
         let now = ParentEvidenceOrphans.clock()
         let atHello = acceptedCID == nil
+        if atHello {
+            hierarchyState.parentHelloReleaseSession = parent.sessionID
+        }
         var held: Set<String> = []
         for orphan in hierarchyState.parentEvidenceOrphans.entries.values
         where fetcherHasParentAttempt(orphan.summary.childCID) {
@@ -1578,7 +1581,9 @@ extension NodeNetworkRuntime {
     /// a request cut short by its session ending can report the parent
     /// unable to serve before this runtime learns the session ended, and
     /// then only that hello follows. Its session ending puts it
-    /// and the rest back with their own retries, for the reconnect's hello;
+    /// and the rest back for the reconnect's hello (or the request timeout),
+    /// or, when that hello has already released the pool, fetches them from
+    /// the new session at once;
     /// a full inbox puts the rest back and waits for the capacity callback,
     /// which resumes exactly those. Only a malformed answer drops an
     /// orphan. An orphan is marked refetched only once its import is
@@ -1625,18 +1630,37 @@ extension NodeNetworkRuntime {
                 }
                 return
             case .unavailable where !sessionCurrent, .failed where !sessionCurrent:
-                repool(Array(released[index...]))
+                let rest = Array(released[index...])
+                // The session that could not serve them ended. A newer one
+                // whose hello already released the pool, while these were
+                // out of it, owes them that release: fetched from it now.
+                // Otherwise the hello to come releases them, or the
+                // request timeout does.
+                if let current = configuredParentPeer(),
+                   current.sessionID != parent.sessionID,
+                   hierarchyState.parentHelloReleaseSession == current.sessionID {
+                    await refetchReleasedOrphans(
+                        rest, from: current, generation: generation, process: process
+                    )
+                } else {
+                    repool(rest, retry: unservedRetry())
+                }
                 return
             case .unavailable:
-                let timeout = planeConfigurations.hierarchy.requestTimeout
-                repool([orphan], retry: .unservedUntil(
-                    ParentEvidenceOrphans.clock()
-                        + Int64(timeout / .milliseconds(1))
-                ))
+                repool([orphan], retry: unservedRetry())
             case .failed:
                 continue
             }
         }
+    }
+
+    /// An orphan the parent did not serve: the next hello or, failing one,
+    /// the request timeout.
+    private func unservedRetry() -> ParentEvidenceOrphans.Retry {
+        let timeout = planeConfigurations.hierarchy.requestTimeout
+        return .unservedUntil(
+            ParentEvidenceOrphans.clock() + Int64(timeout / .milliseconds(1))
+        )
     }
 
     /// `retry` nil keeps each orphan's own.

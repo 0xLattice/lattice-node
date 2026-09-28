@@ -145,7 +145,8 @@ cross-component invariants:
   in-memory orphan, so descendants of a withheld block or far-future blocks
   cannot fill it; a trigger (an accepted block, a parent hello) fetches
   exactly the orphans it releases, each once, leaving pooled those the
-  fetcher still holds; a session blip mid-refetch keeps them; the pool
+  fetcher still holds; a session blip mid-refetch keeps them, fetched
+  from the new session at once if its hello came first; the pool
   evicts at random and empties with a restart; a lone child recovers
   evidence it lost by asking its parent for it by CID; a full inbox costs
   no fetch; a policy decline is consumed
@@ -156,6 +157,7 @@ cross-component invariants:
   `testFutureStampedDescendantsCannotFillTheInbox`,
   `testATriggerFetchesExactlyTheOrphansItReleases`,
   `testASessionBlipDuringARefetchKeepsTheOrphans`,
+  `testARefetchCutShortAfterTheReconnectsHelloFetchesFromTheNewSession`,
   `testALoneChildRecoversLostParentEvidenceByAskingItsParent`,
   `testALoneChildRecoversEvictedParentEvidenceByAskingItsParent`,
   `testAFullOrphanPoolEvictsAtRandom`,
