@@ -247,9 +247,9 @@ then goes out naming the block if the evidence was issued, and on the new
 tip without naming it otherwise: a parent below the root whose carrier has
 no root yet cannot issue the evidence, and its route stays owed, so it waits
 that one iteration and then sends the context unnamed. When the proof is
-already prepared or published with no route owed, nothing this node can do
-now issues the evidence, and the context goes out without naming the block
-at once. Either way a parent that cannot issue the evidence never stalls the
+already prepared (built, waiting on a root to compose it) with no route
+owed, nothing this node can do now issues the evidence, and the context goes
+out without naming the block at once. Either way a parent that cannot issue the evidence never stalls the
 child's offers.
 A reorg re-reads what the new tip carries at once. The context topic is
 `lattice.hierarchy.parent-tip.available.v2`; `v1` carried a bare name

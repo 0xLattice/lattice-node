@@ -2174,34 +2174,44 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             await fixture.childRuntime.stop()
             await fixture.parentRuntime.stop()
         }
+        // Named in a failure: which step threw, and the error in full.
+        var step = "set up"
         do {
+            step = "start the parent"
             try await fixture.parentRuntime.start(
                 process: fixture.parentProcess,
                 chain: inertNetworkHandlers()
             )
+            step = "start the child"
             try await fixture.childRuntime.start(
                 process: fixture.childProcess,
                 chain: recordingChildHandlers(fixture, builds: builds, admits: true)
             )
+            step = "the first held candidate"
             let first = try await firstHeldCandidate(fixture)
             let firstCID = try BlockHeader(node: first.block).rawCID
             let buildsBeforeCarry = await builds.snapshot().count
             await fixture.childRuntime.fillEvidenceLaneForTesting()
 
+            step = "store the carrier"
             let carrier = try await storeCarrier(
                 of: first, fixture: fixture, withEvidence: true
             )
+            step = "admit the carrier"
             try await admitCarrier(
                 carrier, service: parentService, fixture: fixture, withEvidence: true
             )
+            step = "the context names the block"
             try await eventually("the context names the carried block") {
                 await fixture.childRuntime.debugSnapshot().receivedCarriedChildCID
                     == firstCID
             }
+            step = "the named evidence is seeded"
             try await eventually("the named evidence is seeded despite the full lane") {
                 await fixture.childRuntime.debugCarriedHold()
                     .evidenceInFlight[firstCID] != nil
             }
+            step = "the hold holds"
             try await alwaysDuring("the hold holds while the lane is full", .seconds(1)) {
                 await fixture.childRuntime.debugCarriedHold().released != firstCID
             }
@@ -2209,9 +2219,11 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             XCTAssertFalse(accepted, "the lane was full: nothing recovered yet")
 
             await fixture.childRuntime.freeEvidenceLaneForTesting()
+            step = "the block is admitted"
             try await eventually("the carried block is admitted once the lane frees") {
                 await fixture.childProcess.hasAcceptedBlock(firstCID)
             }
+            step = "the child builds on it"
             try await eventually("the child builds on the carried block") {
                 await builds.snapshot().dropFirst(buildsBeforeCarry).contains("2")
             }
@@ -2224,6 +2236,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             XCTAssertNotEqual(released, firstCID, "the hold was never released")
             await stopAll()
         } catch {
+            XCTFail("threw at step '\(step)': \(String(reflecting: error))")
             await stopAll()
             throw error
         }
@@ -2661,6 +2674,193 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             )
             await stopAll()
         } catch {
+            await stopAll()
+            throw error
+        }
+    }
+
+    /// Two carried directories, their carrier below the tip (so no
+    /// recovery iteration seeds its route as the tip's), and a recovery
+    /// iteration that runs while the tip context is still reading the
+    /// second directory, after it queued the first one's route. The route
+    /// is recorded by that iteration even though the context naming it is
+    /// not stored yet, and once the proof is buildable the block is named.
+    /// Before, the iteration dropped every queued route its not-yet-stored
+    /// context did not carry, the wait ended with it, and the block was
+    /// never named.
+    func testARouteQueuedBeforeItsContextIsStoredIsRecorded() async throws {
+        let fixture = try await provisionalRootFixture(keyByte: 0xfa)
+        let builds = NetworkEventRecorder()
+        let recorder = ParentTipRecordingDelegate(forwardingTo: fixture.childRuntime)
+        let passes = Latch()
+        // A second wired child directory: a Receipts node of its own.
+        let receiptsStorage = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lattice-receipts-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: receiptsStorage) }
+        let receiptsConfiguration = try NodeConfiguration(
+            chainPath: ["Nexus", "Receipts"],
+            storagePath: receiptsStorage,
+            privateKeyHex: String(repeating: "c9", count: 32),
+            listenPort: NetworkTransportTestPorts.allocate(),
+            factListenPort: NetworkTransportTestPorts.allocate(),
+            rpcPort: NetworkTransportTestPorts.allocate(),
+            parentEndpoint: ParentEndpoint(
+                publicKey: fixture.parentProcess.configuration.processPublicKey,
+                host: "127.0.0.1",
+                port: fixture.parentProcess.configuration.factListenPort
+            )
+        )
+        let receiptsProcess = try await ChainProcess.open(configuration: receiptsConfiguration)
+        let receipts = try NodeNetworkRuntime(configuration: receiptsConfiguration)
+        func stopAll() async {
+            await passes.open()
+            await receipts.stop()
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+        }
+        // Named in a failure: which step threw, and the error in full.
+        var step = "set up"
+        do {
+            step = "start the parent"
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess,
+                chain: inertNetworkHandlers()
+            )
+            // No recovery iteration runs until the naming read lets one.
+            await fixture.parentRuntime.setChildProofRecoveryIterationForTesting {
+                await passes.wait()
+            }
+            step = "start the child"
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess,
+                chain: recordingChildHandlers(fixture, builds: builds, admits: false)
+            )
+            await fixture.childRuntime.hierarchy.installTestDelegate(recorder)
+            step = "the first held candidate"
+            let first = try await firstHeldCandidate(fixture)
+            let firstCID = try BlockHeader(node: first.block).rawCID
+            step = "start the second child"
+            try await receipts.start(
+                process: receiptsProcess, chain: inertNetworkHandlers()
+            )
+            step = "wire both directories"
+            try await eventually("both directories are wired") {
+                let wired = await fixture.parentRuntime.wiredChildDirectories()
+                step = "wire both directories (wired: \(wired.sorted()))"
+                return wired == ["Payments", "Receipts"]
+            }
+
+            // The carrier commits into both; the tip is one block above it.
+            step = "build and admit the carrier and the tip"
+            let parentTip = try await fixture.parentProcess.validatedTipBlock()
+            let fetcher = CoalescingFetcher(CompositeContentSource([
+                fixture.parentProcess, fixture.childProcess,
+            ]))
+            // The carrier also records the Receipts chain's genesis, so the
+            // parent serves that directory too.
+            let receiptsAnchor = try signedGenesisAnchorTransaction(
+                directory: "Receipts",
+                childGenesisCID: testCID("receipts-genesis")
+            )
+            try await VolumeImpl<Transaction>(node: receiptsAnchor).storeRecursively(
+                storer: fixture.parentProcess
+            )
+            let carrier = try await BlockBuilder.buildBlock(
+                previous: parentTip,
+                transactions: [receiptsAnchor],
+                children: [
+                    "Payments": first.block,
+                    "Receipts": fixture.candidate.block,
+                ],
+                timestamp: parentTip.timestamp + 1_000,
+                nonce: 7,
+                fetcher: fetcher
+            )
+            let carrierHeader = try BlockHeader(node: carrier)
+            try await carrierHeader.storeBlock(
+                fetcher: fetcher, storer: fixture.parentProcess
+            )
+            await fixture.parentProcess.serveRuns(for: "Payments")
+            let carried = try await fixture.parentProcess.importBlock(carrierHeader)
+            XCTAssertTrue(carried.decision.isAccepted, "\(carried.decision)")
+            let unmined = try await BlockBuilder.buildBlock(
+                previous: carrier,
+                timestamp: carrier.timestamp + 1_000,
+                nonce: 0,
+                fetcher: fixture.parentProcess
+            )
+            let tip = try XCTUnwrap(BlockBuilder.mine(
+                block: unmined, target: carrier.nextTarget
+            ))
+            let tipCID = try BlockHeader(node: tip).rawCID
+            let above = try await fixture.parentProcess.importBlock(
+                try BlockHeader(node: tip)
+            )
+            XCTAssertTrue(above.decision.isAccepted, "\(above.decision)")
+            await fixture.parentProcess.serveRuns(for: "Receipts")
+            // Receipts' proof is prepared, not owed: nothing the parent does
+            // for it touches the carrier's routes, so only a recorded
+            // Payments route can ever issue Payments' evidence.
+            let receiptsCID = try BlockHeader(node: fixture.candidate.block).rawCID
+            try await fixture.parentProcess.store.persistPreparedChildProofs(
+                carrierCID: carrierHeader.rawCID,
+                proofs: [try PreparedChildProof(
+                    directory: "Receipts",
+                    childCID: receiptsCID,
+                    isChildGenesis: false,
+                    proof: try await ChildBlockProof.generate(
+                        rootHeader: carrierHeader,
+                        childDirectory: "Receipts",
+                        fetcher: fetcher
+                    )
+                )],
+                capacity: 16
+            )
+
+            // Reading the second directory, the first one's route queued:
+            // one recovery iteration runs to completion.
+            let parentRuntime = fixture.parentRuntime
+            let fired = DecisionSwitch()
+            await parentRuntime.setCarriedNamingWillReadForTesting { childCID in
+                guard childCID == receiptsCID, !(await fired.isOn) else { return }
+                await fired.turnOn()
+                let before = await parentRuntime.debugParentTipNaming().recoveryIterations
+                await passes.open()
+                for _ in 0..<500 {
+                    if await parentRuntime.debugParentTipNaming().recoveryIterations > before {
+                        break
+                    }
+                    try? await Task.sleep(for: .milliseconds(10))
+                }
+            }
+            step = "push the tip context"
+            await parentRuntime.chainStateChanged()
+            try await eventually("the tip's context reaches the child") {
+                !recorder.contexts(forTip: tipCID).isEmpty
+            }
+            let firedAtAll = await fired.isOn
+            XCTAssertTrue(firedAtAll, "an iteration ran between the directory reads")
+            step = "read the owed routes"
+            let owed = try await fixture.parentProcess.store.pendingChildProofRoutes()
+            XCTAssertTrue(
+                owed.contains(PendingChildProofRoute(
+                    carrierCID: carrierHeader.rawCID, directory: "Payments"
+                )),
+                "the route queued before its context was stored was recorded: \(owed)"
+            )
+
+            // The proof becomes buildable: the recorded route issues it.
+            step = "prepare the proof and name the block"
+            _ = try await fixture.parentProcess.prepareChildProofs(
+                for: carrier, children: [first], capacity: 16
+            )
+            await scheduleChildProofRecovery(fixture)
+            try await eventually("the context names the carried block") {
+                recorder.contexts(forTip: tipCID).last?.carried == firstCID
+            }
+            await stopAll()
+        } catch {
+            XCTFail("threw at step '\(step)': \(String(reflecting: error))")
             await stopAll()
             throw error
         }

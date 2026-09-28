@@ -51,6 +51,8 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
         "Append.predecessor": "a value handed to the appending task, not a stored handle",
         "Reservation.evidenceTail": "a value handed to the reserving task, not a stored handle",
         "Tail.task": "held with its lifetime token; finish compares the token",
+        "EvidenceSlotWaiter.timeout":
+            "cancelled when its waiter wakes; a fire only wakes the waiter with its own id",
         "ChainService.canonicalCommitWorker":
             "the service never restarts; shutdown joins the worker",
         "ChainService.executionWalkWorker":

@@ -201,7 +201,7 @@ extension NodeNetworkRuntime {
             evidenceWaits: naming.waits,
             directories: directories
         )
-        hierarchyState.parentTipContext = context
+        storeParentTipContext(context)
         SyncTrace.log("parent tip context \(context.sequence): h=\(tip.height) tip=\(tipCID.prefix(12)) carried=\(carried.keys.sorted()) named=\(naming.named.keys.sorted()) heldBack=\(naming.heldBack.sorted())")
     }
 
@@ -214,11 +214,10 @@ extension NodeNetworkRuntime {
     /// admission record none) and issues the evidence if this node can.
     /// When that iteration has run (a parent below the root without a root
     /// for its carrier keeps the route owed and ends here), or when the
-    /// route is not owed (the proof is prepared or published but its
-    /// evidence is not issued), the context goes out without naming the
-    /// block, so a parent that cannot issue the evidence never stalls the
-    /// child. Nothing here takes the
-    /// process's mutation gate: the push serves every child.
+    /// route is not owed (the proof is prepared, its evidence not issued),
+    /// the context goes out without naming the block, so a parent that
+    /// cannot issue the evidence never stalls the child. Nothing here takes
+    /// the process's mutation gate: the push serves every child.
     private struct CarriedNaming: Equatable {
         var named: [String: CarriedChildEvidence] = [:]
         var heldBack: Set<String> = []
@@ -351,8 +350,18 @@ extension NodeNetworkRuntime {
             evidenceWaits: naming.waits,
             directories: current.directories
         )
-        hierarchyState.parentTipContext = context
+        storeParentTipContext(context)
         SyncTrace.log("parent tip context \(context.sequence): same tip=\(current.tipCID.prefix(12)) named=\(naming.named.keys.sorted()) heldBack=\(naming.heldBack.sorted())")
+    }
+
+    /// The context stands from here: a route queued for a block it no
+    /// longer carries (a reorg since it was queued) is dropped now, and
+    /// every route it does carry stays queued for the next recovery
+    /// iteration, which records them all.
+    private func storeParentTipContext(_ context: ParentTipContext) {
+        hierarchyState.parentTipContext = context
+        hierarchyState.carriedRoutesToRecord = hierarchyState.carriedRoutesToRecord
+            .filter { context.carried[$0.key] == $0.value }
     }
 
     /// Seam for this plane: evidence may have been issued, or a recovery
@@ -832,6 +841,8 @@ extension NodeNetworkRuntime {
                 // A full inbox would refuse the evidence after its fetch:
                 // it waits for room (a named block's as pending, a scan
                 // page on its retry) without costing the parent a fetch.
+                // A refused scan resumes on the capacity callback
+                // (`parentEvidenceCapacityBecameAvailable`, then a new round).
                 if result == .handled,
                    (try? await process.store.parentEvidenceInboxHasCapacity()) == false {
                     result = .backpressured
@@ -2236,10 +2247,10 @@ extension NodeNetworkRuntime {
             // below then works them like any owed route.
             let routes = hierarchyState.carriedRoutesToRecord
             hierarchyState.carriedRoutesToRecord = [:]
-            // Only a block the context still carries: after a reorg a side
-            // carrier's route would stay owed for good.
-            for (directory, block) in routes.sorted(by: { $0.key < $1.key })
-            where hierarchyState.parentTipContext?.carried[directory] == block {
+            // Pruned against each context as it is stored, not here: the
+            // naming that queued a route may still be reading the next
+            // directory, its context not stored yet.
+            for (directory, block) in routes.sorted(by: { $0.key < $1.key }) {
                 _ = try? await process.ensurePendingChildProofRoute(
                     carrierCID: block.carrierCID, directory: directory
                 )

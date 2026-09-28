@@ -689,8 +689,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// Per child directory, the carried block whose route the tip
         /// context needs recorded; the next recovery iteration records it.
         /// At most one per directory.
-        /// Owner: Hierarchy.carriedNaming / Hierarchy.recoverChildProofs /
-        ///     Lifecycle.clearRuntimeState.
+        /// Owner: Hierarchy.carriedNaming / Hierarchy.storeParentTipContext /
+        ///     Hierarchy.recoverChildProofs / Lifecycle.clearRuntimeState.
         var carriedRoutesToRecord: [String: ChainProcess.CarriedChildBlock] = [:]
         /// Pushes held back behind a carried block's evidence, for tests.
         /// Owner: Hierarchy.runParentTipPushes.
@@ -811,10 +811,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// Evidence recoveries waiting for an evidence Volume slot: each is
     /// woken when a slot is released, or by its own timeout (which also
     /// re-checks that its session still stands).
-    /// Owner: NodeNetworkRuntime.releaseEvidenceVolume /
+    /// Owner: NodeNetworkRuntime.wakeEvidenceSlotWaiters /
     ///     NodeNetworkRuntime.waitForEvidenceVolumeSlot /
-    ///     NodeNetworkRuntime.wakeEvidenceSlotWaiter / Lifecycle.clearRuntimeState.
-    var evidenceSlotWaiters: [UInt64: CheckedContinuation<Void, Never>] = [:]
+    ///     NodeNetworkRuntime.wakeEvidenceSlotWaiter (teardown through
+    ///     wakeEvidenceSlotWaiters).
+    var evidenceSlotWaiters: [UInt64: EvidenceSlotWaiter] = [:]
     /// Owner: NodeNetworkRuntime.waitForEvidenceVolumeSlot.
     var nextEvidenceSlotWaiter: UInt64 = 0
     /// Orders parent evidence and reservation transfer within one authenticated
@@ -863,8 +864,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// count at which the wait is over: one iteration that started after
     /// it began has done what this node can for the evidence (a parent
     /// below the root without a root for the carrier keeps the route owed
-    /// and ends here). Nil when no route is owed (the proof is prepared or
-    /// published but its evidence is not issued), so nothing is waited for.
+    /// and ends here). Nil when no route is owed (the proof is prepared,
+    /// its evidence not issued), so nothing is waited for.
     struct CarriedEvidenceWait: Equatable {
         let block: ChainProcess.CarriedChildBlock
         let untilIteration: UInt64?
@@ -907,32 +908,62 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ///     Candidates.markOfferDeferred / Lifecycle.clearRuntimeState.
     var candidateOfferDeferredByAdmission = false
 
+    /// A recovery waiting for an evidence Volume slot, and the timer that
+    /// ends its wait if no slot is released first.
+    struct EvidenceSlotWaiter {
+        let continuation: CheckedContinuation<Void, Never>
+        let timeout: Task<Void, Never>
+
+        func wake() {
+            timeout.cancel()
+            continuation.resume()
+        }
+    }
+
     /// Releases an evidence Volume slot and wakes every recovery waiting
     /// for one: the first to run takes it, the rest wait again.
     func releaseEvidenceVolume(_ lease: EvidenceVolumeLease) {
         sessionLeases.activeEvidenceVolumes.remove(lease)
-        let waiters = evidenceSlotWaiters.values
-        evidenceSlotWaiters.removeAll()
-        for waiter in waiters { waiter.resume() }
+        wakeEvidenceSlotWaiters()
     }
 
-    /// Suspends until an evidence Volume slot is released, or `timeout`.
+    /// Wakes every waiter, cancelling its timer. Also teardown's.
+    func wakeEvidenceSlotWaiters() {
+        let waiters = evidenceSlotWaiters.values
+        evidenceSlotWaiters.removeAll()
+        for waiter in waiters { waiter.wake() }
+    }
+
+    /// Suspends until an evidence Volume slot is released, `timeout`
+    /// passes, or the waiting task is cancelled (its session ended).
     func waitForEvidenceVolumeSlot(
         timeout: Duration,
         generation: UInt64
     ) async {
         nextEvidenceSlotWaiter &+= 1
         let id = nextEvidenceSlotWaiter
-        await withCheckedContinuation { continuation in
-            evidenceSlotWaiters[id] = continuation
-            Timers.deadline(after: timeout, generation: generation) { [weak self] _ in
-                await self?.wakeEvidenceSlotWaiter(id)
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else {
+                    continuation.resume()
+                    return
+                }
+                evidenceSlotWaiters[id] = EvidenceSlotWaiter(
+                    continuation: continuation,
+                    timeout: Timers.deadline(
+                        after: timeout, generation: generation
+                    ) { [weak self] _ in
+                        await self?.wakeEvidenceSlotWaiter(id)
+                    }
+                )
             }
+        } onCancel: {
+            Task { [weak self] in await self?.wakeEvidenceSlotWaiter(id) }
         }
     }
 
     private func wakeEvidenceSlotWaiter(_ id: UInt64) {
-        evidenceSlotWaiters.removeValue(forKey: id)?.resume()
+        evidenceSlotWaiters.removeValue(forKey: id)?.wake()
     }
 
     /// Callback work may outlive a stop/start boundary. Keep its captured
