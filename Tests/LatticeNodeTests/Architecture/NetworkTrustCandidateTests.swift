@@ -261,6 +261,54 @@ private struct EvidenceRefusingContentSource: IvyContentSource {
     }
 }
 
+/// Counts the parent's serves of the attachment Volume of the evidence it
+/// issued for `childCID`, and stalls the serve of `stalledRoot` until
+/// `release` opens (then answers nothing: content unavailable).
+private actor EvidenceServeProbe {
+    private(set) var carriedChild: String?
+    private(set) var serves = 0
+    private(set) var stalledRoot: String?
+    let release = Latch()
+
+    func watch(_ childCID: String) { carriedChild = childCID }
+    func stall(_ rootCID: String) { stalledRoot = rootCID }
+    func served() { serves += 1 }
+}
+
+private struct ProbedContentSource: IvyContentSource {
+    let parent: ChainProcess
+    let probe: EvidenceServeProbe
+
+    private var inner: ChainProcessIvyContentSource {
+        ChainProcessIvyContentSource(process: parent)
+    }
+
+    func content(rootCID: String, cids: [String], maxDataBytes: Int) async -> [ContentEntry] {
+        await inner.content(rootCID: rootCID, cids: cids, maxDataBytes: maxDataBytes)
+    }
+
+    func volume(rootCID: String, maxDataBytes: Int) async -> [ContentEntry] {
+        if await probe.stalledRoot == rootCID {
+            await probe.release.wait()
+            return []
+        }
+        if let child = await probe.carriedChild,
+           let issued = try? await parent.store.issuedChildEvidenceSummary(
+               childCID: child, directory: "Payments"
+           ),
+           issued.summary.attachmentCID == rootCID {
+            await probe.served()
+        }
+        return await inner.volume(rootCID: rootCID, maxDataBytes: maxDataBytes)
+    }
+}
+
+/// On until switched off; a recovery-iteration hook reads it.
+private actor RearmSwitch {
+    private(set) var isOn = true
+    func turnOff() { isOn = false }
+}
+
 /// A one-way switch a test flips and an admission closure reads.
 private actor DecisionSwitch {
     private(set) var isOn = false
@@ -1861,7 +1909,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
 
     /// The parent admits a carrier while the child block's content is
     /// withheld (the proof cannot be built): its push to the child waits
-    /// for the recovery pass, then goes out on the carrier's tip without
+    /// for a recovery iteration, then goes out on the carrier's tip without
     /// naming the block. Once the content is there (the proof prepared)
     /// and a pass issues the evidence, the next context names the block.
     /// Before #200 the context named the block at once.
@@ -1908,7 +1956,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             let naming = await fixture.parentRuntime.debugParentTipNaming()
             XCTAssertGreaterThan(
                 naming.heldBackCount, heldBefore,
-                "the push waited for the recovery pass first"
+                "the push waited for a recovery iteration first"
             )
             XCTAssertEqual(naming.named, [:])
             XCTAssertEqual(naming.heldBack, [], "the pass ended: nothing waits")
@@ -1988,7 +2036,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
     /// A parent that cannot issue the carried block's evidence (its child
     /// content never arrives; for a parent below the root, the root that
     /// would secure the proof never arrives) does not wedge the child: once
-    /// its recovery pass has done what it can, its context goes out without
+    /// a recovery iteration has done what it can, its context goes out without
     /// naming the block, and the child offers on it.
     func testAParentThatCannotIssueTheEvidenceDoesNotWedgeTheChild() async throws {
         let fixture = try await provisionalRootFixture(keyByte: 0xd2)
@@ -2181,8 +2229,367 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         }
     }
 
+    /// The child's parent-evidence inbox is full (one parked entry fills a
+    /// one-entry inbox) when the parent names its carried block. The named
+    /// evidence waits for room without fetching: the parent serves its
+    /// attachment at most once (the hint's own fetch) while the inbox stays
+    /// full, the hold holds, and once an import frees the inbox the block is
+    /// admitted. Before, every inbox refusal re-seeded the evidence at once:
+    /// a fetch loop against the parent for as long as the inbox stayed full.
+    func testAFullInboxHoldsTheNamedEvidenceWithoutAFetchLoop() async throws {
+        let fixture = try await provisionalRootFixture(
+            keyByte: 0xe6, childInboxCapacity: 1
+        )
+        let parentService = networkService(
+            process: fixture.parentProcess,
+            runtime: fixture.parentRuntime
+        )
+        let probe = EvidenceServeProbe()
+        let builds = NetworkEventRecorder()
+        // The filler: a parent-evidence entry for another block, parked in
+        // the inbox (its admission waits), which fills it.
+        let filler = try await fabricatedEvidence(for: fixture.candidate, fixture: fixture)
+        try await fixture.childProcess.store.storeParentEvidenceInbox(
+            sourceID: testEvidenceSourceID,
+            ordinal: 1_000,
+            attachment: filler.attachment,
+            package: filler.package,
+            advanceScan: false
+        )
+        let childService = networkService(
+            process: fixture.childProcess,
+            runtime: fixture.childRuntime
+        )
+        let childHandlers = ClosureChainInterface(
+            childCandidateBuilder: { context, parentSource in
+                let built = try await childService.miningCandidate(
+                    for: context,
+                    parentContentSource: parentSource
+                )
+                await builds.append("\(built.block.height)")
+                return built
+            },
+            admission: { admission in
+                if admission.header.rawCID == filler.childCID {
+                    return NodeImportOutcome(
+                        decision: .unavailable(nil),
+                        parentCarrierLink: nil,
+                        sameChainPredecessor: nil
+                    )
+                }
+                return try await childService.importNetworkCandidate(
+                    admission.header,
+                    authenticatedChildPackage: admission.authenticatedChildPackage,
+                    preparingChildDirectories: admission.preparingChildDirectories,
+                    contentSource: admission.contentSource,
+                    weighed: admission.weighed
+                )
+            }
+        )
+        func stopAll() async {
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+        }
+        do {
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess,
+                chain: inertNetworkHandlers()
+            )
+            await fixture.parentRuntime.hierarchy.setContentSource(
+                ProbedContentSource(parent: fixture.parentProcess, probe: probe)
+            )
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess,
+                chain: childHandlers
+            )
+            let first = try await firstHeldCandidate(fixture)
+            let firstCID = try BlockHeader(node: first.block).rawCID
+            let buildsBeforeCarry = await builds.snapshot().count
+            let full = try await fixture.childProcess.store.parentEvidenceInboxHasCapacity()
+            XCTAssertFalse(full, "the filler fills the inbox")
+            await probe.watch(firstCID)
+
+            let carrier = try await storeCarrier(
+                of: first, fixture: fixture, withEvidence: true
+            )
+            try await admitCarrier(
+                carrier, service: parentService, fixture: fixture, withEvidence: true
+            )
+            try await eventually("the named evidence waits for inbox room") {
+                await fixture.childRuntime.debugCarriedHold().namedEvidenceWaiting
+                    == firstCID
+            }
+            try await alwaysDuring("the hold holds while the inbox is full", .seconds(2)) {
+                await fixture.childRuntime.debugCarriedHold().released != firstCID
+            }
+            let servedWhileFull = await probe.serves
+            XCTAssertLessThanOrEqual(
+                servedWhileFull, 1,
+                "the full inbox cost the parent \(servedWhileFull) fetches"
+            )
+
+            // An import consumes the filler: room, and a state change.
+            try await fixture.childProcess.store.consumeParentEvidence(
+                childCID: filler.childCID, rootCID: filler.package.package.proof.rootCID
+            )
+            await fixture.childRuntime.chainStateChanged()
+            try await eventually("the carried block is admitted once the inbox has room") {
+                await fixture.childProcess.hasAcceptedBlock(firstCID)
+            }
+            try await eventually("the child builds on the carried block") {
+                await builds.snapshot().dropFirst(buildsBeforeCarry).contains("2")
+            }
+            let afterCarry = Array(await builds.snapshot().dropFirst(buildsBeforeCarry))
+            XCTAssertFalse(afterCarry.contains("1"), "a sibling was built: \(afterCarry)")
+            await stopAll()
+        } catch {
+            await stopAll()
+            throw error
+        }
+    }
+
+    /// A parent-evidence entry for `candidate` under a made-up root: a
+    /// Nexus genesis that commits to it (a proof that verifies on its own
+    /// terms, no parent block).
+    private func fabricatedEvidence(
+        for candidate: DirectChildCandidate,
+        fixture: ProvisionalRootFixture
+    ) async throws -> (
+        childCID: String,
+        attachment: ChildEvidenceVolume,
+        package: AuthenticatedChildPackage
+    ) {
+        let content = InMemoryContentStore()
+        let fetcher = CoalescingFetcher(CompositeContentSource([
+            content, fixture.parentProcess, fixture.childProcess,
+        ]))
+        let root = try await BlockBuilder.buildGenesis(
+            spec: NexusGenesis.spec,
+            children: ["Payments": candidate.block],
+            timestamp: 5,
+            target: UInt256.max,
+            fetcher: fetcher
+        )
+        let proof = try await ChildBlockProof.generate(
+            rootHeader: try BlockHeader(node: root),
+            childDirectory: "Payments",
+            fetcher: fetcher
+        )
+        let childCID = try BlockHeader(node: candidate.block).rawCID
+        let package = ChildValidationPackage(proof: proof)
+        let attachment = try ChildEvidenceVolume(
+            envelopeBytes: try ChildValidationPackageEnvelope(package).encode(),
+            childCID: childCID
+        )
+        return (childCID, attachment, AuthenticatedChildPackage(package: package))
+    }
+
+    /// The parent's recovery pass never ends (every iteration re-arms it,
+    /// as a stream of imports or overlay hellos does) while the carried
+    /// block's evidence cannot be issued (its content withheld): the push
+    /// waits for one iteration, then the carrier's context goes out without
+    /// naming the block. Before, the wait ended only when a pass ended, so
+    /// the directory got no context at all for as long as passes were
+    /// re-armed.
+    func testAReArmedRecoveryPassEndsTheWaitAfterOneIteration() async throws {
+        let fixture = try await provisionalRootFixture(keyByte: 0xea)
+        let parentService = networkService(
+            process: fixture.parentProcess,
+            runtime: fixture.parentRuntime
+        )
+        let builds = NetworkEventRecorder()
+        let recorder = ParentTipRecordingDelegate(forwardingTo: fixture.childRuntime)
+        let rearm = RearmSwitch()
+        func stopAll() async {
+            await rearm.turnOff()
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+        }
+        do {
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess,
+                chain: inertNetworkHandlers()
+            )
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess,
+                chain: recordingChildHandlers(fixture, builds: builds, admits: false)
+            )
+            await fixture.childRuntime.hierarchy.installTestDelegate(recorder)
+            let first = try await firstHeldCandidate(fixture)
+            let parentRuntime = fixture.parentRuntime
+            await parentRuntime.setChildProofRecoveryIterationForTesting { [weak parentRuntime] in
+                guard await rearm.isOn else { return }
+                await parentRuntime?.rearmChildProofRecoveryForTesting()
+                try? await Task.sleep(for: .milliseconds(20))
+            }
+            await parentRuntime.rearmChildProofRecoveryForTesting()
+            let carrier = try await storeCarrierBlock(
+                of: first, fixture: fixture, withEvidence: false
+            )
+            let carrierCID = try BlockHeader(node: carrier).rawCID
+            let heldBefore = await parentRuntime.debugParentTipNaming().heldBackCount
+            try await admitCarrierThroughService(
+                carrier, service: parentService, fixture: fixture
+            )
+            try await eventually("the carrier's context reaches the child", within: .seconds(10)) {
+                !recorder.contexts(forTip: carrierCID).isEmpty
+            }
+            XCTAssertEqual(recorder.contexts(forTip: carrierCID).map(\.carried), [nil])
+            let heldAfter = await parentRuntime.debugParentTipNaming().heldBackCount
+            XCTAssertGreaterThan(heldAfter, heldBefore, "the push waited first")
+            let stillRearming = await rearm.isOn
+            XCTAssertTrue(stillRearming, "sent while the pass kept iterating")
+            await stopAll()
+        } catch {
+            await stopAll()
+            throw error
+        }
+    }
+
+    /// The carried block's proof is prepared but its route is not owed
+    /// (the state of a parent below the root whose carrier has no root yet:
+    /// the proof is ready, the evidence cannot be issued, and no work here
+    /// would change that). The context goes out on the carrier's tip at
+    /// once, without naming the block and without holding the push back.
+    func testACarriedBlockWhoseRouteIsNotOwedIsSentUnnamedAtOnce() async throws {
+        let fixture = try await provisionalRootFixture(keyByte: 0xee)
+        let builds = NetworkEventRecorder()
+        let recorder = ParentTipRecordingDelegate(forwardingTo: fixture.childRuntime)
+        func stopAll() async {
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+        }
+        do {
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess,
+                chain: inertNetworkHandlers()
+            )
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess,
+                chain: recordingChildHandlers(fixture, builds: builds, admits: false)
+            )
+            await fixture.childRuntime.hierarchy.installTestDelegate(recorder)
+            let first = try await firstHeldCandidate(fixture)
+            let carrier = try await storeCarrierBlock(
+                of: first, fixture: fixture, withEvidence: false
+            )
+            let carrierCID = try BlockHeader(node: carrier).rawCID
+            // Admitted with no directory to prepare: no route recorded.
+            await fixture.parentProcess.serveRuns(for: "Payments")
+            let admitted = try await fixture.parentProcess.importBlock(
+                try BlockHeader(node: carrier)
+            )
+            XCTAssertTrue(admitted.decision.isAccepted, "\(admitted.decision)")
+            // The proof is prepared afterwards: ready, not promoted, not owed.
+            _ = try await fixture.parentProcess.prepareChildProofs(
+                for: carrier, children: [first], capacity: 16
+            )
+            let owed = try await fixture.parentProcess.pendingChildProofCarrierCIDs()
+            XCTAssertFalse(owed.contains(carrierCID), "no route owed")
+            let heldBefore = await fixture.parentRuntime.debugParentTipNaming().heldBackCount
+            await fixture.parentRuntime.chainStateChanged()
+            try await eventually("the carrier's context reaches the child") {
+                !recorder.contexts(forTip: carrierCID).isEmpty
+            }
+            XCTAssertEqual(recorder.contexts(forTip: carrierCID).map(\.carried), [nil])
+            let heldAfter = await fixture.parentRuntime.debugParentTipNaming().heldBackCount
+            XCTAssertEqual(heldAfter, heldBefore, "nothing owed: no push held back")
+            await stopAll()
+        } catch {
+            await stopAll()
+            throw error
+        }
+    }
+
+    /// The parent's hint for the carried block is queued behind an earlier
+    /// hint whose attachment turns out unavailable, so the hint's append
+    /// ends without trying the block. The context naming the block arrived
+    /// while that append was in flight: its evidence is seeded on its own
+    /// (the reserved slot inherits no earlier append's failure), so the
+    /// hold holds until the block is tried, and it is admitted. Before, the
+    /// context skipped the seed for evidence already in flight, and the
+    /// hold was released when that append settled.
+    func testANamedBlockBehindAnUnavailableHintIsStillTried() async throws {
+        let fixture = try await provisionalRootFixture(keyByte: 0xf2)
+        let parentService = networkService(
+            process: fixture.parentProcess,
+            runtime: fixture.parentRuntime
+        )
+        let probe = EvidenceServeProbe()
+        let builds = NetworkEventRecorder()
+        func stopAll() async {
+            await probe.release.open()
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+        }
+        do {
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess,
+                chain: inertNetworkHandlers()
+            )
+            await fixture.parentRuntime.hierarchy.setContentSource(
+                ProbedContentSource(parent: fixture.parentProcess, probe: probe)
+            )
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess,
+                chain: recordingChildHandlers(fixture, builds: builds, admits: true)
+            )
+            let first = try await firstHeldCandidate(fixture)
+            let firstCID = try BlockHeader(node: first.block).rawCID
+            let buildsBeforeCarry = await builds.snapshot().count
+
+            // An earlier hint whose attachment stalls, then is unavailable.
+            let stalledChild = testCID("stalled-hint-child")
+            let stalledAttachment = testCID("stalled-hint-attachment")
+            await probe.stall(stalledAttachment)
+            let hint = try ChildEvidenceAvailableMessage(
+                childPath: fixture.childConfiguration.chainPath,
+                sourceID: testEvidenceSourceID,
+                ordinal: 9_999,
+                childCID: stalledChild,
+                rootCID: testCID("stalled-hint-root"),
+                attachmentCID: stalledAttachment
+            ).encoded()
+            _ = await fixture.parentRuntime.hierarchy.sendMessage(
+                to: PeerID(publicKey: fixture.childConfiguration.processPublicKey),
+                topic: NodeNetworkTopic.childEvidenceAvailable,
+                payload: hint
+            )
+            try await eventually("the earlier hint's recovery stalls") {
+                await fixture.childRuntime.debugCarriedHold()
+                    .evidenceInFlight[stalledChild] != nil
+            }
+
+            let carrier = try await storeCarrier(
+                of: first, fixture: fixture, withEvidence: true
+            )
+            try await admitCarrier(
+                carrier, service: parentService, fixture: fixture, withEvidence: true
+            )
+            try await eventually("the context names the carried block") {
+                await fixture.childRuntime.debugSnapshot().receivedCarriedChildCID
+                    == firstCID
+            }
+            await probe.release.open()
+            try await eventually("the carried block is admitted") {
+                await fixture.childProcess.hasAcceptedBlock(firstCID)
+            }
+            let released = await fixture.childRuntime.debugCarriedHold().released
+            XCTAssertNotEqual(released, firstCID, "the hold was never released")
+            try await eventually("the child builds on the carried block") {
+                await builds.snapshot().dropFirst(buildsBeforeCarry).contains("2")
+            }
+            let afterCarry = Array(await builds.snapshot().dropFirst(buildsBeforeCarry))
+            XCTAssertFalse(afterCarry.contains("1"), "a sibling was built: \(afterCarry)")
+            await stopAll()
+        } catch {
+            await stopAll()
+            throw error
+        }
+    }
+
     /// The parent restarts with a carried block's route still owed: after
-    /// the child reconnects, the push waits for the recovery pass, and the
+    /// the child reconnects, the push waits for a recovery iteration, and the
     /// first context the child gets on that tip names the block, with its
     /// evidence issued. Without the wait it would go out unnamed.
     func testAfterARestartThePushWaitsForTheRecoveryPass() async throws {
@@ -2259,9 +2666,9 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
     }
 
     /// The parent reorgs off the carrier while the child's push is held
-    /// back behind the carried block's evidence (the recovery pass kept
+    /// back behind the carried block's evidence (the recovery iteration kept
     /// running): the new tip carries nothing into the child, so its
-    /// context goes out at once, without waiting for the pass.
+    /// context goes out at once, without waiting for the iteration.
     func testAReorgWhileThePushIsHeldBackSendsTheNewTip() async throws {
         let fixture = try await provisionalRootFixture(keyByte: 0xda)
         let parentService = networkService(
@@ -2301,7 +2708,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             try await eventually("the push is held back behind the evidence") {
                 await fixture.parentRuntime.debugParentTipNaming().heldBack == ["Payments"]
             }
-            let passesBefore = await fixture.parentRuntime.debugParentTipNaming().recoveryEnds
+            let passesBefore = await fixture.parentRuntime.debugParentTipNaming().recoveryIterations
 
             // A heavier branch on the carrier's parent, carrying nothing.
             var tip = base
@@ -2331,8 +2738,8 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 recorder.contexts(forTip: carrierCID), [],
                 "the held-back context never went out"
             )
-            let passesAfter = await fixture.parentRuntime.debugParentTipNaming().recoveryEnds
-            XCTAssertEqual(passesAfter, passesBefore, "sent before the pass ended")
+            let passesAfter = await fixture.parentRuntime.debugParentTipNaming().recoveryIterations
+            XCTAssertEqual(passesAfter, passesBefore, "sent before a recovery iteration completed")
             await stopAll()
         } catch {
             await stopAll()
@@ -2816,7 +3223,8 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
     }
 
     private func provisionalRootFixture(
-        keyByte: UInt8
+        keyByte: UInt8,
+        childInboxCapacity: Int = 64
     ) async throws -> ProvisionalRootFixture {
         let parentStorage = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-provisional-parent-\(UUID().uuidString)",
@@ -2855,6 +3263,9 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 publicKey: parentConfiguration.processPublicKey,
                 host: "127.0.0.1",
                 port: parentConfiguration.factListenPort
+            ),
+            resourcePolicy: NodeResourcePolicy(
+                maximumPendingParentEvidence: childInboxCapacity
             )
         )
         let parentRuntime = try NodeNetworkRuntime(configuration: parentConfiguration)
@@ -2964,5 +3375,12 @@ extension NodeNetworkRuntime {
     fileprivate func freeEvidenceLaneForTesting() {
         sessionLeases.activeEvidenceVolumes = sessionLeases.activeEvidenceVolumes
             .filter { !$0.attachmentCID.hasPrefix("lane-filler-") }
+    }
+
+    /// Arms another child-proof recovery pass, as an import or an overlay
+    /// hello does.
+    fileprivate func rearmChildProofRecoveryForTesting() {
+        guard let process else { return }
+        scheduleChildProofRecovery(generation: runtimeGeneration, process: process)
     }
 }

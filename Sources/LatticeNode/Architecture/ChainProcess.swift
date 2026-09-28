@@ -1949,8 +1949,8 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// whether it is owed now. An admission records the routes of the
     /// directories it was told to prepare, but not every path that makes a
     /// carrier the validated tip does (the validate walk prepares none),
-    /// so the tip context records the route of a carried block it names
-    /// before it decides to wait for that block's evidence.
+    /// so the child-proof recovery iteration a tip context waits on
+    /// records the route of the carried block first.
     func ensurePendingChildProofRoute(
         carrierCID: String,
         directory: String

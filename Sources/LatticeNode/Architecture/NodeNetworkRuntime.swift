@@ -680,9 +680,18 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// Owner: Hierarchy.carriedEvidenceMayHaveChanged /
         ///     Hierarchy.refreshParentTipContext / Lifecycle.clearRuntimeState.
         var carriedEvidenceDirty = false
-        /// Child-proof recovery passes ended this generation.
+        /// Child-proof recovery iterations completed this generation.
         /// Owner: Hierarchy.recoverChildProofs / Lifecycle.clearRuntimeState.
-        var childProofRecoveryEnds: UInt64 = 0
+        var childProofRecoveryIterations: UInt64 = 0
+        /// A recovery iteration is running (started, not completed).
+        /// Owner: Hierarchy.recoverChildProofs / Lifecycle.clearRuntimeState.
+        var childProofRecoveryIterating = false
+        /// Per child directory, the carried block whose route the tip
+        /// context needs recorded; the next recovery iteration records it.
+        /// At most one per directory.
+        /// Owner: Hierarchy.carriedNaming / Hierarchy.recoverChildProofs /
+        ///     Lifecycle.clearRuntimeState.
+        var carriedRoutesToRecord: [String: ChainProcess.CarriedChildBlock] = [:]
         /// Pushes held back behind a carried block's evidence, for tests.
         /// Owner: Hierarchy.runParentTipPushes.
         var parentTipHeldBackCount = 0
@@ -827,8 +836,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// without it is not named.
         let named: [String: CarriedChildEvidence]
         /// Directories whose push waits for the carried block's evidence:
-        /// not issued yet, its route owed, and no child-proof recovery
-        /// pass has ended since the wait began.
+        /// not issued yet, and no child-proof recovery iteration that
+        /// started after the wait began has completed.
         let heldBack: Set<String>
         /// Per child directory, the wait on the carried block's evidence.
         let evidenceWaits: [String: CarriedEvidenceWait]
@@ -839,15 +848,17 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// Per child directory, the child block the branch carries.
         var carriedChildren: [String: String] { carried.mapValues(\.childCID) }
     }
-    /// A wait on a carried block's evidence, per directory. `recoveryEnds`
-    /// is the child-proof recovery pass count when the wait began: the
-    /// first pass to end after it has done what this node can for the
-    /// evidence, so the wait is over. Nil when no route is owed (the proof
-    /// is published without evidence: a parent without the root yet), so
-    /// nothing is waited for.
+    /// A wait on a carried block's evidence, per directory, keyed by the
+    /// block and its carrier (a reorg that keeps the block under another
+    /// carrier waits again). `untilIteration` is the recovery iteration
+    /// count at which the wait is over: one iteration that started after
+    /// it began has done what this node can for the evidence (a parent
+    /// below the root without a root for the carrier keeps the route owed
+    /// and ends here). Nil when no route is owed (the proof is prepared or
+    /// published but its evidence is not issued), so nothing is waited for.
     struct CarriedEvidenceWait: Equatable {
-        let childCID: String
-        let recoveryEnds: UInt64?
+        let block: ChainProcess.CarriedChildBlock
+        let untilIteration: UInt64?
     }
     /// The latest candidate each child peer pushed for this chain's tip. A
     /// template reads it; nothing is requested at template time.
@@ -863,13 +874,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let sessionID: Data
         let sequence: UInt64
     }
-    /// The parent's context as last received (this chain being the child),
-    /// bound to the session it came on: a new session restarts sequences.
     /// Named evidence from the parent session `peer`, not yet seeded.
     struct PendingNamedEvidence {
         let peer: AuthenticatedPeer
         let evidence: CarriedChildEvidence
     }
+    /// The parent's context as last received (this chain being the child),
+    /// bound to the session it came on: a new session restarts sequences.
     struct ReceivedParentTipContext {
         let sequence: UInt64
         let peer: AuthenticatedPeer
@@ -1470,7 +1481,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let named: [String: String]
         let heldBack: Set<String>
         let heldBackCount: Int
-        let recoveryEnds: UInt64
+        let recoveryIterations: UInt64
     }
 
     func debugParentTipNaming() -> ParentTipNamingSnapshot {
@@ -1480,7 +1491,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             named: context?.named.mapValues(\.childCID) ?? [:],
             heldBack: context?.heldBack ?? [],
             heldBackCount: hierarchyState.parentTipHeldBackCount,
-            recoveryEnds: hierarchyState.childProofRecoveryEnds
+            recoveryIterations: hierarchyState.childProofRecoveryIterations
         )
     }
 

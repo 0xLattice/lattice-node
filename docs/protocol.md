@@ -238,13 +238,19 @@ latency. The parent names that block only once it has durably indexed the
 evidence for it, and the name travels with the evidence summary (child
 block, index source and ordinal, root, attachment), so the claim and the
 pointer to its proof arrive as one unit. While the evidence is not yet
-indexed, the push to that directory waits as long as the evidence is still
-coming: its proof route is owed (the push records the route itself if the
-path that made the carrier its tip did not) and no child-proof recovery pass
-has ended since the wait began. Once a pass has ended without the evidence,
-or when no route is owed (a parent below the root that has no root for its
-carrier yet), the context goes out on the new tip without naming the block,
-so a parent that cannot issue the evidence never stalls the child's offers.
+indexed, the push to that directory waits for one child-proof recovery
+iteration: the first to start after the wait began. That iteration records
+the block's proof route if the path that made the carrier the tip did not,
+and issues the evidence if this node can; however often the recovery pass
+is re-armed, the wait ends when that one iteration completes. The context
+then goes out naming the block if the evidence was issued, and on the new
+tip without naming it otherwise: a parent below the root whose carrier has
+no root yet cannot issue the evidence, and its route stays owed, so it waits
+that one iteration and then sends the context unnamed. When the proof is
+already prepared or published with no route owed, nothing this node does
+would issue the evidence, and the context goes out without naming the block
+at once. Either way a parent that cannot issue the evidence never stalls the
+child's offers.
 A reorg re-reads what the new tip carries at once. The context topic is
 `lattice.hierarchy.parent-tip.available.v2`; `v1` carried a bare name
 without its evidence. This is a hierarchy-plane flag day, not a consensus
@@ -260,11 +266,13 @@ so that offer still fits; carried again it would only be credited once
 more). Nothing is requested at
 template time and no child can stall parent consensus. A child builds no
 candidate while the block its parent's context names as carried is not yet
-imported here: it recovers the named evidence at once, as it does a pushed
-evidence hint, verifying it from content (the summary is only a pointer; a
-forged one fails verification), and waits while that evidence is being
-recovered or an attempt the parent's evidence seeded for the block is still
-pending. A decision against that block, or the parent's evidence for it
+imported here: it recovers the named evidence at once through a slot of
+its evidence lane reserved for it, verifying it from content (the summary is
+only a pointer; a forged one fails verification), and waits while that
+evidence waits for the slot or for room in its evidence inbox, is being
+recovered, or seeded an attempt for the block that is still pending. A full
+inbox holds the named evidence without fetching it until an import makes
+room. A decision against that block, or the parent's evidence for it
 coming to nothing with no such attempt left, releases the hold, so no offer
 waits on a block that will never land. Only the authenticated parent's
 evidence can keep the hold; nothing an overlay peer announces or relays can.

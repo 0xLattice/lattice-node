@@ -265,7 +265,9 @@ extension NodeNetworkRuntime {
         hierarchyState.parentTipPushTask.cancel()
         hierarchyState.parentTipPushDirty = false
         hierarchyState.carriedEvidenceDirty = false
-        hierarchyState.childProofRecoveryEnds = 0
+        hierarchyState.childProofRecoveryIterations = 0
+        hierarchyState.childProofRecoveryIterating = false
+        hierarchyState.carriedRoutesToRecord = [:]
         hierarchyState.descendantRewards = []
         hierarchyState.descendantMinimumWork = []
         hierarchyState.receivedParentTip = nil

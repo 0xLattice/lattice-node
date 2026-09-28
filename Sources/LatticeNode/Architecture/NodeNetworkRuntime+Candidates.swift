@@ -615,7 +615,13 @@ extension NodeNetworkRuntime {
             resolution: resolution,
             deficientProviders: failedOverlayProviders
         )
-        if outcome.decision.isAccepted, authenticatedPackage != nil,
+        // A decided block consumed its inbox entry, accepted or not: room
+        // for evidence that waited on it.
+        let decided: Bool = switch resolution {
+        case .connected, .terminal: true
+        case .wait, .predecessor: false
+        }
+        if decided, authenticatedPackage != nil,
            (try? await process.store.parentEvidenceInboxHasCapacity()) == true {
             parentEvidenceCapacityBecameAvailable()
             await requestEvidenceIndex(
