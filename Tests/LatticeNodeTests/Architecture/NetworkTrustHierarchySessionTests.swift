@@ -620,10 +620,13 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         }
         let orphanAdmission = try await stagingProcess!.importBlock(orphanHeader)
         let descendantAdmission = try await stagingProcess!.importBlock(descendantHeader)
+        // O validates against its height-1 parent P, in hand. D's anchor is
+        // P too, but P is not in the graph and nothing is walked, so D parks
+        // on its predecessor rather than being admitted ahead of it.
         guard case .acceptedSide = orphanAdmission.decision,
-              case .acceptedSide = descendantAdmission.decision
+              case .unavailable = descendantAdmission.decision
         else {
-            return XCTFail("expected accepted orphan suffix")
+            return XCTFail("expected accepted orphan and parked descendant")
         }
         XCTAssertEqual(
             orphanAdmission.sameChainPredecessor,
@@ -668,20 +671,16 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         )
         let recoveredRequirements = await recoveredProcess
             .unresolvedSameChainPredecessors()
+        // Only the admitted orphan is durable; the parked descendant returns
+        // when a peer announces it again.
         XCTAssertEqual(
             recoveredRequirements,
             [
                 SameChainPredecessorRequirement(
-                    descendantCID: descendantHeader.rawCID,
-                    predecessorCID: orphanHeader.rawCID
-                ),
-                SameChainPredecessorRequirement(
                     descendantCID: orphanHeader.rawCID,
                     predecessorCID: predecessorHeader.rawCID
                 ),
-            ].sorted {
-                $0.descendantCID < $1.descendantCID
-            }
+            ]
         )
 
         let handlers = ClosureChainInterface(admission: { admission in

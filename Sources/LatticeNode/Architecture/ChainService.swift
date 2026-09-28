@@ -1082,11 +1082,15 @@ public actor ChainService {
         // state change that touched none of them (a transaction the pool
         // would not select, a walk step that moved nothing here) rebuilds
         // nothing. Every input a candidate is a function of is in this key.
+        // Policies may read the block timestamp, which follows the carrier's,
+        // so with policies the carrier timestamp selects transactions too.
+        let spec = try await chainSpec(for: try await process.validatedTipBlock())
         let inputs = await templateDigestLocked()
             + "|" + parentCarrier.prevState.rawCID
             + "|" + rewards.map { $0.transaction.body.rawCID }.joined(separator: ",")
             + "|" + minimumWork.map { "\($0.chainPath.joined(separator: "/"))=\($0.work)" }
                 .joined(separator: ",")
+            + (spec.wasmPolicies.isEmpty ? "" : "|\(parentCarrier.timestamp)")
         if inputs == lastCandidateInputs, let candidate = lastCandidate {
             SyncTrace.log("child candidate unchanged h=\(candidate.block.height)")
             return candidate
@@ -1149,9 +1153,14 @@ public actor ChainService {
         let spec = try await chainSpec(for: previous)
         let rewardPlan = try await validatedRewardPlan(rewards)
         let minimumWorkPlan = try validatedMinimumWorkPlan(minimumWork)
+        let timestamp = try nextTimestamp(
+            after: previous.timestamp,
+            parentCarrier: parentCarrier
+        )
         let reward = try await validatedRewardTransaction(
             rewardPlan.current,
             previous: previous,
+            timestamp: timestamp,
             spec: spec
         )
         let maximumTransactions = Int(clamping: spec.maxNumberOfTransactionsPerBlock)
@@ -1159,11 +1168,7 @@ public actor ChainService {
         var largestFittingPoolLimit = -1
         var largestFittingTemplate: FittingMiningTemplate?
         var maximumPoolLimit = poolLimit
-        let timestamp = try nextTimestamp(
-            after: previous.timestamp,
-            parentCarrier: parentCarrier
-        )
-        let pooled: [Transaction]
+        let candidates: [Transaction]
         if let parentCarrier {
             var contextual: [Transaction] = []
             for transaction in await pool.contextualTransactions(limit: .max) {
@@ -1177,10 +1182,17 @@ public actor ChainService {
                     contextual.append(transaction)
                 }
             }
-            pooled = contextual
+            candidates = contextual
         } else {
-            pooled = await pool.transactions(limit: .max)
+            candidates = await pool.transactions(limit: .max)
         }
+        let pooled = await policyAcceptedTransactions(
+            candidates,
+            previous: previous,
+            timestamp: timestamp,
+            spec: spec,
+            fetcher: fetcher
+        )
         try await syncLiveMempoolRootsLocked(
             Set(await pool.snapshot().map(\.cid))
         )
@@ -2031,6 +2043,7 @@ public actor ChainService {
     private func validatedRewardTransaction(
         _ transaction: Transaction?,
         previous: Block,
+        timestamp: Int64,
         spec: ChainSpec
     ) async throws -> Transaction? {
         guard let transaction else { return nil }
@@ -2080,6 +2093,8 @@ public actor ChainService {
                   bodies: [body],
                   spec: spec,
                   chainPath: process.configuration.chainPath,
+                  height: height,
+                  timestamp: timestamp,
                   fetcher: process
               ) else {
             throw ChainServiceError.invalidRewardTransaction
@@ -2313,6 +2328,36 @@ public actor ChainService {
             transactions.append(transaction)
         }
         return transactions
+    }
+
+    /// Policies may read the carrying block's height and timestamp, which a
+    /// pool verdict (taken against the tip, at its own time) did not see. Offer
+    /// only transactions the policies accept for THIS template; a skipped one
+    /// stays pooled until it passes or a tip change evicts it.
+    private func policyAcceptedTransactions(
+        _ transactions: [Transaction],
+        previous: Block,
+        timestamp: Int64,
+        spec: ChainSpec,
+        fetcher: any Fetcher
+    ) async -> [Transaction] {
+        guard !spec.wasmPolicies.isEmpty else { return transactions }
+        let (height, overflow) = previous.height.addingReportingOverflow(1)
+        guard !overflow else { return [] }
+        var accepted: [Transaction] = []
+        for transaction in transactions {
+            guard let body = try? await transaction.body.resolve(fetcher: fetcher).node,
+                  (try? await TransactionBody.batchVerifyPolicies(
+                      bodies: [body],
+                      spec: spec,
+                      chainPath: process.configuration.chainPath,
+                      height: height,
+                      timestamp: timestamp,
+                      fetcher: fetcher
+                  )) == true else { continue }
+            accepted.append(transaction)
+        }
+        return accepted
     }
 
     private func nextTimestamp(

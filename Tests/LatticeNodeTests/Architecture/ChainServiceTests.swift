@@ -831,6 +831,65 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertEqual(status.mempoolCount, 0)
     }
 
+    func testTemplateOmitsTransactionItsPolicyRejectsAtTheBlockTimestamp() async throws {
+        // Transaction policy: accept iff the block timestamp (context offset
+        // 19) is at least 1_000_000 ms. Preflight projects `now`, so the
+        // transaction is pooled as ready; the child template is stamped from
+        // its carrier (~2 ms here), where the policy rejects it. The template
+        // must omit it rather than build an invalid block, and keep it pooled.
+        let module = try WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: XCTUnwrap(Data(hex:
+            "0061736d01000000010c0260017f017f60027f7f017f03030200010503010001073903066d656d6f727902000d6c6174746963655f616c6c6f6300001c6c6174746963655f76616c69646174655f7472616e73616374696f6e00010a370205004180080b2f02017f017e03402003420886200041136a20026a310000842103200241016a22024108490d000b200342c0843d590b"
+        ))))
+        let spec = ChainSpec(
+            maxNumberOfTransactionsPerBlock: 100,
+            maxStateGrowth: 100_000,
+            premine: 0,
+            targetBlockTime: 1_000,
+            initialReward: 1,
+            halvingInterval: 100,
+            halfLife: 10,
+            wasmPolicies: [WasmPolicyRef(moduleCID: module.rawCID, scope: .transaction)]
+        )
+        let fixture = try await activeChildService(spec: spec, policyModules: [module])
+        let key = CryptoUtils.generateKeyPair()
+        let body = TransactionBody(
+            accountActions: [],
+            actions: [Action(key: "release", oldValue: nil, newValue: "escrow")],
+            depositActions: [],
+            genesisActions: [],
+            receiptActions: [],
+            withdrawalActions: [],
+            signers: [CryptoUtils.createAddress(from: key.publicKey)],
+            fee: 0,
+            nonce: 0,
+            chainPath: ["Nexus", "Payments"]
+        )
+        let bodyHeader = try HeaderImpl(node: body)
+        let transaction = Transaction(
+            signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(
+                bodyHeader: bodyHeader,
+                privateKeyHex: key.privateKey
+            ))],
+            body: bodyHeader
+        )
+        let submission = try await fixture.service.submitTransaction(
+            SubmitTransactionRequest(transaction: transaction)
+        )
+        XCTAssertEqual(submission.mempoolCount, 1)
+
+        let candidate = try await fixture.service.miningCandidate(
+            for: ChildCandidateRequestContext(
+                parentCarrier: fixture.parentCarrier,
+                rewards: []
+            ),
+            parentContentSource: FetcherContentSource(fixture.parent)
+        )
+        XCTAssertLessThan(candidate.block.timestamp, 1_000_000)
+        XCTAssertEqual(candidate.block.transactions.node?.count, 0)
+        let status = await fixture.service.status()
+        XCTAssertEqual(status.mempoolCount, 1)
+    }
+
     func testTemplateUsesLogicalBlockVolumeSizeAtExactBoundary() async throws {
         let key = CryptoUtils.generateKeyPair()
         let body = TransactionBody(
@@ -3926,9 +3985,13 @@ final class ChainServiceTests: XCTestCase {
     private func activeChildService(
         spec: ChainSpec,
         carrierInterval: Int64 = 1,
-        carrierTarget: UInt256? = nil
+        carrierTarget: UInt256? = nil,
+        policyModules: [WasmPolicyModuleHeader] = []
     ) async throws -> ActiveChildServiceFixture {
         let parent = try await nexusProcess()
+        for module in policyModules {
+            try await module.storeRecursively(storer: parent)
+        }
         let parentGenesis = try await parent.canonicalTipBlock()
         let child = try await anchoredChildGenesis(
             parent: parent,
@@ -3952,6 +4015,9 @@ final class ChainServiceTests: XCTestCase {
                 port: 4002
             )
         ))
+        for module in policyModules {
+            try await module.storeRecursively(storer: process)
+        }
         let activated = try await process.activateSeededChildGenesis(
             seed: child.seed,
             confirmParentRecordedGenesis: { _ in true }
