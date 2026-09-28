@@ -2773,6 +2773,309 @@ final class ChainProcessTests: XCTestCase {
         }
     }
 
+    // MARK: - Storage ordering and ownership (NODE-STORAGE-002, NODE-MEMPOOL-001)
+
+    /// Each of two local submissions reaches its SQLite reference only
+    /// after its complete transaction Volume is stored: at the step between,
+    /// the Volume is there and the journal does not name it yet.
+    /// Establishes: NODE-MEMPOOL-001.c
+    func testLocalSubmissionStoresItsVolumeBeforeItsReference() async throws {
+        let directory = temporaryDirectory()
+        let config = try configuration(path: ["Nexus"], storage: directory)
+        let process = try await ChainProcess.open(configuration: config)
+        let broker = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let store = await process.store
+        let observed = NetworkEventRecorder()
+        await process.setLocalTransactionVolumeStoredForTesting { cid in
+            let volume = await broker.fetchVolumeLocal(root: cid)
+            let referenced: String
+            do {
+                referenced = String(try await store.localMempoolTransactions()
+                    .contains { $0.transactionCID == cid })
+            } catch {
+                referenced = "error: \(error)"
+            }
+            await observed.append(
+                "volume=\(volume != nil) referenced=\(referenced)"
+            )
+        }
+
+        var submitted: [String] = []
+        for (index, name) in ["FirstLocal", "SecondLocal"].enumerated() {
+            let transaction = try signedGenesisAnchorTransaction(
+                directory: name,
+                childGenesisCID: NexusGenesis.expectedBlockHash
+            )
+            submitted.append(try await process.persistLocalTransaction(
+                transaction,
+                addedAt: Int64(index + 1)
+            ))
+        }
+
+        let between = await observed.snapshot()
+        XCTAssertEqual(between, Array(
+            repeating: "volume=true referenced=false",
+            count: 2
+        ))
+        let journaled = try await process.localTransactions()
+        XCTAssertEqual(journaled.map(\.transactionCID), submitted)
+    }
+
+    /// A canonical block and a side block are each carried to admission as
+    /// handoffs; once admission releases each handoff, every root the
+    /// handoff pinned is still in the admission retention scope, live and
+    /// across a restart.
+    /// Establishes: NODE-STORAGE-002.q
+    func testAcceptedBlockRootsStayOwnedAfterItsHandoffIsReleased()
+        async throws {
+        let directory = temporaryDirectory()
+        let config = try configuration(path: ["Nexus"], storage: directory)
+        var process: ChainProcess? = try await ChainProcess.open(
+            configuration: config
+        )
+        let broker = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let genesis = try await process!.canonicalTipBlock()
+        let canonical = try await mineChild(
+            of: genesis, timestamp: 3_600_000, nonce: 1, on: process!
+        )
+        let canonicalCID = try BlockHeader(node: canonical).rawCID
+        var side = try await mineChild(
+            of: genesis, timestamp: 3_600_001, nonce: 2, on: process!
+        )
+        while forkChoicePrefersBlock(
+            try BlockHeader(node: side).rawCID, over: canonicalCID
+        ) {
+            side = try await mineChild(
+                of: genesis, timestamp: 3_600_001, nonce: side.nonce + 1, on: process!
+            )
+        }
+
+        for block in [canonical, side] {
+            let header = try BlockHeader(node: block)
+            try await process!.storeContextualCandidate(
+                header,
+                fetcher: process!,
+                capacity: 4
+            )
+            let marked = try await process!.store.markContextualCandidateHandoff(
+                candidateCID: header.rawCID
+            )
+            XCTAssertTrue(marked)
+        }
+        let handedOff = try await process!.store.contextualCandidateVolumeRoots()
+        XCTAssertTrue(handedOff.contains(canonicalCID))
+
+        guard case .canonicalized = try await process!.importBlock(
+            BlockHeader(node: canonical)
+        ).decision else {
+            return XCTFail("expected the canonical handoff to canonicalize")
+        }
+        guard case .acceptedSide = try await process!.importBlock(
+            BlockHeader(node: side)
+        ).decision else {
+            return XCTFail("expected the side handoff to be an accepted side block")
+        }
+        let released = try await process!.store.contextualCandidateVolumeRoots()
+        XCTAssertTrue(released.isEmpty, "admission did not release the handoffs")
+
+        let scope = [config.nexusGenesisCID, config.address.key]
+            .joined(separator: ":")
+        let retained = Set(try await broker.retainedRoots(scope: scope))
+        XCTAssertEqual(
+            Set(handedOff).subtracting(retained),
+            [],
+            "a released handoff's root lost its admission retention"
+        )
+
+        // Boot rebuilds retention from the admission log alone.
+        process = nil
+        process = try await ChainProcess.open(configuration: config)
+        let rebuilt = Set(try await broker.retainedRoots(scope: scope))
+        XCTAssertEqual(
+            Set(handedOff).subtracting(rebuilt),
+            [],
+            "restart: a released handoff's root lost its admission retention"
+        )
+        _ = process
+    }
+
+    /// A side block, and a block a reorg moves off the main chain, keep the
+    /// retention their admission took, live and across a restart.
+    /// Establishes: NODE-STORAGE-002.n
+    func testCanonicityNeverChangesAdmissionRetention() async throws {
+        let directory = temporaryDirectory()
+        let config = try configuration(path: ["Nexus"], storage: directory)
+        var process: ChainProcess? = try await ChainProcess.open(
+            configuration: config
+        )
+        let broker = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let genesis = try await process!.canonicalTipBlock()
+        let a = try await mineChild(
+            of: genesis, timestamp: 3_600_000, nonce: 1, on: process!
+        )
+        let aCID = try BlockHeader(node: a).rawCID
+        guard case .canonicalized = try await process!.importBlock(
+            BlockHeader(node: a)
+        ).decision else {
+            return XCTFail("expected A to canonicalize on genesis")
+        }
+        var b = try await mineChild(
+            of: genesis, timestamp: 3_600_001, nonce: 2, on: process!
+        )
+        while forkChoicePrefersBlock(try BlockHeader(node: b).rawCID, over: aCID) {
+            b = try await mineChild(
+                of: genesis, timestamp: 3_600_001, nonce: b.nonce + 1, on: process!
+            )
+        }
+        let bCID = try BlockHeader(node: b).rawCID
+        guard case .acceptedSide = try await process!.importBlock(
+            BlockHeader(node: b)
+        ).decision else {
+            return XCTFail("expected B to be an accepted side block")
+        }
+        let c = try await mineChild(
+            of: b, timestamp: 7_200_000, nonce: 3, on: process!
+        )
+        let cCID = try BlockHeader(node: c).rawCID
+        guard case .canonicalized = try await process!.importBlock(
+            BlockHeader(node: c)
+        ).decision else {
+            return XCTFail("expected B -> C to reorg the main chain off A")
+        }
+        let tip = await process!.status().tipCID
+        XCTAssertEqual(tip, cCID)
+
+        let scope = [config.nexusGenesisCID, config.address.key]
+            .joined(separator: ":")
+        let live = Set(try await broker.retainedRoots(scope: scope))
+        for (name, cid) in [("A", aCID), ("B", bCID), ("C", cCID)] {
+            XCTAssertTrue(
+                live.contains(cid),
+                "live: \(name) lost its admission retention"
+            )
+        }
+
+        process = nil
+        process = try await ChainProcess.open(configuration: config)
+        let rebuilt = Set(try await broker.retainedRoots(scope: scope))
+        for (name, cid) in [("A", aCID), ("B", bCID), ("C", cCID)] {
+            XCTAssertTrue(
+                rebuilt.contains(cid),
+                "restart: \(name) lost its admission retention"
+            )
+        }
+        _ = process
+    }
+
+    /// Every template that carries an offer again touches it: of two
+    /// offers, the one carried again outlives the other, twice over.
+    /// Establishes: NODE-STORAGE-002.u
+    func testCarryingAnOfferAgainTouchesItEachTime() async throws {
+        let directory = temporaryDirectory()
+        let config = try configuration(path: ["Nexus"], storage: directory)
+        let process = try await ChainProcess.open(configuration: config)
+        let genesis = try await process.canonicalTipBlock()
+        var offers: [BlockHeader] = []
+        for index in 0..<4 {
+            let block = try await mineChild(
+                of: genesis,
+                timestamp: 3_600_000 + Int64(index),
+                nonce: UInt64(index + 1),
+                on: process
+            )
+            offers.append(try BlockHeader(node: block))
+        }
+        func offer(_ header: BlockHeader) async throws {
+            try await process.storeContextualCandidate(
+                header,
+                fetcher: process,
+                capacity: 2
+            )
+        }
+        func offered() async throws -> Set<String> {
+            let roots = try await process.store.contextualCandidateVolumeRoots()
+            return Set(offers.map(\.rawCID)).intersection(roots)
+        }
+
+        try await offer(offers[0])
+        try await offer(offers[1])
+        try await offer(offers[0])
+        try await offer(offers[2])
+        let afterFirstCarry = try await offered()
+        XCTAssertEqual(afterFirstCarry, [offers[0].rawCID, offers[2].rawCID])
+
+        try await offer(offers[0])
+        try await offer(offers[3])
+        let afterSecondCarry = try await offered()
+        XCTAssertEqual(afterSecondCarry, [offers[0].rawCID, offers[3].rawCID])
+    }
+
+    /// Booting sheds the oldest handoffs beyond the operator's budget, row
+    /// and pins together.
+    /// Establishes: NODE-STORAGE-002.t
+    func testBootShedsHandoffsBeyondTheBudget() async throws {
+        let directory = temporaryDirectory()
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let config = try configuration(
+            path: ["Nexus"],
+            storage: directory,
+            resourcePolicy: NodeResourcePolicy(maximumRetainedHandoffCandidates: 2)
+        )
+        let owner = [config.nexusGenesisCID, config.address.key]
+            .joined(separator: ":") + ":contextual-candidates"
+        let broker = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        var store: NodeStore? = try testNodeStore(
+            databasePath: directory.appendingPathComponent("state.db"),
+            nexusGenesisCID: config.nexusGenesisCID,
+            chainPath: config.chainPath,
+            issuingAuthorityKey: config.processPublicKey,
+            contextualCandidateOwner: owner
+        )
+        // Two beyond the budget: boot sheds every excess handoff, not one.
+        var handoffs: [String] = []
+        for index in 0..<4 {
+            let candidate = try VolumeImpl<PublicKey>(
+                node: PublicKey(key: "boot-budget-handoff-\(index)")
+            )
+            try await candidate.store(storer: broker)
+            try await store!.persistContextualCandidateRoots(
+                candidateCID: candidate.rawCID,
+                roots: [candidate.rawCID],
+                capacity: 16
+            )
+            let marked = try await store!.markContextualCandidateHandoff(
+                candidateCID: candidate.rawCID
+            )
+            XCTAssertTrue(marked)
+            handoffs.append(candidate.rawCID)
+        }
+        store = nil
+
+        let process = try await ChainProcess.open(configuration: config)
+        let retained = try await process.store.contextualCandidateVolumeRoots()
+        XCTAssertEqual(Set(retained), Set(handoffs.suffix(2)))
+        for shedRoot in handoffs.prefix(2) {
+            let shedOwners = await broker.owners(root: shedRoot)
+            XCTAssertTrue(shedOwners.isEmpty, shedRoot)
+        }
+        _ = try await broker.evictUnpinned(graceSeconds: 0)
+        for shedRoot in handoffs.prefix(2) {
+            let shed = await broker.fetchVolumeLocal(root: shedRoot)
+            XCTAssertNil(shed, shedRoot)
+        }
+    }
+
     private func mineChild(
         of previous: Block,
         timestamp: Int64,
