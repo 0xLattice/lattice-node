@@ -21,24 +21,12 @@ import cashew
 /// (`ContentBoundTransaction`, `ContentBoundWasmPolicyModule`,
 /// `SubmitTransactionRequest`, `MiningTemplateRequest`, `MiningReward`).
 ///
-/// Deterministic: one fixed SplitMix64 seed per codec (the generator is a
-/// copy of the private one in `WireProtocolFuzzTests`), so a failure names the
-/// codec and the iteration and replays exactly. No byte golden is checked in
+/// Deterministic: one fixed `SplitMix64` seed per codec (the shared generator
+/// in `Support/SeededGenerator.swift`), so a failure names the codec and the
+/// iteration and replays exactly. No byte golden is checked in
 /// on purpose: the property is self-describing and every CID here changes
 /// with the next consensus flag day.
 final class SafetyNetWireCanonicalityTests: XCTestCase {
-
-    /// Copied from `WireProtocolFuzzTests` (private there).
-    private struct SplitMix64: RandomNumberGenerator {
-        var state: UInt64
-        mutating func next() -> UInt64 {
-            state &+= 0x9E37_79B9_7F4A_7C15
-            var z = state
-            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-            return z ^ (z >> 31)
-        }
-    }
 
     private static let messagesPerCodec = 48
 
