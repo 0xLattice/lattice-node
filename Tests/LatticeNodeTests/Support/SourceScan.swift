@@ -1,7 +1,7 @@
 import Foundation
 
 /// A Swift source file as a structural gate reads it.
-struct SourceFile: Equatable, Sendable {
+struct SourceFile: Sendable {
     /// Relative to the directory the gate scanned.
     let path: String
     let text: String
@@ -46,6 +46,11 @@ enum SourceTree {
 /// Views of Swift source text for pattern-based gates. Both views keep the
 /// text's length in characters and every newline in place, so a line or a
 /// character offset in a view is the same line or offset in the source.
+///
+/// Not modelled: regex literals (`/…/`, `#/…/#`), a quote carrying a
+/// combining mark, and line separators other than newlines inside a
+/// single-line string. `SafetyNetSourceScanTests` fails if the package
+/// sources ever contain one, so teach the lexer before that lands.
 enum SwiftSource {
 
     /// `text` with every comment replaced by spaces. String literals are

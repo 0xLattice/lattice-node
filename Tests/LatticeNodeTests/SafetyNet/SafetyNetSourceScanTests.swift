@@ -70,6 +70,7 @@ final class SafetyNetSourceScanTests: XCTestCase {
     func testEscapesNeverEndTheString() {
         // `"\\"` ends at its second quote: a lexer that reads `\"` as an
         // escaped quote hides everything after it on the line.
+        XCTAssertEqual(SwiftSource.code(#"f("\\", x)"#), #"f("  ", x)"#)
         XCTAssertEqual(code(#"let s = "\\"; hidden()"#), #"let s = " "; hidden()"#)
         XCTAssertEqual(code(#"let q = "a\"b"; hidden()"#), #"let q = " "; hidden()"#)
         XCTAssertEqual(code(#"let t = "\\\""; hidden()"#), #"let t = " "; hidden()"#)
@@ -112,6 +113,18 @@ final class SafetyNetSourceScanTests: XCTestCase {
         )
     }
 
+    func testRawMultilineStrings() {
+        // `#"""` opens a multiline raw string: its closing line is `"""#`,
+        // and a `"""` or `\(x)` inside is text.
+        let text = ##"""
+        let s = #"""
+            a """ "q" \(notCode) \#(isCode)
+            """#
+        Task.sleep(1)
+        """##
+        XCTAssertEqual(code(text), ##"let s = #""" isCode """# Task.sleep(1)"##)
+    }
+
     func testDirectivesAreNotStrings() {
         XCTAssertEqual(code("#if DEBUG\nlet s = #selector(run)\n#endif"), "#if DEBUG let s = #selector(run) #endif")
     }
@@ -151,6 +164,55 @@ final class SafetyNetSourceScanTests: XCTestCase {
         XCTAssertThrowsError(try SourceTree.swiftFiles(under: "Sources/NoSuchDirectory")) {
             XCTAssertTrue($0 is SourceTree.NoSources)
         }
+    }
+
+    /// Inputs the lexer does not model (see `SwiftSource`) are absent from
+    /// what the gates read, so none of them can hide code from a gate.
+    func testSourcesHoldNothingTheLexerDoesNotModel() throws {
+        let files = try SourceTree.swiftFiles(under: "Sources")
+        // A regex literal starts where an expression does: after `(`, `[`,
+        // `,`, `=`, `:` or `return`, or at the start of a line.
+        XCTAssertEqual(
+            try SwiftSource.matchingLines(
+                #"(?:^|[(\[,=:]|\breturn)\s*#*/[^/*\s]"#,
+                in: files,
+                view: SwiftSource.code
+            ),
+            [],
+            "regex literal: teach SourceScan to lex it before a gate reads it"
+        )
+        for file in files {
+            XCTAssertFalse(
+                file.text.unicodeScalars.contains { $0 == "\u{2028}" || $0 == "\u{2029}" || $0 == "\u{85}" },
+                "\(file.path): line separator other than a newline"
+            )
+            XCTAssertFalse(
+                file.text.contains { $0.unicodeScalars.first == "\"" && $0.unicodeScalars.count > 1 },
+                "\(file.path): quote carrying a combining mark"
+            )
+        }
+    }
+
+    /// A view that blanks too much passes every law below, so real code is
+    /// checked to survive: in the package sources, a line that starts with
+    /// `import` or `func` is code, and the code view keeps it up to its first
+    /// string literal or comment.
+    func testCodeViewKeepsDeclarationsOfThePackageSources() throws {
+        var checked = 0
+        for file in try SourceTree.swiftFiles(under: "Sources") {
+            let viewed = SwiftSource.code(file.text).components(separatedBy: "\n")
+            for (index, line) in file.text.components(separatedBy: "\n").enumerated() {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard trimmed.hasPrefix("import ") || trimmed.hasPrefix("func ") else { continue }
+                let code = trimmed.prefix { $0 != "\"" }.components(separatedBy: " //")[0]
+                XCTAssertTrue(
+                    viewed[index].contains(code),
+                    "\(file.path):\(index + 1): code view lost \(code)"
+                )
+                checked += 1
+            }
+        }
+        XCTAssertGreaterThan(checked, 100, "checked \(checked) declaration lines")
     }
 
     /// Laws over every Swift file the gates could read: both views only

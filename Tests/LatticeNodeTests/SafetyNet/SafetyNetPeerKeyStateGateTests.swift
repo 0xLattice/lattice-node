@@ -12,8 +12,9 @@ import XCTest
 /// is one global capacity shared by both planes, released by the hold its
 /// acquire returned, not per-peer state of either plane.
 ///
-/// Scanned as code (`SwiftSource.code`). Plain `XCTAssert` only
-/// (`XCTContext` is unavailable on corelibs XCTest).
+/// Scanned as code (`SwiftSource.code`): comments and string literal text
+/// are skipped. Plain `XCTAssert` only (`XCTContext` is unavailable on
+/// corelibs XCTest).
 final class SafetyNetPeerKeyStateGateTests: XCTestCase {
 
     /// `Type.property` names allowed to store peer keys.
@@ -30,7 +31,7 @@ final class SafetyNetPeerKeyStateGateTests: XCTestCase {
 
     private func runtimeSources() throws -> [SourceFile] {
         let files = try SourceTree.swiftFiles(under: "Sources/LatticeNode/Architecture")
-            .filter { $0.path.hasPrefix("NodeNetworkRuntime") }
+            .filter { ($0.path as NSString).lastPathComponent.hasPrefix("NodeNetworkRuntime") }
         XCTAssertFalse(files.isEmpty, "no NodeNetworkRuntime*.swift in Architecture")
         return files
     }
