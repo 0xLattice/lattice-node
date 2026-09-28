@@ -15,24 +15,13 @@ import XCTest
 /// than rejecting one peer's message. The public read router has already
 /// shipped one of those, which is the argument for fuzzing the rest.
 ///
-/// Deterministic by construction: seeds are fixed, and a failure reports the
-/// generator state it started from, the iteration, and the mutant's bytes, so
-/// it replays exactly. `LATTICE_FUZZ_ITERATIONS` raises the budget for a longer
-/// soak; the default is sized to stay inside an ordinary unit-test run.
+/// Deterministic by construction: the base seed is fixed unless
+/// `LATTICE_TEST_SEED` replaces it (`TestSeed`), and a failure reports that
+/// seed, the generator state it started from, the iteration, and the mutant's
+/// bytes, so it replays exactly. `LATTICE_FUZZ_ITERATIONS` raises the budget
+/// for a longer soak; the default is sized to stay inside an ordinary
+/// unit-test run.
 final class WireProtocolFuzzTests: XCTestCase {
-
-    /// Reproducible, portable, and not `SystemRandomNumberGenerator`: a fuzz
-    /// failure is worthless if the input that caused it cannot be recreated.
-    private struct SplitMix64: RandomNumberGenerator {
-        var state: UInt64
-        mutating func next() -> UInt64 {
-            state &+= 0x9E37_79B9_7F4A_7C15
-            var z = state
-            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-            return z ^ (z >> 31)
-        }
-    }
 
     private var iterations: Int {
         ProcessInfo.processInfo.environment["LATTICE_FUZZ_ITERATIONS"]
@@ -290,7 +279,8 @@ final class WireProtocolFuzzTests: XCTestCase {
             }
         }
 
-        var generator = SplitMix64(state: 0x5EED_1A77_1CE0_0001)
+        let base = try TestSeed.resolve(default: 0x5EED_1A77_1CE0_0001)
+        var generator = SplitMix64(state: base.value)
         var rejected = 0
         for iteration in 0..<iterations {
             let seed = seeds[iteration % seeds.count]
@@ -300,7 +290,7 @@ final class WireProtocolFuzzTests: XCTestCase {
             let startState = generator.state
             let mutant = mutate(seed.data, using: &generator)
             let provenance = """
-                iteration \(iteration), seed \(seed.name), \
+                \(base), iteration \(iteration), seed \(seed.name), \
                 generator state before mutation \(startState), \
                 mutant hex \(mutant.map { String(format: "%02x", $0) }.joined())
                 """
