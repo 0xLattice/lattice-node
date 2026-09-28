@@ -12,16 +12,9 @@ import XCTest
 /// is one global capacity shared by both planes, released by the hold its
 /// acquire returned, not per-peer state of either plane.
 ///
-/// Comment lines are skipped. Plain `XCTAssert` only (`XCTContext` is
-/// unavailable on corelibs XCTest).
+/// Scanned as code (`SwiftSource.code`). Plain `XCTAssert` only
+/// (`XCTContext` is unavailable on corelibs XCTest).
 final class SafetyNetPeerKeyStateGateTests: XCTestCase {
-
-    private static let architectureRoot = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent()  // SafetyNet
-        .deletingLastPathComponent()  // LatticeNodeTests
-        .deletingLastPathComponent()  // Tests
-        .deletingLastPathComponent()  // package root
-        .appendingPathComponent("Sources/LatticeNode/Architecture")
 
     /// `Type.property` names allowed to store peer keys.
     private static let allowlist: Set<String> = ["ParentStateQueryGuard.peers"]
@@ -35,25 +28,18 @@ final class SafetyNetPeerKeyStateGateTests: XCTestCase {
     private static let typePattern =
         #"\b(?:struct|class|actor|enum|extension)\s+(\w+)[^{]*\{"#
 
-    private func runtimeSources() throws -> [(path: String, text: String)] {
-        let root = Self.architectureRoot.standardizedFileURL
-        let names = try FileManager.default.contentsOfDirectory(atPath: root.path)
-            .filter { $0.hasPrefix("NodeNetworkRuntime") && $0.hasSuffix(".swift") }
-            .sorted()
-        XCTAssertFalse(names.isEmpty, "no NodeNetworkRuntime*.swift under \(root.path)")
-        return try names.map {
-            ($0, try String(
-                contentsOf: root.appendingPathComponent($0),
-                encoding: .utf8
-            ))
-        }
+    private func runtimeSources() throws -> [SourceFile] {
+        let files = try SourceTree.swiftFiles(under: "Sources/LatticeNode/Architecture")
+            .filter { $0.path.hasPrefix("NodeNetworkRuntime") }
+        XCTAssertFalse(files.isEmpty, "no NodeNetworkRuntime*.swift in Architecture")
+        return files
     }
 
     /// `Type.property` for every peer-keyed collection stored directly in a
     /// type body. Scopes are tracked by brace depth; a scope is a type body
     /// when the line that opened it declared a type.
     private func storedPeerKeyCollections(
-        in files: [(path: String, text: String)]
+        in files: [SourceFile]
     ) throws -> [String] {
         let declaration = try NSRegularExpression(pattern: Self.declarationPattern)
         let typeOpener = try NSRegularExpression(pattern: Self.typePattern)
@@ -86,14 +72,13 @@ final class SafetyNetPeerKeyStateGateTests: XCTestCase {
         return found
     }
 
-    /// The text's lines as code, a declaration whose type annotation
-    /// continues on the next line (`var x:` then `[PeerKey: …]`) joined
-    /// into one.
+    /// The text's lines as code (`SwiftSource.code`), a declaration whose
+    /// type annotation continues on the next line (`var x:` then
+    /// `[PeerKey: …]`) joined into one.
     private static func codeLines(of text: String) -> [String] {
         var lines: [String] = []
         var pending: String?
-        for rawLine in text.components(separatedBy: "\n") {
-            let line = code(of: rawLine)
+        for line in SwiftSource.code(text).components(separatedBy: "\n") {
             let joined = pending.map { $0 + " " + line.trimmingCharacters(in: .whitespaces) } ?? line
             if joined.trimmingCharacters(in: .whitespaces).hasSuffix(":") {
                 pending = joined
@@ -104,27 +89,6 @@ final class SafetyNetPeerKeyStateGateTests: XCTestCase {
         }
         if let pending { lines.append(pending) }
         return lines
-    }
-
-    /// The line without its `//` comment and string literal contents.
-    private static func code(of line: String) -> String {
-        var result = ""
-        var inString = false
-        var previous: Character?
-        for character in line {
-            if inString {
-                if character == "\"" && previous != "\\" { inString = false }
-            } else if character == "\"" {
-                inString = true
-            } else if character == "/" && previous == "/" {
-                result.removeLast()
-                break
-            } else {
-                result.append(character)
-            }
-            previous = character
-        }
-        return result
     }
 
     func testGateSeesTheAllowlistedGuard() throws {
@@ -154,7 +118,7 @@ final class SafetyNetPeerKeyStateGateTests: XCTestCase {
             }
         }
         """
-        let found = try storedPeerKeyCollections(in: [("sample", sample)])
+        let found = try storedPeerKeyCollections(in: [SourceFile(path: "sample", text: sample)])
         XCTAssertEqual(found, [
             "Sample.byKey",
             "Sample.keys",

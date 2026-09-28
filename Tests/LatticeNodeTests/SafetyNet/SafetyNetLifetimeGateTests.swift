@@ -21,15 +21,10 @@ import XCTest
 ///   work that resumes after its session ended can neither bring the key
 ///   back nor remove a newer session's record.
 ///
-/// Comments and string literal text are skipped. Plain `XCTAssert` only
-/// (`XCTContext` is unavailable on corelibs XCTest).
+/// Scanned as code (`SwiftSource.code`): comments and string literal text
+/// are skipped. Plain `XCTAssert` only (`XCTContext` is unavailable on
+/// corelibs XCTest).
 final class SafetyNetLifetimeGateTests: XCTestCase {
-
-    private static let packageRoot = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent()  // SafetyNet
-        .deletingLastPathComponent()  // LatticeNodeTests
-        .deletingLastPathComponent()  // Tests
-        .deletingLastPathComponent()  // package root
 
     /// `Type.property` stored tasks allowed outside a `TaskSlot`.
     private static let taskAllowlist: [String: String] = [
@@ -82,81 +77,10 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
 
     // MARK: - Source
 
-    private func files(under path: String) throws -> [(path: String, text: String)] {
-        let root = Self.packageRoot.appendingPathComponent(path).standardizedFileURL
-        guard let enumerator = FileManager.default.enumerator(atPath: root.path) else {
-            XCTFail("no sources under \(root.path)")
-            return []
-        }
-        let names = enumerator.compactMap { $0 as? String }
-            .filter { $0.hasSuffix(".swift") }
-            .sorted()
-        XCTAssertFalse(names.isEmpty, "no sources under \(root.path)")
-        return try names.map {
-            ($0, try String(contentsOf: root.appendingPathComponent($0), encoding: .utf8))
-        }
-    }
-
-    private func runtimeFiles() throws -> [(path: String, text: String)] {
-        try files(under: "Sources/LatticeNode").filter {
+    private func runtimeFiles() throws -> [SourceFile] {
+        try SourceTree.swiftFiles(under: "Sources/LatticeNode").filter {
             ($0.path as NSString).lastPathComponent.hasPrefix("NodeNetworkRuntime")
         }
-    }
-
-    /// The text as code: comments, string literal text (single and
-    /// triple-quoted) removed, line structure kept.
-    private static func code(of text: String) -> String {
-        var lines: [String] = []
-        var inBlockString = false
-        var inBlockComment = false
-        for raw in text.components(separatedBy: "\n") {
-            if raw.trimmingCharacters(in: .whitespaces).hasSuffix("\"\"\"")
-                || raw.trimmingCharacters(in: .whitespaces).hasPrefix("\"\"\"") {
-                let count = raw.components(separatedBy: "\"\"\"").count - 1
-                if count % 2 == 1 { inBlockString.toggle() }
-                lines.append("")
-                continue
-            }
-            if inBlockString {
-                lines.append("")
-                continue
-            }
-            var result = ""
-            var inString = false
-            var escaped = false
-            var previous: Character?
-            for character in raw {
-                if inBlockComment {
-                    if previous == "*" && character == "/" { inBlockComment = false }
-                    previous = character
-                    continue
-                }
-                if inString {
-                    if escaped {
-                        escaped = false
-                    } else if character == "\\" {
-                        escaped = true
-                    } else if character == "\"" {
-                        inString = false
-                        result.append(character)
-                    }
-                } else if character == "\"" {
-                    inString = true
-                    result.append(character)
-                } else if character == "/" && previous == "/" {
-                    result.removeLast()
-                    break
-                } else if character == "*" && previous == "/" {
-                    result.removeLast()
-                    inBlockComment = true
-                } else {
-                    result.append(character)
-                }
-                previous = character
-            }
-            lines.append(result)
-        }
-        return lines.joined(separator: "\n")
     }
 
     // MARK: - Stored tasks
@@ -212,9 +136,9 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
     /// `=` or `,`; one whose annotation is followed by a body without `=`
     /// is computed, not stored.
     private func storedTasks(
-        in files: [(path: String, text: String)]
+        in files: [SourceFile]
     ) throws -> [(name: String, site: String)] {
-        let codes = files.map { Self.code(of: $0.text) }
+        let codes = files.map { SwiftSource.code($0.text) }
         let aliases = try Self.taskAliases(in: codes)
         let opener = try NSRegularExpression(pattern: Self.typeOpener)
         let declaration = try NSRegularExpression(pattern: Self.declaration)
@@ -284,13 +208,13 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
     /// Every match of `pattern` in the files, with the function it sits in.
     private func calls(
         matching pattern: String,
-        in files: [(path: String, text: String)]
+        in files: [SourceFile]
     ) throws -> [(function: String, site: String)] {
         let call = try NSRegularExpression(pattern: pattern)
         let function = try NSRegularExpression(pattern: #"\bfunc\s+(\w+)"#)
         var found: [(String, String)] = []
         for file in files {
-            let code = Self.code(of: file.text)
+            let code = SwiftSource.code(file.text)
             let whole = NSRange(code.startIndex..., in: code)
             let functions = function.matches(in: code, range: whole)
             for match in call.matches(in: code, range: whole) {
@@ -349,7 +273,7 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
         }
         """
         XCTAssertEqual(
-            try storedTasks(in: [("sample", sample)]).map(\.name),
+            try storedTasks(in: [SourceFile(path: "sample", text: sample)]).map(\.name),
             [
                 "Sample.plain", "Sample.fixed", "Sample.wrapped", "Sample.byKey",
                 "Sample.list", "Sample.pair", "Sample.aliased", "Sample.aliasedList",
@@ -380,11 +304,11 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
         }
         """
         XCTAssertEqual(
-            try calls(matching: Self.creatingUpdate, in: [("sample", sample)]).map(\.function),
+            try calls(matching: Self.creatingUpdate, in: [SourceFile(path: "sample", text: sample)]).map(\.function),
             ["connect", "late"]
         )
         XCTAssertEqual(
-            try calls(matching: Self.keyedRemoval, in: [("sample", sample)]).map(\.site),
+            try calls(matching: Self.keyedRemoval, in: [SourceFile(path: "sample", text: sample)]).map(\.site),
             ["sample:3", "sample:12", "sample:16"]
         )
     }
@@ -392,7 +316,7 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
     // MARK: - Gates
 
     func testGateSeesTheAllowlistedSites() throws {
-        let sources = try files(under: "Sources/LatticeNode")
+        let sources = try SourceTree.swiftFiles(under: "Sources/LatticeNode")
         XCTAssertEqual(
             Set(try storedTasks(in: sources).map(\.name)),
             Set(Self.taskAllowlist.keys),
@@ -412,7 +336,7 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
     }
 
     func testStoredTaskHandlesAreTaskSlots() throws {
-        let found = try storedTasks(in: files(under: "Sources/LatticeNode"))
+        let found = try storedTasks(in: SourceTree.swiftFiles(under: "Sources/LatticeNode"))
             .filter { Self.taskAllowlist[$0.name] == nil }
         XCTAssertEqual(
             found.map { "\($0.site): \($0.name)" }, [],
