@@ -166,14 +166,20 @@ final class SafetyNetSourceScanTests: XCTestCase {
         }
     }
 
-    /// Where a regex literal can start: any `/` that is not binary, or `#/`
-    /// anywhere. A binary `/` follows an operand (a word character, `)`,
-    /// `]`, `}`, a closing quote or `.`), or is followed by whitespace, `*`,
-    /// `/`, `)`, or a compound `/=` and a space. Everything else counts, so
-    /// the rule never lists where a regex may start. Force-unwrap division
-    /// (`x!/y`) matches, which fails loudly. Missed: a regex right after a
-    /// keyword with no space (`in/x/`).
-    private static let regexLiteralStart = #"(?:^|[^\w)\]}".])#*/(?![\s/*)]|=(?:\s|$))|#/"#
+    /// Where a regex literal can start. Swift reads a `/` as binary after an
+    /// operand (a word character, `)`, `]` or `}`), so the rule excludes that
+    /// rather than listing where a regex may start:
+    /// - a `/` not after an operand, and not followed by whitespace, `/`,
+    ///   `*`, `)`, the end of the line, or `=` and a space (compound `/=`);
+    /// - a spaced `/=` whose nearest non-space on the left is not an operand
+    ///   (`= /= "a"/` is a regex, `x /= 2` is not);
+    /// - `#/` anywhere.
+    /// Force-unwrap division (`x!/2`) matches, which fails loudly. Missed, as
+    /// unlikely and harmless beyond one line: a regex glued to a keyword
+    /// (`in/x/`, `return/x/`, `try/x/`), and `#//…/#`, whose `//` the lexer
+    /// already blanks as a comment.
+    private static let regexLiteralStart =
+        #"(?:^|[^\w)\]}])#*/(?![\s/*)]|=\s|=$|$)|(?:^|[^\w)\]}\s])\s*#*/=(?:\s|$)|#/"#
 
     /// Characters the lexer matches on. Fused into one grapheme with another
     /// scalar, one of them is invisible to a lexer that walks `Character`s.
@@ -191,6 +197,7 @@ final class SafetyNetSourceScanTests: XCTestCase {
             "try /x/.wholeMatch(in: s)", "await /x/", "!/x/", "a&&/x/", "return /x/",
             "[/a/, /b/]", "c ? /a/ : /b/", "let r = #/a b/#", "/x/.firstMatch(in: s)",
             "let r = /=+/", "x == /=/", "-/x/", "a + /x/", "</x/", "%/x/", "~/x/",
+            "let r = /= \"a\"/", "x ?? /= b/",
             // Reachable only through `#/`: its `/` is followed by a space.
             "x.firstMatch(of: #/ a/#)",
         ]
@@ -208,6 +215,7 @@ final class SafetyNetSourceScanTests: XCTestCase {
         let division = [
             "let q = b/c", "let q = b / c", "x /= 2", "x/=2", "let t = (a +\n    b) / 2",
             "f(a /* c */, b)", "(a)/2", "a[0]/2", "s.count/2", "reduce(1, /)",
+            "let r = x /\n    2", "x.map { $0 }/2",
         ]
         for text in division {
             XCTAssertEqual(
