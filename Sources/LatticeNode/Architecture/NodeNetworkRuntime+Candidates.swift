@@ -501,10 +501,6 @@ extension NodeNetworkRuntime {
             }
         }
 
-        // Only the peer that supplied a COMPLETE invalid candidate can be blamed
-        // for it, and only when it was the sole remote supplier: parent evidence
-        // authenticates only parent facts and never vouches for the child
-        // transition. "Blame" is a per-root routing suppression, never a ban.
         SyncTrace.log("admit \(candidate.blockCID.prefix(12)) weighed=\(candidate.weighed) decision=\(outcome.decision)")
         // Only the parent's evidence decides for the hold: an overlay-seeded
         // attempt decided against (a forged package, say) says nothing.
