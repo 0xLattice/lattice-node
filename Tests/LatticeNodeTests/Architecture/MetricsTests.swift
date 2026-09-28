@@ -118,7 +118,7 @@ final class MetricsTests: XCTestCase {
             parentReportsApplied: 3,
             parentReportRefusals: ["notStronger": 2, "locationConflict": 1],
             executionWalkParked: 4,
-            candidateRemoteReads: 5
+            candidateSessionReads: 5
         ))
         let samples = try parseExposition(rendered)
         let chain = "chain=\"Nexus/Payments\""
@@ -126,7 +126,7 @@ final class MetricsTests: XCTestCase {
         XCTAssertEqual(samples["lattice_parent_run_reports_refused_total{\(chain),reason=\"notStronger\"}"], "2")
         XCTAssertEqual(samples["lattice_parent_run_reports_refused_total{\(chain),reason=\"locationConflict\"}"], "1")
         XCTAssertEqual(samples["lattice_validate_walk_parked_total{\(chain)}"], "4")
-        XCTAssertEqual(samples["lattice_candidate_remote_reads_total{\(chain)}"], "5")
+        XCTAssertEqual(samples["lattice_candidate_session_reads_total{\(chain)}"], "5")
         XCTAssertTrue(rendered.contains("# TYPE lattice_parent_run_reports_applied_total counter"))
     }
 

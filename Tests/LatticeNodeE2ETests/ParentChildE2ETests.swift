@@ -112,17 +112,17 @@ final class ParentChildE2ETests: XCTestCase {
         XCTAssertEqual(synced.height, depth)
         XCTAssertEqual(synced.tipCID, tipCID)
         // Acquisition cost is linear in depth: a block admitted in order
-        // asks its supplier for a small constant. Admitting blocks ahead of
+        // reads a small constant from its candidate session. Admitting blocks ahead of
         // their parents walked the missing ancestry per block — quadratic —
         // which drained the supplier's request budget and paced deep syncs
         // by the request timeout (#201). A count, not a wall clock, so a
         // slow runner cannot hide it.
-        let remoteReads = try await joiner.metric(
-            "lattice_candidate_remote_reads_total"
+        let sessionReads = try await joiner.metric(
+            "lattice_candidate_session_reads_total"
         )
         XCTAssertLessThanOrEqual(
-            remoteReads, 4 * depth,
-            "\(remoteReads) supplier reads to acquire \(depth) blocks"
+            sessionReads, 4 * depth,
+            "\(sessionReads) session reads to acquire \(depth) blocks"
         )
 
         try await cluster.stopAll()
