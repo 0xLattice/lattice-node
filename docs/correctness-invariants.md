@@ -103,34 +103,43 @@ places are their own claim until a test covers them too.
 - **NODE-STORAGE-001.c** — `IvyRootContentSource.Session.fetch` makes a Volume
   visible only when its root is present and every entry's bytes match its
   CID; a Volume that fails is attributed to its supplier.
-- **NODE-STORAGE-001.d** — A response is accepted only for the root requested.
-  Gap: #218
-- **NODE-STORAGE-001.e** — A root's member set cannot change once stored.
-  Membership is not checked against the root's DAG: a supplier may add
-  correctly addressed entries, bounded by the session's member and byte
-  limits.
-  Gap: #218
+- **NODE-STORAGE-001.d** — `IvyRootContentSource.Session` accepts a response,
+  fetched or initial, only for the root requested.
+- **NODE-STORAGE-001.e** — A root's member set cannot change while the root
+  is stored in the process's Volume store; eviction forgets it, so a root
+  stored again after pruning is checked afresh. Membership is not checked
+  against the root's DAG: a supplier may add correctly addressed entries,
+  bounded by the session's member and byte limits.
 - **NODE-STORAGE-001.f** — `IvyRootContentSource.response(_:from:)` passes a
   peer-served response only from the peer it asked (a failure passes
   through, whoever reported it).
 - **NODE-STORAGE-001.g** — A complete Volume may span several bounded Ivy
   frames.
-  Gap: #218
 - **NODE-STORAGE-001.h** — Chunks from different requests, authenticated
   sessions, or runtime generations never combine.
   Gap: #218
-- **NODE-STORAGE-001.i** — Partial assembly is never visible: a fetch returns
-  every requested object or none.
+- **NODE-STORAGE-001.i** — Partial assembly is never visible:
+  `IvyRootContentSource.Session.fetch` returns every requested object or
+  none.
+- **NODE-STORAGE-001.j** — A session's initial response is checked as `fetch`
+  checks a response: it is visible only when every entry's bytes match its
+  CID, and one that fails is attributed to its supplier.
+- **NODE-STORAGE-001.k** — `ChainProcessIvyContentSource` refuses every
+  entry-level content request, and serves a Volume over the byte budget
+  whole or not at all.
+- **NODE-STORAGE-001.l** — The overlay transaction-Volume path refuses a
+  Volume any of whose entries' bytes fail their CID, even an entry the
+  transaction never references.
+- **NODE-STORAGE-001.m** — The checks the other acquisition paths make before
+  a session sees a response accept only the peer asked, the root requested
+  and bytes that match their CIDs: the exact-peer source initializers' peer
+  filter (the child-proof and attachment fetches use it), the candidate
+  fetch source, the candidate initial-response check, and the peer and root
+  checks of the transaction-Volume path.
   Gap: #218
-- **NODE-STORAGE-001.j** — Every other acquisition path (a source's initial
-  response, the exact-peer source initializers, the candidate and
-  child-proof fetch sources, overlay transaction Volumes) checks bytes
-  against CIDs the same way and accepts only the peer it asked.
-  Gap: #218
-- **NODE-STORAGE-001.k** — Entry-level content requests are refused before
-  they reach `content(rootCID:cids:)`, and a Volume over the byte budget is
-  served whole or not at all.
-  Gap: #218
+- **NODE-STORAGE-001.n** — `IvyRootContentSource.Session` requests and
+  stores each root at most once; a fetch of a root already in flight
+  returns nothing rather than requesting it again.
 
 ## NODE-STORAGE-002 — a durable fact never outruns its content
 
