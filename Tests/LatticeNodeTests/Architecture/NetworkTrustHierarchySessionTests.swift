@@ -1106,30 +1106,15 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             if !peers.isEmpty {
                 try await Task.sleep(for: .seconds(1))
             }
-            let runtimePeer = PeerID(publicKey: configuration.processPublicKey)
-            @Sendable func connectAndHello(_ client: Ivy) async throws {
-                try await client.start()
-                try await client.connect(to: PeerEndpoint(
-                    publicKey: configuration.processPublicKey,
-                    host: "127.0.0.1",
-                    port: overlayPort
-                ))
-                try await eventually("peer connected") {
-                    (await client.connectedPeers).contains(runtimePeer)
-                }
-                guard case .enqueued = await client.sendMessage(
-                    to: runtimePeer,
-                    topic: NodeNetworkTopic.overlayHello,
-                    payload: try ChainHello(
-                        nexusGenesisCID: configuration.nexusGenesisCID,
-                        chainPath: configuration.chainPath
-                    ).encode()
-                ) else {
-                    throw NetworkTestError.failedSend
-                }
-            }
+            let helloPayload = try ChainHello(
+                nexusGenesisCID: configuration.nexusGenesisCID,
+                chainPath: configuration.chainPath
+            ).encode()
+            let runtimeKey = configuration.processPublicKey
             for client in clients {
-                try await connectAndHello(client)
+                try await recoveryPeerConnects(
+                    client, to: runtimeKey, port: overlayPort, hello: helloPayload
+                )
                 // Hellos land in order: this session's claim is handled
                 // before the next one connects.
                 try await Task.sleep(for: .milliseconds(200))
@@ -1138,12 +1123,24 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             // session with a fresh claim, and the old one gone.
             if let period = silentReconnectsEvery,
                let silentIndex = peers.firstIndex(of: .silent) {
-                let key = signingKey(keyBytes?[silentIndex] ?? UInt8(96 + silentIndex))
+                // Only Sendable lets cross into the task: the key, the first
+                // session, and what each new session's delegate needs.
+                let silentKey = signingKey(
+                    keyBytes?[silentIndex] ?? UInt8(96 + silentIndex)
+                ).rawRepresentation
+                let first = clients[silentIndex]
+                let chain = chain
+                let genesisCID = genesisCID
+                let receiver = recoveredProcess
+                let reconnected = reconnected
                 reconnects = Task {
-                    var current = clients[silentIndex]
+                    var current = first
                     while !Task.isCancelled {
                         try? await Task.sleep(for: period)
                         guard !Task.isCancelled else { break }
+                        guard let key = try? Curve25519.Signing.PrivateKey(
+                            rawRepresentation: silentKey
+                        ) else { break }
                         let next = Ivy(config: IvyConfig(
                             signingKey: key,
                             listenPort: 0,
@@ -1152,12 +1149,14 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
                         ))
                         let delegate = RangeServingPeer(
                             genesisCID: genesisCID, chain: chain,
-                            receiver: recoveredProcess, servesRanges: false
+                            receiver: receiver, servesRanges: false
                         )
                         await next.installTestDelegate(delegate)
                         await next.setContentSource(InMemoryContentStore())
                         await current.stop()
-                        try? await connectAndHello(next)
+                        try? await recoveryPeerConnects(
+                            next, to: runtimeKey, port: overlayPort, hello: helloPayload
+                        )
                         await reconnected.append(next, delegate)
                         current = next
                     }
@@ -1749,5 +1748,31 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             await runtime.stop()
             throw error
         }
+    }
+}
+
+/// Connects `client` to the runtime at `port` and sends its overlay hello.
+private func recoveryPeerConnects(
+    _ client: Ivy,
+    to runtimeKey: String,
+    port: UInt16,
+    hello: Data
+) async throws {
+    let runtimePeer = PeerID(publicKey: runtimeKey)
+    try await client.start()
+    try await client.connect(to: PeerEndpoint(
+        publicKey: runtimeKey,
+        host: "127.0.0.1",
+        port: port
+    ))
+    try await eventually("peer connected") {
+        (await client.connectedPeers).contains(runtimePeer)
+    }
+    guard case .enqueued = await client.sendMessage(
+        to: runtimePeer,
+        topic: NodeNetworkTopic.overlayHello,
+        payload: hello
+    ) else {
+        throw NetworkTestError.failedSend
     }
 }
