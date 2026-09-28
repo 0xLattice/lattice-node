@@ -1201,36 +1201,88 @@ extension NodeNetworkRuntime {
         case .cancelled, .stale:
             return true
         }
-        guard let attachment = resolved.value,
+        let verified = await Self.verifiedPortableAttachment(
+            resolved.value,
+            summary: summary,
+            maximumEncodedSize: configuration.resourcePolicy.maximumParentWitnessBytes
+        )
+        switch Self.portableAttachmentDisposition(
+            verified,
+            current: isCurrentRuntime(generation: generation, process: process)
+                && overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
+            complete: resolved.attribution.allResponsesComplete,
+            soleSupplier: resolved.attribution.soleRemoteSupplierPublicKey
+        ) {
+        case .stale:
+            return true
+        case .reject(let blamed):
+            if let blamed {
+                await overlay.reportDeficientContent(
+                    rootCID: summary.attachmentCID,
+                    servedBy: PeerID(publicKey: blamed)
+                )
+            }
+            return false
+        case .enqueue(let attachment):
+            // See above: a rejected enqueue after a VERIFIED recovery is local
+            // congestion; only verification failures return false (and recycle).
+            _ = enqueueCandidate(CandidateSeed(
+                blockCID: attachment.edge.childCID,
+                package: AuthenticatedChildPackage(package: attachment.package),
+                weighed: true
+            ), generation: generation)
+            return true
+        }
+    }
+
+    /// The package and edge a fetched attachment proves for `summary`, or nil
+    /// when its bytes do not: they decode within the witness bound, prove the
+    /// summary's root, and derive the summary's edge. Depends on the bytes
+    /// alone.
+    nonisolated static func verifiedPortableAttachment(
+        _ attachment: ChildEvidenceVolume?,
+        summary: PortableAttachmentSummary,
+        maximumEncodedSize: Int
+    ) async -> (package: ChildValidationPackage, edge: DirectChildEdge)? {
+        guard let attachment,
               let envelope = try? ChildValidationPackageEnvelope.decode(
                 attachment.envelopeBytes,
-                maximumEncodedSize:
-                    configuration.resourcePolicy.maximumParentWitnessBytes
+                maximumEncodedSize: maximumEncodedSize
               ),
               let package = try? envelope.makeValidationPackage(),
               package.proof.rootCID == summary.rootCID,
               let edge = await DirectChildEdge.derive(from: package.proof),
-              edge.edgeCID == summary.edgeCID,
-              isCurrentRuntime(generation: generation, process: process),
-              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
-            if resolved.attribution.allResponsesComplete,
-               let supplier = resolved.attribution.soleRemoteSupplierPublicKey {
-                await overlay.reportDeficientContent(
-                    rootCID: summary.attachmentCID,
-                    servedBy: PeerID(publicKey: supplier)
-                )
-            }
-            return false
+              edge.edgeCID == summary.edgeCID else {
+            return nil
         }
-        let gated = AuthenticatedChildPackage(package: package)
-        // See above: a rejected enqueue after a VERIFIED recovery is local
-        // congestion; only verification failures return false (and recycle).
-        _ = enqueueCandidate(CandidateSeed(
-            blockCID: edge.childCID,
-            package: gated,
-            weighed: true
-        ), generation: generation)
-        return true
+        return (package, edge)
+    }
+
+    enum PortableAttachmentDisposition<Verified> {
+        /// Verified on the session that is still current.
+        case enqueue(Verified)
+        /// Verified, but the runtime or the session changed while it was
+        /// fetched and checked: nothing to act on, and the supplier served
+        /// good bytes.
+        case stale
+        /// The bytes failed; `blame` is the sole supplier of a complete fetch.
+        case reject(blame: String?)
+    }
+
+    /// What to do with a checked attachment. Blame follows the bytes alone:
+    /// bytes that fail are their sole supplier's fault whatever the node's
+    /// state, and bytes that verify are never blamed, even when the runtime
+    /// or the session changed before they could be used.
+    nonisolated static func portableAttachmentDisposition<Verified>(
+        _ verified: Verified?,
+        current: Bool,
+        complete: Bool,
+        soleSupplier: String?
+    ) -> PortableAttachmentDisposition<Verified> {
+        guard let verified else {
+            return .reject(blame: complete ? soleSupplier : nil)
+        }
+        return current ? .enqueue(verified) : .stale
     }
 
     nonisolated static func resolveEvidenceVolume(
