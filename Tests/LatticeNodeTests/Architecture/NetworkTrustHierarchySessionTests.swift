@@ -7,6 +7,7 @@ import Glibc
 #endif
 import Ivy
 import Lattice
+@testable import LatticeBlockTree
 import Tally
 import UInt256
 import VolumeBroker
@@ -536,7 +537,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         await runtime.stop()
     }
 
-    func testRestartRecoversAcceptedOrphanSuffixOnlyAfterLocalAttachment()
+    func testRestartRecoversAcceptedOrphanOnlyAfterLocalAttachment()
         async throws
     {
         let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -741,6 +742,270 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             let recoveredStatus = await recoveredProcess.status()
             XCTAssertEqual(recoveredStatus.tipCID, descendantHeader.rawCID)
             XCTAssertEqual(recoveredStatus.height, descendant.height)
+        } catch {
+            await client.stop()
+            await runtime.stop()
+            throw error
+        }
+        await client.stop()
+        await runtime.stop()
+    }
+
+    func testRestartRecoversLegacyDurableOrphanSuffixInConnectionOrder()
+        async throws
+    {
+        let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-recovery-suffix-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storage) }
+        let overlayPort = NetworkTransportTestPorts.allocate()
+        let hierarchyPort = NetworkTransportTestPorts.allocate()
+        let rpcPort = NetworkTransportTestPorts.allocate()
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: storage,
+            privateKeyHex: String(repeating: "6d", count: 32),
+            listenPort: overlayPort,
+            factListenPort: hierarchyPort,
+            rpcPort: rpcPort
+        )
+
+        // A store written before admission stopped walking ancestry (Lattice
+        // 37.0.0) can hold a multi-block durable orphan suffix: P (not
+        // admitted) <- O <- D, both accepted side blocks. Admission no longer
+        // produces D, so stage both facts directly, as that node durably
+        // wrote them, then reopen in place. Recovery must seed D parked
+        // behind O and O behind P; P arriving and connecting wakes O, and O
+        // connecting wakes D, which reaches the tip.
+        var stagingProcess: ChainProcess? = try await ChainProcess.open(
+            configuration: configuration
+        )
+        let genesis = try await stagingProcess!.canonicalTipBlock()
+        let predecessorCandidate = try await BlockBuilder.buildBlock(
+            previous: genesis,
+            timestamp: 3_600_000,
+            nonce: 1,
+            fetcher: stagingProcess!
+        )
+        let predecessor = try XCTUnwrap(BlockBuilder.mine(
+            block: predecessorCandidate,
+            target: predecessorCandidate.target,
+            maxAttempts: 4_096
+        ))
+        let predecessorHeader = try BlockHeader(node: predecessor)
+        try await predecessorHeader.storeBlock(
+            fetcher: stagingProcess!,
+            storer: stagingProcess!
+        )
+        let orphanCandidate = try await BlockBuilder.buildBlock(
+            previous: predecessor,
+            timestamp: 7_200_000,
+            nonce: 2,
+            fetcher: stagingProcess!
+        )
+        let orphan = try XCTUnwrap(BlockBuilder.mine(
+            block: orphanCandidate,
+            target: orphanCandidate.target,
+            maxAttempts: 4_096
+        ))
+        let orphanHeader = try BlockHeader(node: orphan)
+        try await orphanHeader.storeBlock(
+            fetcher: stagingProcess!,
+            storer: stagingProcess!
+        )
+        let descendantCandidate = try await BlockBuilder.buildBlock(
+            previous: orphan,
+            timestamp: 10_800_000,
+            nonce: 3,
+            fetcher: stagingProcess!
+        )
+        let descendant = try XCTUnwrap(BlockBuilder.mine(
+            block: descendantCandidate,
+            target: descendantCandidate.target,
+            maxAttempts: 4_096
+        ))
+        let descendantHeader = try BlockHeader(node: descendant)
+        try await descendantHeader.storeBlock(
+            fetcher: stagingProcess!,
+            storer: stagingProcess!
+        )
+        let remoteContent = InMemoryContentStore()
+        for header in [predecessorHeader, orphanHeader, descendantHeader] {
+            try await header.storeBlock(
+                fetcher: stagingProcess!,
+                storer: remoteContent
+            )
+        }
+        // The facts a weighed admission wrote. A work contribution is only
+        // ever read back from a store, so it is built the same way.
+        struct StoredContribution: Encodable {
+            let id: String
+            let work: UInt256
+        }
+        func weighedFacts(_ block: Block, _ header: BlockHeader) throws -> [ChainFact] {
+            let contribution = try JSONDecoder().decode(
+                VerifiedWorkContribution.self,
+                from: JSONEncoder().encode(StoredContribution(
+                    id: header.rawCID,
+                    work: workForTarget(block.target)
+                ))
+            )
+            return [
+                .block(ChainBlockFact(
+                    blockHash: header.rawCID,
+                    parentBlockHash: block.parent?.rawCID,
+                    blockHeight: block.height,
+                    postStateCID: block.postState.rawCID,
+                    prevStateCID: block.prevState.rawCID,
+                    specCID: block.spec.rawCID,
+                    target: block.target.toHexString(),
+                    nextTarget: block.nextTarget.toHexString(),
+                    timestamp: block.timestamp,
+                    stateDiff: .empty,
+                    childCommitments: [:]
+                )),
+                .work(ChainWorkFact(
+                    blockHash: header.rawCID,
+                    contribution: contribution
+                )),
+            ]
+        }
+        try await stagingProcess!.store.stage(
+            BlockImportBatch(facts: try weighedFacts(orphan, orphanHeader)),
+            volumeRoots: []
+        )
+        try await stagingProcess!.store.stage(
+            BlockImportBatch(facts: try weighedFacts(descendant, descendantHeader)),
+            volumeRoots: []
+        )
+        stagingProcess = nil
+
+        let planes = try NodeNetworkPlaneConfigurations(
+            overlay: IvyConfig(
+                signingKey: configuration.signingKey,
+                listenPort: overlayPort,
+                stunServers: [],
+                mode: .overlay
+            ),
+            hierarchy: IvyConfig(
+                signingKey: configuration.signingKey,
+                listenPort: hierarchyPort,
+                stunServers: [],
+                maxConnections: IvyConfig.defaultMaxConnections,
+                maxConnectionsPerNetgroup: IvyConfig.defaultMaxConnections,
+                relayEnabled: false,
+                carriers: [],
+                mode: .privateNetwork
+            )
+        )
+        let runtime = try NodeNetworkRuntime(
+            configuration: configuration,
+            planeConfigurations: planes
+        )
+        let recoveredProcess = try await ChainProcess.open(
+            configuration: configuration
+        )
+        let recoveredRequirements = await recoveredProcess
+            .unresolvedSameChainPredecessors()
+        XCTAssertEqual(
+            recoveredRequirements,
+            [
+                SameChainPredecessorRequirement(
+                    descendantCID: descendantHeader.rawCID,
+                    predecessorCID: orphanHeader.rawCID
+                ),
+                SameChainPredecessorRequirement(
+                    descendantCID: orphanHeader.rawCID,
+                    predecessorCID: predecessorHeader.rawCID
+                ),
+            ].sorted {
+                $0.descendantCID < $1.descendantCID
+            }
+        )
+
+        let connections = NetworkEventRecorder()
+        let handlers = ClosureChainInterface(admission: { admission in
+            let outcome = try await recoveredProcess.importBlock(
+                admission.header,
+                authenticatedChildPackage:
+                    admission.authenticatedChildPackage,
+                preparingChildDirectories:
+                    admission.preparingChildDirectories,
+                remoteSource: admission.contentSource
+            )
+            if outcome.decision.isAccepted, outcome.sameChainPredecessor == nil {
+                await connections.append(admission.header.rawCID)
+            }
+            return outcome
+        })
+        // Announces only P: O and D come back from recovery alone, fetched
+        // from the connected peer that holds them as each is woken.
+        let clientDelegate = OverlayAnnouncingPeer(
+            announcing: [predecessorHeader.rawCID]
+        )
+        let client = Ivy(config: IvyConfig(
+            signingKey: signingKey(96),
+            listenPort: 0,
+            stunServers: [],
+            mode: .overlay
+        ))
+        await client.installTestDelegate(clientDelegate)
+        await client.setContentSource(remoteContent)
+
+        do {
+            try await runtime.start(
+                process: recoveredProcess,
+                chain: handlers
+            )
+            try await client.start()
+            let runtimePeer = PeerID(publicKey: configuration.processPublicKey)
+            try await client.connect(to: PeerEndpoint(
+                publicKey: configuration.processPublicKey,
+                host: "127.0.0.1",
+                port: overlayPort
+            ))
+            for _ in 0..<100 {
+                if (await client.connectedPeers).contains(runtimePeer) { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            guard (await client.connectedPeers).contains(runtimePeer) else {
+                throw NetworkTestError.failedStart
+            }
+            guard case .enqueued = await client.sendMessage(
+                to: runtimePeer,
+                topic: NodeNetworkTopic.overlayHello,
+                payload: try ChainHello(
+                    nexusGenesisCID: configuration.nexusGenesisCID,
+                    chainPath: configuration.chainPath
+                ).encode()
+            ) else {
+                throw NetworkTestError.failedSend
+            }
+            for _ in 0..<200 {
+                if await recoveredProcess.status().tipCID
+                    == descendantHeader.rawCID {
+                    break
+                }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            let recoveredStatus = await recoveredProcess.status()
+            XCTAssertEqual(recoveredStatus.tipCID, descendantHeader.rawCID)
+            XCTAssertEqual(recoveredStatus.height, descendant.height)
+            // P's admission connects the durable suffix in the graph; the
+            // fetcher still owes O and D their parked attempts, which it must
+            // wake in connection order: P wakes O, O's completion wakes D.
+            let expected = [
+                predecessorHeader.rawCID, orphanHeader.rawCID, descendantHeader.rawCID,
+            ]
+            try await eventually("the parked suffix is woken") {
+                await connections.snapshot().count >= expected.count
+            }
+            let connected = await connections.snapshot()
+            XCTAssertEqual(
+                connected, expected,
+                "admitted in order: P, then the O it wakes, then the D O wakes"
+            )
         } catch {
             await client.stop()
             await runtime.stop()
