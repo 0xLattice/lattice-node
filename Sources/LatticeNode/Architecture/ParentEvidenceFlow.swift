@@ -123,6 +123,10 @@ struct ParentEvidenceFlow {
         backpressured.remove(session)
     }
 
+    func isBackpressured(_ session: Session) -> Bool {
+        backpressured.contains(session)
+    }
+
     func isFailed(_ session: Session) -> Bool {
         failed.contains(session)
     }

@@ -34,6 +34,12 @@ enum NodeNetworkTopic {
     static let childEvidenceAvailable = "lattice.hierarchy.evidence.available.v4"
     static let childEvidenceIndexRequest = "lattice.hierarchy.evidence.index.request.v4"
     static let childEvidenceIndexResponse = "lattice.hierarchy.evidence.index.response.v4"
+    /// Child → parent: the evidence for one carried child block, by CID
+    /// (Bitcoin's getdata). The parent answers from its durable issued index
+    /// with a `childEvidenceAvailable` hint, or stays silent. Additive: a
+    /// parent that does not know the topic drops it unread, and the child's
+    /// overlay locate still runs.
+    static let parentEvidenceRequest = "lattice.hierarchy.evidence.request.v1"
     /// Parent → child: the parent's current template context (its validated
     /// tip and the miner's reward plan for the child's subtree). Pushed on
     /// every change; the child builds its candidate against it.
@@ -93,7 +99,7 @@ enum NodeNetworkTopic {
              readEndpointRequest, readEndpointResponse: .overlay
         case hierarchyHello, childEvidenceAvailable,
              childEvidenceIndexRequest, childEvidenceIndexResponse,
-             parentTipAvailable, childCandidateAvailable,
+             parentEvidenceRequest, parentTipAvailable, childCandidateAvailable,
              parentChainFactRequest, parentChainFactResponse,
              childGenesisAnchorRequest, childGenesisAnchorResponse,
              parentRunReport, parentRunReportRequest: .hierarchy
@@ -716,6 +722,20 @@ struct ChildEvidenceAvailableMessage: NodeJSONMessage, Equatable, Sendable {
               _isCanonicalWireCID(childCID),
               _isCanonicalWireCID(rootCID),
               _isCanonicalWireCID(attachmentCID) else {
+            throw NodeNetworkWireError.malformed
+        }
+    }
+}
+
+struct ParentEvidenceRequestMessage: NodeJSONMessage, Equatable, Sendable {
+    let requestID: UInt64
+    let childPath: [String]
+    let childCID: String
+
+    func validate() throws {
+        guard requestID != 0,
+              _isAbsoluteChainPath(childPath), childPath.count > 1,
+              _isCanonicalWireCID(childCID) else {
             throw NodeNetworkWireError.malformed
         }
     }

@@ -6,6 +6,14 @@ public struct NodeResourcePolicy: Sendable, Equatable {
     public let maximumChainSpecBytes: Int
     public let maximumParentWitnessBytes: Int
     public let maximumPendingParentEvidence: Int
+    /// How many parent-evidence orphans this node keeps in memory: evidence
+    /// whose import could not decide on a fact the parent will send (a
+    /// missing predecessor, a clock ahead, content no one served). An
+    /// orphan holds no inbox room; the pool keeps its place in the parent's
+    /// index, to fetch it again once it can decide. A plain local bound: at
+    /// it a random orphan gives way, and an evicted one returns only through
+    /// ordinary acquisition.
+    public let maximumOrphanedParentEvidence: Int
     public let maximumWasmPolicies: Int
     public let maximumAcquisitionVolumes: Int
     public let maximumAcquisitionMembers: Int
@@ -50,6 +58,7 @@ public struct NodeResourcePolicy: Sendable, Equatable {
         maximumParentWitnessBytes: Int =
             Int(IvyConfig.defaultProtocolMaxFrameSize) * 15,
         maximumPendingParentEvidence: Int = 64,
+        maximumOrphanedParentEvidence: Int = 1_024,
         maximumWasmPolicies: Int = 64,
         maximumAcquisitionVolumes: Int = 20_548,
         maximumAcquisitionMembers: Int = Int(UInt16.max),
@@ -64,6 +73,7 @@ public struct NodeResourcePolicy: Sendable, Equatable {
             maximumChainSpecBytes > 0
                 && maximumParentWitnessBytes > 0
                 && maximumPendingParentEvidence > 0
+                && maximumOrphanedParentEvidence > 0
                 && maximumWasmPolicies > 0
                 && maximumAcquisitionVolumes > 0
                 && maximumAcquisitionMembers > 0
@@ -77,6 +87,7 @@ public struct NodeResourcePolicy: Sendable, Equatable {
         self.maximumChainSpecBytes = maximumChainSpecBytes
         self.maximumParentWitnessBytes = maximumParentWitnessBytes
         self.maximumPendingParentEvidence = maximumPendingParentEvidence
+        self.maximumOrphanedParentEvidence = maximumOrphanedParentEvidence
         self.maximumWasmPolicies = maximumWasmPolicies
         self.maximumAcquisitionVolumes = maximumAcquisitionVolumes
         self.maximumAcquisitionMembers = maximumAcquisitionMembers

@@ -424,6 +424,16 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
         }
     }
 
+    func testParentEvidenceRequestIsCanonical() throws {
+        try assertCanonical(ParentEvidenceRequestMessage.self, seed: 0x40) { g in
+            ParentEvidenceRequestMessage(
+                requestID: self.nonZeroID(&g),
+                childPath: self.randomChainPath(&g, minimumCount: 2),
+                childCID: self.randomCID(&g)
+            )
+        }
+    }
+
     func testChildEvidenceIndexRequestIsCanonical() throws {
         try assertCanonical(ChildEvidenceIndexRequestMessage.self, seed: 0x17) { g in
             let path = self.randomChainPath(&g, minimumCount: 2)

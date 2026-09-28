@@ -677,6 +677,35 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// Owner: Hierarchy.scheduleParentTipPush / Hierarchy.runParentTipPushes /
         ///     Lifecycle.clearRuntimeState.
         var parentTipPushTask = TaskSlot()
+        /// Parent evidence whose import could not decide on a fact the
+        /// parent will send: in memory only, bounded, random eviction.
+        /// Owner: Hierarchy.parentEvidenceOrphaned /
+        ///     Hierarchy.parentEvidenceRetryTrigger / Hierarchy.parentEvidenceDecided /
+        ///     Hierarchy.refetchReleasedOrphans / Hierarchy.repool /
+        ///     Lifecycle.clearRuntimeState.
+        var parentEvidenceOrphans = ParentEvidenceOrphans(
+            capacity: NodeResourcePolicy.default.maximumOrphanedParentEvidence
+        )
+        /// The orphans a refetch put back at a full inbox: the capacity
+        /// callback fetches exactly these again (`parentEvidenceRoomResumed`).
+        /// Owner: Hierarchy.refetchReleasedOrphans /
+        ///     Hierarchy.parentEvidenceRoomResumed /
+        ///     Lifecycle.clearRuntimeState.
+        var orphansAwaitingRoom: Set<ParentEvidenceOrphans.Key> = []
+        /// Orphans fetched again from the pool whose import is queued:
+        /// still undecided with no specific trigger afterwards, one is
+        /// dropped. Only the parent's hello clears every mark.
+        /// Owner: Hierarchy.parentEvidenceRetryTrigger /
+        ///     Hierarchy.parentEvidenceOrphaned / Hierarchy.parentEvidenceDecided /
+        ///     Hierarchy.recoverParentEvidence /
+        ///     Lifecycle.clearRuntimeState.
+        var refetchedOrphans: Set<ParentEvidenceOrphans.Key> = []
+        /// The parent session whose hello last released the orphan pool:
+        /// a refetch cut short by its predecessor's end finds that hello
+        /// already past (`refetchReleasedOrphans`).
+        /// Owner: Hierarchy.parentEvidenceRetryTrigger /
+        ///     Lifecycle.clearRuntimeState.
+        var parentHelloReleaseSession: Data?
         /// Owner: Hierarchy.scheduleParentTipPush / Hierarchy.runParentTipPushes /
         ///     Lifecycle.clearRuntimeState.
         var parentTipPushDirty = false
@@ -1070,6 +1099,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
             nexusGenesisCID: configuration.nexusGenesisCID,
             chainPath: configuration.chainPath,
             publicReadURL: configuration.publicReadURL
+        )
+        hierarchyState.parentEvidenceOrphans = ParentEvidenceOrphans(
+            capacity: configuration.resourcePolicy.maximumOrphanedParentEvidence
         )
     }
 

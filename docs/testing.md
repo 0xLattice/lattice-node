@@ -141,7 +141,29 @@ cross-component invariants:
   accepted once the rule is met; a carrier refused for good is relayed and
   consumed and never re-imported; a refusal with no carrier link to relay is
   consumed all the same, and decided is exactly the set the fetcher never
-  retries; a restarted child imports the block from its inbox alone,
+  retries; an import no parent fact can decide leaves the inbox as an
+  in-memory orphan, so descendants of a withheld block or far-future blocks
+  cannot fill it; a trigger (an accepted block, a parent hello) fetches
+  exactly the orphans it releases, each once, leaving pooled those the
+  fetcher still holds; a session blip mid-refetch keeps them, fetched
+  from the new session at once if its hello came first; the pool
+  evicts at random and empties with a restart; a lone child recovers
+  evidence it lost by asking its parent for it by CID; a full inbox costs
+  no fetch; a policy decline is consumed
+  (`testOnlyAParentFactKeepsAnUndecidedEntryInTheInbox`,
+  `testAtTheBoundARandomOrphanGivesWayToTheNewcomer`,
+  `testReleaseTakesExactlyTheReadyOrphans`,
+  `testWithheldPredecessorDescendantsCannotFillTheInbox`,
+  `testFutureStampedDescendantsCannotFillTheInbox`,
+  `testATriggerFetchesExactlyTheOrphansItReleases`,
+  `testASessionBlipDuringARefetchKeepsTheOrphans`,
+  `testARefetchCutShortAfterTheReconnectsHelloFetchesFromTheNewSession`,
+  `testALoneChildRecoversLostParentEvidenceByAskingItsParent`,
+  `testALoneChildRecoversEvictedParentEvidenceByAskingItsParent`,
+  `testAFullOrphanPoolEvictsAtRandom`,
+  `testAPolicyDeclineConsumesTheParentEvidence`,
+  `testAFullInboxCostsNoFetchesAndTheScanResumesWithRoom`); a restarted
+  child imports the block from its inbox alone,
   weighed, with content served by the parent; no import of a block
   reached through an overlay portable attachment uses `ImportMode.full`
   (`testDeferredCarriedBlockKeepsItsEvidenceInTheInboxAcrossRestart`,

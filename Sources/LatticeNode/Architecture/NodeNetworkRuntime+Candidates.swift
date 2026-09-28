@@ -35,10 +35,15 @@ extension NodeNetworkRuntime {
     }
 
     /// Seam: a predecessor activated outside admission (an adopted genesis)
-    /// wakes the successors parked behind it.
-    func predecessorConnectedOutOfBand(_ blockCID: String) {
+    /// wakes the successors parked behind it, and is an acceptance like any
+    /// other for the parent evidence waiting on it.
+    func predecessorConnectedOutOfBand(_ blockCID: String) async {
         blockFetcher.predecessorConnectedOutOfBand(blockCID)
         serviceBlockFetcher()
+        guard let process else { return }
+        await parentEvidenceRetryTrigger(
+            accepted: blockCID, generation: runtimeGeneration, process: process
+        )
     }
 
     /// Seam: an overlay session ended or was replaced; its provider no
@@ -405,6 +410,14 @@ extension NodeNetworkRuntime {
                         resolution: .terminal,
                         deficientProviders: failedOverlayProviders
                     )
+                    // Declined by this node's policy: decided here, so its
+                    // parent evidence is consumed.
+                    if let authenticatedPackage {
+                        try? await process.consumeDeclinedParentEvidence(
+                            childCID: candidate.blockCID,
+                            rootCID: authenticatedPackage.package.proof.rootCID
+                        )
+                    }
                     return
                 }
                 if let failure = error as? BlockImportError {
@@ -415,6 +428,11 @@ extension NodeNetworkRuntime {
                             resolution: .wait(.evidence),
                             deficientProviders: failedOverlayProviders
                         )
+                        await orphanUndecidedParentEvidence(
+                            candidate, package: authenticatedPackage,
+                            resolution: .wait(.evidence), decision: decision,
+                            notBefore: nil, generation: generation, process: process
+                        )
                         return
                     }
                     if decision.shouldRetryLater {
@@ -422,6 +440,11 @@ extension NodeNetworkRuntime {
                             candidate,
                             resolution: .wait(.later),
                             deficientProviders: failedOverlayProviders
+                        )
+                        await orphanUndecidedParentEvidence(
+                            candidate, package: authenticatedPackage,
+                            resolution: .wait(.later), decision: decision,
+                            notBefore: nil, generation: generation, process: process
                         )
                         return
                     }
@@ -444,6 +467,11 @@ extension NodeNetworkRuntime {
                             resolution: .wait(.later),
                             deficientProviders: failedOverlayProviders
                         )
+                        await orphanUndecidedParentEvidence(
+                            candidate, package: authenticatedPackage,
+                            resolution: .wait(.later), decision: nil,
+                            notBefore: nil, generation: generation, process: process
+                        )
                         return
                     }
                 }
@@ -456,6 +484,18 @@ extension NodeNetworkRuntime {
                 resolution: .wait(.content),
                 deficientProviders: failedOverlayProviders
             )
+            await orphanUndecidedParentEvidence(
+                candidate, package: authenticatedPackage,
+                resolution: .wait(.content), decision: nil,
+                notBefore: nil, generation: generation, process: process
+            )
+            if authenticatedPackage == nil {
+                // Only the parent's evidence opens its content to a lone
+                // child: ask the parent for it.
+                await requestParentEvidence(
+                    for: candidate.blockCID, generation: generation, process: process
+                )
+            }
             return
         }
         guard isCurrentRuntime(generation: generation, process: process) else {
@@ -579,6 +619,11 @@ extension NodeNetworkRuntime {
                 generation: generation,
                 process: process
             )
+            // The parent's durable index may hold it where no overlay peer
+            // admitted it (a lone child, its orphan evicted or lost).
+            await requestParentEvidence(
+                for: childCID, generation: generation, process: process
+            )
         }
         let parkOn: String?
         if let predecessor = outcome.sameChainPredecessor,
@@ -613,11 +658,42 @@ extension NodeNetworkRuntime {
             resolution: resolution,
             deficientProviders: failedOverlayProviders
         )
+        await orphanUndecidedParentEvidence(
+            candidate, package: authenticatedPackage,
+            resolution: resolution, decision: outcome.decision,
+            notBefore: outcome.notBefore, generation: generation, process: process
+        )
+        // A block reached without its parent's evidence whose content no
+        // overlay peer serves (a lone child's predecessor walk): the parent's
+        // evidence brings the block's content with it, so ask the parent.
+        if authenticatedPackage == nil, case .wait(.content) = resolution {
+            await requestParentEvidence(
+                for: candidate.blockCID, generation: generation, process: process
+            )
+        }
+        guard isCurrentRuntime(generation: generation, process: process) else {
+            return
+        }
+        // An accepted block may be what orphaned parent evidence waits on.
+        if outcome.decision.isAccepted {
+            await parentEvidenceRetryTrigger(
+                accepted: candidate.blockCID, generation: generation, process: process
+            )
+            guard isCurrentRuntime(generation: generation, process: process) else {
+                return
+            }
+        }
         // A decided block consumed its inbox entry, accepted or not: room
         // for evidence that waited on it.
         let decided: Bool = switch resolution {
         case .connected, .terminal: true
         case .wait, .predecessor: false
+        }
+        if decided, let authenticatedPackage {
+            parentEvidenceDecided(
+                childCID: candidate.blockCID,
+                rootCID: authenticatedPackage.package.proof.rootCID
+            )
         }
         if decided, authenticatedPackage != nil,
            (try? await process.store.parentEvidenceInboxHasCapacity()) == true {
@@ -677,6 +753,34 @@ extension NodeNetworkRuntime {
         if decision.shouldRetryWhenEvidenceChanges { return .wait(.evidence) }
         if decision.shouldRetryLater { return .wait(.later) }
         return .terminal
+    }
+
+    /// An undecided parent-backed import leaves the inbox as an orphan
+    /// unless a parent fact decides it (`ParentEvidenceOrphans.retry`).
+    private func orphanUndecidedParentEvidence(
+        _ candidate: Candidate,
+        package: AuthenticatedChildPackage?,
+        resolution: BlockFetcher.Resolution,
+        decision: NodeImportDecision?,
+        notBefore: Int64?,
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        guard let package,
+              isCurrentRuntime(generation: generation, process: process),
+              let retry = ParentEvidenceOrphans.retry(
+                resolution: resolution,
+                decision: decision,
+                notBefore: notBefore,
+                now: ParentEvidenceOrphans.clock()
+              ) else { return }
+        await parentEvidenceOrphaned(
+            childCID: candidate.blockCID,
+            rootCID: package.package.proof.rootCID,
+            retry: retry,
+            generation: generation,
+            process: process
+        )
     }
 
     private nonisolated static func enforceLocalImportPolicy(

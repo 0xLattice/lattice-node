@@ -1377,7 +1377,8 @@ extension NodeStore {
 
     /// Drop the inbox entries for one (block, root) an admission decided
     /// without persisting relay evidence; the persist and stage paths consume
-    /// theirs by attachment. Nothing else removes an entry.
+    /// theirs by attachment. Otherwise an entry leaves only as an orphan
+    /// (`orphanParentEvidence`).
     func consumeParentEvidence(childCID: String, rootCID: String) async throws {
         let present = try database.query(
             "SELECT 1 FROM parent_evidence_inbox WHERE child_cid = ?1 AND root_cid = ?2 LIMIT 1",
@@ -1389,6 +1390,44 @@ extension NodeStore {
             params: [.text(childCID), .text(rootCID)]
         )
         await reconcileParentEvidenceInboxPruningProtection()
+    }
+
+    /// The import of (block, root) could not decide on a fact the parent
+    /// will send: its inbox entries leave (the runtime keeps them, if at
+    /// all, in its in-memory orphan pool). Returns what left: each entry's
+    /// source and its place in the parent's index, to fetch it again by.
+    func orphanParentEvidence(
+        childCID: String,
+        rootCID: String
+    ) async throws -> [(sourceID: String, summary: IssuedChildEvidenceSummary)] {
+        let orphaned = try database.transaction {
+            () throws -> [(sourceID: String, summary: IssuedChildEvidenceSummary)] in
+            let rows = try database.rows(
+                ParentEvidenceInboxRow.self,
+                "SELECT source_id, ordinal, attachment_cid FROM parent_evidence_inbox WHERE child_cid = ?1 AND root_cid = ?2",
+                params: [.text(childCID), .text(rootCID)]
+            )
+            let orphaned = try rows.map { row in
+                (
+                    sourceID: try row.sourceID,
+                    summary: IssuedChildEvidenceSummary(
+                        ordinal: try row.ordinal,
+                        childCID: childCID,
+                        rootCID: rootCID,
+                        attachmentCID: try row.attachmentCID
+                    )
+                )
+            }
+            try database.execute(
+                "DELETE FROM parent_evidence_inbox WHERE child_cid = ?1 AND root_cid = ?2",
+                params: [.text(childCID), .text(rootCID)]
+            )
+            return orphaned
+        }
+        if !orphaned.isEmpty {
+            await reconcileParentEvidenceInboxPruningProtection()
+        }
+        return orphaned
     }
 
     func parentEvidenceInboxHasCapacity() throws -> Bool {
