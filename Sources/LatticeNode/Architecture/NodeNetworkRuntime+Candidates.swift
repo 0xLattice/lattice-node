@@ -514,17 +514,21 @@ extension NodeNetworkRuntime {
            !outcome.decision.shouldRetryLater {
             releaseCarriedHold(ifCarried: candidate.blockCID)
         }
-        if outcome.decision == .invalid {
-            if attempt.attribution.allResponsesComplete,
-               let supplierKey = attempt.attribution.soleRemoteSupplierPublicKey,
-               let supplier = try? PeerKey(supplierKey),
-               hasReadySession(supplier),
-               configuration.address.isNexus || outcome.parentCarrierLink != nil {
-                await overlay.reportDeficientContent(
-                    rootCID: candidate.blockCID,
-                    servedBy: PeerID(publicKey: supplierKey)
-                )
-            }
+        let soleSupplier = attempt.attribution.soleRemoteSupplierPublicKey
+        if let blamed = Self.candidateBlame(
+            outcome.decision,
+            complete: attempt.attribution.allResponsesComplete,
+            soleSupplier: soleSupplier,
+            supplierHasReadySession: soleSupplier
+                .flatMap { try? PeerKey($0) }
+                .map { hasReadySession($0) } ?? false,
+            isNexus: configuration.address.isNexus,
+            hasCarrierLink: outcome.parentCarrierLink != nil
+        ) {
+            await overlay.reportDeficientContent(
+                rootCID: candidate.blockCID,
+                servedBy: PeerID(publicKey: blamed)
+            )
         }
         if case .unavailable(let requirement?) = outcome.decision,
            let authenticatedPackage {
@@ -580,17 +584,14 @@ extension NodeNetworkRuntime {
                 process: process
             )
         }
-        let resolution: BlockFetcher.Resolution
+        let parkOn: String?
         if let predecessor = outcome.sameChainPredecessor,
            await process.hasAcceptedBlock(predecessor.predecessorCID) == false {
             // Park only when the predecessor is genuinely still missing. An
             // already-accepted predecessor already fired its one-shot connect
             // signal, so parking on it now would wedge this candidate forever.
-            resolution = .predecessor(predecessor.predecessorCID)
-        } else if let predecessor = outcome.sameChainPredecessor,
-                  let missing = await process.deepestMissingAncestor(
-                      of: predecessor.predecessorCID
-                  ) {
+            parkOn = predecessor.predecessorCID
+        } else if let predecessor = outcome.sameChainPredecessor {
             // The immediate predecessor is accepted but itself DISCONNECTED:
             // its connect signal fired long ago, so parking on it would wedge
             // — but stopping here wedges just the same, because the segment is
@@ -599,26 +600,18 @@ extension NodeNetworkRuntime {
             // also seeds its acquisition, and each arrival re-walks one level
             // until the segment connects and fork choice promotes it. This is
             // both the gap fast-forward and the fresh deep-sync descent.
-            resolution = .predecessor(missing)
-        } else if outcome.decision.isAccepted {
-            resolution = .connected
-        } else if outcome.decision == .unavailable(nil),
-                  (
-                    attempt.attribution.contentUnavailable
-                        || attempt.attribution.localCapacityUnavailable
-                  ) {
-            resolution = .wait(.content)
-        } else if case .unavailable(.parentGenesis?) = outcome.decision {
-            resolution = .wait(.later)
-        } else if case .unavailable(.parentStateContinuity?) = outcome.decision {
-            resolution = .wait(.later)
-        } else if outcome.decision.shouldRetryWhenEvidenceChanges {
-            resolution = .wait(.evidence)
-        } else if outcome.decision.shouldRetryLater {
-            resolution = .wait(.later)
+            parkOn = await process.deepestMissingAncestor(
+                of: predecessor.predecessorCID
+            )
         } else {
-            resolution = .terminal
+            parkOn = nil
         }
+        let resolution = Self.candidateResolution(
+            outcome.decision,
+            parkOn: parkOn,
+            contentShortfall: attempt.attribution.contentUnavailable
+                || attempt.attribution.localCapacityUnavailable
+        )
         completeCandidate(
             candidate,
             resolution: resolution,
@@ -638,6 +631,56 @@ extension NodeNetworkRuntime {
                 process: process
             )
         }
+    }
+
+    /// The peer an admission outcome blames, or nil. Only a complete
+    /// `invalid` candidate is attributable, and only to its sole remote
+    /// supplier while that supplier's session is ready. On a child chain the
+    /// candidate must also carry a parent carrier link: parent evidence
+    /// authenticates only parent facts and never vouches for the child
+    /// transition. "Blame" is a per-root routing suppression, never a ban.
+    nonisolated static func candidateBlame(
+        _ decision: NodeImportDecision,
+        complete: Bool,
+        soleSupplier: String?,
+        supplierHasReadySession: Bool,
+        isNexus: Bool,
+        hasCarrierLink: Bool
+    ) -> String? {
+        guard decision == .invalid,
+              complete,
+              let soleSupplier,
+              supplierHasReadySession,
+              isNexus || hasCarrierLink else {
+            return nil
+        }
+        return soleSupplier
+    }
+
+    /// How the fetcher resolves an admission outcome. A missing same-chain
+    /// ancestor (`parkOn`) parks the candidate on it, whatever the decision.
+    /// Otherwise an accepted decision connects; `unavailable` waits: for a new
+    /// provider when the body itself was not served (`contentShortfall`), on a
+    /// timer for a missing parent fact (genesis or state continuity), and for
+    /// new evidence otherwise; `temporarilyInvalid` waits on a timer; every
+    /// other decision is terminal.
+    nonisolated static func candidateResolution(
+        _ decision: NodeImportDecision,
+        parkOn: String?,
+        contentShortfall: Bool
+    ) -> BlockFetcher.Resolution {
+        if let parkOn { return .predecessor(parkOn) }
+        if decision.isAccepted { return .connected }
+        if decision == .unavailable(nil), contentShortfall {
+            return .wait(.content)
+        }
+        if case .unavailable(.parentGenesis?) = decision { return .wait(.later) }
+        if case .unavailable(.parentStateContinuity?) = decision {
+            return .wait(.later)
+        }
+        if decision.shouldRetryWhenEvidenceChanges { return .wait(.evidence) }
+        if decision.shouldRetryLater { return .wait(.later) }
+        return .terminal
     }
 
     private nonisolated static func enforceLocalImportPolicy(
