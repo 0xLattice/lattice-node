@@ -34,7 +34,7 @@ final class ParentEvidenceOrphansTests: XCTestCase {
         pool.insert(sourceID: "s", summary: summary("a"), retry: .predecessor("p"))
         pool.insert(sourceID: "s", summary: summary("b"), retry: .predecessor("q"))
         pool.insert(sourceID: "s", summary: summary("c"), retry: .notBefore(10))
-        let released = pool.release { $0 == .predecessor("p") }
+        let released = pool.release { $0.retry == .predecessor("p") }
         XCTAssertEqual(released.map(\.summary.childCID), ["a"])
         XCTAssertEqual(pool.entries.count, 2)
         XCTAssertFalse(pool.contains(childCID: "a", rootCID: "r"))

@@ -159,14 +159,20 @@ genesis or continuity answer) can decide it. Any other undecided import
 leaves the inbox for a bounded in-memory orphan pool that keeps its place
 in the parent's index (at the bound a random orphan gives way). A
 node-local policy decline is a decision and consumes the entry. Each
-accepted block (by import or otherwise) and each parent hello releases the
-orphans that can now decide (predecessor accepted, time reached, or any
-other) and fetches exactly those again from the parent. The parent relays
-evidence without validating it, so a parent miner could otherwise carry
-blocks that never decide until the inbox was full. An orphan evicted from
-the pool or lost with a restart is gone, as in Bitcoin's orphan pool, and
-returns only through ordinary acquisition (the overlay's portable-attachment
-locate and the predecessor walk).
+accepted block (by import or otherwise) releases the orphans behind it and
+those whose time has come, and each parent hello every orphan that can now
+decide; exactly those are fetched again from the parent, an orphan whose
+block the fetcher still holds staying pooled. The parent relays evidence
+without validating it, so a parent miner could otherwise carry blocks that
+never decide until the inbox was full. An orphan evicted from the pool or
+lost with a restart is gone, as in Bitcoin's orphan pool, and returns
+through ordinary acquisition: the predecessor walk reaches the block, and a
+block reached without its parent's evidence is asked for by CID of the
+overlay (the portable-attachment locate) and of the configured parent
+(`lattice.hierarchy.evidence.request.v1`, answered from the parent's
+durable issued index with the ordinary evidence hint). That request is
+additive, not a flag day: a parent that does not know the topic drops it
+unread and the overlay locate still runs.
 It asks its parent for a carrier's run when it imports a block that
 carrier carried and after each evidence round, the fallback for a push it
 missed; a credit it already holds never depends on the parent being

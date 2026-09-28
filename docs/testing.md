@@ -144,15 +144,20 @@ cross-component invariants:
   retries; an import no parent fact can decide leaves the inbox as an
   in-memory orphan, so descendants of a withheld block or far-future blocks
   cannot fill it; a trigger (an accepted block, a parent hello) fetches
-  exactly the orphans it releases, each once; the pool evicts at random
-  and empties with a restart; a full inbox costs no fetch; a policy decline
-  is consumed
+  exactly the orphans it releases, each once, leaving pooled those the
+  fetcher still holds; a session blip mid-refetch keeps them; the pool
+  evicts at random and empties with a restart; a lone child recovers
+  evidence it lost by asking its parent for it by CID; a full inbox costs
+  no fetch; a policy decline is consumed
   (`testOnlyAParentFactKeepsAnUndecidedEntryInTheInbox`,
   `testAtTheBoundARandomOrphanGivesWayToTheNewcomer`,
   `testReleaseTakesExactlyTheReadyOrphans`,
   `testWithheldPredecessorDescendantsCannotFillTheInbox`,
   `testFutureStampedDescendantsCannotFillTheInbox`,
   `testATriggerFetchesExactlyTheOrphansItReleases`,
+  `testASessionBlipDuringARefetchKeepsTheOrphans`,
+  `testALoneChildRecoversLostParentEvidenceByAskingItsParent`,
+  `testALoneChildRecoversEvictedParentEvidenceByAskingItsParent`,
   `testAFullOrphanPoolEvictsAtRandom`,
   `testAPolicyDeclineConsumesTheParentEvidence`,
   `testAFullInboxCostsNoFetchesAndTheScanResumesWithRoom`); a restarted

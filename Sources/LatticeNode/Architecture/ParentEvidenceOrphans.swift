@@ -53,9 +53,18 @@ struct ParentEvidenceOrphans {
         entries[key] = Orphan(sourceID: sourceID, summary: summary, retry: retry)
     }
 
+    mutating func remove(_ key: Key) {
+        entries.removeValue(forKey: key)
+    }
+
+    /// A pooled orphan takes a new retry (its block was imported again).
+    mutating func updateRetry(_ key: Key, _ retry: Retry) {
+        entries[key]?.retry = retry
+    }
+
     /// Takes the orphans `isReady` releases out of the pool.
-    mutating func release(where isReady: (Retry) -> Bool) -> [Orphan] {
-        let released = entries.filter { isReady($0.value.retry) }
+    mutating func release(where isReady: (Orphan) -> Bool) -> [Orphan] {
+        let released = entries.filter { isReady($0.value) }
         for key in released.keys { entries.removeValue(forKey: key) }
         return released.values.sorted {
             ($0.sourceID, $0.summary.ordinal) < ($1.sourceID, $1.summary.ordinal)

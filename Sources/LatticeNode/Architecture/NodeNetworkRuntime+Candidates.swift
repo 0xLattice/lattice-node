@@ -42,7 +42,7 @@ extension NodeNetworkRuntime {
         serviceBlockFetcher()
         guard let process else { return }
         await parentEvidenceRetryTrigger(
-            generation: runtimeGeneration, process: process
+            accepted: blockCID, generation: runtimeGeneration, process: process
         )
     }
 
@@ -489,6 +489,13 @@ extension NodeNetworkRuntime {
                 resolution: .wait(.content), decision: nil,
                 notBefore: nil, generation: generation, process: process
             )
+            if authenticatedPackage == nil {
+                // Only the parent's evidence opens its content to a lone
+                // child: ask the parent for it.
+                await requestParentEvidence(
+                    for: candidate.blockCID, generation: generation, process: process
+                )
+            }
             return
         }
         guard isCurrentRuntime(generation: generation, process: process) else {
@@ -612,6 +619,11 @@ extension NodeNetworkRuntime {
                 generation: generation,
                 process: process
             )
+            // The parent's durable index may hold it where no overlay peer
+            // admitted it (a lone child, its orphan evicted or lost).
+            await requestParentEvidence(
+                for: childCID, generation: generation, process: process
+            )
         }
         let parkOn: String?
         if let predecessor = outcome.sameChainPredecessor,
@@ -651,13 +663,21 @@ extension NodeNetworkRuntime {
             resolution: resolution, decision: outcome.decision,
             notBefore: outcome.notBefore, generation: generation, process: process
         )
+        // A block reached without its parent's evidence whose content no
+        // overlay peer serves (a lone child's predecessor walk): the parent's
+        // evidence brings the block's content with it, so ask the parent.
+        if authenticatedPackage == nil, case .wait(.content) = resolution {
+            await requestParentEvidence(
+                for: candidate.blockCID, generation: generation, process: process
+            )
+        }
         guard isCurrentRuntime(generation: generation, process: process) else {
             return
         }
         // An accepted block may be what orphaned parent evidence waits on.
         if outcome.decision.isAccepted {
             await parentEvidenceRetryTrigger(
-                generation: generation, process: process
+                accepted: candidate.blockCID, generation: generation, process: process
             )
             guard isCurrentRuntime(generation: generation, process: process) else {
                 return
@@ -668,6 +688,12 @@ extension NodeNetworkRuntime {
         let decided: Bool = switch resolution {
         case .connected, .terminal: true
         case .wait, .predecessor: false
+        }
+        if decided, let authenticatedPackage {
+            parentEvidenceDecided(
+                childCID: candidate.blockCID,
+                rootCID: authenticatedPackage.package.proof.rootCID
+            )
         }
         if decided, authenticatedPackage != nil,
            (try? await process.store.parentEvidenceInboxHasCapacity()) == true {

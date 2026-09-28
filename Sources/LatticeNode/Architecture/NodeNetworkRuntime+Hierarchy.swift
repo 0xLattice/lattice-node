@@ -1438,8 +1438,12 @@ extension NodeNetworkRuntime {
 
     /// Seam: an import could not decide on a fact the parent will send.
     /// Its evidence leaves the inbox for the in-memory orphan pool, which
-    /// keeps its place in the parent's index. Room made works as a
-    /// decision's does.
+    /// keeps its place in the parent's index; an orphan already pooled (its
+    /// block imported again from the fetcher's own attempt) takes the new
+    /// retry. An orphan fetched again from the pool that is still undecided
+    /// with no specific trigger is dropped — lost by design, recoverable by
+    /// asking the parent for it (`requestParentEvidence`). Room made works as
+    /// a decision's does.
     func parentEvidenceOrphaned(
         childCID: String,
         rootCID: String,
@@ -1451,10 +1455,18 @@ extension NodeNetworkRuntime {
             childCID: childCID, rootCID: rootCID
         )) ?? []
         guard isCurrentRuntime(generation: generation, process: process) else { return }
-        for entry in orphaned {
-            hierarchyState.parentEvidenceOrphans.insert(
-                sourceID: entry.sourceID, summary: entry.summary, retry: retry
-            )
+        let key = ParentEvidenceOrphans.Key(childCID: childCID, rootCID: rootCID)
+        let refetched = hierarchyState.refetchedOrphans.remove(key) != nil
+        if retry == .nextTrigger, refetched {
+            hierarchyState.parentEvidenceOrphans.remove(key)
+        } else if orphaned.isEmpty {
+            hierarchyState.parentEvidenceOrphans.updateRetry(key, retry)
+        } else {
+            for entry in orphaned {
+                hierarchyState.parentEvidenceOrphans.insert(
+                    sourceID: entry.sourceID, summary: entry.summary, retry: retry
+                )
+            }
         }
         guard !orphaned.isEmpty,
               (try? await process.store.parentEvidenceInboxHasCapacity()) == true,
@@ -1464,75 +1476,160 @@ extension NodeNetworkRuntime {
         await requestEvidenceIndex(generation: generation, process: process)
     }
 
-    /// Seam: the one retry trigger — a block was accepted (by import, or
-    /// outside it through `predecessorConnectedOutOfBand`), or the parent
-    /// said hello. The orphans that can now decide (predecessor accepted,
-    /// time reached, or any other) leave the pool and exactly those are
-    /// fetched again from the parent by their place in its index: the work
-    /// is what is released, never a rescan. Each is fetched on its own, so
-    /// one the parent cannot serve holds up none of the others. At a full
-    /// inbox the rest go back to the pool without a fetch, and the capacity
-    /// callback runs this again.
+    /// Seam: a parent-backed import decided its block; its orphan, if the
+    /// fetcher's own attempt decided it, is gone.
+    func parentEvidenceDecided(childCID: String, rootCID: String) {
+        let key = ParentEvidenceOrphans.Key(childCID: childCID, rootCID: rootCID)
+        hierarchyState.parentEvidenceOrphans.remove(key)
+        hierarchyState.refetchedOrphans.remove(key)
+    }
+
+    /// Seam: the one retry trigger. A block was accepted (`accepted`, by
+    /// import or outside it through `predecessorConnectedOutOfBand`): the
+    /// orphans behind it, and those whose time has come, are released. The
+    /// parent said hello (`accepted` nil): every orphan whose retry is met
+    /// (predecessor accepted, time reached, or any other) is released.
+    /// Orphans whose block the fetcher still holds stay pooled (its attempt
+    /// decides them). Exactly the released orphans are fetched again from
+    /// the parent by their place in its index — never a rescan — each on its
+    /// own, so one the parent cannot serve holds up none of the others.
     func parentEvidenceRetryTrigger(
+        accepted acceptedCID: String?,
         generation: UInt64,
         process: ChainProcess
     ) async {
         guard isCurrentRuntime(generation: generation, process: process) else { return }
-        var predecessors: Set<String> = []
-        for orphan in hierarchyState.parentEvidenceOrphans.entries.values {
-            if case .predecessor(let predecessorCID) = orphan.retry {
-                predecessors.insert(predecessorCID)
-            }
-        }
         var accepted: Set<String> = []
-        for predecessorCID in predecessors
-        where await process.hasAcceptedBlock(predecessorCID) {
-            accepted.insert(predecessorCID)
+        if let acceptedCID {
+            accepted.insert(acceptedCID)
+        } else {
+            hierarchyState.refetchedOrphans.removeAll()
+            var predecessors: Set<String> = []
+            for orphan in hierarchyState.parentEvidenceOrphans.entries.values {
+                if case .predecessor(let predecessorCID) = orphan.retry {
+                    predecessors.insert(predecessorCID)
+                }
+            }
+            for predecessorCID in predecessors
+            where await process.hasAcceptedBlock(predecessorCID) {
+                accepted.insert(predecessorCID)
+            }
         }
         guard isCurrentRuntime(generation: generation, process: process),
               let parent = configuredParentPeer() else { return }
         let now = ParentEvidenceOrphans.clock()
-        let released = hierarchyState.parentEvidenceOrphans.release { retry in
-            switch retry {
-            case .nextTrigger: true
-            case .notBefore(let time): time <= now
-            case .predecessor(let predecessorCID): accepted.contains(predecessorCID)
+        let atHello = acceptedCID == nil
+        var held: Set<String> = []
+        for orphan in hierarchyState.parentEvidenceOrphans.entries.values
+        where fetcherHasParentAttempt(orphan.summary.childCID) {
+            held.insert(orphan.summary.childCID)
+        }
+        let released = hierarchyState.parentEvidenceOrphans.release { orphan in
+            guard !held.contains(orphan.summary.childCID) else { return false }
+            switch orphan.retry {
+            case .nextTrigger: return atHello
+            case .notBefore(let time): return time <= now
+            case .predecessor(let predecessorCID): return accepted.contains(predecessorCID)
             }
         }
         guard !released.isEmpty else { return }
+        for orphan in released {
+            hierarchyState.refetchedOrphans.insert(ParentEvidenceOrphans.Key(
+                childCID: orphan.summary.childCID, rootCID: orphan.summary.rootCID
+            ))
+        }
         SyncTrace.log("orphaned parent evidence released: \(released.map { $0.summary.childCID.prefix(12) })")
         Task { [weak self] in
-            for (index, orphan) in released.enumerated() {
-                guard let self else { return }
-                let result = await self.recoverParentEvidence(
-                    orphan.summary,
-                    sourceID: orphan.sourceID,
-                    advanceScan: false,
-                    from: parent,
-                    generation: generation,
-                    process: process
-                )
-                if result == .backpressured {
-                    await self.orphansWaitForRoom(
-                        Array(released[index...]), generation: generation
-                    )
-                    return
-                }
+            await self?.refetchReleasedOrphans(
+                released, from: parent, generation: generation, process: process
+            )
+        }
+    }
+
+    /// Fetches released orphans again, one by one. The parent unable to
+    /// serve one, or its session ending, puts it (and, with the session, the
+    /// rest) back in the pool; a full inbox puts the rest back and waits for
+    /// the capacity callback. Only a malformed answer drops an orphan.
+    private func refetchReleasedOrphans(
+        _ released: [ParentEvidenceOrphans.Orphan],
+        from parent: AuthenticatedPeer,
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        for (index, orphan) in released.enumerated() {
+            let childCID = orphan.summary.childCID
+            guard isCurrentRuntime(generation: generation, process: process) else { return }
+            hierarchyState.parentEvidenceInFlight[childCID, default: 0] += 1
+            let result = await recoverParentEvidence(
+                orphan.summary,
+                sourceID: orphan.sourceID,
+                advanceScan: false,
+                from: parent,
+                generation: generation,
+                process: process
+            )
+            await parentEvidenceSettled([childCID], generation: generation, process: process)
+            guard isCurrentRuntime(generation: generation, process: process) else { return }
+            let sessionCurrent =
+                hierarchyState.hierarchyRecords[parent.key]?.session?.sessionID == parent.sessionID
+            switch result {
+            case .handled:
+                continue
+            case .backpressured:
+                repool(Array(released[index...]))
+                hierarchyState.orphansWaitForRoom = true
+                return
+            case .unavailable:
+                repool([orphan])
+            case .failed where !sessionCurrent:
+                repool(Array(released[index...]))
+                return
+            case .failed:
+                hierarchyState.refetchedOrphans.remove(ParentEvidenceOrphans.Key(
+                    childCID: childCID, rootCID: orphan.summary.rootCID
+                ))
             }
         }
     }
 
-    private func orphansWaitForRoom(
-        _ orphans: [ParentEvidenceOrphans.Orphan],
-        generation: UInt64
-    ) {
-        guard isCurrentGeneration(generation) else { return }
+    private func repool(_ orphans: [ParentEvidenceOrphans.Orphan]) {
         for orphan in orphans {
             hierarchyState.parentEvidenceOrphans.insert(
-                sourceID: orphan.sourceID, summary: orphan.summary, retry: .nextTrigger
+                sourceID: orphan.sourceID, summary: orphan.summary, retry: orphan.retry
             )
+            hierarchyState.refetchedOrphans.remove(ParentEvidenceOrphans.Key(
+                childCID: orphan.summary.childCID, rootCID: orphan.summary.rootCID
+            ))
         }
-        hierarchyState.orphansWaitForRoom = true
+    }
+
+    /// Bitcoin's getdata for parent evidence: a child block this node holds
+    /// without its parent's evidence (reached by the predecessor walk, its
+    /// orphan evicted or lost with a restart) is asked of the configured
+    /// parent by CID. The parent answers from its durable issued index with
+    /// the same live hint a carry sends, which the evidence lane recovers.
+    /// Fire and forget, bounded like the overlay locate it runs beside: a
+    /// parent that does not route the topic stays silent.
+    func requestParentEvidence(
+        for childCID: String,
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        guard !configuration.address.isNexus,
+              isCurrentRuntime(generation: generation, process: process),
+              let parent = configuredParentPeer(),
+              hierarchyState.hierarchyRecords[parent.key]?.role == .parent,
+              let payload = try? ParentEvidenceRequestMessage(
+                requestID: makeRequestID(),
+                childPath: configuration.chainPath,
+                childCID: childCID
+              ).encoded() else { return }
+        let sent = await hierarchy.sendMessage(
+            to: parent,
+            topic: NodeNetworkTopic.parentEvidenceRequest,
+            payload: payload
+        )
+        SyncTrace.log("parent-evidence-request \(childCID.prefix(12)) sent=\(sent)")
     }
 
     private func recoverParentEvidence(
@@ -1543,11 +1640,14 @@ extension NodeNetworkRuntime {
         generation: UInt64,
         process: ChainProcess
     ) async -> ParentEvidenceResult {
-        // An orphan still waiting, or a block the fetcher already holds on
-        // the parent's word, is not fetched again.
-        if hierarchyState.parentEvidenceOrphans.contains(
-            childCID: summary.childCID, rootCID: summary.rootCID
-        ) || fetcherHasParentAttempt(summary.childCID) {
+        guard isCurrentRuntime(generation: generation, process: process),
+              hierarchyState.hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID,
+              hierarchyState.hierarchyRecords[peer.key]?.role == .parent else {
+            return .failed
+        }
+        // A block the fetcher already holds on the parent's word is not
+        // fetched again: its attempt decides it.
+        if fetcherHasParentAttempt(summary.childCID) {
             return .handled
         }
         // A full inbox would refuse the evidence after its fetch: it waits
@@ -1915,6 +2015,33 @@ extension NodeNetworkRuntime {
                 await hierarchy.recycleSession(ifCurrent: peer)
             }
 
+        case (NodeNetworkTopic.parentEvidenceRequest, .child(let childPath)):
+            // Getdata for one carried block's evidence: answered from the
+            // durable issued index with the live hint a carry sends, or not
+            // at all. One indexed read per request.
+            guard let directory = childPath.last,
+                  let request = try? ParentEvidenceRequestMessage.decoded(
+                    message.payload
+                  ), request.childPath == childPath,
+                  let issued = try? await process.store.issuedChildEvidenceSummary(
+                    childCID: request.childCID, directory: directory
+                  ),
+                  isCurrentRuntime(generation: generation, process: process),
+                  let payload = try? ChildEvidenceAvailableMessage(
+                    childPath: childPath,
+                    sourceID: issued.sourceID,
+                    ordinal: issued.summary.ordinal,
+                    childCID: request.childCID,
+                    rootCID: issued.summary.rootCID,
+                    attachmentCID: issued.summary.attachmentCID
+                  ).encoded()
+            else { return }
+            _ = await hierarchy.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.childEvidenceAvailable,
+                payload: payload
+            )
+
         case (NodeNetworkTopic.childEvidenceIndexRequest, .child(let childPath)):
             guard let directory = childPath.last,
                   let request = try? ChildEvidenceIndexRequestMessage.decoded(
@@ -2233,6 +2360,7 @@ extension NodeNetworkRuntime {
                 process: process
             )
             await parentEvidenceRetryTrigger(
+                accepted: nil,
                 generation: generation,
                 process: process
             )
@@ -2805,7 +2933,7 @@ extension NodeNetworkRuntime {
                     }
                     if orphansWaited {
                         await self?.parentEvidenceRetryTrigger(
-                            generation: generation, process: process
+                            accepted: nil, generation: generation, process: process
                         )
                     }
                 }

@@ -680,17 +680,25 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// Parent evidence whose import could not decide on a fact the
         /// parent will send: in memory only, bounded, random eviction.
         /// Owner: Hierarchy.parentEvidenceOrphaned /
-        ///     Hierarchy.parentEvidenceRetryTrigger / Hierarchy.orphansWaitForRoom /
+        ///     Hierarchy.parentEvidenceRetryTrigger / Hierarchy.parentEvidenceDecided /
+        ///     Hierarchy.refetchReleasedOrphans / Hierarchy.repool /
         ///     Lifecycle.clearRuntimeState.
         var parentEvidenceOrphans = ParentEvidenceOrphans(
             capacity: NodeResourcePolicy.default.maximumOrphanedParentEvidence
         )
         /// A refetch of released orphans stopped at a full inbox; the
         /// capacity callback runs the trigger again.
-        /// Owner: Hierarchy.orphansWaitForRoom /
+        /// Owner: Hierarchy.refetchReleasedOrphans /
         ///     Hierarchy.parentEvidenceCapacityBecameAvailable /
         ///     Lifecycle.clearRuntimeState.
         var orphansWaitForRoom = false
+        /// Orphans released and being fetched again from the pool: still
+        /// undecided with no specific trigger afterwards, one is dropped.
+        /// Owner: Hierarchy.parentEvidenceRetryTrigger /
+        ///     Hierarchy.parentEvidenceOrphaned / Hierarchy.parentEvidenceDecided /
+        ///     Hierarchy.refetchReleasedOrphans / Hierarchy.repool /
+        ///     Lifecycle.clearRuntimeState.
+        var refetchedOrphans: Set<ParentEvidenceOrphans.Key> = []
         /// Owner: Hierarchy.scheduleParentTipPush / Hierarchy.runParentTipPushes /
         ///     Lifecycle.clearRuntimeState.
         var parentTipPushDirty = false
