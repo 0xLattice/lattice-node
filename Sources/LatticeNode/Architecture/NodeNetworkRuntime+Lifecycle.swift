@@ -231,7 +231,7 @@ extension NodeNetworkRuntime {
         genesisAnnounceTask.cancel()
         hierarchyState.adoptedGenesisTask.cancel()
         hierarchyState.parentEvidenceOrphans.removeAll()
-        hierarchyState.orphansWaitForRoom = false
+        hierarchyState.orphansAwaitingRoom.removeAll()
         hierarchyState.refetchedOrphans.removeAll()
         // Joined, not just cancelled: `Task.sleep` unwinds on cancellation but
         // an in-flight dial does not, and the search holds the ChainProcess

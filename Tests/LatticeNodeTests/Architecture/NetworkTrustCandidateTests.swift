@@ -2714,17 +2714,23 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         /// The late orphans in the parent's index order.
         let lateOrdered: [String]
         let behindWithheld: Set<String>
+        /// Undecided with no specific trigger (not yet valid, no time named).
+        let undecided: Set<String>
         let attachments: [String: String]
         let admissions: NetworkEventRecorder
+        /// Blocks whose entries wait in the inbox on a parent fact.
+        let parentFactWaits: NetworkEventRecorder
         let handlers: ClosureChainInterface
     }
 
     /// `late` orphans behind a late block, `withheld` behind a block never
-    /// published, their evidence served by the parent. A late orphan
-    /// decides (refused) once the late block is accepted.
+    /// published, `undecided` with no specific trigger, their evidence
+    /// served by the parent. A late orphan decides (refused) once the late
+    /// block is accepted.
     private func orphanScenario(
         late: Int,
         withheld: Int,
+        undecided: Int = 0,
         fixture: ProvisionalRootFixture
     ) async throws -> OrphanScenario {
         let withheldCID = testCID("withheld-predecessor")
@@ -2741,7 +2747,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         let lateHeader = try BlockHeader(node: lateBlock)
         let lateCID = lateHeader.rawCID
         let entries = try await attackerEvidence(
-            count: late + withheld,
+            count: late + withheld + undecided,
             on: lateBlock,
             timestamp: { lateBlock.timestamp + Int64($0) + 1 },
             firstOrdinal: 6_000,
@@ -2749,15 +2755,42 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             fixture: fixture
         )
         let behindLate = Set(entries.prefix(late).map(\.childCID))
-        let behindWithheld = Set(entries.dropFirst(late).map(\.childCID))
+        let behindWithheld = Set(entries.dropFirst(late).prefix(withheld).map(\.childCID))
+        let undecidedCIDs = Set(entries.dropFirst(late + withheld).map(\.childCID))
         let admissions = NetworkEventRecorder()
+        let parentFactWaits = NetworkEventRecorder()
         let childProcess = fixture.childProcess
-        let handlers = stubbedChildHandlers(fixture) { cid, _ in
+        let handlers = stubbedChildHandlers(fixture) { cid, admission in
+            if await parentFactWaits.snapshot().contains(cid) {
+                return NodeImportOutcome(
+                    decision: .unavailable(.parentStateContinuity(
+                        parentPath: ["Nexus"],
+                        fromStateCID: LatticeState.emptyHeader.rawCID,
+                        toStateCID: testCID("parent-fact-wait")
+                    )),
+                    parentCarrierLink: nil,
+                    sameChainPredecessor: nil
+                )
+            }
+            if undecidedCIDs.contains(cid) {
+                await admissions.append(cid)
+                return NodeImportOutcome(
+                    decision: .temporarilyInvalid,
+                    parentCarrierLink: nil,
+                    sameChainPredecessor: nil
+                )
+            }
             guard behindLate.contains(cid) || behindWithheld.contains(cid) else {
                 return nil
             }
             await admissions.append(cid)
             if behindLate.contains(cid), await childProcess.hasAcceptedBlock(lateCID) {
+                // Decided, as the real import does, it consumes its entry.
+                if let rootCID = admission.authenticatedChildPackage?.package.proof.rootCID {
+                    try await childProcess.store.consumeParentEvidence(
+                        childCID: cid, rootCID: rootCID
+                    )
+                }
                 return NodeImportOutcome(
                     decision: .invalid, parentCarrierLink: nil, sameChainPredecessor: nil
                 )
@@ -2777,10 +2810,12 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             behindLate: behindLate,
             lateOrdered: entries.prefix(late).map(\.childCID),
             behindWithheld: behindWithheld,
+            undecided: undecidedCIDs,
             attachments: Dictionary(uniqueKeysWithValues: entries.map {
                 ($0.childCID, $0.attachmentCID)
             }),
             admissions: admissions,
+            parentFactWaits: parentFactWaits,
             handlers: handlers
         )
     }
@@ -2938,6 +2973,171 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             try await eventually("the reconnect's hello fetches them") {
                 for cid in scenario.behindLate where await tries(cid) < 2 { return false }
                 return true
+            }
+            await stopAll()
+        } catch {
+            await stopAll()
+            throw error
+        }
+    }
+
+    /// More released orphans than the inbox has room for: the refetch
+    /// stops at the full inbox and resumes as room frees. The room each
+    /// refetched orphan's decision frees resumes exactly the orphans the
+    /// full inbox put back — it is no hello: an orphan with no specific
+    /// trigger stays pooled, costing the parent nothing, and the refetches
+    /// end. Before, each freed slot ran the hello's release (and cleared
+    /// the marks of refetches still importing, so those went back to the
+    /// pool and cycled).
+    func testRoomFreedByRefetchesResumesOnlyTheOrphansAFullInboxPutBack() async throws {
+        let fixture = try await provisionalRootFixture(keyByte: 0xf3, childInboxCapacity: 8)
+        let probe = EvidenceServeProbe()
+        let scenario = try await orphanScenario(
+            late: 4, withheld: 0, undecided: 1, fixture: fixture
+        )
+        let lateCID = scenario.lateHeader.rawCID
+        let bystander = try XCTUnwrap(scenario.undecided.first)
+        func tries(_ cid: String) async -> Int {
+            await scenario.admissions.snapshot().filter { $0 == cid }.count
+        }
+        func stopAll() async {
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+        }
+        do {
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess, chain: inertNetworkHandlers()
+            )
+            await fixture.parentRuntime.hierarchy.setContentSource(
+                ProbedContentSource(parent: fixture.parentProcess, probe: probe)
+            )
+            await probe.watchRoots(Set(scenario.attachments.values))
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess, chain: scenario.handlers
+            )
+            try await eventually("every entry is an orphan") {
+                await self.orphaned(fixture) == scenario.behindLate.union(scenario.undecided)
+            }
+            try await acceptLateBlock(scenario, fixture: fixture)
+            // Entries waiting on a parent fact leave room for one.
+            let childGenesis = try await fixture.childProcess.canonicalTipBlock()
+            for wait in try await attackerEvidence(
+                count: 7,
+                on: childGenesis,
+                timestamp: { childGenesis.timestamp + Int64($0) + 100 },
+                firstOrdinal: 8_100,
+                fixture: fixture
+            ) {
+                await scenario.parentFactWaits.append(wait.childCID)
+            }
+            await fixture.childRuntime.dropFetcherAttemptsForTesting()
+            await fixture.childRuntime.triggerParentEvidenceRetryForTesting(accepted: lateCID)
+            try await eventually("each late orphan is fetched again and decided") {
+                for cid in scenario.behindLate where await tries(cid) < 2 { return false }
+                return true
+            }
+            try await alwaysDuring("the refetches end; the bystander stays pooled", .seconds(2)) {
+                let served = await probe.rootServes
+                let pooled = await self.orphaned(fixture)
+                return served == scenario.behindLate.count && pooled == [bystander]
+            }
+            let bystanderTries = await tries(bystander)
+            XCTAssertEqual(bystanderTries, 1, "no hello, no refetch")
+            await stopAll()
+        } catch {
+            await stopAll()
+            throw error
+        }
+    }
+
+    /// The parent cannot serve an orphan released behind its accepted
+    /// predecessor: back in the pool, it waits out the request timeout and
+    /// the next acceptance fetches it again. Before, it kept its
+    /// predecessor retry, which no later acceptance meets.
+    func testAnOrphanTheParentCannotServeIsRetriedAfterTheRequestTimeout() async throws {
+        let fixture = try await provisionalRootFixture(keyByte: 0xf4)
+        let probe = EvidenceServeProbe()
+        let scenario = try await orphanScenario(late: 1, withheld: 0, fixture: fixture)
+        let lateCID = scenario.lateHeader.rawCID
+        let orphan = try XCTUnwrap(scenario.lateOrdered.first)
+        func tries() async -> Int {
+            await scenario.admissions.snapshot().filter { $0 == orphan }.count
+        }
+        func stopAll() async {
+            await probe.release.open()
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+        }
+        do {
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess, chain: inertNetworkHandlers()
+            )
+            await fixture.parentRuntime.hierarchy.setContentSource(
+                ProbedContentSource(parent: fixture.parentProcess, probe: probe)
+            )
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess, chain: scenario.handlers
+            )
+            try await eventually("the entry is an orphan") {
+                await self.orphaned(fixture) == [orphan]
+            }
+            try await acceptLateBlock(scenario, fixture: fixture)
+            await fixture.childRuntime.dropFetcherAttemptsForTesting()
+            // The parent answers the refetch with nothing.
+            await probe.release.open()
+            await probe.stall(try XCTUnwrap(scenario.attachments[orphan]))
+            await fixture.childRuntime.triggerParentEvidenceRetryForTesting(accepted: lateCID)
+            try await eventually("the unserved orphan waits out the request timeout") {
+                let retry = await fixture.childRuntime.orphanedParentEvidenceForTesting()[orphan]
+                guard case .notBefore = retry else { return false }
+                return true
+            }
+            await probe.stall("served")
+            let unrelated = testCID("unrelated-acceptance")
+            try await eventually("an acceptance after the timeout fetches it", within: .seconds(60), poll: .milliseconds(250)) {
+                await fixture.childRuntime.triggerParentEvidenceRetryForTesting(accepted: unrelated)
+                return await tries() >= 2
+            }
+            await stopAll()
+        } catch {
+            await stopAll()
+            throw error
+        }
+    }
+
+    /// A released orphan whose refetch queues no import (here another
+    /// fetch of its attachment holds the lease) leaves no refetch mark: a
+    /// stale mark would drop the orphan's next undecided import.
+    func testARefetchThatQueuesNoImportLeavesNoRefetchMark() async throws {
+        let fixture = try await provisionalRootFixture(keyByte: 0xf5)
+        let scenario = try await orphanScenario(late: 1, withheld: 0, fixture: fixture)
+        let lateCID = scenario.lateHeader.rawCID
+        let orphan = try XCTUnwrap(scenario.lateOrdered.first)
+        func stopAll() async {
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+        }
+        do {
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess, chain: inertNetworkHandlers()
+            )
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess, chain: scenario.handlers
+            )
+            try await eventually("the entry is an orphan") {
+                await self.orphaned(fixture) == [orphan]
+            }
+            try await acceptLateBlock(scenario, fixture: fixture)
+            await fixture.childRuntime.dropFetcherAttemptsForTesting()
+            await fixture.childRuntime.holdParentEvidenceLeaseForTesting(
+                attachmentCID: try XCTUnwrap(scenario.attachments[orphan])
+            )
+            await fixture.childRuntime.triggerParentEvidenceRetryForTesting(accepted: lateCID)
+            try await eventually("the orphan is released") {
+                await !self.orphaned(fixture).contains(orphan)
+            }
+            try await alwaysDuring("no refetch mark is left behind", .seconds(1)) {
+                await fixture.childRuntime.refetchedOrphansForTesting().isEmpty
             }
             await stopAll()
         } catch {
@@ -4583,11 +4783,27 @@ extension NodeNetworkRuntime {
         blockFetcher.reset(retryWindow: planeConfigurations.overlay.requestTimeout)
     }
 
-    fileprivate func triggerParentEvidenceRetryForTesting(accepted: String) async {
+    /// `accepted` nil: the parent's hello.
+    fileprivate func triggerParentEvidenceRetryForTesting(accepted: String?) async {
         guard let process else { return }
         await parentEvidenceRetryTrigger(
             accepted: accepted, generation: runtimeGeneration, process: process
         )
+    }
+
+    fileprivate func refetchedOrphansForTesting() -> Set<String> {
+        Set(hierarchyState.refetchedOrphans.map(\.childCID))
+    }
+
+    /// Holds the configured parent's evidence lease on `attachmentCID`, as
+    /// another fetch of that attachment does.
+    fileprivate func holdParentEvidenceLeaseForTesting(attachmentCID: String) {
+        guard let parent = configuredParentPeer() else { return }
+        sessionLeases.activeEvidenceVolumes.insert(EvidenceVolumeLease(
+            plane: .hierarchy,
+            sessionID: parent.sessionID,
+            attachmentCID: attachmentCID
+        ))
     }
 
     fileprivate func requestEvidenceIndexForTesting() async {

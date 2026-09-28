@@ -686,17 +686,18 @@ public actor NodeNetworkRuntime: IvyDelegate {
         var parentEvidenceOrphans = ParentEvidenceOrphans(
             capacity: NodeResourcePolicy.default.maximumOrphanedParentEvidence
         )
-        /// A refetch of released orphans stopped at a full inbox; the
-        /// capacity callback runs the trigger again.
+        /// The orphans a refetch put back at a full inbox: the capacity
+        /// callback fetches exactly these again (`parentEvidenceRoomResumed`).
         /// Owner: Hierarchy.refetchReleasedOrphans /
-        ///     Hierarchy.parentEvidenceCapacityBecameAvailable /
+        ///     Hierarchy.parentEvidenceRoomResumed /
         ///     Lifecycle.clearRuntimeState.
-        var orphansWaitForRoom = false
-        /// Orphans released and being fetched again from the pool: still
-        /// undecided with no specific trigger afterwards, one is dropped.
+        var orphansAwaitingRoom: Set<ParentEvidenceOrphans.Key> = []
+        /// Orphans fetched again from the pool whose import is queued:
+        /// still undecided with no specific trigger afterwards, one is
+        /// dropped. Only the parent's hello clears every mark.
         /// Owner: Hierarchy.parentEvidenceRetryTrigger /
         ///     Hierarchy.parentEvidenceOrphaned / Hierarchy.parentEvidenceDecided /
-        ///     Hierarchy.refetchReleasedOrphans / Hierarchy.repool /
+        ///     Hierarchy.recoverParentEvidence /
         ///     Lifecycle.clearRuntimeState.
         var refetchedOrphans: Set<ParentEvidenceOrphans.Key> = []
         /// Owner: Hierarchy.scheduleParentTipPush / Hierarchy.runParentTipPushes /

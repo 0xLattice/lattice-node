@@ -1533,11 +1533,6 @@ extension NodeNetworkRuntime {
             }
         }
         guard !released.isEmpty else { return }
-        for orphan in released {
-            hierarchyState.refetchedOrphans.insert(ParentEvidenceOrphans.Key(
-                childCID: orphan.summary.childCID, rootCID: orphan.summary.rootCID
-            ))
-        }
         SyncTrace.log("orphaned parent evidence released: \(released.map { $0.summary.childCID.prefix(12) })")
         Task { [weak self] in
             await self?.refetchReleasedOrphans(
@@ -1546,10 +1541,43 @@ extension NodeNetworkRuntime {
         }
     }
 
+    /// Seam: the inbox has room again after a refetch stopped at a full
+    /// one. Exactly the orphans that refetch put back are fetched again;
+    /// no other orphan is released and no refetch mark is cleared (only
+    /// the parent's hello does that), so room freed by the refetches'
+    /// own imports cannot cycle them.
+    func parentEvidenceRoomResumed(generation: UInt64, process: ChainProcess) async {
+        guard isCurrentRuntime(generation: generation, process: process),
+              let parent = configuredParentPeer() else { return }
+        let waiting = hierarchyState.orphansAwaitingRoom
+        hierarchyState.orphansAwaitingRoom.removeAll()
+        var held: Set<String> = []
+        for orphan in hierarchyState.parentEvidenceOrphans.entries.values
+        where fetcherHasParentAttempt(orphan.summary.childCID) {
+            held.insert(orphan.summary.childCID)
+        }
+        let released = hierarchyState.parentEvidenceOrphans.release { orphan in
+            !held.contains(orphan.summary.childCID) && waiting.contains(
+                ParentEvidenceOrphans.Key(
+                    childCID: orphan.summary.childCID, rootCID: orphan.summary.rootCID
+                )
+            )
+        }
+        guard !released.isEmpty else { return }
+        SyncTrace.log("orphaned parent evidence resumed with room: \(released.map { $0.summary.childCID.prefix(12) })")
+        await refetchReleasedOrphans(
+            released, from: parent, generation: generation, process: process
+        )
+    }
+
     /// Fetches released orphans again, one by one. The parent unable to
-    /// serve one, or its session ending, puts it (and, with the session, the
-    /// rest) back in the pool; a full inbox puts the rest back and waits for
-    /// the capacity callback. Only a malformed answer drops an orphan.
+    /// serve one puts it back in the pool until the request timeout passes
+    /// (its own trigger may already have fired); its session ending puts it
+    /// and the rest back with their own retries, for the reconnect's hello;
+    /// a full inbox puts the rest back and waits for the capacity callback,
+    /// which resumes exactly those. Only a malformed answer drops an
+    /// orphan. An orphan is marked refetched only once its import is
+    /// queued, so a refetch that queued none leaves no mark behind.
     private func refetchReleasedOrphans(
         _ released: [ParentEvidenceOrphans.Orphan],
         from parent: AuthenticatedPeer,
@@ -1564,6 +1592,7 @@ extension NodeNetworkRuntime {
                 orphan.summary,
                 sourceID: orphan.sourceID,
                 advanceScan: false,
+                refetchedOrphan: true,
                 from: parent,
                 generation: generation,
                 process: process
@@ -1576,30 +1605,46 @@ extension NodeNetworkRuntime {
             case .handled:
                 continue
             case .backpressured:
+                let waiting = Array(released[index...])
+                repool(waiting)
+                for orphan in waiting {
+                    hierarchyState.orphansAwaitingRoom.insert(ParentEvidenceOrphans.Key(
+                        childCID: orphan.summary.childCID, rootCID: orphan.summary.rootCID
+                    ))
+                }
+                // Room freed while this refetch was suspended found none
+                // waiting: its callback is taken here instead.
+                if (try? await process.store.parentEvidenceInboxHasCapacity()) == true,
+                   isCurrentRuntime(generation: generation, process: process) {
+                    parentEvidenceCapacityBecameAvailable()
+                }
+                return
+            case .unavailable where !sessionCurrent, .failed where !sessionCurrent:
                 repool(Array(released[index...]))
-                hierarchyState.orphansWaitForRoom = true
                 return
             case .unavailable:
-                repool([orphan])
-            case .failed where !sessionCurrent:
-                repool(Array(released[index...]))
-                return
-            case .failed:
-                hierarchyState.refetchedOrphans.remove(ParentEvidenceOrphans.Key(
-                    childCID: childCID, rootCID: orphan.summary.rootCID
+                let timeout = planeConfigurations.hierarchy.requestTimeout
+                repool([orphan], retry: .notBefore(
+                    ParentEvidenceOrphans.clock()
+                        + Int64(timeout / .milliseconds(1))
                 ))
+            case .failed:
+                continue
             }
         }
     }
 
-    private func repool(_ orphans: [ParentEvidenceOrphans.Orphan]) {
+    /// `retry` nil keeps each orphan's own.
+    private func repool(
+        _ orphans: [ParentEvidenceOrphans.Orphan],
+        retry: ParentEvidenceOrphans.Retry? = nil
+    ) {
         for orphan in orphans {
             hierarchyState.parentEvidenceOrphans.insert(
-                sourceID: orphan.sourceID, summary: orphan.summary, retry: orphan.retry
+                sourceID: orphan.sourceID,
+                summary: orphan.summary,
+                retry: retry ?? orphan.retry
             )
-            hierarchyState.refetchedOrphans.remove(ParentEvidenceOrphans.Key(
-                childCID: orphan.summary.childCID, rootCID: orphan.summary.rootCID
-            ))
         }
     }
 
@@ -1636,6 +1681,7 @@ extension NodeNetworkRuntime {
         _ summary: IssuedChildEvidenceSummary,
         sourceID: String,
         advanceScan: Bool,
+        refetchedOrphan: Bool = false,
         from peer: AuthenticatedPeer,
         generation: UInt64,
         process: ChainProcess
@@ -1775,7 +1821,15 @@ extension NodeNetworkRuntime {
             SyncTrace.log("parent evidence for \(summary.childCID.prefix(12)) already admitted: not re-entered")
             return .handled
         }
-        return await enqueueInboxParentCandidate(
+        // A refetched orphan is marked once its import is queued: that
+        // import, still undecided with no specific trigger, drops it.
+        let refetchKey = ParentEvidenceOrphans.Key(
+            childCID: summary.childCID, rootCID: summary.rootCID
+        )
+        if refetchedOrphan, isCurrentRuntime(generation: generation, process: process) {
+            hierarchyState.refetchedOrphans.insert(refetchKey)
+        }
+        let enqueued = await enqueueInboxParentCandidate(
             // Weighed, like every network-sourced block: the verified proof is
             // all the weighed tier needs, so the block enters fork choice with
             // its work at once and is executed when the chain would step into
@@ -1789,7 +1843,12 @@ extension NodeNetworkRuntime {
             ),
             generation: generation,
             process: process
-        ) ? .handled : .failed
+        )
+        if refetchedOrphan, !enqueued,
+           isCurrentRuntime(generation: generation, process: process) {
+            hierarchyState.refetchedOrphans.remove(refetchKey)
+        }
+        return enqueued ? .handled : .failed
     }
 
     func handleHierarchy(
@@ -2921,8 +2980,7 @@ extension NodeNetworkRuntime {
            let session = parentEvidenceSession(for: parent) {
             let scanStopped = parentEvidence.isBackpressured(session)
             parentEvidence.capacityBecameAvailable(for: session)
-            let orphansWaited = hierarchyState.orphansWaitForRoom
-            hierarchyState.orphansWaitForRoom = false
+            let orphansWaited = !hierarchyState.orphansAwaitingRoom.isEmpty
             if scanStopped || orphansWaited, let process {
                 let generation = runtimeGeneration
                 Task { [weak self] in
@@ -2932,8 +2990,8 @@ extension NodeNetworkRuntime {
                         )
                     }
                     if orphansWaited {
-                        await self?.parentEvidenceRetryTrigger(
-                            accepted: nil, generation: generation, process: process
+                        await self?.parentEvidenceRoomResumed(
+                            generation: generation, process: process
                         )
                     }
                 }
