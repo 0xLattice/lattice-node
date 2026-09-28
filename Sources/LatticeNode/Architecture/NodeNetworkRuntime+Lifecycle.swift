@@ -255,6 +255,7 @@ extension NodeNetworkRuntime {
         parentStateQueryGuard.removeAll()
         overlayState.rangeSync.reentryTask.cancel()
         sessionLeases.activeEvidenceVolumes.removeAll()
+        wakeEvidenceSlotWaiters()
         overlayState.portableEvidenceWorker.cancel()
         sessionLeases.portableEvidenceOrder.removeAll()
         sessionLeases.portableEvidenceWork.removeAll()
@@ -264,13 +265,16 @@ extension NodeNetworkRuntime {
         hierarchyState.parentTipContext = nil
         hierarchyState.parentTipPushTask.cancel()
         hierarchyState.parentTipPushDirty = false
+        hierarchyState.carriedEvidenceDirty = false
+        hierarchyState.childProofRecoveryIterations = 0
+        hierarchyState.childProofRecoveryIterating = false
+        hierarchyState.carriedRoutesToRecord = [:]
         hierarchyState.descendantRewards = []
         hierarchyState.descendantMinimumWork = []
         hierarchyState.receivedParentTip = nil
         hierarchyState.releasedCarriedChildCID = nil
-        hierarchyState.requestedCarriedChildCID = nil
-        hierarchyState.requestedCarriedRound = nil
-        hierarchyState.carriedRoundEndedCID = nil
+        hierarchyState.namedCarriedEvidence = nil
+        hierarchyState.namedCarriedEvidenceAppend = nil
         hierarchyState.evidenceRoundStarting = false
         hierarchyState.parentEvidenceInFlight.removeAll()
         hierarchyState.candidateOfferTask.cancel()

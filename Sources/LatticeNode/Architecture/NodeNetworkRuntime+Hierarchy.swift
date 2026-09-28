@@ -30,6 +30,11 @@ extension NodeNetworkRuntime {
         let generation = runtimeGeneration
         scheduleParentTipPush(generation: generation, process: process)
         scheduleCandidateOffer(generation: generation, process: process)
+        // An import (the validate walk's too) may have consumed an inbox
+        // entry the named carried block's evidence waits behind.
+        await retryNamedCarriedEvidenceIfInboxHasRoom(
+            generation: generation, process: process
+        )
     }
 
     /// The candidates a template built on the given parent state can carry,
@@ -79,7 +84,7 @@ extension NodeNetworkRuntime {
                 on: tipCID,
                 directories: children.compactMap { $0.2.last }
             )
-            carriedChildren.merge(onTip) { _, tip in tip }
+            carriedChildren.merge(onTip.mapValues(\.childCID)) { _, tip in tip }
         }
         let carriedOnContext = hierarchyState.parentTipContext?.carriedChildren ?? [:]
         var candidates: [(Int, DirectChildCandidate)] = []
@@ -123,9 +128,10 @@ extension NodeNetworkRuntime {
     }
 
     /// Re-reads this chain's validated tip and, if the context children build
-    /// against changed (tip, rewards, minimum work), mints the next one for
-    /// the push task to send. Only the push task calls this, so two reads
-    /// never race to label an older tip with the newer sequence.
+    /// against changed (tip, rewards, minimum work, or what it names as
+    /// carried), mints the next one for the push task to send. Only the push
+    /// task calls this, so two reads never race to label an older tip with
+    /// the newer sequence.
     private func refreshParentTipContext(
         process: ChainProcess,
         generation: UInt64
@@ -148,12 +154,16 @@ extension NodeNetworkRuntime {
             guard case .child(let path) = role else { return nil }
             return path.last
         })
+        func unchanged(_ context: ParentTipContext, tipCID: String) -> Bool {
+            context.tipCID == tipCID
+                && context.directories == directories
+                && Self.sameRewardPlan(context.rewards, rewards)
+                && context.minimumWork == minimumWork
+        }
         if let current = hierarchyState.parentTipContext,
            let cheapTip = await process.deepestValidatedCanonicalTip()?.cid,
-           cheapTip == current.tipCID,
-           current.directories == directories,
-           Self.sameRewardPlan(current.rewards, rewards),
-           current.minimumWork == minimumWork {
+           unchanged(current, tipCID: cheapTip) {
+            await renameCarriedChildren(of: current, process: process, generation: generation)
             return
         }
         guard let tip = try? await process.validatedTipBlock(),
@@ -162,14 +172,20 @@ extension NodeNetworkRuntime {
               isCurrentRuntime(generation: generation, process: process)
         else { return }
         if let current = hierarchyState.parentTipContext,
-           current.tipCID == tipCID,
-           current.directories == directories,
-           Self.sameRewardPlan(current.rewards, rewards),
-           current.minimumWork == minimumWork {
+           unchanged(current, tipCID: tipCID) {
+            await renameCarriedChildren(of: current, process: process, generation: generation)
             return
         }
-        let carriedChildren = await process.carriedChildBlocks(
+        let carried = await process.carriedChildBlocks(
             on: tipCID, directories: directories.sorted()
+        )
+        guard isCurrentRuntime(generation: generation, process: process) else { return }
+        hierarchyState.carriedEvidenceDirty = false
+        let naming = await carriedNaming(
+            carried,
+            waits: hierarchyState.parentTipContext?.evidenceWaits ?? [:],
+            process: process,
+            generation: generation
         )
         guard isCurrentRuntime(generation: generation, process: process) else { return }
         hierarchyState.nextParentTipSequence &+= 1
@@ -179,11 +195,184 @@ extension NodeNetworkRuntime {
             tipData: tipData,
             rewards: rewards,
             minimumWork: minimumWork,
-            carriedChildren: carriedChildren,
+            carried: carried,
+            named: naming.named,
+            heldBack: naming.heldBack,
+            evidenceWaits: naming.waits,
             directories: directories
         )
+        storeParentTipContext(context)
+        SyncTrace.log("parent tip context \(context.sequence): h=\(tip.height) tip=\(tipCID.prefix(12)) carried=\(carried.keys.sorted()) named=\(naming.named.keys.sorted()) heldBack=\(naming.heldBack.sorted())")
+    }
+
+    /// What a context names as carried, per directory, and which pushes
+    /// wait: a carried block is named only once its evidence is durably
+    /// issued here, so a child told it was carried can fetch the block at
+    /// once. Without it, the push waits for one child-proof recovery
+    /// iteration: the first to start after the wait began, which records
+    /// the block's route if no path did (the validate walk and a weighed
+    /// admission record none) and issues the evidence if this node can.
+    /// When that iteration has run (a parent below the root without a root
+    /// for its carrier keeps the route owed and ends here), or when the
+    /// route is not owed (the proof is prepared, its evidence not issued),
+    /// the context goes out without naming the block, so a parent that
+    /// cannot issue the evidence never stalls the child. Nothing here takes
+    /// the process's mutation gate: the push serves every child.
+    private struct CarriedNaming: Equatable {
+        var named: [String: CarriedChildEvidence] = [:]
+        var heldBack: Set<String> = []
+        var waits: [String: CarriedEvidenceWait] = [:]
+    }
+
+    private func carriedNaming(
+        _ carried: [String: ChainProcess.CarriedChildBlock],
+        waits previous: [String: CarriedEvidenceWait],
+        process: ChainProcess,
+        generation: UInt64
+    ) async -> CarriedNaming {
+        var naming = CarriedNaming()
+        for directory in carried.keys.sorted() {
+            guard let block = carried[directory] else { continue }
+            if let wait = previous[directory], wait.block == block,
+               let until = wait.untilIteration,
+               hierarchyState.childProofRecoveryIterations < until {
+                // Still waiting: only issuance ends it early.
+                if let evidence = await issuedCarriedEvidence(
+                    block.childCID, directory: directory, process: process
+                ) {
+                    naming.named[directory] = evidence
+                } else {
+                    naming.waits[directory] = wait
+                    naming.heldBack.insert(directory)
+                }
+                continue
+            }
+            #if DEBUG
+            await carriedNamingWillReadForTesting?(block.childCID)
+            #endif
+            // One read, one snapshot: issued, owed, ready or unrecorded. The
+            // promotion that issues the evidence completes its route after
+            // it, so the two can never be seen torn apart.
+            let state = try? await process.store.carriedChildEvidenceState(
+                childCID: block.childCID,
+                carrierCID: block.carrierCID,
+                directory: directory
+            )
+            guard isCurrentRuntime(generation: generation, process: process) else {
+                return naming
+            }
+            switch state {
+            case .issued(let sourceID, let summary)?:
+                naming.named[directory] = CarriedChildEvidence(
+                    sourceID: sourceID, summary: summary
+                )
+                continue
+            case .ready?:
+                naming.waits[directory] = CarriedEvidenceWait(
+                    block: block, untilIteration: nil
+                )
+                continue
+            case .unrecorded?, .owed?, nil:
+                break
+            }
+            if let wait = previous[directory], wait.block == block {
+                // Its iteration has run: the wait is over, the block unnamed.
+                naming.waits[directory] = wait
+                continue
+            }
+            if case .unrecorded? = state {
+                hierarchyState.carriedRoutesToRecord[directory] = block
+            }
+            // No suspension from here to the schedule: the iteration the wait
+            // ends on is the first to start after it, and it records the
+            // route queued above before it retries owed routes.
+            let iterations = hierarchyState.childProofRecoveryIterations
+            naming.waits[directory] = CarriedEvidenceWait(
+                block: block,
+                untilIteration: iterations
+                    + (hierarchyState.childProofRecoveryIterating ? 2 : 1)
+            )
+            naming.heldBack.insert(directory)
+            scheduleChildProofRecovery(generation: generation, process: process)
+        }
+        return naming
+    }
+
+    private func issuedCarriedEvidence(
+        _ childCID: String,
+        directory: String,
+        process: ChainProcess
+    ) async -> CarriedChildEvidence? {
+        guard let issued = try? await process.store.issuedChildEvidenceSummary(
+            childCID: childCID, directory: directory
+        ) else { return nil }
+        return CarriedChildEvidence(sourceID: issued.sourceID, summary: issued.summary)
+    }
+
+    /// The same tip: re-read what the context names only when evidence may
+    /// have been issued or a recovery pass ended, and only while a carried
+    /// block is not named; mint the next context if that changed.
+    private func renameCarriedChildren(
+        of current: ParentTipContext,
+        process: ChainProcess,
+        generation: UInt64
+    ) async {
+        guard hierarchyState.carriedEvidenceDirty,
+              current.carried.keys.contains(where: { current.named[$0] == nil })
+        else { return }
+        hierarchyState.carriedEvidenceDirty = false
+        let naming = await carriedNaming(
+            current.carried,
+            waits: current.evidenceWaits,
+            process: process,
+            generation: generation
+        )
+        guard isCurrentRuntime(generation: generation, process: process),
+              hierarchyState.parentTipContext?.sequence == current.sequence,
+              naming != CarriedNaming(
+                named: current.named,
+                heldBack: current.heldBack,
+                waits: current.evidenceWaits
+              ) else { return }
+        // Only a wait changed: what goes out did not, so no new sequence.
+        let resend = naming.named != current.named
+            || naming.heldBack != current.heldBack
+        if resend { hierarchyState.nextParentTipSequence &+= 1 }
+        let context = ParentTipContext(
+            sequence: resend ? hierarchyState.nextParentTipSequence : current.sequence,
+            tipCID: current.tipCID,
+            tipData: current.tipData,
+            rewards: current.rewards,
+            minimumWork: current.minimumWork,
+            carried: current.carried,
+            named: naming.named,
+            heldBack: naming.heldBack,
+            evidenceWaits: naming.waits,
+            directories: current.directories
+        )
+        storeParentTipContext(context)
+        SyncTrace.log("parent tip context \(context.sequence): same tip=\(current.tipCID.prefix(12)) named=\(naming.named.keys.sorted()) heldBack=\(naming.heldBack.sorted())")
+    }
+
+    /// The context stands from here: a route queued for a block it no
+    /// longer carries (a reorg since it was queued) is dropped now, and
+    /// every route it does carry stays queued for the next recovery
+    /// iteration, which records them all.
+    private func storeParentTipContext(_ context: ParentTipContext) {
         hierarchyState.parentTipContext = context
-        SyncTrace.log("parent tip context \(context.sequence): h=\(tip.height) tip=\(tipCID.prefix(12)) carried=\(carriedChildren.keys.sorted())")
+        hierarchyState.carriedRoutesToRecord = hierarchyState.carriedRoutesToRecord
+            .filter { context.carried[$0.key] == $0.value }
+    }
+
+    /// Seam for this plane: evidence may have been issued, or a recovery
+    /// pass ended; the context re-reads what it names.
+    private func carriedEvidenceMayHaveChanged(
+        generation: UInt64,
+        process: ChainProcess
+    ) {
+        guard isCurrentRuntime(generation: generation, process: process) else { return }
+        hierarchyState.carriedEvidenceDirty = true
+        scheduleParentTipPush(generation: generation, process: process)
     }
 
     /// Pushes the latest context to every ready child. Coalescing, like the
@@ -240,6 +429,13 @@ extension NodeNetworkRuntime {
                       let peer = hierarchyState.hierarchyRecords[key]?.session,
                       sequence(hierarchyState.hierarchyRecords[key]?.pushedSequence, on: peer) != context.sequence
                 else { continue }
+                // Its carried block's evidence is still coming: the child
+                // is told of the carry with the evidence, not before it.
+                if let directory = childPath.last,
+                   context.heldBack.contains(directory) {
+                    hierarchyState.parentTipHeldBackCount += 1
+                    continue
+                }
                 await pushParentTipContext(context, to: peer, childPath: childPath)
             }
         }
@@ -324,7 +520,7 @@ extension NodeNetworkRuntime {
             tipData: context.tipData,
             rewards: resolvedRewards,
             minimumWork: minimumWork,
-            carriedChildCID: childPath.last.flatMap { context.carriedChildren[$0] }
+            carriedEvidence: childPath.last.flatMap { context.named[$0] }
         ).encoded() else {
             SyncTrace.log("parent tip push to \(childPath.joined(separator: "/")) not built")
             return
@@ -397,9 +593,9 @@ extension NodeNetworkRuntime {
         // context names it, that this chain has not admitted: a candidate
         // built now would only be its sibling. Hold until the admission
         // decides: an acceptance publishes a state change, and a decision
-        // against the block, or a scan round that ends without it, releases
-        // the hold (`releasedCarriedChildCID`), so no offer waits on a block
-        // that will never land.
+        // against the block, or the parent's named evidence coming to
+        // nothing, releases the hold (`releasedCarriedChildCID`), so no
+        // offer waits on a block that will never land.
         let held = await heldCarriedBlock(
             accepted: { await process.hasAcceptedBlock($0) }
         )
@@ -578,10 +774,16 @@ extension NodeNetworkRuntime {
         case rejected
     }
 
+    /// `named`: the one append of the evidence the parent's context names
+    /// its carried block with (`seedNamedCarriedEvidence`). It takes the
+    /// lane's reserved slot, so no competing work can refuse it, and it
+    /// does not inherit an earlier append's failure to land: it is ordered
+    /// after it, not bound to it.
     private func appendParentEvidence(
         _ summaries: [IssuedChildEvidenceSummary],
         sourceID: String,
         advanceScan: Bool,
+        named: LifetimeToken? = nil,
         from peer: AuthenticatedPeer,
         generation: UInt64,
         process: ChainProcess
@@ -596,9 +798,10 @@ extension NodeNetworkRuntime {
         }.count
         guard let append = parentEvidence.beginAppend(
             for: session,
-            competingOperationCount: sessionLeases.portableEvidenceWork.count
-                + activePortable,
-            capacity: Self.maximumEvidenceCandidates
+            competingOperationCount: named == nil
+                ? sessionLeases.portableEvidenceWork.count + activePortable
+                : 0,
+            capacity: named == nil ? Self.maximumEvidenceCandidates : Int.max
         ) else { return .backpressured }
         let childCIDs = summaries.map(\.childCID)
         for childCID in childCIDs {
@@ -618,20 +821,58 @@ extension NodeNetworkRuntime {
             } else {
                 ParentEvidenceResult.handled
             }
+            if named != nil, result != .failed { result = .handled }
             if Task.isCancelled { result = .failed }
-            for summary in summaries where result == .handled {
-                result = await self.recoverParentEvidence(
-                    summary,
-                    sourceID: sourceID,
-                    advanceScan: advanceScan,
-                    from: peer,
-                    generation: generation,
-                    process: process
-                )
+            // Ordered after the session's earlier appends, the named
+            // evidence may already be here: an earlier append seeded an
+            // attempt for the block, or it was admitted. Then nothing is
+            // fetched again.
+            var alreadyHere = false
+            if named != nil, result == .handled,
+               let childCID = summaries.first?.childCID {
+                alreadyHere = await self.fetcherHasParentAttempt(childCID)
+                if !alreadyHere {
+                    alreadyHere = await process.hasAcceptedBlock(childCID)
+                }
+            }
+            if alreadyHere {
+                SyncTrace.log("named evidence already here: not fetched")
+            } else {
+                // A full inbox would refuse the evidence after its fetch:
+                // it waits for room (a named block's as pending, a scan
+                // page on its retry) without costing the parent a fetch.
+                // A refused scan resumes on the capacity callback
+                // (`parentEvidenceCapacityBecameAvailable`, then a new round).
+                if result == .handled,
+                   (try? await process.store.parentEvidenceInboxHasCapacity()) == false {
+                    result = .backpressured
+                }
+                for summary in summaries where result == .handled {
+                    result = await self.recoverParentEvidence(
+                        summary,
+                        sourceID: sourceID,
+                        advanceScan: advanceScan,
+                        from: peer,
+                        generation: generation,
+                        process: process
+                    )
+                }
             }
             await self.finishParentEvidence(
                 session: session,
                 token: append.token,
+                result: result,
+                peer: peer,
+                generation: generation,
+                process: process
+            )
+            // Before the settle this task's end schedules: the named carried
+            // block's evidence the inbox refused waits again, so the review
+            // sees it waiting.
+            await self.parentEvidenceAppendFinished(
+                named: named,
+                summaries: summaries,
+                sourceID: sourceID,
                 result: result,
                 peer: peer,
                 generation: generation,
@@ -664,10 +905,13 @@ extension NodeNetworkRuntime {
             hierarchyState.parentEvidenceInFlight[childCID] = remaining > 0 ? remaining : nil
         }
         SyncTrace.log("parent evidence settled: \(childCIDs.map { $0.prefix(12) })")
+        await retryNamedCarriedEvidenceIfInboxHasRoom(
+            generation: generation, process: process
+        )
         if let carried = hierarchyState.receivedParentTip?.carriedChildCID,
            childCIDs.contains(carried) {
             await reviewCarriedChildHold(
-                endedRound: nil, generation: generation, process: process
+                generation: generation, process: process
             )
         }
     }
@@ -920,6 +1164,9 @@ extension NodeNetworkRuntime {
                 }
             }
         }
+        // Issued evidence may be what a context waits on to name a carried
+        // block.
+        carriedEvidenceMayHaveChanged(generation: generation, process: process)
         return isCurrentRuntime(generation: generation, process: process)
     }
 
@@ -1071,9 +1318,7 @@ extension NodeNetworkRuntime {
         if hierarchyState.receivedParentTip?.peer.key == key {
             hierarchyState.receivedParentTip = nil
             hierarchyState.releasedCarriedChildCID = nil
-            hierarchyState.requestedCarriedChildCID = nil
-            hierarchyState.requestedCarriedRound = nil
-            hierarchyState.carriedRoundEndedCID = nil
+            hierarchyState.namedCarriedEvidence = nil
             hierarchyState.lastOfferedCandidateCID = nil
         }
         return requeue
@@ -1081,7 +1326,6 @@ extension NodeNetworkRuntime {
 
     private func scheduleParentEvidencePage(
         _ response: ChildEvidenceIndexResponseMessage,
-        round: UInt64,
         from peer: AuthenticatedPeer,
         generation: UInt64,
         process: ChainProcess
@@ -1112,7 +1356,6 @@ extension NodeNetworkRuntime {
                         sourceID: response.sourceID,
                         cursor: response.cursor,
                         through: response.through,
-                        round: round,
                         generation: generation,
                         process: process
                     )
@@ -1127,17 +1370,8 @@ extension NodeNetworkRuntime {
         }
         Task { [weak self] in
             guard let self else { return }
-            guard (await tail?.value ?? .handled) == .handled else {
-                // The round dies here (its page was not retained; the scan
-                // re-serves it next round). For the carried block that is a
-                // round that ended without it, or its hold would wait on a
-                // round that never reviews it.
-                await self.reviewCarriedChildHold(
-                    endedRound: round,
-                    generation: generation, process: process
-                )
-                return
-            }
+            // Not retained: the scan re-serves this page next round.
+            guard (await tail?.value ?? .handled) == .handled else { return }
             // The scan cursor advances only through evidence this child has
             // durably retained (the per-item advanceScan path). The parent's
             // asserted `through` is never persisted directly: a lying parent
@@ -1147,7 +1381,6 @@ extension NodeNetworkRuntime {
                     sourceID: response.sourceID,
                     cursor: response.next,
                     through: response.through,
-                    round: round,
                     generation: generation,
                     process: process
                 )
@@ -1156,10 +1389,6 @@ extension NodeNetworkRuntime {
                 // candidates queued: ask for the runs of the committers this
                 // chain already accepted blocks from (§9.10).
                 await self.requestParentRunReports(
-                    generation: generation, process: process
-                )
-                await self.reviewCarriedChildHold(
-                    endedRound: round,
                     generation: generation, process: process
                 )
             }
@@ -1174,50 +1403,36 @@ extension NodeNetworkRuntime {
         return carried
     }
 
-    /// Seam (and the hierarchy's own review): after a scan round ends or
-    /// dies, when the carried block's attempt completes or leaves the
-    /// fetcher, when its parent evidence settles, and whenever the parent's
-    /// context names it: the block the parent's context names as carried
-    /// is either here, still coming on the parent's word (its evidence
-    /// being recovered, or an attempt seeded with that evidence, whose
-    /// admission will decide), asked for now, or, once a round sent for it
-    /// has ended without it, let go: the offer hold is released and the
-    /// child builds on the tip it has, its own choice from here. Only
-    /// authenticated parent state counts; nothing an overlay peer announces
-    /// or relays can keep the hold. No timer, no count: the scan's own
-    /// round trip paces it.
+    /// Seam (and the hierarchy's own review): when the parent's context
+    /// names a carried block, when that block's parent evidence settles,
+    /// when its admission completes, and when its last parent-backed
+    /// attempt leaves the fetcher. The parent names a carried block only
+    /// with its evidence, so the claim and the pointer to its proof arrive
+    /// as one unit: the block is either here, still coming on the parent's
+    /// word (its named evidence waiting for the evidence lane or being
+    /// recovered, or an attempt seeded with the
+    /// parent's evidence, whose admission will decide), or let go: the
+    /// offer hold is released and the child builds on the tip it has, its
+    /// own choice from here. Only authenticated parent state counts;
+    /// nothing an overlay peer announces or relays can keep the hold. No
+    /// timer, no count: the evidence's own recovery paces it.
     func reviewCarriedChildHold(
-        endedRound: UInt64?,
         generation: UInt64,
         process: ChainProcess
     ) async {
         guard isCurrentRuntime(generation: generation, process: process),
               let carried = carriedHoldBlockCID() else { return }
-        // Rounds are numbered in order and each scans from the durable
-        // cursor, so the round sent for this block or any later one ending
-        // (or dying) ends its wait; an earlier one says nothing about it.
-        if let endedRound, hierarchyState.requestedCarriedChildCID == carried,
-           let requested = hierarchyState.requestedCarriedRound,
-           endedRound >= requested {
-            hierarchyState.carriedRoundEndedCID = carried
-        }
         let accepted = await process.hasAcceptedBlock(carried)
         // Everything below is sampled after the suspension.
         guard !accepted,
               isCurrentRuntime(generation: generation, process: process),
-              carriedHoldBlockCID() == carried else { return }
-        // No round sent for it yet: ask, whatever else is pending.
-        guard hierarchyState.requestedCarriedChildCID == carried else {
-            await requestEvidenceIndex(
-                forCarried: carried, generation: generation, process: process
-            )
-            return
-        }
-        guard hierarchyState.carriedRoundEndedCID == carried,
+              carriedHoldBlockCID() == carried,
               !fetcherHasParentAttempt(carried),
-              hierarchyState.parentEvidenceInFlight[carried] == nil else { return }
+              hierarchyState.parentEvidenceInFlight[carried] == nil,
+              hierarchyState.namedCarriedEvidence?.evidence.childCID != carried
+        else { return }
         hierarchyState.releasedCarriedChildCID = carried
-        SyncTrace.log("carried \(carried.prefix(12)) not served by a scan round: offer hold released")
+        SyncTrace.log("carried \(carried.prefix(12)) not landed by the parent's evidence: offer hold released")
         scheduleCandidateOffer(generation: generation, process: process)
     }
 
@@ -1240,27 +1455,26 @@ extension NodeNetworkRuntime {
             attachmentCID: summary.attachmentCID
         )
         if sessionLeases.activeEvidenceVolumes.contains(lease) { return .handled }
-        // nil: a slot is free. The stale and lease checks also pass on the
-        // first step: both were just made above with no suspension between.
-        let slotWait: ParentEvidenceResult? = await Timers.poll(
-            every: planeConfigurations.hierarchy.requestTimeout,
-            onCancel: .handled
-        ) {
+        // Wait for a slot, woken by its release (a timeout re-checks the
+        // session). The stale and lease checks also pass on the first step:
+        // both were just made above with no suspension between.
+        while sessionLeases.activeEvidenceVolumes.count >= Self.maximumEvidenceCandidates {
+            await waitForEvidenceVolumeSlot(
+                timeout: planeConfigurations.hierarchy.requestTimeout,
+                generation: generation
+            )
+            if Task.isCancelled { return .handled }
             guard isCurrentRuntime(
                 generation: generation,
                 process: process
             ), hierarchyState.hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID,
                hierarchyState.hierarchyRecords[peer.key]?.role == .parent else {
-                return .done(.failed)
+                return .failed
             }
-            if sessionLeases.activeEvidenceVolumes.contains(lease) { return .done(.handled) }
-            return sessionLeases.activeEvidenceVolumes.count >= Self.maximumEvidenceCandidates
-                ? .again
-                : .done(nil)
+            if sessionLeases.activeEvidenceVolumes.contains(lease) { return .handled }
         }
-        if let slotWait { return slotWait }
         sessionLeases.activeEvidenceVolumes.insert(lease)
-        defer { sessionLeases.activeEvidenceVolumes.remove(lease) }
+        defer { releaseEvidenceVolume(lease) }
         let source = IvyRootContentSource(
             ivy: hierarchy,
             peer: peer,
@@ -1660,7 +1874,6 @@ extension NodeNetworkRuntime {
             hierarchyState.pendingEvidenceIndexes.removeValue(forKey: response.requestID)
             scheduleParentEvidencePage(
                 response,
-                round: pending.round,
                 from: peer,
                 generation: generation,
                 process: process
@@ -1685,6 +1898,7 @@ extension NodeNetworkRuntime {
                 SyncTrace.log("parent tip dropped: stale sequence \(context.sequence) <= \(current.sequence)")
                 return
             }
+            let previous = hierarchyState.receivedParentTip
             hierarchyState.receivedParentTip = ReceivedParentTipContext(
                 sequence: context.sequence,
                 peer: peer,
@@ -1695,16 +1909,35 @@ extension NodeNetworkRuntime {
                 carriedChildCID: context.carriedChildCID
             )
             SyncTrace.log("parent tip \(context.sequence): h=\(tip.height) tip=\(context.tipCID.prefix(12)) rewards=\(context.rewards.count) carried=\(context.carriedChildCID?.prefix(12) ?? "none")")
-            // A carried block this chain has not admitted is fetched now,
-            // not on the next hello or admission: the hint naming it may
-            // have been refused, and no admission follows a held offer.
-            // The review asks for a round when none was sent for it, and
-            // lets go when one already ended without it and nothing the
-            // parent seeded is pending: a block named again after the
-            // parent's tip moved away and back gets looked at once more.
-            if context.carriedChildCID != nil {
+            // The carried block comes with the parent's evidence for it:
+            // recovered through the evidence lane's reserved slot whenever a
+            // context newly names it, whatever else carries the same
+            // evidence (a hint's append can end without trying it). The
+            // named append is ordered after the session's earlier appends
+            // and fetches nothing if one of them already brought it. It
+            // waits as pending before the acceptance read, so no review in
+            // between finds nothing. The summary is only a pointer: the
+            // evidence is verified from content, so a forged one fails, and
+            // the review that follows its settling releases the hold.
+            if let evidence = context.carriedEvidence,
+               previous?.peer.sessionID != peer.sessionID
+                || previous?.carriedChildCID != evidence.childCID {
+                let pending = PendingNamedEvidence(peer: peer, evidence: evidence)
+                hierarchyState.namedCarriedEvidence = pending
+                let accepted = await process.hasAcceptedBlock(evidence.childCID)
+                guard isCurrentRuntime(generation: generation, process: process)
+                else { return }
+                if accepted {
+                    if hierarchyState.namedCarriedEvidence?.evidence == evidence {
+                        hierarchyState.namedCarriedEvidence = nil
+                    }
+                } else {
+                    seedNamedCarriedEvidence(generation: generation, process: process)
+                }
+            }
+            if context.carriedEvidence != nil {
                 await reviewCarriedChildHold(
-                    endedRound: nil, generation: generation, process: process
+                    generation: generation, process: process
                 )
             }
             scheduleCandidateOffer(generation: generation, process: process)
@@ -1961,6 +2194,7 @@ extension NodeNetworkRuntime {
         defer {
             if hierarchyState.childProofRecoveryTask.clear(token) {
                 hierarchyState.childProofRecoveryNeedsRefresh = false
+                hierarchyState.childProofRecoveryIterating = false
             }
         }
         // This pass still owns the recovery slot and its generation runs.
@@ -2002,6 +2236,26 @@ extension NodeNetworkRuntime {
             // the slot: a stale pass would swallow the current one's.
             guard current() else { return }
             hierarchyState.childProofRecoveryNeedsRefresh = false
+            #if DEBUG
+            await childProofRecoveryIterationForTesting?()
+            guard current() else { return }
+            #endif
+            // The iteration starts: a tip context's wait begun from here on
+            // ends on the next one, not this.
+            hierarchyState.childProofRecoveryIterating = true
+            // Routes the tip context needs recorded: this iteration's retry
+            // below then works them like any owed route.
+            let routes = hierarchyState.carriedRoutesToRecord
+            hierarchyState.carriedRoutesToRecord = [:]
+            // Pruned against each context as it is stored, not here: the
+            // naming that queued a route may still be reading the next
+            // directory, its context not stored yet.
+            for (directory, block) in routes.sorted(by: { $0.key < $1.key }) {
+                _ = try? await process.ensurePendingChildProofRoute(
+                    carrierCID: block.carrierCID, directory: directory
+                )
+                guard current() else { return }
+            }
             await retryRecoveredChildProofs(
                 generation: generation,
                 process: process
@@ -2011,6 +2265,15 @@ extension NodeNetworkRuntime {
                 generation: generation,
                 process: process
             )
+            guard current() else { return }
+            // The iteration did what this node can for every owed route: a
+            // context waiting on a carried block's evidence stops waiting,
+            // naming the block if its evidence was issued. However long the
+            // pass keeps iterating (every import and overlay hello re-arms
+            // it), a wait ends on one iteration.
+            hierarchyState.childProofRecoveryIterating = false
+            hierarchyState.childProofRecoveryIterations &+= 1
+            carriedEvidenceMayHaveChanged(generation: generation, process: process)
         } while current() && hierarchyState.childProofRecoveryNeedsRefresh
     }
 
@@ -2413,6 +2676,107 @@ extension NodeNetworkRuntime {
            let session = parentEvidenceSession(for: parent) {
             parentEvidence.capacityBecameAvailable(for: session)
         }
+        if let process {
+            seedNamedCarriedEvidence(generation: runtimeGeneration, process: process)
+        }
+    }
+
+    /// Seeds the evidence the parent's context names its carried block
+    /// with, through the lane's one reserved slot: nothing else competes
+    /// for it, so local backpressure never drops the parent's claim, and
+    /// the slot holds at most one append (one named block per context).
+    /// While it waits for the slot, or for room in the inbox after the
+    /// inbox refused it, the named evidence keeps the hold; it waits only
+    /// while the context still names that block on that session, and a
+    /// session's end or a stop drops it.
+    private func seedNamedCarriedEvidence(
+        generation: UInt64,
+        process: ChainProcess
+    ) {
+        guard isCurrentRuntime(generation: generation, process: process),
+              let pending = hierarchyState.namedCarriedEvidence else { return }
+        guard hierarchyState.receivedParentTip?.carriedChildCID == pending.evidence.childCID,
+              hierarchyState.receivedParentTip?.peer.sessionID == pending.peer.sessionID
+        else {
+            hierarchyState.namedCarriedEvidence = nil
+            return
+        }
+        guard hierarchyState.namedCarriedEvidenceAppend == nil else { return }
+        let token = LifetimeToken.next()
+        switch appendParentEvidence(
+            [pending.evidence.summary],
+            sourceID: pending.evidence.sourceID,
+            advanceScan: false,
+            named: token,
+            from: pending.peer,
+            generation: generation,
+            process: process
+        ) {
+        case .scheduled:
+            hierarchyState.namedCarriedEvidence = nil
+            hierarchyState.namedCarriedEvidenceAppend = token
+        case .backpressured:
+            // Only a session already failed refuses the reserved slot; its
+            // recycle ends the context and drops the wait.
+            break
+        case .rejected:
+            hierarchyState.namedCarriedEvidence = nil
+            Task { [hierarchy] in
+                await hierarchy.recycleSession(ifCurrent: pending.peer)
+            }
+        }
+    }
+
+    /// An append ended. The reserved one frees the slot. Whichever append
+    /// carried the named carried block's evidence, refused by a full inbox
+    /// (local backpressure), the evidence waits for room while the context
+    /// still names its block on that session: it is not retried until the
+    /// inbox has room (`parentEvidenceCapacityBecameAvailable`, a settle,
+    /// a state change), so a full inbox costs no fetch loop.
+    private func parentEvidenceAppendFinished(
+        named: LifetimeToken?,
+        summaries: [IssuedChildEvidenceSummary],
+        sourceID: String,
+        result: ParentEvidenceResult,
+        peer: AuthenticatedPeer,
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        guard isCurrentRuntime(generation: generation, process: process) else { return }
+        if let named, hierarchyState.namedCarriedEvidenceAppend == named {
+            hierarchyState.namedCarriedEvidenceAppend = nil
+        }
+        guard result == .backpressured else {
+            seedNamedCarriedEvidence(generation: generation, process: process)
+            return
+        }
+        if hierarchyState.namedCarriedEvidence == nil,
+           hierarchyState.receivedParentTip?.peer.sessionID == peer.sessionID,
+           let carried = hierarchyState.receivedParentTip?.carriedChildCID,
+           let summary = summaries.first(where: { $0.childCID == carried }) {
+            hierarchyState.namedCarriedEvidence = PendingNamedEvidence(
+                peer: peer,
+                evidence: CarriedChildEvidence(sourceID: sourceID, summary: summary)
+            )
+        }
+        // Room made while the refusal was in flight fired its wakeup before
+        // the evidence waited: look once more, after it waits.
+        await retryNamedCarriedEvidenceIfInboxHasRoom(
+            generation: generation, process: process
+        )
+    }
+
+    /// The named evidence waits for inbox room: seed it once there is some.
+    func retryNamedCarriedEvidenceIfInboxHasRoom(
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        guard isCurrentRuntime(generation: generation, process: process),
+              hierarchyState.namedCarriedEvidence != nil,
+              hierarchyState.namedCarriedEvidenceAppend == nil,
+              (try? await process.store.parentEvidenceInboxHasCapacity()) == true
+        else { return }
+        seedNamedCarriedEvidence(generation: generation, process: process)
     }
 
     /// Ask the parent for the runs of the committers this chain recently
@@ -2632,20 +2996,14 @@ extension NodeNetworkRuntime {
     }
 
     /// Returns whether a request was sent: none is while a round is in
-    /// flight, before a parent session exists, or on a root chain.
-    ///
-    /// `round` names the scan round a continuation, retry or timeout page
-    /// belongs to; without it a new round starts. `forCarried` records the
-    /// new round as the one sent for that carried block, before anything
-    /// suspends. A page of a round that cannot be sent is that round's
-    /// death: the carried hold is reviewed as if it had ended.
+    /// flight or starting, before a parent session exists, or on a root
+    /// chain. A page refused because a round is in flight is superseded by
+    /// it: that round scans from the durable cursor.
     @discardableResult
     func requestEvidenceIndex(
         sourceID: String? = nil,
         cursor: UInt64? = nil,
         through: UInt64? = nil,
-        round: UInt64? = nil,
-        forCarried carried: String? = nil,
         generation: UInt64? = nil,
         process expectedProcess: ChainProcess? = nil
     ) async -> Bool {
@@ -2656,38 +3014,11 @@ extension NodeNetworkRuntime {
                 process: expectedProcess
             ), !configuration.address.isNexus
         else { return false }
-        func died(_ round: UInt64?) -> Bool {
-            if let round {
-                Task { [weak self] in
-                    await self?.reviewCarriedChildHold(
-                        endedRound: round,
-                        generation: fence.generation,
-                        process: fence.process
-                    )
-                }
-            }
-            return false
-        }
-        // Another round in flight (or starting) supersedes this page: it
-        // scans from the durable cursor, and its own end reviews the hold
-        // (a later round's end covers this one), so this is no death.
         guard hierarchyState.pendingEvidenceIndexes.isEmpty,
-              !hierarchyState.evidenceRoundStarting
+              !hierarchyState.evidenceRoundStarting,
+              let parent = configuredParentPeer()
         else { return false }
-        guard let parent = configuredParentPeer() else { return died(round) }
         hierarchyState.evidenceRoundStarting = true
-        let pageRound: UInt64
-        if let round {
-            pageRound = round
-        } else {
-            hierarchyState.lastEvidenceRound &+= 1
-            pageRound = hierarchyState.lastEvidenceRound
-            if let carried {
-                hierarchyState.requestedCarriedChildCID = carried
-                hierarchyState.requestedCarriedRound = pageRound
-                hierarchyState.carriedRoundEndedCID = nil
-            }
-        }
         let durableCursor: ParentEvidenceScanCursor
         if let sourceID, let cursor {
             durableCursor = ParentEvidenceScanCursor(
@@ -2705,7 +3036,7 @@ extension NodeNetworkRuntime {
             ) else { return false }
             guard let persisted else {
                 hierarchyState.evidenceRoundStarting = false
-                return died(pageRound)
+                return false
             }
             durableCursor = persisted
         }
@@ -2718,12 +3049,11 @@ extension NodeNetworkRuntime {
         )
         guard let payload = try? request.encoded() else {
             hierarchyState.evidenceRoundStarting = false
-            return died(pageRound)
+            return false
         }
         hierarchyState.pendingEvidenceIndexes[request.requestID] = .init(
             peer: parent,
-            request: request,
-            round: pageRound
+            request: request
         )
         hierarchyState.evidenceRoundStarting = false
         let result = await hierarchy.sendMessage(
@@ -2750,7 +3080,7 @@ extension NodeNetworkRuntime {
             return true
         } else {
             hierarchyState.pendingEvidenceIndexes.removeValue(forKey: request.requestID)
-            return died(pageRound)
+            return false
         }
     }
 
@@ -2785,7 +3115,6 @@ extension NodeNetworkRuntime {
             sourceID: request.request.sourceID,
             cursor: request.request.cursor,
             through: request.request.through,
-            round: request.round,
             generation: generation,
             process: process
         )

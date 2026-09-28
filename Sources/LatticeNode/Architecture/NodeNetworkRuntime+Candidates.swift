@@ -113,7 +113,6 @@ extension NodeNetworkRuntime {
         let generation = runtimeGeneration
         Task { [weak self] in
             await self?.reviewCarriedChildHold(
-                endedRound: nil,
                 generation: generation, process: process
             )
         }
@@ -155,11 +154,10 @@ extension NodeNetworkRuntime {
             ) else { return }
             serviceBlockFetcher()
             // The carried block's attempt completed (parked or left the
-            // fetcher): the hold is reviewed now, not only when a round ends.
+            // fetcher): the hold is reviewed now.
             if candidate.blockCID == carriedHoldBlockCID() {
                 await reviewCarriedChildHold(
-                    endedRound: nil,
-                    generation: generation, process: process
+                        generation: generation, process: process
                 )
                 guard isCurrentRuntime(
                     generation: generation,
@@ -617,7 +615,13 @@ extension NodeNetworkRuntime {
             resolution: resolution,
             deficientProviders: failedOverlayProviders
         )
-        if outcome.decision.isAccepted, authenticatedPackage != nil,
+        // A decided block consumed its inbox entry, accepted or not: room
+        // for evidence that waited on it.
+        let decided: Bool = switch resolution {
+        case .connected, .terminal: true
+        case .wait, .predecessor: false
+        }
+        if decided, authenticatedPackage != nil,
            (try? await process.store.parentEvidenceInboxHasCapacity()) == true {
             parentEvidenceCapacityBecameAvailable()
             await requestEvidenceIndex(

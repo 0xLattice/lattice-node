@@ -145,6 +145,11 @@ extension NodeNetworkRuntime {
             // The peer's frontier is pulled by `pullFrontierIfAtEdge` once its
             // tip is known (its own hello-reply announcement) and we are at
             // the live edge with respect to it — never blindly here.
+            // Child-proof recovery fetches the child content an owed route
+            // lacks through the overlay: a new same-chain peer is a source an
+            // earlier iteration did not have. Re-arming costs one coalesced
+            // pass (a refresh flag while one runs), and no tip context waits
+            // on more than one iteration of it.
             scheduleChildProofRecovery(
                 generation: generation,
                 process: process
@@ -1117,7 +1122,7 @@ extension NodeNetworkRuntime {
         }
         if let slotWait { return slotWait }
         sessionLeases.activeEvidenceVolumes.insert(lease)
-        defer { sessionLeases.activeEvidenceVolumes.remove(lease) }
+        defer { releaseEvidenceVolume(lease) }
         if let evidence = try? await process.store.issuedChildEvidence(
             scope: .incomingCarrier,
             edgeCID: summary.edgeCID,
