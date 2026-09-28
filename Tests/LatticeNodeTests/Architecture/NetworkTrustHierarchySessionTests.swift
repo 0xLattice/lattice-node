@@ -1189,12 +1189,16 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
                 "admitted in order: P, then the O it wakes, then the D O wakes"
             )
         } catch {
+            // Await the task: a reconnect in flight at cancel still appends its
+            // Ivy, which must be in the list stopped below.
             reconnects?.cancel()
+            await reconnects?.value
             for client in clients + (await reconnected.clients) { await client.stop() }
             await runtime.stop()
             throw error
         }
         reconnects?.cancel()
+        await reconnects?.value
         for client in clients + (await reconnected.clients) { await client.stop() }
         await runtime.stop()
         withExtendedLifetime(delegates) {}
