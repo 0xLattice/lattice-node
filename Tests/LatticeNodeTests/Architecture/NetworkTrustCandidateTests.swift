@@ -2826,11 +2826,10 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 await fired.turnOn()
                 let before = await parentRuntime.debugParentTipNaming().recoveryIterations
                 await passes.open()
-                for _ in 0..<500 {
-                    if await parentRuntime.debugParentTipNaming().recoveryIterations > before {
-                        break
-                    }
-                    try? await Task.sleep(for: .milliseconds(10))
+                // The hook cannot throw: a timeout here fails the route and
+                // naming assertions that follow.
+                try? await eventually("one recovery iteration completes") {
+                    await parentRuntime.debugParentTipNaming().recoveryIterations > before
                 }
             }
             step = "push the tip context"
