@@ -234,7 +234,23 @@ carry a sequence that is monotonic per session; a lower one is dropped. The
 context also names the child block the tip's branch last committed into the
 child's directory (the nearest carrier's commitment, so it follows the
 branch under a reorg): that is how a child learns it was carried, at push
-latency rather than evidence latency. The
+latency. The parent names that block only once it has durably indexed the
+evidence for it, and the name travels with the evidence summary (child
+block, index source and ordinal, root, attachment), so the claim and the
+pointer to its proof arrive as one unit. While the evidence is not yet
+indexed, the push to that directory waits as long as the evidence is still
+coming: its proof route is owed (the push records the route itself if the
+path that made the carrier its tip did not) and no child-proof recovery pass
+has ended since the wait began. Once a pass has ended without the evidence,
+or when no route is owed (a parent below the root that has no root for its
+carrier yet), the context goes out on the new tip without naming the block,
+so a parent that cannot issue the evidence never stalls the child's offers.
+A reorg re-reads what the new tip carries at once. The context topic is
+`lattice.hierarchy.parent-tip.available.v2`; `v1` carried a bare name
+without its evidence. This is a hierarchy-plane flag day, not a consensus
+change: a `v1` peer does not route the `v2` topic, so parents and children
+roll together, and until both have rolled the child receives no context.
+The
 parent holds the latest candidate per child peer — a candidate it already
 holds on that session, or an older one, is dropped from the frame's head
 without decoding the block — and a template carries at most one held
@@ -244,11 +260,15 @@ so that offer still fits; carried again it would only be credited once
 more). Nothing is requested at
 template time and no child can stall parent consensus. A child builds no
 candidate while the block its parent's context names as carried is not yet
-imported here (it asks for the parent's evidence index once per named
-block, and again when a scan round ends without it; a decision against that
-block, or a round sent for it that ends without it while nothing holds an
-attempt for it, releases the hold, so no offer waits on a block that will
-never land), while its execution walk is stepping, while its validated
+imported here: it recovers the named evidence at once, as it does a pushed
+evidence hint, verifying it from content (the summary is only a pointer; a
+forged one fails verification), and waits while that evidence is being
+recovered or an attempt the parent's evidence seeded for the block is still
+pending. A decision against that block, or the parent's evidence for it
+coming to nothing with no such attempt left, releases the hold, so no offer
+waits on a block that will never land. Only the authenticated parent's
+evidence can keep the hold; nothing an overlay peer announces or relays can.
+It also builds no candidate while its execution walk is stepping, while its validated
 tip is behind its weighed tip and the walk can still step (the request arms
 the walk), or while a candidate it built that the parent's evidence has
 named and still holds in its inbox is ready for or in its import; it
@@ -258,7 +278,9 @@ before the child knew of a carry would only be a sibling of the carried
 block: carried, it would reorg the child's tip to the heavier carrier, and
 at a fast parent the child could never get ahead of its own forks. Parent
 evidence re-served for a carrier whose import already credited the block
-(a scan, a repeated hint) is not imported again.
+(a scan, a repeated hint) is not imported again. The child's scans of the
+parent's evidence index remain the backfill path for evidence in general;
+they play no part in the hold.
 Candidates are
 offers, not miner-work durability: the child keeps a candidate's content by
 its own bounded budget, oldest offer first, until the carried block's

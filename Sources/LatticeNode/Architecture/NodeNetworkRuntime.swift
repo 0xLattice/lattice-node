@@ -209,8 +209,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     struct PendingChildEvidenceIndex: Sendable {
         let peer: AuthenticatedPeer
         let request: ChildEvidenceIndexRequestMessage
-        /// The scan round this page belongs to.
-        let round: UInt64
     }
 
     struct PendingParentChainFact: Sendable {
@@ -696,44 +694,21 @@ public actor NodeNetworkRuntime: IvyDelegate {
         ///     Lifecycle.clearRuntimeState.
         var receivedParentTip: ReceivedParentTipContext?
         /// A carried block the parent named that this chain will not wait for:
-        /// its admission decided against it, or a scan round asked for after
-        /// the naming ended without it and nothing tracks it. The hold on it is
+        /// its admission decided against it, or the parent's evidence for it
+        /// came to nothing and nothing tracks it. The hold on it is
         /// released, or no offer would ever follow. One at a time, like the
         /// context that names it.
         /// Owner: Hierarchy.releaseCarriedHold / Hierarchy.clearHierarchyAuthorization /
         ///     Hierarchy.reviewCarriedChildHold / Lifecycle.clearRuntimeState.
         var releasedCarriedChildCID: String?
-        /// The carried block an evidence scan was sent for (not merely asked
-        /// for: a request while a round is in flight sends nothing), so one
-        /// carry costs one round, and a round that ends without the block
-        /// releases the hold.
-        /// Owner: Hierarchy.clearHierarchyAuthorization / Hierarchy.requestEvidenceIndex /
-        ///     Lifecycle.clearRuntimeState.
-        var requestedCarriedChildCID: String?
-        /// The scan round sent for `requestedCarriedChildCID`: its end (or
-        /// death), or a later round's, ends the carried block's wait.
-        /// Owner: Hierarchy.clearHierarchyAuthorization / Hierarchy.requestEvidenceIndex /
-        ///     Lifecycle.clearRuntimeState.
-        var requestedCarriedRound: UInt64?
-        /// The last scan round started (a counter; rounds are sequential).
-        /// Owner: Hierarchy.requestEvidenceIndex.
-        var lastEvidenceRound: UInt64 = 0
         /// A page request is being prepared (its cursor read) and not yet
         /// pending: no second round starts meanwhile.
         /// Owner: Hierarchy.requestEvidenceIndex / Lifecycle.clearRuntimeState.
         var evidenceRoundStarting = false
-        /// The carried block a scan round sent for it (or a later one) has
-        /// ended or died for (its last page processed, its candidates
-        /// queued). Only then may a hold on it be released: a page's
-        /// response arrives before its evidence is retained and its rooted
-        /// package queued.
-        /// Owner: Hierarchy.clearHierarchyAuthorization / Hierarchy.reviewCarriedChildHold /
-        ///     Hierarchy.requestEvidenceIndex / Lifecycle.clearRuntimeState.
-        var carriedRoundEndedCID: String?
-        /// Child blocks whose parent evidence (a scan page or a push) is
-        /// being recovered, counted per append: until it settles, the
-        /// rooted package may still arrive, so a hold on one of them is not
-        /// released.
+        /// Child blocks whose parent evidence (a scan page, a hint or the
+        /// context naming the block) is being recovered, counted per
+        /// append: until it settles, the rooted package may still arrive,
+        /// so a hold on one of them is not released.
         /// Owner: Hierarchy.appendParentEvidence / Hierarchy.parentEvidenceSettled /
         ///     Lifecycle.clearRuntimeState.
         var parentEvidenceInFlight: [String: Int] = [:]
@@ -1503,9 +1478,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     struct CarriedHoldSnapshot: Sendable {
         let named: String?
         let released: String?
-        let requested: String?
-        let requestedRound: UInt64?
-        let roundEnded: String?
         let evidenceInFlight: [String: Int]
         let pendingEvidenceIndexCount: Int
     }
@@ -1514,9 +1486,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         CarriedHoldSnapshot(
             named: hierarchyState.receivedParentTip?.carriedChildCID,
             released: hierarchyState.releasedCarriedChildCID,
-            requested: hierarchyState.requestedCarriedChildCID,
-            requestedRound: hierarchyState.requestedCarriedRound,
-            roundEnded: hierarchyState.carriedRoundEndedCID,
             evidenceInFlight: hierarchyState.parentEvidenceInFlight,
             pendingEvidenceIndexCount: hierarchyState.pendingEvidenceIndexes.count
         )

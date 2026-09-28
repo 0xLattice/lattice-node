@@ -113,7 +113,6 @@ extension NodeNetworkRuntime {
         let generation = runtimeGeneration
         Task { [weak self] in
             await self?.reviewCarriedChildHold(
-                endedRound: nil,
                 generation: generation, process: process
             )
         }
@@ -155,11 +154,10 @@ extension NodeNetworkRuntime {
             ) else { return }
             serviceBlockFetcher()
             // The carried block's attempt completed (parked or left the
-            // fetcher): the hold is reviewed now, not only when a round ends.
+            // fetcher): the hold is reviewed now.
             if candidate.blockCID == carriedHoldBlockCID() {
                 await reviewCarriedChildHold(
-                    endedRound: nil,
-                    generation: generation, process: process
+                        generation: generation, process: process
                 )
                 guard isCurrentRuntime(
                     generation: generation,

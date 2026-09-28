@@ -37,7 +37,13 @@ enum NodeNetworkTopic {
     /// Parent → child: the parent's current template context (its validated
     /// tip and the miner's reward plan for the child's subtree). Pushed on
     /// every change; the child builds its candidate against it.
-    static let parentTipAvailable = "lattice.hierarchy.parent-tip.available.v1"
+    // v2: a carried block is named together with its evidence summary, so
+    // the claim and the pointer to its proof arrive as one unit. A v1 child
+    // treated a bare name as a reason to scan; a v1 peer on this topic
+    // would read the evidence trailer as malformed and drop every context.
+    // Bumping the topic makes a mixed pair see no route rather than a
+    // silent drop: roll parents and children together.
+    static let parentTipAvailable = "lattice.hierarchy.parent-tip.available.v2"
     /// Child → parent: the child's current candidate for the parent's tip.
     /// Pushed on every change of its inputs; the parent caches the latest.
     static let childCandidateAvailable = "lattice.hierarchy.child-candidate.available.v1"
@@ -795,15 +801,20 @@ struct ParentTipContextMessage: Sendable {
     /// without minimum work keeps its exact prior layout.
     let minimumWork: [MiningMinimumWork]
     /// The child block the tip's branch last committed into the child's
-    /// directory, when it committed one: the child learns of a carry here,
-    /// at push latency, and holds its offers until that block is admitted.
-    /// Encoded after the minimum work only when present.
-    let carriedChildCID: String?
+    /// directory, named with the evidence the parent issued for it, when
+    /// that evidence is indexed: the child learns of a carry here, at push
+    /// latency, fetches the block from the evidence at once, and holds its
+    /// offers until the block is decided. The summary is a pointer, never
+    /// trusted: the evidence is verified from content. Encoded after the
+    /// minimum work only when present.
+    let carriedEvidence: CarriedChildEvidence?
+
+    var carriedChildCID: String? { carriedEvidence?.childCID }
 
     /// Trailers after the parent block, each tagged, in ascending tag order,
     /// each at most once and never empty.
     static let minimumWorkTrailer: UInt8 = 1
-    static let carriedChildTrailer: UInt8 = 2
+    static let carriedEvidenceTrailer: UInt8 = 2
 
     init(
         sequence: UInt64,
@@ -812,7 +823,7 @@ struct ParentTipContextMessage: Sendable {
         tipData: Data,
         rewards: [MiningReward],
         minimumWork: [MiningMinimumWork] = [],
-        carriedChildCID: String? = nil
+        carriedEvidence: CarriedChildEvidence? = nil
     ) {
         self.sequence = sequence
         self.childPath = childPath
@@ -820,7 +831,76 @@ struct ParentTipContextMessage: Sendable {
         self.tipData = tipData
         self.rewards = rewards
         self.minimumWork = minimumWork
-        self.carriedChildCID = carriedChildCID
+        self.carriedEvidence = carriedEvidence
+    }
+
+    /// The evidence trailer's body: the child block, the index source and
+    /// ordinal, the root, and the attachment, each CID canonical.
+    private static func encodeCarriedEvidence(
+        _ evidence: CarriedChildEvidence
+    ) throws -> Data {
+        let summary = evidence.summary
+        guard _isCanonicalWireCID(summary.childCID),
+              UUID(uuidString: evidence.sourceID) != nil,
+              _isBoundedWireAtom(evidence.sourceID),
+              summary.ordinal > 0,
+              _isCanonicalWireCID(summary.rootCID),
+              _isCanonicalWireCID(summary.attachmentCID) else {
+            throw NodeNetworkWireError.malformed
+        }
+        var data = Data()
+        for atom in [summary.childCID, evidence.sourceID] {
+            data.appendUInt16(UInt16(atom.utf8.count))
+            data.append(Data(atom.utf8))
+        }
+        data.appendUInt64(summary.ordinal)
+        for atom in [summary.rootCID, summary.attachmentCID] {
+            data.appendUInt16(UInt16(atom.utf8.count))
+            data.append(Data(atom.utf8))
+        }
+        return data
+    }
+
+    private static func decodeAtom(
+        _ data: Data,
+        at position: inout Data.Index
+    ) throws -> String {
+        guard let length = data.readUInt16(at: &position), length > 0,
+              data.distance(from: position, to: data.endIndex) >= Int(length) else {
+            throw NodeNetworkWireError.malformed
+        }
+        let end = data.index(position, offsetBy: Int(length))
+        guard let atom = String(data: data[position..<end], encoding: .utf8),
+              _isBoundedWireAtom(atom) else {
+            throw NodeNetworkWireError.malformed
+        }
+        position = end
+        return atom
+    }
+
+    private static func decodeCarriedEvidence(
+        _ data: Data,
+        at position: inout Data.Index
+    ) throws -> CarriedChildEvidence {
+        let childCID = try decodeAtom(data, at: &position)
+        let sourceID = try decodeAtom(data, at: &position)
+        guard let ordinal = data.readUInt64(at: &position) else {
+            throw NodeNetworkWireError.malformed
+        }
+        let rootCID = try decodeAtom(data, at: &position)
+        let attachmentCID = try decodeAtom(data, at: &position)
+        let evidence = CarriedChildEvidence(
+            sourceID: sourceID,
+            summary: IssuedChildEvidenceSummary(
+                ordinal: ordinal,
+                childCID: childCID,
+                rootCID: rootCID,
+                attachmentCID: attachmentCID
+            )
+        )
+        // Validated by the encoder's own rule.
+        _ = try encodeCarriedEvidence(evidence)
+        return evidence
     }
 
     func encoded() throws -> Data {
@@ -844,14 +924,13 @@ struct ParentTipContextMessage: Sendable {
         )
         guard rewardBytes.count <= Self.maximumRewardBytes,
               rewardBytes.count <= Int(UInt32.max),
-              minimumWorkBytes.count <= Int(UInt32.max),
-              carriedChildCID.map({ _isBoundedWireAtom($0) }) ?? true else {
+              minimumWorkBytes.count <= Int(UInt32.max) else {
             throw NodeNetworkWireError.malformed
         }
-        let carriedBytes = carriedChildCID.map { Data($0.utf8) }
+        let carriedBytes = try carriedEvidence.map(Self.encodeCarriedEvidence)
         let pathSize: Int = pathBytes.reduce(0) { $0 + 2 + $1.count }
         let minimumWorkSize: Int = minimumWorkBytes.isEmpty ? 0 : 1 + 4 + minimumWorkBytes.count
-        let carriedSize: Int = carriedBytes.map { 1 + 2 + $0.count } ?? 0
+        let carriedSize: Int = carriedBytes.map { 1 + $0.count } ?? 0
         var size = 8 + 2 + pathSize
         size += 2 + tipBytes.count + 4 + rewardBytes.count
         size += 4 + tipData.count
@@ -878,8 +957,7 @@ struct ParentTipContextMessage: Sendable {
             data.append(minimumWorkBytes)
         }
         if let carriedBytes {
-            data.append(Self.carriedChildTrailer)
-            data.appendUInt16(UInt16(carriedBytes.count))
+            data.append(Self.carriedEvidenceTrailer)
             data.append(carriedBytes)
         }
         return data
@@ -945,7 +1023,7 @@ struct ParentTipContextMessage: Sendable {
         let tipData = Data(data[position..<blockEnd])
         position = blockEnd
         var minimumWork: [MiningMinimumWork] = []
-        var carriedChildCID: String?
+        var carriedEvidence: CarriedChildEvidence?
         var lastTrailer: UInt8 = 0
         while position < data.endIndex {
             let trailer = data[position]
@@ -970,20 +1048,10 @@ struct ParentTipContextMessage: Sendable {
                 }
                 minimumWork = entries
                 position = entriesEnd
-            case Self.carriedChildTrailer:
-                guard let length = data.readUInt16(at: &position), length > 0,
-                      data.distance(from: position, to: data.endIndex) >= Int(length) else {
-                    throw NodeNetworkWireError.malformed
-                }
-                let cidEnd = data.index(position, offsetBy: Int(length))
-                guard let cid = String(
-                          data: data[position..<cidEnd],
-                          encoding: .utf8
-                      ), _isBoundedWireAtom(cid) else {
-                    throw NodeNetworkWireError.malformed
-                }
-                carriedChildCID = cid
-                position = cidEnd
+            case Self.carriedEvidenceTrailer:
+                carriedEvidence = try Self.decodeCarriedEvidence(
+                    data, at: &position
+                )
             default:
                 throw NodeNetworkWireError.malformed
             }
@@ -995,7 +1063,7 @@ struct ParentTipContextMessage: Sendable {
             tipData: tipData,
             rewards: rewards,
             minimumWork: minimumWork,
-            carriedChildCID: carriedChildCID
+            carriedEvidence: carriedEvidence
         )
         guard try message.encoded() == data else {
             throw NodeNetworkWireError.nonCanonical

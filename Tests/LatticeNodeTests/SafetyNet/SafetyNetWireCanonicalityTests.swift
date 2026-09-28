@@ -15,7 +15,7 @@ import cashew
 /// corpus does not reach: the three portable-attachment and three
 /// child-evidence JSON messages, the two binary hierarchy frames
 /// (`ParentTipContextMessage` with its `minimumWorkTrailer` /
-/// `carriedChildTrailer`, `ChildCandidateAvailableMessage` with its search
+/// `carriedEvidenceTrailer`, `ChildCandidateAvailableMessage` with its search
 /// witness), `ChainHello`, `ChildValidationPackageEnvelope`,
 /// `ChildEvidenceVolume`, and the RPC types with a custom Codable
 /// (`ContentBoundTransaction`, `ContentBoundWasmPolicyModule`,
@@ -607,7 +607,15 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
                 tipData: tip.block.toData()!,
                 rewards: rewards,
                 minimumWork: minimumWork,
-                carriedChildCID: randomBool(&generator) ? randomCID(&generator) : nil
+                carriedEvidence: randomBool(&generator) ? CarriedChildEvidence(
+                    sourceID: UUID().uuidString,
+                    summary: IssuedChildEvidenceSummary(
+                        ordinal: UInt64.random(in: 1...UInt64.max, using: &generator),
+                        childCID: randomCID(&generator),
+                        rootCID: randomCID(&generator),
+                        attachmentCID: randomCID(&generator)
+                    )
+                ) : nil
             )
             let bytes = try message.encoded()
             let decoded = try ParentTipContextMessage.decoded(bytes)
@@ -617,7 +625,7 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
             XCTAssertEqual(decoded.tipCID, message.tipCID, provenance)
             XCTAssertEqual(decoded.tipData, message.tipData, provenance)
             XCTAssertEqual(decoded.minimumWork, message.minimumWork, provenance)
-            XCTAssertEqual(decoded.carriedChildCID, message.carriedChildCID, provenance)
+            XCTAssertEqual(decoded.carriedEvidence, message.carriedEvidence, provenance)
             XCTAssertEqual(
                 decoded.rewards.map(\.chainPath), message.rewards.map(\.chainPath),
                 provenance

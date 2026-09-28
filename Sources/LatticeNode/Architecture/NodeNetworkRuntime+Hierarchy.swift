@@ -479,7 +479,7 @@ extension NodeNetworkRuntime {
             tipData: context.tipData,
             rewards: resolvedRewards,
             minimumWork: minimumWork,
-            carriedChildCID: childPath.last.flatMap { context.named[$0]?.childCID }
+            carriedEvidence: childPath.last.flatMap { context.named[$0] }
         ).encoded() else {
             SyncTrace.log("parent tip push to \(childPath.joined(separator: "/")) not built")
             return
@@ -552,9 +552,9 @@ extension NodeNetworkRuntime {
         // context names it, that this chain has not admitted: a candidate
         // built now would only be its sibling. Hold until the admission
         // decides: an acceptance publishes a state change, and a decision
-        // against the block, or a scan round that ends without it, releases
-        // the hold (`releasedCarriedChildCID`), so no offer waits on a block
-        // that will never land.
+        // against the block, or the parent's named evidence coming to
+        // nothing, releases the hold (`releasedCarriedChildCID`), so no
+        // offer waits on a block that will never land.
         let held = await heldCarriedBlock(
             accepted: { await process.hasAcceptedBlock($0) }
         )
@@ -822,7 +822,7 @@ extension NodeNetworkRuntime {
         if let carried = hierarchyState.receivedParentTip?.carriedChildCID,
            childCIDs.contains(carried) {
             await reviewCarriedChildHold(
-                endedRound: nil, generation: generation, process: process
+                generation: generation, process: process
             )
         }
     }
@@ -1229,9 +1229,6 @@ extension NodeNetworkRuntime {
         if hierarchyState.receivedParentTip?.peer.key == key {
             hierarchyState.receivedParentTip = nil
             hierarchyState.releasedCarriedChildCID = nil
-            hierarchyState.requestedCarriedChildCID = nil
-            hierarchyState.requestedCarriedRound = nil
-            hierarchyState.carriedRoundEndedCID = nil
             hierarchyState.lastOfferedCandidateCID = nil
         }
         return requeue
@@ -1239,7 +1236,6 @@ extension NodeNetworkRuntime {
 
     private func scheduleParentEvidencePage(
         _ response: ChildEvidenceIndexResponseMessage,
-        round: UInt64,
         from peer: AuthenticatedPeer,
         generation: UInt64,
         process: ChainProcess
@@ -1270,7 +1266,6 @@ extension NodeNetworkRuntime {
                         sourceID: response.sourceID,
                         cursor: response.cursor,
                         through: response.through,
-                        round: round,
                         generation: generation,
                         process: process
                     )
@@ -1285,17 +1280,8 @@ extension NodeNetworkRuntime {
         }
         Task { [weak self] in
             guard let self else { return }
-            guard (await tail?.value ?? .handled) == .handled else {
-                // The round dies here (its page was not retained; the scan
-                // re-serves it next round). For the carried block that is a
-                // round that ended without it, or its hold would wait on a
-                // round that never reviews it.
-                await self.reviewCarriedChildHold(
-                    endedRound: round,
-                    generation: generation, process: process
-                )
-                return
-            }
+            // Not retained: the scan re-serves this page next round.
+            guard (await tail?.value ?? .handled) == .handled else { return }
             // The scan cursor advances only through evidence this child has
             // durably retained (the per-item advanceScan path). The parent's
             // asserted `through` is never persisted directly: a lying parent
@@ -1305,7 +1291,6 @@ extension NodeNetworkRuntime {
                     sourceID: response.sourceID,
                     cursor: response.next,
                     through: response.through,
-                    round: round,
                     generation: generation,
                     process: process
                 )
@@ -1314,10 +1299,6 @@ extension NodeNetworkRuntime {
                 // candidates queued: ask for the runs of the committers this
                 // chain already accepted blocks from (§9.10).
                 await self.requestParentRunReports(
-                    generation: generation, process: process
-                )
-                await self.reviewCarriedChildHold(
-                    endedRound: round,
                     generation: generation, process: process
                 )
             }
@@ -1332,50 +1313,33 @@ extension NodeNetworkRuntime {
         return carried
     }
 
-    /// Seam (and the hierarchy's own review): after a scan round ends or
-    /// dies, when the carried block's attempt completes or leaves the
-    /// fetcher, when its parent evidence settles, and whenever the parent's
-    /// context names it: the block the parent's context names as carried
-    /// is either here, still coming on the parent's word (its evidence
-    /// being recovered, or an attempt seeded with that evidence, whose
-    /// admission will decide), asked for now, or, once a round sent for it
-    /// has ended without it, let go: the offer hold is released and the
-    /// child builds on the tip it has, its own choice from here. Only
-    /// authenticated parent state counts; nothing an overlay peer announces
-    /// or relays can keep the hold. No timer, no count: the scan's own
-    /// round trip paces it.
+    /// Seam (and the hierarchy's own review): when the parent's context
+    /// names a carried block, when that block's parent evidence settles,
+    /// when its admission completes, and when its last parent-backed
+    /// attempt leaves the fetcher. The parent names a carried block only
+    /// with its evidence, so the claim and the pointer to its proof arrive
+    /// as one unit: the block is either here, still coming on the parent's
+    /// word (its evidence being recovered, or an attempt seeded with the
+    /// parent's evidence, whose admission will decide), or let go: the
+    /// offer hold is released and the child builds on the tip it has, its
+    /// own choice from here. Only authenticated parent state counts;
+    /// nothing an overlay peer announces or relays can keep the hold. No
+    /// timer, no count: the evidence's own recovery paces it.
     func reviewCarriedChildHold(
-        endedRound: UInt64?,
         generation: UInt64,
         process: ChainProcess
     ) async {
         guard isCurrentRuntime(generation: generation, process: process),
               let carried = carriedHoldBlockCID() else { return }
-        // Rounds are numbered in order and each scans from the durable
-        // cursor, so the round sent for this block or any later one ending
-        // (or dying) ends its wait; an earlier one says nothing about it.
-        if let endedRound, hierarchyState.requestedCarriedChildCID == carried,
-           let requested = hierarchyState.requestedCarriedRound,
-           endedRound >= requested {
-            hierarchyState.carriedRoundEndedCID = carried
-        }
         let accepted = await process.hasAcceptedBlock(carried)
         // Everything below is sampled after the suspension.
         guard !accepted,
               isCurrentRuntime(generation: generation, process: process),
-              carriedHoldBlockCID() == carried else { return }
-        // No round sent for it yet: ask, whatever else is pending.
-        guard hierarchyState.requestedCarriedChildCID == carried else {
-            await requestEvidenceIndex(
-                forCarried: carried, generation: generation, process: process
-            )
-            return
-        }
-        guard hierarchyState.carriedRoundEndedCID == carried,
+              carriedHoldBlockCID() == carried,
               !fetcherHasParentAttempt(carried),
               hierarchyState.parentEvidenceInFlight[carried] == nil else { return }
         hierarchyState.releasedCarriedChildCID = carried
-        SyncTrace.log("carried \(carried.prefix(12)) not served by a scan round: offer hold released")
+        SyncTrace.log("carried \(carried.prefix(12)) not landed by the parent's evidence: offer hold released")
         scheduleCandidateOffer(generation: generation, process: process)
     }
 
@@ -1818,7 +1782,6 @@ extension NodeNetworkRuntime {
             hierarchyState.pendingEvidenceIndexes.removeValue(forKey: response.requestID)
             scheduleParentEvidencePage(
                 response,
-                round: pending.round,
                 from: peer,
                 generation: generation,
                 process: process
@@ -1843,6 +1806,7 @@ extension NodeNetworkRuntime {
                 SyncTrace.log("parent tip dropped: stale sequence \(context.sequence) <= \(current.sequence)")
                 return
             }
+            let previous = hierarchyState.receivedParentTip
             hierarchyState.receivedParentTip = ReceivedParentTipContext(
                 sequence: context.sequence,
                 peer: peer,
@@ -1853,16 +1817,36 @@ extension NodeNetworkRuntime {
                 carriedChildCID: context.carriedChildCID
             )
             SyncTrace.log("parent tip \(context.sequence): h=\(tip.height) tip=\(context.tipCID.prefix(12)) rewards=\(context.rewards.count) carried=\(context.carriedChildCID?.prefix(12) ?? "none")")
-            // A carried block this chain has not admitted is fetched now,
-            // not on the next hello or admission: the hint naming it may
-            // have been refused, and no admission follows a held offer.
-            // The review asks for a round when none was sent for it, and
-            // lets go when one already ended without it and nothing the
-            // parent seeded is pending: a block named again after the
-            // parent's tip moved away and back gets looked at once more.
-            if context.carriedChildCID != nil {
+            // The carried block comes with the parent's evidence for it:
+            // recovered now, as a pushed hint is, unless this session named
+            // it already, the parent's evidence for it is already on its way
+            // here, or the block is here. The summary is only a pointer: the
+            // evidence is verified from content, so a forged one fails, and
+            // the review that follows its settling releases the hold.
+            if let evidence = context.carriedEvidence,
+               previous?.peer.sessionID != peer.sessionID
+                || previous?.carriedChildCID != evidence.childCID,
+               hierarchyState.parentEvidenceInFlight[evidence.childCID] == nil,
+               !fetcherHasParentAttempt(evidence.childCID),
+               !(await process.hasAcceptedBlock(evidence.childCID)),
+               isCurrentRuntime(generation: generation, process: process),
+               hierarchyState.receivedParentTip?.sequence == context.sequence,
+               hierarchyState.receivedParentTip?.peer.sessionID == peer.sessionID {
+                if case .rejected = appendParentEvidence(
+                    [evidence.summary],
+                    sourceID: evidence.sourceID,
+                    advanceScan: false,
+                    from: peer,
+                    generation: generation,
+                    process: process
+                ) {
+                    await hierarchy.recycleSession(ifCurrent: peer)
+                    return
+                }
+            }
+            if context.carriedEvidence != nil {
                 await reviewCarriedChildHold(
-                    endedRound: nil, generation: generation, process: process
+                    generation: generation, process: process
                 )
             }
             scheduleCandidateOffer(generation: generation, process: process)
@@ -2799,20 +2783,14 @@ extension NodeNetworkRuntime {
     }
 
     /// Returns whether a request was sent: none is while a round is in
-    /// flight, before a parent session exists, or on a root chain.
-    ///
-    /// `round` names the scan round a continuation, retry or timeout page
-    /// belongs to; without it a new round starts. `forCarried` records the
-    /// new round as the one sent for that carried block, before anything
-    /// suspends. A page of a round that cannot be sent is that round's
-    /// death: the carried hold is reviewed as if it had ended.
+    /// flight or starting, before a parent session exists, or on a root
+    /// chain. A page refused because a round is in flight is superseded by
+    /// it: that round scans from the durable cursor.
     @discardableResult
     func requestEvidenceIndex(
         sourceID: String? = nil,
         cursor: UInt64? = nil,
         through: UInt64? = nil,
-        round: UInt64? = nil,
-        forCarried carried: String? = nil,
         generation: UInt64? = nil,
         process expectedProcess: ChainProcess? = nil
     ) async -> Bool {
@@ -2823,38 +2801,11 @@ extension NodeNetworkRuntime {
                 process: expectedProcess
             ), !configuration.address.isNexus
         else { return false }
-        func died(_ round: UInt64?) -> Bool {
-            if let round {
-                Task { [weak self] in
-                    await self?.reviewCarriedChildHold(
-                        endedRound: round,
-                        generation: fence.generation,
-                        process: fence.process
-                    )
-                }
-            }
-            return false
-        }
-        // Another round in flight (or starting) supersedes this page: it
-        // scans from the durable cursor, and its own end reviews the hold
-        // (a later round's end covers this one), so this is no death.
         guard hierarchyState.pendingEvidenceIndexes.isEmpty,
-              !hierarchyState.evidenceRoundStarting
+              !hierarchyState.evidenceRoundStarting,
+              let parent = configuredParentPeer()
         else { return false }
-        guard let parent = configuredParentPeer() else { return died(round) }
         hierarchyState.evidenceRoundStarting = true
-        let pageRound: UInt64
-        if let round {
-            pageRound = round
-        } else {
-            hierarchyState.lastEvidenceRound &+= 1
-            pageRound = hierarchyState.lastEvidenceRound
-            if let carried {
-                hierarchyState.requestedCarriedChildCID = carried
-                hierarchyState.requestedCarriedRound = pageRound
-                hierarchyState.carriedRoundEndedCID = nil
-            }
-        }
         let durableCursor: ParentEvidenceScanCursor
         if let sourceID, let cursor {
             durableCursor = ParentEvidenceScanCursor(
@@ -2872,7 +2823,7 @@ extension NodeNetworkRuntime {
             ) else { return false }
             guard let persisted else {
                 hierarchyState.evidenceRoundStarting = false
-                return died(pageRound)
+                return false
             }
             durableCursor = persisted
         }
@@ -2885,12 +2836,11 @@ extension NodeNetworkRuntime {
         )
         guard let payload = try? request.encoded() else {
             hierarchyState.evidenceRoundStarting = false
-            return died(pageRound)
+            return false
         }
         hierarchyState.pendingEvidenceIndexes[request.requestID] = .init(
             peer: parent,
-            request: request,
-            round: pageRound
+            request: request
         )
         hierarchyState.evidenceRoundStarting = false
         let result = await hierarchy.sendMessage(
@@ -2917,7 +2867,7 @@ extension NodeNetworkRuntime {
             return true
         } else {
             hierarchyState.pendingEvidenceIndexes.removeValue(forKey: request.requestID)
-            return died(pageRound)
+            return false
         }
     }
 
@@ -2952,7 +2902,6 @@ extension NodeNetworkRuntime {
             sourceID: request.request.sourceID,
             cursor: request.request.cursor,
             through: request.request.through,
-            round: request.round,
             generation: generation,
             process: process
         )
