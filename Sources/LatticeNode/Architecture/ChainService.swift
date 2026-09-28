@@ -1082,11 +1082,15 @@ public actor ChainService {
         // state change that touched none of them (a transaction the pool
         // would not select, a walk step that moved nothing here) rebuilds
         // nothing. Every input a candidate is a function of is in this key.
+        // Policies may read the block timestamp, which follows the carrier's,
+        // so with policies the carrier timestamp selects transactions too.
+        let spec = try await chainSpec(for: try await process.validatedTipBlock())
         let inputs = await templateDigestLocked()
             + "|" + parentCarrier.prevState.rawCID
             + "|" + rewards.map { $0.transaction.body.rawCID }.joined(separator: ",")
             + "|" + minimumWork.map { "\($0.chainPath.joined(separator: "/"))=\($0.work)" }
                 .joined(separator: ",")
+            + (spec.wasmPolicies.isEmpty ? "" : "|\(parentCarrier.timestamp)")
         if inputs == lastCandidateInputs, let candidate = lastCandidate {
             SyncTrace.log("child candidate unchanged h=\(candidate.block.height)")
             return candidate
