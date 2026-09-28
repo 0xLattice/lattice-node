@@ -1107,6 +1107,38 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertTrue(inbox.isEmpty, "both decided: consumed")
     }
 
+    /// Evidence for a carried block, as the parent's index serves it.
+    private struct CarriedEvidence {
+        let header: BlockHeader
+        let package: AuthenticatedChildPackage
+        let attachment: ChildEvidenceVolume
+    }
+
+    private func carriedEvidence(
+        _ block: Block,
+        carrierTimestamp: Int64,
+        source: InMemoryContentStore
+    ) async throws -> CarriedEvidence {
+        let header = try BlockHeader(node: block)
+        let carrier = try await BlockBuilder.buildGenesis(
+            spec: NexusGenesis.spec, children: ["Payments": block],
+            timestamp: carrierTimestamp, target: UInt256.max, fetcher: source
+        )
+        let proof = try await ChildBlockProof.generate(
+            rootHeader: try BlockHeader(node: carrier), childDirectory: "Payments",
+            fetcher: source
+        )
+        let package = AuthenticatedChildPackage(package: ChildValidationPackage(proof: proof))
+        return CarriedEvidence(
+            header: header,
+            package: package,
+            attachment: try ChildEvidenceVolume(
+                envelopeBytes: try ChildValidationPackageEnvelope(package.package).encode(),
+                childCID: header.rawCID
+            )
+        )
+    }
+
     /// Two steps out of order on the carried path: B3's evidence arrives
     /// before B1's and B2's. Its parent is not held, so admission parks it on
     /// B2 without resolving anything over the network, and the parked
@@ -1185,6 +1217,66 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertEqual(tips.weighed, 3)
         inbox = try await process.store.parentEvidenceInbox()
         XCTAssertTrue(inbox.isEmpty, "all three decided: consumed")
+    }
+
+    /// A carried block stamped far in the future is not yet valid, a rule no
+    /// parent fact meets: the outcome names its time, and the entry is an
+    /// orphan until then. The inbox keeps an undecided entry only for a
+    /// parent fact; anything else undecided is an orphan.
+    func testOnlyAParentFactKeepsAnUndecidedEntryInTheInbox() async throws {
+        let fixture = try await childBootstrapFixture()
+        let parentSource = fixture.source
+        let process = try await ChainProcess.open(configuration: fixture.configuration)
+        let bootstrapped = try await process.activateSeededChildGenesis(
+            seed: fixture.seed, confirmParentRecordedGenesis: { _ in true }
+        )
+        XCTAssertTrue(bootstrapped)
+        let genesis = try XCTUnwrap(fixture.childHeader.node)
+        let century: Int64 = 100 * 365 * 24 * 60 * 60 * 1_000
+        let future = Int64(Date().timeIntervalSince1970 * 1_000) + century
+        let block = try await BlockBuilder.buildBlock(
+            previous: genesis, timestamp: future, nonce: 1, fetcher: parentSource
+        )
+        let evidence = try await carriedEvidence(block, carrierTimestamp: 3, source: parentSource)
+        try await evidence.header.storeBlock(fetcher: parentSource, storer: parentSource)
+        let outcome = try await process.importBlock(
+            evidence.header, authenticatedChildPackage: evidence.package,
+            remoteSource: parentSource, mode: .header
+        )
+        XCTAssertEqual(outcome.decision, .temporarilyInvalid)
+        XCTAssertEqual(outcome.notBefore, future, "the outcome names the block's time")
+        let now = ParentEvidenceOrphans.clock()
+        func retry(
+            _ resolution: BlockFetcher.Resolution,
+            _ decision: NodeImportDecision?,
+            _ notBefore: Int64? = nil
+        ) -> ParentEvidenceOrphans.Retry? {
+            ParentEvidenceOrphans.retry(
+                resolution: resolution, decision: decision,
+                notBefore: notBefore, now: now
+            )
+        }
+        XCTAssertEqual(
+            retry(.wait(.later), outcome.decision, outcome.notBefore), .notBefore(future)
+        )
+        XCTAssertEqual(
+            retry(.wait(.later), .temporarilyInvalid, now - 1), .nextTrigger,
+            "a refusal whose time is not ahead waits for the next trigger"
+        )
+        XCTAssertEqual(retry(.predecessor("p"), .unavailable(nil)), .predecessor("p"))
+        XCTAssertEqual(retry(.wait(.evidence), .unavailable(nil)), .nextTrigger)
+        XCTAssertEqual(retry(.wait(.content), nil), .nextTrigger)
+        XCTAssertNil(retry(.terminal, .invalid), "a decision consumed the entry")
+        XCTAssertNil(retry(.terminal, .carrier), "a decision consumed the entry")
+        for fact: CrossChainEvidenceRequirement in [
+            .parentStateContinuity(parentPath: ["Nexus"], fromStateCID: "a", toStateCID: "b"),
+            .parentGenesis(
+                parentPath: ["Nexus"], directory: "Payments",
+                childGenesisCID: "c", parentStateCID: "d"
+            ),
+        ] {
+            XCTAssertNil(retry(.wait(.later), .unavailable(fact)), "\(fact) stays in the inbox")
+        }
     }
 
     func testSuccessorAttachmentWaitsForChildGenesis() async throws {

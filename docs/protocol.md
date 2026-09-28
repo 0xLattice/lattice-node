@@ -154,7 +154,20 @@ nothing, and a decision consumes the entry whether or not it leaves relay
 evidence behind. So no stop or crash between a deferral and its retry can
 lose a parent-carried block, no refusal can hold an inbox slot for good,
 and a child never stays on a branch its parent chain has left for want of
-one. It asks its parent for a carrier's run when it imports a block that
+one. The inbox keeps an undecided entry only while a parent fact (its
+genesis or continuity answer) can decide it. Any other undecided import
+leaves the inbox for a bounded in-memory orphan pool that keeps its place
+in the parent's index (at the bound a random orphan gives way). A
+node-local policy decline is a decision and consumes the entry. Each
+accepted block (by import or otherwise) and each parent hello releases the
+orphans that can now decide (predecessor accepted, time reached, or any
+other) and fetches exactly those again from the parent. The parent relays
+evidence without validating it, so a parent miner could otherwise carry
+blocks that never decide until the inbox was full. An orphan evicted from
+the pool or lost with a restart is gone, as in Bitcoin's orphan pool, and
+returns only through ordinary acquisition (the overlay's portable-attachment
+locate and the predecessor walk).
+It asks its parent for a carrier's run when it imports a block that
 carrier carried and after each evidence round, the fallback for a push it
 missed; a credit it already holds never depends on the parent being
 reachable again.
@@ -349,7 +362,9 @@ physical root CID, and complete attachment Volume CID. An index walk fixes its
 new evidence cannot reshuffle the walk. A changed source ID restarts at zero.
 The child fetches the Volume directly from the exact parent session, validates
 it, and durably retains it in a pre-import inbox before advancing its scan
-cursor. Live summaries use the same inbox without advancing that cursor.
+cursor; it fetches nothing while the inbox is full, and what a full inbox
+stopped runs again when room frees. Live summaries use the same inbox
+without advancing that cursor.
 Import transfers ownership to ordinary chain recovery before releasing the
 inbox root. Multiple roots for one child are separate summaries. No proof-root
 pagination or evidence request/response layer exists beneath this inventory.

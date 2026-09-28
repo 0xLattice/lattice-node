@@ -39,17 +39,22 @@ public struct NodeImportOutcome: Sendable {
     public let parentCarrierLink: ParentCarrierLink?
     public let sameChainPredecessor: SameChainPredecessorRequirement?
     let canonicalCommitReceipt: CanonicalCommitReceipt?
+    /// For a block refused as not yet valid, the block's timestamp in
+    /// milliseconds: the time a retry could decide it.
+    let notBefore: Int64?
 
     init(
         decision: NodeImportDecision,
         parentCarrierLink: ParentCarrierLink?,
         sameChainPredecessor: SameChainPredecessorRequirement?,
-        canonicalCommitReceipt: CanonicalCommitReceipt? = nil
+        canonicalCommitReceipt: CanonicalCommitReceipt? = nil,
+        notBefore: Int64? = nil
     ) {
         self.decision = decision
         self.parentCarrierLink = parentCarrierLink
         self.sameChainPredecessor = sameChainPredecessor
         self.canonicalCommitReceipt = canonicalCommitReceipt
+        self.notBefore = notBefore
     }
 }
 
@@ -430,9 +435,9 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         // genesis attachment. That is an ordering dependency, not malformed
         // genesis. Keep the authenticated candidate parked behind its direct
         // predecessor so ordinary same-chain wake-up admits it after bootstrap.
-        // Nothing is persisted for it: its evidence stays in the parent-evidence
-        // inbox, the one durable record of a block still to be admitted, until
-        // the admission that decides it.
+        // Nothing is persisted for it. Its evidence leaves the inbox as an
+        // in-memory orphan (it cannot decide until the predecessor arrives),
+        // fetched again from the parent once the predecessor is accepted.
         let bootstrapCandidate = try await Self.resolvedCandidate(
             blockHeader,
             fetcher: attemptFetcher
@@ -593,12 +598,15 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// invalid, or this node could not verify it. Decided is exactly the set
     /// the candidate fetcher never retries, by the same predicate: what it
     /// would retry (evidence not yet held, a rule not yet met) is a deferral.
-    /// A deferral persists nothing; the block's evidence stays in the
-    /// parent-evidence inbox and is replayed on restart, so no stop or crash
-    /// between a deferral and its retry can lose a parent-carried block. A
-    /// decision consumes the entry, relay or no relay: an entry no retry is
-    /// coming for would be re-admitted at every start and, at capacity,
-    /// refuse every later parent-carried block.
+    /// A deferral persists nothing. The block's evidence stays in the
+    /// parent-evidence inbox, replayed on restart, only while a parent fact
+    /// (its genesis or continuity answer) can decide it, so no stop or crash
+    /// between such a deferral and its retry loses it. Any other deferral
+    /// leaves the inbox as an in-memory orphan (`NodeStore.orphanParentEvidence`),
+    /// Bitcoin's orphan pool: lost with an eviction or a restart, it returns
+    /// through ordinary acquisition. A decision consumes the entry, relay or
+    /// no relay: an entry no retry is coming for would be re-admitted at
+    /// every start and, at capacity, refuse every later parent-carried block.
     static func isDecided(_ result: BlockImportResult) -> Bool {
         let decision = NodeImportDecision(result)
         return !(decision.shouldRetryWhenEvidenceChanges || decision.shouldRetryLater)
@@ -947,11 +955,18 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         releaseOperation()
         operationHeld = false
 
+        var notBefore: Int64?
+        if decision == .temporarilyInvalid {
+            notBefore = try? await Self.resolvedCandidate(
+                blockHeader, fetcher: attemptFetcher
+            ).timestamp
+        }
         return NodeImportOutcome(
             decision: decision,
             parentCarrierLink: result.parentCarrierLink,
             sameChainPredecessor: result.sameChainPredecessor,
-            canonicalCommitReceipt: receipt
+            canonicalCommitReceipt: receipt,
+            notBefore: notBefore
         )
     }
 
@@ -1809,6 +1824,26 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             package: package,
             advanceScan: advanceScan
         )
+    }
+
+    /// The import of `childCID` under `rootCID` could not decide on a fact
+    /// the parent will send: its evidence leaves the inbox as an orphan
+    /// (`NodeStore.orphanParentEvidence`). Returns what left.
+    func orphanParentEvidence(
+        childCID: String,
+        rootCID: String
+    ) async throws -> [(sourceID: String, summary: IssuedChildEvidenceSummary)] {
+        try await acquireMutationOperation()
+        defer { releaseOperation() }
+        return try await store.orphanParentEvidence(childCID: childCID, rootCID: rootCID)
+    }
+
+    /// A node-local refusal (a resource-policy decline) decides the block
+    /// for this node: its parent evidence is consumed.
+    func consumeDeclinedParentEvidence(childCID: String, rootCID: String) async throws {
+        try await acquireMutationOperation()
+        defer { releaseOperation() }
+        try await store.consumeParentEvidence(childCID: childCID, rootCID: rootCID)
     }
 
     public func status() async -> ChainProcessStatus {

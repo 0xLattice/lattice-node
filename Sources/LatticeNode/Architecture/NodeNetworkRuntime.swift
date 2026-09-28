@@ -677,6 +677,20 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// Owner: Hierarchy.scheduleParentTipPush / Hierarchy.runParentTipPushes /
         ///     Lifecycle.clearRuntimeState.
         var parentTipPushTask = TaskSlot()
+        /// Parent evidence whose import could not decide on a fact the
+        /// parent will send: in memory only, bounded, random eviction.
+        /// Owner: Hierarchy.parentEvidenceOrphaned /
+        ///     Hierarchy.parentEvidenceRetryTrigger / Hierarchy.orphansWaitForRoom /
+        ///     Lifecycle.clearRuntimeState.
+        var parentEvidenceOrphans = ParentEvidenceOrphans(
+            capacity: NodeResourcePolicy.default.maximumOrphanedParentEvidence
+        )
+        /// A refetch of released orphans stopped at a full inbox; the
+        /// capacity callback runs the trigger again.
+        /// Owner: Hierarchy.orphansWaitForRoom /
+        ///     Hierarchy.parentEvidenceCapacityBecameAvailable /
+        ///     Lifecycle.clearRuntimeState.
+        var orphansWaitForRoom = false
         /// Owner: Hierarchy.scheduleParentTipPush / Hierarchy.runParentTipPushes /
         ///     Lifecycle.clearRuntimeState.
         var parentTipPushDirty = false
@@ -1070,6 +1084,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
             nexusGenesisCID: configuration.nexusGenesisCID,
             chainPath: configuration.chainPath,
             publicReadURL: configuration.publicReadURL
+        )
+        hierarchyState.parentEvidenceOrphans = ParentEvidenceOrphans(
+            capacity: configuration.resourcePolicy.maximumOrphanedParentEvidence
         )
     }
 
