@@ -47,10 +47,12 @@ enum SourceTree {
 /// text's length in characters and every newline in place, so a line or a
 /// character offset in a view is the same line or offset in the source.
 ///
-/// Not modelled: regex literals (`/…/`, `#/…/#`), a quote carrying a
-/// combining mark, and line separators other than newlines inside a
-/// single-line string. `SafetyNetSourceScanTests` fails if the package
-/// sources ever contain one, so teach the lexer before that lands.
+/// Not modelled: regex literals (`/…/`, `#/…/#`); a character the lexer
+/// matches on (`"`, `#`, `/`, `*`, `\`, `(`, `)`) fused with another scalar
+/// into one grapheme; and newline-like separators other than `\n` and `\r`
+/// (vertical tab, form feed, U+0085, U+2028, U+2029). The lexer walks
+/// `Character`s, so each of these can hide code. `SafetyNetSourceScanTests`
+/// fails if the package sources ever contain one: teach the lexer first.
 enum SwiftSource {
 
     /// `text` with every comment replaced by spaces. String literals are

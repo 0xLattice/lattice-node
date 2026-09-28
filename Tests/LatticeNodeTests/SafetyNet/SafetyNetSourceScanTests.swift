@@ -166,44 +166,92 @@ final class SafetyNetSourceScanTests: XCTestCase {
         }
     }
 
-    /// Inputs the lexer does not model (see `SwiftSource`) are absent from
-    /// what the gates read, so none of them can hide code from a gate.
-    func testSourcesHoldNothingTheLexerDoesNotModel() throws {
-        let files = try SourceTree.swiftFiles(under: "Sources")
-        // A regex literal starts where an expression does: after `(`, `[`,
-        // `,`, `=`, `:` or `return`, or at the start of a line.
-        XCTAssertEqual(
-            try SwiftSource.matchingLines(
-                #"(?:^|[(\[,=:]|\breturn)\s*#*/[^/*\s]"#,
-                in: files,
-                view: SwiftSource.code
-            ),
-            [],
-            "regex literal: teach SourceScan to lex it before a gate reads it"
-        )
-        for file in files {
-            XCTAssertFalse(
-                file.text.unicodeScalars.contains { $0 == "\u{2028}" || $0 == "\u{2029}" || $0 == "\u{85}" },
-                "\(file.path): line separator other than a newline"
+    /// Where a regex literal can start: a `/` with whitespace, an opener or
+    /// an operator character on its left and a non-space on its right (the
+    /// position Swift reads a prefix `/` in), or `#/` anywhere. Division has
+    /// an operand on its left. An operator reference such as `(/)` matches,
+    /// which fails loudly.
+    private static let regexLiteralStart = #"(?:^|[\s(\[{,:;=!&|?])#*/[^\s/*=)]|#/"#
+
+    /// Characters the lexer matches on. Fused into one grapheme with another
+    /// scalar, one of them is invisible to a lexer that walks `Character`s.
+    private static let lexedScalars: Set<Unicode.Scalar> = ["\"", "#", "/", "*", "\\", "(", ")"]
+
+    /// Newline-like scalars other than `\n` and `\r`: `Character.isNewline`
+    /// accepts them, so one inside a string would end it early.
+    private static let otherSeparators: Set<Unicode.Scalar> = [
+        "\u{0B}", "\u{0C}", "\u{85}", "\u{2028}", "\u{2029}",
+    ]
+
+    func testRegexLiteralPatternFindsEveryStartAndNoDivision() throws {
+        let starts = [
+            ".contains(/x/)", "a ?? /x/", "s.map { /x/ }", "case /x/:", "if /x/ ~= s {",
+            "try /x/.wholeMatch(in: s)", "await /x/", "!/x/", "a&&/x/", "return /x/",
+            "[/a/, /b/]", "c ? /a/ : /b/", "let r = #/a b/#", "/x/.firstMatch(in: s)",
+        ]
+        for start in starts {
+            XCTAssertEqual(
+                try SwiftSource.matchingLines(
+                    Self.regexLiteralStart,
+                    in: [SourceFile(path: "s", text: start)],
+                    view: SwiftSource.code
+                ).count,
+                1,
+                start
             )
-            XCTAssertFalse(
-                file.text.contains { $0.unicodeScalars.first == "\"" && $0.unicodeScalars.count > 1 },
-                "\(file.path): quote carrying a combining mark"
+        }
+        let division = ["let q = b/c", "let q = b / c", "x /= 2", "let t = (a +\n    b) / 2", "f(a /* c */, b)"]
+        for text in division {
+            XCTAssertEqual(
+                try SwiftSource.matchingLines(
+                    Self.regexLiteralStart,
+                    in: [SourceFile(path: "d", text: text)],
+                    view: SwiftSource.code
+                ),
+                [],
+                text
             )
         }
     }
 
+    /// What the lexer does not model (see `SwiftSource`) is absent from what
+    /// the gates read, so none of it can hide code from a gate.
+    func testSourcesHoldNothingTheLexerDoesNotModel() throws {
+        let files = try SourceTree.swiftFiles(under: "Sources")
+        XCTAssertEqual(
+            try SwiftSource.matchingLines(Self.regexLiteralStart, in: files, view: SwiftSource.code),
+            [],
+            "regex literal: teach SourceScan to lex it before a gate reads it"
+        )
+        var unmodelled: [String] = []
+        for file in files {
+            if file.text.unicodeScalars.contains(where: Self.otherSeparators.contains) {
+                unmodelled.append("\(file.path): a newline-like separator other than \\n or \\r")
+            }
+            if file.text.contains(where: {
+                $0.unicodeScalars.count > 1 && $0.unicodeScalars.contains(where: Self.lexedScalars.contains)
+            }) {
+                unmodelled.append("\(file.path): a lexed character fused into a grapheme")
+            }
+        }
+        XCTAssertEqual(unmodelled, [], "teach SourceScan to lex these before a gate reads them")
+    }
+
     /// A view that blanks too much passes every law below, so real code is
-    /// checked to survive: in the package sources, a line that starts with
-    /// `import` or `func` is code, and the code view keeps it up to its first
-    /// string literal or comment.
+    /// checked to survive: in the package sources, a line that declares a
+    /// function (after any attributes and modifiers) or an import is code,
+    /// and the code view keeps it up to its first string literal or comment.
     func testCodeViewKeepsDeclarationsOfThePackageSources() throws {
+        let declaration = try NSRegularExpression(
+            pattern: #"^(?:@?\w+(?:\([^)]*\))?\s+)*(?:func|import)\s"#
+        )
         var checked = 0
         for file in try SourceTree.swiftFiles(under: "Sources") {
             let viewed = SwiftSource.code(file.text).components(separatedBy: "\n")
             for (index, line) in file.text.components(separatedBy: "\n").enumerated() {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
-                guard trimmed.hasPrefix("import ") || trimmed.hasPrefix("func ") else { continue }
+                let range = NSRange(trimmed.startIndex..., in: trimmed)
+                guard declaration.firstMatch(in: trimmed, range: range) != nil else { continue }
                 let code = trimmed.prefix { $0 != "\"" }.components(separatedBy: " //")[0]
                 XCTAssertTrue(
                     viewed[index].contains(code),
@@ -212,7 +260,7 @@ final class SafetyNetSourceScanTests: XCTestCase {
                 checked += 1
             }
         }
-        XCTAssertGreaterThan(checked, 100, "checked \(checked) declaration lines")
+        XCTAssertGreaterThan(checked, 1_000, "checked \(checked) declaration lines")
     }
 
     /// Laws over every Swift file the gates could read: both views only
