@@ -1096,6 +1096,58 @@ extension NodeStore {
         )
     }
 
+    /// Where the evidence for a carried child block stands, read in one
+    /// synchronous step of this actor, so it cannot tear against the
+    /// promotion that issues it and completes its route (which writes the
+    /// evidence before it removes the route).
+    enum CarriedChildEvidenceState: Sendable {
+        /// Issued under some root: the first one.
+        case issued(sourceID: String, summary: IssuedChildEvidenceSummary)
+        /// Not issued; the route (carrier, directory) is owed.
+        case owed
+        /// Not issued; the proof is prepared or published, no route owed.
+        case ready
+        /// Not issued; nothing recorded for the route.
+        case unrecorded
+    }
+
+    func carriedChildEvidenceState(
+        childCID: String,
+        carrierCID: String,
+        directory: String
+    ) throws -> CarriedChildEvidenceState {
+        if let issued = try issuedChildEvidenceSummary(
+            childCID: childCID, directory: directory
+        ) {
+            return .issued(sourceID: issued.sourceID, summary: issued.summary)
+        }
+        if try database.row(
+            from: PendingChildProofRouteRow.table,
+            "SELECT 1 AS present FROM pending_child_proof_routes WHERE carrier_cid = ?1 AND directory = ?2 LIMIT 1",
+            params: [.text(carrierCID), .text(directory)]
+        ) != nil {
+            return .owed
+        }
+        if try database.row(
+            from: PreparedChildProofRow.table,
+            "SELECT 1 AS present FROM prepared_child_proofs WHERE carrier_cid = ?1 AND directory = ?2 LIMIT 1",
+            params: [.text(carrierCID), .text(directory)]
+        ) != nil {
+            return .ready
+        }
+        if try database.row(
+            from: ProofEdgeJoinRow.table,
+            "SELECT 1 AS present \(Self.proofEdgeJoinSQL) WHERE p.scope = ?1 AND e.parent_carrier_cid = ?2 AND e.directory = ?3 LIMIT 1",
+            params: [
+                .text(IssuedChildProofScope.outgoingDirectChild.rawValue),
+                .text(carrierCID), .text(directory),
+            ]
+        ) != nil {
+            return .ready
+        }
+        return .unrecorded
+    }
+
     func childRootAttachmentSummaries(
         scope: IssuedChildProofScope,
         directory: String,

@@ -247,8 +247,8 @@ then goes out naming the block if the evidence was issued, and on the new
 tip without naming it otherwise: a parent below the root whose carrier has
 no root yet cannot issue the evidence, and its route stays owed, so it waits
 that one iteration and then sends the context unnamed. When the proof is
-already prepared or published with no route owed, nothing this node does
-would issue the evidence, and the context goes out without naming the block
+already prepared or published with no route owed, nothing this node can do
+now issues the evidence, and the context goes out without naming the block
 at once. Either way a parent that cannot issue the evidence never stalls the
 child's offers.
 A reorg re-reads what the new tip carries at once. The context topic is
@@ -272,7 +272,10 @@ only a pointer; a forged one fails verification), and waits while that
 evidence waits for the slot or for room in its evidence inbox, is being
 recovered, or seeded an attempt for the block that is still pending. A full
 inbox holds the named evidence without fetching it until an import makes
-room. A decision against that block, or the parent's evidence for it
+room, and the offer stays held for as long as the inbox stays full. Only the
+parent's evidence enters that inbox, so this is a stall the parent can
+already cause by withholding the carried block; it adds no power to anyone
+else. A decision against that block, or the parent's evidence for it
 coming to nothing with no such attempt left, releases the hold, so no offer
 waits on a block that will never land. Only the authenticated parent's
 evidence can keep the hold; nothing an overlay peer announces or relays can.

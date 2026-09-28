@@ -1122,7 +1122,7 @@ extension NodeNetworkRuntime {
         }
         if let slotWait { return slotWait }
         sessionLeases.activeEvidenceVolumes.insert(lease)
-        defer { sessionLeases.activeEvidenceVolumes.remove(lease) }
+        defer { releaseEvidenceVolume(lease) }
         if let evidence = try? await process.store.issuedChildEvidence(
             scope: .incomingCarrier,
             edgeCID: summary.edgeCID,

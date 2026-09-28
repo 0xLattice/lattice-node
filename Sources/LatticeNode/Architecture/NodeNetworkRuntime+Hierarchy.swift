@@ -234,36 +234,59 @@ extension NodeNetworkRuntime {
         var naming = CarriedNaming()
         for directory in carried.keys.sorted() {
             guard let block = carried[directory] else { continue }
-            if let evidence = await issuedCarriedEvidence(
-                block.childCID, directory: directory, process: process
-            ) {
-                naming.named[directory] = evidence
-                continue
-            }
-            if let wait = previous[directory], wait.block == block {
-                naming.waits[directory] = wait
-                if let until = wait.untilIteration,
-                   hierarchyState.childProofRecoveryIterations < until {
+            if let wait = previous[directory], wait.block == block,
+               let until = wait.untilIteration,
+               hierarchyState.childProofRecoveryIterations < until {
+                // Still waiting: only issuance ends it early.
+                if let evidence = await issuedCarriedEvidence(
+                    block.childCID, directory: directory, process: process
+                ) {
+                    naming.named[directory] = evidence
+                } else {
+                    naming.waits[directory] = wait
                     naming.heldBack.insert(directory)
                 }
                 continue
             }
-            let owed = await childProofRouteOwed(block, directory: directory, process: process)
+            #if DEBUG
+            await carriedNamingWillReadForTesting?(block.childCID)
+            #endif
+            // One read, one snapshot: issued, owed, ready or unrecorded. The
+            // promotion that issues the evidence completes its route after
+            // it, so the two can never be seen torn apart.
+            let state = try? await process.store.carriedChildEvidenceState(
+                childCID: block.childCID,
+                carrierCID: block.carrierCID,
+                directory: directory
+            )
             guard isCurrentRuntime(generation: generation, process: process) else {
                 return naming
             }
-            if owed == false {
+            switch state {
+            case .issued(let sourceID, let summary)?:
+                naming.named[directory] = CarriedChildEvidence(
+                    sourceID: sourceID, summary: summary
+                )
+                continue
+            case .ready?:
                 naming.waits[directory] = CarriedEvidenceWait(
                     block: block, untilIteration: nil
                 )
                 continue
+            case .unrecorded?, .owed?, nil:
+                break
+            }
+            if let wait = previous[directory], wait.block == block {
+                // Its iteration has run: the wait is over, the block unnamed.
+                naming.waits[directory] = wait
+                continue
+            }
+            if case .unrecorded? = state {
+                hierarchyState.carriedRoutesToRecord[directory] = block
             }
             // No suspension from here to the schedule: the iteration the wait
             // ends on is the first to start after it, and it records the
-            // route queued here before it retries owed routes.
-            if owed == nil {
-                hierarchyState.carriedRoutesToRecord[directory] = block
-            }
+            // route queued above before it retries owed routes.
             let iterations = hierarchyState.childProofRecoveryIterations
             naming.waits[directory] = CarriedEvidenceWait(
                 block: block,
@@ -274,34 +297,6 @@ extension NodeNetworkRuntime {
             scheduleChildProofRecovery(generation: generation, process: process)
         }
         return naming
-    }
-
-    /// Whether the route (carrier, directory) is owed a child proof: true
-    /// when it is recorded, false when the proof is prepared or published
-    /// (its evidence waits on a root, not on this node's work), nil when
-    /// neither (the route is to be recorded). Store reads only.
-    private func childProofRouteOwed(
-        _ block: ChainProcess.CarriedChildBlock,
-        directory: String,
-        process: ChainProcess
-    ) async -> Bool? {
-        let route = PendingChildProofRoute(
-            carrierCID: block.carrierCID, directory: directory
-        )
-        if (try? await process.store.pendingChildProofRoutes().contains(route)) == true {
-            return true
-        }
-        let prepared = (try? await process.store.preparedChildProofs(
-            carrierCID: block.carrierCID
-        )) ?? []
-        let published = (try? await process.store.publishedDirectChildProofs(
-            carrierCID: block.carrierCID
-        )) ?? []
-        if (prepared + published).contains(where: { $0.directory == directory }) {
-            // Issued meanwhile is caught by the next read; not owed here.
-            return false
-        }
-        return nil
     }
 
     private func issuedCarriedEvidence(
@@ -819,21 +814,38 @@ extension NodeNetworkRuntime {
             }
             if named != nil, result != .failed { result = .handled }
             if Task.isCancelled { result = .failed }
-            // A full inbox would refuse the named evidence after its fetch:
-            // it waits for room without costing the parent a fetch.
+            // Ordered after the session's earlier appends, the named
+            // evidence may already be here: an earlier append seeded an
+            // attempt for the block, or it was admitted. Then nothing is
+            // fetched again.
+            var alreadyHere = false
             if named != nil, result == .handled,
-               (try? await process.store.parentEvidenceInboxHasCapacity()) == false {
-                result = .backpressured
+               let childCID = summaries.first?.childCID {
+                alreadyHere = await self.fetcherHasParentAttempt(childCID)
+                if !alreadyHere {
+                    alreadyHere = await process.hasAcceptedBlock(childCID)
+                }
             }
-            for summary in summaries where result == .handled {
-                result = await self.recoverParentEvidence(
-                    summary,
-                    sourceID: sourceID,
-                    advanceScan: advanceScan,
-                    from: peer,
-                    generation: generation,
-                    process: process
-                )
+            if alreadyHere {
+                SyncTrace.log("named evidence already here: not fetched")
+            } else {
+                // A full inbox would refuse the evidence after its fetch:
+                // it waits for room (a named block's as pending, a scan
+                // page on its retry) without costing the parent a fetch.
+                if result == .handled,
+                   (try? await process.store.parentEvidenceInboxHasCapacity()) == false {
+                    result = .backpressured
+                }
+                for summary in summaries where result == .handled {
+                    result = await self.recoverParentEvidence(
+                        summary,
+                        sourceID: sourceID,
+                        advanceScan: advanceScan,
+                        from: peer,
+                        generation: generation,
+                        process: process
+                    )
+                }
             }
             await self.finishParentEvidence(
                 session: session,
@@ -1432,27 +1444,26 @@ extension NodeNetworkRuntime {
             attachmentCID: summary.attachmentCID
         )
         if sessionLeases.activeEvidenceVolumes.contains(lease) { return .handled }
-        // nil: a slot is free. The stale and lease checks also pass on the
-        // first step: both were just made above with no suspension between.
-        let slotWait: ParentEvidenceResult? = await Timers.poll(
-            every: planeConfigurations.hierarchy.requestTimeout,
-            onCancel: .handled
-        ) {
+        // Wait for a slot, woken by its release (a timeout re-checks the
+        // session). The stale and lease checks also pass on the first step:
+        // both were just made above with no suspension between.
+        while sessionLeases.activeEvidenceVolumes.count >= Self.maximumEvidenceCandidates {
+            await waitForEvidenceVolumeSlot(
+                timeout: planeConfigurations.hierarchy.requestTimeout,
+                generation: generation
+            )
+            if Task.isCancelled { return .handled }
             guard isCurrentRuntime(
                 generation: generation,
                 process: process
             ), hierarchyState.hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID,
                hierarchyState.hierarchyRecords[peer.key]?.role == .parent else {
-                return .done(.failed)
+                return .failed
             }
-            if sessionLeases.activeEvidenceVolumes.contains(lease) { return .done(.handled) }
-            return sessionLeases.activeEvidenceVolumes.count >= Self.maximumEvidenceCandidates
-                ? .again
-                : .done(nil)
+            if sessionLeases.activeEvidenceVolumes.contains(lease) { return .handled }
         }
-        if let slotWait { return slotWait }
         sessionLeases.activeEvidenceVolumes.insert(lease)
-        defer { sessionLeases.activeEvidenceVolumes.remove(lease) }
+        defer { releaseEvidenceVolume(lease) }
         let source = IvyRootContentSource(
             ivy: hierarchy,
             peer: peer,
@@ -1890,8 +1901,9 @@ extension NodeNetworkRuntime {
             // The carried block comes with the parent's evidence for it:
             // recovered through the evidence lane's reserved slot whenever a
             // context newly names it, whatever else carries the same
-            // evidence (a hint's append can end without trying it; a
-            // concurrent recovery of the same attachment is a no-op). It
+            // evidence (a hint's append can end without trying it). The
+            // named append is ordered after the session's earlier appends
+            // and fetches nothing if one of them already brought it. It
             // waits as pending before the acceptance read, so no review in
             // between finds nothing. The summary is only a pointer: the
             // evidence is verified from content, so a forged one fails, and
@@ -2224,7 +2236,10 @@ extension NodeNetworkRuntime {
             // below then works them like any owed route.
             let routes = hierarchyState.carriedRoutesToRecord
             hierarchyState.carriedRoutesToRecord = [:]
-            for (directory, block) in routes.sorted(by: { $0.key < $1.key }) {
+            // Only a block the context still carries: after a reorg a side
+            // carrier's route would stay owed for good.
+            for (directory, block) in routes.sorted(by: { $0.key < $1.key })
+            where hierarchyState.parentTipContext?.carried[directory] == block {
                 _ = try? await process.ensurePendingChildProofRoute(
                     carrierCID: block.carrierCID, directory: directory
                 )

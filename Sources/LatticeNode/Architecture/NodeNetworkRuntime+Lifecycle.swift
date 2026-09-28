@@ -255,6 +255,9 @@ extension NodeNetworkRuntime {
         parentStateQueryGuard.removeAll()
         overlayState.rangeSync.reentryTask.cancel()
         sessionLeases.activeEvidenceVolumes.removeAll()
+        let slotWaiters = evidenceSlotWaiters.values
+        evidenceSlotWaiters.removeAll()
+        for waiter in slotWaiters { waiter.resume() }
         overlayState.portableEvidenceWorker.cancel()
         sessionLeases.portableEvidenceOrder.removeAll()
         sessionLeases.portableEvidenceWork.removeAll()

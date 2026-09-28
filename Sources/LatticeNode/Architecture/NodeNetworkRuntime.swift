@@ -808,6 +808,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ///     Overlay.drainPortableEvidence / Overlay.recoverPortableAttachment /
     ///     Overlay.discardServingSessions.
     var sessionLeases = SessionLeases()
+    /// Evidence recoveries waiting for an evidence Volume slot: each is
+    /// woken when a slot is released, or by its own timeout (which also
+    /// re-checks that its session still stands).
+    /// Owner: NodeNetworkRuntime.releaseEvidenceVolume /
+    ///     NodeNetworkRuntime.waitForEvidenceVolumeSlot /
+    ///     NodeNetworkRuntime.wakeEvidenceSlotWaiter / Lifecycle.clearRuntimeState.
+    var evidenceSlotWaiters: [UInt64: CheckedContinuation<Void, Never>] = [:]
+    /// Owner: NodeNetworkRuntime.waitForEvidenceVolumeSlot.
+    var nextEvidenceSlotWaiter: UInt64 = 0
     /// Orders parent evidence and reservation transfer within one authenticated
     /// session. Transport effects remain in this actor.
     /// Owner: Candidates.importCandidate / Hierarchy.appendParentEvidence /
@@ -897,6 +906,34 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// Owner: Candidates.drainCandidateImports / Candidates.offerGate /
     ///     Candidates.markOfferDeferred / Lifecycle.clearRuntimeState.
     var candidateOfferDeferredByAdmission = false
+
+    /// Releases an evidence Volume slot and wakes every recovery waiting
+    /// for one: the first to run takes it, the rest wait again.
+    func releaseEvidenceVolume(_ lease: EvidenceVolumeLease) {
+        sessionLeases.activeEvidenceVolumes.remove(lease)
+        let waiters = evidenceSlotWaiters.values
+        evidenceSlotWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    /// Suspends until an evidence Volume slot is released, or `timeout`.
+    func waitForEvidenceVolumeSlot(
+        timeout: Duration,
+        generation: UInt64
+    ) async {
+        nextEvidenceSlotWaiter &+= 1
+        let id = nextEvidenceSlotWaiter
+        await withCheckedContinuation { continuation in
+            evidenceSlotWaiters[id] = continuation
+            Timers.deadline(after: timeout, generation: generation) { [weak self] _ in
+                await self?.wakeEvidenceSlotWaiter(id)
+            }
+        }
+    }
+
+    private func wakeEvidenceSlotWaiter(_ id: UInt64) {
+        evidenceSlotWaiters.removeValue(forKey: id)?.resume()
+    }
 
     /// Callback work may outlive a stop/start boundary. Keep its captured
     /// process tied to the generation that began it, rather than letting an
@@ -1469,6 +1506,16 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// iteration, so a test can keep a pass running.
     var childProofRecoveryIterationForTesting: (@Sendable () async -> Void)?
 
+    /// Test seam: awaited in the tip context's naming, right before it
+    /// reads where a carried block's evidence stands.
+    var carriedNamingWillReadForTesting: (@Sendable (String) async -> Void)?
+
+    func setCarriedNamingWillReadForTesting(
+        _ hook: (@Sendable (String) async -> Void)?
+    ) {
+        carriedNamingWillReadForTesting = hook
+    }
+
     func setChildProofRecoveryIterationForTesting(
         _ hook: (@Sendable () async -> Void)?
     ) {
@@ -1482,6 +1529,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let heldBack: Set<String>
         let heldBackCount: Int
         let recoveryIterations: UInt64
+        /// A child-proof recovery pass holds its slot.
+        let recoveryPassRunning: Bool
     }
 
     func debugParentTipNaming() -> ParentTipNamingSnapshot {
@@ -1491,7 +1540,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
             named: context?.named.mapValues(\.childCID) ?? [:],
             heldBack: context?.heldBack ?? [],
             heldBackCount: hierarchyState.parentTipHeldBackCount,
-            recoveryIterations: hierarchyState.childProofRecoveryIterations
+            recoveryIterations: hierarchyState.childProofRecoveryIterations,
+            recoveryPassRunning: !hierarchyState.childProofRecoveryTask.isEmpty
         )
     }
 

@@ -2231,9 +2231,9 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
 
     /// The child's parent-evidence inbox is full (one parked entry fills a
     /// one-entry inbox) when the parent names its carried block. The named
-    /// evidence waits for room without fetching: the parent serves its
-    /// attachment at most once (the hint's own fetch) while the inbox stays
-    /// full, the hold holds, and once an import frees the inbox the block is
+    /// evidence waits for room without fetching: the parent never serves
+    /// its attachment while the inbox stays full (no hint, scan page or
+    /// named append fetches what the inbox would refuse), the hold holds, and once an import frees the inbox the block is
     /// admitted. Before, every inbox refusal re-seeded the evidence at once:
     /// a fetch loop against the parent for as long as the inbox stayed full.
     func testAFullInboxHoldsTheNamedEvidenceWithoutAFetchLoop() async throws {
@@ -2323,8 +2323,8 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 await fixture.childRuntime.debugCarriedHold().released != firstCID
             }
             let servedWhileFull = await probe.serves
-            XCTAssertLessThanOrEqual(
-                servedWhileFull, 1,
+            XCTAssertEqual(
+                servedWhileFull, 0,
                 "the full inbox cost the parent \(servedWhileFull) fetches"
             )
 
@@ -2437,8 +2437,14 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             XCTAssertEqual(recorder.contexts(forTip: carrierCID).map(\.carried), [nil])
             let heldAfter = await parentRuntime.debugParentTipNaming().heldBackCount
             XCTAssertGreaterThan(heldAfter, heldBefore, "the push waited first")
-            let stillRearming = await rearm.isOn
-            XCTAssertTrue(stillRearming, "sent while the pass kept iterating")
+            let naming = await parentRuntime.debugParentTipNaming()
+            XCTAssertTrue(
+                naming.recoveryPassRunning,
+                "sent while the re-armed pass was still running"
+            )
+            XCTAssertGreaterThanOrEqual(
+                naming.recoveryIterations, 1, "after one iteration completed"
+            )
             await stopAll()
         } catch {
             await stopAll()
@@ -2581,6 +2587,78 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             }
             let afterCarry = Array(await builds.snapshot().dropFirst(buildsBeforeCarry))
             XCTAssertFalse(afterCarry.contains("1"), "a sibling was built: \(afterCarry)")
+            await stopAll()
+        } catch {
+            await stopAll()
+            throw error
+        }
+    }
+
+    /// The evidence for the carried block is issued, and its route
+    /// completed, between the moment the tip context starts reading where
+    /// it stands and its read (as the delivery task of a mined carrier's
+    /// admission does, racing the push the same admission triggers). The
+    /// read is one snapshot, so it sees the evidence issued and the context
+    /// names the block. A read of "issued?" and then "owed?" could see
+    /// neither (no evidence yet, then no route) and send the context
+    /// unnamed: the #200 window again.
+    func testEvidenceIssuedDuringTheNamingReadIsNamed() async throws {
+        let fixture = try await provisionalRootFixture(keyByte: 0xf6)
+        let builds = NetworkEventRecorder()
+        let recorder = ParentTipRecordingDelegate(forwardingTo: fixture.childRuntime)
+        let passes = Latch()
+        func stopAll() async {
+            await passes.open()
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+        }
+        do {
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess,
+                chain: inertNetworkHandlers()
+            )
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess,
+                chain: recordingChildHandlers(fixture, builds: builds, admits: false)
+            )
+            await fixture.childRuntime.hierarchy.installTestDelegate(recorder)
+            let first = try await firstHeldCandidate(fixture)
+            let firstCID = try BlockHeader(node: first.block).rawCID
+            // No recovery pass issues anything behind the test's back.
+            await fixture.parentRuntime.setChildProofRecoveryIterationForTesting {
+                await passes.wait()
+            }
+            let carrier = try await storeCarrierBlock(
+                of: first, fixture: fixture, withEvidence: true
+            )
+            let carrierCID = try BlockHeader(node: carrier).rawCID
+            await fixture.parentProcess.serveRuns(for: "Payments")
+            let admitted = try await fixture.parentProcess.importBlock(
+                try BlockHeader(node: carrier),
+                preparingChildDirectories: ["Payments"]
+            )
+            XCTAssertTrue(admitted.decision.isAccepted, "\(admitted.decision)")
+            let before = try await fixture.parentProcess.store
+                .issuedChildEvidenceSummary(childCID: firstCID, directory: "Payments")
+            XCTAssertNil(before, "admitted, its evidence not yet issued")
+            let parentProcess = fixture.parentProcess
+            let promoted = DecisionSwitch()
+            await fixture.parentRuntime.setCarriedNamingWillReadForTesting { childCID in
+                guard childCID == firstCID, !(await promoted.isOn) else { return }
+                // The delivery task: issue the evidence, complete the route.
+                _ = try? await parentProcess.retryPendingChildProofs(carrierCID: carrierCID)
+                await promoted.turnOn()
+            }
+            await fixture.parentRuntime.chainStateChanged()
+            try await eventually("the carrier's context reaches the child") {
+                !recorder.contexts(forTip: carrierCID).isEmpty
+            }
+            let wasPromoted = await promoted.isOn
+            XCTAssertTrue(wasPromoted, "issued during the naming read")
+            XCTAssertEqual(
+                recorder.contexts(forTip: carrierCID).first?.carried, firstCID,
+                "evidence issued during the read: the context names the block"
+            )
             await stopAll()
         } catch {
             await stopAll()
@@ -3373,8 +3451,10 @@ extension NodeNetworkRuntime {
     }
 
     fileprivate func freeEvidenceLaneForTesting() {
-        sessionLeases.activeEvidenceVolumes = sessionLeases.activeEvidenceVolumes
-            .filter { !$0.attachmentCID.hasPrefix("lane-filler-") }
+        for lease in sessionLeases.activeEvidenceVolumes
+        where lease.attachmentCID.hasPrefix("lane-filler-") {
+            releaseEvidenceVolume(lease)
+        }
     }
 
     /// Arms another child-proof recovery pass, as an import or an overlay
