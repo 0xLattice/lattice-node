@@ -72,7 +72,7 @@ places are their own claim until a test covers them too.
 - **NODE-SEMANTICS-004.a** — `localFailure` is a local observation, not a
   verdict: the attempt is retried and its parent evidence is kept.
   Gap: #214 (today a local verification failure is terminal: its
-  parent-evidence inbox entry is consumed and the carried hold released)
+  parent-evidence inbox entry is consumed)
 - **NODE-SEMANTICS-004.b** — Candidate admission's outcome blame
   (`candidateBlame`) never names the supplier of a `localFailure` outcome.
 - **NODE-SEMANTICS-004.c** — The portable-attachment decision blames on the

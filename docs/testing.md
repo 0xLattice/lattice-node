@@ -106,6 +106,11 @@ cross-component invariants:
   again (`testChildPushesACandidateForThePushedParentTipAndTheParentHoldsIt`,
   `testParentPushesDescendantMinimumWorkAndTheChildBuildsWithIt`,
   `testParentTipChangeDropsTheStaleCandidateUntilTheChildRepushes`);
+- a carried child block is not carried again nor is it a template digest
+  input, while a sibling of it is carried; and an overlay peer announcing the
+  carried block without serving it does not stall the child
+  (`testTheCarriedChildBlockIsNotCarriedAgainButASiblingIs`,
+  `testAnOverlayAnnouncerThatNeverServesTheCarriedBlockCannotStallTheChild`);
 - an offer this chain built is kept by its own budget, oldest first, and a
   candidate the parent's evidence names carried survives every newer offer
   until the carried block's import owns its roots

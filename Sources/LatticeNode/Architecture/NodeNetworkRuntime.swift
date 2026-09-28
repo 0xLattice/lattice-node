@@ -709,27 +709,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// Owner: Hierarchy.scheduleParentTipPush / Hierarchy.runParentTipPushes /
         ///     Lifecycle.clearRuntimeState.
         var parentTipPushDirty = false
-        /// Evidence for a carried block may have been issued, or a recovery
-        /// pass ended: the context re-reads its carried blocks' evidence on
-        /// the same tip. Nothing else can change what it names.
-        /// Owner: Hierarchy.carriedEvidenceMayHaveChanged /
-        ///     Hierarchy.refreshParentTipContext / Lifecycle.clearRuntimeState.
-        var carriedEvidenceDirty = false
-        /// Child-proof recovery iterations completed this generation.
-        /// Owner: Hierarchy.recoverChildProofs / Lifecycle.clearRuntimeState.
-        var childProofRecoveryIterations: UInt64 = 0
-        /// A recovery iteration is running (started, not completed).
-        /// Owner: Hierarchy.recoverChildProofs / Lifecycle.clearRuntimeState.
-        var childProofRecoveryIterating = false
-        /// Per child directory, the carried block whose route the tip
-        /// context needs recorded; the next recovery iteration records it.
-        /// At most one per directory.
-        /// Owner: Hierarchy.carriedNaming / Hierarchy.storeParentTipContext /
-        ///     Hierarchy.recoverChildProofs / Lifecycle.clearRuntimeState.
-        var carriedRoutesToRecord: [String: ChainProcess.CarriedChildBlock] = [:]
-        /// Pushes held back behind a carried block's evidence, for tests.
-        /// Owner: Hierarchy.runParentTipPushes.
-        var parentTipHeldBackCount = 0
         /// Owner: Hierarchy.updateDescendantPlan / Lifecycle.clearRuntimeState.
         var descendantRewards: [MiningReward] = []
         /// Owner: Hierarchy.updateDescendantPlan / Lifecycle.clearRuntimeState.
@@ -737,39 +716,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// Owner: Hierarchy.clearHierarchyAuthorization / Hierarchy.handleHierarchy /
         ///     Lifecycle.clearRuntimeState.
         var receivedParentTip: ReceivedParentTipContext?
-        /// A carried block the parent named that this chain will not wait for:
-        /// its admission decided against it, or the parent's evidence for it
-        /// came to nothing and nothing tracks it. The hold on it is
-        /// released, or no offer would ever follow. One at a time, like the
-        /// context that names it.
-        /// Owner: Hierarchy.releaseCarriedHold / Hierarchy.clearHierarchyAuthorization /
-        ///     Hierarchy.reviewCarriedChildHold / Lifecycle.clearRuntimeState.
-        var releasedCarriedChildCID: String?
         /// A page request is being prepared (its cursor read) and not yet
         /// pending: no second round starts meanwhile.
         /// Owner: Hierarchy.requestEvidenceIndex / Lifecycle.clearRuntimeState.
         var evidenceRoundStarting = false
-        /// Child blocks whose parent evidence (a scan page, a hint or the
-        /// context naming the block) is being recovered, counted per
-        /// append: until it settles, the rooted package may still arrive,
-        /// so a hold on one of them is not released.
-        /// Owner: Hierarchy.appendParentEvidence / Hierarchy.parentEvidenceSettled /
-        ///     Lifecycle.clearRuntimeState.
-        var parentEvidenceInFlight: [String: Int] = [:]
-        /// The evidence the parent's context names its carried block with,
-        /// waiting for the evidence lane's reserved slot or for room in the
-        /// inbox. One at a time, like the context that names it.
-        /// Owner: Hierarchy.handleHierarchy / Hierarchy.seedNamedCarriedEvidence /
-        ///     Hierarchy.parentEvidenceAppendFinished /
-        ///     Hierarchy.clearHierarchyAuthorization / Lifecycle.clearRuntimeState.
-        var namedCarriedEvidence: PendingNamedEvidence?
-        /// The reserved slot's append, while it runs.
-        /// Owner: Hierarchy.seedNamedCarriedEvidence /
-        ///     Hierarchy.parentEvidenceAppendFinished / Lifecycle.clearRuntimeState.
-        var namedCarriedEvidenceAppend: LifetimeToken?
-        /// Times the offer held behind a carried block, for tests.
-        /// Owner: Hierarchy.offerCandidate.
-        var carriedHoldCount = 0
         /// One coalescing offer task: an input change while a build runs marks it
         /// dirty and the task runs again; nothing is queued.
         /// Owner: Hierarchy.scheduleCandidateOffer / Hierarchy.runCandidateOffers /
@@ -835,10 +785,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     ///     disconnectProvider / fetcherTracks / offerGate) /
     ///     Lifecycle.startNow / Lifecycle.clearRuntimeState.
     var blockFetcher = BlockFetcher()
-    /// The carried block, while the fetcher holds a parent-backed attempt
-    /// for it: its last one leaving is a reason to review the hold.
-    /// Owner: Candidates.reviewCarriedHoldIfParentAttemptLeft.
-    var parentBackedCarriedCID: String?
     /// Owner: Candidates.startCandidateWorker / Candidates.finishCandidateWorker /
     ///     Lifecycle.clearRuntimeState.
     var candidateWorker = TaskSlot()
@@ -881,38 +827,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let rewards: [MiningReward]
         let minimumWork: [MiningMinimumWork]
         /// Per child directory, the child block the tip's branch last
-        /// committed into it (the nearest committer's commitment) and that
-        /// committer: what a template does not carry again.
-        let carried: [String: ChainProcess.CarriedChildBlock]
-        /// Per child directory, the evidence the context names its carried
-        /// block with: only evidence durably issued here, so a child told
-        /// it was carried can fetch the block at once. A carried block
-        /// without it is not named.
-        let named: [String: CarriedChildEvidence]
-        /// Directories whose push waits for the carried block's evidence:
-        /// not issued yet, and no child-proof recovery iteration that
-        /// started after the wait began has completed.
-        let heldBack: Set<String>
-        /// Per child directory, the wait on the carried block's evidence.
-        let evidenceWaits: [String: CarriedEvidenceWait]
+        /// committed into it (the nearest committer's commitment): what a
+        /// template does not carry again.
+        let carriedChildren: [String: String]
         /// The child directories the context was minted for: a directory
         /// that connects later is owed a fresh context on the same tip.
         let directories: Set<String>
-
-        /// Per child directory, the child block the branch carries.
-        var carriedChildren: [String: String] { carried.mapValues(\.childCID) }
-    }
-    /// A wait on a carried block's evidence, per directory, keyed by the
-    /// block and its carrier (a reorg that keeps the block under another
-    /// carrier waits again). `untilIteration` is the recovery iteration
-    /// count at which the wait is over: one iteration that started after
-    /// it began has done what this node can for the evidence (a parent
-    /// below the root without a root for the carrier keeps the route owed
-    /// and ends here). Nil when no route is owed (the proof is prepared,
-    /// its evidence not issued), so nothing is waited for.
-    struct CarriedEvidenceWait: Equatable {
-        let block: ChainProcess.CarriedChildBlock
-        let untilIteration: UInt64?
     }
     /// The latest candidate each child peer pushed for this chain's tip. A
     /// template reads it; nothing is requested at template time.
@@ -928,11 +848,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let sessionID: Data
         let sequence: UInt64
     }
-    /// Named evidence from the parent session `peer`, not yet seeded.
-    struct PendingNamedEvidence {
-        let peer: AuthenticatedPeer
-        let evidence: CarriedChildEvidence
-    }
     /// The parent's context as last received (this chain being the child),
     /// bound to the session it came on: a new session restarts sequences.
     struct ReceivedParentTipContext {
@@ -942,14 +857,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let tip: Block
         let rewards: [MiningReward]
         let minimumWork: [MiningMinimumWork]
-        /// The child block the parent's branch last carried for this
-        /// chain, as the parent named it; nil when it named none.
-        let carriedChildCID: String?
     }
     /// Set when the offer gate deferred behind an own carried candidate's
     /// admission; the admission drain then re-arms the offer.
     /// Owner: Candidates.drainCandidateImports / Candidates.offerGate /
-    ///     Candidates.markOfferDeferred / Lifecycle.clearRuntimeState.
+    ///     Lifecycle.clearRuntimeState.
     var candidateOfferDeferredByAdmission = false
 
     /// A recovery waiting for an evidence Volume slot, and the timer that
@@ -1581,73 +1493,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
     var hierarchySendReturnedForTesting:
         (@Sendable (String, SendMessageResult) async -> Void)?
 
-    /// Test seam: awaited at the start of each child-proof recovery
-    /// iteration, so a test can keep a pass running.
-    var childProofRecoveryIterationForTesting: (@Sendable () async -> Void)?
-
-    /// Test seam: awaited in the tip context's naming, right before it
-    /// reads where a carried block's evidence stands.
-    var carriedNamingWillReadForTesting: (@Sendable (String) async -> Void)?
-
-    func setCarriedNamingWillReadForTesting(
-        _ hook: (@Sendable (String) async -> Void)?
-    ) {
-        carriedNamingWillReadForTesting = hook
-    }
-
-    func setChildProofRecoveryIterationForTesting(
-        _ hook: (@Sendable () async -> Void)?
-    ) {
-        childProofRecoveryIterationForTesting = hook
-    }
-
-    /// What the parent's tip context names and holds back, for tests.
-    struct ParentTipNamingSnapshot: Sendable {
-        let tipCID: String?
-        let named: [String: String]
-        let heldBack: Set<String>
-        let heldBackCount: Int
-        let recoveryIterations: UInt64
-        /// A child-proof recovery pass holds its slot.
-        let recoveryPassRunning: Bool
-    }
-
-    func debugParentTipNaming() -> ParentTipNamingSnapshot {
-        let context = hierarchyState.parentTipContext
-        return ParentTipNamingSnapshot(
-            tipCID: context?.tipCID,
-            named: context?.named.mapValues(\.childCID) ?? [:],
-            heldBack: context?.heldBack ?? [],
-            heldBackCount: hierarchyState.parentTipHeldBackCount,
-            recoveryIterations: hierarchyState.childProofRecoveryIterations,
-            recoveryPassRunning: !hierarchyState.childProofRecoveryTask.isEmpty
-        )
-    }
-
     func setHierarchySendReturnedForTesting(
         _ hook: (@Sendable (String, SendMessageResult) async -> Void)?
     ) {
         hierarchySendReturnedForTesting = hook
-    }
-
-    /// The carried-hold bookkeeping, for tests.
-    struct CarriedHoldSnapshot: Sendable {
-        let named: String?
-        let released: String?
-        /// The named evidence waiting for the lane's reserved slot or the inbox.
-        let namedEvidenceWaiting: String?
-        let evidenceInFlight: [String: Int]
-        let pendingEvidenceIndexCount: Int
-    }
-
-    func debugCarriedHold() -> CarriedHoldSnapshot {
-        CarriedHoldSnapshot(
-            named: hierarchyState.receivedParentTip?.carriedChildCID,
-            released: hierarchyState.releasedCarriedChildCID,
-            namedEvidenceWaiting: hierarchyState.namedCarriedEvidence?.evidence.childCID,
-            evidenceInFlight: hierarchyState.parentEvidenceInFlight,
-            pendingEvidenceIndexCount: hierarchyState.pendingEvidenceIndexes.count
-        )
     }
 
     /// Test view of the per-peer and per-session state (see
@@ -1667,7 +1516,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         keys.formUnion(parentStateQueryGuard.peers.keys)
         keys.formUnion(sessionLeases.portableEvidenceWork.values.map(\.peer.key))
         if let receivedParentTip = hierarchyState.receivedParentTip { keys.insert(receivedParentTip.peer.key) }
-        if let named = hierarchyState.namedCarriedEvidence { keys.insert(named.peer.key) }
         for hex in blockFetcher.debugSnapshot().providerKeys
             .union(parentEvidence.debugSnapshot().peerIDs) {
             if let key = try? PeerKey(hex) { keys.insert(key) }
@@ -1703,9 +1551,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             rangeSyncAnchor: overlayState.rangeSync.state.map {
                 ($0.requestedAfterCID, $0.requestedHeight)
             },
-            receivedCarriedChildCID: hierarchyState.receivedParentTip?.carriedChildCID,
             candidateOfferHeld: candidateOfferDeferredByAdmission,
-            carriedHoldCount: hierarchyState.carriedHoldCount,
             refusedChildEvidenceHintCount: recordedRefusedHints.count
         )
     }

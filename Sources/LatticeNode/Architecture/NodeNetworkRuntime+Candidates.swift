@@ -84,12 +84,6 @@ extension NodeNetworkRuntime {
         return true
     }
 
-    /// Seam: the offer held behind a carried block; the admission drain
-    /// re-arms it.
-    func markOfferDeferred() {
-        candidateOfferDeferredByAdmission = true
-    }
-
     func candidateProvider(
         _ peer: AuthenticatedPeer
     ) -> CandidateProvider {
@@ -105,27 +99,6 @@ extension NodeNetworkRuntime {
         }
         if blockFetcher.hasReadyCandidate {
             startCandidateWorker()
-        }
-        reviewCarriedHoldIfParentAttemptLeft()
-    }
-
-    /// Every fetcher change passes here: when the carried block's last
-    /// parent-backed attempt leaves the fetcher (completed, expired, or
-    /// evicted for capacity), the hold is reviewed.
-    private func reviewCarriedHoldIfParentAttemptLeft() {
-        let carried = carriedHoldBlockCID()
-        let backed = carried.flatMap {
-            blockFetcher.hasParentAttempt($0) ? $0 : nil
-        }
-        defer { parentBackedCarriedCID = backed }
-        guard let carried, backed == nil,
-              parentBackedCarriedCID == carried,
-              let process else { return }
-        let generation = runtimeGeneration
-        Task { [weak self] in
-            await self?.reviewCarriedChildHold(
-                generation: generation, process: process
-            )
         }
     }
 
@@ -164,17 +137,6 @@ extension NodeNetworkRuntime {
                 process: process
             ) else { return }
             serviceBlockFetcher()
-            // The carried block's attempt completed (parked or left the
-            // fetcher): the hold is reviewed now.
-            if candidate.blockCID == carriedHoldBlockCID() {
-                await reviewCarriedChildHold(
-                        generation: generation, process: process
-                )
-                guard isCurrentRuntime(
-                    generation: generation,
-                    process: process
-                ) else { return }
-            }
             // An offer deferred behind an admission is owed a look whatever
             // that admission decided: an acceptance reports a state change,
             // a park reports nothing. Only then; an admission a peer drove
@@ -542,14 +504,6 @@ extension NodeNetworkRuntime {
         }
 
         SyncTrace.log("admit \(candidate.blockCID.prefix(12)) weighed=\(candidate.weighed) decision=\(outcome.decision)")
-        // Only the parent's evidence decides for the hold: an overlay-seeded
-        // attempt decided against (a forged package, say) says nothing.
-        if candidate.fromParent,
-           !outcome.decision.isAccepted,
-           !outcome.decision.shouldRetryWhenEvidenceChanges,
-           !outcome.decision.shouldRetryLater {
-            releaseCarriedHold(ifCarried: candidate.blockCID)
-        }
         let soleSupplier = attempt.attribution.soleRemoteSupplierPublicKey
         if let blamed = Self.candidateBlame(
             outcome.decision,

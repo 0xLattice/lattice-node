@@ -148,8 +148,7 @@ extension NodeNetworkRuntime {
             // Child-proof recovery fetches the child content an owed route
             // lacks through the overlay: a new same-chain peer is a source an
             // earlier iteration did not have. Re-arming costs one coalesced
-            // pass (a refresh flag while one runs), and no tip context waits
-            // on more than one iteration of it.
+            // pass (a refresh flag while one runs).
             scheduleChildProofRecovery(
                 generation: generation,
                 process: process

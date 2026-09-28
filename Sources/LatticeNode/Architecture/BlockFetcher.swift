@@ -54,9 +54,6 @@ struct BlockFetcher {
         /// fork choice on verified work without executing it. Set for every
         /// network-sourced candidate; eager-wins (see `Seed.weighed`).
         let weighed: Bool
-        /// A package for this attempt came from the configured parent's
-        /// evidence (see `Seed.fromParent`).
-        let fromParent: Bool
     }
 
     struct Seed: Sendable {
@@ -451,8 +448,7 @@ struct BlockFetcher {
                 providers: record.providers.values.sorted {
                     $0.publicKey < $1.publicKey
                 },
-                weighed: attempt.weighed,
-                fromParent: attempt.fromParent
+                weighed: attempt.weighed
             )
         }
         return nil

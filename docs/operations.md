@@ -571,29 +571,6 @@ should be redeployed rather than migrated**, unless you are satisfied its
 history predates any exposure. A child deployed fresh after the upgrade is
 unaffected.
 
-## The parent tip context topic is `v2`
-
-The parent pushes its tip context to each direct child on
-`lattice.hierarchy.parent-tip.available.v2`. The context names the child block
-the parent's branch carried together with the evidence the parent issued for
-it, so a child receives the claim and the pointer to its proof as one message.
-A `v1` node sends and handles only `lattice.hierarchy.parent-tip.available.v1`,
-which carries a bare name.
-
-This is a hierarchy-plane change only: no consensus rule, block, CID or genesis
-changes, and no chain is relaunched or wiped. Both ends of every parent↔child
-edge run the same topic version, so the two nodes of an edge upgrade together.
-
-On a mismatched edge the session and every other hierarchy topic keep working
-(evidence hints, scans, run reports, chain facts), but the tip context does not
-cross it: the receiving side has no route for the sender's `parent-tip`
-topic, and drops the message unread without logging it. The child then has no
-parent tip to build against, so it offers no candidates, and the parent's
-templates carry nothing for that directory. With sync tracing on, the parent
-logs `parent tip context N` for each context it mints while the child never
-logs a matching `parent tip N:` line. Nothing is damaged and nothing needs
-repair; the edge resumes as soon as both ends run the same version.
-
 ## Common failures
 
 ### `invalidNexusGenesis`

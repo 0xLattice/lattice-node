@@ -216,7 +216,7 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
         extension NodeNetworkRuntime {
             func admit() {
                 blockFetcher.next()
-                hierarchyState.releasedCarriedChildCID = cid
+                hierarchyState.parentTipPushDirty = true
                 hierarchyOnly()
             }
         }

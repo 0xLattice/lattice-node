@@ -33,9 +33,7 @@ struct NetworkDebugSnapshot {
     /// The range sync's current request anchor (the block the next page is
     /// requested after, and its height).
     let rangeSyncAnchor: (afterCID: String, requestedHeight: UInt64)?
-    let receivedCarriedChildCID: String?
     let candidateOfferHeld: Bool
-    let carriedHoldCount: Int
     let refusedChildEvidenceHintCount: Int
 }
 #endif
