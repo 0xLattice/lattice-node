@@ -174,10 +174,11 @@ final class SafetyNetSourceScanTests: XCTestCase {
     /// - a spaced `/=` whose nearest non-space on the left is not an operand
     ///   (`= /= "a"/` is a regex, `x /= 2` is not);
     /// - `#/` anywhere.
-    /// Force-unwrap division (`x!/2`) matches, which fails loudly. Missed, as
-    /// unlikely and harmless beyond one line: a regex glued to a keyword
-    /// (`in/x/`, `return/x/`, `try/x/`), and `#//…/#`, whose `//` the lexer
-    /// already blanks as a comment.
+    /// Force-unwrap division (`x!/2`, `x! /= 2`) and an operator declared
+    /// with no space before its parameters (`func /(`) match, which fails
+    /// loudly. Missed, as unlikely and harmless beyond one line: a regex
+    /// glued to a keyword (`in/x/`, `return/x/`, `try/x/`), and `#//…/#`,
+    /// whose `//` the lexer already blanks as a comment.
     private static let regexLiteralStart =
         #"(?:^|[^\w)\]}])#*/(?![\s/*)]|=\s|=$|$)|(?:^|[^\w)\]}\s])\s*#*/=(?:\s|$)|#/"#
 
