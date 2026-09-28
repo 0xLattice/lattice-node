@@ -53,9 +53,12 @@ places are their own claim until a test covers them too.
   verdict: the attempt is retried and its parent evidence is kept.
   Gap: #214 (today a local verification failure is terminal: its
   parent-evidence inbox entry is consumed and the carried hold released)
-- **NODE-SEMANTICS-004.b** — A local failure, a store error, or a local change
-  of runtime generation or session never penalizes a peer.
-  Gap: #213, #215
+- **NODE-SEMANTICS-004.b** — A local failure or a store error never penalizes
+  a peer.
+  Gap: #213
+- **NODE-SEMANTICS-004.c** — The portable-attachment decision blames on the
+  bytes alone: an attachment that verifies is never blamed, even when the
+  runtime generation or the session changed while it was checked.
 
 ## NODE-SEMANTICS-005 — only obtained invalid evidence is punishable
 
