@@ -3182,6 +3182,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             await fixture.childRuntime.stop()
             await fixture.parentRuntime.stop()
         }
+        var step = "start the runtimes"
         do {
             try await fixture.parentRuntime.start(
                 process: fixture.parentProcess, chain: inertNetworkHandlers()
@@ -3189,10 +3190,12 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             try await fixture.childRuntime.start(
                 process: fixture.childProcess, chain: childHandlers
             )
+            step = "await the first held candidate"
             _ = try await firstHeldCandidate(fixture)
             let childGenesis = try await fixture.childProcess.canonicalTipBlock()
             let hour: Int64 = 3_600_000
             let forkPoint = try await fixture.parentProcess.validatedTipBlock()
+            step = "build the withheld B1"
             let b1 = try await carriableChildBlock(
                 on: childGenesis, nonce: 501, spacing: hour,
                 content: content, fixture: fixture
@@ -3200,9 +3203,11 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             try await BlockHeader(node: b1).storeBlock(
                 fetcher: content, storer: withheldContent
             )
+            step = "advance the parent"
             try await advanceParent(
                 spacing: hour, content: content, service: parentService, fixture: fixture
             )
+            step = "carry B2 and B3"
             var chain = [b1]
             for nonce: UInt64 in [502, 503] {
                 let tip = try await fixture.parentProcess.validatedTipBlock()
@@ -3216,6 +3221,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 )
                 chain.append(block)
             }
+            step = "B2 and B3 park"
             let cids = try chain.map { try BlockHeader(node: $0).rawCID }
             try await eventually("B2 and B3 were imported and parked") {
                 let inbox = try await fixture.childProcess.store.parentEvidenceInbox()
@@ -3223,6 +3229,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 return inbox.isEmpty && orphans == (loss == .eviction ? 1 : 2)
             }
             // The scan has passed them: nothing re-serves them by ordinal.
+            step = "the parent issues B3"
             var b3Issued: (sourceID: String, summary: IssuedChildEvidenceSummary)?
             try await eventually("the parent issued B3's evidence") {
                 b3Issued = try await fixture.parentProcess.store.issuedChildEvidenceSummary(
@@ -3233,17 +3240,20 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             let b3Ordinal = try XCTUnwrap(b3Issued).summary.ordinal
             // The live hints got here first; a scan re-reads them once the
             // fetcher's own attempts are gone, and its cursor passes them.
+            step = "the scan cursor passes B2 and B3"
             await fixture.childRuntime.dropFetcherAttemptsForTesting()
             try await eventually("the scan cursor passes B2 and B3") {
                 await fixture.childRuntime.requestEvidenceIndexForTesting()
                 let cursor = try await fixture.childProcess.store.parentEvidenceScanCursor()
                 return cursor.ordinal >= b3Ordinal
             }
+            step = "B2 and B3 are orphans again"
             try await eventually("B2 and B3 are orphans again") {
                 let inbox = try await fixture.childProcess.store.parentEvidenceInbox()
                 let orphans = await self.orphanCount(fixture)
                 return inbox.isEmpty && orphans == (loss == .eviction ? 1 : 2)
             }
+            step = "lose the evidence"
             switch loss {
             case .restart:
                 await fixture.childRuntime.stop()
@@ -3255,10 +3265,12 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             }
             // The withheld block is published on a parent fork; then the
             // parent carries B4 on B3.
+            step = "publish B1 on a parent fork"
             try await carryOnParentFork(
                 b1, on: forkPoint, spacing: hour, content: content,
                 service: parentService, fixture: fixture
             )
+            step = "carry B4"
             let tip = try await fixture.parentProcess.validatedTipBlock()
             let b4 = try await carriableChildBlock(
                 on: chain[2], nonce: 504, spacing: hour, content: content, fixture: fixture
@@ -3267,6 +3279,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 b4, on: tip, spacing: hour, content: content,
                 service: parentService, fixture: fixture
             )
+            step = "admit B1 through B4"
             let all = cids + [try BlockHeader(node: b4).rawCID]
             try await eventually("B1 through B4 are admitted") {
                 var admitted = true
@@ -3277,6 +3290,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             }
             await stopAll()
         } catch {
+            XCTFail("threw at step '\(step)': \(String(reflecting: error))")
             await stopAll()
             throw error
         }
