@@ -290,7 +290,8 @@ final class WireProtocolFuzzTests: XCTestCase {
             let startState = generator.state
             let mutant = mutate(seed.data, using: &generator)
             let provenance = """
-                \(base), iteration \(iteration), seed \(seed.name), \
+                \(base) LATTICE_FUZZ_ITERATIONS=\(iteration + 1), \
+                iteration \(iteration), seed \(seed.name), \
                 generator state before mutation \(startState), \
                 mutant hex \(mutant.map { String(format: "%02x", $0) }.joined())
                 """

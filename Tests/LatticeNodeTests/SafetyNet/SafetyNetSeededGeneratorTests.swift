@@ -37,10 +37,21 @@ final class SafetyNetSeededGeneratorTests: XCTestCase {
             try TestSeed.resolve(default: 7, environment: [TestSeed.variable: " 0x2a "]).value,
             42
         )
+        XCTAssertEqual(
+            try TestSeed.resolve(default: 7, environment: [TestSeed.variable: "0X2A"]).value,
+            42
+        )
+        for maximum in ["18446744073709551615", "0xffffffffffffffff"] {
+            XCTAssertEqual(
+                try TestSeed.resolve(default: 7, environment: [TestSeed.variable: maximum]).value,
+                .max
+            )
+        }
     }
 
     func testAMalformedSeedFailsNamingTheVariable() {
-        for bad in ["", "0x", "forty-two", "0xZZ", "-1", "18446744073709551616"] {
+        // `ff` is refused, not read as hex: only the `0x` prefix means hex.
+        for bad in ["", "0x", "ff", "forty-two", "0xZZ", "-1", "18446744073709551616"] {
             XCTAssertThrowsError(
                 try TestSeed.resolve(default: 7, environment: [TestSeed.variable: bad]),
                 "\(bad) was accepted"
