@@ -2463,6 +2463,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
     /// parked on a fact it cannot get, or never armed — does not withhold
     /// the child's candidate: the child builds on its validated tip, since
     /// that is how a chain outweighs a branch it cannot validate.
+    /// Establishes: NODE-MEMPOOL-001.b
     func testAParkedExecutionWalkDoesNotWithholdTheChildsCandidate() async throws {
         let fixture = try await provisionalRootFixture(keyByte: 0x9c)
         // No evidence source: the walk the deferral arms parks on the

@@ -49,3 +49,30 @@ struct TestSeed: CustomStringConvertible {
         "\(Self.variable)=0x\(String(value, radix: 16))"
     }
 }
+
+/// How many iterations a seeded test runs: `variable` (a positive decimal
+/// integer) when it is set, otherwise the test's own default. A malformed
+/// value fails the test naming the variable instead of silently running the
+/// default, so a soak that asked for more work never passes on less.
+enum TestBudget {
+    struct Malformed: Error, CustomStringConvertible {
+        let variable: String
+        let value: String
+        var description: String {
+            "\(variable)=\(value) is not a positive decimal integer"
+        }
+    }
+
+    static func resolve(
+        _ variable: String,
+        default fixed: Int,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> Int {
+        guard let raw = environment[variable] else { return fixed }
+        guard let parsed = Int(raw.trimmingCharacters(in: .whitespaces), radix: 10),
+              parsed > 0 else {
+            throw Malformed(variable: variable, value: raw)
+        }
+        return parsed
+    }
+}

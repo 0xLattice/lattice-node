@@ -213,10 +213,10 @@ places are their own claim until a test covers them too.
 - **NODE-MEMPOOL-001.a** — A pool entry that fails the state transform
   (`StateErrors`) never suppresses a template: a failing chunk of
   transactions is bisected, and the valid rest is kept.
-- **NODE-MEMPOOL-001.b** — The pool may retain, order, relay, replace, or retry
-  transactions; only Lattice validation against the validated tip makes a
-  transaction part of a template.
-  Gap: #217
+- **NODE-MEMPOOL-001.b** — Template assembly (`buildMiningTemplate`) builds on
+  the validated tip, never on a heavier merely weighed canonical tip: a Nexus
+  template and a child candidate both take the validated tip as parent and its
+  height plus one.
 - **NODE-MEMPOOL-001.c** — A local submission stores its complete transaction
   Volume before its SQLite reference.
 - **NODE-MEMPOOL-001.d** — `ChainService.restoreLocalTransactions` brings every
@@ -224,19 +224,17 @@ places are their own claim until a test covers them too.
   after a reopen; one that no longer does is dropped from the journal.
   Gap: #217 (the restart test journals a single transaction)
 - **NODE-MEMPOOL-001.e** — Every pooled root holds exactly one live-pool pin,
-  synced from the pool's current roots after every change: admission,
-  replacement, eviction, inclusion, reorg re-add, and reset.
-  Gap: #217
+  and no other root holds one, synced from the pool's current roots after
+  every change: admission, replacement, eviction, inclusion, reorg re-add, and
+  reset.
 - **NODE-MEMPOOL-001.f** — Removing a local transaction removes its durable
   pin.
 - **NODE-MEMPOOL-001.g** — Startup clears the live-pool owner.
 - **NODE-MEMPOOL-001.h** — Restored local roots are pinned again after the
   live-pool owner is cleared.
-  Gap: #217
 - **NODE-MEMPOOL-001.i** — Only durable local roots are restored: a peer
   submission is never recovery authority.
 - **NODE-MEMPOOL-001.j** — A peer submission stays serveable while pooled.
-  Gap: #217
 - **NODE-MEMPOOL-001.k** — A local transaction that leaves the pool (inclusion,
   replacement, eviction) leaves the durable journal and loses its durable pin.
   Gap: #217
@@ -247,3 +245,11 @@ places are their own claim until a test covers them too.
   (`MiningCandidateValidationError`) or a proof (`ProofErrors`) is bisected
   out the same way.
   Gap: #217
+- **NODE-MEMPOOL-001.n** — The pool may retain, order, relay, replace, or retry
+  transactions; only Lattice validation against the validated tip makes a
+  transaction part of a template: admission, reconciliation and restore
+  classify pool entries against the validated tip, not a weighed one.
+  Gap: #228
+- **NODE-MEMPOOL-001.o** — A local transaction a reorg returns to the pool is
+  still local: it is journaled again and regains its durable pin.
+  Gap: #227
