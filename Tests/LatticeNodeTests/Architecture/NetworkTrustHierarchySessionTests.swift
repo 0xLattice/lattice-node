@@ -751,9 +751,116 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         await runtime.stop()
     }
 
+    /// Quiet network: the peer holding P connects after startup and says
+    /// only its hello and its tip claim. Its tip D is already held here, so
+    /// the gap test sees no gap; the parked ancestry makes the node page the
+    /// peer's chain from the fork point, and P arrives from the peer that
+    /// claimed it.
     func testRestartRecoversLegacyDurableOrphanSuffixInConnectionOrder()
         async throws
     {
+        try await assertLegacyOrphanSuffixRecovers(
+            peers: [.holder], expectsRangeSync: true
+        )
+    }
+
+    /// The same with the node's own tip ahead of the fork point, so the
+    /// peer's claim is at our edge, not beyond it.
+    func testParkedAncestryIsPagedFromAPeerAtOurEdge() async throws {
+        try await assertLegacyOrphanSuffixRecovers(
+            peers: [.holder], canonicalAhead: true, expectsRangeSync: true
+        )
+    }
+
+    /// No peer at all, P's bytes held locally: startup itself must run the
+    /// recovered frontier, since no later event ever starts the worker.
+    func testRestartRunsRecoveredFrontierWithoutAnyPeer() async throws {
+        try await assertLegacyOrphanSuffixRecovers(peers: [])
+    }
+
+    /// A session that claims nothing says hello first; it is never asked,
+    /// and the holder's claim that follows brings P.
+    func testRecoveredFrontierReachesAHolderAfterASessionThatLacksIt()
+        async throws
+    {
+        try await assertLegacyOrphanSuffixRecovers(
+            peers: [.lacking, .holder], expectsRangeSync: true
+        )
+    }
+
+    /// Two sessions claim their tips at startup: the first takes the range-
+    /// sync slot and answers no range request, so the holder's claim meets a
+    /// busy slot. Its claim stays recorded and unasked; when the range sync's
+    /// own response and progress timeouts release the slot, the re-entry
+    /// probe asks the holder, and P arrives from it.
+    func testHolderClaimThatMetABusySlotIsAskedWhenTheSlotClears() async throws {
+        try await assertLegacyOrphanSuffixRecovers(
+            peers: [.silent, .holder],
+            expectsRangeSync: true,
+            requestTimeout: .seconds(1),
+            within: .seconds(60)
+        )
+    }
+
+    /// Claims are asked oldest first. The holder claims while a silent
+    /// session holds the slot; that session's key sorts first, and it
+    /// reconnects over and over, each time with a fresh, unasked claim. The
+    /// holder's older claim is still asked when the slot next clears.
+    func testReconnectingSessionCannotJumpAnOlderClaim() async throws {
+        let holderKey = peerKey(signingKey(97)).hex
+        let smaller = try XCTUnwrap(
+            (UInt8(1)...UInt8(255)).first {
+                $0 != 97 && peerKey(signingKey($0)).hex < holderKey
+            }
+        )
+        try await assertLegacyOrphanSuffixRecovers(
+            peers: [.silent, .holder],
+            keyBytes: [smaller, 97],
+            silentReconnectsEvery: .seconds(2),
+            expectsRangeSync: true,
+            requestTimeout: .seconds(1),
+            within: .seconds(20)
+        )
+    }
+
+    /// Keeps a reconnecting peer's sessions (and their weakly held
+    /// delegates) alive until teardown.
+    private actor ReconnectedClients {
+        private(set) var clients: [Ivy] = []
+        private var delegates: [any IvyDelegate] = []
+        func append(_ client: Ivy, _ delegate: any IvyDelegate) {
+            clients.append(client)
+            delegates.append(delegate)
+        }
+    }
+
+    private enum RecoveryPeer {
+        /// Claims its tip and serves its chain's ranges and Volumes.
+        case holder
+        /// Says hello and nothing else.
+        case lacking
+        /// Claims the holder's tip, then answers no range request.
+        case silent
+    }
+
+    /// `peers` connect after startup in order, each saying its hello (and,
+    /// by role, its tip claim). With none, P's bytes are held locally
+    /// instead. `canonicalAhead`: the node's own main chain holds a block at
+    /// height 1 besides the suffix, so a peer claiming D is at our edge.
+    /// `expectsRangeSync`: the holder must be sent a range request before P
+    /// is admitted — the claim, not any fallback, brought P. The holder
+    /// serves P's Volume only after that request, so no other path can
+    /// admit P first.
+    private func assertLegacyOrphanSuffixRecovers(
+        peers: [RecoveryPeer],
+        canonicalAhead: Bool = false,
+        keyBytes: [UInt8]? = nil,
+        silentReconnectsEvery: Duration? = nil,
+        expectsRangeSync: Bool = false,
+        requestTimeout: Duration = .seconds(15),
+        within deadline: Duration = .seconds(10)
+    ) async throws {
+        let predecessorHeldLocally = peers.isEmpty
         let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-recovery-suffix-\(UUID().uuidString)",
             isDirectory: true
@@ -776,66 +883,57 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         // admitted) <- O <- D, both accepted side blocks. Admission no longer
         // produces D, so stage both facts directly, as that node durably
         // wrote them, then reopen in place. Recovery must seed D parked
-        // behind O and O behind P; P arriving and connecting wakes O, and O
-        // connecting wakes D, which reaches the tip.
+        // behind O and O behind P; P connecting wakes O, and O connecting
+        // wakes D, which reaches the tip.
         var stagingProcess: ChainProcess? = try await ChainProcess.open(
             configuration: configuration
         )
         let genesis = try await stagingProcess!.canonicalTipBlock()
-        let predecessorCandidate = try await BlockBuilder.buildBlock(
-            previous: genesis,
-            timestamp: 3_600_000,
-            nonce: 1,
-            fetcher: stagingProcess!
-        )
-        let predecessor = try XCTUnwrap(BlockBuilder.mine(
-            block: predecessorCandidate,
-            target: predecessorCandidate.target,
-            maxAttempts: 4_096
-        ))
-        let predecessorHeader = try BlockHeader(node: predecessor)
-        try await predecessorHeader.storeBlock(
-            fetcher: stagingProcess!,
-            storer: stagingProcess!
-        )
-        let orphanCandidate = try await BlockBuilder.buildBlock(
-            previous: predecessor,
-            timestamp: 7_200_000,
-            nonce: 2,
-            fetcher: stagingProcess!
-        )
-        let orphan = try XCTUnwrap(BlockBuilder.mine(
-            block: orphanCandidate,
-            target: orphanCandidate.target,
-            maxAttempts: 4_096
-        ))
-        let orphanHeader = try BlockHeader(node: orphan)
-        try await orphanHeader.storeBlock(
-            fetcher: stagingProcess!,
-            storer: stagingProcess!
-        )
-        let descendantCandidate = try await BlockBuilder.buildBlock(
-            previous: orphan,
-            timestamp: 10_800_000,
-            nonce: 3,
-            fetcher: stagingProcess!
-        )
-        let descendant = try XCTUnwrap(BlockBuilder.mine(
-            block: descendantCandidate,
-            target: descendantCandidate.target,
-            maxAttempts: 4_096
-        ))
-        let descendantHeader = try BlockHeader(node: descendant)
-        try await descendantHeader.storeBlock(
-            fetcher: stagingProcess!,
-            storer: stagingProcess!
-        )
+        // This node held the boundaries of the two side blocks it accepted,
+        // O and D; P's bytes only when `predecessorHeldLocally`, otherwise
+        // only the peer holds them.
         let remoteContent = InMemoryContentStore()
-        for header in [predecessorHeader, orphanHeader, descendantHeader] {
-            try await header.storeBlock(
-                fetcher: stagingProcess!,
-                storer: remoteContent
+        var building: CoalescingFetcher? = CoalescingFetcher(CompositeContentSource([
+            stagingProcess!, remoteContent,
+        ]))
+        func mined(on previous: Block, timestamp: Int64, nonce: UInt64) async throws
+            -> (Block, BlockHeader)
+        {
+            let candidate = try await BlockBuilder.buildBlock(
+                previous: previous,
+                timestamp: timestamp,
+                nonce: nonce,
+                fetcher: building!
             )
+            let block = try XCTUnwrap(BlockBuilder.mine(
+                block: candidate,
+                target: candidate.target,
+                maxAttempts: 4_096
+            ))
+            let header = try BlockHeader(node: block)
+            try await header.storeBlock(fetcher: building!, storer: remoteContent)
+            return (block, header)
+        }
+        let (predecessor, predecessorHeader) = try await mined(
+            on: genesis, timestamp: 3_600_000, nonce: 1
+        )
+        let (orphan, orphanHeader) = try await mined(
+            on: predecessor, timestamp: 7_200_000, nonce: 2
+        )
+        let (descendant, descendantHeader) = try await mined(
+            on: orphan, timestamp: 10_800_000, nonce: 3
+        )
+        for header in [orphanHeader, descendantHeader]
+            + (predecessorHeldLocally ? [predecessorHeader] : []) {
+            try await header.storeBlock(fetcher: building!, storer: stagingProcess!)
+        }
+        if canonicalAhead {
+            let (_, ahead) = try await mined(
+                on: genesis, timestamp: 1_800_000, nonce: 9
+            )
+            try await ahead.storeBlock(fetcher: building!, storer: stagingProcess!)
+            let admitted = try await stagingProcess!.importBlock(ahead)
+            XCTAssertTrue(admitted.decision.isAccepted, "\(admitted.decision)")
         }
         // The facts a weighed admission wrote. A work contribution is only
         // ever read back from a store, so it is built the same way.
@@ -879,12 +977,16 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             BlockImportBatch(facts: try weighedFacts(descendant, descendantHeader)),
             volumeRoots: []
         )
+        // The staging fetcher holds the process: release both, so the
+        // reopen below takes the storage lock.
+        building = nil
         stagingProcess = nil
 
         let planes = try NodeNetworkPlaneConfigurations(
             overlay: IvyConfig(
                 signingKey: configuration.signingKey,
                 listenPort: overlayPort,
+                requestTimeout: requestTimeout,
                 stunServers: [],
                 mode: .overlay
             ),
@@ -925,6 +1027,9 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         )
 
         let connections = NetworkEventRecorder()
+        // Range requests the holder receives and P's admission, in order.
+        let events = NetworkEventRecorder()
+        let predecessorCID = predecessorHeader.rawCID
         let handlers = ClosureChainInterface(admission: { admission in
             let outcome = try await recoveredProcess.importBlock(
                 admission.header,
@@ -936,62 +1041,140 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             )
             if outcome.decision.isAccepted, outcome.sameChainPredecessor == nil {
                 await connections.append(admission.header.rawCID)
+                if admission.header.rawCID == predecessorCID {
+                    await events.append("P admitted")
+                }
             }
             return outcome
         })
-        // Announces only P: O and D come back from recovery alone, fetched
-        // from the connected peer that holds them as each is woken.
-        let clientDelegate = OverlayAnnouncingPeer(
-            announcing: [predecessorHeader.rawCID]
-        )
-        let client = Ivy(config: IvyConfig(
-            signingKey: signingKey(96),
-            listenPort: 0,
-            stunServers: [],
-            mode: .overlay
-        ))
-        await client.installTestDelegate(clientDelegate)
-        await client.setContentSource(remoteContent)
+        // A quiet network: the peers connect after startup, and nothing
+        // announces a block beyond each holder's one tip claim.
+        let chain = [predecessorHeader, orphanHeader, descendantHeader].map(\.rawCID)
+        let genesisCID = try BlockHeader(node: genesis).rawCID
+        var clients: [Ivy] = []
+        // Ivy holds its delegate weakly: keep them alive for the test.
+        var delegates: [any IvyDelegate] = []
+        var reconnects: Task<Void, Never>?
+        let reconnected = ReconnectedClients()
+        for (index, role) in peers.enumerated() {
+            let client = Ivy(config: IvyConfig(
+                signingKey: signingKey(keyBytes?[index] ?? UInt8(96 + index)),
+                listenPort: 0,
+                stunServers: [],
+                mode: .overlay
+            ))
+            let delegate: any IvyDelegate
+            switch role {
+            case .holder:
+                delegate = RangeServingPeer(
+                    genesisCID: genesisCID, chain: chain, receiver: recoveredProcess,
+                    events: events
+                )
+                await client.setContentSource(
+                    expectsRangeSync
+                        ? GatedVolumeSource(
+                            base: remoteContent,
+                            gatedRoot: predecessorCID,
+                            opensOn: "range request",
+                            events: events
+                        )
+                        : remoteContent
+                )
+            case .lacking:
+                delegate = OverlayAnnouncingPeer(announcing: [])
+                await client.setContentSource(InMemoryContentStore())
+            case .silent:
+                delegate = RangeServingPeer(
+                    genesisCID: genesisCID, chain: chain, receiver: recoveredProcess,
+                    servesRanges: false
+                )
+                await client.setContentSource(InMemoryContentStore())
+            }
+            await client.installTestDelegate(delegate)
+            clients.append(client)
+            delegates.append(delegate)
+        }
 
         do {
             try await runtime.start(
                 process: recoveredProcess,
                 chain: handlers
             )
-            try await client.start()
+            // Startup runs the recovered frontier at once, with no session to
+            // fetch it from, so it parks on content. Peers connect only
+            // after that.
+            if !peers.isEmpty {
+                try await Task.sleep(for: .seconds(1))
+            }
             let runtimePeer = PeerID(publicKey: configuration.processPublicKey)
-            try await client.connect(to: PeerEndpoint(
-                publicKey: configuration.processPublicKey,
-                host: "127.0.0.1",
-                port: overlayPort
-            ))
-            for _ in 0..<100 {
-                if (await client.connectedPeers).contains(runtimePeer) { break }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            guard (await client.connectedPeers).contains(runtimePeer) else {
-                throw NetworkTestError.failedStart
-            }
-            guard case .enqueued = await client.sendMessage(
-                to: runtimePeer,
-                topic: NodeNetworkTopic.overlayHello,
-                payload: try ChainHello(
-                    nexusGenesisCID: configuration.nexusGenesisCID,
-                    chainPath: configuration.chainPath
-                ).encode()
-            ) else {
-                throw NetworkTestError.failedSend
-            }
-            for _ in 0..<200 {
-                if await recoveredProcess.status().tipCID
-                    == descendantHeader.rawCID {
-                    break
+            @Sendable func connectAndHello(_ client: Ivy) async throws {
+                try await client.start()
+                try await client.connect(to: PeerEndpoint(
+                    publicKey: configuration.processPublicKey,
+                    host: "127.0.0.1",
+                    port: overlayPort
+                ))
+                try await eventually("peer connected") {
+                    (await client.connectedPeers).contains(runtimePeer)
                 }
-                try await Task.sleep(for: .milliseconds(20))
+                guard case .enqueued = await client.sendMessage(
+                    to: runtimePeer,
+                    topic: NodeNetworkTopic.overlayHello,
+                    payload: try ChainHello(
+                        nexusGenesisCID: configuration.nexusGenesisCID,
+                        chainPath: configuration.chainPath
+                    ).encode()
+                ) else {
+                    throw NetworkTestError.failedSend
+                }
+            }
+            for client in clients {
+                try await connectAndHello(client)
+                // Hellos land in order: this session's claim is handled
+                // before the next one connects.
+                try await Task.sleep(for: .milliseconds(200))
+            }
+            // The first (silent) peer reconnects on a period: each time a new
+            // session with a fresh claim, and the old one gone.
+            if let period = silentReconnectsEvery,
+               let silentIndex = peers.firstIndex(of: .silent) {
+                let key = signingKey(keyBytes?[silentIndex] ?? UInt8(96 + silentIndex))
+                reconnects = Task {
+                    var current = clients[silentIndex]
+                    while !Task.isCancelled {
+                        try? await Task.sleep(for: period)
+                        guard !Task.isCancelled else { break }
+                        let next = Ivy(config: IvyConfig(
+                            signingKey: key,
+                            listenPort: 0,
+                            stunServers: [],
+                            mode: .overlay
+                        ))
+                        let delegate = RangeServingPeer(
+                            genesisCID: genesisCID, chain: chain,
+                            receiver: recoveredProcess, servesRanges: false
+                        )
+                        await next.installTestDelegate(delegate)
+                        await next.setContentSource(InMemoryContentStore())
+                        await current.stop()
+                        try? await connectAndHello(next)
+                        await reconnected.append(next, delegate)
+                        current = next
+                    }
+                }
+            }
+            try await eventually("the suffix reaches the tip", within: deadline) {
+                await recoveredProcess.status().tipCID == descendantHeader.rawCID
             }
             let recoveredStatus = await recoveredProcess.status()
-            XCTAssertEqual(recoveredStatus.tipCID, descendantHeader.rawCID)
             XCTAssertEqual(recoveredStatus.height, descendant.height)
+            if expectsRangeSync {
+                let order = await events.snapshot()
+                XCTAssertEqual(
+                    order.first, "range request",
+                    "the holder's claim started a range sync before P was admitted: \(order)"
+                )
+            }
             // P's admission connects the durable suffix in the graph; the
             // fetcher still owes O and D their parked attempts, which it must
             // wake in connection order: P wakes O, O's completion wakes D.
@@ -1007,12 +1190,15 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
                 "admitted in order: P, then the O it wakes, then the D O wakes"
             )
         } catch {
-            await client.stop()
+            reconnects?.cancel()
+            for client in clients + (await reconnected.clients) { await client.stop() }
             await runtime.stop()
             throw error
         }
-        await client.stop()
+        reconnects?.cancel()
+        for client in clients + (await reconnected.clients) { await client.stop() }
         await runtime.stop()
+        withExtendedLifetime(delegates) {}
     }
 
     func testRestartedRuntimeRetriesDurableChildOrphanWhenOnlyPredecessorArrives()

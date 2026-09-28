@@ -19,19 +19,23 @@ extension NodeNetworkRuntime {
     // (withheld bodies / off-chain blocks) is rotated off so an honest heavier
     // tip is not starved.
 
+    /// Whether this call took the slot. `onStart` runs the moment it is
+    /// taken, before the ancestor request suspends.
+    @discardableResult
     func startRangeSync(
         peer: AuthenticatedPeer,
         targetHeight: UInt64,
         generation: UInt64,
-        process: ChainProcess
-    ) async {
+        process: ChainProcess,
+        onStart: () -> Void = {}
+    ) async -> Bool {
         guard isCurrentRuntime(generation: generation, process: process),
               overlayState.rangeSync.state == nil,
-              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return false }
         let acquired = await process.canonicalTip()
         guard isCurrentRuntime(generation: generation, process: process),
               overlayState.rangeSync.state == nil,
-              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return false }
         SyncTrace.log(
             "range-sync start target=\(targetHeight) "
                 + "peer=\(peer.key.hex.prefix(8))"
@@ -55,10 +59,12 @@ extension NodeNetworkRuntime {
             responseTimeout: nil,
             progressTimeout: nil
         )
+        onStart()
         scheduleRangeSyncProgress(generation: generation, process: process)
         // Negotiate the common ancestor before streaming, so a frontier that
         // sits on a losing sibling is not told "empty = caught up" and marooned.
         await sendAncestorRangeRequest(generation: generation, process: process)
+        return true
     }
 
     /// Request the next forward page if one is due: the common ancestor is
@@ -503,7 +509,8 @@ extension NodeNetworkRuntime {
     /// still far behind would idle forever. Re-entry is the receiver's own
     /// assessment, probed one request-timeout after each clear.
     private func scheduleRangeSyncReentry() {
-        guard overlayState.rangeSync.reentryTask.isEmpty, !recordedAnnouncedTips.isEmpty else {
+        guard overlayState.rangeSync.reentryTask.isEmpty,
+              !recordedAnnouncedTips.isEmpty || unaskedAncestryClaimant != nil else {
             return
         }
         let generation = runtimeGeneration
@@ -548,7 +555,17 @@ extension NodeNetworkRuntime {
         }
         guard let best = candidates.max(by: {
             $0.value.height < $1.value.height
-        }) else { return }
+        }) else {
+            // No deep claim: a session that claimed its tip while the slot
+            // was busy, and was never asked for the ancestry blocks here
+            // park on, is asked now.
+            if let claimant = unaskedAncestryClaimant {
+                await askForMissingAncestry(
+                    peer: claimant, generation: generation, process: process
+                )
+            }
+            return
+        }
         await startRangeSync(
             peer: best.value.peer,
             targetHeight: best.value.height,

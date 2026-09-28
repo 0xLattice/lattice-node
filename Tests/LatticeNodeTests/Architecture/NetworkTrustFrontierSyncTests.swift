@@ -136,13 +136,17 @@ private actor EchoInventoryPeer: IvyDelegate {
 /// common-ancestor negotiation and forward pages from that chain, and records
 /// the receiver's ACQUIRED height at the moment each frontier (accepted-
 /// leaves) request arrives.
-private actor RangeServingPeer: IvyDelegate {
+actor RangeServingPeer: IvyDelegate {
     private let genesisCID: String
     /// Ascending, genesis excluded.
     private let chain: [String]
     private let receiver: ChainProcess
     /// The height announced once per session (defaults to the chain's).
     private let claimedHeight: UInt64
+    /// False: claims its tip, then answers no range request.
+    private let servesRanges: Bool
+    /// Where each range request received is recorded, if anywhere.
+    private let events: NetworkEventRecorder?
     private var authorizedSessions: [Data] = []
     private var frontierRequestHeights: [UInt64] = []
     private var forwardAfterCIDs: [String] = []
@@ -151,12 +155,16 @@ private actor RangeServingPeer: IvyDelegate {
         genesisCID: String,
         chain: [String],
         receiver: ChainProcess,
-        claimedHeight: UInt64? = nil
+        claimedHeight: UInt64? = nil,
+        servesRanges: Bool = true,
+        events: NetworkEventRecorder? = nil
     ) {
         self.genesisCID = genesisCID
         self.chain = chain
         self.receiver = receiver
         self.claimedHeight = claimedHeight ?? UInt64(chain.count)
+        self.servesRanges = servesRanges
+        self.events = events
     }
 
     func ivy(
@@ -179,7 +187,8 @@ private actor RangeServingPeer: IvyDelegate {
                 payload: payload
             )
         case NodeNetworkTopic.ancestorRangeRequest:
-            guard let request = try? AncestorRangeRequestMessage.decoded(
+            await events?.append("range request")
+            guard servesRanges, let request = try? AncestorRangeRequestMessage.decoded(
                 message.payload
             ) else { return }
             // Locator is newest-first: the first hit is the highest shared.
@@ -200,7 +209,7 @@ private actor RangeServingPeer: IvyDelegate {
                 payload: payload
             )
         case NodeNetworkTopic.forwardRangeRequest:
-            guard let request = try? ForwardRangeRequestMessage.decoded(
+            guard servesRanges, let request = try? ForwardRangeRequestMessage.decoded(
                 message.payload
             ) else { return }
             forwardAfterCIDs.append(request.afterCID)
@@ -450,7 +459,7 @@ private actor SilentDeepPeer: IvyDelegate {
 
 /// Answer a runtime's hello-reply inventory request with an empty page so the
 /// scripted session survives past the request timeout.
-private func answerInventoryEmpty(
+func answerInventoryEmpty(
     _ ivy: Ivy,
     message: PeerMessage,
     peer: AuthenticatedPeer

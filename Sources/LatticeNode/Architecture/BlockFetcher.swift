@@ -168,6 +168,9 @@ struct BlockFetcher {
     }
 
     var hasReadyCandidate: Bool { !readySet.isEmpty }
+    /// Whether some held block is parked on a predecessor this node does not
+    /// hold: a recovered frontier, or a live predecessor walk.
+    var awaitsMissingAncestry: Bool { !waitingOn.isEmpty }
     /// Whether any attempt for the block is held, in whatever state.
     func tracks(_ blockCID: String) -> Bool {
         records[blockCID].map { !$0.attempts.isEmpty } ?? false

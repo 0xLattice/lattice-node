@@ -47,6 +47,12 @@ extension NodeNetworkRuntime {
         blockFetcher.disconnect(candidateProvider(peer))
     }
 
+    /// Seam: whether some held block parks on a predecessor this node does
+    /// not hold.
+    func fetcherAwaitsMissingAncestry() -> Bool {
+        blockFetcher.awaitsMissingAncestry
+    }
+
     /// Seam: whether any attempt for the block is held.
     func fetcherTracks(_ blockCID: String) -> Bool {
         blockFetcher.tracks(blockCID)
