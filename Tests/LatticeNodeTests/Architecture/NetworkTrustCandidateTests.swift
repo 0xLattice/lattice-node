@@ -2107,6 +2107,80 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         }
     }
 
+    /// The child's parent-evidence lane is full (every evidence slot held
+    /// by overlay work) when the parent names its carried block: the
+    /// pushed hint is dropped as local backpressure, but the named evidence
+    /// takes the lane's reserved slot and waits for a Volume slot, so the
+    /// hold holds and no sibling is built. Once the lane frees, the block
+    /// is admitted and the next candidate is built on it. Before, the
+    /// backpressured append seeded nothing and the hold was released.
+    func testABackpressuredEvidenceLaneDoesNotReleaseTheHold() async throws {
+        let fixture = try await provisionalRootFixture(keyByte: 0xe2)
+        let parentService = networkService(
+            process: fixture.parentProcess,
+            runtime: fixture.parentRuntime
+        )
+        let builds = NetworkEventRecorder()
+        func stopAll() async {
+            await fixture.childRuntime.freeEvidenceLaneForTesting()
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+        }
+        do {
+            try await fixture.parentRuntime.start(
+                process: fixture.parentProcess,
+                chain: inertNetworkHandlers()
+            )
+            try await fixture.childRuntime.start(
+                process: fixture.childProcess,
+                chain: recordingChildHandlers(fixture, builds: builds, admits: true)
+            )
+            let first = try await firstHeldCandidate(fixture)
+            let firstCID = try BlockHeader(node: first.block).rawCID
+            let buildsBeforeCarry = await builds.snapshot().count
+            await fixture.childRuntime.fillEvidenceLaneForTesting()
+
+            let carrier = try await storeCarrier(
+                of: first, fixture: fixture, withEvidence: true
+            )
+            try await admitCarrier(
+                carrier, service: parentService, fixture: fixture, withEvidence: true
+            )
+            try await eventually("the context names the carried block") {
+                await fixture.childRuntime.debugSnapshot().receivedCarriedChildCID
+                    == firstCID
+            }
+            try await eventually("the named evidence is seeded despite the full lane") {
+                await fixture.childRuntime.debugCarriedHold()
+                    .evidenceInFlight[firstCID] != nil
+            }
+            try await alwaysDuring("the hold holds while the lane is full", .seconds(1)) {
+                await fixture.childRuntime.debugCarriedHold().released != firstCID
+            }
+            let accepted = await fixture.childProcess.hasAcceptedBlock(firstCID)
+            XCTAssertFalse(accepted, "the lane was full: nothing recovered yet")
+
+            await fixture.childRuntime.freeEvidenceLaneForTesting()
+            try await eventually("the carried block is admitted once the lane frees") {
+                await fixture.childProcess.hasAcceptedBlock(firstCID)
+            }
+            try await eventually("the child builds on the carried block") {
+                await builds.snapshot().dropFirst(buildsBeforeCarry).contains("2")
+            }
+            let afterCarry = Array(await builds.snapshot().dropFirst(buildsBeforeCarry))
+            XCTAssertFalse(
+                afterCarry.contains("1"),
+                "a sibling of the carried block was built: \(afterCarry)"
+            )
+            let released = await fixture.childRuntime.debugCarriedHold().released
+            XCTAssertNotEqual(released, firstCID, "the hold was never released")
+            await stopAll()
+        } catch {
+            await stopAll()
+            throw error
+        }
+    }
+
     /// The parent restarts with a carried block's route still owed: after
     /// the child reconnects, the push waits for the recovery pass, and the
     /// first context the child gets on that tip names the block, with its
@@ -2871,5 +2945,24 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         try await eventually("direct child candidate session") {
             await fixture.parentRuntime.directChildCandidates(fixture.context).count == 1
         }
+    }
+}
+
+extension NodeNetworkRuntime {
+    /// Holds every evidence Volume slot with overlay work, as a burst of
+    /// portable attachments would.
+    fileprivate func fillEvidenceLaneForTesting() {
+        for index in 0..<Self.maximumEvidenceCandidates {
+            sessionLeases.activeEvidenceVolumes.insert(EvidenceVolumeLease(
+                plane: .overlay,
+                sessionID: Data([0xee]),
+                attachmentCID: "lane-filler-\(index)"
+            ))
+        }
+    }
+
+    fileprivate func freeEvidenceLaneForTesting() {
+        sessionLeases.activeEvidenceVolumes = sessionLeases.activeEvidenceVolumes
+            .filter { !$0.attachmentCID.hasPrefix("lane-filler-") }
     }
 }

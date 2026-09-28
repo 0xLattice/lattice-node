@@ -270,6 +270,8 @@ extension NodeNetworkRuntime {
         hierarchyState.descendantMinimumWork = []
         hierarchyState.receivedParentTip = nil
         hierarchyState.releasedCarriedChildCID = nil
+        hierarchyState.namedCarriedEvidence = nil
+        hierarchyState.namedCarriedEvidenceAppend = nil
         hierarchyState.evidenceRoundStarting = false
         hierarchyState.parentEvidenceInFlight.removeAll()
         hierarchyState.candidateOfferTask.cancel()

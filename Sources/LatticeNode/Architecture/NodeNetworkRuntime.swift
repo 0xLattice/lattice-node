@@ -712,6 +712,17 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// Owner: Hierarchy.appendParentEvidence / Hierarchy.parentEvidenceSettled /
         ///     Lifecycle.clearRuntimeState.
         var parentEvidenceInFlight: [String: Int] = [:]
+        /// The evidence the parent's context names its carried block with,
+        /// waiting for the evidence lane's reserved slot or for room in the
+        /// inbox. One at a time, like the context that names it.
+        /// Owner: Hierarchy.handleHierarchy / Hierarchy.seedNamedCarriedEvidence /
+        ///     Hierarchy.parentEvidenceAppendFinished /
+        ///     Hierarchy.clearHierarchyAuthorization / Lifecycle.clearRuntimeState.
+        var namedCarriedEvidence: PendingNamedEvidence?
+        /// The reserved slot's append, while it runs.
+        /// Owner: Hierarchy.seedNamedCarriedEvidence /
+        ///     Hierarchy.parentEvidenceAppendFinished / Lifecycle.clearRuntimeState.
+        var namedCarriedEvidenceAppend: LifetimeToken?
         /// Times the offer held behind a carried block, for tests.
         /// Owner: Hierarchy.offerCandidate.
         var carriedHoldCount = 0
@@ -854,6 +865,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
     /// The parent's context as last received (this chain being the child),
     /// bound to the session it came on: a new session restarts sequences.
+    /// Named evidence from the parent session `peer`, not yet seeded.
+    struct PendingNamedEvidence {
+        let peer: AuthenticatedPeer
+        let evidence: CarriedChildEvidence
+    }
     struct ReceivedParentTipContext {
         let sequence: UInt64
         let peer: AuthenticatedPeer
@@ -1478,6 +1494,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
     struct CarriedHoldSnapshot: Sendable {
         let named: String?
         let released: String?
+        /// The named evidence waiting for the lane's reserved slot or the inbox.
+        let namedEvidenceWaiting: String?
         let evidenceInFlight: [String: Int]
         let pendingEvidenceIndexCount: Int
     }
@@ -1486,6 +1504,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         CarriedHoldSnapshot(
             named: hierarchyState.receivedParentTip?.carriedChildCID,
             released: hierarchyState.releasedCarriedChildCID,
+            namedEvidenceWaiting: hierarchyState.namedCarriedEvidence?.evidence.childCID,
             evidenceInFlight: hierarchyState.parentEvidenceInFlight,
             pendingEvidenceIndexCount: hierarchyState.pendingEvidenceIndexes.count
         )
@@ -1508,6 +1527,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         keys.formUnion(parentStateQueryGuard.peers.keys)
         keys.formUnion(sessionLeases.portableEvidenceWork.values.map(\.peer.key))
         if let receivedParentTip = hierarchyState.receivedParentTip { keys.insert(receivedParentTip.peer.key) }
+        if let named = hierarchyState.namedCarriedEvidence { keys.insert(named.peer.key) }
         for hex in blockFetcher.debugSnapshot().providerKeys
             .union(parentEvidence.debugSnapshot().peerIDs) {
             if let key = try? PeerKey(hex) { keys.insert(key) }
