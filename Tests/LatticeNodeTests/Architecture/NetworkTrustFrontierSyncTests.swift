@@ -252,6 +252,19 @@ actor RangeServingPeer: IvyDelegate {
     func forwardRequests() -> [String] { forwardAfterCIDs }
 }
 
+/// Says nothing, but answers every transaction inventory request (empty),
+/// as a live peer does; an unanswered one recycles the session.
+private final class InventoryAnsweringPeer: IvyDelegate, Sendable {
+    func ivy(
+        _ ivy: Ivy,
+        didReceiveMessage message: PeerMessage,
+        from peer: AuthenticatedPeer
+    ) async {
+        guard message.topic == NodeNetworkTopic.transactionInventoryRequest else { return }
+        await answerInventoryEmpty(ivy, message: message, peer: peer)
+    }
+}
+
 /// Records every topic it receives and the requestID of each frontier
 /// (accepted-leaves) request, so a test can answer — or fail to answer — it.
 private actor FrontierRequestCapturingPeer: IvyDelegate {
@@ -1915,11 +1928,10 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
     {
         let fixture = try await overlayRuntime(
             keyByte: 0xe1,
-            requestTimeout: .seconds(5)
+            requestTimeout: .milliseconds(300)
         )
         // Deep enough that walking the ancestry per level (block h asked
-        // depth + 1 - h times) breaks the per-block bound below, shallow
-        // enough for the sanitizer jobs, which run at 3–10x the cost.
+        // depth + 1 - h times) breaks the per-block bound below.
         let depth = 8
         let producer = try await canonicalNetworkProcess()
         let clock = TestBlockClock()
@@ -1946,8 +1958,12 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             mode: .overlay
         ))
         // Answers no range request: the tip and the predecessor walk under
-        // it are the only way the joiner acquires this chain.
-        let delegate = TopicRecordingPeer(recorder: TopicRecorder())
+        // it are the only way the joiner acquires this chain. It answers the
+        // transaction inventory request, as any peer does: left unanswered,
+        // the runtime recycles the session at the request timeout, which on
+        // a slow run lands mid-walk and strands it. The short request
+        // timeout keeps that fixture race visible on a fast run.
+        let delegate = InventoryAnsweringPeer()
         await client.installTestDelegate(delegate)
         await client.setContentSource(source)
         let service = networkService(
@@ -1975,7 +1991,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             ) else {
                 throw NetworkTestError.failedSend
             }
-            try await eventually("joiner acquires the announced chain", within: .seconds(60)) {
+            try await eventually("joiner acquires the announced chain") {
                 await fixture.process.canonicalTipHeight() == UInt64(depth)
             }
             let requests = await source.requests()
