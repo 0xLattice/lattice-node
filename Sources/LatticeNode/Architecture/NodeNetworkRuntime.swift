@@ -269,12 +269,18 @@ public actor NodeNetworkRuntime: IvyDelegate {
         var helloDeadline: HelloDeadline?
         /// Carries its own session ID (see `FrontierPull`).
         var frontierPull: FrontierPull?
+        /// This session's tip claim, recorded for every claim — held tip or
+        /// not — and whether the session has been asked, once, to page its
+        /// chain from our fork point because blocks here park on missing
+        /// ancestry (`syncMissingAncestryIfNeeded`).
+        var ancestryClaim: AncestryClaim?
         /// The tallest tip the peer announced, with the session it came on.
         /// Kept across a reconnect: every reader compares its session.
         var announcedTip: (height: UInt64, peer: AuthenticatedPeer)?
 
         var isEmpty: Bool {
             session == nil && helloDeadline == nil && frontierPull == nil
+                && ancestryClaim == nil
                 && announcedTip == nil
         }
 
@@ -779,6 +785,15 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let sessionID: Data
         var requestID: UInt64?
     }
+
+    /// A session's tip claim for the missing-ancestry range sync; `sequence`
+    /// orders claims oldest first, so a reconnect goes to the back.
+    struct AncestryClaim {
+        let sessionID: Data
+        let sequence: UInt64
+        var height: UInt64
+        var asked: Bool
+    }
     /// Periodically re-announces this node as a DHT provider of its chain's
     /// genesis block, so other nodes (and the explorer's /api/chain/endpoints)
     /// can discover it via `findProviders(genesisCID)` with no registry.
@@ -1202,6 +1217,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
             overlayState.overlayRecords.update(peer.key) {
                 $0.session = .awaitingHello(peer)
                 $0.frontierPull = nil
+                $0.ancestryClaim = nil
             }
             scheduleOverlayHelloDeadline(for: peer, generation: generation)
             SyncTrace.log("overlay connect peer=\(peer.key.hex.prefix(8))")

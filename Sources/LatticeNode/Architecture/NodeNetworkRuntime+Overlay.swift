@@ -332,6 +332,20 @@ extension NodeNetworkRuntime {
                           overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
                 }
             }
+            // A tip claim while blocks here park on missing ancestry: the
+            // gap test above cannot see that gap (it may lie below our tip
+            // or on another branch), so page this peer's chain from our fork
+            // point once per session, as a locator exchange would.
+            if let announced = announcement.height {
+                await syncMissingAncestryIfNeeded(
+                    from: peer,
+                    peerHeight: announced,
+                    generation: generation,
+                    process: process
+                )
+                guard isCurrentRuntime(generation: generation, process: process),
+                      overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return }
+            }
             // At-edge evaluation happens whether or not we hold the block:
             // holding the peer's tip IS being at its edge. The peer's height
             // is its best claim this session (this announcement or a taller
@@ -1277,6 +1291,94 @@ extension NodeNetworkRuntime {
             if case .awaitingHello? = record.session { record.session = nil }
         }
         await overlay.recycleSession(ifCurrent: peer)
+    }
+
+    /// Records `peer`'s tip claim, then asks the OLDEST unasked claimant
+    /// (`askForMissingAncestry`) if blocks here park on missing ancestry.
+    /// Every claim is recorded, whether or not its block is held, so a claim
+    /// that meets a busy range-sync slot is asked when the slot clears; the
+    /// oldest goes first, so no session jumps the queue by reconnecting.
+    func syncMissingAncestryIfNeeded(
+        from peer: AuthenticatedPeer,
+        peerHeight: UInt64,
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        guard overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID
+        else { return }
+        overlayState.overlayRecords.update(session: peer) { record in
+            if var claim = record.ancestryClaim, claim.sessionID == peer.sessionID {
+                claim.height = max(claim.height, peerHeight)
+                record.ancestryClaim = claim
+            } else {
+                record.ancestryClaim = AncestryClaim(
+                    sessionID: peer.sessionID,
+                    sequence: LifetimeToken.next().rawValue,
+                    height: peerHeight,
+                    asked: false
+                )
+            }
+        }
+        guard let oldest = unaskedAncestryClaimant else { return }
+        await askForMissingAncestry(
+            peer: oldest, generation: generation, process: process
+        )
+    }
+
+    /// Once per session, when some held block parks on a predecessor this
+    /// node lacks, run the ordinary range sync against a session that has
+    /// claimed its tip: the ancestor negotiation finds our fork point on its
+    /// main chain and the pages that follow arrive as seeds with this peer as
+    /// provider, like any range sync's. A missing ancestor on that chain is
+    /// fetched from the peer that claimed it; one that is not is left to the
+    /// next session. An unresponsive peer is handled by the range sync's own
+    /// response and progress timeouts. While another range sync holds the
+    /// slot this does nothing; the claim stays unasked, and the slot's
+    /// re-entry probe asks it when the slot clears.
+    func askForMissingAncestry(
+        peer: AuthenticatedPeer,
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        guard fetcherAwaitsMissingAncestry(),
+              overlayState.rangeSync.state == nil,
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
+              let claim = overlayState.overlayRecords[peer.key]?.ancestryClaim,
+              claim.sessionID == peer.sessionID, !claim.asked
+        else { return }
+        SyncTrace.log(
+            "ancestry sync peer=\(peer.key.hex.prefix(8)) peerHeight=\(claim.height)"
+        )
+        // Marked asked the moment the slot is taken, before the ancestor
+        // request suspends, so no second ask can slip in.
+        await startRangeSync(
+            peer: peer,
+            targetHeight: claim.height,
+            generation: generation,
+            process: process
+        ) {
+            overlayState.overlayRecords.update(session: peer) {
+                if $0.ancestryClaim?.sessionID == peer.sessionID {
+                    $0.ancestryClaim?.asked = true
+                }
+            }
+        }
+    }
+
+    /// The ready session with the OLDEST recorded tip claim not yet asked
+    /// for missing ancestry, while blocks here park on it. First in, first
+    /// asked: a reconnect's new claim queues behind every earlier one.
+    var unaskedAncestryClaimant: AuthenticatedPeer? {
+        guard fetcherAwaitsMissingAncestry() else { return nil }
+        return overlayState.overlayRecords.records
+            .compactMap { _, record -> (peer: AuthenticatedPeer, sequence: UInt64)? in
+                guard let peer = record.readyPeer,
+                      let claim = record.ancestryClaim,
+                      claim.sessionID == peer.sessionID, !claim.asked else { return nil }
+                return (peer, claim.sequence)
+            }
+            .min { $0.sequence < $1.sequence }?
+            .peer
     }
 
     /// One-shot frontier pull, once per session, at the live edge. The tip

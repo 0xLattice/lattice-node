@@ -573,8 +573,18 @@ final class MiningCoordinatorTests: XCTestCase {
         #endif
         var original = rlimit()
         XCTAssertEqual(getrlimit(nofile, &original), 0)
+        // The cap is headroom above the fds already open, not an absolute
+        // number: the test shares its process with every other suite, and
+        // on Linux Process.run fails with EBADF when any open fd sits at or
+        // above the soft limit. 128 spare fds is still far fewer than 200
+        // spawns, so a per-spawn leak runs out and throws EMFILE.
+        let openFDs = try FileManager.default.contentsOfDirectory(
+            atPath: FileManager.default.fileExists(atPath: "/proc/self/fd")
+                ? "/proc/self/fd" : "/dev/fd"
+        ).compactMap { rlim_t($0) }
+        let highestOpenFD = try XCTUnwrap(openFDs.max())
         var capped = original
-        capped.rlim_cur = min(original.rlim_max, 128)
+        capped.rlim_cur = min(original.rlim_max, highestOpenFD + 1 + 128)
         XCTAssertEqual(setrlimit(nofile, &capped), 0)
         defer { setrlimit(nofile, &original) }
 

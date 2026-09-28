@@ -87,6 +87,11 @@ extension NodeNetworkRuntime {
                 stopHierarchy: { await self.hierarchy.stop() }
             )
             isRunning = true
+            // Recovered seeds (the missing-predecessor frontier the reset
+            // readied) run now: on a quiet network no later enqueue would
+            // start the worker for them. The worker is fenced to this
+            // generation by `startCandidateWorker`.
+            serviceBlockFetcher()
             for candidate in recoveredParentCandidates {
                 guard await enqueueInboxParentCandidate(
                     candidate,

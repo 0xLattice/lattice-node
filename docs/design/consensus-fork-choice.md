@@ -1,8 +1,8 @@
 # Consensus and fork-choice ownership
 
 Consensus is defined by Lattice, not by `lattice-node`. The canonical rules are
-the [protocol specification](https://github.com/adalinxx/Lattice/blob/37.0.0/docs/spec.md)
-and [work and fork-choice rationale](https://github.com/adalinxx/Lattice/blob/37.0.0/docs/consensus-fork-choice.md).
+the [protocol specification](https://github.com/adalinxx/Lattice/blob/38.0.0/docs/spec.md)
+and [work and fork-choice rationale](https://github.com/adalinxx/Lattice/blob/38.0.0/docs/consensus-fork-choice.md).
 
 The node owns only the operational boundary around those rules:
 

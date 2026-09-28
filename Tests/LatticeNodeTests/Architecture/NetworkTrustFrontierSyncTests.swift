@@ -136,13 +136,17 @@ private actor EchoInventoryPeer: IvyDelegate {
 /// common-ancestor negotiation and forward pages from that chain, and records
 /// the receiver's ACQUIRED height at the moment each frontier (accepted-
 /// leaves) request arrives.
-private actor RangeServingPeer: IvyDelegate {
+actor RangeServingPeer: IvyDelegate {
     private let genesisCID: String
     /// Ascending, genesis excluded.
     private let chain: [String]
     private let receiver: ChainProcess
     /// The height announced once per session (defaults to the chain's).
     private let claimedHeight: UInt64
+    /// False: claims its tip, then answers no range request.
+    private let servesRanges: Bool
+    /// Where each range request received is recorded, if anywhere.
+    private let events: NetworkEventRecorder?
     private var authorizedSessions: [Data] = []
     private var frontierRequestHeights: [UInt64] = []
     private var forwardAfterCIDs: [String] = []
@@ -151,12 +155,16 @@ private actor RangeServingPeer: IvyDelegate {
         genesisCID: String,
         chain: [String],
         receiver: ChainProcess,
-        claimedHeight: UInt64? = nil
+        claimedHeight: UInt64? = nil,
+        servesRanges: Bool = true,
+        events: NetworkEventRecorder? = nil
     ) {
         self.genesisCID = genesisCID
         self.chain = chain
         self.receiver = receiver
         self.claimedHeight = claimedHeight ?? UInt64(chain.count)
+        self.servesRanges = servesRanges
+        self.events = events
     }
 
     func ivy(
@@ -179,7 +187,8 @@ private actor RangeServingPeer: IvyDelegate {
                 payload: payload
             )
         case NodeNetworkTopic.ancestorRangeRequest:
-            guard let request = try? AncestorRangeRequestMessage.decoded(
+            await events?.append("range request")
+            guard servesRanges, let request = try? AncestorRangeRequestMessage.decoded(
                 message.payload
             ) else { return }
             // Locator is newest-first: the first hit is the highest shared.
@@ -200,7 +209,7 @@ private actor RangeServingPeer: IvyDelegate {
                 payload: payload
             )
         case NodeNetworkTopic.forwardRangeRequest:
-            guard let request = try? ForwardRangeRequestMessage.decoded(
+            guard servesRanges, let request = try? ForwardRangeRequestMessage.decoded(
                 message.payload
             ) else { return }
             forwardAfterCIDs.append(request.afterCID)
@@ -241,6 +250,19 @@ private actor RangeServingPeer: IvyDelegate {
 
     func frontierRequests() -> [UInt64] { frontierRequestHeights }
     func forwardRequests() -> [String] { forwardAfterCIDs }
+}
+
+/// Says nothing, but answers every transaction inventory request (empty),
+/// as a live peer does; an unanswered one recycles the session.
+private final class InventoryAnsweringPeer: IvyDelegate, Sendable {
+    func ivy(
+        _ ivy: Ivy,
+        didReceiveMessage message: PeerMessage,
+        from peer: AuthenticatedPeer
+    ) async {
+        guard message.topic == NodeNetworkTopic.transactionInventoryRequest else { return }
+        await answerInventoryEmpty(ivy, message: message, peer: peer)
+    }
 }
 
 /// Records every topic it receives and the requestID of each frontier
@@ -450,7 +472,7 @@ private actor SilentDeepPeer: IvyDelegate {
 
 /// Answer a runtime's hello-reply inventory request with an empty page so the
 /// scripted session survives past the request timeout.
-private func answerInventoryEmpty(
+func answerInventoryEmpty(
     _ ivy: Ivy,
     message: PeerMessage,
     peer: AuthenticatedPeer
@@ -1892,6 +1914,160 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         }
         await client.stop()
         await fixture.runtime.stop()
+    }
+
+    /// A block that arrives before its parent waits for the parent at a
+    /// constant request cost. Resolving its difficulty anchor by walking the
+    /// missing ancestry over the network — one Volume request per ancestor,
+    /// repeated at every level of the predecessor walk down from an announced
+    /// deep tip — is quadratic, and drained the supplier's per-peer budget
+    /// until requests went unanswered for a full request timeout each (#201).
+    /// Admission now answers the anchor from what it holds or parks.
+    func testOutOfOrderBlockParksOnItsParentWithoutWalkingItsAncestry()
+        async throws
+    {
+        let fixture = try await overlayRuntime(
+            keyByte: 0xe1,
+            requestTimeout: .milliseconds(300)
+        )
+        // Deep enough that walking the ancestry per level (block h asked
+        // depth + 1 - h times) breaks the per-block bound below.
+        let depth = 8
+        let producer = try await canonicalNetworkProcess()
+        let clock = TestBlockClock()
+        var parent = try await producer.canonicalTipBlock()
+        var chain: [String] = []
+        var volumes: [SerializedVolume] = []
+        for _ in 0..<depth {
+            parent = try await acceptNexusBlock(
+                on: parent,
+                process: producer,
+                timestamp: clock.next()
+            )
+            let cid = try BlockHeader(node: parent).rawCID
+            chain.append(cid)
+            let volume = await producer.volume(cid)
+            volumes.append(try XCTUnwrap(volume))
+        }
+        let source = RecordingVolumesSource(volumes)
+        let client = Ivy(config: IvyConfig(
+            signingKey: signingKey(0xe2),
+            listenPort: 0,
+            stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        ))
+        // Answers no range request: the tip and the predecessor walk under
+        // it are the only way the joiner acquires this chain. It answers the
+        // transaction inventory request, as any peer does: left unanswered,
+        // the runtime recycles the session at the request timeout, which on
+        // a slow run lands mid-walk and strands it. The short request
+        // timeout keeps that fixture race visible on a fast run.
+        let delegate = InventoryAnsweringPeer()
+        await client.installTestDelegate(delegate)
+        await client.setContentSource(source)
+        let service = networkService(
+            process: fixture.process,
+            runtime: fixture.runtime
+        )
+        do {
+            try await fixture.runtime.start(
+                process: fixture.process,
+                chain: transactionServiceHandlers(service)
+            )
+            try await connectAndHello(
+                client,
+                peerID: fixture.peerID,
+                endpoint: fixture.endpoint,
+                hello: fixture.hello
+            )
+            guard case .enqueued = await client.sendMessage(
+                to: fixture.peerID,
+                topic: NodeNetworkTopic.blockAnnouncement,
+                payload: try BlockAnnouncementMessage(
+                    blockCID: try XCTUnwrap(chain.last),
+                    height: UInt64(depth)
+                ).encoded()
+            ) else {
+                throw NetworkTestError.failedSend
+            }
+            try await eventually("joiner acquires the announced chain") {
+                await fixture.process.canonicalTipHeight() == UInt64(depth)
+            }
+            let requests = await source.requests()
+            // A constant per block, whatever its depth: its own admission
+            // (which parks it), its child's admission reading it as the
+            // parent (for the grandparent's difficulty anchor), and its
+            // re-admission when its parent connects. The ancestor walk asked
+            // for the lowest blocks once per level above them.
+            for (height, cid) in chain.enumerated() {
+                let count = requests.filter { $0 == cid }.count
+                XCTAssertLessThanOrEqual(
+                    count, 3,
+                    "block at height \(height + 1) requested \(count) times"
+                )
+            }
+        } catch {
+            await client.stop()
+            await fixture.runtime.stop()
+            throw error
+        }
+        await client.stop()
+        await fixture.runtime.stop()
+    }
+
+    /// Waiting on a missing parent applies only to a block that clears its
+    /// own target. A target miss is a carrier: decided and relayed from its
+    /// own bytes, whatever its parent (§9.5), so it is never held behind a
+    /// parent this node may never accept.
+    func testTargetMissWithUnknownParentIsACarrierNotAPark() async throws {
+        let producer = try await canonicalNetworkProcess()
+        let joiner = try await canonicalNetworkProcess()
+        let clock = TestBlockClock()
+        let genesis = try await producer.canonicalTipBlock()
+        let parent = try await acceptNexusBlock(
+            on: genesis,
+            process: producer,
+            timestamp: clock.next()
+        )
+        let parentCID = try BlockHeader(node: parent).rawCID
+        var nonce: UInt64 = 0
+        var miss = try await BlockBuilder.buildBlock(
+            previous: parent, timestamp: clock.next(), target: UInt256(1) << 8,
+            nonce: nonce, fetcher: producer
+        )
+        while miss.validateProofOfWork(nexusHash: miss.proofOfWorkHash()) {
+            nonce += 1
+            miss = try await BlockBuilder.buildBlock(
+                previous: parent, timestamp: clock.next(), target: UInt256(1) << 8,
+                nonce: nonce, fetcher: producer
+            )
+        }
+        let missHeader = try BlockHeader(node: miss)
+        try await missHeader.storeBlock(fetcher: producer, storer: producer)
+        let carrier = try await joiner.importBlock(
+            missHeader, remoteSource: producer, mode: .header
+        )
+        guard case .carrier = carrier.decision else {
+            return XCTFail("a target miss is a carrier, got \(carrier.decision)")
+        }
+        XCTAssertEqual(
+            carrier.parentCarrierLink?.carrierCID, missHeader.rawCID,
+            "the carrier is relayed"
+        )
+        XCTAssertNil(carrier.sameChainPredecessor, "not parked on its parent")
+
+        // The same parent under a block that clears its target: it waits
+        // for that parent.
+        let child = try await acceptNexusBlock(
+            on: parent,
+            process: producer,
+            timestamp: clock.next()
+        )
+        let waiting = try await joiner.importBlock(
+            try BlockHeader(node: child), remoteSource: producer, mode: .header
+        )
+        XCTAssertEqual(waiting.sameChainPredecessor?.predecessorCID, parentCID)
     }
 
     /// One peer's in-flight range sync must not silence every OTHER peer's

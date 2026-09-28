@@ -20,6 +20,11 @@ struct NodeMetricsSample: Sendable {
     /// Validate-walk passes parked on a non-verdict (§9.9): a stall the
     /// operator must be able to see, since nothing re-arms it on its own.
     let executionWalkParked: UInt64
+    /// CIDs network block admission requested from candidates' sessions after
+    /// local storage missed, cache hits included, admission path only. A block
+    /// admitted in order costs a small constant; growth per block with chain
+    /// depth is an acquisition defect.
+    let candidateSessionReads: UInt64
 
     init(
         chainPath: [String],
@@ -30,7 +35,8 @@ struct NodeMetricsSample: Sendable {
         processStartTime: Date,
         parentReportsApplied: UInt64 = 0,
         parentReportRefusals: [String: UInt64] = [:],
-        executionWalkParked: UInt64 = 0
+        executionWalkParked: UInt64 = 0,
+        candidateSessionReads: UInt64 = 0
     ) {
         self.chainPath = chainPath
         self.validatedTipHeight = validatedTipHeight
@@ -41,6 +47,7 @@ struct NodeMetricsSample: Sendable {
         self.parentReportsApplied = parentReportsApplied
         self.parentReportRefusals = parentReportRefusals
         self.executionWalkParked = executionWalkParked
+        self.candidateSessionReads = candidateSessionReads
     }
 }
 
@@ -89,6 +96,12 @@ func renderNodeMetrics(_ sample: NodeMetricsSample) -> String {
         "lattice_validate_walk_parked_total",
         "Validate-walk passes parked on a non-verdict (a stall nothing re-arms on its own).",
         [(chain, String(sample.executionWalkParked))],
+        type: "counter"
+    )
+    family(
+        "lattice_candidate_session_reads_total",
+        "CIDs network block admission requested from candidate sessions after local storage missed (session cache hits included; admission path only).",
+        [(chain, String(sample.candidateSessionReads))],
         type: "counter"
     )
     family(

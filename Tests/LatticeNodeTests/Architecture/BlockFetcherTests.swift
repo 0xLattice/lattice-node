@@ -541,6 +541,44 @@ final class BlockFetcherTests: XCTestCase {
         XCTAssertEqual(fetcher.next()?.blockCID, "descendant")
     }
 
+    func testExtendingWalkEvictsAnotherParkBeforeItsOwnHead() throws {
+        // The head of a predecessor walk is its oldest park. With the budget
+        // full, the walk extending itself must evict some other retained
+        // entry, not the head it exists to connect.
+        var fetcher = BlockFetcher()
+        XCTAssertTrue(fetcher.observe(.init(blockCID: "head", package: nil)).accepted)
+        let stale = (0..<(BlockFetcher.parkedCapacity - 1)).map { "stale-\($0)" }
+        for cid in stale {
+            XCTAssertTrue(fetcher.observe(.init(blockCID: cid, package: nil)).accepted)
+        }
+        let head = try XCTUnwrap(fetcher.next())
+        XCTAssertEqual(head.blockCID, "head")
+        XCTAssertTrue(fetcher.complete(head.ticket, resolution: .predecessor("p1")))
+        for cid in stale {
+            let candidate = try XCTUnwrap(fetcher.next())
+            XCTAssertEqual(candidate.blockCID, cid)
+            XCTAssertTrue(fetcher.complete(
+                candidate.ticket,
+                resolution: .wait(.evidence)
+            ))
+        }
+        // Budget full: the head and every stale wait are parked.
+        let p1 = try XCTUnwrap(fetcher.next())
+        XCTAssertEqual(p1.blockCID, "p1")
+        XCTAssertTrue(fetcher.complete(p1.ticket, resolution: .predecessor("p2")))
+        XCTAssertTrue(fetcher.tracks("head"), "the walk kept its head")
+        XCTAssertFalse(fetcher.tracks("stale-0"), "the oldest other park went")
+
+        // The walk connects all the way up to its head.
+        let p2 = try XCTUnwrap(fetcher.next())
+        XCTAssertEqual(p2.blockCID, "p2")
+        XCTAssertTrue(fetcher.complete(p2.ticket, resolution: .connected))
+        let woken = try XCTUnwrap(fetcher.next())
+        XCTAssertEqual(woken.blockCID, "p1")
+        XCTAssertTrue(fetcher.complete(woken.ticket, resolution: .connected))
+        XCTAssertEqual(fetcher.next()?.blockCID, "head")
+    }
+
     func testRecoverySeedingRespectsTheRetainedBudget() throws {
         // A history-heavy store can carry thousands of stale unresolved side
         // edges; seeding them all would exhaust the retained budget from

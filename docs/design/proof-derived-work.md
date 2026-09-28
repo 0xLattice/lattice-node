@@ -226,4 +226,4 @@ with the production descent, weight index, or arithmetic, must agree with
 `ChainState` on the golden, differential, and replay fixtures. Its
 `LatticeSim` harness quantifies the deterministic tie-break and no-finality
 tradeoffs under deep-reorg, selfish-mining, and balancing strategies (see the
-[consensus simulator](https://github.com/adalinxx/Lattice/blob/37.0.0/docs/consensus-simulator.md)).
+[adversarial report](https://github.com/adalinxx/Lattice/blob/38.0.0/docs/consensus/adversarial-report.md)).

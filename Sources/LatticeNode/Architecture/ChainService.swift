@@ -10,6 +10,22 @@ private struct ImportEffects: Sendable {
     let parentGenesisLinks: [ParentGenesisLink]
 }
 
+/// Wraps a network candidate's session so admission's reads of it are
+/// counted: the CIDs network block admission requests from the session after
+/// local storage misses. The session answers some from its per-attempt cache
+/// and fetches the rest from the candidate's supplier, so this is an upper
+/// bound on supplier requests from the admission path, not a count of them;
+/// other acquisition paths (the validate walk, evidence) are not counted.
+private struct CountedContentSource: ContentSource {
+    let base: any ContentSource
+    let count: @Sendable (Int) async -> Void
+
+    func fetch(_ cids: Set<String>) async -> [String: Data] {
+        await count(cids.count)
+        return await base.fetch(cids)
+    }
+}
+
 /// Transport-independent operations for one path. A future HTTP layer only
 /// decodes a bounded DTO, calls this actor, and encodes the response.
 public actor ChainService {
@@ -100,6 +116,9 @@ public actor ChainService {
     private let executionWalkRetryInterval: Duration
     private var executionWalkRetryTask: Task<Void, Never>?
     private var executionWalkParkedCount: UInt64 = 0
+    /// CIDs network block admission requested from candidates' sessions
+    /// (see `CountedContentSource`).
+    private var candidateSessionReadCount: UInt64 = 0
     #if DEBUG
     // Test seam: invoked with each height about to be `.execution`-admitted, in
     // walk order. Lets tests assert strictly-forward progress (never tip-first).
@@ -231,7 +250,8 @@ public actor ChainService {
             processStartTime: processStartTime,
             parentReportsApplied: reports.applied,
             parentReportRefusals: reports.refusals,
-            executionWalkParked: executionWalkParkedCount
+            executionWalkParked: executionWalkParkedCount,
+            candidateSessionReads: candidateSessionReadCount
         ))
     }
 
@@ -678,7 +698,10 @@ public actor ChainService {
             header,
             authenticatedChildPackage: authenticatedChildPackage,
             preparingChildDirectories: preparingChildDirectories,
-            remoteSource: contentSource,
+            remoteSource: CountedContentSource(base: contentSource) {
+                [weak self] count in
+                await self?.countCandidateSessionReads(count)
+            },
             mode: weighed ? .header : .full,
             canonicalCommitPublisher: { [self] commit in
                 await enqueueCanonicalCommit(commit)
@@ -702,6 +725,10 @@ public actor ChainService {
             outcome: outcome
         )
         return outcome
+    }
+
+    private func countCandidateSessionReads(_ count: Int) {
+        candidateSessionReadCount &+= UInt64(count)
     }
 
     public func submitTransaction(

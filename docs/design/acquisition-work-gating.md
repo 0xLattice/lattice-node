@@ -219,12 +219,14 @@ Acquisition spends in three steps, and only the last is permanent:
   Until then that work stays uncredited and the pending blocks occupy the
   budget.
 
-  A node holding the parent in its consensus graph reads the anchor from it in
-  O(1). A node that does not — an out-of-order arrival, which is exactly this
-  path — falls back to walking the ancestry to height 1, which is O(chain
-  depth) rather than the ancestor window the windowed rule needed.
-  That is bounded by the offered branch's depth, not by a committed parameter,
-  and it grows with the chain. It is a cost to watch as Nexus deepens.
+  Admission reads the anchor in O(1) from what it already holds: the block
+  itself at height 1, a height-1 parent, or the parent's or grandparent's
+  entry in the consensus graph. An out-of-order arrival with neither held —
+  exactly this path — never walks its ancestry: admission reports the anchor
+  unavailable and the block parks on its predecessor, retried when that
+  connects. Only a builder with no consensus graph to ask walks to height
+  1. The cost per offered block is therefore constant, whatever the chain's
+  depth.
 - **Keep.** Once the work that would enter a comparison reaches the bar, the
   offers behind it go through ordinary acquisition unchanged: weighed when
   possessed, stored durably, counted, and executed if they become load-bearing.
