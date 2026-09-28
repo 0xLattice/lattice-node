@@ -225,9 +225,8 @@ Acquisition spends in three steps, and only the last is permanent:
   exactly this path — never walks its ancestry: admission reports the anchor
   unavailable and the block parks on its predecessor, retried when that
   connects. Only a builder with no consensus graph to ask walks to height
-  1.
-  That is bounded by the offered branch's depth, not by a committed parameter,
-  and it grows with the chain. It is a cost to watch as Nexus deepens.
+  1. The cost per offered block is therefore constant, whatever the chain's
+  depth.
 - **Keep.** Once the work that would enter a comparison reaches the bar, the
   offers behind it go through ordinary acquisition unchanged: weighed when
   possessed, stored durably, counted, and executed if they become load-bearing.
