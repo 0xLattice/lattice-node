@@ -1917,7 +1917,10 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             keyByte: 0xe1,
             requestTimeout: .seconds(5)
         )
-        let depth = 16
+        // Deep enough that walking the ancestry per level (block h asked
+        // depth + 1 - h times) breaks the per-block bound below, shallow
+        // enough for the sanitizer jobs, which run at 3–10x the cost.
+        let depth = 8
         let producer = try await canonicalNetworkProcess()
         let clock = TestBlockClock()
         var parent = try await producer.canonicalTipBlock()
@@ -1972,7 +1975,7 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             ) else {
                 throw NetworkTestError.failedSend
             }
-            try await eventually("joiner acquires the announced chain") {
+            try await eventually("joiner acquires the announced chain", within: .seconds(60)) {
                 await fixture.process.canonicalTipHeight() == UInt64(depth)
             }
             let requests = await source.requests()
