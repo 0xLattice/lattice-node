@@ -12,17 +12,11 @@ import XCTest
 /// cross-plane dependency is listed here and nowhere else.
 ///
 /// Members are attributed by brace depth inside the file's
-/// `extension NodeNetworkRuntime`. Comments and string literal text are
-/// skipped; string interpolations are code. Plain `XCTAssert` only
-/// (`XCTContext` is unavailable on corelibs XCTest).
+/// `extension NodeNetworkRuntime`, scanned as code (`SwiftSource.code`):
+/// comments and string literal text are skipped; string interpolations are
+/// code. Plain `XCTAssert` only (`XCTContext` is unavailable on corelibs
+/// XCTest).
 final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
-
-    private static let architectureRoot = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent()  // SafetyNet
-        .deletingLastPathComponent()  // LatticeNodeTests
-        .deletingLastPathComponent()  // Tests
-        .deletingLastPathComponent()  // package root
-        .appendingPathComponent("Sources/LatticeNode/Architecture")
 
     private enum Plane: String {
         case overlay
@@ -75,14 +69,11 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
         var lines: [(number: Int, code: String)] = []
     }
 
-    private func sources() throws -> [(path: String, text: String)] {
-        let root = Self.architectureRoot.standardizedFileURL
-        return try Self.files.keys.sorted().map {
-            ($0, try String(
-                contentsOf: root.appendingPathComponent($0),
-                encoding: .utf8
-            ))
-        }
+    private func sources() throws -> [SourceFile] {
+        let files = try SourceTree.swiftFiles(under: "Sources/LatticeNode/Architecture")
+            .filter { Self.files[$0.path] != nil }
+        XCTAssertEqual(Set(files.map(\.path)), Set(Self.files.keys), "a plane file is missing")
+        return files
     }
 
     private static let memberPattern =
@@ -92,7 +83,7 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
     /// at the extension's own depth that declares a member starts it; its
     /// body is every line until the depth returns.
     private func members(
-        in files: [(path: String, text: String)],
+        in files: [SourceFile],
         plane: (String) -> Plane
     ) throws -> [Member] {
         let declaration = try NSRegularExpression(pattern: Self.memberPattern)
@@ -100,8 +91,8 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
         for file in files {
             var depth = 0
             var current: Member?
-            for (index, raw) in file.text.components(separatedBy: "\n").enumerated() {
-                let line = Self.code(of: raw)
+            for (index, line) in SwiftSource.code(file.text)
+                .components(separatedBy: "\n").enumerated() {
                 let range = NSRange(line.startIndex..., in: line)
                 if depth == 1,
                    let match = declaration.firstMatch(in: line, range: range),
@@ -195,48 +186,6 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
         return found
     }
 
-    /// The line without its `//` comment and string literal text; an
-    /// interpolation inside a string is kept as code.
-    private static func code(of line: String) -> String {
-        var result = ""
-        var inString = false
-        var interpolationDepth = 0
-        var previous: Character?
-        for character in line {
-            if inString && interpolationDepth == 0 {
-                if character == "\"" && previous != "\\" {
-                    inString = false
-                } else if character == "(" && previous == "\\" {
-                    interpolationDepth = 1
-                    result.append(" ")
-                }
-                previous = character
-                continue
-            }
-            if inString {
-                if character == "(" { interpolationDepth += 1 }
-                if character == ")" {
-                    interpolationDepth -= 1
-                    if interpolationDepth == 0 {
-                        result.append(" ")
-                        previous = character
-                        continue
-                    }
-                }
-                result.append(character)
-            } else if character == "\"" {
-                inString = true
-            } else if character == "/" && previous == "/" {
-                result.removeLast()
-                break
-            } else {
-                result.append(character)
-            }
-            previous = character
-        }
-        return result
-    }
-
     func testScanAttributesMembersAndFindsCrossings() throws {
         let overlay = """
         extension NodeNetworkRuntime {
@@ -273,7 +222,11 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
         }
         """
         let members = try members(
-            in: [("o", overlay), ("h", hierarchy), ("f", fetcher)]
+            in: [
+                SourceFile(path: "o", text: overlay),
+                SourceFile(path: "h", text: hierarchy),
+                SourceFile(path: "f", text: fetcher),
+            ]
         ) { ["o": .overlay, "h": .hierarchy][$0] ?? .fetcher }
         XCTAssertEqual(
             members.map { "\($0.file).\($0.name)" },
@@ -290,6 +243,23 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
         ])
         XCTAssertEqual(try crossings(in: members, from: .fetcher), [
             "f:4: admit touches hierarchyState",
+        ])
+    }
+
+    /// A `"\\"` literal ends at its second quote. A strip that reads `\"` as
+    /// an escaped quote hides the rest of the line, and a crossing with it:
+    /// with balanced braces nothing else notices.
+    func testACrossingAfterAnEscapedBackslashIsSeen() throws {
+        let overlay = #"""
+        extension NodeNetworkRuntime {
+            func overlayWork() {
+                let separator = "\\"; _ = hierarchyState
+            }
+        }
+        """#
+        let members = try members(in: [SourceFile(path: "o", text: overlay)]) { _ in .overlay }
+        XCTAssertEqual(try crossings(in: members, from: .overlay), [
+            "o:3: overlayWork touches hierarchyState",
         ])
     }
 

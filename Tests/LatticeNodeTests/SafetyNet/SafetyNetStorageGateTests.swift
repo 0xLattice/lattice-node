@@ -11,52 +11,17 @@ import XCTest
 /// - (b) No execution tier is spelled as an integer: every
 ///   `accepted_blocks.validated` read and write goes through `BlockStatus`.
 ///
+/// Comments are skipped; string literals are not, because the tier rule is
+/// mostly spelled in SQL.
 /// Plain `XCTAssert` only (`XCTContext` is unavailable on corelibs XCTest).
 final class SafetyNetStorageGateTests: XCTestCase {
 
-    private static let architectureRoot = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent()  // SafetyNet
-        .deletingLastPathComponent()  // LatticeNodeTests
-        .deletingLastPathComponent()  // Tests
-        .deletingLastPathComponent()  // package root
-        .appendingPathComponent("Sources/LatticeNode/Architecture")
-
-    /// Every Swift source under `Architecture`, keyed by path relative to it.
-    private func sources() throws -> [(path: String, text: String)] {
-        let root = Self.architectureRoot.standardizedFileURL
-        guard let enumerator = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: nil
-        ) else {
-            XCTFail("cannot enumerate \(root.path)")
-            return []
-        }
-        var files: [(path: String, text: String)] = []
-        for case let url as URL in enumerator where url.pathExtension == "swift" {
-            let path = url.standardizedFileURL.path
-            let relative = String(path.dropFirst(root.path.count + 1))
-            files.append((relative, try String(contentsOf: url, encoding: .utf8)))
-        }
-        XCTAssertFalse(files.isEmpty, "no Swift sources under \(root.path)")
-        return files.sorted { $0.path < $1.path }
+    private func sources() throws -> [SourceFile] {
+        try SourceTree.swiftFiles(under: "Sources/LatticeNode/Architecture")
     }
 
-    /// `file:line: text` for every line of `files` matching `pattern`.
-    private func matches(
-        _ pattern: String,
-        in files: [(path: String, text: String)]
-    ) throws -> [String] {
-        let regex = try NSRegularExpression(pattern: pattern)
-        var found: [String] = []
-        for file in files {
-            for (index, line) in file.text.components(separatedBy: "\n").enumerated() {
-                let range = NSRange(line.startIndex..., in: line)
-                if regex.firstMatch(in: line, range: range) != nil {
-                    found.append("\(file.path):\(index + 1): \(line.trimmingCharacters(in: .whitespaces))")
-                }
-            }
-        }
-        return found
+    private func matches(_ pattern: String, in files: [SourceFile]) throws -> [String] {
+        try SwiftSource.matchingLines(pattern, in: files, view: SwiftSource.blankingComments)
     }
 
     func testGateSeesTheSources() throws {

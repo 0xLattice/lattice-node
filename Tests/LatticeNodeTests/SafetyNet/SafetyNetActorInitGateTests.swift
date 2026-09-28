@@ -11,92 +11,17 @@ import XCTest
 /// for a clock and the runtime's peer sets, and it is listed as the one
 /// known exception until it takes an interface too.
 ///
-/// Comments and string literals are blanked before scanning. Initializers of
-/// types nested in an actor are not the actor's and are not scanned.
+/// Scanned as code (`SwiftSource.code`): comments and string literal text
+/// are blanked, interpolations are kept. Initializers of types nested in an
+/// actor are not the actor's and are not scanned.
 /// Plain `XCTAssert` only (`XCTContext` is unavailable on corelibs XCTest).
 final class SafetyNetActorInitGateTests: XCTestCase {
-
-    private static let architectureRoot = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent()  // SafetyNet
-        .deletingLastPathComponent()  // LatticeNodeTests
-        .deletingLastPathComponent()  // Tests
-        .deletingLastPathComponent()  // package root
-        .appendingPathComponent("Sources/LatticeNode/Architecture")
 
     /// Files whose actor initializers may still take closures.
     private static let knownExceptions: Set<String> = ["StaleTipPeerSearch.swift"]
 
-    /// Every Swift source under `Architecture`, keyed by path relative to it.
-    private func sources() throws -> [(path: String, text: String)] {
-        let root = Self.architectureRoot.standardizedFileURL
-        guard let enumerator = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: nil
-        ) else {
-            XCTFail("cannot enumerate \(root.path)")
-            return []
-        }
-        var files: [(path: String, text: String)] = []
-        for case let url as URL in enumerator where url.pathExtension == "swift" {
-            let path = url.standardizedFileURL.path
-            let relative = String(path.dropFirst(root.path.count + 1))
-            files.append((relative, try String(contentsOf: url, encoding: .utf8)))
-        }
-        XCTAssertFalse(files.isEmpty, "no Swift sources under \(root.path)")
-        return files.sorted { $0.path < $1.path }
-    }
-
-    /// `text` with comments and string-literal contents replaced by spaces
-    /// (newlines kept), so braces and parentheses left are code.
-    private static func blanked(_ text: String) -> [Character] {
-        let chars = Array(text)
-        var out = chars
-        var index = 0
-        func blank(_ i: Int) { if out[i] != "\n" { out[i] = " " } }
-        func at(_ i: Int, _ s: String) -> Bool {
-            let needle = Array(s)
-            guard i + needle.count <= chars.count else { return false }
-            return Array(chars[i..<(i + needle.count)]) == needle
-        }
-        while index < chars.count {
-            if at(index, "//") {
-                while index < chars.count, chars[index] != "\n" { blank(index); index += 1 }
-            } else if at(index, "/*") {
-                var depth = 0
-                repeat {
-                    if at(index, "/*") { depth += 1; blank(index); blank(index + 1); index += 2 }
-                    else if at(index, "*/") { depth -= 1; blank(index); blank(index + 1); index += 2 }
-                    else { blank(index); index += 1 }
-                } while depth > 0 && index < chars.count
-            } else if chars[index] == "\"" {
-                let delimiter = at(index, "\"\"\"") ? "\"\"\"" : "\""
-                index += delimiter.count
-                var interpolation = 0
-                while index < chars.count {
-                    if interpolation == 0 {
-                        if chars[index] == "\\", at(index + 1, "(") {
-                            blank(index); interpolation = 1; index += 2
-                        } else if chars[index] == "\\" {
-                            blank(index)
-                            if index + 1 < chars.count { blank(index + 1) }
-                            index += 2
-                        } else if at(index, delimiter) {
-                            index += delimiter.count
-                            break
-                        } else {
-                            blank(index); index += 1
-                        }
-                    } else {
-                        if chars[index] == "(" { interpolation += 1 }
-                        if chars[index] == ")" { interpolation -= 1 }
-                        blank(index); index += 1
-                    }
-                }
-            } else {
-                index += 1
-            }
-        }
-        return out
+    private func sources() throws -> [SourceFile] {
+        try SourceTree.swiftFiles(under: "Sources/LatticeNode/Architecture")
     }
 
     private static func matchingClose(
@@ -121,9 +46,9 @@ final class SafetyNetActorInitGateTests: XCTestCase {
     /// `file:line: init` for every initializer, declared directly in an
     /// actor or in an extension of one, whose parameters include `@escaping`.
     private static func escapingActorInits(
-        in files: [(path: String, text: String)]
+        in files: [SourceFile]
     ) throws -> [String] {
-        let blankedFiles = files.map { (path: $0.path, code: blanked($0.text)) }
+        let blankedFiles = files.map { (path: $0.path, code: Array(SwiftSource.code($0.text))) }
         let actorName = try NSRegularExpression(pattern: #"\bactor\s+(\w+)"#)
         var actors = Set<String>()
         for file in blankedFiles {
@@ -208,7 +133,7 @@ final class SafetyNetActorInitGateTests: XCTestCase {
             init(callback: @escaping () -> Void) {}
         }
         """
-        let found = try Self.escapingActorInits(in: [(path: "sample", text: sample)])
+        let found = try Self.escapingActorInits(in: [SourceFile(path: "sample", text: sample)])
         XCTAssertEqual(found, ["sample:14: init", "sample:7: init"])
     }
 
