@@ -2923,7 +2923,10 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
 
     /// The parent session ends while released orphans are being fetched
     /// again: they go back to the pool (a blip is no reason to lose them),
-    /// and the reconnect's hello fetches them.
+    /// and the reconnect's hello fetches them. The request the blip cuts
+    /// short can report the parent unable to serve before the runtime
+    /// learns the session ended; that orphan too is the hello's. Before, it
+    /// waited out the request timeout for an acceptance that never came.
     func testASessionBlipDuringARefetchKeepsTheOrphans() async throws {
         let fixture = try await provisionalRootFixture(keyByte: 0xee)
         let probe = EvidenceServeProbe()
@@ -3089,7 +3092,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             await fixture.childRuntime.triggerParentEvidenceRetryForTesting(accepted: lateCID)
             try await eventually("the unserved orphan waits out the request timeout") {
                 let retry = await fixture.childRuntime.orphanedParentEvidenceForTesting()[orphan]
-                guard case .notBefore = retry else { return false }
+                guard case .unservedUntil = retry else { return false }
                 return true
             }
             await probe.stall("served")

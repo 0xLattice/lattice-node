@@ -14,11 +14,14 @@ struct ParentEvidenceOrphans {
     }
 
     /// What makes an orphan worth trying again: its missing same-chain
-    /// predecessor accepted; its time (milliseconds) reached; or, for any
-    /// other undecided import, the next trigger.
+    /// predecessor accepted; its time (milliseconds) reached; for one the
+    /// parent could not serve, the request timeout passed or the parent's
+    /// next hello (the session that could not serve it may have been
+    /// ending); or, for any other undecided import, the next trigger.
     enum Retry: Equatable, Sendable {
         case predecessor(String)
         case notBefore(Int64)
+        case unservedUntil(Int64)
         case nextTrigger
     }
 

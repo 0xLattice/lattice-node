@@ -1488,7 +1488,8 @@ extension NodeNetworkRuntime {
     /// import or outside it through `predecessorConnectedOutOfBand`): the
     /// orphans behind it, and those whose time has come, are released. The
     /// parent said hello (`accepted` nil): every orphan whose retry is met
-    /// (predecessor accepted, time reached, or any other) is released.
+    /// (predecessor accepted, time reached, not served before, or any
+    /// other) is released.
     /// Orphans whose block the fetcher still holds stay pooled (its attempt
     /// decides them). Exactly the released orphans are fetched again from
     /// the parent by their place in its index — never a rescan — each on its
@@ -1529,6 +1530,7 @@ extension NodeNetworkRuntime {
             switch orphan.retry {
             case .nextTrigger: return atHello
             case .notBefore(let time): return time <= now
+            case .unservedUntil(let time): return atHello || time <= now
             case .predecessor(let predecessorCID): return accepted.contains(predecessorCID)
             }
         }
@@ -1572,7 +1574,10 @@ extension NodeNetworkRuntime {
 
     /// Fetches released orphans again, one by one. The parent unable to
     /// serve one puts it back in the pool until the request timeout passes
-    /// (its own trigger may already have fired); its session ending puts it
+    /// (its own trigger may already have fired) or the parent's next hello:
+    /// a request cut short by its session ending can report the parent
+    /// unable to serve before this runtime learns the session ended, and
+    /// then only that hello follows. Its session ending puts it
     /// and the rest back with their own retries, for the reconnect's hello;
     /// a full inbox puts the rest back and waits for the capacity callback,
     /// which resumes exactly those. Only a malformed answer drops an
@@ -1624,7 +1629,7 @@ extension NodeNetworkRuntime {
                 return
             case .unavailable:
                 let timeout = planeConfigurations.hierarchy.requestTimeout
-                repool([orphan], retry: .notBefore(
+                repool([orphan], retry: .unservedUntil(
                     ParentEvidenceOrphans.clock()
                         + Int64(timeout / .milliseconds(1))
                 ))
