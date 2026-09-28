@@ -657,6 +657,56 @@ final class MiningTemplateBookTests: XCTestCase {
         XCTAssertEqual(template.block.toData(), scheduled.toData())
     }
 
+    /// Establishes: NODE-MEMPOOL-001.a
+    func testAFailingTransactionBetweenValidOnesKeepsThemAll() async throws {
+        let fixture = try await chainFixture()
+        let recipient = CryptoUtils.createAddress(
+            from: CryptoUtils.generateKeyPair().publicKey
+        )
+        let unfundedKey = CryptoUtils.generateKeyPair()
+        let unfunded = CryptoUtils.createAddress(from: unfundedKey.publicKey)
+        // The failing transaction sits BETWEEN the valid ones, so they are
+        // accepted in separate chunks: bisection must keep the half after the
+        // failure, and each accepted chunk must build on the ones before.
+        let stale = try signedTransaction(
+            key: unfundedKey,
+            accountActions: [
+                AccountAction(owner: unfunded, delta: -2),
+                AccountAction(owner: recipient, delta: 1),
+            ],
+            fee: 1,
+            nonce: 1
+        )
+        let valid = try (1...2).map { nonce in
+            try signedTransaction(
+                key: fixture.key,
+                accountActions: [
+                    AccountAction(owner: fixture.owner, delta: -2),
+                    AccountAction(owner: recipient, delta: 1),
+                ],
+                fee: 1,
+                nonce: UInt64(nonce)
+            )
+        }
+
+        let template = try await MiningTemplateBook(
+            chainPath: ["Nexus"]
+        ).build(
+            previous: fixture.genesis,
+            transactions: [valid[0], stale, valid[1]],
+            children: [],
+            timestamp: 1,
+            fetcher: fixture.store
+        )
+        let transactions = try XCTUnwrap(template.block.transactions.node)
+        let included = Set(try transactions.allKeysAndValues().values.compactMap {
+            $0.node?.body.rawCID
+        })
+
+        XCTAssertEqual(included, Set(valid.map(\.body.rawCID)))
+    }
+
+    /// Establishes: NODE-MEMPOOL-001.a
     func testStateInvalidTransactionDoesNotSuppressWork() async throws {
         let fixture = try await chainFixture()
         let recipient = CryptoUtils.createAddress(

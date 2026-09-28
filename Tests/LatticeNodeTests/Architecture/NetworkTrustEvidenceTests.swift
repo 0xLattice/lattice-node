@@ -314,6 +314,41 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
         }
     }
 
+    /// Establishes: NODE-STORAGE-001.a
+    func testAnObjectOutsideTheSessionRootIsRequestedAsItsOwnRootOnce() async throws {
+        let recorder = ContentRequestRecorder()
+        let servingKey = peerKey(signingKey(46)).hex
+        let rootHeader = try HeaderImpl<PublicKey>(node: PublicKey(key: "session-root"))
+        let nestedHeader = try HeaderImpl<PublicKey>(node: PublicKey(key: "own-root"))
+        let rootCID = rootHeader.rawCID
+        let nestedCID = nestedHeader.rawCID
+        let volumes = [
+            rootCID: [rootCID: try rootHeader.mapToData()],
+            nestedCID: [nestedCID: try nestedHeader.mapToData()],
+        ]
+        let source = IvyRootContentSource { root in
+            await recorder.append(root: root)
+            return AttributedVolumeResponse(
+                rootCID: root,
+                entries: volumes[root] ?? [:],
+                servedBy: PeerID(publicKey: servingKey)
+            )
+        }
+
+        let result = await source.withRootTracing(rootCID) { session in
+            _ = await session.fetch([rootCID])
+            let first = await session.fetch([nestedCID])
+            let again = await session.fetch([nestedCID])
+            return (first, again)
+        }
+
+        XCTAssertEqual(result.value.0, [nestedCID: volumes[nestedCID]![nestedCID]!])
+        XCTAssertEqual(result.value.1, result.value.0)
+        let requests = await recorder.snapshot()
+        XCTAssertEqual(requests, [rootCID, nestedCID])
+    }
+
+    /// Establishes: NODE-STORAGE-001.a
     func testRootScopedContentFetchesCompleteVolumesAndKeepsAttribution() async {
         let recorder = ContentRequestRecorder()
         let servingKey = peerKey(signingKey(45)).hex
@@ -462,6 +497,32 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
         XCTAssertTrue(result.attribution.contentUnavailable)
     }
 
+    /// Establishes: NODE-STORAGE-001.c
+    func testRootScopedContentRefusesAVolumeWithOneBadMemberEntry() async throws {
+        let root = try HeaderImpl<PublicKey>(node: PublicKey(key: "root"))
+        let member = try HeaderImpl<PublicKey>(node: PublicKey(key: "member"))
+        let rootBytes = try root.mapToData()
+        let supplier = peerKey(signingKey(0x45)).hex
+        let source = IvyRootContentSource { requested in
+            AttributedVolumeResponse(
+                rootCID: requested,
+                entries: [requested: rootBytes, member.rawCID: Data([0])],
+                servedBy: PeerID(publicKey: supplier)
+            )
+        }
+
+        let result = await source.withRootTracing(root.rawCID) { session in
+            await session.fetch([root.rawCID])
+        }
+
+        XCTAssertTrue(result.value.isEmpty, "a valid root entry does not vouch for its members")
+        XCTAssertEqual(
+            result.attribution.deficientVolumeSuppliers,
+            [root.rawCID: [supplier]]
+        )
+    }
+
+    /// Establishes: NODE-STORAGE-001.c
     func testRootScopedContentAttributesMalformedVolumeToItsSupplier() async {
         let root = try! HeaderImpl<PublicKey>(node: PublicKey(key: "root"))
         let supplier = peerKey(signingKey(0x44)).hex
@@ -484,6 +545,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
         )
     }
 
+    /// Establishes: NODE-STORAGE-001.f
     func testExactPeerSourcePreservesLocalFailuresBeforeAttribution() {
         let expected = PeerID(publicKey: "expected")
         let other = PeerID(publicKey: "other")
@@ -510,6 +572,12 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             IvyRootContentSource.response(wrongPeer, from: expected),
             .empty
         )
+        let rightPeer = AttributedVolumeResponse(
+            rootCID: "root",
+            entries: ["root": Data([1])],
+            servedBy: expected
+        )
+        XCTAssertEqual(IvyRootContentSource.response(rightPeer, from: expected), rightPeer)
     }
 
     func testEvidenceMergeAddsLocallyValidatedGenesisFact() throws {

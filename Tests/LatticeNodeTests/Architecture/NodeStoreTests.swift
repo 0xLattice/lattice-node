@@ -2162,6 +2162,34 @@ final class NodeStoreTests: XCTestCase {
         XCTAssertTrue(hasVolume)
     }
 
+    /// Establishes: NODE-STORAGE-002.g
+    func testTouchingAnOfferMakesItTheNewestAcrossReopen() async throws {
+        let directory = temporaryDirectory(create: true)
+        let path = directory.appendingPathComponent("state.db")
+        let broker = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let volumes = try ["touched-a", "touched-b", "touched-c"].map { seed in
+            try VolumeImpl<PublicKey>(node: PublicKey(key: seed))
+        }
+        for volume in volumes { try await volume.store(storer: broker) }
+        let (a, b, c) = (volumes[0].rawCID, volumes[1].rawCID, volumes[2].rawCID)
+
+        var store: NodeStore? = try makeStore(path: path, broker: broker)
+        try await store!.persistContextualCandidateRoots(candidateCID: a, roots: [a], capacity: 2)
+        try await store!.persistContextualCandidateRoots(candidateCID: b, roots: [b], capacity: 2)
+        // The path production takes when a template carries an offer again.
+        let touched = try await store!.touchContextualCandidate(candidateCID: a)
+        XCTAssertTrue(touched)
+
+        store = nil
+        store = try makeStore(path: path, broker: broker)
+        try await store!.persistContextualCandidateRoots(candidateCID: c, roots: [c], capacity: 2)
+        let retained = try await store!.contextualCandidateVolumeRoots()
+        XCTAssertEqual(Set(retained), Set([a, c]), "the touched offer outlived the untouched one")
+    }
+
+    /// Establishes: NODE-STORAGE-002.g, NODE-STORAGE-002.i, NODE-STORAGE-002.p
     func testContextualCandidateRootsUseDurableLRUReplacement()
         async throws
     {
@@ -2207,6 +2235,12 @@ final class NodeStoreTests: XCTestCase {
         let retainedBeforeReopen = try await store!
             .contextualCandidateVolumeRoots()
         XCTAssertEqual(Set(retainedBeforeReopen), Set([a, c, shared]))
+        // Live, before any reopen rebuilds the counts: b's eviction released
+        // its own pin on the shared root, and a and c still hold theirs.
+        _ = try await broker.evictUnpinned(graceSeconds: 0)
+        let sharedWhileLive = await broker.fetchVolumeLocal(root: shared)
+        XCTAssertNotNil(sharedWhileLive, "b's eviction left a and c's shared root owned")
+        try await volumes[3].store(storer: storer)
 
         store = nil
         store = try makeStore(path: path, broker: broker)
@@ -2262,6 +2296,7 @@ final class NodeStoreTests: XCTestCase {
     /// inbox retention sets), no wave of newer offers evicts it — its body
     /// and post-state stay pinned until the carried block's admission owns
     /// those roots, and only then are they released.
+    /// Establishes: NODE-STORAGE-002.j
     func testHandedOffOfferSurvivesNewerOffersUntilAdmissionOwnsRoots()
         async throws
     {
@@ -2339,6 +2374,7 @@ final class NodeStoreTests: XCTestCase {
     /// and drops the oldest whole — row and pinned roots together — so a
     /// child that rebuilds often cannot pin without bound, and an offer the
     /// parent never carried costs nothing for long.
+    /// Establishes: NODE-STORAGE-002.i
     func testOfferBudgetEvictsTheOldestOfferWhole() async throws {
         let directory = temporaryDirectory(create: true)
         let broker = try DiskBroker(
@@ -2348,18 +2384,18 @@ final class NodeStoreTests: XCTestCase {
             path: directory.appendingPathComponent("state.db"),
             broker: broker
         )
-        var offers: [VolumeImpl<PublicKey>] = []
-        for index in 0..<3 {
-            let offer = try VolumeImpl<PublicKey>(
-                node: PublicKey(key: "offer-\(index)")
-            )
+        // Offered in DESCENDING CID order, so the oldest offer has the
+        // largest CID: evicting by CID instead of by age picks the wrong one.
+        let offers = try (0..<3).map { index in
+            try VolumeImpl<PublicKey>(node: PublicKey(key: "offer-\(index)"))
+        }.sorted { $0.rawCID > $1.rawCID }
+        for offer in offers {
             try await offer.store(storer: broker)
             try await store.persistContextualCandidateRoots(
                 candidateCID: offer.rawCID,
                 roots: [offer.rawCID],
                 capacity: 2
             )
-            offers.append(offer)
         }
         let retained = try await store.contextualCandidateVolumeRoots()
         XCTAssertEqual(Set(retained), Set([offers[1].rawCID, offers[2].rawCID]))
@@ -2484,6 +2520,7 @@ final class NodeStoreTests: XCTestCase {
     /// The handoff budget runs on the offer cadence: storing an offer sheds
     /// the oldest handoff beyond capacity, with no explicit call, so a run
     /// that never restarts still keeps handoffs bounded.
+    /// Establishes: NODE-STORAGE-002.l
     func testStoringAnOfferEnforcesTheHandoffBudget() async throws {
         let directory = temporaryDirectory(create: true)
         let broker = try DiskBroker(

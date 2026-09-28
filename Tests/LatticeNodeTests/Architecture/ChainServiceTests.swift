@@ -696,6 +696,7 @@ final class ChainServiceTests: XCTestCase {
         }
     }
 
+    /// Establishes: NODE-MEMPOOL-001.i
     func testRestartRestoresLocalTransactionsButNotPeerTransactions() async throws {
         let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-service-mempool-restart-\(UUID().uuidString)",

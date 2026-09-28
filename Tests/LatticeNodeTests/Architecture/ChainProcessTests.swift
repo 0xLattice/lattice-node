@@ -10,6 +10,7 @@ import cashew
 @testable import LatticeNode
 
 final class ChainProcessTests: XCTestCase {
+    /// Establishes: NODE-MEMPOOL-001.f
     func testLocalTransactionVolumeSurvivesRestartAndUnretainsOnRemoval()
         async throws
     {
@@ -152,6 +153,7 @@ final class ChainProcessTests: XCTestCase {
         _ = process
     }
 
+    /// Establishes: NODE-STORAGE-002.p
     func testOpenDropsContextualPinsLeftAfterStateEvictionCommitted()
         async throws {
         let directory = temporaryDirectory()
@@ -225,6 +227,7 @@ final class ChainProcessTests: XCTestCase {
         _ = process
     }
 
+    /// Establishes: NODE-MEMPOOL-001.g
     func testLiveMempoolPinsTrackCurrentRootsAndClearOnRestart() async throws {
         let directory = temporaryDirectory()
         let config = try configuration(path: ["Nexus"], storage: directory)
@@ -271,6 +274,7 @@ final class ChainProcessTests: XCTestCase {
         process = nil
     }
 
+    /// Establishes: NODE-STORAGE-001.b
     func testTransientHierarchyContentIsAvailableOnlyAsACompleteVolume()
         async throws
     {
@@ -343,6 +347,12 @@ final class ChainProcessTests: XCTestCase {
             maxDataBytes: 1_024
         )
         XCTAssertTrue(selectedEntries.isEmpty)
+        let durableSelection = await source.content(
+            rootCID: durableHeader.rawCID,
+            cids: [durableHeader.rawCID],
+            maxDataBytes: 1_024
+        )
+        XCTAssertTrue(durableSelection.isEmpty)
     }
 
     func testNexusOpenBootstrapsExactGenesisAndRecoversIt() async throws {
@@ -1609,6 +1619,86 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertNotNil(stored)
     }
 
+    /// Establishes: NODE-STORAGE-002.a
+    func testImportRetainsItsRootsBeforeStagingTheBatchThatNamesThem()
+        async throws {
+        let directory = temporaryDirectory()
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let config = try configuration(path: ["Nexus"], storage: directory)
+        let store = try testNodeStore(
+            databasePath: directory.appendingPathComponent("state.db"),
+            nexusGenesisCID: config.nexusGenesisCID,
+            chainPath: config.chainPath,
+            issuingAuthorityKey: config.processPublicKey
+        )
+        let broker = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path,
+            evictUnpinnedGraceSeconds: 0
+        )
+        let importStorage = NodeImportStorage(storage: broker)
+        var stored: [String] = []
+        for directory in ["Ordered", "AlsoOrdered"] {
+            let volume = try VolumeImpl<Transaction>(node: try signedGenesisAnchorTransaction(
+                directory: directory,
+                childGenesisCID: NexusGenesis.expectedBlockHash
+            ))
+            try await volume.store(storer: importStorage)
+            stored.append(volume.rawCID)
+        }
+        let roots = stored
+        let root = roots[0]
+        let scope = "ordered-import-test"
+        let between = NetworkEventRecorder()
+
+        // On the success path, between retention and staging: every root of
+        // the batch is already retained and no staged batch names any yet.
+        try await ChainProcess.persist(
+            BlockImportBatch(facts: [
+                .block(ChainBlockFact(
+                    blockHash: root,
+                    parentBlockHash: nil,
+                    blockHeight: 0,
+                    postStateCID: root,
+                    prevStateCID: "previous-state",
+                    specCID: "spec",
+                    target: "target",
+                    nextTarget: "next-target",
+                    timestamp: 0,
+                    stateDiff: .empty
+                )),
+            ]),
+            importStorage: importStorage,
+            store: store,
+            broker: broker,
+            retentionScope: scope,
+            persistence: ImportPersistence(
+                pendingChildProofRoutes: [],
+                pendingChildProofCapacity: 1
+            ),
+            afterRetainingRoots: {
+                do {
+                    let retained = try await broker.retainedRoots(scope: scope)
+                    let staged = try await store.stagedImports().flatMap(\.volumeRoots)
+                    await between.append(
+                        "retained=\(Set(roots).isSubset(of: retained)) "
+                            + "staged=\(!Set(roots).isDisjoint(with: staged))"
+                    )
+                } catch {
+                    await between.append("error: \(error)")
+                }
+            }
+        )
+
+        let observed = await between.snapshot()
+        XCTAssertEqual(observed, ["retained=true staged=false"])
+        let stagedAfter = try await store.stagedImports().flatMap(\.volumeRoots)
+        XCTAssertTrue(Set(roots).isSubset(of: stagedAfter))
+    }
+
+    /// Establishes: NODE-STORAGE-002.a, NODE-STORAGE-002.c
     func testFailedStageLeavesSafeRetainedOrphanUntilStartupReconciliation()
         async throws {
         let directory = temporaryDirectory()
@@ -2104,6 +2194,7 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertEqual(durable.childCID, childHeader.rawCID)
     }
 
+    /// Establishes: NODE-SEMANTICS-002.a
     func testDeepestValidatedTipDegradesToValidatedAncestorAcrossReorg()
         async throws
     {
@@ -2363,6 +2454,7 @@ final class ChainProcessTests: XCTestCase {
     /// post-state. Consensus facts and the accepted-block row are untouched
     /// (the block stays accepted and its boundary still serves), the canonical
     /// closure stays validated, and a reopen agrees with the demoted set.
+    /// Establishes: NODE-STORAGE-002.o
     func testEvictionDemotesOffChainWalkValidatedBlockBeyondBudget() async throws {
         let directory = temporaryDirectory()
         let config = try configuration(
