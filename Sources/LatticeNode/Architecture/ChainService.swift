@@ -2422,7 +2422,7 @@ public actor ChainService {
     }
 }
 
-private extension WorkDisposition {
+extension WorkDisposition {
     init(_ decision: NodeImportDecision) {
         switch decision {
         case .canonicalized: self = .canonicalized

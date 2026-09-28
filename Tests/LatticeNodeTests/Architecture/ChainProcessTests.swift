@@ -2294,6 +2294,65 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertEqual(degradedValidatedTip, bCID)
     }
 
+    /// Import A (canonical on genesis), then a competing side block B. The
+    /// process hands its publisher A's commit and nothing for B, and the tip
+    /// stays A.
+    ///
+    /// Establishes: NODE-SEMANTICS-002.b
+    func testASideBlockPublishesNoCanonicalCommit() async throws {
+        let config = try configuration(
+            path: ["Nexus"], storage: temporaryDirectory()
+        )
+        let process = try await ChainProcess.open(configuration: config)
+        let published = PublishedCommits()
+        let publisher: CanonicalCommitPublisher = { commit in
+            await published.record(commit)
+            let receipt = CanonicalCommitReceipt()
+            await receipt.finish()
+            return receipt
+        }
+        let genesis = try await process.canonicalTipBlock()
+
+        let a = try await mineChild(
+            of: genesis, timestamp: 3_600_000, nonce: 1, on: process
+        )
+        let aCID = try BlockHeader(node: a).rawCID
+        guard case .canonicalized = try await process.importBlock(
+            BlockHeader(node: a), canonicalCommitPublisher: publisher
+        ).decision else {
+            return XCTFail("expected A to canonicalize on genesis")
+        }
+        let afterA = await published.commits
+        XCTAssertEqual(afterA.map(\.tipHash), [aCID])
+
+        // Equal work: pick a nonce whose block Lattice's tie-break does not
+        // prefer over A, so B is a side block under the consensus rule.
+        var b = try await mineChild(
+            of: genesis, timestamp: 3_600_001, nonce: 2, on: process
+        )
+        while forkChoicePrefersBlock(try BlockHeader(node: b).rawCID, over: aCID) {
+            b = try await mineChild(
+                of: genesis, timestamp: 3_600_001, nonce: b.nonce + 1, on: process
+            )
+        }
+        let bCID = try BlockHeader(node: b).rawCID
+        let side = try await process.importBlock(
+            BlockHeader(node: b), canonicalCommitPublisher: publisher
+        )
+        guard case .acceptedSide = side.decision else {
+            return XCTFail("expected B to be an accepted side block, got \(side.decision)")
+        }
+        XCTAssertNil(side.canonicalCommitReceipt)
+
+        let afterB = await published.commits
+        XCTAssertEqual(afterB.map(\.tipHash), [aCID], "B published a commit")
+        XCTAssertFalse(afterB.contains {
+            $0.tipHash == bCID || $0.canonicalBlocksAdded[bCID] != nil
+        })
+        let tip = await process.status().tipCID
+        XCTAssertEqual(tip, aCID)
+    }
+
     /// A walk-validated block's materialized body + post-state must survive a
     /// restart AND the daemon's periodic unpinned-volume eviction: the restart
     /// rebuilds batch retention from `admission_batches`, which never carried
@@ -2848,4 +2907,13 @@ final class ChainProcessTests: XCTestCase {
 
 private enum ChainProcessTestError: Error {
     case nonceSearchExhausted
+}
+
+/// Records every commit a process hands its canonical-commit publisher.
+private actor PublishedCommits {
+    private(set) var commits: [ChainCommit] = []
+
+    func record(_ commit: ChainCommit) {
+        commits.append(commit)
+    }
 }

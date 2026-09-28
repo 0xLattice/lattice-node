@@ -20,21 +20,29 @@ places are their own claim until a test covers them too.
 
 - **NODE-SEMANTICS-001.a** — `canonicalized`, `acceptedSide`, `carrier`,
   `duplicate`, `unavailable`, `temporarilyInvalid`, `invalid`, and
-  `localFailure` remain distinct at the node boundary: every import result
-  and error maps to exactly one of them.
+  `localFailure` remain distinct at the node boundary: `NodeImportDecision`
+  maps every import result and error to exactly one of them.
+- **NODE-SEMANTICS-001.b** — A child chain's genesis bootstrap in
+  `ChainProcess.importBlock`, which maps its own results and carrier-link
+  failures without `NodeImportDecision`, gives each the same meaning.
   Gap: #212
 
 ## NODE-SEMANTICS-002 — side validity is not canonicity
 
 - **NODE-SEMANTICS-002.a** — The process's import decision for a block
   accepted off the canonical path is `acceptedSide`, not `canonicalized`.
-- **NODE-SEMANTICS-002.b** — `acceptedSide` never publishes a canonical tip.
-  Gap: #212
-- **NODE-SEMANTICS-002.c** — `acceptedSide` counts as an accepted import for
-  relay, child-proof handling and the service's accepted set.
-  Gap: #212
+- **NODE-SEMANTICS-002.b** — The process hands its canonical-commit
+  publisher an import's commit only when the decision is `canonicalized`: an
+  `acceptedSide` import publishes nothing and the tip stays where it was.
+- **NODE-SEMANTICS-002.c** — `acceptedSide` is an accepted decision
+  (`isAccepted`), as `canonicalized` and `duplicate` are and no other
+  decision is.
 - **NODE-SEMANTICS-002.d** — The service maps the process's decisions to its
   own dispositions case for case: a side block stays a side block.
+- **NODE-SEMANTICS-002.e** — The service's relay of an accepted block, its
+  child-genesis links and the submit-work `accepted` flag, which each decide
+  by their own switch rather than `isAccepted`, count `acceptedSide` as
+  accepted.
   Gap: #212
 
 ## NODE-SEMANTICS-003 — availability is retriable, not punishable
