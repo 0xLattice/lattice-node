@@ -160,6 +160,13 @@ actor NodeStore {
         preparedMutationWaiters.removeFirst().resume()
     }
 
+    #if DEBUG
+    /// Test seam: the mutations parked at the prepared-mutation gate.
+    func preparedMutationWaiterCountForTesting() -> Int {
+        preparedMutationWaiters.count
+    }
+    #endif
+
     static func encode<T: Encodable>(_ value: T) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]

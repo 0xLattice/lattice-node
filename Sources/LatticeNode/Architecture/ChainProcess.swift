@@ -1197,6 +1197,9 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             return volume.rawCID
         }
         try await volume.store(storer: broker)
+        #if DEBUG
+        await localTransactionVolumeStoredForTesting?(volume.rawCID)
+        #endif
         try Task.checkCancellation()
         try await broker.pin(root: volume.rawCID, owner: durableMempoolOwner)
         do {
@@ -1407,6 +1410,15 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// reconciliation demotes at the next open.
     func unpinValidatedOwnerForTesting(_ cid: String) async throws {
         try await broker.unpinAll(owner: Self.validatedOwner(retentionScope, cid))
+    }
+    /// Test seam: awaited in `persistLocalTransaction` once the transaction
+    /// Volume is stored, before its pin and its SQLite reference.
+    private var localTransactionVolumeStoredForTesting:
+        (@Sendable (String) async -> Void)?
+    func setLocalTransactionVolumeStoredForTesting(
+        _ hook: (@Sendable (String) async -> Void)?
+    ) {
+        localTransactionVolumeStoredForTesting = hook
     }
     #endif
 

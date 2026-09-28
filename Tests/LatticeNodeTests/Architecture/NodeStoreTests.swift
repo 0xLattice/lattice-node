@@ -1822,16 +1822,20 @@ final class NodeStoreTests: XCTestCase {
         XCTAssertNotNil(retainedAttachment)
     }
 
+    /// The second of two preparations parks at the gate while the first is
+    /// parked inside it, and stores nothing until the first is done; the
+    /// kept proof is then exactly the prepared retained set.
+    /// Establishes: NODE-STORAGE-002.e
     func testPreparedRetentionMutationIsSerializedThroughExactReconciliation()
         async throws {
         let directory = temporaryDirectory(create: true)
         let broker = try DiskBroker(
             path: directory.appendingPathComponent("volumes.db").path
         )
-        let blockingBroker = BlockingBroker(broker: broker)
+        let faulting = FaultInjectingBroker(broker: broker)
         let store = try makeStore(
             path: directory.appendingPathComponent("state.db"),
-            broker: blockingBroker
+            broker: faulting
         )
         let first = try await childProofFixture(childTimestamp: 1)
         let second = try await childProofFixture(childTimestamp: 10)
@@ -1847,19 +1851,10 @@ final class NodeStoreTests: XCTestCase {
             isChildGenesis: false,
             proof: second.first
         )
-        let firstAttachment = try ChildEvidenceVolume(
-            envelopeBytes: try ChildValidationPackageEnvelope(
-                ChildValidationPackage(proof: first.first)
-            ).encode(),
-            childCID: first.childCID
-        )
-        let secondAttachment = try ChildEvidenceVolume(
-            envelopeBytes: try ChildValidationPackageEnvelope(
-                ChildValidationPackage(proof: second.first)
-            ).encode(),
-            childCID: second.childCID
-        )
+        let firstAttachment = try preparedAttachment(firstPrepared)
+        let secondAttachment = try preparedAttachment(secondPrepared)
 
+        await faulting.parkNext(.store(root: firstAttachment))
         let firstTask = Task {
             try await store.persistPreparedChildProofs(
                 carrierCID: first.first.rootCID,
@@ -1867,7 +1862,7 @@ final class NodeStoreTests: XCTestCase {
                 capacity: 1
             )
         }
-        await blockingBroker.waitUntilFirstStore()
+        try await faulting.waitUntilParked(.store(root: firstAttachment))
         let secondTask = Task {
             try await store.persistPreparedChildProofs(
                 carrierCID: second.first.rootCID,
@@ -1875,21 +1870,31 @@ final class NodeStoreTests: XCTestCase {
                 capacity: 1
             )
         }
-        for _ in 0..<20 {
-            await Task.yield()
+        try await eventually(
+            "the second preparation parks at the prepared gate",
+            within: .seconds(10)
+        ) {
+            await store.preparedMutationWaiterCountForTesting() == 1
         }
-        let storesWhileBlocked = await blockingBroker.storeCount()
-        XCTAssertEqual(storesWhileBlocked, 1)
+        let reachedWhileParked = await faulting.reachedSteps()
+        XCTAssertFalse(
+            reachedWhileParked.contains(.store(root: secondAttachment)),
+            "the second preparation stored inside the first one's gate"
+        )
 
-        await blockingBroker.releaseFirstStore()
+        await faulting.release(.store(root: firstAttachment))
         try await firstTask.value
         try await secondTask.value
         let retainedCarriers = try await store.preparedChildProofCarrierCIDs()
         XCTAssertEqual(retainedCarriers, [second.first.rootCID])
+        let retainedRoots = try await broker.retainedRoots(
+            scope: "test:prepared-hierarchy"
+        )
+        XCTAssertEqual(retainedRoots, [secondAttachment])
 
         _ = try await broker.evictUnpinned(graceSeconds: 0)
-        let evicted = await broker.fetchVolumeLocal(root: firstAttachment.rawCID)
-        let retained = await broker.fetchVolumeLocal(root: secondAttachment.rawCID)
+        let evicted = await broker.fetchVolumeLocal(root: firstAttachment)
+        let retained = await broker.fetchVolumeLocal(root: secondAttachment)
         XCTAssertNil(evicted)
         XCTAssertNotNil(retained)
     }
@@ -2985,6 +2990,1259 @@ final class NodeStoreTests: XCTestCase {
             root: admitted.childCID
         )
         XCTAssertNotNil(admittedChild)
+    }
+
+    // MARK: - Storage ordering and ownership (NODE-STORAGE-002)
+
+    /// A store that throws records nothing: of two Volumes, only the one
+    /// whose store returned is a root the admission may retain and stage.
+    /// Establishes: NODE-STORAGE-002.v
+    func testImportStorageRecordsARootOnlyAfterItsStoreReturns() async throws {
+        let directory = temporaryDirectory(create: true)
+        let broker = FaultInjectingBroker(broker: try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        ))
+        let storage = NodeImportStorage(storage: broker)
+        let volumes = try ["recorded-first", "refused-second"].map {
+            try VolumeImpl<PublicKey>(node: PublicKey(key: $0))
+        }
+        await broker.failNext(.store(root: volumes[1].rawCID))
+
+        try await volumes[0].store(storer: storage)
+        do {
+            try await volumes[1].store(storer: storage)
+            XCTFail("the injected store fault did not surface")
+        } catch {
+            XCTAssertEqual(
+                error as? InjectedBrokerFault,
+                InjectedBrokerFault(step: .store(root: volumes[1].rawCID))
+            )
+        }
+
+        let recorded = await storage.takeStoredVolumeRoots()
+        XCTAssertEqual(recorded, [volumes[0].rawCID])
+    }
+
+    /// A child proof's row names its attachment and its bootstrap roots; a
+    /// fault at any of their stores, or at their retention, leaves no row,
+    /// and while the retention merge is in flight no row exists yet. Every
+    /// bootstrap root is retained, not only the child's own.
+    /// Establishes: NODE-STORAGE-002.b
+    func testIssuedChildProofIsWrittenOnlyAfterItsVolumesAreStoredAndRetained()
+        async throws {
+        let directory = temporaryDirectory(create: true)
+        let disk = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let broker = FaultInjectingBroker(broker: disk)
+        let store = try makeStore(
+            path: directory.appendingPathComponent("state.db"),
+            broker: broker
+        )
+        let fixture = try await childProofFixture()
+        try await disk.store(volume: fixture.childVolume)
+        let extraBootstrap = try VolumeImpl<PublicKey>(
+            node: PublicKey(key: "issued-bootstrap-extra")
+        )
+        try await extraBootstrap.store(storer: disk)
+        let bootstrapRoots = [fixture.childCID, extraBootstrap.rawCID]
+        let attachment = try ChildEvidenceVolume(
+            envelopeBytes: try ChildValidationPackageEnvelope(
+                ChildValidationPackage(proof: fixture.first)
+            ).encode(),
+            childCID: fixture.childCID
+        )
+        let merge = BrokerStep.merge(scope: "test:issued-hierarchy")
+
+        for step in [
+            BrokerStep.store(root: fixture.childCID),
+            .store(root: extraBootstrap.rawCID),
+            .store(root: attachment.rawCID),
+            merge,
+        ] {
+            await broker.failNext(step)
+            do {
+                try await persistIssuedChildProof(
+                    in: store,
+                    fixture.first,
+                    childCID: fixture.childCID,
+                    bootstrapRoots: bootstrapRoots
+                )
+                XCTFail("the fault at \(step) did not surface")
+            } catch {
+                XCTAssertEqual(
+                    error as? InjectedBrokerFault,
+                    InjectedBrokerFault(step: step)
+                )
+            }
+            let written = try await store.issuedChildEvidence(
+                childCID: fixture.childCID,
+                directory: "Child"
+            )
+            XCTAssertNil(written, "a proof row outran its Volume at \(step)")
+            let recoveryRoots = try await store.recoveryVolumeRoots()
+            XCTAssertTrue(recoveryRoots.isEmpty, "a root row outran \(step)")
+        }
+
+        let envelope = try ChildValidationPackageEnvelope(
+            ChildValidationPackage(proof: fixture.first)
+        )
+        let proof = fixture.first
+        let childCID = fixture.childCID
+        await broker.parkNext(merge)
+        let issuing = Task {
+            try await store.persistIssuedChildProof(
+                proof,
+                childCID: childCID,
+                isChildGenesis: true,
+                bootstrapRoots: bootstrapRoots,
+                rootEnvelope: envelope
+            )
+        }
+        try await broker.waitUntilParked(merge)
+        let writtenWhileParked = try await store.issuedChildEvidence(
+            childCID: fixture.childCID,
+            directory: "Child"
+        )
+        XCTAssertNil(writtenWhileParked, "a proof row outran its retention")
+        let rootsWhileParked = try await store.recoveryVolumeRoots()
+        XCTAssertTrue(rootsWhileParked.isEmpty, "a root row outran its retention")
+        await broker.release(merge)
+        try await issuing.value
+
+        let written = try await store.issuedChildEvidence(
+            childCID: fixture.childCID,
+            directory: "Child"
+        )
+        XCTAssertEqual(written?.attachmentCID, attachment.rawCID)
+        let retained = try await disk.retainedRoots(scope: "test:issued-hierarchy")
+        XCTAssertEqual(
+            Set(retained),
+            Set(bootstrapRoots + [attachment.rawCID])
+        )
+    }
+
+    /// Issued carrier evidence (`persistIssuedHierarchyArtifacts`) takes its
+    /// attachment over from the parent-evidence inbox: a fault at its store
+    /// or its issued retention writes no evidence row and leaves the inbox
+    /// entry, and the inbox's retention, where they were; while the
+    /// retention merge is in flight, no row exists yet.
+    /// Establishes: NODE-STORAGE-002.b
+    func testIssuedCarrierEvidenceIsWrittenOnlyAfterItsVolumeIsStoredAndRetained()
+        async throws {
+        let fixture = try await childProofFixture()
+        let child = try await childEvidenceStore(holdingInbox: fixture)
+        let link = try decode(ParentCarrierLink.self, json: """
+            {"parentPath":["Nexus","Child"],"carrierCID":"\(fixture.childCID)","rootCID":"\(fixture.first.rootCID)"}
+            """)
+        let artifacts = ImportHierarchyArtifacts(
+            carrierLink: link,
+            carrierEvidence: ImportCarrierEvidence(
+                proof: fixture.first,
+                childCID: fixture.childCID
+            ),
+            parentGenesisLinks: []
+        )
+
+        for step in [
+            BrokerStep.store(root: child.attachment.rawCID),
+            .merge(scope: "test:issued-hierarchy"),
+        ] {
+            await child.broker.failNext(step)
+            do {
+                try await child.store.persistIssuedHierarchyArtifacts(artifacts)
+                XCTFail("the fault at \(step) did not surface")
+            } catch {
+                XCTAssertEqual(
+                    error as? InjectedBrokerFault,
+                    InjectedBrokerFault(step: step)
+                )
+            }
+            try await assertInboxStillOwns(child, fixture: fixture, after: step)
+            let issuedLink = try await child.store.issuedParentCarrierLink(
+                carrierCID: fixture.childCID,
+                rootCID: fixture.first.rootCID
+            )
+            XCTAssertNil(issuedLink, "a carrier link outran its evidence at \(step)")
+        }
+
+        let merge = BrokerStep.merge(scope: "test:issued-hierarchy")
+        await child.broker.parkNext(merge)
+        let issuing = Task {
+            try await child.store.persistIssuedHierarchyArtifacts(artifacts)
+        }
+        try await child.broker.waitUntilParked(merge)
+        try await assertInboxStillOwns(child, fixture: fixture, after: merge)
+        let linkWhileParked = try await child.store.issuedParentCarrierLink(
+            carrierCID: fixture.childCID,
+            rootCID: fixture.first.rootCID
+        )
+        XCTAssertNil(linkWhileParked, "a carrier link outran its retention")
+        await child.broker.release(merge)
+        try await issuing.value
+
+        let evidence = try await child.store.incomingCarrierEvidence(
+            childCID: fixture.childCID,
+            directory: "Child",
+            rootCID: fixture.first.rootCID
+        )
+        XCTAssertEqual(evidence?.attachmentCID, child.attachment.rawCID)
+        let inbox = try await child.store.parentEvidenceInbox()
+        XCTAssertTrue(inbox.isEmpty)
+        let issued = try await child.disk.retainedRoots(
+            scope: "test:issued-hierarchy"
+        )
+        XCTAssertEqual(issued, [child.attachment.rawCID])
+    }
+
+    /// The admission batch that stages a carried block's incoming evidence
+    /// (`stage`) takes its attachment over from the parent-evidence inbox: a
+    /// fault at its store or its issued retention stages no batch and leaves
+    /// the inbox entry, and the inbox's retention, where they were; while
+    /// the retention merge is in flight, no row exists yet.
+    /// Establishes: NODE-STORAGE-002.b
+    func testStagedCarrierEvidenceIsWrittenOnlyAfterItsVolumeIsStoredAndRetained()
+        async throws {
+        let fixture = try await childProofFixture()
+        let persistence = ImportPersistence(
+            incomingCarrierEvidence: ImportCarrierEvidence(
+                proof: fixture.first,
+                childCID: fixture.childCID
+            )
+        )
+        try await assertStagedEvidenceIsWrittenOnlyAfterItsVolumeIsStoredAndRetained(
+            persistence,
+            fixture: fixture
+        )
+    }
+
+    /// The same at the batch's issued hierarchy artifacts (`stage` with
+    /// `hierarchyArtifacts.carrierEvidence`, a carried child block's own
+    /// carrier link and evidence).
+    /// Establishes: NODE-STORAGE-002.b
+    func testStagedHierarchyCarrierEvidenceIsWrittenOnlyAfterItsVolumeIsStoredAndRetained()
+        async throws {
+        let fixture = try await childProofFixture()
+        let link = try decode(ParentCarrierLink.self, json: """
+            {"parentPath":["Nexus","Child"],"carrierCID":"\(fixture.childCID)","rootCID":"\(fixture.first.rootCID)"}
+            """)
+        let persistence = ImportPersistence(
+            hierarchyArtifacts: ImportHierarchyArtifacts(
+                carrierLink: link,
+                carrierEvidence: ImportCarrierEvidence(
+                    proof: fixture.first,
+                    childCID: fixture.childCID
+                ),
+                parentGenesisLinks: []
+            )
+        )
+        try await assertStagedEvidenceIsWrittenOnlyAfterItsVolumeIsStoredAndRetained(
+            persistence,
+            fixture: fixture
+        )
+    }
+
+    private func assertStagedEvidenceIsWrittenOnlyAfterItsVolumeIsStoredAndRetained(
+        _ persistence: ImportPersistence,
+        fixture: (
+            childCID: String,
+            childVolume: SerializedVolume,
+            first: ChildBlockProof,
+            second: ChildBlockProof,
+            rootVolumes: [SerializedVolume]
+        ),
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let child = try await childEvidenceStore(holdingInbox: fixture)
+        let batch = blockBatch(
+            postStateCID: testCID("staged-evidence-state"),
+            blockHash: fixture.childCID
+        )
+
+        for step in [
+            BrokerStep.store(root: child.attachment.rawCID),
+            .merge(scope: "test:issued-hierarchy"),
+        ] {
+            await child.broker.failNext(step)
+            do {
+                try await child.store.stage(
+                    batch,
+                    volumeRoots: [],
+                    persistence: persistence
+                )
+                XCTFail("the fault at \(step) did not surface", file: file, line: line)
+            } catch {
+                XCTAssertEqual(
+                    error as? InjectedBrokerFault,
+                    InjectedBrokerFault(step: step),
+                    file: file,
+                    line: line
+                )
+            }
+            let staged = try await child.store.stagedImports()
+            XCTAssertTrue(
+                staged.isEmpty,
+                "a batch outran its evidence at \(step)",
+                file: file,
+                line: line
+            )
+            try await assertInboxStillOwns(
+                child,
+                fixture: fixture,
+                after: step,
+                file: file,
+                line: line
+            )
+        }
+
+        let merge = BrokerStep.merge(scope: "test:issued-hierarchy")
+        await child.broker.parkNext(merge)
+        let staging = Task {
+            try await child.store.stage(
+                batch,
+                volumeRoots: [],
+                persistence: persistence
+            )
+        }
+        try await child.broker.waitUntilParked(merge)
+        let stagedWhileParked = try await child.store.stagedImports()
+        XCTAssertTrue(
+            stagedWhileParked.isEmpty,
+            "a batch outran its retention",
+            file: file,
+            line: line
+        )
+        try await assertInboxStillOwns(
+            child,
+            fixture: fixture,
+            after: merge,
+            file: file,
+            line: line
+        )
+        await child.broker.release(merge)
+        try await staging.value
+
+        let staged = try await child.store.stagedImports()
+        XCTAssertEqual(staged.count, 1, file: file, line: line)
+        let evidence = try await child.store.incomingCarrierEvidence(
+            childCID: fixture.childCID,
+            directory: "Child",
+            rootCID: fixture.first.rootCID
+        )
+        XCTAssertEqual(
+            evidence?.attachmentCID,
+            child.attachment.rawCID,
+            file: file,
+            line: line
+        )
+        let issued = try await child.disk.retainedRoots(
+            scope: "test:issued-hierarchy"
+        )
+        XCTAssertEqual(issued, [child.attachment.rawCID], file: file, line: line)
+    }
+
+    /// An inbox row, and the scan cursor past it, are written only after
+    /// the attachment is stored and retained: a fault at either leaves
+    /// neither, and while the retention merge is in flight neither exists.
+    /// Establishes: NODE-STORAGE-002.b
+    func testParentEvidenceInboxRowIsWrittenOnlyAfterItsVolumeIsStoredAndRetained()
+        async throws {
+        let directory = temporaryDirectory(create: true)
+        let disk = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let broker = FaultInjectingBroker(broker: disk)
+        let store = try makeStore(
+            path: directory.appendingPathComponent("state.db"),
+            chainPath: ["Nexus", "Child"],
+            broker: broker
+        )
+        let fixture = try await childProofFixture()
+        let package = AuthenticatedChildPackage(
+            package: ChildValidationPackage(proof: fixture.first)
+        )
+        let attachment = try ChildEvidenceVolume(
+            envelopeBytes: try ChildValidationPackageEnvelope(
+                package.package
+            ).encode(),
+            childCID: fixture.childCID
+        )
+        let sourceID = UUID().uuidString
+
+        for step in [
+            BrokerStep.store(root: attachment.rawCID),
+            .merge(scope: "parent-evidence-inbox"),
+        ] {
+            await broker.failNext(step)
+            do {
+                try await store.storeParentEvidenceInbox(
+                    sourceID: sourceID,
+                    ordinal: 1,
+                    attachment: attachment,
+                    package: package,
+                    advanceScan: true
+                )
+                XCTFail("the fault at \(step) did not surface")
+            } catch {
+                XCTAssertEqual(
+                    error as? InjectedBrokerFault,
+                    InjectedBrokerFault(step: step)
+                )
+            }
+            let inbox = try await store.parentEvidenceInbox()
+            XCTAssertTrue(inbox.isEmpty, "an inbox row outran its Volume at \(step)")
+            let cursor = try await store.parentEvidenceScanCursor()
+            XCTAssertEqual(
+                cursor,
+                ParentEvidenceScanCursor(sourceID: nil, ordinal: 0),
+                "the scan advanced past unstored evidence at \(step)"
+            )
+        }
+
+        let merge = BrokerStep.merge(scope: "parent-evidence-inbox")
+        await broker.parkNext(merge)
+        let storing = Task {
+            try await store.storeParentEvidenceInbox(
+                sourceID: sourceID,
+                ordinal: 1,
+                attachment: attachment,
+                package: package,
+                advanceScan: true
+            )
+        }
+        try await broker.waitUntilParked(merge)
+        let inboxWhileParked = try await store.parentEvidenceInbox()
+        XCTAssertTrue(inboxWhileParked.isEmpty, "an inbox row outran its retention")
+        let cursorWhileParked = try await store.parentEvidenceScanCursor()
+        XCTAssertEqual(
+            cursorWhileParked,
+            ParentEvidenceScanCursor(sourceID: nil, ordinal: 0),
+            "the scan advanced past unretained evidence"
+        )
+        await broker.release(merge)
+        _ = try await storing.value
+
+        let inbox = try await store.parentEvidenceInbox()
+        XCTAssertEqual(inbox.map(\.attachment.rawCID), [attachment.rawCID])
+        let retained = try await disk.retainedRoots(scope: "parent-evidence-inbox")
+        XCTAssertEqual(retained, [attachment.rawCID])
+    }
+
+    /// Of two prepared proofs in one batch, a fault at the second one's
+    /// store, or at their retention, leaves neither row; while the merge is
+    /// in flight neither row exists, and once both rows exist (the
+    /// reconciling advance) both attachments are already retained.
+    /// Establishes: NODE-STORAGE-002.b
+    func testPreparedChildProofIsWrittenOnlyAfterItsVolumeIsStoredAndRetained()
+        async throws {
+        let directory = temporaryDirectory(create: true)
+        let disk = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let broker = FaultInjectingBroker(broker: disk)
+        let store = try makeStore(
+            path: directory.appendingPathComponent("state.db"),
+            broker: broker
+        )
+        let fixture = try await twoDirectoryProofFixture()
+        let prepared = try fixture.proofs.map { entry in
+            try PreparedChildProof(
+                directory: entry.directory,
+                childCID: entry.childCID,
+                isChildGenesis: false,
+                proof: entry.proof
+            )
+        }
+        let attachments = try fixture.proofs.map { entry in
+            try ChildEvidenceVolume(
+                envelopeBytes: try ChildValidationPackageEnvelope(
+                    ChildValidationPackage(proof: entry.proof)
+                ).encode(),
+                childCID: entry.childCID
+            ).rawCID
+        }
+
+        for step in [
+            BrokerStep.store(root: attachments[1]),
+            .merge(scope: "test:prepared-hierarchy"),
+        ] {
+            await broker.failNext(step)
+            do {
+                try await store.persistPreparedChildProofs(
+                    carrierCID: fixture.carrierCID,
+                    proofs: prepared,
+                    capacity: 4
+                )
+                XCTFail("the fault at \(step) did not surface")
+            } catch {
+                XCTAssertEqual(
+                    error as? InjectedBrokerFault,
+                    InjectedBrokerFault(step: step)
+                )
+            }
+            let carriers = try await store.preparedChildProofCarrierCIDs()
+            XCTAssertTrue(carriers.isEmpty, "a prepared row outran \(step)")
+        }
+
+        let merge = BrokerStep.merge(scope: "test:prepared-hierarchy")
+        let advance = BrokerStep.advance(scope: "test:prepared-hierarchy")
+        await broker.parkNext(merge)
+        await broker.parkNext(advance)
+        let preparing = Task {
+            try await store.persistPreparedChildProofs(
+                carrierCID: fixture.carrierCID,
+                proofs: prepared,
+                capacity: 4
+            )
+        }
+        try await broker.waitUntilParked(merge)
+        let rowsAtMerge = try await store.preparedChildProofCarrierCIDs()
+        XCTAssertTrue(rowsAtMerge.isEmpty, "a prepared row outran its retention")
+        await broker.release(merge)
+        try await broker.waitUntilParked(advance)
+        let rowsAtAdvance = try await store.preparedChildProofCarrierCIDs()
+        XCTAssertEqual(rowsAtAdvance, [fixture.carrierCID])
+        let retainedAtAdvance = try await disk.retainedRoots(
+            scope: "test:prepared-hierarchy"
+        )
+        XCTAssertEqual(
+            Set(retainedAtAdvance),
+            Set(attachments),
+            "a prepared row existed before its attachment was retained"
+        )
+        await broker.release(advance)
+        try await preparing.value
+
+        let written = try await store.preparedChildProofs(
+            carrierCID: fixture.carrierCID
+        )
+        XCTAssertEqual(written.map(\.directory), ["Alpha", "Beta"])
+        let retained = try await disk.retainedRoots(scope: "test:prepared-hierarchy")
+        XCTAssertEqual(Set(retained), Set(attachments))
+    }
+
+    /// Two issued child proofs, the second issued after the first: a
+    /// pruning pass while the node is live keeps both attachments.
+    /// Establishes: NODE-STORAGE-002.d
+    func testIssuedChildProofsOnlyGrowIssuedRetentionWhileLive() async throws {
+        let directory = temporaryDirectory(create: true)
+        let broker = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let store = try makeStore(
+            path: directory.appendingPathComponent("state.db"),
+            broker: broker
+        )
+        let fixture = try await childProofFixture()
+        for proof in [fixture.first, fixture.second] {
+            try await persistIssuedChildProof(
+                in: store,
+                proof,
+                childCID: fixture.childCID,
+                isChildGenesis: false
+            )
+        }
+        var attachments: [String] = []
+        for proof in [fixture.first, fixture.second] {
+            let evidence = try await store.issuedChildEvidence(
+                childCID: fixture.childCID,
+                directory: "Child",
+                rootCID: proof.rootCID
+            )
+            attachments.append(try XCTUnwrap(evidence).attachmentCID)
+        }
+        XCTAssertEqual(Set(attachments).count, 2)
+
+        _ = try await broker.evictUnpinned(graceSeconds: 0)
+        for attachment in attachments {
+            let kept = await broker.fetchVolumeLocal(root: attachment)
+            XCTAssertNotNil(kept, "a live issue shrank issued retention")
+        }
+    }
+
+    /// Carrier evidence enters issued retention through two sites, issued
+    /// artifacts and a staged admission, interleaved: each after the other
+    /// has retained something, and a pruning pass keeps all three.
+    /// Establishes: NODE-STORAGE-002.d
+    func testIssuedCarrierEvidenceOnlyGrowsIssuedRetentionWhileLive()
+        async throws {
+        let directory = temporaryDirectory(create: true)
+        let broker = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let store = try makeStore(
+            path: directory.appendingPathComponent("state.db"),
+            chainPath: ["Nexus", "Child"],
+            broker: broker
+        )
+        let early = try await childProofFixture(childTimestamp: 1)
+        let late = try await childProofFixture(childTimestamp: 10)
+        func artifacts(
+            _ childCID: String,
+            _ proof: ChildBlockProof
+        ) throws -> ImportHierarchyArtifacts {
+            ImportHierarchyArtifacts(
+                carrierLink: try decode(ParentCarrierLink.self, json: """
+                    {"parentPath":["Nexus","Child"],"carrierCID":"\(childCID)","rootCID":"\(proof.rootCID)"}
+                    """),
+                carrierEvidence: ImportCarrierEvidence(
+                    proof: proof,
+                    childCID: childCID
+                ),
+                parentGenesisLinks: []
+            )
+        }
+
+        try await store.persistIssuedHierarchyArtifacts(
+            try artifacts(early.childCID, early.first)
+        )
+        try await store.stage(
+            blockBatch(
+                postStateCID: testCID("late-carrier-state"),
+                blockHash: late.childCID
+            ),
+            volumeRoots: [],
+            persistence: ImportPersistence(
+                incomingCarrierEvidence: ImportCarrierEvidence(
+                    proof: late.first,
+                    childCID: late.childCID
+                )
+            )
+        )
+        try await store.persistIssuedHierarchyArtifacts(
+            try artifacts(early.childCID, early.second)
+        )
+
+        var attachments: [String] = []
+        for (childCID, rootCID) in [
+            (early.childCID, early.first.rootCID),
+            (late.childCID, late.first.rootCID),
+            (early.childCID, early.second.rootCID),
+        ] {
+            let evidence = try await store.incomingCarrierEvidence(
+                childCID: childCID,
+                directory: "Child",
+                rootCID: rootCID
+            )
+            attachments.append(try XCTUnwrap(evidence).attachmentCID)
+        }
+        XCTAssertEqual(Set(attachments).count, 3)
+        _ = try await broker.evictUnpinned(graceSeconds: 0)
+        for attachment in attachments {
+            let kept = await broker.fetchVolumeLocal(root: attachment)
+            XCTAssertNotNil(kept, "a live issue shrank issued retention")
+        }
+    }
+
+    /// A removal waits at the gate a parked preparation holds, just as a
+    /// second preparation does.
+    /// Establishes: NODE-STORAGE-002.e
+    func testPreparedProofRemovalIsSerializedThroughTheGate() async throws {
+        let directory = temporaryDirectory(create: true)
+        let disk = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let broker = FaultInjectingBroker(broker: disk)
+        let store = try makeStore(
+            path: directory.appendingPathComponent("state.db"),
+            broker: broker
+        )
+        let fixture = try await childProofFixture()
+        let removed = try PreparedChildProof(
+            directory: "Child",
+            childCID: fixture.childCID,
+            isChildGenesis: false,
+            proof: fixture.first
+        )
+        let kept = try PreparedChildProof(
+            directory: "Child",
+            childCID: fixture.childCID,
+            isChildGenesis: false,
+            proof: fixture.second
+        )
+        let keptAttachment = try preparedAttachment(kept)
+        try await store.persistPreparedChildProofs(
+            carrierCID: fixture.first.rootCID,
+            proofs: [removed],
+            capacity: 2
+        )
+
+        await broker.parkNext(.store(root: keptAttachment))
+        let preparation = Task {
+            try await store.persistPreparedChildProofs(
+                carrierCID: fixture.second.rootCID,
+                proofs: [kept],
+                capacity: 2
+            )
+        }
+        try await broker.waitUntilParked(.store(root: keptAttachment))
+        let removal = Task {
+            try await store.removePreparedChildProof(
+                carrierCID: fixture.first.rootCID,
+                directory: "Child"
+            )
+        }
+        try await eventually(
+            "the removal parks at the prepared gate",
+            within: .seconds(10)
+        ) {
+            await store.preparedMutationWaiterCountForTesting() == 1
+        }
+        let rowsWhileParked = try await store.preparedChildProofCarrierCIDs()
+        XCTAssertEqual(rowsWhileParked, [fixture.first.rootCID])
+
+        await broker.release(.store(root: keptAttachment))
+        try await preparation.value
+        try await removal.value
+        let carriers = try await store.preparedChildProofCarrierCIDs()
+        XCTAssertEqual(carriers, [fixture.second.rootCID])
+        let retained = try await disk.retainedRoots(scope: "test:prepared-hierarchy")
+        XCTAssertEqual(retained, [keptAttachment])
+    }
+
+    /// Each prepared mutation advances the retained set while it still
+    /// holds the gate: a second mutation stays parked at the gate while the
+    /// first is parked inside its advance, on the success path and on the
+    /// failure path of a preparation, and on a removal.
+    /// Establishes: NODE-STORAGE-002.f
+    func testPreparedRetainedSetIsAdvancedInsideTheGate() async throws {
+        let directory = temporaryDirectory(create: true)
+        let disk = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let broker = FaultInjectingBroker(broker: disk)
+        let store = try makeStore(
+            path: directory.appendingPathComponent("state.db"),
+            broker: broker
+        )
+        let scope = "test:prepared-hierarchy"
+        let fixture = try await childProofFixture()
+        let other = try await childProofFixture(childTimestamp: 10)
+        func prepared(_ proof: ChildBlockProof, _ childCID: String) throws
+            -> PreparedChildProof {
+            try PreparedChildProof(
+                directory: "Child",
+                childCID: childCID,
+                isChildGenesis: false,
+                proof: proof
+            )
+        }
+        let first = try prepared(fixture.first, fixture.childCID)
+        let second = try prepared(fixture.second, fixture.childCID)
+        let third = try prepared(other.first, other.childCID)
+
+        // Success path: the first preparation parks inside its advance.
+        await broker.parkNext(.advance(scope: scope))
+        let succeeding = Task {
+            try await store.persistPreparedChildProofs(
+                carrierCID: fixture.first.rootCID,
+                proofs: [first],
+                capacity: 4
+            )
+        }
+        try await broker.waitUntilParked(.advance(scope: scope))
+        let waiting = Task {
+            try await store.persistPreparedChildProofs(
+                carrierCID: fixture.second.rootCID,
+                proofs: [second],
+                capacity: 4
+            )
+        }
+        try await eventually("a second preparation parks at the gate", within: .seconds(10)) {
+            await store.preparedMutationWaiterCountForTesting() == 1
+        }
+        await broker.release(.advance(scope: scope))
+        try await succeeding.value
+        try await waiting.value
+
+        // Failure path: the retention merge fails, and the preparation parks
+        // inside the advance that reconciles what it left.
+        await broker.failNext(.merge(scope: scope))
+        await broker.parkNext(.advance(scope: scope))
+        let failing = Task {
+            try await store.persistPreparedChildProofs(
+                carrierCID: other.first.rootCID,
+                proofs: [third],
+                capacity: 4
+            )
+        }
+        try await broker.waitUntilParked(.advance(scope: scope))
+        let removing = Task {
+            try await store.removePreparedChildProof(
+                carrierCID: fixture.second.rootCID,
+                directory: "Child"
+            )
+        }
+        try await eventually("a removal parks at the gate", within: .seconds(10)) {
+            await store.preparedMutationWaiterCountForTesting() == 1
+        }
+        await broker.release(.advance(scope: scope))
+        do {
+            try await failing.value
+            XCTFail("the injected merge fault did not surface")
+        } catch {
+            XCTAssertEqual(
+                error as? InjectedBrokerFault,
+                InjectedBrokerFault(step: .merge(scope: scope))
+            )
+        }
+        try await removing.value
+
+        // Removal: it parks inside its own advance.
+        await broker.parkNext(.advance(scope: scope))
+        let removal = Task {
+            try await store.removePreparedChildProof(
+                carrierCID: fixture.first.rootCID,
+                directory: "Child"
+            )
+        }
+        try await broker.waitUntilParked(.advance(scope: scope))
+        let after = Task {
+            try await store.persistPreparedChildProofs(
+                carrierCID: other.first.rootCID,
+                proofs: [third],
+                capacity: 4
+            )
+        }
+        try await eventually("a preparation parks behind the removal", within: .seconds(10)) {
+            await store.preparedMutationWaiterCountForTesting() == 1
+        }
+        await broker.release(.advance(scope: scope))
+        try await removal.value
+        try await after.value
+
+        let carriers = try await store.preparedChildProofCarrierCIDs()
+        XCTAssertEqual(carriers, [other.first.rootCID])
+        let retained = try await disk.retainedRoots(scope: scope)
+        XCTAssertEqual(retained, [try preparedAttachment(third)])
+    }
+
+    /// A removal whose advance fails reconciles the retained set again on
+    /// its failure path, still holding the gate: a preparation stays parked
+    /// at the gate while that reconciling advance is parked, and the set
+    /// left behind is exactly the kept proofs.
+    /// Establishes: NODE-STORAGE-002.f
+    func testPreparedRemovalReconcilesInsideTheGateWhenItsAdvanceFails()
+        async throws {
+        let directory = temporaryDirectory(create: true)
+        let disk = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let broker = FaultInjectingBroker(broker: disk)
+        let store = try makeStore(
+            path: directory.appendingPathComponent("state.db"),
+            broker: broker
+        )
+        let fixture = try await childProofFixture()
+        let other = try await childProofFixture(childTimestamp: 10)
+        let removed = try PreparedChildProof(
+            directory: "Child",
+            childCID: fixture.childCID,
+            isChildGenesis: false,
+            proof: fixture.first
+        )
+        let added = try PreparedChildProof(
+            directory: "Child",
+            childCID: other.childCID,
+            isChildGenesis: false,
+            proof: other.first
+        )
+        try await store.persistPreparedChildProofs(
+            carrierCID: fixture.first.rootCID,
+            proofs: [removed],
+            capacity: 4
+        )
+
+        let advance = BrokerStep.advance(scope: "test:prepared-hierarchy")
+        await broker.failNext(advance)
+        await broker.parkNext(advance)
+        let removal = Task {
+            try await store.removePreparedChildProof(
+                carrierCID: fixture.first.rootCID,
+                directory: "Child"
+            )
+        }
+        try await broker.waitUntilParked(advance)
+        let preparation = Task {
+            try await store.persistPreparedChildProofs(
+                carrierCID: other.first.rootCID,
+                proofs: [added],
+                capacity: 4
+            )
+        }
+        try await eventually(
+            "a preparation parks behind the removal's reconciling advance",
+            within: .seconds(10)
+        ) {
+            await store.preparedMutationWaiterCountForTesting() == 1
+        }
+        await broker.release(advance)
+        do {
+            try await removal.value
+            XCTFail("the injected advance fault did not surface")
+        } catch {
+            XCTAssertEqual(
+                error as? InjectedBrokerFault,
+                InjectedBrokerFault(step: advance)
+            )
+        }
+        try await preparation.value
+
+        let carriers = try await store.preparedChildProofCarrierCIDs()
+        XCTAssertEqual(carriers, [other.first.rootCID])
+        let retained = try await disk.retainedRoots(scope: "test:prepared-hierarchy")
+        XCTAssertEqual(retained, [try preparedAttachment(added)])
+    }
+
+    /// A batch pin that throws writes no offer row: the offer is not there
+    /// to touch and names no roots, and nothing is left pinned. While the
+    /// pin is in flight, no row exists yet.
+    /// Establishes: NODE-STORAGE-002.h
+    func testOfferRowIsWrittenOnlyAfterItsRootsArePinned() async throws {
+        let directory = temporaryDirectory(create: true)
+        let disk = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let broker = FaultInjectingBroker(broker: disk)
+        let store = try makeStore(
+            path: directory.appendingPathComponent("state.db"),
+            broker: broker
+        )
+        let volumes = try ["pinned-offer", "pinned-offer-state"].map {
+            try VolumeImpl<PublicKey>(node: PublicKey(key: $0))
+        }
+        for volume in volumes { try await volume.store(storer: disk) }
+        let offer = volumes[0].rawCID
+        let roots = volumes.map(\.rawCID)
+
+        await broker.failNext(.pinBatch(owner: "test:contextual-candidates"))
+        do {
+            try await store.persistContextualCandidateRoots(
+                candidateCID: offer,
+                roots: roots,
+                capacity: 2
+            )
+            XCTFail("the injected pin fault did not surface")
+        } catch {
+            XCTAssertEqual(
+                error as? InjectedBrokerFault,
+                InjectedBrokerFault(
+                    step: .pinBatch(owner: "test:contextual-candidates")
+                )
+            )
+        }
+        let touched = try await store.touchContextualCandidate(candidateCID: offer)
+        XCTAssertFalse(touched, "an offer row outran its pins")
+        let indexed = try await store.contextualCandidateVolumeRoots()
+        XCTAssertTrue(indexed.isEmpty)
+
+        let pin = BrokerStep.pinBatch(owner: "test:contextual-candidates")
+        await broker.parkNext(pin)
+        let offering = Task {
+            try await store.persistContextualCandidateRoots(
+                candidateCID: offer,
+                roots: roots,
+                capacity: 2
+            )
+        }
+        try await broker.waitUntilParked(pin)
+        let indexedWhileParked = try await store.contextualCandidateVolumeRoots()
+        XCTAssertTrue(indexedWhileParked.isEmpty, "an offer row outran its pins")
+        await broker.release(pin)
+        try await offering.value
+
+        let indexedAfter = try await store.contextualCandidateVolumeRoots()
+        XCTAssertEqual(Set(indexedAfter), Set(roots))
+        for root in roots {
+            let owners = await disk.owners(root: root)
+            XCTAssertEqual(owners, ["test:contextual-candidates"])
+        }
+    }
+
+    /// Of two handoffs, the one whose admission batch owns only some of its
+    /// roots keeps its row and pins; the one whose batch owns every root is
+    /// released, and one with no admission is not.
+    /// Establishes: NODE-STORAGE-002.k
+    func testAdmissionReleasesAHandoffOnlyOnceItsBatchOwnsEveryRoot()
+        async throws {
+        let directory = temporaryDirectory(create: true)
+        let broker = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let store = try makeStore(
+            path: directory.appendingPathComponent("state.db"),
+            broker: broker
+        )
+        var handoffs: [[String]] = []
+        for name in ["partly-owned", "fully-owned", "unadmitted"] {
+            let volumes = try ["\(name)", "\(name)-body", "\(name)-state"].map {
+                try VolumeImpl<PublicKey>(node: PublicKey(key: $0))
+            }
+            for volume in volumes { try await volume.store(storer: broker) }
+            let roots = volumes.map(\.rawCID)
+            try await store.persistContextualCandidateRoots(
+                candidateCID: roots[0],
+                roots: roots,
+                capacity: 16
+            )
+            let marked = try await store.markContextualCandidateHandoff(
+                candidateCID: roots[0]
+            )
+            XCTAssertTrue(marked)
+            handoffs.append(roots)
+        }
+        let (partly, fully, unadmitted) = (handoffs[0], handoffs[1], handoffs[2])
+        try await store.stage(
+            blockBatch(postStateCID: "partly-state", blockHash: partly[0]),
+            volumeRoots: Array(partly.prefix(2))
+        )
+        try await store.stage(
+            blockBatch(postStateCID: "fully-state", blockHash: fully[0]),
+            volumeRoots: fully
+        )
+
+        let releasedPartly = try await store.removeContextualCandidateIfAdmitted(
+            candidateCID: partly[0]
+        )
+        let releasedFully = try await store.removeContextualCandidateIfAdmitted(
+            candidateCID: fully[0]
+        )
+        let releasedUnadmitted = try await store
+            .removeContextualCandidateIfAdmitted(candidateCID: unadmitted[0])
+        XCTAssertFalse(releasedPartly, "released before the batch owned every root")
+        XCTAssertTrue(releasedFully)
+        XCTAssertFalse(releasedUnadmitted)
+
+        let indexed = try await store.contextualCandidateVolumeRoots()
+        XCTAssertEqual(Set(indexed), Set(partly + unadmitted))
+        for root in partly + unadmitted {
+            let owners = await broker.owners(root: root)
+            XCTAssertEqual(owners, ["test:contextual-candidates"], root)
+        }
+        for root in fully {
+            let owners = await broker.owners(root: root)
+            XCTAssertTrue(owners.isEmpty, root)
+        }
+    }
+
+    /// Of two offers, only the one the parent's evidence names carried
+    /// becomes a handoff: it is pending while its evidence waits in the
+    /// inbox, and a wave of newer offers evicts the other, never it.
+    /// Establishes: NODE-STORAGE-002.s
+    func testParentEvidenceMarksTheCandidateItNamesAHandoff() async throws {
+        let directory = temporaryDirectory(create: true)
+        let broker = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let store = try makeStore(
+            path: directory.appendingPathComponent("state.db"),
+            chainPath: ["Nexus", "Child"],
+            broker: broker
+        )
+        let fixture = try await childProofFixture()
+        try await broker.store(volume: fixture.childVolume)
+        let unnamed = try VolumeImpl<PublicKey>(
+            node: PublicKey(key: "unnamed-offer")
+        )
+        try await unnamed.store(storer: broker)
+        for candidate in [fixture.childCID, unnamed.rawCID] {
+            try await store.persistContextualCandidateRoots(
+                candidateCID: candidate,
+                roots: [candidate],
+                capacity: 2
+            )
+        }
+
+        let package = AuthenticatedChildPackage(
+            package: ChildValidationPackage(proof: fixture.first)
+        )
+        try await store.storeParentEvidenceInbox(
+            sourceID: UUID().uuidString,
+            ordinal: 1,
+            attachment: try ChildEvidenceVolume(
+                envelopeBytes: try ChildValidationPackageEnvelope(
+                    package.package
+                ).encode(),
+                childCID: fixture.childCID
+            ),
+            package: package,
+            advanceScan: true
+        )
+        let pending = try await store.pendingHandoffChildCIDs()
+        XCTAssertEqual(pending, [fixture.childCID])
+
+        var newer: [String] = []
+        for index in 0..<2 {
+            let offer = try VolumeImpl<PublicKey>(
+                node: PublicKey(key: "newer-than-handoff-\(index)")
+            )
+            try await offer.store(storer: broker)
+            try await store.persistContextualCandidateRoots(
+                candidateCID: offer.rawCID,
+                roots: [offer.rawCID],
+                capacity: 2
+            )
+            newer.append(offer.rawCID)
+        }
+        let indexed = try await store.contextualCandidateVolumeRoots()
+        XCTAssertEqual(
+            Set(indexed),
+            Set([fixture.childCID] + newer),
+            "only the named candidate is a handoff"
+        )
+    }
+
+    private struct ChildEvidenceStore {
+        let disk: DiskBroker
+        let broker: FaultInjectingBroker
+        let store: NodeStore
+        let attachment: ChildEvidenceVolume
+    }
+
+    /// A child-chain store holding `fixture.first`'s evidence in its
+    /// parent-evidence inbox, behind a fault-injecting broker.
+    private func childEvidenceStore(
+        holdingInbox fixture: (
+            childCID: String,
+            childVolume: SerializedVolume,
+            first: ChildBlockProof,
+            second: ChildBlockProof,
+            rootVolumes: [SerializedVolume]
+        )
+    ) async throws -> ChildEvidenceStore {
+        let directory = temporaryDirectory(create: true)
+        let disk = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let broker = FaultInjectingBroker(broker: disk)
+        let store = try makeStore(
+            path: directory.appendingPathComponent("state.db"),
+            chainPath: ["Nexus", "Child"],
+            broker: broker
+        )
+        let package = AuthenticatedChildPackage(
+            package: ChildValidationPackage(proof: fixture.first)
+        )
+        let attachment = try ChildEvidenceVolume(
+            envelopeBytes: try ChildValidationPackageEnvelope(
+                package.package
+            ).encode(),
+            childCID: fixture.childCID
+        )
+        try await store.storeParentEvidenceInbox(
+            sourceID: UUID().uuidString,
+            ordinal: 1,
+            attachment: attachment,
+            package: package,
+            advanceScan: true
+        )
+        return ChildEvidenceStore(
+            disk: disk,
+            broker: broker,
+            store: store,
+            attachment: attachment
+        )
+    }
+
+    /// The inbox still holds the attachment, the inbox scope still retains
+    /// it, and no evidence row names it.
+    private func assertInboxStillOwns(
+        _ child: ChildEvidenceStore,
+        fixture: (
+            childCID: String,
+            childVolume: SerializedVolume,
+            first: ChildBlockProof,
+            second: ChildBlockProof,
+            rootVolumes: [SerializedVolume]
+        ),
+        after step: BrokerStep,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let inbox = try await child.store.parentEvidenceInbox()
+        XCTAssertEqual(
+            inbox.map(\.attachment.rawCID),
+            [child.attachment.rawCID],
+            "the inbox released its entry before \(step)",
+            file: file,
+            line: line
+        )
+        let inboxRetained = try await child.disk.retainedRoots(
+            scope: "parent-evidence-inbox"
+        )
+        XCTAssertEqual(
+            inboxRetained,
+            [child.attachment.rawCID],
+            "the inbox released its retention before \(step)",
+            file: file,
+            line: line
+        )
+        let evidence = try await child.store.incomingCarrierEvidence(
+            childCID: fixture.childCID,
+            directory: "Child",
+            rootCID: fixture.first.rootCID
+        )
+        XCTAssertNil(
+            evidence,
+            "an evidence row outran its Volume at \(step)",
+            file: file,
+            line: line
+        )
+    }
+
+    private func preparedAttachment(_ prepared: PreparedChildProof) throws
+        -> String {
+        try ChildEvidenceVolume(
+            envelopeBytes: try ChildValidationPackageEnvelope(
+                ChildValidationPackage(proof: prepared.proof)
+            ).encode(),
+            childCID: prepared.childCID
+        ).rawCID
+    }
+
+    /// One carrier whose root commits two child chains, Alpha and Beta,
+    /// and a direct-hop proof of each.
+    private func twoDirectoryProofFixture() async throws -> (
+        carrierCID: String,
+        proofs: [(directory: String, childCID: String, proof: ChildBlockProof)]
+    ) {
+        let content = InMemoryContentStore()
+        try await LatticeState.emptyHeader.storeRecursively(storer: content)
+        var children: [String: Block] = [:]
+        for (directory, timestamp) in [("Alpha", Int64(1)), ("Beta", Int64(2))] {
+            children[directory] = try await BlockBuilder.buildChildGenesis(
+                spec: NexusGenesis.spec,
+                parentState: LatticeState.emptyHeader,
+                timestamp: timestamp,
+                target: UInt256.max,
+                fetcher: content
+            )
+        }
+        let root = try await BlockBuilder.buildGenesis(
+            spec: NexusGenesis.spec,
+            children: children,
+            timestamp: 3,
+            target: UInt256.max,
+            nonce: 1,
+            fetcher: content
+        )
+        let rootHeader = try BlockHeader(node: root)
+        try await rootHeader.storeRecursively(storer: content as any Storer)
+        try await VolumeImpl<Block>(node: root).store(storer: content)
+        var proofs: [(directory: String, childCID: String, proof: ChildBlockProof)] = []
+        for directory in ["Alpha", "Beta"] {
+            proofs.append((
+                directory,
+                try BlockHeader(node: children[directory]!).rawCID,
+                try await ChildBlockProof.generate(
+                    rootHeader: rootHeader,
+                    childDirectory: directory,
+                    fetcher: content
+                )
+            ))
+        }
+        return (rootHeader.rawCID, proofs)
     }
 
     private func makeStore(

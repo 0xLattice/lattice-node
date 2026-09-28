@@ -550,7 +550,8 @@ because boundary-focused testing needed the same things:
 - **Peer delivery.** The node receives transport events through the
   `IvyDelegate` protocol, and tests already install recording delegates.
 - **Storage.** The retained-root path is written against VolumeBroker's broker
-  protocols. This lets `NodeStoreTests` interpose a `BlockingBroker`.
+  protocols. This lets `NodeStoreTests` interpose a `FaultInjectingBroker`,
+  which fails or parks a chosen store, merge, advance or batch pin.
 - **Precedent for seeded runs.** Lattice's `LatticeSim` drives the real
   `ChainState` fork choice from a seed and requires "the same trace
   byte-for-byte" ([consensus simulator](https://github.com/adalinxx/Lattice/blob/38.0.0/docs/consensus-simulator.md)).

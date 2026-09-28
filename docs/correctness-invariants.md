@@ -139,39 +139,37 @@ places are their own claim until a test covers them too.
 - **NODE-STORAGE-002.b** — Every other durable reference (issued evidence,
   parent-evidence inbox, issued child proof) is written after its complete
   Volume is stored and retained.
-  Gap: #216
 - **NODE-STORAGE-002.c** — Import pruning protection only grows while the node
   is live.
 - **NODE-STORAGE-002.d** — Issued-hierarchy pruning protection only grows while
   the node is live.
-  Gap: #216
 - **NODE-STORAGE-002.e** — Prepared proof storage and its SQLite capacity
   eviction are serialized through one gate, which leaves exactly the kept
   proofs retained.
-  Gap: #216 (the current test passes with the gate removed)
 - **NODE-STORAGE-002.f** — The prepared retained set is advanced inside that
   gate, never after it is released.
-  Gap: #216
 - **NODE-STORAGE-002.g** — Contextual child offers live in a durable LRU in
   the store: touching an offer (`touchContextualCandidate`, or offering it
   again) makes it the newest, and the order survives reopening the store.
 - **NODE-STORAGE-002.h** — An offer's roots are pinned before its index row is
   written.
-  Gap: #216
 - **NODE-STORAGE-002.i** — Offer eviction removes the oldest offer, whole.
 - **NODE-STORAGE-002.j** — Offer eviction never touches a candidate marked as
   a handoff.
-- **NODE-STORAGE-002.k** — Import takes ownership of a handoff's roots before
-  the handoff is released.
-  Gap: #216
+- **NODE-STORAGE-002.k** — Admission releases a handoff
+  (`removeContextualCandidateIfAdmitted`) only once its admission batch owns
+  every one of the handoff's roots; a batch that owns only some of them
+  releases nothing. The handoff budget (002.l, 002.t) sheds handoffs without
+  any admission.
 - **NODE-STORAGE-002.l** — Storing a new offer sheds the oldest handoffs beyond
   the handoff budget.
 - **NODE-STORAGE-002.m** — No parent reserves anything at a child, and no
   acknowledgement gates parent progress.
-  Gap: #216
-- **NODE-STORAGE-002.n** — Canonicity never changes admission retention or
-  exclusion. The validated marker is a cache, not validity (002.o).
-  Gap: #216
+  Gap: #216 (no enforcement point: an absence across the hierarchy runtime)
+- **NODE-STORAGE-002.n** — Canonicity never changes admission retention: a
+  side block, and a block a reorg moves off the main chain, keep the
+  retention their admission took, live and across a restart. The validated
+  marker is a cache, not validity (002.o).
 - **NODE-STORAGE-002.o** — The validated tier is a cache: an off-chain
   validated block beyond the operator's retention budget loses its validated
   marker and pin.
@@ -179,18 +177,26 @@ places are their own claim until a test covers them too.
   the last of them is released.
 - **NODE-STORAGE-002.q** — An accepted block's roots stay owned after the
   handoff that brought them is released.
-  Gap: #216
 - **NODE-STORAGE-002.r** — Proof acquisition is independent of offers and
   handoffs.
   Gap: #216 (no enforcement point identified)
 - **NODE-STORAGE-002.s** — A candidate the parent's evidence names carried is
   marked as a handoff.
-  Gap: #216
-- **NODE-STORAGE-002.t** — Re-offering a stored candidate and booting the node
-  also shed handoffs beyond the budget.
-  Gap: #216
+- **NODE-STORAGE-002.t** — Booting the node also sheds the oldest handoffs
+  beyond the budget, row and pins together, as storing a new offer does
+  (002.l).
 - **NODE-STORAGE-002.u** — The process touches an offer each time a template
-  carries it again.
+  carries it to the process again (`storeContextualCandidate`).
+- **NODE-STORAGE-002.v** — `NodeImportStorage` records a Volume root only after
+  its store returns: a store that throws leaves no root to retain or stage.
+- **NODE-STORAGE-002.w** — Canonicity never changes exclusion.
+  Gap: #216
+- **NODE-STORAGE-002.x** — A template the service rebuilds from unchanged
+  inputs reuses its cached candidate without reaching the process
+  (`miningCandidate`), so that carry touches nothing. The cached candidate is
+  the last one whose build completed; a build that stores its offer and then
+  fails (`prepareChildProofs` throws) leaves a newer offer than the one the
+  cache carries.
   Gap: #216
 
 ## NODE-MEMPOOL-001 — the mempool is tip-relative, not consensus
@@ -204,7 +210,6 @@ places are their own claim until a test covers them too.
   Gap: #217
 - **NODE-MEMPOOL-001.c** — A local submission stores its complete transaction
   Volume before its SQLite reference.
-  Gap: #216
 - **NODE-MEMPOOL-001.d** — `ChainService.restoreLocalTransactions` brings every
   journaled local submission that still passes preflight back into the pool
   after a reopen; one that no longer does is dropped from the journal.
