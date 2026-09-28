@@ -20,31 +20,51 @@ places are their own claim until a test covers them too.
 
 - **NODE-SEMANTICS-001.a** — `canonicalized`, `acceptedSide`, `carrier`,
   `duplicate`, `unavailable`, `temporarilyInvalid`, `invalid`, and
-  `localFailure` remain distinct at the node boundary: every import result
-  and error maps to exactly one of them.
+  `localFailure` remain distinct at the node boundary: `NodeImportDecision`
+  maps every import result and error to exactly one of them.
+- **NODE-SEMANTICS-001.b** — A child chain's genesis bootstrap in
+  `ChainProcess.importBlock`, whose accepted and carrier arms set their
+  decision by hand (its rejected arm uses `NodeImportDecision`), gives each
+  the same meaning.
   Gap: #212
 
 ## NODE-SEMANTICS-002 — side validity is not canonicity
 
 - **NODE-SEMANTICS-002.a** — The process's import decision for a block
   accepted off the canonical path is `acceptedSide`, not `canonicalized`.
-- **NODE-SEMANTICS-002.b** — `acceptedSide` never publishes a canonical tip.
-  Gap: #212
-- **NODE-SEMANTICS-002.c** — `acceptedSide` counts as an accepted import for
-  relay, child-proof handling and the service's accepted set.
-  Gap: #212
+- **NODE-SEMANTICS-002.b** — The process hands its canonical-commit
+  publisher an import's commit only when the decision is `canonicalized`: an
+  `acceptedSide` import publishes nothing and the tip stays where it was.
+- **NODE-SEMANTICS-002.c** — `acceptedSide` is an accepted decision
+  (`isAccepted`), as `canonicalized` and `duplicate` are and no other
+  decision is.
 - **NODE-SEMANTICS-002.d** — The service maps the process's decisions to its
   own dispositions case for case: a side block stays a side block.
+- **NODE-SEMANTICS-002.e** — The service's relay of an accepted block, its
+  child-genesis links and the submit-work `accepted` flag, which each decide
+  by their own switch rather than `isAccepted`, count `acceptedSide` as
+  accepted.
   Gap: #212
 
 ## NODE-SEMANTICS-003 — availability is retriable, not punishable
 
-- **NODE-SEMANTICS-003.a** — `unavailable` is retried: a missing body or
-  evidence when the evidence or the providers change, and by the execution
-  walk on a timer; a missing parent fact (genesis or state continuity) on a
-  timer.
-  Gap: #213
-- **NODE-SEMANTICS-003.b** — `unavailable` never penalizes the supplying peer.
+- **NODE-SEMANTICS-003.a** — Candidate admission's resolution
+  (`candidateResolution`) turns an `unavailable` outcome with no missing
+  same-chain ancestor into a wait, never a decision: a body no provider
+  served waits for a provider (`.wait(.content)`), a missing parent fact
+  (genesis or state continuity) waits on a timer (`.wait(.later)`), and any
+  other missing evidence waits for new evidence (`.wait(.evidence)`).
+- **NODE-SEMANTICS-003.b** — Candidate admission's outcome blame
+  (`candidateBlame`) never names the supplier of an `unavailable` outcome,
+  whatever it waits for. Reporting bytes that fail their CID is separate and
+  follows the bytes.
+- **NODE-SEMANTICS-003.c** — An `unavailable` import error thrown out of
+  candidate admission, rather than returned as its outcome, is resolved by
+  the same rule.
+  Gap: #213 (the catch path waits for evidence on every thrown
+  `unavailable`, a missing parent fact included; Lattice throws none today)
+- **NODE-SEMANTICS-003.d** — The execution walk retries a block whose body or
+  evidence is unavailable on a timer.
   Gap: #213
 
 ## NODE-SEMANTICS-004 — local durability is not peer behavior
@@ -53,21 +73,25 @@ places are their own claim until a test covers them too.
   verdict: the attempt is retried and its parent evidence is kept.
   Gap: #214 (today a local verification failure is terminal: its
   parent-evidence inbox entry is consumed and the carried hold released)
-- **NODE-SEMANTICS-004.b** — A local failure or a store error never penalizes
-  a peer.
-  Gap: #213
+- **NODE-SEMANTICS-004.b** — Candidate admission's outcome blame
+  (`candidateBlame`) never names the supplier of a `localFailure` outcome.
 - **NODE-SEMANTICS-004.c** — The portable-attachment decision blames on the
   bytes alone: an attachment that verifies is never blamed, even when the
   runtime generation or the session changed while it was checked.
+- **NODE-SEMANTICS-004.d** — A store error thrown out of candidate admission
+  never penalizes a peer.
+  Gap: #213
 
 ## NODE-SEMANTICS-005 — only obtained invalid evidence is punishable
 
-- **NODE-SEMANTICS-005.a** — Only a complete `invalid` same-chain candidate is
-  attributed, and only to its sole supplier.
-  Gap: #213
-- **NODE-SEMANTICS-005.b** — Authenticated parent evidence establishes parent
-  facts; it never vouches for a child transition, and a child-chain block
-  rejected without a carrier link blames no one.
+- **NODE-SEMANTICS-005.a** — Candidate admission blames only a complete
+  `invalid` outcome, only its sole remote supplier, only while that
+  supplier's session is ready, and only on Nexus or when the outcome carries
+  a parent carrier link.
+- **NODE-SEMANTICS-005.b** — A child-chain candidate rejected as `invalid`
+  without a parent carrier link blames no one.
+- **NODE-SEMANTICS-005.c** — Authenticated parent evidence establishes parent
+  facts; it never vouches for a child transition.
   Gap: #213
 
 ## NODE-STORAGE-001 — peers and persistence exchange complete Volumes

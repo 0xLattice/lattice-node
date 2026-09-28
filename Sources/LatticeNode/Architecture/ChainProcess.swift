@@ -927,11 +927,13 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 rootCID: authenticatedPackage.package.proof.rootCID
             )
         }
+        // Only a canonical change is published: a side block's commit leaves
+        // the tip where it was and has nothing to reconcile.
         var receipt: CanonicalCommitReceipt?
-        if let canonicalCommitPublisher {
-            if let commit = result.commit {
-                receipt = await canonicalCommitPublisher(commit)
-            }
+        if let canonicalCommitPublisher,
+           decision.shouldPublishCanonicalTip,
+           let commit = result.commit {
+            receipt = await canonicalCommitPublisher(commit)
         }
         if decision.isAccepted {
             // Staging (or the earlier duplicate admission) is already durable.
