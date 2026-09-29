@@ -1795,6 +1795,11 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             try await eventually("every entry is an orphan") {
                 await self.orphaned(fixture) == scenario.behindLate.union(scenario.undecided)
             }
+            // The fetcher's own attempts (the bystander's timed wait, the
+            // late block's) are retried once the retry window passes, which
+            // a slow run of the setup below can reach: dropped first, so
+            // only the parent's triggers bring an orphan back.
+            await fixture.childRuntime.dropFetcherAttemptsForTesting()
             try await acceptLateBlock(scenario, fixture: fixture)
             // Entries waiting on a parent fact leave room for one.
             let childGenesis = try await fixture.childProcess.canonicalTipBlock()
@@ -1813,13 +1818,18 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 for cid in scenario.behindLate where await tries(cid) < 2 { return false }
                 return true
             }
+            // Read once the refetches' imports ran: the one import worker
+            // has finished any attempt it took before the fetcher dropped
+            // its own.
+            let pooledTries = await tries(bystander)
+            XCTAssertGreaterThanOrEqual(pooledTries, 1, "the bystander was imported")
             try await alwaysDuring("the refetches end; the bystander stays pooled", .seconds(2)) {
                 let served = await probe.rootServes
                 let pooled = await self.orphaned(fixture)
                 return served == scenario.behindLate.count && pooled == [bystander]
             }
             let bystanderTries = await tries(bystander)
-            XCTAssertEqual(bystanderTries, 1, "no hello, no refetch")
+            XCTAssertEqual(bystanderTries, pooledTries, "no hello, no refetch")
             await stopAll()
         } catch {
             await stopAll()
