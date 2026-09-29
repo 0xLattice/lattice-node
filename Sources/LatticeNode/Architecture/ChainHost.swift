@@ -191,12 +191,16 @@ public actor ChainHost {
     private func stopLocked(_ address: ChainAddress) async throws {
         guard var running = levels[address]?.running else { return }
         levels[address]?.running = nil
-        let tasks = [running.services.take(), running.seededGenesis.take()]
-            .compactMap { $0 }
-        for task in tasks { task.cancel() }
-        for task in tasks { await task.value }
-        await running.node.network.stop()
-        await running.node.service.shutdown()
+        let services = running.services.take()
+        let seeded = running.seededGenesis.take()
+        services?.cancel()
+        seeded?.cancel()
+        await services?.value
+        // The seed task is joined after the network stops, which resumes its
+        // parent-record wait.
+        await running.node.shutdown {
+            await seeded?.value
+        }
         // The storage lock is held for the process's lifetime, so it is
         // released only once the last reference to the level's process has
         // gone and its deinit has run. Probed on the lock itself: the weak

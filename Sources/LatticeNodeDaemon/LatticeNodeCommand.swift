@@ -218,6 +218,14 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                 _ = try await process.pruneUnpinnedVolumes()
             }
         }
+        // Each app's `runService()` returns once SIGTERM/SIGINT has
+        // gracefully stopped its listener; the node then shuts down behind
+        // it, on success and on error alike: tasks that touch the store are
+        // joined, the network stops, and the service joins its own work.
+        // The seed task is joined after the network stops, which resumes
+        // its parent-record wait. The stores close when `run()` returns and
+        // drops the node.
+        let result: Result<Void, any Error>
         do {
             if let publicReadApp {
                 try await withThrowingTaskGroup(of: Void.self) { group in
@@ -234,17 +242,17 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             } else {
                 try await app.runService()
             }
+            result = .success(())
         } catch {
-            genesisSeedTask?.cancel()
-            volumeMaintenance.cancel()
-            await volumeMaintenance.value
-            await network.stop()
-            throw error
+            result = .failure(error)
         }
         genesisSeedTask?.cancel()
         volumeMaintenance.cancel()
         await volumeMaintenance.value
-        await network.stop()
+        await node.shutdown {
+            await genesisSeedTask?.value
+        }
+        try result.get()
     }
 
     private func storageURL(for address: ChainAddress) throws -> URL {
