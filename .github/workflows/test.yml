@@ -214,9 +214,6 @@ jobs:
   thread-sanitizer:
     runs-on: macos-15
     timeout-minutes: 90
-    env:
-      # adalinxx/Ivy#12: remove with the Ivy fix and its pin bump.
-      LATTICE_SKIP_IVY_12: 1
     steps:
       - uses: actions/checkout@v4
 
@@ -240,8 +237,6 @@ jobs:
     timeout-minutes: 90
     env:
       ASAN_OPTIONS: detect_leaks=0
-      # adalinxx/Ivy#12: remove with the Ivy fix and its pin bump.
-      LATTICE_SKIP_IVY_12: 1
     steps:
       - uses: actions/checkout@v4
 
