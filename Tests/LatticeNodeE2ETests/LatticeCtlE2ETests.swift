@@ -224,10 +224,10 @@ final class LatticeCtlE2ETests: XCTestCase {
     }
 
     /// Brings up one CLI-managed host mining Nexus with rewards to `miner`
-    /// (and each chain in `recipients` to its key), then deploys a premined
-    /// child.
+    /// (none when nil: they burn), and each chain in `recipients` to its
+    /// key, then deploys a premined child.
     private func bringUpMiningHost(
-        miner: TestKey,
+        miner: TestKey?,
         recipients: [String: TestKey] = [:]
     ) async throws -> CtlHost {
         let root = FileManager.default.temporaryDirectory
@@ -254,8 +254,9 @@ final class LatticeCtlE2ETests: XCTestCase {
         topology["mine"] = [
             "chain": "Nexus", "worker": "cpu", "workers": 1,
             "batchSize": 100_000,
-            "recipients": recipients.mapValues(\.address)
-                .merging(["Nexus": miner.address]) { current, _ in current },
+            "recipients": recipients.mapValues(\.address).merging(
+                miner.map { ["Nexus": $0.address] } ?? [:]
+            ) { current, _ in current },
         ] as [String: Any]
         try JSONSerialization.data(withJSONObject: topology)
             .write(to: topologyURL)
@@ -611,12 +612,18 @@ final class LatticeCtlE2ETests: XCTestCase {
             at: scratch, withIntermediateDirectories: true
         )
         defer { try? FileManager.default.removeItem(at: scratch) }
-        let miner = try await makeKey(scratch, "minerG")
         let seller = try await makeKey(scratch, "sellerG")
         let buyer = try await makeKey(scratch, "buyerG")
         let sink = try await makeKey(scratch, "sinkG")
 
-        let host = try await bringUpMiningHost(miner: miner)
+        // No Nexus recipient: nothing here spends Nexus rewards, and a
+        // credited recipient changes Nexus's post-state on every block. At
+        // this host's near-maximum Nexus target nearly every hash is a full
+        // Nexus block, so each one would stale Market's prebuilt candidate
+        // (it binds the tip's post-state) before the coordinator's next
+        // template can carry it; with the receipt pooled, Market lost that
+        // race on every block and never advanced.
+        let host = try await bringUpMiningHost(miner: nil)
         // Middle chain premined to the BUYER (their receipt funding);
         // grandchild premined to the SELLER (the locked goods).
         let marketRPC = try await deployChild(
