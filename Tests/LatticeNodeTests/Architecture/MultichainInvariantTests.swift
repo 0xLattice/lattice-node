@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import UInt256
 import XCTest
 import cashew
@@ -20,7 +21,7 @@ final class MultichainInvariantTests: XCTestCase {
     /// mined on top of the carrier raises that run and the child credits the
     /// difference, once — a repeat is refused, the credit survives the
     /// child's restart, a report naming the wrong block is refused and
-    /// counted, and the child remembers the committer to re-ask for.
+    /// counted, and the child remembers the committer to re-read at start.
     func testParentRunWorkIsCreditedAtTheChildBlockItCommits() async throws {
         let parentStorage = temporaryDirectory()
         let childStorage = temporaryDirectory()
@@ -71,7 +72,7 @@ final class MultichainInvariantTests: XCTestCase {
         let carrierHeader = try BlockHeader(node: carrier)
         // Not served yet: nothing hosts Payments until the parent prepares
         // proofs for it — that is the operator's declaration, made through the
-        // service, which also pushes every changed run to a publisher.
+        // service, which also pushes every changed run to the hosted child.
         let servedBefore = await parent.servedRunDirectoryList()
         XCTAssertEqual(servedBefore, [])
         let pushed = ParentRunReportSink()
@@ -80,10 +81,12 @@ final class MultichainInvariantTests: XCTestCase {
             network: ClosureNetworkInterface(
                 childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
-                parentRunReportPublisher: { report in await pushed.record(report) },
                 acceptedBlockPublisher: { _ in }
             )
         )
+        await parentService.attachChildLevel(directory: "Payments") {
+            pushed.record($0)
+        }
         let carrierOutcome = try await parentService.importNetworkCandidate(
             carrierHeader,
             authenticatedChildPackage: nil,
@@ -102,7 +105,7 @@ final class MultichainInvariantTests: XCTestCase {
         let carrierReports = await parent.runReports(changedBy: carrierHeader.rawCID)
         XCTAssertEqual(carrierReports.count, 1)
         let carrierReport = try XCTUnwrap(carrierReports.first)
-        let pushedAfterCarrier = await pushed.received()
+        let pushedAfterCarrier = pushed.received()
         XCTAssertEqual(pushedAfterCarrier, [], "the carrier alone attributes nothing: nothing to push")
         XCTAssertEqual(carrierReport.blockHash, carrierHeader.rawCID)
         XCTAssertEqual(carrierReport.directory, "Payments")
@@ -121,17 +124,16 @@ final class MultichainInvariantTests: XCTestCase {
         let childContent = InMemoryContentStore()
         try await BlockHeader(node: childBlock).storeBlock(fetcher: parent, storer: childContent)
         let childBlockHeader = BlockHeader(rawCID: childBlockCID, node: nil, encryptionInfo: nil)
-        // Through the service: admitting a block a parent block carried asks
-        // the parent for that committer's run, so the credit never waits for
-        // a push or a reconnect. The service is dropped right after, with
-        // the process, so the storage lock is released for the reopen.
-        let asked = RunReportRequestSink()
+        // Through the service, which records the carrier edge. (Its read of
+        // the carrier's run goes through a hosted child's mailbox, pinned by
+        // `testCarrierRunsAreReadOnlyOnceTheParentServesTheDirectory`.) The
+        // service is dropped right after, with the process, so the storage
+        // lock is released for the reopen.
         var childService: ChainService? = ChainService(
             process: try child(),
             network: ClosureNetworkInterface(
                 childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
-                parentRunReportRequester: { carriers in await asked.record(carriers) },
                 acceptedBlockPublisher: { _ in }
             )
         )
@@ -150,10 +152,8 @@ final class MultichainInvariantTests: XCTestCase {
         )
         childService = nil
         XCTAssertTrue(admitted.decision.isAccepted)
-        let askedFor = await asked.received()
-        XCTAssertEqual(askedFor, [[carrierHeader.rawCID]], "one ask, naming the admitted block's carrier")
         let remembered = try await child().recentCarriers()
-        XCTAssertEqual(remembered, [carrierHeader.rawCID], "the child remembers whom to re-ask")
+        XCTAssertEqual(remembered, [carrierHeader.rawCID], "the child remembers whom to re-read")
         // A directory this chain never anchored a child genesis for is not
         // served, whoever names it.
         await parent.serveRuns(for: "Markets")
@@ -183,7 +183,7 @@ final class MultichainInvariantTests: XCTestCase {
             contentSource: FetcherContentSource(parent)
         )
         XCTAssertTrue(successorOutcome.decision.isAccepted)
-        let pushedReports = await pushed.received()
+        let pushedReports = pushed.received()
         let successorReports = await parent.runReports(changedBy: successorHeader.rawCID)
         XCTAssertEqual(pushedReports, successorReports, "the first run a child could credit is the first push")
         XCTAssertEqual(successorReports.count, 1, "the successor's admission changed exactly the carrier's run")
@@ -191,7 +191,7 @@ final class MultichainInvariantTests: XCTestCase {
         XCTAssertEqual(grown.blockHash, carrierHeader.rawCID, "credited to the nearest committer")
         XCTAssertGreaterThan(grown.runWork, grown.ownWork)
         let byRequest = await parent.runReport(carrier: carrierHeader.rawCID, directory: "Payments")
-        XCTAssertEqual(byRequest, grown, "the re-serve request answers with the same report")
+        XCTAssertEqual(byRequest, grown, "the child's read answers with the same report")
         let unserved = await parent.runReport(carrier: carrierHeader.rawCID, directory: "Markets")
         XCTAssertNil(unserved)
 
@@ -277,7 +277,7 @@ final class MultichainInvariantTests: XCTestCase {
         guard case .refused(.notStronger) = afterRestart else {
             return XCTFail("the attributed credit must survive a restart, got \(afterRestart)")
         }
-        // ... and so does whom to re-ask: the fallback works after a restart.
+        // ... and so does whom to re-read: the fallback works after a restart.
         let rememberedAfterRestart = try await reopened.recentCarriers()
         XCTAssertEqual(rememberedAfterRestart, [carrierHeader.rawCID])
     }
@@ -408,20 +408,28 @@ final class MultichainInvariantTests: XCTestCase {
         let nexusReport = try XCTUnwrap(nexusReports.first { $0.childBlock == a2CID })
         XCTAssertEqual(nexusReport.blockHash, n2Header.rawCID)
         XCTAssertGreaterThan(nexusReport.runWork, nexusReport.ownWork)
-        // A credits through its service, which pushes B the run the credit
-        // changed — the middle chain does not wait for B to ask.
+        // Nexus's report reaches A through A's parent mailbox; A credits it
+        // and its service pushes B, through B's mailbox, the run the credit
+        // changed — the middle chain does not wait for B to read it.
         let pushedToB = ParentRunReportSink()
-        let aService = ChainService(
-            process: a,
-            network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
-                childProofPublisher: { _ in },
-                parentRunReportPublisher: { report in await pushedToB.record(report) },
-                acceptedBlockPublisher: { _ in }
-            )
+        let aService = levelService(a, parent: nexus)
+        let bService = levelService(b, parent: a)
+        let bMailbox = await bService.openParentMailbox(
+            tipChanged: {}, serveParentRuns: { await aService.serveRuns(for: "B") }
         )
-        let aCredited = try await aService.applyParentRunReport(nexusReport)
-        guard case .credited = aCredited else { return XCTFail("A must credit Nexus's run: \(aCredited)") }
+        await aService.attachChildLevel(directory: "B") {
+            pushedToB.record($0)
+            bMailbox.send($0)
+        }
+        let aMailbox = await aService.openParentMailbox(
+            tipChanged: {}, serveParentRuns: {}
+        )
+        aMailbox.send(.runs([nexusReport]))
+        try await eventually("A credits Nexus's run and B credits A's") {
+            let aApplied = await a.parentReportCounters().applied
+            let bApplied = await b.parentReportCounters().applied
+            return aApplied == 1 && bApplied == 1
+        }
 
         // The credit landed at A2, which roots its own run for B: the run A
         // serves B grew by exactly what Nexus attributed, while A2's own
@@ -436,14 +444,237 @@ final class MultichainInvariantTests: XCTestCase {
             nexusReport.runWork.subtracting(nexusReport.ownWork),
             "what Nexus attributed at A2 is what A's run for B grew by"
         )
-        let pushed = await pushedToB.received()
+        let pushed = pushedToB.received()
         XCTAssertEqual(pushed, [runAfter], "the credit pushed exactly the run it changed, to B")
-        let bCredited = try await b.applyParentRunReport(runAfter)
-        guard case .credited = bCredited else { return XCTFail("B must credit A's grown run: \(bCredited)") }
         let bCounters = await b.parentReportCounters()
-        XCTAssertEqual(bCounters.applied, 1)
+        XCTAssertEqual(bCounters.applied, 1, "B credited A's grown run from its mailbox")
         let bAgain = try await b.applyParentRunReport(runAfter)
         guard case .refused(.notStronger) = bAgain else { return XCTFail("once: \(bAgain)") }
+        await aService.shutdown()
+        await bService.shutdown()
+    }
+
+    /// §9.10 through the hosted-child mailbox: every parent admission that
+    /// grows a run into a hosted child's directory is sent to the child, and
+    /// the child credits each in the order the parent sent them. Three
+    /// successors grow the carrier's run three times; each is stronger than
+    /// the one before it, so an in-order drain credits all three and refuses
+    /// none of them.
+    func testParentAdmissionsCreditTheChildThroughItsMailboxInOrder() async throws {
+        let (nexus, child, carried) = try await payingChild(keyByte: 0x81)
+        let nexusService = levelService(nexus)
+        let childService = levelService(child, parent: nexus)
+        let sent = ParentRunReportSink()
+        let mailbox = await childService.openParentMailbox(
+            tipChanged: {},
+            serveParentRuns: { await nexusService.serveRuns(for: "Payments") }
+        )
+        await nexusService.attachChildLevel(directory: "Payments") {
+            sent.record($0)
+            mailbox.send($0)
+        }
+        // Opening the mailbox has the parent serve the directory, then
+        // re-reads the carrier's run: the carrier alone, nothing to credit.
+        try await eventually("the child's start re-read") {
+            await child.parentReportCounters().refusals["notStronger"] == 1
+        }
+
+        var tip = carried.carrier
+        for timestamp in Int64(3)...5 {
+            let unmined = try await BlockBuilder.buildBlock(
+                previous: tip, timestamp: timestamp, nonce: 0, fetcher: nexus
+            )
+            let successor = try XCTUnwrap(BlockBuilder.mine(
+                block: unmined, target: tip.nextTarget
+            ))
+            let outcome = try await nexusService.importNetworkCandidate(
+                try BlockHeader(node: successor),
+                authenticatedChildPackage: nil,
+                preparingChildDirectories: [],
+                contentSource: FetcherContentSource(nexus)
+            )
+            XCTAssertTrue(outcome.decision.isAccepted)
+            tip = successor
+        }
+        try await eventually("the child credits every pushed run") {
+            await child.parentReportCounters().applied == 3
+        }
+        let reports = sent.received()
+        XCTAssertEqual(reports.count, 3, "one push per admission that grew the run")
+        XCTAssertEqual(
+            reports.map(\.runWork), reports.map(\.runWork).sorted(),
+            "the parent sent the growing run in order"
+        )
+        let counters = await child.parentReportCounters()
+        XCTAssertEqual(counters.refusals["notStronger"], 1, "no push was refused as stale")
+        await childService.shutdown()
+        await nexusService.shutdown()
+    }
+
+    /// A block a parent block carried is credited that carrier's run once
+    /// the parent serves the directory, never read before: the admission
+    /// queues the read behind the start's serve in the child's mailbox. A
+    /// read while the parent's serve walk ran would find nothing and the
+    /// credit would be lost. Three blocks are admitted while the serve is
+    /// held; each carrier's run holds a plain parent block above it, and all
+    /// three are credited once the serve completes.
+    func testCarrierRunsAreReadOnlyOnceTheParentServesTheDirectory() async throws {
+        let (nexus, child, first) = try await payingChild(keyByte: 0x87)
+        let serveGate = Latch()
+        let recording = RecordingParentLevel(LocalParentLevel(nexus)) {
+            await nexus.servedRunDirectoryList().contains("Payments")
+        }
+        let childService = ChainService(
+            process: child,
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in }
+            ),
+            parentLevel: recording
+        )
+        _ = await childService.openParentMailbox(
+            tipChanged: {},
+            serveParentRuns: {
+                await serveGate.wait()
+                await nexus.serveRuns(for: "Payments")
+            }
+        )
+        var carriers = [try BlockHeader(node: first.carrier).rawCID]
+        var above = try await mine(on: nexus, previous: first.carrier, timestamp: 3)
+        var previous = first.block
+        for timestamp in stride(from: Int64(4), through: 8, by: 2) {
+            let carried = try await carry(
+                childOf: previous, transactions: [], directory: "Payments",
+                parent: nexus, parentTip: above, child: child,
+                timestamp: timestamp, through: childService
+            )
+            carriers.append(try BlockHeader(node: carried.carrier).rawCID)
+            above = try await mine(on: nexus, previous: carried.carrier, timestamp: timestamp + 1)
+            previous = carried.block
+        }
+        let servedEarly = await nexus.servedRunDirectoryList()
+        XCTAssertEqual(servedEarly, [], "the serve is still held")
+        await serveGate.open()
+        try await eventually("every carried block credited after the serve") {
+            await child.parentReportCounters().applied == 4
+        }
+        let unserved = await recording.unservedReads
+        XCTAssertEqual(unserved, 0, "no run was read before the parent served the directory")
+        let read = Set(await recording.carriersRead)
+        XCTAssertEqual(read, Set(carriers))
+        await childService.shutdown()
+    }
+
+    /// A child level whose mailbox opened before the parent anchored its
+    /// genesis, and whose genesis then activated without the service's
+    /// out-of-band hook (as an in-band admission does), gets no second serve
+    /// at activation. Its carrier reads still serve the directory first, so
+    /// a block carried after that is credited its carrier's run.
+    func testCarrierRunsAreCreditedWhenGenesisActivatesWithoutASecondServe() async throws {
+        let nexus = try await ChainProcess.open(configuration: try configuration(
+            path: ["Nexus"], storage: temporaryDirectory(),
+            privateKeyHex: String(repeating: "8a", count: 32)
+        ))
+        let child = try await ChainProcess.open(configuration: try configuration(
+            path: ["Nexus", "Payments"], storage: temporaryDirectory(),
+            privateKeyHex: String(repeating: "8b", count: 32)
+        ))
+        let childService = levelService(child, parent: nexus)
+        let openServeRan = Latch()
+        // Later serves (before each carrier read) wait here, so the read
+        // lands once the parent block above the carrier exists.
+        let readGate = Latch()
+        _ = await childService.openParentMailbox(
+            tipChanged: {},
+            serveParentRuns: {
+                if await openServeRan.isOpen { await readGate.wait() }
+                await nexus.serveRuns(for: "Payments")
+                await openServeRan.open()
+            }
+        )
+        // The open-time serve finds no anchor: nothing is served.
+        await openServeRan.wait()
+        let servedAtOpen = await nexus.servedRunDirectoryList()
+        XCTAssertEqual(servedAtOpen, [])
+
+        // Nexus anchors the genesis; the child activates it directly on the
+        // process, so `genesisActivatedOutOfBand` queues no serve.
+        let seed = ChildGenesisSeed(spec: NexusGenesis.spec, premineTo: nil, timestamp: 1)
+        let genesis = try await ChildGenesisBuilder.build(
+            seed: seed, chainPath: ["Nexus", "Payments"], fetcher: nexus
+        )
+        let recording = try await record(
+            anchorOf: genesis, directory: "Payments", on: nexus,
+            previous: try await nexus.canonicalTipBlock(),
+            chainPath: ["Nexus"], timestamp: 1
+        )
+        let up = try await child.activateChildGenesis(
+            seed: seed, confirmParentRecordedGenesis: { _ in true }
+        )
+        XCTAssertTrue(up)
+        let servedAfterActivation = await nexus.servedRunDirectoryList()
+        XCTAssertEqual(servedAfterActivation, [], "no serve was queued at activation")
+
+        // Block 1, carried and admitted through the service, with a plain
+        // parent block above its carrier.
+        let block1 = try await carry(
+            childOf: genesis, transactions: [], directory: "Payments",
+            parent: nexus, parentTip: recording, child: child,
+            timestamp: 2, through: childService
+        )
+        _ = try await mine(on: nexus, previous: block1.carrier, timestamp: 3)
+        await readGate.open()
+        try await eventually("block 1's carrier run credited") {
+            await child.parentReportCounters().applied == 1
+        }
+        let served = await nexus.servedRunDirectoryList()
+        XCTAssertEqual(served, ["Payments"], "the carrier read served the directory")
+        await childService.shutdown()
+    }
+
+    /// A restarted child level keeps the credit a push would have brought:
+    /// the run grew while the child was down (nothing was sent), and when
+    /// the level starts again its mailbox has the parent serve the directory
+    /// and re-reads the runs of the carriers it recently accepted blocks
+    /// from (`recentCarriers`), crediting the growth.
+    func testRestartedChildRereadsTheRunsOfItsRecentCarriers() async throws {
+        let nexus: ChainProcess
+        let carried: Carried
+        let childConfiguration: NodeConfiguration
+        do {
+            let fixture = try await payingChild(keyByte: 0x84)
+            nexus = fixture.nexus
+            carried = fixture.carried
+            childConfiguration = fixture.child.configuration
+        }
+        // The child is down (its storage lock released with the process):
+        // the parent's run grows with nobody listening.
+        await nexus.serveRuns(for: "Payments")
+        _ = try await mine(on: nexus, previous: carried.carrier, timestamp: 3)
+        let grown = await nexus.runReport(
+            carrier: try BlockHeader(node: carried.carrier).rawCID,
+            directory: "Payments"
+        )
+        let run = try XCTUnwrap(grown)
+        XCTAssertGreaterThan(run.runWork, run.ownWork)
+        let reopened = try await ChainProcess.open(configuration: childConfiguration)
+        let recent = try await reopened.recentCarriers()
+        XCTAssertEqual(recent, [try BlockHeader(node: carried.carrier).rawCID])
+
+        let childService = levelService(reopened, parent: nexus)
+        _ = await childService.openParentMailbox(
+            tipChanged: {},
+            serveParentRuns: { await nexus.serveRuns(for: "Payments") }
+        )
+        try await eventually("the restarted child re-reads and credits the run") {
+            await reopened.parentReportCounters().applied == 1
+        }
+        let repeated = try await reopened.applyParentRunReport(run)
+        guard case .refused(.notStronger) = repeated else {
+            return XCTFail("the re-read credited the grown run, got \(repeated)")
+        }
+        await childService.shutdown()
     }
 
     func testBlockOneAnchorResolvesAgainstALiveParent() async throws {
@@ -868,14 +1099,15 @@ final class MultichainInvariantTests: XCTestCase {
     /// carrier proof and the continuity link the parent attests.
     private func carry(
         childOf previous: Block, transactions: [Transaction], directory: String,
-        parent: ChainProcess, parentTip: Block, child: ChainProcess, timestamp: Int64
+        parent: ChainProcess, parentTip: Block, child: ChainProcess, timestamp: Int64,
+        through childService: ChainService? = nil
     ) async throws -> Carried {
         let provisional = try await BlockBuilder.buildBlock(
             previous: parentTip, timestamp: timestamp, nonce: 0, fetcher: parent
         )
         let childBlock = try await BlockBuilder.buildBlock(
             previous: previous, transactions: transactions, parentChainBlock: provisional,
-            timestamp: timestamp, fetcher: parent
+            timestamp: timestamp, fetcher: UnionFetcher([parent, child])
         )
         let unminedCarrier = try await BlockBuilder.buildBlock(
             previous: parentTip, children: [directory: childBlock],
@@ -895,33 +1127,145 @@ final class MultichainInvariantTests: XCTestCase {
         )
         let evidence = try XCTUnwrap(issued)
         let content = InMemoryContentStore()
-        try await BlockHeader(node: childBlock).storeBlock(fetcher: parent, storer: content)
-        let admitted = try await child.importBlock(
-            BlockHeader(rawCID: childBlockCID, node: nil, encryptionInfo: nil),
-            authenticatedChildPackage: AuthenticatedChildPackage(package: ChildValidationPackage(
-                proof: evidence.proof,
-                parentStateContinuityLink: ParentStateContinuityLink(
-                    parentPath: Array(child.configuration.chainPath.dropLast()),
-                    fromStateCID: LatticeState.emptyHeader.rawCID,
-                    toStateCID: childBlock.parentState.rawCID
-                )
-            )),
-            remoteSource: content
-        )
+        try await BlockHeader(node: childBlock).storeBlock(fetcher: UnionFetcher([parent, child]), storer: content)
+        let package = AuthenticatedChildPackage(package: ChildValidationPackage(
+            proof: evidence.proof,
+            parentStateContinuityLink: ParentStateContinuityLink(
+                parentPath: Array(child.configuration.chainPath.dropLast()),
+                fromStateCID: LatticeState.emptyHeader.rawCID,
+                toStateCID: childBlock.parentState.rawCID
+            )
+        ))
+        let childHeader = BlockHeader(rawCID: childBlockCID, node: nil, encryptionInfo: nil)
+        let admitted = if let childService {
+            try await childService.importNetworkCandidate(
+                childHeader,
+                authenticatedChildPackage: package,
+                preparingChildDirectories: [],
+                contentSource: content
+            )
+        } else {
+            try await child.importBlock(
+                childHeader, authenticatedChildPackage: package, remoteSource: content
+            )
+        }
         XCTAssertTrue(admitted.decision.isAccepted, "child block into \(directory)")
         return Carried(block: childBlock, carrier: carrier)
     }
 
-    private actor RunReportRequestSink {
-        private var asks: [[String]] = []
-        func record(_ carriers: [String]) { asks.append(carriers) }
-        func received() -> [[String]] { asks }
+    /// Nexus with a Payments child whose block 1 a Nexus carrier commits.
+    private func payingChild(
+        keyByte: UInt8
+    ) async throws -> (nexus: ChainProcess, child: ChainProcess, carried: Carried) {
+        let nexus = try await ChainProcess.open(configuration: try configuration(
+            path: ["Nexus"], storage: temporaryDirectory(),
+            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32)
+        ))
+        let child = try await ChainProcess.open(configuration: try configuration(
+            path: ["Nexus", "Payments"], storage: temporaryDirectory(),
+            privateKeyHex: String(
+                repeating: String(format: "%02x", keyByte + 1), count: 32
+            )
+        ))
+        let seed = ChildGenesisSeed(spec: NexusGenesis.spec, premineTo: nil, timestamp: 1)
+        let genesis = try await ChildGenesisBuilder.build(
+            seed: seed, chainPath: ["Nexus", "Payments"], fetcher: nexus
+        )
+        let recording = try await record(
+            anchorOf: genesis, directory: "Payments", on: nexus,
+            previous: try await nexus.canonicalTipBlock(),
+            chainPath: ["Nexus"], timestamp: 1
+        )
+        let up = try await child.activateChildGenesis(
+            seed: seed, confirmParentRecordedGenesis: { _ in true }
+        )
+        XCTAssertTrue(up)
+        let carried = try await carry(
+            childOf: genesis, transactions: [], directory: "Payments",
+            parent: nexus, parentTip: recording, child: child, timestamp: 2
+        )
+        return (nexus, child, carried)
     }
 
-    private actor ParentRunReportSink {
-        private var reports: [ParentRunReport] = []
-        func record(_ report: ParentRunReport) { reports.append(report) }
-        func received() -> [ParentRunReport] { reports }
+    /// A root level's service.
+    private func levelService(_ process: ChainProcess) -> ChainService {
+        ChainService(
+            process: process,
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in }
+            )
+        )
+    }
+
+    /// A hosted level's service reading its parent facts from `parent`.
+    private func levelService(
+        _ process: ChainProcess, parent: ChainProcess
+    ) -> ChainService {
+        ChainService(
+            process: process,
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in }
+            ),
+            parentLevel: LocalParentLevel(parent)
+        )
+    }
+
+    /// The runs a parent service sent a hosted child, in order. Recorded
+    /// synchronously: the send is the parent's non-blocking notification.
+    private final class ParentRunReportSink: Sendable {
+        private let reports = Mutex<[ParentRunReport]>([])
+
+        func record(_ change: ParentChange) {
+            guard case .runs(let sent) = change else { return }
+            reports.withLock { $0 += sent }
+        }
+
+        func received() -> [ParentRunReport] {
+            reports.withLock { $0 }
+        }
+    }
+
+    /// A parent level that records the carriers a child read runs for.
+    private actor RecordingParentLevel: ParentLevel {
+        private let base: any ParentLevel
+        private let served: @Sendable () async -> Bool
+        private(set) var carriersRead: [String] = []
+        /// Reads made while the parent did not yet serve the directory.
+        private(set) var unservedReads = 0
+
+        init(
+            _ base: any ParentLevel,
+            served: @escaping @Sendable () async -> Bool = { true }
+        ) {
+            self.base = base
+            self.served = served
+        }
+
+        func hasProducedState(_ stateCID: String) async -> Bool {
+            await base.hasProducedState(stateCID)
+        }
+
+        func recordedGenesisLink(
+            directory: String, childGenesisCID: String
+        ) async -> ParentGenesisLink? {
+            await base.recordedGenesisLink(
+                directory: directory, childGenesisCID: childGenesisCID
+            )
+        }
+
+        func anchoredGenesisCID(directory: String) async -> String? {
+            await base.anchoredGenesisCID(directory: directory)
+        }
+
+        func runReport(carrier: String, directory: String) async -> ParentRunReport? {
+            carriersRead.append(carrier)
+            if await !served() { unservedReads += 1 }
+            return await base.runReport(carrier: carrier, directory: directory)
+        }
     }
 
 }

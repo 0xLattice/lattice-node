@@ -115,13 +115,14 @@ also the only continuity question a parent answers. (A parent also serves run
 reports for the directories it hosts: it pushes the changed run of each served
 directory's nearest carrier after every accepted import and after every
 credit it is itself handed by its own parent — so a run flows down every
-level without a re-ask — for each run a child could actually credit (its
-`runWork` exceeds its `ownWork`), once per value it reaches; and it serves
-the runs of the carriers a child names: a child asks for a block's
-carriers when it imports a block they carried, and for its recent carriers
-after every evidence catch-up round, so a push it could not yet bind or one
-it missed while away is recovered without waiting for the next parent block.
-Those report work; they answer nothing about continuity or validity.) A
+level without a re-read — for each run a child could actually credit (its
+`runWork` exceeds its `ownWork`), once per value it reaches, into the
+co-hosted child's ordered mailbox; and a child reads the runs of carriers
+from its co-hosted parent level itself: a block's carriers when it imports a
+block they carried, and its recent carriers when it starts, so a push it
+could not yet bind or one it missed while stopped is recovered without
+waiting for the next parent block. Those report work; they answer nothing
+about continuity or validity.) A
 request naming any
 other `from` is
 malformed, not merely unusual: no correct child can produce one, and serving it
@@ -217,12 +218,8 @@ The node uses two Ivy sessions:
 - the public same-chain overlay exchanges announcements and same-path content;
 - the private hierarchy plane connects one configured immediate parent with its
   direct children and carries contextual candidates, exact parent-fact queries,
-  root-bound proof facts, and parent run reports
-  (`lattice.hierarchy.parent-run-report.v1`, pushed by the parent whenever a
-  served run changes; `lattice.hierarchy.parent-run-report.request.v1`, a
-  child's request for the runs of the carriers it names). A parent that does
-  not know the topic drops it unread and the child keeps the credit it already
-  holds, so parents roll before children.
+  and root-bound proof facts. Parent run reports travel in-process, from a
+  parent level to the child levels it hosts.
 
 Both planes currently require node protocol version 4. Parent-fact
 request/response semantics are versioned, so mixed-version peers refuse the

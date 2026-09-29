@@ -24,14 +24,23 @@ public protocol ParentLevel: AnyObject, Sendable {
     /// The genesis CID the parent committed for `directory` in its
     /// validated tip's state. Nil while no anchor is committed there.
     func anchoredGenesisCID(directory: String) async -> String?
+    /// The run the parent credits to `carrier`, one of its blocks committing
+    /// into `directory` (§9.10). Nil while the parent does not serve runs for
+    /// `directory` or `carrier` commits nothing there.
+    func runReport(carrier: String, directory: String) async -> ParentRunReport?
 }
 
-/// What the parent level tells a hosted child. Delivery never blocks the
+/// What the parent level tells a hosted child (`ChainService.ParentMailbox`):
+/// runs in the order sent, tip changes coalesced. Delivery never blocks the
 /// parent.
 public enum ParentChange: Sendable {
     /// The parent's validated tip or executed frontier moved: a parent fact
     /// a child block waited on may hold now.
     case tipChanged
+    /// Runs the parent credits to its blocks committing into the child's
+    /// directory changed (§9.10): the child credits each at the child block
+    /// the committer carried.
+    case runs([ParentRunReport])
 }
 
 /// A parent fact a child admission can read from its co-hosted parent
@@ -148,5 +157,9 @@ final class LocalParentLevel: @unchecked Sendable, ParentLevel {
         await process?.anchoredChildGenesisCIDs(
             directories: [directory]
         )[directory]
+    }
+
+    func runReport(carrier: String, directory: String) async -> ParentRunReport? {
+        await process?.runReport(carrier: carrier, directory: directory)
     }
 }

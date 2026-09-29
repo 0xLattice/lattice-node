@@ -112,19 +112,6 @@ final class WireProtocolFuzzTests: XCTestCase {
             try seed(PortableAttachmentLocateRequestMessage(
                 requestID: 25, childCID: cids[4]
             )),
-            try seed(ParentRunReportMessage(
-                directory: "Payments",
-                carrierCID: cids[0],
-                childBlockCID: cids[1],
-                grinds: [cids[2], cids[3]],
-                runWork: WorkSum(UInt256(17)),
-                ownWork: WorkSum(UInt256(5)),
-                revision: 29
-            )),
-            try seed(ParentRunReportRequestMessage(
-                requestID: 31,
-                carrierCIDs: [cids[0], cids[4]]
-            )),
         ]
     }
 
@@ -240,8 +227,6 @@ final class WireProtocolFuzzTests: XCTestCase {
             probe(ReadEndpointRequestMessage.self),
             probe(ReadEndpointResponseMessage.self),
             probe(PortableAttachmentLocateRequestMessage.self),
-            probe(ParentRunReportMessage.self),
-            probe(ParentRunReportRequestMessage.self),
         ]
     }
 

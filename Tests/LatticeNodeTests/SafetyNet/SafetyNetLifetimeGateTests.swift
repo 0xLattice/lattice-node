@@ -31,8 +31,6 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
         "TaskSlot.current": "the primitive itself",
         "NodeNetworkRuntime.lifecycleTail":
             "a tail each lifecycle operation replaces; never cleared by a task",
-        "HierarchyState.runReportApplyTail":
-            "a tail each run report replaces; teardown cancels it, no task clears it",
         "HelloDeadline.task": "held with its lifetime token; fires compare the token",
         "PendingTransactionInventory.timeout":
             "an entry keyed by a process-unique request ID, removed by its owner",
@@ -56,6 +54,10 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
             "the service never restarts; shutdown cancels it before joining the workers",
         "ChainService.transactionPublicationWorker":
             "the service never restarts; shutdown joins the worker",
+        "ChainService.parentMailboxDrain":
+            "the service never restarts; shutdown finishes the mailbox and joins the drain",
+        "ChainService.parentTipDrain":
+            "the service never restarts; shutdown finishes the tip signal and joins the drain",
         "ChainService.carrierProofDeliveries":
             "entries keyed by a service-unique ID, each removed by its own task; shutdown joins them",
     ]

@@ -180,8 +180,13 @@ cross-component invariants:
   `testPortableAttachmentsKeepDistinctRootsForTheSameChildWhileAdmissionIsBlocked`); a run
   flows through every level — what Nexus attributes to the middle chain's
   committing block reaches the grandchild, and the middle chain's service
-  pushes the run that credit changed to its own children without waiting
-  for a re-ask (`testParentRunWorkPropagatesTwoLevelsDown`);
+  pushes the run that credit changed to its own children, through their
+  mailboxes, without waiting for a re-read
+  (`testParentRunWorkPropagatesTwoLevelsDown`); a hosted child credits the
+  runs its parent sends in order
+  (`testParentAdmissionsCreditTheChildThroughItsMailboxInOrder`) and
+  re-reads its recent carriers' runs when it restarts
+  (`testRestartedChildRereadsTheRunsOfItsRecentCarriers`);
 - staged facts and retained Volume roots reopen together, or recovery fails
   closed.
 

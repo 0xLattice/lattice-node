@@ -20,8 +20,9 @@ public enum ChainHostError: Error, Equatable, CustomStringConvertible {
 
 /// One process hosting a chain tree: one `Node` per level, built and started
 /// parent-first and stopped in reverse. Each child reads its parent facts
-/// from its co-hosted parent level (`LocalParentLevel`) and is told when the
-/// parent's tip moves. Its parent endpoint is the parent's fact plane on
+/// from its co-hosted parent level (`LocalParentLevel`) and is told, in
+/// order, when the parent's tip moves and when a run the parent credits into
+/// its directory changes. Its parent endpoint is the parent's fact plane on
 /// loopback, which still carries the parent's evidence.
 ///
 /// The level set is fixed when the host is built: a chain added to the
@@ -139,13 +140,26 @@ public actor ChainHost {
             parentLevel: parent.map { LocalParentLevel($0.process) }
         )
         if let parent {
-            await parent.service.attachChildLevel(
-                directory: address.directory
-            ) { [weak network = node.network] change in
-                Task { await network?.parentChanged(change) }
+            // The child's one ordered mailbox from its parent. The parent
+            // only enqueues into it. The child's drain serves this
+            // directory's runs on the parent (now, and again when the child's
+            // genesis activates) outside any lease of the child's: the
+            // parent's serve may take the parent's gate, so it is never
+            // called from inside a child's lease (§2.4).
+            let directory = address.directory
+            let mailbox = await node.service.openParentMailbox(
+                tipChanged: { [weak network = node.network] in
+                    await network?.parentChanged(.tipChanged)
+                },
+                serveParentRuns: { [weak parentService = parent.service] in
+                    await parentService?.serveRuns(for: directory)
+                }
+            )
+            await parent.service.attachChildLevel(directory: directory) {
+                mailbox.send($0)
             }
             // A tip change while the child was starting found no listener.
-            await node.network.parentChanged(.tipChanged)
+            mailbox.send(.tipChanged)
         }
         var running = Running(node: node)
         if let services {

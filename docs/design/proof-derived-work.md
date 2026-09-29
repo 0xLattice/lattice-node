@@ -201,10 +201,9 @@ malformed bytes is.
 There is no generic forest, accumulator, light-client protocol, quorum, second
 CAS, or second fork-choice implementation. No wire topic carries securing or
 inherited work, and no store keeps inherited-work snapshots, parent-work facts
-or cursors, or parent-work readiness. The §9.10 run-report topics
-`lattice.hierarchy.parent-run-report.v1` and
-`lattice.hierarchy.parent-run-report.request.v1` carry a report the child
-binds and derives into a work fact, never a weight snapshot.
+or cursors, or parent-work readiness. A §9.10 run report, handed in-process
+from a parent level to a hosted child, carries a report the child binds and
+derives into a work fact, never a weight snapshot.
 
 ## Properties
 

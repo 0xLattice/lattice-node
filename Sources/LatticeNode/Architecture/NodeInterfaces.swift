@@ -56,13 +56,6 @@ public protocol NetworkInterface: AnyObject, Sendable {
     /// carry, as `directory:cid` lines: one input of the template digest.
     func childCandidateDigestInput(parentStateCID: String) async -> [String]
     func publishChildProof(_ publication: DirectChildProofPublication) async throws
-    /// A parent pushes the run it credits to a committing block to the
-    /// children of that directory (§9.10), on every change to that run.
-    func announceParentRunReport(_ report: ParentRunReport) async throws
-    /// Ask this chain's configured parent for the runs of the committing
-    /// blocks behind one block admitted here (§9.10) — one ask per admission,
-    /// so the credit for those runs never waits for a push or a reconnect.
-    func requestParentRunReports(carriers: [String]) async
     func publishAcceptedBlock(_ blockCID: String) async throws
     func publishTransaction(_ volumeRootCID: String) async throws
     /// Opens a network body-acquisition session bound to one block's root and
@@ -85,7 +78,7 @@ public protocol NetworkInterface: AnyObject, Sendable {
 
 /// Which optional `ChainInterface` operations a network-runtime generation
 /// may use. A missing capability disables the network behaviour behind it
-/// (transaction relay, inventory sync, candidate offers, run reports).
+/// (transaction relay, inventory sync, candidate offers).
 public struct ChainNetworkCapabilities: OptionSet, Sendable {
     public let rawValue: UInt8
 
@@ -96,13 +89,9 @@ public struct ChainNetworkCapabilities: OptionSet, Sendable {
     public static let childCandidates = ChainNetworkCapabilities(rawValue: 1 << 0)
     public static let transactions = ChainNetworkCapabilities(rawValue: 1 << 1)
     public static let transactionInventory = ChainNetworkCapabilities(rawValue: 1 << 2)
-    public static let parentRunReports = ChainNetworkCapabilities(rawValue: 1 << 3)
-    public static let runReportServing = ChainNetworkCapabilities(rawValue: 1 << 4)
-    public static let recentCarriers = ChainNetworkCapabilities(rawValue: 1 << 5)
 
     public static let all: ChainNetworkCapabilities = [
         .childCandidates, .transactions, .transactionInventory,
-        .parentRunReports, .runReportServing, .recentCarriers,
     ]
 }
 
@@ -120,15 +109,6 @@ public protocol ChainInterface: AnyObject, Sendable {
     ) async throws -> NodeImportOutcome
     func submitNetworkTransaction(_ transaction: Transaction) async throws -> Bool
     func transactionInventoryRoots() async -> [String]
-    /// A run report from the configured parent, to be credited at the child
-    /// block it names (§9.10). The service derives the credit under its own
-    /// lease.
-    func applyParentRunReport(_ report: ParentRunReport) async throws
-    /// A child wired in for `directory`: start serving its runs.
-    func serveRuns(for directory: String) async
-    /// The committers this chain asks its parent to re-serve after each
-    /// evidence catch-up round.
-    func recentCarriers() async -> [String]
     /// This chain's genesis activated outside candidate admission (adopted
     /// from the parent's record): its tip moved from nothing.
     func genesisActivatedOutOfBand() async
@@ -179,15 +159,6 @@ final class WeakNetwork: @unchecked Sendable, NetworkInterface {
             childDirectory: publication.directory,
             childCID: publication.childCID
         )
-    }
-
-    func announceParentRunReport(_ report: ParentRunReport) async throws {
-        guard let runtime else { throw CancellationError() }
-        await runtime.announceParentRunReport(report)
-    }
-
-    func requestParentRunReports(carriers: [String]) async {
-        await runtime?.requestParentRunReports(carriers: carriers)
     }
 
     func publishAcceptedBlock(_ blockCID: String) async throws {
@@ -262,20 +233,6 @@ final class WeakChain: @unchecked Sendable, ChainInterface {
     func transactionInventoryRoots() async -> [String] {
         guard let service else { return [] }
         return await service.transactionInventoryRoots()
-    }
-
-    func applyParentRunReport(_ report: ParentRunReport) async throws {
-        guard let service else { throw CancellationError() }
-        _ = try await service.applyParentRunReport(report)
-    }
-
-    func serveRuns(for directory: String) async {
-        await service?.serveRuns(for: directory)
-    }
-
-    func recentCarriers() async -> [String] {
-        guard let service else { return [] }
-        return (try? await service.recentCarriers()) ?? []
     }
 
     func genesisActivatedOutOfBand() async {

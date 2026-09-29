@@ -761,8 +761,8 @@ extension NodeStore {
 
     /// The committing parent blocks of the blocks this chain ACCEPTED with a
     /// carrier proof, distinct, newest first (Lattice §9.10). Durable, so it
-    /// is the answer to "whom does this chain ask its parent to re-serve"
-    /// after a restart. Joined on `accepted_blocks` deliberately: the relay
+    /// is the answer to "whose runs does this chain re-read from its parent
+    /// level" after a restart. Joined on `accepted_blocks` deliberately: the relay
     /// evidence table also records carriers of blocks this chain refused —
     /// every merged-mining round whose root missed this chain's target — and
     /// those are not committers of anything here.
