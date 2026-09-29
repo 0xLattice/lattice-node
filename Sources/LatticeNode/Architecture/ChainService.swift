@@ -2112,6 +2112,7 @@ public actor ChainService {
     /// adopted): its tip moved from nothing, so its hosted children and its
     /// network hear it like any other tip change.
     func genesisActivatedOutOfBand() {
+        guard !stopped else { return }
         publishChainStateChange()
     }
 
