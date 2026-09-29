@@ -71,8 +71,10 @@ public struct TopologyMine: Codable {
     public var worker: String?
     public var workers: Int?
     public var batchSize: UInt64?
-    /// A `lattice-rewards emit-batch` file; the cursor lives beside it.
-    public var rewards: String?
+    /// Where each chain's block reward and fees go, by chain path (e.g.
+    /// `{"Nexus": "bafy..."}`), passed to the coordinator as `--recipient`.
+    /// A chain left out mines to no one: its reward and fees burn.
+    public var recipients: [String: String]?
     /// Minimum work per block by chain path (e.g. `{"Nexus": "2^32"}`),
     /// passed to the coordinator as `--min-work`. The miner only searches for
     /// and submits hashes that meet it; blocks still commit their scheduled
@@ -108,7 +110,7 @@ public struct TopologyMine: Codable {
 
     public init(
         chain: String, worker: String? = nil, workers: Int? = nil,
-        batchSize: UInt64? = nil, rewards: String? = nil,
+        batchSize: UInt64? = nil, recipients: [String: String]? = nil,
         minWork: [String: String]? = nil,
         minBlockIntervalSeconds: UInt64? = nil,
         templateTimeoutSeconds: UInt64? = nil,
@@ -118,11 +120,52 @@ public struct TopologyMine: Codable {
         self.worker = worker
         self.workers = workers
         self.batchSize = batchSize
-        self.rewards = rewards
+        self.recipients = recipients
         self.minWork = minWork
         self.minBlockIntervalSeconds = minBlockIntervalSeconds
         self.templateTimeoutSeconds = templateTimeoutSeconds
         self.roundDeadlineMultiplier = roundDeadlineMultiplier
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case chain, worker, workers, batchSize, recipients, minWork
+        case minBlockIntervalSeconds, templateTimeoutSeconds
+        case roundDeadlineMultiplier
+    }
+
+    private enum ReplacedKeys: String, CodingKey {
+        case rewards
+    }
+
+    public init(from decoder: any Decoder) throws {
+        // The pre-signed reward batch this replaced. Refused loudly, so an
+        // old tree fails instead of silently mining to no one.
+        let replaced = try decoder.container(keyedBy: ReplacedKeys.self)
+        guard !replaced.contains(.rewards) else {
+            throw CtlError("mine.rewards was replaced by mine.recipients: a map from chain path to the address paid that chain's block reward and fees")
+        }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            chain: try container.decode(String.self, forKey: .chain),
+            worker: try container.decodeIfPresent(String.self, forKey: .worker),
+            workers: try container.decodeIfPresent(Int.self, forKey: .workers),
+            batchSize: try container.decodeIfPresent(UInt64.self, forKey: .batchSize),
+            recipients: try container.decodeIfPresent(
+                [String: String].self, forKey: .recipients
+            ),
+            minWork: try container.decodeIfPresent(
+                [String: String].self, forKey: .minWork
+            ),
+            minBlockIntervalSeconds: try container.decodeIfPresent(
+                UInt64.self, forKey: .minBlockIntervalSeconds
+            ),
+            templateTimeoutSeconds: try container.decodeIfPresent(
+                UInt64.self, forKey: .templateTimeoutSeconds
+            ),
+            roundDeadlineMultiplier: try container.decodeIfPresent(
+                Int.self, forKey: .roundDeadlineMultiplier
+            )
+        )
     }
 
     /// The default behind `templateTimeoutSeconds`: the `URLRequest` default
@@ -168,6 +211,16 @@ public struct TopologyMine: Codable {
     public func pacingHold(afterRoundOf elapsed: Duration) -> Duration {
         guard let seconds = minBlockIntervalSeconds else { return .zero }
         return max(.zero, .seconds(seconds) - elapsed)
+    }
+
+    /// `recipients` as coordinator `--recipient` values, in path order.
+    public var recipientEntries: [String] {
+        (recipients ?? [:]).sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
+    }
+
+    /// The coordinator arguments for `recipients`.
+    public var coordinatorRecipientArguments: [String] {
+        recipientEntries.flatMap { ["--recipient", $0] }
     }
 
     /// The coordinator arguments for `minWork`.

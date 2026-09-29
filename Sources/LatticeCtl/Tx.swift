@@ -1,5 +1,5 @@
 // Transactions: author, sign, and submit ordinary transactions for a chain
-// in the tree. Signing uses a `lattice-rewards` key file and never leaves this
+// in the tree. Signing uses a `lattice key generate` key file and never leaves this
 // host; submission goes to that chain's loopback RPC, which validates it
 // against current state before it enters the pool. Four shapes cover the
 // protocol's action types: a plain transfer, and the three legs of a
@@ -167,7 +167,7 @@ struct TxOptions: ParsableArguments {
     @Option(name: .long, help: "Absolute chain path in the tree (e.g. Nexus/Market).")
     var chain: String
 
-    @Option(name: .long, help: "Key file (lattice-rewards format) that signs and pays.")
+    @Option(name: .long, help: "Key file (from `lattice key generate`) that signs and pays.")
     var key: String
 
     @Option(name: .long, help: "Signer nonce; defaults to the chain's next expected nonce for the key.")
@@ -237,7 +237,6 @@ struct TxOptions: ParsableArguments {
             receiptActions: receiptActions,
             withdrawalActions: withdrawalActions,
             signers: [signer.address],
-            fee: fee,
             nonce: signerNonce,
             chainPath: path
         )

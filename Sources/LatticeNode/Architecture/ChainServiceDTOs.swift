@@ -36,38 +36,17 @@ public struct SubmitTransactionResponse: Codable, Sendable, Equatable {
     public let mempoolBytes: Int
 }
 
-/// One externally signed reward transaction for one absolute chain path.
-/// Process identity is never accepted as, or converted into, wallet identity.
-public struct MiningReward: Codable, Sendable {
+/// Where one chain's block reward and fees go: a wallet address for one
+/// absolute chain path. The block commits it as `rewardRecipient`, which the
+/// proof of work covers, so a relayer cannot swap it. Process identity is
+/// never accepted as, or converted into, wallet identity.
+public struct MiningRecipient: Codable, Sendable, Equatable {
     public let chainPath: [String]
-    public let transaction: Transaction
+    public let address: String
 
-    public init(chainPath: [String], transaction: Transaction) {
+    public init(chainPath: [String], address: String) {
         self.chainPath = chainPath
-        self.transaction = transaction
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case chainPath
-        case transaction
-    }
-
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        chainPath = try container.decode([String].self, forKey: .chainPath)
-        transaction = try container.decode(
-            ContentBoundTransaction.self,
-            forKey: .transaction
-        ).transaction()
-    }
-
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(chainPath, forKey: .chainPath)
-        try container.encode(
-            ContentBoundTransaction(transaction: transaction),
-            forKey: .transaction
-        )
+        self.address = address
     }
 }
 
@@ -92,27 +71,38 @@ public struct MiningMinimumWork: Codable, Sendable, Equatable {
 }
 
 public struct MiningTemplateRequest: Codable, Sendable {
-    public let rewards: [MiningReward]
+    /// A chain with no entry mines to no one: its block reward and fees burn.
+    public let recipients: [MiningRecipient]
     public let minimumWork: [MiningMinimumWork]
 
     public init(
-        rewards: [MiningReward] = [],
+        recipients: [MiningRecipient] = [],
         minimumWork: [MiningMinimumWork] = []
     ) {
-        self.rewards = rewards
+        self.recipients = recipients
         self.minimumWork = minimumWork
     }
 
     private enum CodingKeys: String, CodingKey {
-        case rewards
+        case recipients
         case minimumWork
+        case rewards
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        rewards = try container.decodeIfPresent(
-            [MiningReward].self,
-            forKey: .rewards
+        // The signed-reward request this replaced. Refused loudly, so an old
+        // miner fails instead of silently mining to no one.
+        guard !container.contains(.rewards) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .rewards,
+                in: container,
+                debugDescription: "\"rewards\" was replaced by \"recipients\""
+            )
+        }
+        recipients = try container.decodeIfPresent(
+            [MiningRecipient].self,
+            forKey: .recipients
         ) ?? []
         minimumWork = try container.decodeIfPresent(
             [MiningMinimumWork].self,
@@ -122,7 +112,7 @@ public struct MiningTemplateRequest: Codable, Sendable {
 
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(rewards, forKey: .rewards)
+        try container.encode(recipients, forKey: .recipients)
         if !minimumWork.isEmpty {
             try container.encode(minimumWork, forKey: .minimumWork)
         }
@@ -234,11 +224,9 @@ public struct BlockSummary: Codable, Sendable, Equatable {
 
 public enum ChainServiceError: Error, Equatable, Sendable {
     case unresolvedChainSpec
-    case invalidRewardTransaction
-    case invalidRewardPlan
+    case invalidRecipientPlan
     case invalidMinimumWork
     case minimumWorkPlanTooLarge
-    case rewardPlanTooLarge
     case requestTooLarge
     case invalidChildDirectory
     case invalidChildGenesis

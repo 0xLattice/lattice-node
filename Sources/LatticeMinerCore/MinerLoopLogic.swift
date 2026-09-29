@@ -142,6 +142,33 @@ public enum MinerLoopLogic {
         return work
     }
 
+    /// The `recipients` field of `POST /v1/mining/templates` for `--recipient`
+    /// entries of the form `<chain path>=<address>` (e.g. `Nexus=bafy...`).
+    /// Nil when any entry is malformed or names a chain twice. The node checks
+    /// each address; a chain with no entry mines to no one.
+    public static func recipientField(_ entries: [String]) -> [[String: Any]]? {
+        var seen: Set<String> = []
+        var field: [[String: Any]] = []
+        for entry in entries {
+            let parts = entry.split(
+                separator: "=",
+                maxSplits: 1,
+                omittingEmptySubsequences: false
+            )
+            guard parts.count == 2, !parts[1].isEmpty else { return nil }
+            let chainPath = parts[0]
+                .split(separator: "/", omittingEmptySubsequences: false)
+                .map(String.init)
+            guard chainPath.first == "Nexus",
+                  !chainPath.contains(where: \.isEmpty),
+                  seen.insert(String(parts[0])).inserted else {
+                return nil
+            }
+            field.append(["chainPath": chainPath, "address": String(parts[1])])
+        }
+        return field
+    }
+
     /// The `minimumWork` field of `POST /v1/mining/templates` for `--min-work`
     /// entries of the form `<chain path>=<work>` (e.g. `Nexus/Payments=2^32`).
     /// Nil when any entry is malformed or names a chain twice.

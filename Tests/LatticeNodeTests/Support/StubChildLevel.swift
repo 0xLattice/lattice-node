@@ -73,7 +73,9 @@ extension ChainService {
             timestamp: tip.timestamp + 1
         ) else { throw ChainServiceError.invalidParentCarrier }
         let built = try await provider(
-            ChildCandidateRequestContext(parentCarrier: carrier, rewards: [])
+            ChildCandidateRequestContext(
+                parentCarrier: carrier, recipients: plan.recipients
+            )
         )
         for directory in directories {
             let level = StubChildLevel(directory: directory)

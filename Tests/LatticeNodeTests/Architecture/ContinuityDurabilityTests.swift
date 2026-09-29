@@ -40,25 +40,25 @@ final class ContinuityDurabilityTests: XCTestCase {
         var blocks: [Block] = []
         for index in 0..<depth {
             let body = TransactionBody(
-                accountActions: [AccountAction(
-                    owner: CryptoUtils.createAddress(from: miner.publicKey),
-                    delta: 1
-                )],
+                accountActions: [],
                 actions: [], depositActions: [], genesisActions: [],
                 receiptActions: [], withdrawalActions: [],
-                signers: [CryptoUtils.createAddress(from: miner.publicKey)],
-                fee: 0, nonce: UInt64(index), chainPath: ["Nexus"]
+                signers: [CryptoUtils.createAddress(from: miner.publicKey)], nonce: UInt64(index), chainPath: ["Nexus"]
             )
             let header = try HeaderImpl(node: body)
             let signature = try XCTUnwrap(TransactionSigning.sign(
                 bodyHeader: header, privateKeyHex: miner.privateKey
             ))
-            let reward = Transaction(
+            let marker = Transaction(
                 signatures: [miner.publicKey: signature], body: header
             )
+            _ = try await service.submitTransaction(
+                SubmitTransactionRequest(transaction: marker)
+            )
             let template = try await service.miningTemplate(
-                MiningTemplateRequest(rewards: [MiningReward(
-                    chainPath: ["Nexus"], transaction: reward
+                MiningTemplateRequest(recipients: [MiningRecipient(
+                    chainPath: ["Nexus"],
+                    address: CryptoUtils.createAddress(from: miner.publicKey)
                 )])
             )
             let block = template.block.auditReplacingNonce(
@@ -408,7 +408,8 @@ private extension Block {
             version: version, parent: parent, transactions: transactions,
             target: target, nextTarget: nextTarget, spec: spec,
             parentState: parentState, prevState: prevState, postState: postState,
-            children: children, height: height, timestamp: timestamp, nonce: nonce
+            children: children, height: height, timestamp: timestamp,
+            rewardRecipient: rewardRecipient, nonce: nonce
         )
     }
 }

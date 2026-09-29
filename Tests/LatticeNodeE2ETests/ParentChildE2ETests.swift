@@ -566,11 +566,26 @@ final class ParentChildE2ETests: XCTestCase {
 
         // Co-mine block 1: mining the parent collects the child's candidate into
         // the parent template; the co-mined block promotes the child to height 1.
+        // Each chain pays its own recipient.
+        let nexusRecipient = CryptoUtils.createAddress(
+            from: CryptoUtils.generateKeyPair().publicKey
+        )
+        let childRecipient = CryptoUtils.createAddress(
+            from: CryptoUtils.generateKeyPair().publicKey
+        )
+        let recipients = [
+            MiningRecipient(chainPath: ["Nexus"], address: nexusRecipient),
+            MiningRecipient(
+                chainPath: ["Nexus", "Payments"], address: childRecipient
+            ),
+        ]
         let clock = ContinuousClock()
         let deadline = clock.now + e2eScaled(.seconds(90))
         var childHeight = active.height ?? 0
         while clock.now < deadline && childHeight < 1 {
-            _ = try? await mineBlock(nexus, requestTimeout: 30)
+            _ = try? await mineBlock(
+                nexus, recipients: recipients, requestTimeout: 30
+            )
             if let status = try? await child.waitForStatus(
                 timeout: .seconds(3),
                 where: { ($0.height ?? 0) >= 1 }
@@ -586,6 +601,19 @@ final class ParentChildE2ETests: XCTestCase {
         XCTAssertEqual(final.phase, .active)
         XCTAssertEqual(final.height, 1)
         XCTAssertEqual(final.chainPath, ["Nexus", "Payments"])
+
+        // Both chains paid their recipients the block reward: no fees rode
+        // these blocks, so each credit is a whole number of rewards.
+        let reward = NexusGenesis.spec.initialReward
+        let nexusAccount: ExplorerAccount = try await nexus.get(
+            "/api/state/account/\(nexusRecipient)"
+        )
+        XCTAssertGreaterThan(nexusAccount.balance, 0)
+        XCTAssertEqual(nexusAccount.balance % reward, 0)
+        let childAccount: ExplorerAccount = try await child.get(
+            "/api/state/account/\(childRecipient)"
+        )
+        XCTAssertEqual(childAccount.balance, reward)
 
         try await cluster.stopAll()
         passed = true
@@ -989,20 +1017,20 @@ final class ParentChildE2ETests: XCTestCase {
 
     private func mine(
         _ parent: E2ENode,
-        rewards: [MiningReward] = []
+        recipients: [MiningRecipient] = []
     ) async throws -> SubmitWorkResponse {
-        try await mineBlock(parent, rewards: rewards).response
+        try await mineBlock(parent, recipients: recipients).response
     }
 
     private func mineBlock(
         _ parent: E2ENode,
-        rewards: [MiningReward] = [],
+        recipients: [MiningRecipient] = [],
         requestTimeout: TimeInterval? = nil
     ) async throws -> E2EMinedBlock {
         // Child candidate collection is protocol-bounded at 15 seconds.
         let template: MiningTemplateResponse = try await parent.post(
             "/v1/mining/templates",
-            body: MiningTemplateRequest(rewards: rewards),
+            body: MiningTemplateRequest(recipients: recipients),
             timeout: requestTimeout ?? 20
         )
         let midstate = ProofOfWork.midstate(for: template.block)
@@ -1225,7 +1253,6 @@ final class ParentChildE2ETests: XCTestCase {
         genesisActions: [GenesisAction] = [],
         receiptActions: [ReceiptAction] = [],
         withdrawalActions: [WithdrawalAction] = [],
-        fee: UInt64 = 0,
         nonce: UInt64
     ) throws -> Transaction {
         try signedTransaction(
@@ -1236,7 +1263,6 @@ final class ParentChildE2ETests: XCTestCase {
             genesisActions: genesisActions,
             receiptActions: receiptActions,
             withdrawalActions: withdrawalActions,
-            fee: fee,
             nonce: nonce
         )
     }
@@ -1249,7 +1275,6 @@ final class ParentChildE2ETests: XCTestCase {
         genesisActions: [GenesisAction] = [],
         receiptActions: [ReceiptAction] = [],
         withdrawalActions: [WithdrawalAction] = [],
-        fee: UInt64 = 0,
         nonce: UInt64
     ) throws -> Transaction {
         let body = TransactionBody(
@@ -1260,7 +1285,6 @@ final class ParentChildE2ETests: XCTestCase {
             receiptActions: receiptActions,
             withdrawalActions: withdrawalActions,
             signers: keys.map { CryptoUtils.createAddress(from: $0.publicKey) },
-            fee: fee,
             nonce: nonce,
             chainPath: chainPath
         )
@@ -1303,7 +1327,6 @@ final class ParentChildE2ETests: XCTestCase {
             receiptActions: [],
             withdrawalActions: [],
             signers: [CryptoUtils.createAddress(from: key.publicKey)],
-            fee: 0,
             nonce: 0,
             chainPath: chainPath
         )
@@ -1451,7 +1474,7 @@ final class ParentChildE2ETests: XCTestCase {
             }
             let probe: MiningTemplateResponse = try await sourceNexus.post(
                 "/v1/mining/templates",
-                body: MiningTemplateRequest(rewards: []),
+                body: MiningTemplateRequest(),
                 timeout: 30
             )
             if probe.block.target < probe.searchTarget {
@@ -1499,7 +1522,7 @@ final class ParentChildE2ETests: XCTestCase {
             // is what freezes the parent, not unreachability).
             let template: MiningTemplateResponse = try await sourceNexus.post(
                 "/v1/mining/templates",
-                body: MiningTemplateRequest(rewards: []),
+                body: MiningTemplateRequest(),
                 timeout: 30
             )
             let parentTarget = template.block.target

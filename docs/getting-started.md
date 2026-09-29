@@ -31,7 +31,7 @@ The default storage path is `~/.lattice/chains/Nexus`. On its first start the
 node creates a mode-0600 `process.key`, constructs the deterministic Nexus
 genesis, and verifies its CID:
 
-`bafyreifvxwhqbwvnrtr2plvtmlvpceqxnexyayjs7klgy6dbkj7yppdsz4`
+`bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24`
 
 The RPC server listens on loopback. Non-loopback `--rpc-bind` values are
 rejected because the current HTTP surface is unauthenticated.
@@ -97,9 +97,10 @@ Use `--once` for one bounded coordinator batch. `lattice-miner` is not a
 node-facing daemon; the coordinator launches it with a concrete work ID, block,
 target, start nonce, and count.
 
-`--rewards-file` accepts the complete, at-most-1-MiB externally signed template
-request JSON (`{"rewards":[...]}`). Omit it for no rewards; the coordinator has
-no identity or private-key flag.
+`--recipient <chain path>=<address>` (repeat once per chain) names where that
+chain's block reward and fees go. Omit it and the chain's reward and fees burn;
+the coordinator has no identity or private-key flag. Create an address with
+`lattice key generate --out key.json`.
 
 ## Start a child process
 

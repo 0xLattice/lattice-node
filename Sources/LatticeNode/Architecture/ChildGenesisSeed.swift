@@ -65,7 +65,6 @@ public enum ChildGenesisBuilder {
                 receiptActions: [],
                 withdrawalActions: [],
                 signers: [],
-                fee: 0,
                 nonce: 0,
                 chainPath: chainPath
             )

@@ -1577,7 +1577,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 nonce: 2,
                 fetcher: fixture.parentProcess
             ),
-            rewards: []
+            recipients: []
         )
     }
 
@@ -1636,7 +1636,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 ),
                 fetcher: fixture.parentProcess
             ),
-            rewards: []
+            recipients: []
         )
         return try await childCandidate(fixture, for: context)
     }
@@ -2289,7 +2289,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             childProcess: childProcess,
             context: ChildCandidateRequestContext(
                 parentCarrier: provisional,
-                rewards: []
+                recipients: []
             ),
             candidate: DirectChildCandidate(
                 directory: "Payments",

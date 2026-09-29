@@ -81,7 +81,6 @@ final class MetricsTests: XCTestCase {
                 receiptActions: [],
                 withdrawalActions: [],
                 signers: [CryptoUtils.createAddress(from: key.publicKey)],
-                fee: 0,
                 nonce: 0,
                 chainPath: ["Nexus"]
             ))

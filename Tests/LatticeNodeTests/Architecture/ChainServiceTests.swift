@@ -31,16 +31,6 @@ final class ChainServiceTests: XCTestCase {
         )
         XCTAssertNotNil(submitted.transaction.body.node)
         XCTAssertEqual(submitted.transaction.body.rawCID, transaction.body.rawCID)
-
-        let reward = try decoder.decode(
-            MiningReward.self,
-            from: encoder.encode(MiningReward(
-                chainPath: ["Nexus"],
-                transaction: transaction
-            ))
-        )
-        XCTAssertNotNil(reward.transaction.body.node)
-        XCTAssertEqual(reward.transaction.body.rawCID, transaction.body.rawCID)
     }
 
     func testRequestPayloadCeilingIsInclusive() async throws {
@@ -295,25 +285,19 @@ final class ChainServiceTests: XCTestCase {
         async throws
     {
         let service = makeService(process: try await nexusProcess())
-        func reward() throws -> MiningReward {
-            let key = CryptoUtils.generateKeyPair()
-            return MiningReward(
+        func recipient() -> MiningRecipient {
+            MiningRecipient(
                 chainPath: ["Nexus"],
-                transaction: try signedTransaction(
-                    key: key,
-                    chainPath: ["Nexus"],
-                    accountActions: [AccountAction(
-                        owner: CryptoUtils.createAddress(from: key.publicKey),
-                        delta: 1
-                    )]
+                address: CryptoUtils.createAddress(
+                    from: CryptoUtils.generateKeyPair().publicKey
                 )
             )
         }
         let first = try await service.miningTemplate(
-            MiningTemplateRequest(rewards: [try reward()])
+            MiningTemplateRequest(recipients: [recipient()])
         )
         let second = try await service.miningTemplate(
-            MiningTemplateRequest(rewards: [try reward()])
+            MiningTemplateRequest(recipients: [recipient()])
         )
         XCTAssertNotEqual(first.workID, second.workID)
 
@@ -337,7 +321,7 @@ final class ChainServiceTests: XCTestCase {
         }
     }
 
-    func testExternalRewardTransactionProducesAndSubmitsWork() async throws {
+    func testRecipientTemplateCreditsTheBlockRewardAndSubmitsWork() async throws {
         let process = try await nexusProcess()
         let publishedBlocks = PublishedBlocks()
         let service = makeService(
@@ -346,37 +330,24 @@ final class ChainServiceTests: XCTestCase {
                 await publishedBlocks.record(blockCID)
             }
         )
-        let miner = CryptoUtils.generateKeyPair()
-        let reward = try signedTransaction(
-            key: miner,
-            chainPath: ["Nexus"],
-            accountActions: [AccountAction(
-                owner: CryptoUtils.createAddress(from: miner.publicKey),
-                delta: 1
-            )]
+        let recipient = CryptoUtils.createAddress(
+            from: CryptoUtils.generateKeyPair().publicKey
         )
 
         let template = try await service.miningTemplate(
-            MiningTemplateRequest(rewards: [MiningReward(
+            MiningTemplateRequest(recipients: [MiningRecipient(
                 chainPath: ["Nexus"],
-                transaction: reward
+                address: recipient
             )])
         )
         XCTAssertEqual(template.block.nonce, 0)
         XCTAssertEqual(template.chainPath, ["Nexus"])
+        XCTAssertEqual(template.block.rewardRecipient, recipient)
+        // The reward is a header field, not a transaction: it takes no slot.
         XCTAssertEqual(
             try template.block.transactions.node?.allKeysAndValues().count,
-            1
+            0
         )
-        XCTAssertEqual(
-            try template.block.transactions.node?.allKeysAndValues()
-                .values.first?.rawCID,
-            try VolumeImpl<Transaction>(node: reward).rawCID
-        )
-        XCTAssertEqual(Set(reward.signatures.keys), [miner.publicKey])
-        XCTAssertFalse(reward.signatures.keys.contains(
-            process.configuration.processPublicKey
-        ))
 
         let submitted = try await service.submitWork(SubmitWorkRequest(
             workID: template.workID,
@@ -388,62 +359,163 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertEqual(blockCIDs, [try XCTUnwrap(submitted.tipCID)])
         let status = await service.status()
         XCTAssertEqual(status.height, 1)
+        let reward = NexusGenesis.spec.rewardAtBlock(1)
+        let account = await service.explorerAccount(owner: recipient)
+        XCTAssertEqual(account?.balance, reward)
+        let block = await service.explorerBlock(cid: try XCTUnwrap(submitted.tipCID))
+        XCTAssertEqual(block?.rewardRecipient, recipient)
+        XCTAssertEqual(block?.rewardAmount, reward)
     }
 
-    func testStateInvalidRewardIsRejectedInsteadOfSilentlyDropped() async throws {
+    /// The recipient is credited the reward PLUS the fees its block carries,
+    /// and a template without one burns both.
+    func testRecipientIsPaidRewardPlusFeesAndNoRecipientBurns() async throws {
         let service = makeService(process: try await nexusProcess())
-        let issued = try await service.miningTemplate(MiningTemplateRequest())
-        let miner = CryptoUtils.generateKeyPair()
-        let rewardWithNonceGap = try signedTransaction(
-            key: miner,
-            chainPath: ["Nexus"],
-            accountActions: [AccountAction(
-                owner: CryptoUtils.createAddress(from: miner.publicKey),
-                delta: 1
-            )],
-            nonce: 1
+        let payer = CryptoUtils.generateKeyPair()
+        let payerAddress = CryptoUtils.createAddress(from: payer.publicKey)
+        let recipient = CryptoUtils.createAddress(
+            from: CryptoUtils.generateKeyPair().publicKey
         )
-
-        await XCTAssertThrowsErrorAsync(
-            try await service.miningTemplate(MiningTemplateRequest(
-                rewards: [MiningReward(
-                    chainPath: ["Nexus"],
-                    transaction: rewardWithNonceGap
-                )]
-            ))
-        ) { error in
-            XCTAssertEqual(error as? ChainServiceError, .invalidRewardTransaction)
-        }
-
-        let submitted = try await service.submitWork(SubmitWorkRequest(
-            workID: issued.workID,
-            nonce: 0
+        // Block 1 funds the payer.
+        let funding = try await service.miningTemplate(MiningTemplateRequest(
+            recipients: [MiningRecipient(chainPath: ["Nexus"], address: payerAddress)]
         ))
-        XCTAssertTrue(submitted.accepted)
+        let funded = try await service.submitWork(SubmitWorkRequest(
+            workID: funding.workID, nonce: 0
+        ))
+        XCTAssertTrue(funded.accepted)
+        // Block 2 carries a transfer of 10 that pays a fee of 7.
+        let sink = CryptoUtils.createAddress(
+            from: CryptoUtils.generateKeyPair().publicKey
+        )
+        _ = try await service.submitTransaction(SubmitTransactionRequest(
+            transaction: try signedTransaction(
+                key: payer,
+                accountActions: [
+                    AccountAction(owner: payerAddress, delta: -17),
+                    AccountAction(owner: sink, delta: 10),
+                ]
+            )
+        ))
+        let paying = try await service.miningTemplate(MiningTemplateRequest(
+            recipients: [MiningRecipient(chainPath: ["Nexus"], address: recipient)]
+        ))
+        XCTAssertEqual(
+            try paying.block.transactions.node?.allKeysAndValues().count, 1
+        )
+        let paid = try await service.submitWork(SubmitWorkRequest(
+            workID: paying.workID, nonce: 0
+        ))
+        XCTAssertTrue(paid.accepted)
+        let reward = NexusGenesis.spec.rewardAtBlock(2)
+        let account = await service.explorerAccount(owner: recipient)
+        XCTAssertEqual(account?.balance, reward + 7)
+        let paidBlock = await service.explorerBlock(cid: try XCTUnwrap(paid.tipCID))
+        XCTAssertEqual(paidBlock?.rewardAmount, reward + 7)
+
+        // Block 3 names no recipient: nothing is credited to anyone.
+        let burning = try await service.miningTemplate(MiningTemplateRequest())
+        XCTAssertNil(burning.block.rewardRecipient)
+        let burned = try await service.submitWork(SubmitWorkRequest(
+            workID: burning.workID, nonce: 0
+        ))
+        XCTAssertTrue(burned.accepted)
+        let burnedBlock = await service.explorerBlock(
+            cid: try XCTUnwrap(burned.tipCID)
+        )
+        XCTAssertNil(burnedBlock?.rewardRecipient)
+        XCTAssertNil(burnedBlock?.rewardAmount)
+        let unchanged = await service.explorerAccount(owner: recipient)
+        XCTAssertEqual(unchanged?.balance, reward + 7)
     }
 
-    func testRewardPlanBindsDeclaredPathBeforeRouting() async throws {
+    /// The recipient is in the proof-of-work preimage: a different recipient
+    /// is a different template, block and preimage.
+    func testRecipientChangesTheTemplateAndPreimage() async throws {
         let service = makeService(process: try await nexusProcess())
-        let miner = CryptoUtils.generateKeyPair()
-        let reward = try signedTransaction(
-            key: miner,
-            chainPath: ["Nexus"],
-            accountActions: [AccountAction(
-                owner: CryptoUtils.createAddress(from: miner.publicKey),
-                delta: 1
-            )]
-        )
-
-        await XCTAssertThrowsErrorAsync(
-            try await service.miningTemplate(MiningTemplateRequest(rewards: [
-                MiningReward(
-                    chainPath: ["Nexus", "Payments"],
-                    transaction: reward
-                )
-            ]))
-        ) { error in
-            XCTAssertEqual(error as? ChainServiceError, .invalidRewardPlan)
+        func template(_ address: String) async throws -> MiningTemplateResponse {
+            try await service.miningTemplate(MiningTemplateRequest(
+                recipients: [MiningRecipient(chainPath: ["Nexus"], address: address)]
+            ))
         }
+        let a = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
+        let b = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
+        let first = try await template(a)
+        let second = try await template(b)
+        XCTAssertNotEqual(first.workID, second.workID)
+        XCTAssertNotEqual(
+            try BlockHeader(node: first.block).rawCID,
+            try BlockHeader(node: second.block).rawCID
+        )
+        XCTAssertNotEqual(
+            Block.makeProofOfWorkPreimagePrefix(block: first.block),
+            Block.makeProofOfWorkPreimagePrefix(block: second.block)
+        )
+    }
+
+    func testMalformedRecipientPlansAreRefused() async throws {
+        let service = makeService(process: try await nexusProcess())
+        let address = CryptoUtils.createAddress(
+            from: CryptoUtils.generateKeyPair().publicKey
+        )
+        let refused: [[MiningRecipient]] = [
+            // Not a canonical address.
+            [MiningRecipient(chainPath: ["Nexus"], address: "not-an-address")],
+            [MiningRecipient(chainPath: ["Nexus"], address: "")],
+            // Twice for one chain.
+            [
+                MiningRecipient(chainPath: ["Nexus"], address: address),
+                MiningRecipient(chainPath: ["Nexus"], address: address),
+            ],
+            // Not at or below this chain.
+            [MiningRecipient(chainPath: ["Other"], address: address)],
+            [MiningRecipient(chainPath: [], address: address)],
+        ]
+        for recipients in refused {
+            await XCTAssertThrowsErrorAsync(
+                try await service.miningTemplate(
+                    MiningTemplateRequest(recipients: recipients)
+                )
+            ) { error in
+                XCTAssertEqual(error as? ChainServiceError, .invalidRecipientPlan)
+            }
+        }
+    }
+
+    /// The signed-reward request this replaced is refused, never read as a
+    /// request that mines to no one.
+    func testRewardsRequestIsRefused() throws {
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            MiningTemplateRequest.self,
+            from: Data(#"{"rewards":[]}"#.utf8)
+        ))
+        let decoded = try JSONDecoder().decode(
+            MiningTemplateRequest.self,
+            from: Data(#"{"recipients":[{"chainPath":["Nexus"],"address":"a"}]}"#.utf8)
+        )
+        XCTAssertEqual(decoded.recipients, [
+            MiningRecipient(chainPath: ["Nexus"], address: "a"),
+        ])
+    }
+
+    /// A transaction that creates value breaks the fee rule in any block, so
+    /// the mempool never admits it.
+    func testMempoolRefusesAValueCreatingTransaction() async throws {
+        let service = makeService(process: try await nexusProcess())
+        let key = CryptoUtils.generateKeyPair()
+        await XCTAssertThrowsErrorAsync(
+            try await service.submitTransaction(SubmitTransactionRequest(
+                transaction: try signedTransaction(
+                    key: key,
+                    accountActions: [AccountAction(
+                        owner: CryptoUtils.createAddress(from: key.publicKey),
+                        delta: 1
+                    )]
+                )
+            ))
+        )
+        let status = await service.status()
+        XCTAssertEqual(status.mempoolCount, 0)
     }
 
     func testServiceOwnsABoundedMempool() async throws {
@@ -484,7 +556,6 @@ final class ChainServiceTests: XCTestCase {
             try signedTransaction(
                 key: CryptoUtils.generateKeyPair(),
                 chainPath: ["Nexus"],
-                fee: .max,
                 nonce: 1
             )
         )
@@ -816,21 +887,13 @@ final class ChainServiceTests: XCTestCase {
             nonce: 0
         )
         let rewardKey = CryptoUtils.generateKeyPair()
-        let reward = try signedTransaction(
-            key: rewardKey,
-            chainPath: ["Nexus"],
-            accountActions: [AccountAction(
-                owner: CryptoUtils.createAddress(from: rewardKey.publicKey),
-                delta: 1
-            )]
-        )
         _ = try await service.submitTransaction(
             SubmitTransactionRequest(transaction: removed)
         )
         let firstTemplate = try await service.miningTemplate(
-            MiningTemplateRequest(rewards: [MiningReward(
+            MiningTemplateRequest(recipients: [MiningRecipient(
                 chainPath: ["Nexus"],
-                transaction: reward
+                address: CryptoUtils.createAddress(from: rewardKey.publicKey)
             )])
         )
         let first = try await service.submitWork(SubmitWorkRequest(
@@ -929,7 +992,6 @@ final class ChainServiceTests: XCTestCase {
             receiptActions: [],
             withdrawalActions: [],
             signers: [CryptoUtils.createAddress(from: key.publicKey)],
-            fee: 0,
             nonce: 0,
             chainPath: ["Nexus", "Payments"]
         )
@@ -949,7 +1011,7 @@ final class ChainServiceTests: XCTestCase {
         let candidate = try await fixture.service.miningCandidate(
             for: ChildCandidateRequestContext(
                 parentCarrier: fixture.parentCarrier,
-                rewards: []
+                recipients: []
             ),
             parentContentSource: FetcherContentSource(fixture.parent)
         )
@@ -973,7 +1035,6 @@ final class ChainServiceTests: XCTestCase {
             receiptActions: [],
             withdrawalActions: [],
             signers: [CryptoUtils.createAddress(from: key.publicKey)],
-            fee: 0,
             nonce: 0,
             chainPath: ["Nexus", "Payments"]
         )
@@ -1009,7 +1070,7 @@ final class ChainServiceTests: XCTestCase {
             let candidate = try await fixture.service.miningCandidate(
                 for: ChildCandidateRequestContext(
                     parentCarrier: fixture.parentCarrier,
-                    rewards: []
+                    recipients: []
                 ),
                 parentContentSource: FetcherContentSource(fixture.parent)
             )
@@ -1023,7 +1084,7 @@ final class ChainServiceTests: XCTestCase {
         let sizedCandidate = try await sizing.service.miningCandidate(
             for: ChildCandidateRequestContext(
                 parentCarrier: sizing.parentCarrier,
-                rewards: []
+                recipients: []
             ),
             parentContentSource: FetcherContentSource(sizing.parent)
         )
@@ -1057,7 +1118,6 @@ final class ChainServiceTests: XCTestCase {
                 receiptActions: [],
                 withdrawalActions: [],
                 signers: [signer],
-                fee: 0,
                 nonce: UInt64(index),
                 chainPath: ["Nexus", "Payments"]
             )
@@ -1097,7 +1157,7 @@ final class ChainServiceTests: XCTestCase {
             return try await fixture.service.miningCandidate(
                 for: ChildCandidateRequestContext(
                     parentCarrier: fixture.parentCarrier,
-                    rewards: []
+                    recipients: []
                 ),
                 parentContentSource: FetcherContentSource(fixture.parent)
             )
@@ -1112,7 +1172,7 @@ final class ChainServiceTests: XCTestCase {
         let six = try await sizing.service.miningCandidate(
             for: ChildCandidateRequestContext(
                 parentCarrier: sizing.parentCarrier,
-                rewards: []
+                recipients: []
             ),
             parentContentSource: FetcherContentSource(sizing.parent)
         )
@@ -1129,7 +1189,7 @@ final class ChainServiceTests: XCTestCase {
         let seven = try await fullSizing.service.miningCandidate(
             for: ChildCandidateRequestContext(
                 parentCarrier: fullSizing.parentCarrier,
-                rewards: []
+                recipients: []
             ),
             parentContentSource: FetcherContentSource(fullSizing.parent)
         )
@@ -1204,7 +1264,7 @@ final class ChainServiceTests: XCTestCase {
                 try await service.miningCandidate(
                     for: ChildCandidateRequestContext(
                         parentCarrier: fixture.parentCarrier,
-                        rewards: []
+                        recipients: []
                     ),
                     parentContentSource: FetcherContentSource(fixture.parent)
                 ),
@@ -1285,7 +1345,7 @@ final class ChainServiceTests: XCTestCase {
             let candidate = try await stableService.miningCandidate(
                 for: ChildCandidateRequestContext(
                     parentCarrier: stableFixture.parentCarrier,
-                    rewards: []
+                    recipients: []
                 ),
                 parentContentSource: FetcherContentSource(stableFixture.parent)
             )
@@ -1977,6 +2037,65 @@ final class ChainServiceTests: XCTestCase {
         )
     }
 
+    /// A level carries a child's snapshot only when it pays the miner's
+    /// recipient for that chain: one paying anyone else is dropped, even
+    /// when it was published as built on the plan.
+    func testChildCandidatePayingTheWrongRecipientIsDropped() async throws {
+        let planned = CryptoUtils.createAddress(
+            from: CryptoUtils.generateKeyPair().publicKey
+        )
+        let other = CryptoUtils.createAddress(
+            from: CryptoUtils.generateKeyPair().publicKey
+        )
+        for (paid, carried) in [(other, false), (planned, true)] {
+            let fixture = try await activeChildService(spec: NexusGenesis.spec)
+            let payments = makeService(
+                process: fixture.process,
+                parentLevel: LocalParentLevel(fixture.parent)
+            )
+            let recipients = [MiningRecipient(
+                chainPath: ["Nexus", "Payments", "Grandchild"], address: planned
+            )]
+            try await payments.attachStubChildren(
+                ["Grandchild"],
+                on: fixture.process,
+                plan: DescendantPlan(recipients: recipients)
+            ) { context in
+                let genesis = try await BlockBuilder.buildChildGenesis(
+                    spec: NexusGenesis.spec,
+                    parentState: context.parentCarrier.prevState,
+                    timestamp: context.parentCarrier.timestamp,
+                    target: .max,
+                    fetcher: fixture.process
+                )
+                let grandchild = try await BlockBuilder.buildBlock(
+                    previous: genesis,
+                    transactions: [],
+                    parentChainBlock: context.parentCarrier,
+                    timestamp: context.parentCarrier.timestamp + 1,
+                    rewardRecipient: paid,
+                    fetcher: fixture.process
+                )
+                return [DirectChildCandidate(
+                    directory: "Grandchild",
+                    block: grandchild
+                )]
+            }
+            let merged = await mergedMiningService(fixture, child: payments)
+            _ = try await settledTemplate(
+                merged, MiningTemplateRequest(recipients: recipients)
+            )
+            let childBlock = try XCTUnwrap(
+                merged.child.readyCandidate()?.candidate.block
+            )
+            XCTAssertEqual(
+                childBlock.children.node?["Grandchild"] != nil,
+                carried,
+                "grandchild paying \(paid == planned ? "the planned" : "another") recipient"
+            )
+        }
+    }
+
     /// Submission through a three-level hierarchy: a filter on the grandchild
     /// is visible to the Nexus only through the child's witness, and a hash
     /// that clears every committed target but misses that filter is refused
@@ -2158,7 +2277,7 @@ final class ChainServiceTests: XCTestCase {
         ))
         XCTAssertEqual(template.searchTarget, UInt256(1))
 
-        // A plan past the payload cap `rewards` also honours is a named
+        // A plan past the payload cap `recipients` also honours is a named
         // refusal here, not a child candidate that silently goes missing for
         // a whole round when the wire frame bites instead.
         await XCTAssertThrowsErrorAsync(
@@ -2184,7 +2303,7 @@ final class ChainServiceTests: XCTestCase {
         let service = makeService(process: process)
         let legacy = try JSONDecoder().decode(
             MiningTemplateRequest.self,
-            from: Data(#"{"rewards":[]}"#.utf8)
+            from: Data(#"{"recipients":[]}"#.utf8)
         )
         XCTAssertTrue(legacy.minimumWork.isEmpty)
         let template = try await service.miningTemplate(legacy)
@@ -2198,14 +2317,14 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertEqual(template.block.toData(), scheduled.toData())
         XCTAssertEqual(
             try JSONEncoder().encode(MiningTemplateRequest()),
-            Data(#"{"rewards":[]}"#.utf8)
+            Data(#"{"recipients":[]}"#.utf8)
         )
         // A request from an older miner that still asks for its filter to be
         // committed decodes fine and is simply not honoured: the key is gone,
         // so the block commits the schedule like any other.
         let legacyOptIn = try JSONDecoder().decode(
             MiningTemplateRequest.self,
-            from: Data(#"{"rewards":[],"commitMinimumWorkTarget":true}"#.utf8)
+            from: Data(#"{"recipients":[],"commitMinimumWorkTarget":true}"#.utf8)
         )
         XCTAssertTrue(legacyOptIn.minimumWork.isEmpty)
     }
@@ -2835,8 +2954,7 @@ final class ChainServiceTests: XCTestCase {
             genesisActions: [GenesisAction(
                 directory: "Orphan",
                 blockCID: childHeader.rawCID
-            )],
-            fee: 1
+            )]
         )
         let ordinary = try signedTransaction(
             key: CryptoUtils.generateKeyPair(),
@@ -2855,7 +2973,7 @@ final class ChainServiceTests: XCTestCase {
         let livenessCandidate = try await childService.miningCandidate(
             for: ChildCandidateRequestContext(
                 parentCarrier: nextParentCarrier,
-                rewards: []
+                recipients: []
             ),
             parentContentSource: FetcherContentSource(parentProcess)
         )
@@ -2868,22 +2986,15 @@ final class ChainServiceTests: XCTestCase {
         )
 
         let childMiner = CryptoUtils.generateKeyPair()
-        let childReward = try signedTransaction(
-            key: childMiner,
-            chainPath: ["Nexus", "Payments"],
-            accountActions: [AccountAction(
-                owner: CryptoUtils.createAddress(from: childMiner.publicKey),
-                delta: 1
-            )]
-        )
+        let childRecipient = CryptoUtils.createAddress(from: childMiner.publicKey)
         let candidate: DirectChildCandidate
         do {
             candidate = try await childService.miningCandidate(
                 for: ChildCandidateRequestContext(
                     parentCarrier: nextParentCarrier,
-                    rewards: [MiningReward(
+                    recipients: [MiningRecipient(
                         chainPath: ["Nexus", "Payments"],
-                        transaction: childReward
+                        address: childRecipient
                     )]
                 ),
                 parentContentSource: FetcherContentSource(parentProcess)
@@ -2902,11 +3013,7 @@ final class ChainServiceTests: XCTestCase {
             candidate.block.parentState.rawCID,
             childGenesis.parentState.rawCID
         )
-        XCTAssertEqual(
-            try candidate.block.transactions.node?.allKeysAndValues()
-                .values.first?.rawCID,
-            try VolumeImpl<Transaction>(node: childReward).rawCID
-        )
+        XCTAssertEqual(candidate.block.rewardRecipient, childRecipient)
         await XCTAssertThrowsErrorAsync(
             try await childService.submitWork(SubmitWorkRequest(
                 workID: try BlockHeader(node: candidate.block).rawCID,
@@ -2943,7 +3050,7 @@ final class ChainServiceTests: XCTestCase {
         let first = try await fixture.service.miningCandidate(
             for: ChildCandidateRequestContext(
                 parentCarrier: firstCarrier,
-                rewards: []
+                recipients: []
             ),
             parentContentSource: FetcherContentSource(fixture.parent)
         )
@@ -2951,7 +3058,7 @@ final class ChainServiceTests: XCTestCase {
         let second = try await fixture.service.miningCandidate(
             for: ChildCandidateRequestContext(
                 parentCarrier: secondCarrier,
-                rewards: []
+                recipients: []
             ),
             parentContentSource: FetcherContentSource(fixture.parent)
         )
@@ -3036,7 +3143,7 @@ final class ChainServiceTests: XCTestCase {
     }
 
     func testAncestorRangeMessagesRoundTripAndBound() throws {
-        let genesis = "bafyreifvxwhqbwvnrtr2plvtmlvpceqxnexyayjs7klgy6dbkj7yppdsz4"
+        let genesis = "bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24"
         let request = AncestorRangeRequestMessage(requestID: 7, locator: [genesis])
         XCTAssertEqual(
             try AncestorRangeRequestMessage.decoded(request.encoded()), request
@@ -3424,6 +3531,7 @@ final class ChainServiceTests: XCTestCase {
             children: truth.children,
             height: truth.height,
             timestamp: truth.timestamp,
+            rewardRecipient: truth.rewardRecipient,
             nonce: truth.nonce
         )
         // Changing `postState` changes the proof-of-work preimage, so the
@@ -4327,9 +4435,9 @@ final class ChainServiceTests: XCTestCase {
         }
     }
 
-    /// Mine `depth` blocks on `producer`, each carrying a reward transaction (so
-    /// each block has a real, boundary-excluded BODY the validate walk must
-    /// fetch), returned in ascending-height order.
+    /// Mine `depth` blocks on `producer`, each paying `miner` and carrying one
+    /// of its transactions (so each block has a real, boundary-excluded BODY
+    /// the validate walk must fetch), returned in ascending-height order.
     private func mineNexusRewardChain(
         on producer: ChainProcess,
         depth: Int,
@@ -4338,28 +4446,32 @@ final class ChainServiceTests: XCTestCase {
         let service = makeService(process: producer)
         var blocks: [Block] = []
         for index in 0..<depth {
-            let reward = try signedTransaction(
+            let marker = try signedTransaction(
                 key: miner,
                 chainPath: ["Nexus"],
-                accountActions: [AccountAction(
-                    owner: CryptoUtils.createAddress(from: miner.publicKey),
-                    delta: 1
-                )],
                 nonce: UInt64(index)
             )
+            _ = try await service.submitTransaction(
+                SubmitTransactionRequest(transaction: marker)
+            )
             let template = try await service.miningTemplate(
-                MiningTemplateRequest(rewards: [MiningReward(
+                MiningTemplateRequest(recipients: [MiningRecipient(
                     chainPath: ["Nexus"],
-                    transaction: reward
+                    address: CryptoUtils.createAddress(from: miner.publicKey)
                 )])
+            )
+            XCTAssertEqual(
+                try template.block.transactions.node?.allKeysAndValues().count,
+                1,
+                "block \(index) must carry the miner's transaction"
             )
             // Solve the block rather than admitting the template's nonce as
             // mined. Under the old windowed retarget this chain sat at exactly
             // the maximum target, where nonce 0 always qualified; the absolute
             // schedule hardens slightly each block, so an unsolved block is
             // refused for want of work -- and because that stalls the tip, the
-            // NEXT reward transaction's nonce is then wrong, which surfaces as
-            // `invalidRewardTransaction` several blocks away from the cause.
+            // NEXT transaction's nonce is then wrong, several blocks away
+            // from the cause.
             let block = template.block.replacingNonce(
                 firstNonce(of: template.block, from: 0) {
                     $0 <= template.block.target

@@ -35,9 +35,9 @@ public actor ChainService {
         let genesisCID: String
     }
 
-    private struct ValidatedRewardPlan {
-        let current: Transaction?
-        let descendants: [MiningReward]
+    private struct ValidatedRecipientPlan {
+        let current: String?
+        let descendants: [MiningRecipient]
     }
 
     private struct FittingMiningTemplate {
@@ -59,12 +59,12 @@ public actor ChainService {
     // a directory atom's consensus grammar (Lattice accepts up to the same wire
     // capacity, so a 64-byte cap here would reject candidates consensus considers
     // valid), a signature's crypto verification, a workID's template lookup — and
-    // the reward-plan BYTE cap already bounds how many entries fit, so no invented
-    // reward/signature COUNT cap is imposed on top of it.
+    // the mining-plan BYTE cap already bounds how many entries fit, so no invented
+    // recipient/signature COUNT cap is imposed on top of it.
     private static let maximumWorkIDBytes = _wireAtomCapacity
     private static let maximumDirectoryBytes = _wireAtomCapacity
     private static let maximumSignatureFieldBytes = _wireAtomCapacity
-    private static let maximumRewardPlanBytes =
+    private static let maximumMiningPlanBytes =
         ChainServiceLimits.maximumPayloadBytes
     private static let templateLifetimeSeconds: Int64 = 30
     private static let templateLifetimeMilliseconds: UInt64 = 30_000
@@ -531,8 +531,35 @@ public actor ChainService {
             nextTarget: block.nextTarget,
             transactionsCID: block.transactions.rawCID,
             postStateCID: block.postState.rawCID,
-            chain: process.configuration.chainPath
+            chain: process.configuration.chainPath,
+            rewardRecipient: block.rewardRecipient,
+            rewardAmount: await rewardAmount(of: block)
         )
+    }
+
+    /// What `block` credited its recipient: the block reward plus fees, by
+    /// the rule consensus applies. Nil when nothing was credited (no
+    /// recipient, so it burned) or the block's content is not held here.
+    private func rewardAmount(of block: Block) async -> UInt64? {
+        guard block.rewardRecipient != nil,
+              let spec = try? await chainSpec(for: block),
+              let transactions = try? await blockTransactions(in: block)
+        else { return nil }
+        var bodies: [TransactionBody] = []
+        for transaction in transactions {
+            guard let body = try? await transaction.body.resolve(
+                fetcher: process
+            ).node else { return nil }
+            bodies.append(body)
+        }
+        guard case .success(let amount) = Block.coinbaseAmount(
+            spec: spec,
+            height: block.height,
+            accountActions: bodies.flatMap(\.accountActions),
+            depositActions: bodies.flatMap(\.depositActions),
+            withdrawalActions: bodies.flatMap(\.withdrawalActions)
+        ) else { return nil }
+        return amount.uint64Value
     }
 
     /// Page over an accepted block's transaction dictionary by numeric index
@@ -581,7 +608,6 @@ public actor ChainService {
                 summaries.append(ExplorerTransactionSummary(
                     txCID: volume.rawCID,
                     signers: body.signers,
-                    fee: body.fee,
                     accountActionCount: body.accountActions.count,
                     depositActionCount: body.depositActions.count,
                     receiptActionCount: body.receiptActions.count,
@@ -637,7 +663,6 @@ public actor ChainService {
             blockHeight: nil,
             blockHash: nil,
             timestamp: nil,
-            fee: body.fee,
             nonce: body.nonce,
             signers: body.signers,
             chainPath: body.chainPath,
@@ -1103,7 +1128,7 @@ public actor ChainService {
 
     /// A Nexus template for `request`, carrying the hosted children's
     /// snapshots. The node serves one miner's plan at a time: a request whose
-    /// plan (rewards and minimum work for descendant chains) differs from the
+    /// plan (recipients and minimum work for descendant chains) differs from the
     /// last adopts it, and each child whose part changed rebuilds on it. A
     /// snapshot built on another plan is never carried — that child is left
     /// out of the template, never paid to the wrong miner — so the template
@@ -1121,12 +1146,12 @@ public actor ChainService {
         // Children build their next candidates against this miner's plan for
         // them. Read before the build, so a refused plan refuses the request
         // and never reaches a child.
-        let rewardPlan = try await validatedRewardPlan(request.rewards)
+        let recipientPlan = try validatedRecipientPlan(request.recipients)
         let minimumWorkPlan = try validatedMinimumWorkPlan(request.minimumWork)
         // Adopted before the digest and the build, which carry only the
         // snapshots built on it.
         sendDescendantPlan(DescendantPlan(
-            rewards: rewardPlan.descendants,
+            recipients: recipientPlan.descendants,
             minimumWork: minimumWorkPlan.descendants
         ))
         // Read before the build: a child's snapshot may move while it runs,
@@ -1135,7 +1160,7 @@ public actor ChainService {
         // so the miner refreshes.
         let digest = await templateDigestLocked()
         let assembled = try await buildMiningTemplate(
-            rewards: request.rewards,
+            recipients: request.recipients,
             minimumWork: request.minimumWork,
             parentCarrier: nil
         )
@@ -1281,7 +1306,7 @@ public actor ChainService {
             let candidate = try await miningCandidate(
                 parentCarrier: context.parentCarrier,
                 parentContentSource: parentContentSource,
-                rewards: context.rewards,
+                recipients: context.recipients,
                 minimumWork: context.minimumWork
             )
             syncTrace("child candidate built h=\(candidate.block.height)")
@@ -1299,7 +1324,7 @@ public actor ChainService {
     private func miningCandidate(
         parentCarrier: Block,
         parentContentSource: any ContentSource,
-        rewards: [MiningReward],
+        recipients: [MiningRecipient],
         minimumWork: [MiningMinimumWork]
     ) async throws -> DirectChildCandidate {
         await acquireOperation()
@@ -1314,7 +1339,7 @@ public actor ChainService {
             parentContentSource,
         ]))
         let template = try await buildMiningTemplate(
-            rewards: rewards,
+            recipients: recipients,
             minimumWork: minimumWork,
             parentCarrier: parentCarrier,
             fetcher: fetcher
@@ -1344,7 +1369,7 @@ public actor ChainService {
     }
 
     private func buildMiningTemplate(
-        rewards: [MiningReward],
+        recipients: [MiningRecipient],
         minimumWork: [MiningMinimumWork],
         parentCarrier: Block?,
         fetcher: (any Fetcher)? = nil
@@ -1360,20 +1385,15 @@ public actor ChainService {
             forBlockHash: try BlockHeader(node: previous).rawCID
         )
         let spec = try await chainSpec(for: previous)
-        let rewardPlan = try await validatedRewardPlan(rewards)
+        // The recipient is a header field, not a transaction: it takes no
+        // pool slot, and the builder credits it the reward plus fees.
+        let recipient = try validatedRecipientPlan(recipients).current
         let minimumWorkPlan = try validatedMinimumWorkPlan(minimumWork)
         let timestamp = try nextTimestamp(
             after: previous.timestamp,
             parentCarrier: parentCarrier
         )
-        let reward = try await validatedRewardTransaction(
-            rewardPlan.current,
-            previous: previous,
-            timestamp: timestamp,
-            spec: spec
-        )
-        let maximumTransactions = Int(clamping: spec.maxNumberOfTransactionsPerBlock)
-        var poolLimit = max(0, maximumTransactions - (reward == nil ? 0 : 1))
+        var poolLimit = Int(clamping: spec.maxNumberOfTransactionsPerBlock)
         var largestFittingPoolLimit = -1
         var largestFittingTemplate: FittingMiningTemplate?
         var maximumPoolLimit = poolLimit
@@ -1418,19 +1438,18 @@ public actor ChainService {
         )
 
         while true {
-            let transactions = (reward.map { [$0] } ?? []) + pooled
             let provisional = try await templates.preview(
                 previous: previous,
-                transactions: transactions,
+                transactions: pooled,
                 children: [],
                 parentCarrier: parentCarrier,
                 timestamp: timestamp,
-                transactionLimit: poolLimit + (reward == nil ? 0 : 1),
+                transactionLimit: poolLimit,
+                rewardRecipient: recipient,
                 minimumWork: minimumWorkPlan.works,
                 difficultyAnchor: difficultyAnchor,
                 fetcher: fetcher
             )
-            try requireReward(rewardPlan.current, in: provisional.block)
             if try await !blockFits(
                 provisional.block,
                 spec: spec,
@@ -1468,11 +1487,11 @@ public actor ChainService {
                     .sorted { $0.directory < $1.directory },
                 parentCarrier: parentCarrier,
                 timestamp: timestamp,
+                rewardRecipient: recipient,
                 minimumWork: minimumWorkPlan.works,
                 difficultyAnchor: difficultyAnchor,
                 fetcher: fetcher
             )
-            try requireReward(rewardPlan.current, in: template.block)
             try requireSameTemplateContext(
                 provisional.block,
                 final: template.block
@@ -1490,6 +1509,7 @@ public actor ChainService {
                         .sorted { $0.directory < $1.directory },
                     parentCarrier: parentCarrier,
                     timestamp: timestamp,
+                    rewardRecipient: recipient,
                     minimumWork: minimumWorkPlan.works,
                     difficultyAnchor: difficultyAnchor,
                     fetcher: fetcher
@@ -1512,6 +1532,7 @@ public actor ChainService {
                                 .sorted { $0.directory < $1.directory },
                             parentCarrier: parentCarrier,
                             timestamp: timestamp,
+                            rewardRecipient: recipient,
                             minimumWork: minimumWorkPlan.works,
                             difficultyAnchor: difficultyAnchor,
                             fetcher: fetcher
@@ -2452,7 +2473,7 @@ public actor ChainService {
         let candidate = try? await miningCandidate(
             for: ChildCandidateRequestContext(
                 parentCarrier: carrier,
-                rewards: plan.rewards,
+                recipients: plan.recipients,
                 minimumWork: plan.minimumWork
             ),
             parentContentSource: parentLevel.contentSource
@@ -2624,121 +2645,42 @@ public actor ChainService {
         return spec
     }
 
-    private func validatedRewardTransaction(
-        _ transaction: Transaction?,
-        previous: Block,
-        timestamp: Int64,
-        spec: ChainSpec
-    ) async throws -> Transaction? {
-        guard let transaction else { return nil }
-        guard let bodyHeader = try? await transaction.body.resolve(fetcher: process),
-              let body = bodyHeader.node else {
-            throw ChainServiceError.invalidRewardTransaction
-        }
-        let resolved = Transaction(
-            signatures: transaction.signatures,
-            body: bodyHeader
-        )
-        let (height, overflow) = previous.height.addingReportingOverflow(1)
-        guard !overflow,
-              transaction.signatures.allSatisfy({ key, signature in
-                  key.utf8.count <= Self.maximumSignatureFieldBytes
-                      && signature.utf8.count <= Self.maximumSignatureFieldBytes
-              }),
-              body.chainPath == process.configuration.chainPath,
-              body.fee == 0,
-              !body.accountActions.isEmpty,
-              body.accountActions.allSatisfy(\.isCredit),
-              body.actions.isEmpty,
-              body.depositActions.isEmpty,
-              body.genesisActions.isEmpty,
-              body.receiptActions.isEmpty,
-              body.withdrawalActions.isEmpty,
-              body.stateAtomsAreValid(),
-              body.accountActionsAreValid(),
-              resolved.signaturesAreValid(),
-              resolved.signaturesMatchSigners(),
-              let envelope = resolved.toData(),
-              let bodyData = body.toData(),
-              envelope.count <= spec.maxBlockSize,
-              bodyData.count <= spec.maxBlockSize else {
-            throw ChainServiceError.invalidRewardTransaction
-        }
-        var claimed: UInt64 = 0
-        for action in body.accountActions {
-            let addition = claimed.addingReportingOverflow(action.absoluteAmount)
-            guard !addition.overflow else {
-                throw ChainServiceError.invalidRewardTransaction
-            }
-            claimed = addition.partialValue
-        }
-        guard claimed <= spec.rewardAtBlock(height),
-              try await TransactionBody.batchVerifyPolicies(
-                  bodies: [body],
-                  spec: spec,
-                  chainPath: process.configuration.chainPath,
-                  height: height,
-                  timestamp: timestamp,
-                  fetcher: process
-              ) else {
-            throw ChainServiceError.invalidRewardTransaction
-        }
-        try await VolumeImpl<Transaction>(node: resolved).store(storer: process)
-        return resolved
-    }
-
-    private func validatedRewardPlan(
-        _ rewards: [MiningReward]
-    ) async throws -> ValidatedRewardPlan {
+    /// A miner's recipients by chain path: this chain's, which its template
+    /// commits, and the descendants', which travel with the child candidate
+    /// requests. Each is a canonical address on a chain at or below this one,
+    /// at most one per chain.
+    private func validatedRecipientPlan(
+        _ recipients: [MiningRecipient]
+    ) throws -> ValidatedRecipientPlan {
         guard let encoded = try? JSONEncoder().encode(
-                  MiningTemplateRequest(rewards: rewards)
+                  MiningTemplateRequest(recipients: recipients)
               ),
-              encoded.count <= Self.maximumRewardPlanBytes else {
-            throw ChainServiceError.rewardPlanTooLarge
+              encoded.count <= Self.maximumMiningPlanBytes else {
+            throw ChainServiceError.invalidRecipientPlan
         }
         let currentPath = process.configuration.chainPath
         var seen: Set<String> = []
-        var current: Transaction?
-        var descendants: [MiningReward] = []
-        var resolvedBytes = 0
-        for reward in rewards {
-            guard let address = ChainAddress(reward.chainPath),
+        var current: String?
+        var descendants: [MiningRecipient] = []
+        for recipient in recipients {
+            guard let address = ChainAddress(recipient.chainPath),
                   address.components.count >= currentPath.count,
                   Array(address.components.prefix(currentPath.count))
                     == currentPath,
                   seen.insert(address.key).inserted,
-                  reward.transaction.signatures.allSatisfy({ key, signature in
-                      key.utf8.count <= Self.maximumSignatureFieldBytes
-                          && signature.utf8.count
-                            <= Self.maximumSignatureFieldBytes
-                  }),
-                  let bodyHeader = try? await reward.transaction.body.resolve(
-                      fetcher: process
-                  ),
-                  let body = bodyHeader.node,
-                  body.chainPath == address.components,
-                  let bodyData = body.toData(),
-                  let transactionData = reward.transaction.toData(),
-                  bodyData.count <= Self.maximumRewardPlanBytes - resolvedBytes,
-                  transactionData.count <= Self.maximumRewardPlanBytes
-                    - resolvedBytes - bodyData.count else {
-                throw ChainServiceError.invalidRewardPlan
+                  CryptoUtils.isValidAddress(recipient.address) else {
+                throw ChainServiceError.invalidRecipientPlan
             }
-            resolvedBytes += bodyData.count + transactionData.count
-            let resolvedReward = MiningReward(
-                chainPath: address.components,
-                transaction: Transaction(
-                    signatures: reward.transaction.signatures,
-                    body: bodyHeader
-                )
-            )
             if address.components == currentPath {
-                current = resolvedReward.transaction
+                current = recipient.address
             } else {
-                descendants.append(resolvedReward)
+                descendants.append(MiningRecipient(
+                    chainPath: address.components,
+                    address: recipient.address
+                ))
             }
         }
-        return ValidatedRewardPlan(
+        return ValidatedRecipientPlan(
             current: current,
             descendants: descendants.sorted {
                 $0.chainPath.lexicographicallyPrecedes($1.chainPath)
@@ -2752,14 +2694,14 @@ public actor ChainService {
     private func validatedMinimumWorkPlan(
         _ entries: [MiningMinimumWork]
     ) throws -> (works: [[String]: UInt256], descendants: [MiningMinimumWork]) {
-        // The same payload cap the reward plan honours. Bounding it here means
+        // The same payload cap the recipient plan honours. Bounding it here means
         // an oversized plan is a named refusal to the miner that sent it,
         // rather than a descendant request that silently fails to encode and
         // leaves that child with no candidate for the round.
         guard let encoded = try? JSONEncoder().encode(
                   MiningTemplateRequest(minimumWork: entries)
               ),
-              encoded.count <= Self.maximumRewardPlanBytes else {
+              encoded.count <= Self.maximumMiningPlanBytes else {
             throw ChainServiceError.minimumWorkPlanTooLarge
         }
         let currentPath = process.configuration.chainPath
@@ -2810,7 +2752,12 @@ public actor ChainService {
                   ChainAddress(
                       process.configuration.chainPath + [candidate.directory]
                   ) != nil,
-                  candidate.block.parentState.rawCID == parentStateCID else {
+                  candidate.block.parentState.rawCID == parentStateCID,
+                  // Paid to the miner's recipient for that chain (nil when
+                  // the plan names none), never one the child chose.
+                  candidate.block.rewardRecipient == descendantPlan.recipients.first(where: {
+                      $0.chainPath == process.configuration.chainPath + [candidate.directory]
+                  })?.address else {
                 continue
             }
             guard await schedulingTargets(for: candidate) != nil,
@@ -2851,6 +2798,7 @@ public actor ChainService {
             children: emptyChildren,
             height: tip.height + 1,
             timestamp: timestamp,
+            rewardRecipient: nil,
             nonce: 0
         )
     }
@@ -2891,22 +2839,9 @@ public actor ChainService {
               provisional.postState.rawCID == final.postState.rawCID,
               provisional.height == final.height,
               provisional.timestamp == final.timestamp,
+              provisional.rewardRecipient == final.rewardRecipient,
               provisional.nonce == final.nonce else {
             throw ChainServiceError.templateContextChanged
-        }
-    }
-
-    private func requireReward(
-        _ reward: Transaction?,
-        in block: Block
-    ) throws {
-        guard let reward else { return }
-        let rewardCID = try VolumeImpl<Transaction>(node: reward).rawCID
-        guard let transactions = block.transactions.node,
-              try transactions.allKeysAndValues().values.contains(where: {
-                  $0.rawCID == rewardCID
-              }) else {
-            throw ChainServiceError.invalidRewardTransaction
         }
     }
 

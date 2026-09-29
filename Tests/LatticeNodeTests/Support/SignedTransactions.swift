@@ -11,7 +11,6 @@ func signedTransaction(
     accountActions: [AccountAction] = [],
     actions: [Action] = [],
     genesisActions: [GenesisAction] = [],
-    fee: UInt64 = 0,
     nonce: UInt64 = 0
 ) throws -> Transaction {
     let body = TransactionBody(
@@ -22,7 +21,6 @@ func signedTransaction(
         receiptActions: [],
         withdrawalActions: [],
         signers: keys.map { CryptoUtils.createAddress(from: $0.publicKey) },
-        fee: fee,
         nonce: nonce,
         chainPath: chainPath
     )
@@ -43,7 +41,6 @@ func signedTransaction(
     accountActions: [AccountAction] = [],
     actions: [Action] = [],
     genesisActions: [GenesisAction] = [],
-    fee: UInt64 = 0,
     nonce: UInt64 = 0
 ) throws -> Transaction {
     try signedTransaction(
@@ -52,20 +49,7 @@ func signedTransaction(
         accountActions: accountActions,
         actions: actions,
         genesisActions: genesisActions,
-        fee: fee,
         nonce: nonce
-    )
-}
-
-/// A mining reward crediting a fresh key by 1 on Nexus.
-func signedRewardTransaction() throws -> Transaction {
-    let key = CryptoUtils.generateKeyPair()
-    return try signedTransaction(
-        key: key,
-        accountActions: [AccountAction(
-            owner: CryptoUtils.createAddress(from: key.publicKey),
-            delta: 1
-        )]
     )
 }
 

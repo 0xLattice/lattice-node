@@ -81,16 +81,16 @@ public struct ReadyCandidate: Sendable {
     }
 }
 
-/// The miner's plan for a level's subtree (rewards and minimum work), from
+/// The miner's plan for a level's subtree (recipients and minimum work), from
 /// the last template request: what a hosted child builds its candidate
 /// against. A parent sends each child its subtree's part when it changes,
 /// and carries a child's snapshot only when it was built on that part.
 public struct DescendantPlan: Sendable {
-    public let rewards: [MiningReward]
+    public let recipients: [MiningRecipient]
     public let minimumWork: [MiningMinimumWork]
 
-    public init(rewards: [MiningReward] = [], minimumWork: [MiningMinimumWork] = []) {
-        self.rewards = rewards
+    public init(recipients: [MiningRecipient] = [], minimumWork: [MiningMinimumWork] = []) {
+        self.recipients = recipients
         self.minimumWork = minimumWork
     }
 
@@ -101,19 +101,13 @@ public struct DescendantPlan: Sendable {
                 && Array(chainPath.prefix(subtree.count)) == subtree
         }
         return DescendantPlan(
-            rewards: rewards.filter { inSubtree($0.chainPath) },
+            recipients: recipients.filter { inSubtree($0.chainPath) },
             minimumWork: minimumWork.filter { inSubtree($0.chainPath) }
         )
     }
 
     func same(as other: DescendantPlan) -> Bool {
-        guard rewards.count == other.rewards.count,
-              minimumWork == other.minimumWork else { return false }
-        return zip(rewards, other.rewards).allSatisfy { a, b in
-            a.chainPath == b.chainPath
-                && a.transaction.body.rawCID == b.transaction.body.rawCID
-                && a.transaction.signatures == b.transaction.signatures
-        }
+        recipients == other.recipients && minimumWork == other.minimumWork
     }
 }
 

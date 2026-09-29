@@ -22,7 +22,7 @@ process validates its own sparse route and chooses its own canonical projection.
 The pinned Nexus genesis CID is:
 
 ```text
-bafyreifvxwhqbwvnrtr2plvtmlvpceqxnexyayjs7klgy6dbkj7yppdsz4
+bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24
 ```
 
 It contains the deterministic premine transaction for public key
@@ -49,9 +49,10 @@ historical body-CID preimage. Mixed multisignature envelopes are valid when each
 individual signature verifies under one accepted form. This compatibility does
 not weaken body, signer, nonce, or path validation.
 
-Mining rewards are ordinary externally signed transactions. Process identity is
-never converted into wallet identity, and the node does not receive a reward
-private key.
+A block pays its reward and fees to its `rewardRecipient`, a header field the
+proof of work covers; a block with none burns them. The recipient is only an
+address: process identity is never converted into wallet identity, and the
+node never receives a private key.
 
 ## Work and hierarchy evidence
 
@@ -222,7 +223,7 @@ The node uses two Ivy sessions:
 Parent facts, run reports and merged-mining candidates never cross a network
 plane: they pass in-process between co-hosted levels.
 
-Both planes currently require node protocol version 4; mixed-version peers
+Both planes currently require node protocol version 5; mixed-version peers
 refuse the session. Co-hosted levels run one binary, so a hierarchy session
 never mixes versions.
 
@@ -245,7 +246,7 @@ bounded framing, and atomic publication are transport/storage details; node
 protocol messages never request arbitrary CID selections.
 Merged-mining candidates pass in-process. Each hosted child level keeps one
 pre-built candidate against a provisional carrier on its parent level's
-validated tip, for the miner's reward plan and minimum work for the child's
+validated tip, for the miner's recipients and minimum work for the child's
 subtree. It rebuilds that candidate — one build at a time, a change during a
 build running one more — when the parent's tip, its own state or the plan
 changes, under its own lease only and reading its parent without taking the
@@ -396,9 +397,10 @@ POST /v1/mining/templates
 POST /v1/mining/work
 ```
 
-Template requests may contain externally signed reward transactions keyed by
-absolute chain path. The node partitions those rewards through the hierarchy
-request and issues only the final parent template.
+Template requests may name one reward recipient per absolute chain path. The
+node partitions those recipients through the hierarchy, carries a child's
+block only when it pays the recipient named for that chain, and issues only
+the final parent template.
 
 There is no template mode. A transaction carrying a `GenesisAction` is selected
 like any other pooled transaction. A child genesis is self-contained, so a

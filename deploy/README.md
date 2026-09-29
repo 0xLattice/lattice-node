@@ -32,7 +32,7 @@ were removed because those roles do not exist in Lattice.
    separate processes from the node.
 6. Treat `state.db` and `volumes.db` as one backup and recovery unit.
 7. Use the single pinned Nexus genesis CID:
-   `bafyreifvxwhqbwvnrtr2plvtmlvpceqxnexyayjs7klgy6dbkj7yppdsz4`.
+   `bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24`.
 
 Deploy a child chain with testing-oriented parameters when an application needs
 a testing network. Nexus keeps the same pinned genesis in every deployment.
@@ -55,10 +55,11 @@ needed (stop the node/miner first, restart after):
 bash deploy/upgrade-binaries.sh sha-<release>
 ```
 
-To pay mining rewards, generate a key and a pre-signed batch with
-`lattice-rewards` on a trusted machine (the key never ships to the miner) and
-run [mine-supervisor.py](mine-supervisor.py) beside the coordinator; see the
-"Mining rewards" section of [docs/operations.md](../docs/operations.md).
+To pay mining rewards, generate a key with `lattice key generate` on a trusted
+machine (only its address ships to the miner) and run
+[mine-supervisor.py](mine-supervisor.py) beside the coordinator with
+`RECIPIENTS=Nexus=<address>`; see the "Mining rewards" section of
+[docs/operations.md](../docs/operations.md).
 
 Then install [lattice-node.service](lattice-node.service) and
 [lattice-miner.service](lattice-miner.service). The latter runs the coordinator

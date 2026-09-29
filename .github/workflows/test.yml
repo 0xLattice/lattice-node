@@ -192,7 +192,6 @@ jobs:
           E2E_COORDINATOR_BIN: ${{ github.workspace }}/.build/release/lattice-mining-coordinator
           E2E_MINER_BIN: ${{ github.workspace }}/.build/release/lattice-miner
           E2E_CTL_BIN: ${{ github.workspace }}/.build/release/lattice
-          E2E_REWARDS_BIN: ${{ github.workspace }}/.build/release/lattice-rewards
         run: swift test --skip-build --filter LatticeCtlE2ETests
 
       - name: Collect retained E2E artifacts

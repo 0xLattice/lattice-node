@@ -33,12 +33,15 @@ public struct ExplorerBlock: Codable, Sendable, Equatable {
     public let transactionsCID: String
     public let postStateCID: String
     public let chain: [String]
+    /// The address this block credited its reward and fees; nil burned them.
+    public let rewardRecipient: String?
+    /// The block reward plus fees credited to `rewardRecipient`.
+    public let rewardAmount: UInt64?
 }
 
 public struct ExplorerTransactionSummary: Codable, Sendable, Equatable {
     public let txCID: String
     public let signers: [String]
-    public let fee: UInt64
     public let accountActionCount: Int
     public let depositActionCount: Int
     public let receiptActionCount: Int
@@ -94,7 +97,6 @@ public struct ExplorerTransaction: Codable, Sendable, Equatable {
     public let blockHeight: UInt64?
     public let blockHash: String?
     public let timestamp: Int64?
-    public let fee: UInt64
     public let nonce: UInt64
     public let signers: [String]
     public let chainPath: [String]
