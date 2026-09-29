@@ -32,9 +32,9 @@ lattice-node \
   --peer <public-key>@<host>:4001
 ```
 
-RPC must remain on loopback. The same-chain overlay port may be public. Expose
-the hierarchy fact port only where configured direct parents and children need
-it.
+RPC must remain on loopback. The same-chain overlay port may be public. Never
+expose the hierarchy port: co-hosted levels dial it on loopback and no remote
+peer needs it, but its listener binds all interfaces, so firewall it.
 
 ## Bootstrap peers
 

@@ -11,7 +11,7 @@ The levels follow direct chain relationships without collapsing them into one
 chain runtime:
 
 ```text
-Nexus level  ── in-process facts, loopback evidence ──▶  Nexus/Payments level
+Nexus level  ── in-process facts; evidence dialed on loopback ──▶  Nexus/Payments level
 ```
 
 The parent level owns only its own chain. The child level owns only its own
@@ -26,7 +26,8 @@ bytes are protocol availability, not access to the level's storage interface.
 
 A non-Nexus chain runs only in the same `lattice-node` process as its whole
 ancestry. The host wires its parent endpoint to the co-hosted parent level's
-hierarchy plane on loopback, which carries only child evidence.
+hierarchy plane, dialed on loopback, which carries only child evidence. The
+listener binds all interfaces, so firewall the hierarchy port.
 
 The co-hosted parent level answers two narrow facts from its own validated
 state, read in-process: exact child deployment and forward state continuity
@@ -53,8 +54,9 @@ parent to trust.
 ## Separate planes
 
 Same-chain overlay traffic and parent/child evidence use separate Ivy
-instances. The hierarchy plane runs on loopback between co-hosted levels,
-disables relay, and carries only child-evidence delivery; parent facts, run
+instances. The hierarchy plane is dialed on loopback between co-hosted levels
+(the listener binds all interfaces, so firewall the hierarchy port), disables
+relay, and carries only child-evidence delivery; parent facts, run
 reports, and candidates pass in-process. A public overlay peer therefore
 cannot become a parent merely by claiming a path.
 
@@ -144,7 +146,7 @@ Treat the co-hosted parent level as the only source of immediate-parent
 validity; its loopback endpoint is one route for availability. Other peers may
 supply identical Volumes, but they cannot replace the parent level's fact
 needed for a new parent-state movement. Keep each level's identity key stable,
-keep the hierarchy port on loopback, and back up identity separately from
+firewall the hierarchy port (no remote peer needs it), and back up identity separately from
 wipeable chain storage.
 
 A child trusts its parent level as it trusts its own binary: a bug in parent

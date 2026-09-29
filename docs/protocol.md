@@ -212,11 +212,12 @@ The node uses two Ivy sessions:
 
 - the public same-chain overlay exchanges announcements and same-path content;
 - the private hierarchy plane connects each co-hosted parent level with its
-  child levels over loopback, and carries only child-evidence delivery: the
-  hello, the evidence-available hint, the evidence index request and
-  response, the per-block evidence request (getdata), and the evidence
-  Volumes fetched from that exact session. It stays loopback-only between
-  co-hosted levels until evidence delivery also moves in-process.
+  child levels, and carries only child-evidence delivery: the hello, the
+  evidence-available hint, the evidence index request and response, the
+  per-block evidence request (getdata), and the evidence Volumes fetched from
+  that exact session. It is dialed on loopback between co-hosted levels; the
+  listener binds all interfaces, so firewall the hierarchy port. It carries
+  evidence until evidence delivery also moves in-process.
 
 Parent facts, run reports and merged-mining candidates never cross a network
 plane: they pass in-process between co-hosted levels.

@@ -12,13 +12,13 @@ lattice-node process
   Nexus level
     chain: Nexus
     overlay: 4001
-    hierarchy (loopback): 4002
+    hierarchy (dialed on loopback; firewall): 4002
     RPC: 127.0.0.1:8080
   Nexus/Payments level
     chain: Nexus/Payments
     parent level: Nexus (in-process; evidence over 127.0.0.1:4002)
     overlay: 4101
-    hierarchy (loopback): 4102
+    hierarchy (dialed on loopback; firewall): 4102
     RPC: 127.0.0.1:8180
 ```
 
@@ -58,7 +58,7 @@ LatticeNodeDaemon
   ├─ NodeStore             state.db: semantic facts, indexes, root references
   ├─ DiskBroker            volumes.db: materialized CAS volumes
   ├─ Ivy overlay           same-chain peers and content
-  ├─ Ivy hierarchy plane   loopback child-evidence delivery between levels
+  ├─ Ivy hierarchy plane   child-evidence delivery, dialed on loopback
   └─ loopback HTTP         thin JSON adapter over ChainService
 ```
 
@@ -117,8 +117,9 @@ The planes are deliberately separate:
 1. The public overlay admits peers that claim the same Nexus genesis and
    absolute chain path. It carries block and transaction
    Volume inventories plus content-addressed retrieval.
-2. The private hierarchy plane has no relay role. It runs on loopback between
-   a co-hosted parent level and its child levels, and carries only child
+2. The private hierarchy plane has no relay role. It is dialed on loopback
+   between a co-hosted parent level and its child levels (the listener binds
+   all interfaces, so firewall the hierarchy port), and carries only child
    evidence: the evidence-available hint, the evidence index, the per-block
    evidence request, and the evidence Volumes. The parent level's key is the
    one parent; the child role goes only to the process key of the child
