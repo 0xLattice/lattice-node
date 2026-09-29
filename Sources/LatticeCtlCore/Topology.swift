@@ -1,15 +1,16 @@
-// The declarative unit `lattice` operates on: one host's chain-process tree.
+// The declarative unit `lattice` operates on: one host's chain tree.
 //
-// Lattice runs one process per chain; a child authenticates against its
-// immediate parent's fact plane. This file makes that tree a value: each
-// entry is one process, parents are derived from chain paths, and every
-// verb reconciles against it rather than accumulating flag invocations.
+// One lattice-node process hosts every chain in the tree; a child
+// authenticates against its co-hosted parent's fact plane over loopback.
+// This file makes that tree a value: each entry is one chain, parents are
+// derived from chain paths, and every verb reconciles against it rather than
+// accumulating flag invocations.
 
 import Foundation
 import Lattice
 import LatticeNode
 
-public struct TopologyChain: Codable {
+public struct TopologyChain: Codable, Sendable {
     public var listen: UInt16
     public var fact: UInt16
     public var rpc: UInt16
@@ -200,17 +201,9 @@ public struct Topology: Codable {
     public func save(root: URL) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        try encoder.encode(self).write(
-            to: root.appendingPathComponent(Self.fileName),
-            options: .atomic
+        try writeDurably(
+            encoder.encode(self), to: root.appendingPathComponent(Self.fileName)
         )
-    }
-
-    /// Parent-before-child order, so `up` can wire children to a parent
-    /// that is already running.
-    public func orderedPaths() -> [String] {
-        chains.keys.sorted { $0.components(separatedBy: "/").count
-            < $1.components(separatedBy: "/").count || $0 < $1 }
     }
 
     public func validated() throws -> Topology {
@@ -253,6 +246,18 @@ public struct Topology: Codable {
     }
 }
 
+public enum HostLayoutError: Error, Equatable, CustomStringConvertible {
+    /// A pre-encoding identity key file that several chains map to.
+    case ambiguousLegacyIdentityKey(file: String, paths: [String])
+
+    public var description: String {
+        switch self {
+        case .ambiguousLegacyIdentityKey(let file, let paths):
+            "identity key \(file) could belong to any of \(paths.joined(separator: ", ")); rename it to the right chain's identityKey file by hand"
+        }
+    }
+}
+
 public struct CtlError: Error, CustomStringConvertible {
     public let description: String
     public init(_ description: String) { self.description = description }
@@ -268,11 +273,40 @@ public struct HostLayout: Sendable {
             ?? FileManager.default.currentDirectoryPath)
     }
 
+    /// Percent-encoded like `pendingDeploy`: `-` is a legal directory atom,
+    /// so flattening `/` to `-` gave `Nexus/A/B` and `Nexus/A-B` one key,
+    /// and one process cannot host two levels with one key.
     public func identityKey(for path: String) -> URL {
         root.appendingPathComponent("identity")
-            .appendingPathComponent(
-                path.replacingOccurrences(of: "/", with: "-") + ".key"
-            )
+            .appendingPathComponent(Self.encoded(path) + ".key")
+    }
+
+    /// Renames each chain's key file from the old flattened name to
+    /// `identityKey(for:)`, so an upgraded host keeps its identities. A
+    /// flattened name that more than one of `paths` maps to is ambiguous and
+    /// is refused rather than guessed.
+    public func migrateIdentityKeys(for paths: some Collection<String>) throws {
+        let manager = FileManager.default
+        for path in paths {
+            let flattened = path.replacingOccurrences(of: "/", with: "-")
+            let legacy = root.appendingPathComponent("identity")
+                .appendingPathComponent(flattened + ".key")
+            let current = identityKey(for: path)
+            guard legacy.path != current.path,
+                  manager.fileExists(atPath: legacy.path),
+                  !manager.fileExists(atPath: current.path) else {
+                continue
+            }
+            let sharing = paths.filter {
+                $0.replacingOccurrences(of: "/", with: "-") == flattened
+            }
+            guard sharing.count == 1 else {
+                throw HostLayoutError.ambiguousLegacyIdentityKey(
+                    file: legacy.path, paths: sharing.sorted()
+                )
+            }
+            try manager.moveItem(at: legacy, to: current)
+        }
     }
 
     public func chainDirectory(for path: String) -> URL {
@@ -286,19 +320,32 @@ public struct HostLayout: Sendable {
         // Percent-encoded, not `/`-flattened: `-` is a legal directory atom,
         // so flattening would give `Nexus/A/B` and `Nexus/A-B` one file, and
         // one child's genesis seed would overwrite the other's.
-        let encoded = path.addingPercentEncoding(
+        return root.appendingPathComponent("pending-deploy")
+            .appendingPathComponent(Self.encoded(path) + ".json")
+    }
+
+    private static func encoded(_ path: String) -> String {
+        path.addingPercentEncoding(
             withAllowedCharacters: CharacterSet.alphanumerics.union(
                 CharacterSet(charactersIn: "._-")
             )
         ) ?? path
-        return root.appendingPathComponent("pending-deploy")
-            .appendingPathComponent(encoded + ".json")
     }
 
     public func pidFile(for path: String) -> URL {
         root.appendingPathComponent("run").appendingPathComponent(
             path.replacingOccurrences(of: "/", with: "-") + ".pid"
         )
+    }
+
+    /// Removes `path`'s pidfile only while it still names `pid`: a stop
+    /// must never delete the pidfile of a process started after it.
+    public func removePidFile(for path: String, ifNaming pid: Int32) {
+        let url = pidFile(for: path)
+        guard let text = try? String(contentsOf: url, encoding: .utf8),
+              text.split(separator: " ").first.flatMap({ Int32($0) }) == pid
+        else { return }
+        try? FileManager.default.removeItem(at: url)
     }
 
     public func logFile(for path: String) -> URL {

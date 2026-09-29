@@ -1,6 +1,7 @@
-// Tree lifecycle: reconcile running lattice-node processes against the
-// topology. `up` spawns and exits (pidfiles + loopback health are the
-// record); `down` stops by pidfile; `status` reads only local loopback RPC —
+// Tree lifecycle: one lattice-node process hosts the whole topology. `up`
+// spawns it and exits (its pidfile + loopback health are the record), and
+// restarts it when lattice.json lists other chains than it hosts; `down`
+// stops it by pidfile; `status` reads only local loopback RPC —
 // it never claims fleet truth. `wipe` removes chain state, never identity.
 
 import Foundation
@@ -29,24 +30,38 @@ func nodeBinary() throws -> URL {
 /// pidfile recorded: pids recycle, and killing a stranger is worse than a
 /// stale file.
 func runningPid(_ layout: HostLayout, _ path: String) -> Int32? {
+    guard let recorded = recordedPid(layout, path),
+          isAlive(recorded.pid, named: recorded.name) else {
+        return nil
+    }
+    return recorded.pid
+}
+
+/// The pid and command name a pidfile records.
+private func recordedPid(
+    _ layout: HostLayout, _ path: String
+) -> (pid: Int32, name: String?)? {
     guard let text = try? String(
         contentsOf: layout.pidFile(for: path), encoding: .utf8
     ) else { return nil }
     let parts = text.trimmingCharacters(in: .whitespacesAndNewlines)
         .split(separator: " ", maxSplits: 1)
-    guard let pid = parts.first.flatMap({ Int32($0) }),
-          kill(pid, 0) == 0 else {
-        return nil
-    }
-    if parts.count == 2 {
-        let expected = String(parts[1])
+    guard let pid = parts.first.flatMap({ Int32($0) }) else { return nil }
+    return (pid, parts.count == 2 ? String(parts[1]) : nil)
+}
+
+/// Whether `pid` is alive and, when a name was recorded, still runs that
+/// command.
+private func isAlive(_ pid: Int32, named expected: String?) -> Bool {
+    guard kill(pid, 0) == 0 else { return false }
+    if let expected {
         let probe = Process()
         probe.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         probe.arguments = ["ps", "-o", "comm=", "-p", String(pid)]
         let out = Pipe()
         probe.standardOutput = out
         probe.standardError = FileHandle.nullDevice
-        guard (try? probe.run()) != nil else { return pid }
+        guard (try? probe.run()) != nil else { return true }
         // Captured while the probe is alive, for the same reason the bounded
         // wait does it: a group derived after the child is reaped is gone.
         let teardown = ProcessTeardownTarget.capture(
@@ -73,13 +88,13 @@ func runningPid(_ layout: HostLayout, _ path: String) -> Int32? {
             // truncated name would fail the suffix check below and report a
             // live node as stopped -- which invites a double spawn. Same
             // convention as the run() failure above: assume running.
-            return pid
+            return true
         }
         let name = String(decoding: read.data, as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard name.hasSuffix(expected) else { return nil }
+        guard name.hasSuffix(expected) else { return false }
     }
-    return pid
+    return true
 }
 
 func writePidFile(
@@ -124,71 +139,33 @@ func health(rpc: UInt16) async -> [String: Any]? {
     return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
 }
 
-func spawnChain(
-    _ path: String,
-    topology: Topology,
-    layout: HostLayout
-) throws {
-    let chain = topology.chains[path]!
+/// The pidfile and log name of the one daemon hosting the whole tree.
+let hostProcessName = "lattice-node"
+
+/// Starts the one `lattice-node` hosting every chain in the tree. It wires
+/// each child to its co-hosted parent itself. The host reads `lattice.json`
+/// once, so the chain set it starts with is recorded beside its pidfile.
+func spawnHost(layout: HostLayout) throws {
     let manager = FileManager.default
     for directory in [
-        layout.chainDirectory(for: path),
-        layout.pidFile(for: path).deletingLastPathComponent(),
-        layout.logFile(for: path).deletingLastPathComponent(),
+        layout.pidFile(for: hostProcessName).deletingLastPathComponent(),
+        layout.logFile(for: hostProcessName).deletingLastPathComponent(),
     ] {
         try manager.createDirectory(
             at: directory, withIntermediateDirectories: true
         )
     }
-    var arguments = [
-        "--chain-path", path,
-        "--data-directory", layout.chainDirectory(for: path).path,
-        "--identity-key", layout.identityKey(for: path).path,
-        "--listen-port", String(chain.listen),
-        "--fact-listen-port", String(chain.fact),
-        "--rpc-port", String(chain.rpc),
-    ]
-    let components = path.components(separatedBy: "/")
-    if components.count > 1 {
-        let parentPath = components.dropLast().joined(separator: "/")
-        let parent = topology.chains[parentPath]!
-        let parentKey = try publicKey(
-            ofIdentity: layout.identityKey(for: parentPath)
-        )
-        arguments += ["--parent", "\(parentKey)@127.0.0.1:\(parent.fact)"]
-    }
-    // Absent = no peer source configured, so the node uses its built-in
-    // defaults. A list REPLACES them, and an explicit empty list means none.
-    if let peers = chain.peers {
-        if peers.isEmpty {
-            arguments += ["--no-default-peers"]
-        }
-        for peer in peers {
-            arguments += ["--peer", peer]
-        }
-    }
-    if let publicRead = chain.publicRead {
-        arguments += ["--public-read-port", String(publicRead)]
-    }
-    if let rate = chain.publicReadRate {
-        arguments += ["--public-read-rate", String(rate)]
-    }
-    if let rate = chain.publicReadExpensiveRate {
-        arguments += ["--public-read-expensive-rate", String(rate)]
-    }
-    if let rate = chain.publicReadMaxRate {
-        arguments += ["--public-read-max-rate", String(rate)]
-    }
-    if let externalAddress = chain.externalAddress {
-        arguments += ["--external-address", externalAddress]
-    }
-    if let publicReadUrl = chain.publicReadUrl {
-        arguments += ["--public-read-url", publicReadUrl]
-    }
+    let chains = try Topology.load(root: layout.root).chains.keys.sorted()
+    try Data(chains.joined(separator: "\n").utf8).write(
+        to: hostedChainsFile(layout), options: .atomic
+    )
     let process = Process()
     process.executableURL = try nodeBinary()
-    process.arguments = arguments
-    let log = layout.logFile(for: path)
+    process.arguments = [
+        "--config", layout.root.appendingPathComponent(Topology.fileName).path,
+        "--data-root", layout.root.path,
+    ]
+    let log = layout.logFile(for: hostProcessName)
     _ = manager.createFile(atPath: log.path, contents: nil)
     let handle = try FileHandle(forWritingTo: log)
     handle.seekToEndOfFile()
@@ -196,40 +173,102 @@ func spawnChain(
     process.standardError = handle
     try process.run()
     try writePidFile(
-        layout, path, pid: process.processIdentifier, name: "lattice-node"
+        layout, hostProcessName, pid: process.processIdentifier,
+        name: "lattice-node"
     )
+}
+
+private func hostedChainsFile(_ layout: HostLayout) -> URL {
+    layout.pidFile(for: hostProcessName).deletingPathExtension()
+        .appendingPathExtension("chains")
+}
+
+/// The chains the running host was started with; nil when unrecorded.
+private func hostedChains(_ layout: HostLayout) -> Set<String>? {
+    guard let text = try? String(
+        contentsOf: hostedChainsFile(layout), encoding: .utf8
+    ) else { return nil }
+    return Set(text.split(separator: "\n").map(String.init))
+}
+
+/// Stops a process by pidfile: SIGTERM, then SIGKILL if it lingers, then
+/// waits until it is gone, so a spawn after this finds its locks and ports
+/// free. Watches the pid it signalled, never a re-read pidfile, and
+/// removes the pidfile only while it still names that pid. `grace` is how
+/// long SIGTERM gets; `onKill` runs right after the SIGKILL, for anything
+/// else the killed process leaves behind. Callers hold the spawn lock.
+/// Returns false when the process was not running.
+@discardableResult
+func stopProcess(
+    _ layout: HostLayout, _ name: String,
+    grace: Duration = .seconds(30),
+    onKill: () -> Void = {}
+) async throws -> Bool {
+    guard let recorded = recordedPid(layout, name),
+          isAlive(recorded.pid, named: recorded.name) else { return false }
+    let pid = recorded.pid
+    let alive = { isAlive(pid, named: recorded.name) }
+    kill(pid, SIGTERM)
+    let deadline = ContinuousClock.now + grace
+    while alive(), ContinuousClock.now < deadline {
+        try await Task.sleep(for: .milliseconds(100))
+    }
+    if alive() {
+        kill(pid, SIGKILL)
+        onKill()
+        for _ in 0..<100 where alive() {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard !alive() else {
+            throw CtlError("\(name) (pid \(pid)) survived SIGKILL for 10s")
+        }
+    }
+    layout.removePidFile(for: name, ifNaming: pid)
+    return true
+}
+
+/// Restarts the running host so it serves the chains `lattice.json` lists
+/// now: the host never adds a chain while it runs. The caller holds the
+/// spawn lock; returns false, touching nothing, when no host is running.
+func restartHostIfRunningLocked(_ layout: HostLayout) async throws -> Bool {
+    guard runningPid(layout, hostProcessName) != nil else { return false }
+    try await stopProcess(layout, hostProcessName)
+    try spawnHost(layout: layout)
+    return true
 }
 
 struct Up: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Start every chain process in the tree that is not already running."
+        abstract: "Start the one process hosting every chain in the tree; restart it if lattice.json lists chains it does not host."
     )
 
     @OptionGroup var rootOption: RootOption
 
-    @Flag(name: .long, help: "Stay in the foreground and restart processes that exit (container PID 1).")
+    @Flag(name: .long, help: "Stay in the foreground and restart the process if it exits (container PID 1).")
     var foreground = false
 
     func run() async throws {
         let layout = rootOption.layout
         let topology = try Topology.load(root: layout.root).validated()
         try await withSpawnLock(layout) {
-            for path in topology.orderedPaths() {
-                if let pid = runningPid(layout, path) {
-                    print("\(path): already running (pid \(pid))")
-                    continue
+            if let pid = runningPid(layout, hostProcessName) {
+                guard hostedChains(layout) != Set(topology.chains.keys) else {
+                    print("already running (pid \(pid))")
+                    return
                 }
-                try spawnChain(path, topology: topology, layout: layout)
-                print("\(path): started (pid \(runningPid(layout, path) ?? -1))")
+                print("lattice.json changed since the host started (pid \(pid)); restarting it")
+                try await stopProcess(layout, hostProcessName)
             }
+            try spawnHost(layout: layout)
+            print("started \(topology.chains.count) chain(s) (pid \(runningPid(layout, hostProcessName) ?? -1))")
         }
         guard foreground else { return }
         while true {
             try await Task.sleep(for: .seconds(10))
-            for path in topology.orderedPaths()
-            where runningPid(layout, path) == nil {
-                print("\(path): exited; restarting")
-                try spawnChain(path, topology: topology, layout: layout)
+            try await withSpawnLock(layout) {
+                guard runningPid(layout, hostProcessName) == nil else { return }
+                print("exited; restarting")
+                try spawnHost(layout: layout)
             }
         }
     }
@@ -237,23 +276,28 @@ struct Up: AsyncParsableCommand {
 
 struct Down: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Stop every running chain process in the tree, children first."
+        abstract: "Stop the process hosting the tree; it stops the chains children first."
     )
 
     @OptionGroup var rootOption: RootOption
 
     func run() async throws {
         let layout = rootOption.layout
-        let topology = try Topology.load(root: layout.root).validated()
-        for path in topology.orderedPaths().reversed() {
-            guard let pid = runningPid(layout, path) else { continue }
-            kill(pid, SIGTERM)
-            for _ in 0..<50 where runningPid(layout, path) != nil {
-                try await Task.sleep(for: .milliseconds(100))
+        // Under the spawn lock, so no `up`, restart or deploy spawns while
+        // this stops. A running `up --foreground` respawns once the lock is
+        // released, as documented: it is the supervisor, so stop it first.
+        try await withSpawnLock(layout) {
+            // An upgrade from one process per chain can leave those processes
+            // running under their own pidfiles, children after parents.
+            let legacy = ((try? Topology.load(root: layout.root))?.chains.keys)
+                .map { $0.sorted().reversed() } ?? []
+            for path in legacy where runningPid(layout, path) != nil {
+                print("warning: \(path) still runs as its own process from an older lattice; stopping it")
+                try await stopProcess(layout, path)
             }
-            if runningPid(layout, path) != nil { kill(pid, SIGKILL) }
-            try? FileManager.default.removeItem(at: layout.pidFile(for: path))
-            print("\(path): stopped")
+            guard runningPid(layout, hostProcessName) != nil else { return }
+            try await stopProcess(layout, hostProcessName)
+            print("stopped")
         }
     }
 }
@@ -268,9 +312,10 @@ struct Status: AsyncParsableCommand {
     func run() async throws {
         let layout = rootOption.layout
         let topology = try Topology.load(root: layout.root).validated()
-        for path in topology.orderedPaths() {
+        let running = runningPid(layout, hostProcessName) != nil
+        for path in topology.chains.keys.sorted() {
             let chain = topology.chains[path]!
-            guard runningPid(layout, path) != nil else {
+            guard running else {
                 print("\(path): down")
                 continue
             }
@@ -299,21 +344,35 @@ struct Wipe: AsyncParsableCommand {
 
     func run() async throws {
         let layout = rootOption.layout
-        let topology = try Topology.load(root: layout.root).validated()
-        guard topology.chains[chain] != nil else {
-            throw CtlError("\(chain) is not in the tree")
+        // Under the spawn lock, so no `up` or restart starts the tree while
+        // its chain state is being removed.
+        try await withSpawnLock(layout) {
+            let topology = try Topology.load(root: layout.root).validated()
+            guard topology.chains[chain] != nil else {
+                throw CtlError("\(chain) is not in the tree")
+            }
+            guard runningPid(layout, hostProcessName) == nil else {
+                throw CtlError("the tree is running; `lattice down` first")
+            }
+            let directory = layout.chainDirectory(for: chain)
+                .standardizedFileURL
+            let container = layout.root.appendingPathComponent("chains")
+                .standardizedFileURL
+            guard directory.path.hasPrefix(container.path + "/") else {
+                throw CtlError("refusing to remove unexpected path \(directory.path)")
+            }
+            // The node's own writer lock: held by any process still serving this
+            // chain, whatever the pidfiles say.
+            let lock: StorageDirectoryLock?
+            do {
+                lock = FileManager.default.fileExists(atPath: directory.path)
+                    ? try StorageDirectoryLock(directory: directory) : nil
+            } catch StorageDirectoryLockError.alreadyLocked {
+                throw CtlError("\(chain) storage is in use by a running node; `lattice down` first")
+            }
+            try? FileManager.default.removeItem(at: directory)
+            _ = lock
+            print("\(chain): chain state wiped; identity preserved")
         }
-        guard runningPid(layout, chain) == nil else {
-            throw CtlError("\(chain) is running; `lattice down` first")
-        }
-        let directory = layout.chainDirectory(for: chain)
-            .standardizedFileURL
-        let container = layout.root.appendingPathComponent("chains")
-            .standardizedFileURL
-        guard directory.path.hasPrefix(container.path + "/") else {
-            throw CtlError("refusing to remove unexpected path \(directory.path)")
-        }
-        try? FileManager.default.removeItem(at: directory)
-        print("\(chain): chain state wiped; identity preserved")
     }
 }

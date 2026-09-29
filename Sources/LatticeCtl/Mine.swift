@@ -67,25 +67,20 @@ struct Mine: AsyncParsableCommand {
 
         func run() async throws {
             let layout = rootOption.layout
-            guard let pid = runningPid(layout, "mine") else {
-                print("mining not running")
-                return
+            // Under the spawn lock, so a concurrent `mine start` cannot
+            // lose its pidfile to this stop. Graceful: the loop finishes
+            // its batch and persists the cursor within the grace.
+            let stopped = try await withSpawnLock(layout) {
+                try await stopProcess(
+                    layout, "mine", grace: .seconds(60),
+                    onKill: {
+                        if let coordinator = runningPid(layout, "mine-coordinator") {
+                            kill(coordinator, SIGKILL)
+                        }
+                    }
+                )
             }
-            // Graceful: the loop finishes its batch and persists the cursor.
-            kill(pid, SIGTERM)
-            for _ in 0..<600 where runningPid(layout, "mine") != nil {
-                try await Task.sleep(for: .milliseconds(100))
-            }
-            if runningPid(layout, "mine") != nil {
-                kill(pid, SIGKILL)
-                if let coordinator = runningPid(layout, "mine-coordinator") {
-                    kill(coordinator, SIGKILL)
-                }
-            }
-            try? FileManager.default.removeItem(
-                at: layout.pidFile(for: "mine")
-            )
-            print("mining stopped")
+            print(stopped ? "mining stopped" : "mining not running")
         }
     }
 

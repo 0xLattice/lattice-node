@@ -77,6 +77,63 @@ final class DaemonHTTPTests: XCTestCase {
         }
     }
 
+    /// A web page can send a cross-origin "simple" POST (no preflight) or
+    /// reach the loopback listener under a rebound hostname: the operator
+    /// write routes refuse both before touching the service.
+    func testOperatorWritesRefuseNonJSONBodiesAndForeignHosts() async throws {
+        let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-http-csrf-\(UUID().uuidString)"
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storage) }
+        let process = try await ChainProcess.open(configuration: NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: storage,
+            privateKeyHex: String(repeating: "01", count: 32)
+        ))
+        let service = ChainService(
+            process: process,
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in },
+            )
+        )
+        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
+        let body = try JSONEncoder().encode(MiningTemplateRequest())
+
+        try await app.test(.router) { client in
+            for contentType in ["text/plain", "application/x-www-form-urlencoded"] {
+                try await client.execute(
+                    uri: "/v1/mining/templates",
+                    method: .post,
+                    headers: [.contentType: contentType],
+                    body: ByteBuffer(bytes: body)
+                ) { response in
+                    XCTAssertEqual(response.status, .unsupportedMediaType)
+                }
+            }
+            var foreign = HTTPFields()
+            foreign[.contentType] = "application/json"
+            foreign.append(.init(name: .init("Host")!, value: "rebound.example:8080"))
+            try await client.execute(
+                uri: "/v1/mining/templates",
+                method: .post,
+                headers: foreign,
+                body: ByteBuffer(bytes: body)
+            ) { response in
+                XCTAssertEqual(response.status, .forbidden)
+            }
+            try await client.execute(
+                uri: "/v1/mining/templates",
+                method: .post,
+                headers: [.contentType: "application/json; charset=utf-8"],
+                body: ByteBuffer(bytes: body)
+            ) { response in
+                XCTAssertEqual(response.status, .ok)
+            }
+        }
+    }
+
     func testMiningTemplateRequestJSONDefaults() throws {
         let legacy = try JSONDecoder().decode(
             MiningTemplateRequest.self,

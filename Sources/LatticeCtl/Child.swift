@@ -3,10 +3,11 @@
 // `deploy` runs the full arc against the LOCAL parent process: build the
 // self-contained child genesis OFFLINE (empty parentState) → submit ONE signed
 // GenesisAction anchor recording its CID in the parent's genesisState → wait for
-// the parent to record it → child process active — then records the child in the
-// topology. The seed and signed anchor are durable before submission, so an
-// interrupted deploy resumes on re-run instead of orphaning a recorded CID.
-// `adopt` joins an EXISTING child permissionlessly: the child process
+// the parent to record it → record the child in the topology and restart the
+// running host so it hosts the child → child active. The seed and signed
+// anchor are durable before submission, so an interrupted deploy resumes on
+// re-run instead of orphaning a recorded CID.
+// `adopt` joins an EXISTING child permissionlessly: the child level
 // re-derives its genesis through the authenticated parent link, never from "a
 // node that tracks it".
 
@@ -62,7 +63,7 @@ struct Child: AsyncParsableCommand {
 
         func run() async throws {
             let layout = rootOption.layout
-            var topology = try Topology.load(root: layout.root).validated()
+            let topology = try Topology.load(root: layout.root).validated()
             guard let parentChain = topology.chains[parent] else {
                 throw CtlError("parent \(parent) is not in the tree")
             }
@@ -365,14 +366,27 @@ struct Child: AsyncParsableCommand {
                 JSONEncoder().encode(seed),
                 to: childData.appendingPathComponent("child-genesis.json")
             )
-            let ports = nextFreePorts(topology)
-            topology.chains[childPath] = TopologyChain(
-                listen: ports.0, fact: ports.1, rpc: ports.2, peers: nil
-            )
-            try topology.validated().save(root: layout.root)
-            // The child's own directory now carries the seed.
-            try? FileManager.default.removeItem(at: pendingURL)
-            try spawnChain(childPath, topology: topology, layout: layout)
+            // Re-read, add and save under the spawn lock, so a concurrent
+            // deploy or adopt cannot lose this entry, and restart the host
+            // on the file just saved.
+            let (ports, restarted) = try await withSpawnLock(layout) {
+                var current = try Topology.load(root: layout.root).validated()
+                guard current.chains[childPath] == nil else {
+                    throw CtlError("\(childPath) is already in the tree")
+                }
+                let ports = nextFreePorts(current)
+                current.chains[childPath] = TopologyChain(
+                    listen: ports.0, fact: ports.1, rpc: ports.2, peers: nil
+                )
+                try current.validated().save(root: layout.root)
+                // The child's own directory now carries the seed.
+                try? FileManager.default.removeItem(at: pendingURL)
+                return (ports, try await restartHostIfRunningLocked(layout))
+            }
+            guard restarted else {
+                print("\(childPath): added; `lattice up` starts it")
+                return
+            }
             try await waitActive(childPath, rpc: ports.2)
             print("\(childPath): active")
         }
@@ -390,17 +404,25 @@ struct Child: AsyncParsableCommand {
 
         func run() async throws {
             let layout = rootOption.layout
-            var topology = try Topology.load(root: layout.root).validated()
-            guard topology.chains[path] == nil else {
-                throw CtlError("\(path) is already in the tree")
+            // Load, add, save and restart under the spawn lock, so a
+            // concurrent deploy or adopt cannot lose this entry.
+            let restarted = try await withSpawnLock(layout) {
+                var topology = try Topology.load(root: layout.root).validated()
+                guard topology.chains[path] == nil else {
+                    throw CtlError("\(path) is already in the tree")
+                }
+                let ports = nextFreePorts(topology)
+                topology.chains[path] = TopologyChain(
+                    listen: ports.0, fact: ports.1, rpc: ports.2, peers: nil
+                )
+                _ = try topology.validated()
+                try topology.save(root: layout.root)
+                return try await restartHostIfRunningLocked(layout)
             }
-            let ports = nextFreePorts(topology)
-            topology.chains[path] = TopologyChain(
-                listen: ports.0, fact: ports.1, rpc: ports.2, peers: nil
-            )
-            _ = try topology.validated()
-            try topology.save(root: layout.root)
-            try spawnChain(path, topology: topology, layout: layout)
+            guard restarted else {
+                print("\(path): added; `lattice up` starts it")
+                return
+            }
             print("\(path): started; awaiting authenticated genesis from the parent")
         }
     }
