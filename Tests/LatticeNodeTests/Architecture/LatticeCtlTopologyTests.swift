@@ -413,6 +413,24 @@ final class LatticeCtlTopologyTests: XCTestCase {
             .contains("/chains/"))
     }
 
+    /// A stop removes the pidfile only while it names the pid the stop
+    /// signalled: a daemon a restart spawned meanwhile keeps its pidfile.
+    func testAStopLeavesAPidFileNamingAnotherPid() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ctl-pid-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let layout = HostLayout(root: root.path)
+        let url = layout.pidFile(for: "lattice-node")
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try Data("4243 lattice-node".utf8).write(to: url)
+        layout.removePidFile(for: "lattice-node", ifNaming: 4242)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        layout.removePidFile(for: "lattice-node", ifNaming: 4243)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
     func testLegacyIdentityKeysMigrateUnlessAmbiguous() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ctl-keys-\(UUID().uuidString)")

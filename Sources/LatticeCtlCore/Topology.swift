@@ -201,9 +201,8 @@ public struct Topology: Codable {
     public func save(root: URL) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        try encoder.encode(self).write(
-            to: root.appendingPathComponent(Self.fileName),
-            options: .atomic
+        try writeDurably(
+            encoder.encode(self), to: root.appendingPathComponent(Self.fileName)
         )
     }
 
@@ -337,6 +336,16 @@ public struct HostLayout: Sendable {
         root.appendingPathComponent("run").appendingPathComponent(
             path.replacingOccurrences(of: "/", with: "-") + ".pid"
         )
+    }
+
+    /// Removes `path`'s pidfile only while it still names `pid`: a stop
+    /// must never delete the pidfile of a process started after it.
+    public func removePidFile(for path: String, ifNaming pid: Int32) {
+        let url = pidFile(for: path)
+        guard let text = try? String(contentsOf: url, encoding: .utf8),
+              text.split(separator: " ").first.flatMap({ Int32($0) }) == pid
+        else { return }
+        try? FileManager.default.removeItem(at: url)
     }
 
     public func logFile(for path: String) -> URL {

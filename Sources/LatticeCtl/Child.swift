@@ -63,7 +63,7 @@ struct Child: AsyncParsableCommand {
 
         func run() async throws {
             let layout = rootOption.layout
-            var topology = try Topology.load(root: layout.root).validated()
+            let topology = try Topology.load(root: layout.root).validated()
             guard let parentChain = topology.chains[parent] else {
                 throw CtlError("parent \(parent) is not in the tree")
             }
@@ -366,14 +366,24 @@ struct Child: AsyncParsableCommand {
                 JSONEncoder().encode(seed),
                 to: childData.appendingPathComponent("child-genesis.json")
             )
-            let ports = nextFreePorts(topology)
-            topology.chains[childPath] = TopologyChain(
-                listen: ports.0, fact: ports.1, rpc: ports.2, peers: nil
-            )
-            try topology.validated().save(root: layout.root)
-            // The child's own directory now carries the seed.
-            try? FileManager.default.removeItem(at: pendingURL)
-            guard try await restartHostIfRunning(layout) else {
+            // Re-read, add and save under the spawn lock, so a concurrent
+            // deploy or adopt cannot lose this entry, and restart the host
+            // on the file just saved.
+            let (ports, restarted) = try await withSpawnLock(layout) {
+                var current = try Topology.load(root: layout.root).validated()
+                guard current.chains[childPath] == nil else {
+                    throw CtlError("\(childPath) is already in the tree")
+                }
+                let ports = nextFreePorts(current)
+                current.chains[childPath] = TopologyChain(
+                    listen: ports.0, fact: ports.1, rpc: ports.2, peers: nil
+                )
+                try current.validated().save(root: layout.root)
+                // The child's own directory now carries the seed.
+                try? FileManager.default.removeItem(at: pendingURL)
+                return (ports, try await restartHostIfRunningLocked(layout))
+            }
+            guard restarted else {
                 print("\(childPath): added; `lattice up` starts it")
                 return
             }
@@ -394,17 +404,22 @@ struct Child: AsyncParsableCommand {
 
         func run() async throws {
             let layout = rootOption.layout
-            var topology = try Topology.load(root: layout.root).validated()
-            guard topology.chains[path] == nil else {
-                throw CtlError("\(path) is already in the tree")
+            // Load, add, save and restart under the spawn lock, so a
+            // concurrent deploy or adopt cannot lose this entry.
+            let restarted = try await withSpawnLock(layout) {
+                var topology = try Topology.load(root: layout.root).validated()
+                guard topology.chains[path] == nil else {
+                    throw CtlError("\(path) is already in the tree")
+                }
+                let ports = nextFreePorts(topology)
+                topology.chains[path] = TopologyChain(
+                    listen: ports.0, fact: ports.1, rpc: ports.2, peers: nil
+                )
+                _ = try topology.validated()
+                try topology.save(root: layout.root)
+                return try await restartHostIfRunningLocked(layout)
             }
-            let ports = nextFreePorts(topology)
-            topology.chains[path] = TopologyChain(
-                listen: ports.0, fact: ports.1, rpc: ports.2, peers: nil
-            )
-            _ = try topology.validated()
-            try topology.save(root: layout.root)
-            guard try await restartHostIfRunning(layout) else {
+            guard restarted else {
                 print("\(path): added; `lattice up` starts it")
                 return
             }
