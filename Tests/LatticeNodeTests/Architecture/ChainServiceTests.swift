@@ -1374,7 +1374,8 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertFalse(submitted.accepted)
         XCTAssertEqual(submitted.disposition, .carrier)
         XCTAssertNotNil(submitted.parentCarrierLink)
-        XCTAssertTrue(submitted.durableChildProofs.isEmpty)
+        // The hosted child admitted its carried block (the stub admits).
+        XCTAssertEqual(submitted.durableChildProofs.map(\.directory), ["Payments"])
         for _ in 0..<500 {
             if await publishedProofs.count() > 0 { break }
             try await Task.sleep(for: .milliseconds(10))
@@ -1391,6 +1392,73 @@ final class ChainServiceTests: XCTestCase {
         )
         XCTAssertEqual(admissionsAfter, admissionsBefore)
         XCTAssertEqual(leavesAfter, leavesBefore)
+    }
+
+    /// A grind this host mined that misses Nexus's target but clears the
+    /// hosted child's is handed to the child in memory: the child admits its
+    /// carried block before `submitWork` answers, and the answer names it.
+    func testMinedTargetMissIsAdmittedAtTheHostedChildBeforeSubmitWorkReturns()
+        async throws
+    {
+        let fixture = try await activeChildService(
+            spec: NexusGenesis.spec,
+            carrierTarget: UInt256.max >> 4
+        )
+        let merged = await mergedMiningService(fixture)
+        let template = try await settledTemplate(merged, MiningTemplateRequest())
+        let childBlock = try XCTUnwrap(template.block.children.node?["Payments"]?.node)
+        let childCID = try BlockHeader(node: childBlock).rawCID
+        let nonce = firstNonce(of: template.block) {
+            $0 > template.block.target && $0 <= childBlock.target
+        }
+
+        let submitted = try await merged.service.submitWork(SubmitWorkRequest(
+            workID: template.workID,
+            nonce: nonce
+        ))
+        XCTAssertEqual(submitted.disposition, .carrier)
+        XCTAssertEqual(submitted.durableChildProofs, [
+            DirectChildProofSummary(directory: "Payments", childCID: childCID),
+        ])
+        // Admitted weighed: the child's canonical tip is the carried block.
+        let childTip = await fixture.process.canonicalTip()?.cid
+        XCTAssertEqual(childTip, childCID)
+    }
+
+    /// A hosted child still busy when the bound passes is left out of the
+    /// answer; its admission is not cancelled and lands once it frees up.
+    func testMinedHandoffAnswersWithoutAChildBusyPastTheBound() async throws {
+        let fixture = try await activeChildService(
+            spec: NexusGenesis.spec,
+            carrierTarget: UInt256.max >> 4
+        )
+        let busy = Latch()
+        let (service, child) = await mergedMiningService(fixture) {
+            BusyChildLevel($0, busy: busy)
+        }
+        let template = try await settledTemplate(
+            (service, child), MiningTemplateRequest()
+        )
+        let childBlock = try XCTUnwrap(template.block.children.node?["Payments"]?.node)
+        let childCID = try BlockHeader(node: childBlock).rawCID
+        let genesisTip = await fixture.process.canonicalTip()?.cid
+        let nonce = firstNonce(of: template.block) {
+            $0 > template.block.target && $0 <= childBlock.target
+        }
+
+        let submitted = try await service.submitWork(SubmitWorkRequest(
+            workID: template.workID,
+            nonce: nonce
+        ))
+        XCTAssertEqual(submitted.disposition, .carrier)
+        XCTAssertEqual(submitted.durableChildProofs, [])
+        let tipAtAnswer = await fixture.process.canonicalTip()?.cid
+        XCTAssertEqual(tipAtAnswer, genesisTip)
+
+        await busy.open()
+        try await eventually("the child admits once it frees up") {
+            await fixture.process.canonicalTip()?.cid == childCID
+        }
     }
 
     /// A nonce that clears only the child's easier target must not close the
@@ -2005,25 +2073,28 @@ final class ChainServiceTests: XCTestCase {
     /// wires one.
     private func mergedMiningService(
         _ fixture: ActiveChildServiceFixture,
-        child: ChainService? = nil
+        child: ChainService? = nil,
+        wrap: (any ChildLevel) -> any ChildLevel = { $0 }
     ) async -> (service: ChainService, child: ChainService) {
         let childService = child ?? makeService(
             process: fixture.process,
             parentLevel: LocalParentLevel(fixture.parent)
         )
         let service = makeService(process: fixture.parent)
-        await host(childService, in: "Payments", under: service)
+        await host(childService, in: "Payments", under: service, wrap: wrap)
         return (service, childService)
     }
 
     /// Wires `child` as `parent`'s hosted child level in `directory`, as
     /// `ChainHost` does: the child's rebuilds pass `gate`, and a new
-    /// snapshot marks the parent's own rebuild.
+    /// snapshot marks the parent's own rebuild. `wrap` stands in for the
+    /// level the parent sees.
     private func host(
         _ child: ChainService,
         in directory: String,
         under parent: ChainService,
-        gate: @escaping @Sendable ([String]) async -> Bool = { _ in true }
+        gate: @escaping @Sendable ([String]) async -> Bool = { _ in true },
+        wrap: (any ChildLevel) -> any ChildLevel = { $0 }
     ) async {
         let mailbox = await child.openParentMailbox(
             tipChanged: {},
@@ -2033,9 +2104,9 @@ final class ChainServiceTests: XCTestCase {
                 await parent?.childCandidateChanged()
             }
         )
-        await parent.attachChildLevel(LocalChildLevel(
+        await parent.attachChildLevel(wrap(LocalChildLevel(
             directory: directory, mailbox: mailbox, service: child
-        ))
+        )))
     }
 
     /// Waits until `level`'s snapshot rebuilds from what stands now.
@@ -2611,7 +2682,11 @@ final class ChainServiceTests: XCTestCase {
     /// same block once more.
     func testTheTipsCarriedChildBlockIsNotCarriedAgain() async throws {
         let fixture = try await activeChildService(spec: NexusGenesis.spec)
-        let merged = await mergedMiningService(fixture)
+        // A child that has not admitted its carried block (the mined
+        // handoff would admit it, and the child would build its next one).
+        let merged = await mergedMiningService(fixture) {
+            DecliningChildLevel($0)
+        }
         // The host has the parent serve a hosted child's runs, which also
         // names the child block the branch last carried.
         await merged.service.serveRuns(for: "Payments")
@@ -4593,4 +4668,48 @@ private actor HeldGate {
 private actor ShutdownReturned {
     private(set) var value = false
     func mark() { value = true }
+}
+
+/// A hosted child level that holds each mined handoff until `busy` opens,
+/// then hands it to `level`.
+private final class BusyChildLevel: ChildLevel, Sendable {
+    private let level: any ChildLevel
+    private let busy: Latch
+
+    init(_ level: any ChildLevel, busy: Latch) {
+        self.level = level
+        self.busy = busy
+    }
+
+    var directory: String { level.directory }
+
+    func parentChanged(_ change: ParentChange) {
+        level.parentChanged(change)
+    }
+
+    var readyCandidate: ReadyCandidate? { level.readyCandidate }
+
+    func admitMined(childCID: String, proof: ChildBlockProof) async -> Bool {
+        await busy.wait()
+        return await level.admitMined(childCID: childCID, proof: proof)
+    }
+}
+
+/// A hosted child level that admits no mined handoff.
+private final class DecliningChildLevel: ChildLevel, Sendable {
+    private let level: any ChildLevel
+
+    init(_ level: any ChildLevel) {
+        self.level = level
+    }
+
+    var directory: String { level.directory }
+
+    func parentChanged(_ change: ParentChange) {
+        level.parentChanged(change)
+    }
+
+    var readyCandidate: ReadyCandidate? { level.readyCandidate }
+
+    func admitMined(childCID: String, proof: ChildBlockProof) async -> Bool { false }
 }

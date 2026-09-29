@@ -8,19 +8,27 @@ final class StubChildLevel: ChildLevel, Sendable {
     let directory: String
     private let snapshot = Published<ReadyCandidate>()
     private let notify: @Sendable (ParentChange) -> Void
+    private let admit: @Sendable (String, ChildBlockProof) async -> Bool
 
+    /// `admit` answers each mined handoff; by default the child admits.
     init(
         directory: String,
         candidate: DirectChildCandidate? = nil,
-        notify: @escaping @Sendable (ParentChange) -> Void = { _ in }
+        notify: @escaping @Sendable (ParentChange) -> Void = { _ in },
+        admit: @escaping @Sendable (String, ChildBlockProof) async -> Bool = { _, _ in true }
     ) {
         self.directory = directory
         self.notify = notify
+        self.admit = admit
         publish(candidate)
     }
 
     func parentChanged(_ change: ParentChange) {
         notify(change)
+    }
+
+    func admitMined(childCID: String, proof: ChildBlockProof) async -> Bool {
+        await admit(childCID, proof)
     }
 
     var readyCandidate: ReadyCandidate? { snapshot.value }

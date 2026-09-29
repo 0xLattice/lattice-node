@@ -333,6 +333,63 @@ final class ChainHostTests: XCTestCase {
         await host.stopAll()
     }
 
+    /// With the hierarchy plane still on, each carried block reaches the
+    /// child twice: in memory at `submitWork`, and later over the plane. The
+    /// child admits it once, before `submitWork` answers, and the plane's
+    /// copy moves nothing.
+    func testTheMinedHandoffAndThePlaneAdmitACarriedBlockOnce() async throws {
+        let root = temporaryDirectory(create: true)
+        let (_, genesisCID) = try await seedChild(root: root, timestamp: 1_000)
+        let host = try ChainHost(chains: [
+            nexus: configure(nexus, root: root, keyByte: 1),
+            child: configure(child, root: root, keyByte: 2),
+        ])
+        let failed = try await host.startAll()
+        XCTAssertTrue(failed.isEmpty)
+        let parent = try await service(host, nexus)
+        let payments = try await service(host, child)
+        try await anchor(genesisCID, on: host)
+        try await eventually("the child activates", within: .seconds(60)) {
+            await payments.status().tipCID == genesisCID
+        }
+
+        let childNode = await host.node(child)
+        let childProcess = try XCTUnwrap(childNode).process
+        var handedOff: [String] = []
+        try await eventually("three carried blocks are handed off", within: .seconds(120)) {
+            let height = await childProcess.canonicalTip()?.height ?? 0
+            let template = try await parent.miningTemplate(
+                MiningTemplateRequest(rewards: [])
+            )
+            guard let carried = template.block.children.node?[self.child.directory]?.node,
+                  carried.height == height + 1 else { return false }
+            let carriedCID = try BlockHeader(node: carried).rawCID
+            let mined = try await parent.submitWork(SubmitWorkRequest(
+                workID: template.workID, nonce: solvedNonce(for: template)
+            ))
+            XCTAssertEqual(mined.durableChildProofs, [
+                DirectChildProofSummary(directory: self.child.directory, childCID: carriedCID),
+            ])
+            let tip = await childProcess.canonicalTip()?.cid
+            XCTAssertEqual(tip, carriedCID, "admitted before submitWork answered")
+            handedOff.append(carriedCID)
+            return handedOff.count == 3
+        }
+
+        // The plane's copies drain from the child's inbox without moving it.
+        try await eventually("the plane's copies drain", within: .seconds(60)) {
+            (try? await childProcess.store.pendingHandoffChildCIDs().isEmpty) ?? false
+        }
+        let tip = await childProcess.canonicalTip()
+        XCTAssertEqual(tip?.cid, handedOff.last)
+        XCTAssertEqual(tip?.height, 3)
+        let leaves = try await childProcess.store.acceptedLeafPage(
+            afterCID: nil, snapshotSequence: nil, limit: 16
+        )
+        XCTAssertEqual(leaves.blockCIDs, [handedOff.last!])
+        await host.stopAll()
+    }
+
     /// Nexus, a child and a grandchild in one host: the grandchild's snapshot
     /// composes into the child's, which Nexus's template carries, so one
     /// mined Nexus block carries both — each level admits its carried block,
@@ -377,6 +434,8 @@ final class ChainHostTests: XCTestCase {
             await refunds.status().tipCID == grandchildGenesis
         }
 
+        let refundsNode = await host.node(grandchild)
+        let refundsProcess = try XCTUnwrap(refundsNode).process
         var carriedBoth = false
         try await eventually("a Nexus block carries both levels", within: .seconds(120)) {
             let template = try await parent.miningTemplate(
@@ -387,11 +446,18 @@ final class ChainHostTests: XCTestCase {
             let mined = try await parent.submitWork(SubmitWorkRequest(
                 workID: template.workID, nonce: solvedNonce(for: template)
             ))
-            carriedBoth = carriedBoth || (carried && mined.accepted)
+            if carried && mined.accepted {
+                // Handed off in memory, transitively: the child admitted its
+                // block and handed the grandchild its own before
+                // `submitWork` answered.
+                carriedBoth = true
+                XCTAssertEqual(
+                    mined.durableChildProofs.map(\.directory), [self.child.directory]
+                )
+                let grandchildHeight = await refundsProcess.canonicalTip()?.height ?? 0
+                XCTAssertGreaterThanOrEqual(grandchildHeight, 1)
+            }
             return carriedBoth
-        }
-        try await eventually("the grandchild admits its carried block", within: .seconds(120)) {
-            (await refunds.status().height ?? 0) >= 1
         }
 
         // Each admission moves a level's tip and its snapshot follows, so a
