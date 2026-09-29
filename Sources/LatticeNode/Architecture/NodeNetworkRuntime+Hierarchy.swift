@@ -72,7 +72,7 @@ extension NodeNetworkRuntime {
                    $0.refusedHint = nil
                    return true
                }) == true {
-                SyncTrace.log("child evidence announcement re-sent to \(key.hex.prefix(12))")
+                syncTrace("child evidence announcement re-sent to \(key.hex.prefix(12))")
             }
         }
     }
@@ -406,7 +406,7 @@ extension NodeNetworkRuntime {
                     )
                 }
             case .notConnected:
-                SyncTrace.log("child evidence announcement to \(childPath.joined(separator: "/")) not enqueued: \(result); recycling the session")
+                syncTrace("child evidence announcement to \(childPath.joined(separator: "/")) not enqueued: \(result); recycling the session")
                 if bootstrapping {
                     finishChildEvidencePublication(
                         to: peer,
@@ -423,7 +423,7 @@ extension NodeNetworkRuntime {
                 // next resend run; a child scans the index only on a hello or
                 // an admission, so a refused hint left alone strands the
                 // entry until the next delivered one.
-                SyncTrace.log("child evidence announcement to \(childPath.joined(separator: "/")) not enqueued: \(result); re-sent on the next resend run")
+                syncTrace("child evidence announcement to \(childPath.joined(separator: "/")) not enqueued: \(result); re-sent on the next resend run")
                 hierarchyState.hierarchyRecords.update(session: peer) { $0.refusedHint = payload }
                 if bootstrapping {
                     finishChildEvidencePublication(
@@ -446,7 +446,7 @@ extension NodeNetworkRuntime {
             return
         }
         if !permitsCleanup {
-            SyncTrace.log("child evidence publication to \(peer.key.hex.prefix(8)) failed: session no longer becomes ready")
+            syncTrace("child evidence publication to \(peer.key.hex.prefix(8)) failed: session no longer becomes ready")
             hierarchyState.hierarchyRecords.update(session: peer) {
                 $0.evidence.markPublicationFailed(for: sessionID)
             }
@@ -742,7 +742,7 @@ extension NodeNetworkRuntime {
             }
         }
         guard !released.isEmpty else { return }
-        SyncTrace.log("orphaned parent evidence released: \(released.map { $0.summary.childCID.prefix(12) })")
+        syncTrace("orphaned parent evidence released: \(released.map { $0.summary.childCID.prefix(12) })")
         Task { [weak self] in
             await self?.refetchReleasedOrphans(
                 released, from: parent, generation: generation, process: process
@@ -773,7 +773,7 @@ extension NodeNetworkRuntime {
             )
         }
         guard !released.isEmpty else { return }
-        SyncTrace.log("orphaned parent evidence resumed with room: \(released.map { $0.summary.childCID.prefix(12) })")
+        syncTrace("orphaned parent evidence resumed with room: \(released.map { $0.summary.childCID.prefix(12) })")
         await refetchReleasedOrphans(
             released, from: parent, generation: generation, process: process
         )
@@ -904,7 +904,7 @@ extension NodeNetworkRuntime {
             topic: NodeNetworkTopic.parentEvidenceRequest,
             payload: payload
         )
-        SyncTrace.log("parent-evidence-request \(childCID.prefix(12)) sent=\(sent)")
+        syncTrace("parent-evidence-request \(childCID.prefix(12)) sent=\(sent)")
     }
 
     private func recoverParentEvidence(
@@ -1048,7 +1048,7 @@ extension NodeNetworkRuntime {
         // or a repeated hint, it credits nothing new, and an admission would
         // only be a duplicate through the one admission worker.
         if alreadyAdmitted {
-            SyncTrace.log("parent evidence for \(summary.childCID.prefix(12)) already admitted: not re-entered")
+            syncTrace("parent evidence for \(summary.childCID.prefix(12)) already admitted: not re-entered")
             return .handled
         }
         // A refetched orphan is marked once its import is queued: that
@@ -1603,7 +1603,7 @@ extension NodeNetworkRuntime {
                     confirmParentRecordedGenesis: confirm
                 )) ?? .unconfirmed
             } else {
-                SyncTrace.log(
+                syncTrace(
                     "child-genesis seed unreadable directory=\(directory);"
                         + " fetching the anchored genesis"
                 )
@@ -1620,7 +1620,7 @@ extension NodeNetworkRuntime {
                 )
             }) ?? .notAnchoredGenesis
         }
-        SyncTrace.log(
+        syncTrace(
             "child-genesis \(outcome) directory=\(directory) cid=\(genesisCID)"
         )
         guard isCurrentRuntime(generation: generation, process: process)

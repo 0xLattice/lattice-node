@@ -79,17 +79,20 @@ is accepted and connected. No node-local work floor exists: any filter on work
 that can reach fork choice would be consensus-relevant, so the chain's own
 target is the only work gate.
 
-Parent canonicity never affects work. An authenticated parent process may issue
-genesis and parent-state continuity facts and serves the run reports of spec
-§9.10 for the directories it hosts; it cannot declare the child valid or
+Parent canonicity never affects work. A node hosts a child chain only
+together with every ancestor, one level per chain in one process, and a child
+level reads its parent facts from its co-hosted parent level's own validated
+state: the genesis the parent recorded for the child's directory, whether the
+parent executed a block producing a state, and the run reports of spec §9.10
+for the child's directory. The parent level cannot declare the child valid or
 choose the child's tip. A run report names a quantity, and only a quantity:
 the child binds it — its own directory, the block THIS chain's verified
 carrier proof says that carrier commits (a report naming any other block is
 refused), one of the carrier's grinds already credited there — and derives
 the credit itself, `runWork − ownWork`,
 under an identity keyed by the carrier and directory, applied only as a
-strict increase and never revoked. The quantity is the configured immediate
-parent's word: the same trust the child already extends to that process for
+strict increase and never revoked. The quantity is the node's own
+computation over its own parent chain: the same parent level that answers
 state continuity, which gates minting outright, so no new trust class is
 introduced. Every child block anchors its
 `parentState` directly to the PARENT CHAIN'S GENESIS — not to its predecessor:
@@ -111,8 +114,8 @@ unexecuted claim would let a forged `receiptState` settle a withdrawal that was
 never paid.
 
 Because that anchor is the only continuity question the protocol defines, it is
-also the only continuity question a parent answers. (A parent also serves run
-reports for the directories it hosts: it pushes the changed run of each served
+also the only continuity question a parent level answers. (A parent level also
+reports runs for the directories it hosts: it pushes the changed run of each served
 directory's nearest carrier after every accepted import and after every
 credit it is itself handed by its own parent — so a run flows down every
 level without a re-read — for each run a child could actually credit (its
@@ -123,16 +126,14 @@ block they carried, and its recent carriers when it starts, so a push it
 could not yet bind or one it missed while stopped is recovered without
 waiting for the next parent block. Those report work; they answer nothing
 about continuity or validity.) A
-request naming any
-other `from` is
-malformed, not merely unusual: no correct child can produce one, and serving it
-would mean running a general ancestry walk on the consensus actor on a peer's
-behalf. Refusing the shape is not a budget — the question the protocol actually
-asks is still answered in full, and identically on every node — which is why
-this path needs neither a visit ceiling nor a serving rate limit: answering it
-walks no chain and is independent of height. A truncated answer would have been
-worse than a refusal: a refused question is retried,
-while a truncated one is silently wrong and splits honest nodes by local policy.
+requirement naming any other `from` is malformed, not merely unusual: no
+correct child can produce one, and answering it would mean running a general
+ancestry walk on the parent's consensus actor. Refusing the shape is not a
+budget — the question the protocol actually asks is still answered in full,
+and identically on every node — which is why the answer needs no visit
+ceiling: it walks no chain and is independent of height. A truncated answer
+would have been worse than a refusal: a refused question is retried, while a
+truncated one is silently wrong and splits honest nodes by local policy.
 
 A restarted child recomputes fork choice entirely from its durable fact log:
 accepted blocks, proof-derived work, and the attributed work-only batches it
@@ -142,7 +143,7 @@ at once, executed when the chain would step into it — never held back for a
 continuity fact or a rule not yet met. Its carriage is relayed at once,
 with the acceptance, as for a carrier this chain refused: deeper chains are owed the proof of carriage whatever this
 chain makes of the block, and the proofs this chain composes for its own
-children follow from that relay. Only the parent-process facts it issues —
+children follow from that relay. Only the parent facts it answers —
 the genesis links a child's first block anchors to — wait for its
 validation, since a child must not anchor to state this chain has not
 executed. Until an import DECIDES it
@@ -169,19 +170,13 @@ never decide until the inbox was full. An orphan evicted from the pool or
 lost with a restart is gone, as in Bitcoin's orphan pool, and returns
 through ordinary acquisition: the predecessor walk reaches the block, and a
 block reached without its parent's evidence is asked for by CID of the
-overlay (the portable-attachment locate) and of the configured parent
+overlay (the portable-attachment locate) and of the co-hosted parent level
 (`lattice.hierarchy.evidence.request.v1`, answered from the parent's
-durable issued index with the ordinary evidence hint). That request is
-additive, not a flag day: a parent that does not know the topic drops it
-unread and the overlay locate still runs.
-It asks its parent for a carrier's run when it imports a block that
-carrier carried and after each evidence round, the fallback for a push it
-missed; a credit it already holds never depends on the parent being
-reachable again.
-When import needs a new genesis or continuity
-fact, the child asks its authenticated immediate-parent process. A positive
-answer is an unsigned acknowledgement bound to that live session and exact
-request; peers cannot relay it.
+durable issued index with the ordinary evidence hint).
+When import needs a genesis or continuity fact the parent level does not
+hold yet, the block parks on that fact and is readied again when the parent
+level's tip moves; nothing is asked of a peer, and no answer crosses the
+network.
 
 `parentState` commits the carrier's `prevState`. It is not a parent-block
 backlink and is never inverted to discover ancestry.
@@ -216,14 +211,20 @@ consensus facts and never uses storage presence or peer identity as validity.
 The node uses two Ivy sessions:
 
 - the public same-chain overlay exchanges announcements and same-path content;
-- the private hierarchy plane connects one configured immediate parent with its
-  direct children and carries contextual candidates, exact parent-fact queries,
-  and root-bound proof facts. Parent run reports travel in-process, from a
-  parent level to the child levels it hosts.
+- the private hierarchy plane connects each co-hosted parent level with its
+  child levels, and carries only child-evidence delivery: the hello, the
+  evidence-available hint, the evidence index request and response, the
+  per-block evidence request (getdata), and the evidence Volumes fetched from
+  that exact session. It is dialed on loopback between co-hosted levels; the
+  listener binds all interfaces, so firewall the hierarchy port. It carries
+  evidence until evidence delivery also moves in-process.
 
-Both planes currently require node protocol version 4. Parent-fact
-request/response semantics are versioned, so mixed-version peers refuse the
-session and must be upgraded together.
+Parent facts, run reports and merged-mining candidates never cross a network
+plane: they pass in-process between co-hosted levels.
+
+Both planes currently require node protocol version 4; mixed-version peers
+refuse the session. Co-hosted levels run one binary, so a hierarchy session
+never mixes versions.
 
 Two overlay request topics are answered in their full form so older peers
 still sync from this node: the accepted-leaves page and the portable-attachment
@@ -242,42 +243,39 @@ that made the claim. Each connection must complete a compatible hello before it
 may request a Volume, including a same-key replacement connection. Entry CIDs,
 bounded framing, and atomic publication are transport/storage details; node
 protocol messages never request arbitrary CID selections.
-A parent pushes its template context to each authenticated direct child
-whenever it changes — its validated tip block and the miner's reward plan and
-minimum work for the child's subtree — and the child pushes back its current
-candidate for that tip whenever one of its inputs changes. Both messages
-carry a sequence that is monotonic per session; a lower one is dropped. The
-context topic is `lattice.hierarchy.parent-tip.available.v1`, and the
-context says nothing about what the parent carried: a child learns of a
-carry from the parent's evidence for it, as it learns of any. The
-parent holds the latest candidate per child peer — a candidate it already
-holds on that session, or an older one, is dropped from the frame's head
-without decoding the block — and a template carries at most one held
-candidate per directory, built on its current tip's post-state, never the
-block the branch already carries for that directory (a children-only carrier leaves the post-state,
-so that offer still fits; carried again it would only be credited once
-more). A sibling of the carried block, offered before the child imports it,
-is carried like any candidate: the child's fork choice settles the siblings,
-as stale blocks settle in conventional merged mining. Nothing is
-requested at template time and no child can stall parent consensus.
+Merged-mining candidates pass in-process. Each hosted child level keeps one
+pre-built candidate against a provisional carrier on its parent level's
+validated tip, for the miner's reward plan and minimum work for the child's
+subtree. It rebuilds that candidate — one build at a time, a change during a
+build running one more — when the parent's tip, its own state or the plan
+changes, under its own lease only and reading its parent without taking the
+parent's gate or lease. The parent's template path reads each hosted child's
+latest candidate without waiting on the child: no parent path awaits a
+child, so no child can stall parent consensus. A child learns of a carry
+from the parent's evidence for it, as it learns of any. A template carries
+at most one candidate per directory, built on its current tip's post-state,
+never the block the branch already carries for that directory (a
+children-only carrier leaves the post-state, so that candidate still fits;
+carried again it would only be credited once more). A sibling of the carried
+block, built before the child imports it, is carried like any candidate: the
+child's fork choice settles the siblings, as stale blocks settle in
+conventional merged mining.
 A child builds no candidate while its execution walk is stepping, while its validated
-tip is behind its weighed tip and the walk can still step (the request arms
-the walk), or while a candidate it built that the parent's evidence has
-named and still holds in its inbox is ready for or in its import; it
-offers when the walk or the import decides, on the tip it reached, and
-it rebuilds only when an input of the candidate changed. Parent
+tip is behind its weighed tip and the walk can still step, or while a
+candidate it built that the parent's evidence has named and still holds in
+its inbox is ready for or in its import; it builds again when the walk or
+the import decides, on the tip it reached, and it rebuilds only when an
+input of the candidate changed. Parent
 evidence re-served for a carrier whose import already credited the block
 (a scan, a repeated hint) is not imported again. A child checks its evidence
 inbox for room before it fetches the parent's evidence, so a full inbox costs
 the parent no fetch: the evidence waits until an import makes room.
 Candidates are
-offers, not miner-work durability: the child keeps a candidate's content by
-its own bounded budget, oldest offer first, until the carried block's
-import owns the roots or the budget sheds it, and a candidate named in the
-parent's evidence is a handoff the budget never sheds. Parent-proof
-acquisition is a separate retryable path. Pushes and candidates are accepted
-only on the authenticated direct parent/child session for the exact child
-path.
+not miner-work durability: the child keeps a candidate's content by its own
+bounded budget, oldest first, until the carried block's import owns the
+roots or the budget sheds it, and a candidate named in the parent's evidence
+is a handoff the budget never sheds. Parent-proof acquisition is a separate
+retryable path.
 
 Each candidate-root content session uses the node's `NodeResourcePolicy` for
 archive bytes, Volume count, and member count. `ChainSpec.maxBlockSize` remains
@@ -287,9 +285,11 @@ witnesses receive separate node-local byte checks before decoding. Exceeding a
 local ceiling declines or defers acquisition without proving the candidate
 invalid or punishing its advertiser.
 
-Hierarchy authorization comes from the configured immediate-parent key or a
-durable parent-issued child directory/genesis relationship, not a process key
-choosing a branch. CAS bytes are non-secret availability and grant no validity:
+Hierarchy authorization comes from the host, not from a process key choosing
+a branch: a child level trusts the parent level it is co-hosted with, and a
+parent level grants the hierarchy child role only to the process key of the
+child level it hosts for that directory. Any other key claiming a child path
+is refused. CAS bytes are non-secret availability and grant no validity:
 the consumer verifies every CID and the exact Lattice evidence it reads.
 
 ### Child-evidence availability
@@ -332,16 +332,19 @@ stopped runs again when room frees. Live summaries use the same inbox
 without advancing that cursor.
 Import transfers ownership to ordinary chain recovery before releasing the
 inbox root. Multiple roots for one child are separate summaries. No proof-root
-pagination or evidence request/response layer exists beneath this inventory.
+pagination exists beneath this inventory; the one other evidence request is
+the per-block getdata (`lattice.hierarchy.evidence.request.v1`), which the
+parent answers with the same evidence hint or not at all.
 
-For child genesis, the configured immediate parent positively acknowledges only
-an exact `(directory, child CID, empty parent state)` tuple recorded by a
+For child genesis, the parent level answers positively only for an exact
+`(directory, child CID, empty parent state)` tuple recorded by a
 `GenesisAction` in an accepted parent block; a self-contained child genesis
-commits to the empty parent state. For a non-genesis candidate, equal parent-state
-references need no request; otherwise the parent positively acknowledges only
-an exact transitive reachability pair from its recovered validated graph.
-Responses are unsigned, bound to the current authenticated session and pending
-request, and never portable. Parent canonicity does not affect reachability.
+commits to the empty parent state. For a non-genesis block, equal parent-state
+references need no fact; otherwise the parent level answers positively only
+when it executed, from its genesis, a block producing the block's
+`parentState`. Both are reads of the parent level's own state in the same
+process: nothing is sent, signed, or portable. Parent canonicity does not
+affect reachability.
 
 Child work is derived directly from the candidate's content-addressed directory
 proof. A carrier need not be imported or valid on its own chain: the root grind

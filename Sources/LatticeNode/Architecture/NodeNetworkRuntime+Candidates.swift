@@ -200,7 +200,7 @@ extension NodeNetworkRuntime {
         deficientProviders: Set<CandidateProvider> = [],
         parentFact: ParentFact? = nil
     ) {
-        SyncTrace.log(
+        syncTrace(
             "complete \(candidate.blockCID) \(resolution) "
                 + "deficient=\(deficientProviders.count)"
         )
@@ -543,7 +543,7 @@ extension NodeNetworkRuntime {
             }
         }
 
-        SyncTrace.log("admit \(candidate.blockCID.prefix(12)) weighed=\(candidate.weighed) decision=\(outcome.decision)")
+        syncTrace("admit \(candidate.blockCID.prefix(12)) weighed=\(candidate.weighed) decision=\(outcome.decision)")
         let soleSupplier = attempt.attribution.soleRemoteSupplierPublicKey
         if let blamed = Self.candidateBlame(
             outcome.decision,

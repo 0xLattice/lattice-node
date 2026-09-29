@@ -2181,7 +2181,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             try? FileManager.default.removeItem(at: parentStorage)
             try? FileManager.default.removeItem(at: childStorage)
         }
-        let parentConfiguration = try NodeConfiguration(
+        var parentConfiguration = try NodeConfiguration(
             chainPath: ["Nexus"],
             storagePath: parentStorage,
             privateKeyHex: String(
@@ -2212,6 +2212,9 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             host: "127.0.0.1",
             port: parentConfiguration.factListenPort
         ))
+        parentConfiguration = parentConfiguration.withHostedChild(
+            directory: "Payments", publicKey: childConfiguration.processPublicKey
+        )
         let parentRuntime = try NodeNetworkRuntime(configuration: parentConfiguration)
         let parentProcess = try await ChainProcess.open(
             configuration: parentConfiguration

@@ -1,7 +1,8 @@
 // The declarative unit `lattice` operates on: one host's chain tree.
 //
 // One lattice-node process hosts every chain in the tree; a child
-// authenticates against its co-hosted parent's fact plane over loopback.
+// reads its parent facts in-process and takes its parent's evidence over
+// the loopback hierarchy plane.
 // This file makes that tree a value: each entry is one chain, parents are
 // derived from chain paths, and every verb reconciles against it rather than
 // accumulating flag invocations.

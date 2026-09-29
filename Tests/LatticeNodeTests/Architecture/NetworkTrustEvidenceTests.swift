@@ -1367,7 +1367,11 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
         async throws {
         let target = try await overlayRuntime(
             keyByte: 0xd1,
-            requestTimeout: .seconds(2)
+            requestTimeout: .seconds(2),
+            hostedChildren: [
+                "c000": peerKey(signingKey(0xd2)),
+                "c200": peerKey(signingKey(0xd3)),
+            ]
         )
         let directories = (0...200).map { String(format: "c%03d", $0) }
         let anchors = directories.map {
@@ -1617,6 +1621,8 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             listenPort: overlayPort,
             factListenPort: hierarchyPort,
             rpcPort: NetworkTransportTestPorts.allocate()
+        ).withHostedChild(
+            directory: "Payments", publicKey: peerKey(signingKey(keyByte &+ 1)).hex
         )
         let childKey = signingKey(keyByte &+ 1)
         let hierarchyTally = rejectAvailability

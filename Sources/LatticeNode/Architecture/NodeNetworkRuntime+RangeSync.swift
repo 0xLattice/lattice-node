@@ -36,7 +36,7 @@ extension NodeNetworkRuntime {
         guard isCurrentRuntime(generation: generation, process: process),
               overlayState.rangeSync.state == nil,
               overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else { return false }
-        SyncTrace.log(
+        syncTrace(
             "range-sync start target=\(targetHeight) "
                 + "peer=\(peer.key.hex.prefix(8))"
         )
@@ -295,7 +295,7 @@ extension NodeNetworkRuntime {
         // Never punish (a slow and a stalling peer are indistinguishable), and
         // never conclude "caught up".
         guard let ancestor = response.commonAncestor else {
-            SyncTrace.log("ancestor-range no-overlap peer=\(peer.key.hex.prefix(8))")
+            syncTrace("ancestor-range no-overlap peer=\(peer.key.hex.prefix(8))")
             if overlayState.overlayRecords[peer.key]?.announcedTip?.peer.sessionID == peer.sessionID {
                 overlayState.overlayRecords.updateExisting(peer.key) { $0.announcedTip = nil }
             }
@@ -499,7 +499,7 @@ extension NodeNetworkRuntime {
     }
 
     func clearRangeSync(from caller: String = #function) {
-        SyncTrace.log("range-sync clear (\(caller))")
+        syncTrace("range-sync clear (\(caller))")
         overlayState.rangeSync.clear()
         scheduleRangeSyncReentry()
     }

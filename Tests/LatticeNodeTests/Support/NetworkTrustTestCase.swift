@@ -25,7 +25,8 @@ class NetworkTrustTestCase: XCTestCase {
         keyByte: UInt8,
         requestTimeout: Duration,
         bootstrapPeers: [PeerEndpoint] = [],
-        publicReadURL: String? = nil
+        publicReadURL: String? = nil,
+        hostedChildren: [String: PeerKey] = [:]
     ) async throws -> (
         runtime: NodeNetworkRuntime,
         process: ChainProcess,
@@ -40,7 +41,7 @@ class NetworkTrustTestCase: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: storage) }
         let overlayPort = NetworkTransportTestPorts.allocate()
         let hierarchyPort = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
+        let unhosted = try NodeConfiguration(
             chainPath: ["Nexus"],
             storagePath: storage,
             privateKeyHex: String(
@@ -52,6 +53,9 @@ class NetworkTrustTestCase: XCTestCase {
             rpcPort: NetworkTransportTestPorts.allocate(),
             publicReadURL: publicReadURL
         )
+        let configuration = hostedChildren.reduce(unhosted) { hosting, child in
+            hosting.withHostedChild(directory: child.key, publicKey: child.value.hex)
+        }
         let runtime = try NodeNetworkRuntime(
             configuration: configuration,
             planeConfigurations: try NodeNetworkPlaneConfigurations(

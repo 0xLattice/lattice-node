@@ -73,7 +73,7 @@ identities sum. A proof cannot affect fork choice until its terminal child is
 accepted and connected in that child's chain.
 
 The second source of a child location's weight is the attributed run (spec
-§9.10). The configured immediate parent process partitions its connected graph
+§9.10). The co-hosted parent level partitions its connected graph
 into runs, one per commitment into the child's directory, and serves
 `(carrier, directory, childBlock, grinds, runWork, ownWork, revision)`. The
 child binds the report — its own directory, this child block, one of the
@@ -154,17 +154,12 @@ the fact binds that empty state. A structural carrier that was not
 accepted on the parent chain can prove work but cannot authorize deployment.
 
 Arbitrary peers may supply any required content-addressed Volume. They never
-supply a validity verdict. A configured remote parent can lie, so production
-deployments should run and validate their own chain processes recursively to
-Nexus; otherwise that remote process is an explicit operational trust boundary.
-
-This is a named residual, not an oversight: the ack is unsigned and
-non-portable, so a Byzantine configured parent can equivocate — answering
-"reachable" to one child node and staying silent to another — and split
-followers of the same child chain with no cryptographic evidence of the
-equivocation. An authenticated parent session proves identity, never honesty.
-A portable equivocation certificate is exactly the light-client artifact this
-design forbids; the protection is running your own parent recursively.
+supply a validity verdict. A node hosts every child with its whole ancestry
+and answers parent facts from its own co-hosted parent level, so it validates
+its own parent chains recursively to Nexus; there is no remote parent whose
+answer could differ between child nodes. The facts are local reads, unsigned
+and non-portable: a portable certificate is exactly the light-client artifact
+this design forbids.
 
 ## Data and process boundaries
 
