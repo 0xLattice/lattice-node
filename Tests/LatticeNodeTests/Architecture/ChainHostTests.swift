@@ -359,7 +359,7 @@ final class ChainHostTests: XCTestCase {
         try await eventually("three carried blocks are handed off", within: .seconds(120)) {
             let height = await childProcess.canonicalTip()?.height ?? 0
             let template = try await parent.miningTemplate(
-                MiningTemplateRequest(rewards: [])
+                MiningTemplateRequest()
             )
             guard let carried = template.block.children.node?[self.child.directory]?.node,
                   carried.height == height + 1 else { return false }
