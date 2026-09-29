@@ -74,12 +74,6 @@ private actor PortableAttachmentQueuePeer: IvyDelegate, IvyContentSource {
     func servedRoots() -> Set<String> { servedAttachments }
 }
 
-private actor ParentRunReportSink {
-    private var reports: [ParentRunReport] = []
-    func record(_ report: ParentRunReport) { reports.append(report) }
-    func received() -> [ParentRunReport] { reports }
-}
-
 private actor ChildEvidenceRecorder {
     struct Snapshot: Sendable {
         let helloSessions: [Data]
@@ -91,11 +85,6 @@ private actor ChildEvidenceRecorder {
     private var helloSessions: [Data] = []
     private var indexEntries: [[IssuedChildEvidenceSummary]] = []
     private var available: [ChildEvidenceAvailableMessage] = []
-    private var runReports: [ParentRunReportMessage] = []
-
-    func record(_ report: ParentRunReportMessage) { runReports.append(report) }
-    func runReportsSeen() -> [ParentRunReportMessage] { runReports }
-    func nextRunReportRequestID() -> UInt64 { defer { nextRequestID &+= 1 }; return nextRequestID }
 
     func beginSession(_ sessionID: Data) -> UInt64? {
         guard !helloSessions.contains(sessionID) else { return nil }
@@ -125,20 +114,15 @@ private final class ChildEvidencePeer: IvyDelegate, Sendable {
     private let recorder: ChildEvidenceRecorder
     private let hello: Data
     private let childPath: [String]
-    /// Committers to ask the parent to re-serve once the evidence index has
-    /// answered (i.e. once this child is evidence-ready on the parent).
-    private let runReportCarriers: [String]
 
     init(
         recorder: ChildEvidenceRecorder,
         hello: Data,
-        childPath: [String],
-        runReportCarriers: [String] = []
+        childPath: [String]
     ) {
         self.recorder = recorder
         self.hello = hello
         self.childPath = childPath
-        self.runReportCarriers = runReportCarriers
     }
 
     func ivy(
@@ -172,20 +156,6 @@ private final class ChildEvidencePeer: IvyDelegate, Sendable {
                 message.payload
             ) else { return }
             await recorder.record(response)
-            guard !runReportCarriers.isEmpty,
-                  let payload = try? ParentRunReportRequestMessage(
-                    requestID: await recorder.nextRunReportRequestID(),
-                    carrierCIDs: runReportCarriers
-                  ).encoded() else { return }
-            _ = await ivy.sendMessage(
-                to: peer,
-                topic: NodeNetworkTopic.parentRunReportRequest,
-                payload: payload
-            )
-        case NodeNetworkTopic.parentRunReport:
-            guard let report = try? ParentRunReportMessage.decoded(message.payload)
-            else { return }
-            await recorder.record(report)
         case NodeNetworkTopic.childEvidenceAvailable:
             guard let available = try? ChildEvidenceAvailableMessage.decoded(
                 message.payload
@@ -195,24 +165,6 @@ private final class ChildEvidencePeer: IvyDelegate, Sendable {
             break
         }
     }
-}
-
-private struct RunReportServeFixture {
-    let storage: URL
-    let configuration: NodeConfiguration
-    let runtime: NodeNetworkRuntime
-    let process: ChainProcess
-    let child: Ivy
-    /// Ivy holds its delegate weakly; the fixture keeps the fake child alive.
-    let childDelegate: ChildEvidencePeer
-    /// A second child naming a directory this node never anchored.
-    let stranger: Ivy
-    let strangerDelegate: ChildEvidencePeer
-    let strangerRecorder: ChildEvidenceRecorder
-    let recorder: ChildEvidenceRecorder
-    let carrierCID: String
-    let childCID: String
-    let strangerCID: String
 }
 
 private struct PendingSideCarrierFixture {
@@ -1140,134 +1092,6 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
         await runtime.stop()
     }
 
-    /// The validate walk's evidence request suspends on the parent's answer.
-    /// §9.10 over a real hierarchy session, PARENT side: a child that wired in
-    /// (and became evidence-ready) asks for the runs of two committers, one
-    /// real and one that commits nothing here. The runtime serves the real
-    /// one — with the successor's work in it — and is silent about the other,
-    /// exactly once each; and the directory was served only because this
-    /// chain anchored the child's genesis, not because a peer named it.
-    func testParentServesRunReportsForTheCarriersAChildNamesAndOnlyThose()
-        async throws
-    {
-        let fixture = try await runReportServeFixture(keyByte: 0x68)
-        addTeardownBlock {
-            try? FileManager.default.removeItem(at: fixture.storage)
-        }
-        do {
-            let process = fixture.process
-            try await fixture.runtime.start(
-                process: process,
-                chain: ClosureChainInterface(
-                    admission: { _ in
-                        NodeImportOutcome(
-                            decision: .duplicate,
-                            parentCarrierLink: nil,
-                            sameChainPredecessor: nil
-                        )
-                    },
-                    runReportServing: { directory in
-                        await process.serveRuns(for: directory)
-                    }
-                )
-            )
-            try await fixture.child.start()
-            try await fixture.stranger.start()
-            try await eventually("the parent served the real committer's run") {
-                !(await fixture.recorder.runReportsSeen()).isEmpty
-            }
-            try await eventually("the stranger's index request was answered") {
-                !(await fixture.strangerRecorder.snapshot()).indexEntries.isEmpty
-            }
-            // Let a second (wrong) answer arrive if one were ever going to.
-            try await alwaysDuring("the stranger stays unserved, one report only", .milliseconds(300)) {
-                let strangerSaw = await fixture.strangerRecorder.runReportsSeen()
-                let served = await fixture.recorder.runReportsSeen()
-                return strangerSaw.isEmpty && served.count == 1
-            }
-            let served = await fixture.recorder.runReportsSeen()
-            let strangerSaw = await fixture.strangerRecorder.runReportsSeen()
-            XCTAssertTrue(strangerSaw.isEmpty, "a directory this node never anchored is served nothing")
-            XCTAssertEqual(served.count, 1, "one report for the one committer; silence for the stranger")
-            let report = try XCTUnwrap(served.first)
-            XCTAssertEqual(report.carrierCID, fixture.carrierCID)
-            XCTAssertEqual(report.childBlockCID, fixture.childCID)
-            XCTAssertEqual(report.directory, "Payments")
-            XCTAssertGreaterThan(report.runWork, report.ownWork,
-                                 "the successor mined on the carrier is in its run")
-            let servedDirectories = await process.servedRunDirectoryList()
-            XCTAssertEqual(servedDirectories, ["Payments"], "served because anchored, not because a peer named it")
-            await fixture.stranger.stop()
-            await fixture.child.stop()
-            await fixture.runtime.stop()
-        } catch {
-            await fixture.stranger.stop()
-            await fixture.child.stop()
-            await fixture.runtime.stop()
-            throw error
-        }
-    }
-
-    /// §9.10 over a real hierarchy session, child side: once the parent role
-    /// is granted the child asks for the runs of the committers it names, the
-    /// parent's reply arrives on the push topic, and the report reaches the
-    /// service handler with its fields intact. A child with nothing to ask
-    /// sends nothing (pinned by the request list being exactly its committers).
-    func testChildAsksItsParentForRunReportsOnHelloAndReceivesTheReply()
-        async throws
-    {
-        let fixture = try await hierarchyRetryFixture(keyByte: 0x6A, summary: nil)
-        addTeardownBlock {
-            try? FileManager.default.removeItem(at: fixture.storage)
-        }
-        let carrier = testCID("run-report-committer")
-        let sink = ParentRunReportSink()
-        do {
-            try await fixture.parent.start()
-            try await fixture.runtime.start(
-                process: fixture.process,
-                chain: ClosureChainInterface(
-                    admission: { _ in
-                        NodeImportOutcome(
-                            decision: .duplicate,
-                            parentCarrierLink: nil,
-                            sameChainPredecessor: nil
-                        )
-                    },
-                    parentRunReport: { report in await sink.record(report) },
-                    recentCarriers: { [carrier] }
-                )
-            )
-            try await eventually("parent role granted") {
-                !(await fixture.recorder.sessionTrace()).hellos.isEmpty
-            }
-            try await eventually("run-report request sent to the parent") {
-                !(await fixture.recorder.runReportRequestsSeen()).isEmpty
-            }
-            let requests = await fixture.recorder.runReportRequestsSeen()
-            XCTAssertEqual(requests.map(\.carrierCIDs), [[carrier]],
-                           "exactly the committers this chain knows, once per session")
-            try await eventually("the parent's report reached the handler") {
-                !(await sink.received()).isEmpty
-            }
-            let received = await sink.received()
-            let report = try XCTUnwrap(received.first)
-            XCTAssertEqual(report.blockHash, carrier)
-            XCTAssertEqual(report.directory, "Retry")
-            XCTAssertEqual(report.childBlock, testCID("run-report-child-block"))
-            XCTAssertEqual(report.grinds, [carrier])
-            XCTAssertEqual(report.runWork, WorkSum(UInt256(9)))
-            XCTAssertEqual(report.ownWork, WorkSum(UInt256(4)))
-            XCTAssertEqual(report.revision, 7)
-            await fixture.parent.stop()
-            await fixture.runtime.stop()
-        } catch {
-            await fixture.parent.stop()
-            await fixture.runtime.stop()
-            throw error
-        }
-    }
-
     func testRecoveredNoncanonicalCarrierAnnouncesEvidenceAfterEmptyIndex()
         async throws {
         let fixture = try await pendingSideCarrierFixture(
@@ -1771,166 +1595,6 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                 "provider record for \(directory)"
             )
         }
-    }
-
-    /// A Nexus runtime hosting one anchored child directory with a carrier
-    /// that commits child block 1 and a successor mined on top of it, plus a
-    /// fake child peer that, once evidence-ready, asks for the runs of the
-    /// carrier and of a block that commits nothing.
-    private func runReportServeFixture(keyByte: UInt8) async throws -> RunReportServeFixture {
-        let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-run-report-serve-\(UUID().uuidString)",
-            isDirectory: true
-        )
-        let overlayPort = NetworkTransportTestPorts.allocate()
-        let hierarchyPort = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: storage,
-            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
-            listenPort: overlayPort,
-            factListenPort: hierarchyPort,
-            rpcPort: NetworkTransportTestPorts.allocate()
-        )
-        let childKey = signingKey(keyByte &+ 1)
-        let runtime = try NodeNetworkRuntime(
-            configuration: configuration,
-            planeConfigurations: try NodeNetworkPlaneConfigurations(
-                overlay: IvyConfig(
-                    signingKey: configuration.signingKey,
-                    listenPort: overlayPort,
-                    stunServers: [],
-                    mode: .overlay
-                ),
-                hierarchy: IvyConfig(
-                    signingKey: configuration.signingKey,
-                    listenPort: hierarchyPort,
-                    requestTimeout: .milliseconds(200),
-                    stunServers: [],
-                    maxConnections: IvyConfig.defaultMaxConnections,
-                    maxConnectionsPerNetgroup: IvyConfig.defaultMaxConnections,
-                    privateContentExchangeEnabled: true,
-                    mode: .privateNetwork
-                )
-            )
-        )
-        let process = try await ChainProcess.open(configuration: configuration)
-        let genesis = try await process.canonicalTipBlock()
-        // Anchor the child's genesis on the canonical chain.
-        let childGenesis = try await BlockBuilder.buildChildGenesis(
-            spec: NexusGenesis.spec,
-            parentState: LatticeState.emptyHeader,
-            timestamp: 3_600_000,
-            target: UInt256.max,
-            fetcher: process
-        )
-        let authorization = try signedGenesisAnchorTransaction(
-            directory: "Payments",
-            childGenesisCID: try BlockHeader(node: childGenesis).rawCID,
-            chainPath: configuration.chainPath
-        )
-        try await VolumeImpl<Transaction>(node: authorization).storeRecursively(storer: process)
-        let recording = try await BlockBuilder.buildBlock(
-            previous: genesis, transactions: [authorization],
-            timestamp: 3_600_000, nonce: 1, fetcher: process
-        )
-        guard try await process.importBlock(BlockHeader(node: recording)).decision.isAccepted else {
-            throw NetworkTestError.failedPhase("recording carrier")
-        }
-        // The carrier commits child block 1.
-        let provisional = try await BlockBuilder.buildBlock(
-            previous: recording, timestamp: 7_200_000, nonce: 2, fetcher: process
-        )
-        let childBlock = try await BlockBuilder.buildBlock(
-            previous: childGenesis, parentChainBlock: provisional,
-            timestamp: 7_200_000, target: UInt256.max, fetcher: process
-        )
-        let carrier = try await BlockBuilder.buildBlock(
-            previous: recording, children: ["Payments": childBlock],
-            timestamp: 7_200_000, nonce: 2, fetcher: process
-        )
-        let carrierHeader = try BlockHeader(node: carrier)
-        _ = try await process.prepareChildProofs(for: carrier, capacity: 16)
-        guard try await process.importBlock(
-            carrierHeader, preparingChildDirectories: ["Payments"]
-        ).decision.isAccepted else {
-            throw NetworkTestError.failedPhase("carrier")
-        }
-        _ = try await process.retryPendingChildProofs(carrierCID: carrierHeader.rawCID)
-        // A successor on the carrier: its work belongs to the carrier's run.
-        let successor = try await BlockBuilder.buildBlock(
-            previous: carrier, timestamp: 10_800_000, nonce: 3, fetcher: process
-        )
-        let successorHeader = try BlockHeader(node: successor)
-        guard try await process.importBlock(successorHeader).decision.isAccepted else {
-            throw NetworkTestError.failedPhase("successor")
-        }
-
-        let childPath = ["Nexus", "Payments"]
-        let recorder = ChildEvidenceRecorder()
-        let childDelegate = ChildEvidencePeer(
-            recorder: recorder,
-            hello: try ChainHello(
-                nexusGenesisCID: configuration.nexusGenesisCID,
-                chainPath: childPath
-            ).encode(),
-            childPath: childPath,
-            runReportCarriers: [carrierHeader.rawCID, successorHeader.rawCID]
-        )
-        let child = Ivy(config: IvyConfig(
-            signingKey: childKey,
-            listenPort: 0,
-            bootstrapPeers: [PeerEndpoint(
-                publicKey: configuration.processPublicKey,
-                host: "127.0.0.1",
-                port: hierarchyPort
-            )],
-            requestTimeout: .milliseconds(200),
-            stunServers: [],
-            mode: .privateNetwork
-        ))
-        await child.installTestDelegate(childDelegate)
-        // A child of a directory this node never anchored asks for the same
-        // committer: the name alone must serve nothing.
-        let strangerPath = ["Nexus", "Markets"]
-        let strangerRecorder = ChildEvidenceRecorder()
-        let strangerDelegate = ChildEvidencePeer(
-            recorder: strangerRecorder,
-            hello: try ChainHello(
-                nexusGenesisCID: configuration.nexusGenesisCID,
-                chainPath: strangerPath
-            ).encode(),
-            childPath: strangerPath,
-            runReportCarriers: [carrierHeader.rawCID]
-        )
-        let stranger = Ivy(config: IvyConfig(
-            signingKey: signingKey(keyByte &+ 2),
-            listenPort: 0,
-            bootstrapPeers: [PeerEndpoint(
-                publicKey: configuration.processPublicKey,
-                host: "127.0.0.1",
-                port: hierarchyPort
-            )],
-            requestTimeout: .milliseconds(200),
-            stunServers: [],
-            mode: .privateNetwork
-        ))
-        await stranger.installTestDelegate(strangerDelegate)
-        return RunReportServeFixture(
-            storage: storage,
-            configuration: configuration,
-            runtime: runtime,
-            process: process,
-            child: child,
-            childDelegate: childDelegate,
-            stranger: stranger,
-            strangerDelegate: strangerDelegate,
-            strangerRecorder: strangerRecorder,
-            recorder: recorder,
-            carrierCID: carrierHeader.rawCID,
-            childCID: try BlockHeader(node: childBlock).rawCID,
-            strangerCID: successorHeader.rawCID
-        )
     }
 
     private func pendingSideCarrierFixture(

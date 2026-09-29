@@ -49,6 +49,10 @@ actor StubParentLevel: ParentLevel {
         await base?.anchoredGenesisCID(directory: directory)
     }
 
+    func runReport(carrier: String, directory: String) async -> ParentRunReport? {
+        await base?.runReport(carrier: carrier, directory: directory)
+    }
+
     /// The parent now answers from what it holds.
     func release() { withheld = false }
 

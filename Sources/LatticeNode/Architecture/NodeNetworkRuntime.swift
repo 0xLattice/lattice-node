@@ -147,7 +147,7 @@ struct NodeNetworkPlaneConfigurations {
                 // Tally's per-peer request budget is one bucket per peer,
                 // spent by this node's sends and the peer's inbound alike.
                 // At merged-mining block rates a parent legitimately sends a
-                // child a context, an evidence hint, run-report answers and
+                // child a context, an evidence hint and
                 // the content its candidate build fetches, every block; on
                 // the overlay default the parent's own bucket refused those
                 // sends and its children's chains crawled (traced: 427
@@ -618,10 +618,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         ///     Hierarchy.handleHierarchyHello / Hierarchy.scheduleHierarchyHelloDeadline /
         ///     Lifecycle.clearRuntimeState / NodeNetworkRuntime.removeHierarchyHelloDeadline.
         var hierarchyRecords = PeerSet<HierarchyPeerRecord>()
-        /// Run reports apply one after another off the delivery path; one
-        /// handle, cancelled with the runtime.
-        /// Owner: Hierarchy.handleHierarchy / Lifecycle.clearRuntimeState.
-        var runReportApplyTail: Task<Void, Never>?
         /// Owner: Hierarchy.scheduleChildProofRecovery / Hierarchy.recoverChildProofs /
         ///     Lifecycle.clearRuntimeState.
         var childProofRecoveryTask = TaskSlot()

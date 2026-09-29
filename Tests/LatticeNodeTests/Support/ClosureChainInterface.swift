@@ -19,44 +19,27 @@ final class ClosureChainInterface: ChainInterface {
         _ transaction: Transaction
     ) async throws -> Bool
     typealias TransactionInventoryProvider = @Sendable () async -> [String]
-    typealias ParentRunReportHandler = @Sendable (
-        _ report: ParentRunReport
-    ) async throws -> Void
-    typealias RunReportServingHandler = @Sendable (_ directory: String) async -> Void
-    typealias RecentCarrierProvider = @Sendable () async -> [String]
 
     private let childCandidateBuilder: ChildCandidateBuilder?
     private let admission: ImportHandler
     private let transaction: TransactionHandler?
     private let transactionInventory: TransactionInventoryProvider?
-    private let parentRunReport: ParentRunReportHandler?
-    private let runReportServing: RunReportServingHandler?
-    private let recentCarrierProvider: RecentCarrierProvider?
     let networkCapabilities: ChainNetworkCapabilities
 
     init(
         childCandidateBuilder: ChildCandidateBuilder? = nil,
         admission: @escaping ImportHandler,
         transaction: TransactionHandler? = nil,
-        transactionInventory: TransactionInventoryProvider? = nil,
-        parentRunReport: ParentRunReportHandler? = nil,
-        runReportServing: RunReportServingHandler? = nil,
-        recentCarriers: RecentCarrierProvider? = nil
+        transactionInventory: TransactionInventoryProvider? = nil
     ) {
         self.childCandidateBuilder = childCandidateBuilder
         self.admission = admission
         self.transaction = transaction
         self.transactionInventory = transactionInventory
-        self.parentRunReport = parentRunReport
-        self.runReportServing = runReportServing
-        self.recentCarrierProvider = recentCarriers
         var capabilities: ChainNetworkCapabilities = []
         if childCandidateBuilder != nil { capabilities.insert(.childCandidates) }
         if transaction != nil { capabilities.insert(.transactions) }
         if transactionInventory != nil { capabilities.insert(.transactionInventory) }
-        if parentRunReport != nil { capabilities.insert(.parentRunReports) }
-        if runReportServing != nil { capabilities.insert(.runReportServing) }
-        if recentCarriers != nil { capabilities.insert(.recentCarriers) }
         networkCapabilities = capabilities
     }
 
@@ -81,19 +64,6 @@ final class ClosureChainInterface: ChainInterface {
 
     func transactionInventoryRoots() async -> [String] {
         await transactionInventory?() ?? []
-    }
-
-    func applyParentRunReport(_ report: ParentRunReport) async throws {
-        guard let parentRunReport else { throw CancellationError() }
-        try await parentRunReport(report)
-    }
-
-    func serveRuns(for directory: String) async {
-        await runReportServing?(directory)
-    }
-
-    func recentCarriers() async -> [String] {
-        await recentCarrierProvider?() ?? []
     }
 
     func genesisActivatedOutOfBand() async {}

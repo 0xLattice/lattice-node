@@ -47,16 +47,6 @@ enum NodeNetworkTopic {
     /// Child → parent: the child's current candidate for the parent's tip.
     /// Pushed on every change of its inputs; the parent caches the latest.
     static let childCandidateAvailable = "lattice.hierarchy.child-candidate.available.v1"
-    // §9.10: a parent PUSHES the run it credits to one of its committing
-    // blocks to the children of that directory, on every change to that run
-    // — every admitted block or strengthening with verifiable work — and a
-    // child may ask for the runs of committers it names, the fallback for a
-    // push missed while its session was down. A parent that does not know
-    // this topic drops it unread and the child simply keeps the credit it
-    // already holds: parents roll before children.
-    static let parentRunReport = "lattice.hierarchy.parent-run-report.v1"
-    static let parentRunReportRequest =
-        "lattice.hierarchy.parent-run-report.request.v1"
 
     static func plane(for topic: String) -> Plane? {
         switch topic {
@@ -72,121 +62,8 @@ enum NodeNetworkTopic {
              readEndpointRequest, readEndpointResponse: .overlay
         case hierarchyHello, childEvidenceAvailable,
              childEvidenceIndexRequest, childEvidenceIndexResponse,
-             parentEvidenceRequest, parentTipAvailable, childCandidateAvailable,
-             parentRunReport, parentRunReportRequest: .hierarchy
+             parentEvidenceRequest, parentTipAvailable, childCandidateAvailable: .hierarchy
         default: nil
-        }
-    }
-}
-
-/// The run a parent credits to one of its committing blocks (Lattice §9.10),
-/// pushed to the children of `directory` whenever that run changes. The
-/// quantity is the parent's word — the trust a child already extends to its
-/// configured parent for state continuity — but the child binds the report
-/// before reading any number: its own directory, this child block, one of the
-/// committer's grinds already credited there. Malformed here means it could
-/// not have come from a correct parent: `ownWork` never exceeds `runWork`.
-struct ParentRunReportMessage: NodeJSONMessage, Equatable, Sendable {
-    let directory: String
-    let carrierCID: String
-    let childBlockCID: String
-    let grinds: [String]
-    let runWork: WorkSum
-    let ownWork: WorkSum
-    let revision: UInt64
-
-    /// `carrierCID` travels as `committerCID`: the JSON key is wire bytes.
-    private enum CodingKeys: String, CodingKey {
-        case directory
-        case carrierCID = "committerCID"
-        case childBlockCID
-        case grinds
-        case runWork
-        case ownWork
-        case revision
-    }
-
-    init(
-        directory: String, carrierCID: String, childBlockCID: String,
-        grinds: [String], runWork: WorkSum, ownWork: WorkSum, revision: UInt64
-    ) {
-        self.directory = directory
-        self.carrierCID = carrierCID
-        self.childBlockCID = childBlockCID
-        self.grinds = grinds
-        self.runWork = runWork
-        self.ownWork = ownWork
-        self.revision = revision
-    }
-
-    init(_ report: ParentRunReport) {
-        self.init(
-            directory: report.directory,
-            carrierCID: report.blockHash,
-            childBlockCID: report.childBlock,
-            grinds: report.grinds.sorted(),
-            runWork: report.runWork,
-            ownWork: report.ownWork,
-            revision: report.revision
-        )
-    }
-
-    var report: ParentRunReport {
-        ParentRunReport(
-            blockHash: carrierCID,
-            directory: directory,
-            childBlock: childBlockCID,
-            grinds: Set(grinds),
-            runWork: runWork,
-            ownWork: ownWork,
-            revision: revision
-        )
-    }
-
-    func validate() throws {
-        guard _isBoundedWireAtom(directory), !directory.isEmpty,
-              _isCanonicalWireCID(carrierCID),
-              _isCanonicalWireCID(childBlockCID),
-              !grinds.isEmpty,
-              Set(grinds).count == grinds.count,
-              grinds.allSatisfy(_isCanonicalWireCID),
-              ownWork <= runWork else {
-            throw NodeNetworkWireError.malformed
-        }
-    }
-}
-
-/// The most committers one re-serve request may name — what a correct child
-/// asks for (its newest carriers, `ChainProcess.recentCarrierCapacity`).
-/// Structural, not a budget: a larger request is one no correct child sends,
-/// so it is malformed rather than served slowly. Each named committer costs
-/// the parent one O(1) read and at most one push.
-let maximumParentRunReportRequestCarriers = 256
-
-/// A child asks its authenticated immediate parent to re-serve the runs of the
-/// committers it names — on admitting a block one of them carried, and for
-/// its recent committers after each evidence catch-up round: the fallback for
-/// a push it could not yet bind or missed while its session was down. The
-/// parent answers with one `ParentRunReportMessage` per named
-/// committer that commits into the asking child's directory, and nothing for
-/// the rest: a committer the parent does not serve is silence, not a claim.
-struct ParentRunReportRequestMessage: NodeJSONMessage, Equatable, Sendable {
-    let requestID: UInt64
-    let carrierCIDs: [String]
-
-    /// `carrierCIDs` travels as `committerCIDs`: the JSON key is wire bytes.
-    private enum CodingKeys: String, CodingKey {
-        case requestID
-        case carrierCIDs = "committerCIDs"
-    }
-
-    func validate() throws {
-        guard requestID != 0,
-              !carrierCIDs.isEmpty,
-              carrierCIDs.count <= maximumParentRunReportRequestCarriers,
-              Set(carrierCIDs).count == carrierCIDs.count,
-              carrierCIDs.allSatisfy(_isCanonicalWireCID) else {
-            throw NodeNetworkWireError.malformed
         }
     }
 }

@@ -22,8 +22,6 @@ final class ClosureNetworkInterface: NetworkInterface {
     typealias ChildProofPublisher = @Sendable (
         DirectChildProofPublication
     ) async throws -> Void
-    typealias ParentRunReportPublisher = @Sendable (ParentRunReport) async throws -> Void
-    typealias ParentRunReportRequester = @Sendable ([String]) async -> Void
     typealias AcceptedBlockPublisher = @Sendable (_ blockCID: String) async throws -> Void
     typealias AcceptedTransactionPublisher = @Sendable (
         _ volumeRootCID: String
@@ -40,8 +38,6 @@ final class ClosureNetworkInterface: NetworkInterface {
     private let descendantPlanPublisher: DescendantPlanPublisher
     private let childCandidateDigestProvider: ChildCandidateDigestProvider
     private let childProofPublisher: ChildProofPublisher
-    private let parentRunReportPublisher: ParentRunReportPublisher
-    private let parentRunReportRequester: ParentRunReportRequester
     private let acceptedBlockPublisher: AcceptedBlockPublisher
     private let acceptedTransactionPublisher: AcceptedTransactionPublisher
     private let executionBodySource: ExecutionBodyImport?
@@ -52,8 +48,6 @@ final class ClosureNetworkInterface: NetworkInterface {
         descendantPlanPublisher: @escaping DescendantPlanPublisher = { _, _ in },
         childCandidateDigestProvider: @escaping ChildCandidateDigestProvider = { _ in [] },
         childProofPublisher: @escaping ChildProofPublisher,
-        parentRunReportPublisher: @escaping ParentRunReportPublisher = { _ in },
-        parentRunReportRequester: @escaping ParentRunReportRequester = { _ in },
         acceptedBlockPublisher: @escaping AcceptedBlockPublisher,
         acceptedTransactionPublisher: @escaping AcceptedTransactionPublisher = { _ in },
         executionBodySource: ExecutionBodyImport? = nil
@@ -63,8 +57,6 @@ final class ClosureNetworkInterface: NetworkInterface {
         self.descendantPlanPublisher = descendantPlanPublisher
         self.childCandidateDigestProvider = childCandidateDigestProvider
         self.childProofPublisher = childProofPublisher
-        self.parentRunReportPublisher = parentRunReportPublisher
-        self.parentRunReportRequester = parentRunReportRequester
         self.acceptedBlockPublisher = acceptedBlockPublisher
         self.acceptedTransactionPublisher = acceptedTransactionPublisher
         self.executionBodySource = executionBodySource
@@ -93,14 +85,6 @@ final class ClosureNetworkInterface: NetworkInterface {
 
     func publishChildProof(_ publication: DirectChildProofPublication) async throws {
         try await childProofPublisher(publication)
-    }
-
-    func announceParentRunReport(_ report: ParentRunReport) async throws {
-        try await parentRunReportPublisher(report)
-    }
-
-    func requestParentRunReports(carriers: [String]) async {
-        await parentRunReportRequester(carriers)
     }
 
     func publishAcceptedBlock(_ blockCID: String) async throws {

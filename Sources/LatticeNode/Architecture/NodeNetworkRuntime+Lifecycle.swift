@@ -265,8 +265,6 @@ extension NodeNetworkRuntime {
         sessionLeases.portableEvidenceOrder.removeAll()
         sessionLeases.portableEvidenceWork.removeAll()
         parentEvidence.reset()
-        hierarchyState.runReportApplyTail?.cancel()
-        hierarchyState.runReportApplyTail = nil
         hierarchyState.parentTipContext = nil
         hierarchyState.parentTipPushTask.cancel()
         hierarchyState.parentTipPushDirty = false

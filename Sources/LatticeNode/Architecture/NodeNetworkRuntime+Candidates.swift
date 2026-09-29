@@ -43,6 +43,9 @@ extension NodeNetworkRuntime {
             parentTipChanges &+= 1
             triggerGenesisActivation()
             await retryHeldParentFacts()
+        case .runs:
+            // Credited by the service's mailbox drain, never the network.
+            break
         }
     }
 

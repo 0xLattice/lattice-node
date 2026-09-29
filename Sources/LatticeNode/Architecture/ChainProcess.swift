@@ -1902,17 +1902,17 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
 
     /// Start serving run reports for `directory`: this process hosts a child
     /// chain there. The directory must be one THIS chain has anchored a child
-    /// genesis for — a peer's hello or a prepare request names it, but a name
-    /// this chain never committed into is refused, so a stranger cannot make
-    /// this node walk its graph for directories it does not host (Lattice
-    /// §9.10: which directories a node serves is its own choice). Idempotent;
-    /// the served set is NOT persisted (Lattice's lives in memory), so callers
-    /// re-serve after every restart. One whole-graph walk per directory, on
-    /// the consensus actor; the node-side set is updated only after the walk,
-    /// so a report asked for meanwhile finds the directory unserved and is
-    /// answered with silence — a caller that must answer (the run report
-    /// request arm) awaits this call first, which serializes behind the
-    /// in-flight walk on the chain actor and costs nothing once served.
+    /// genesis for — the host names a co-hosted child's directory, and a
+    /// prepare request names one, but a name this chain never committed into
+    /// is refused, so this node never walks its graph for directories it does
+    /// not host (Lattice §9.10: which directories a node serves is its own
+    /// choice). Idempotent; the served set is NOT persisted (Lattice's lives
+    /// in memory), so the host re-serves after every restart. One whole-graph
+    /// walk per directory, on the consensus actor; the node-side set is
+    /// updated only after the walk, so a report read meanwhile finds the
+    /// directory unserved and is nil. Takes no operation gate, but callers
+    /// treat it as one that may: never call it from inside a child level's
+    /// lease (`ChainHost`).
     func serveRuns(for directory: String) async {
         guard case .active(let level) = runtimePhase,
               !servedRunDirectories.contains(directory),
@@ -1931,7 +1931,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// admitted block or strengthening with verifiable work credits exactly
     /// one run per served directory, so this is O(#served) and complete for
     /// a leaf; the descendants a graft brought in that start their own runs
-    /// are re-served by the child's ask when it admits the blocks they carry.
+    /// are read by the child when it admits the blocks they carry.
     func runReports(changedBy blockHash: String) async -> [ParentRunReport] {
         guard case .active(let level) = runtimePhase,
               !servedRunDirectories.isEmpty,
@@ -1950,7 +1950,9 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         return reports
     }
 
-    /// One committer's run report, for a child's re-serve request. Nil when
+    /// One committer's run report, read by a co-hosted child level
+    /// (`ParentLevel.runReport`). Gate-free: it reads the served set and the
+    /// consensus actor, never the operation gate. Nil when
     /// the directory is not served here or the block is not a committer into
     /// it — silence, never a claim.
     func runReport(carrier: String, directory: String) async -> ParentRunReport? {
@@ -1988,22 +1990,21 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     }
 
     /// The committing parent blocks of the blocks this chain ACCEPTED with a
-    /// carrier proof, distinct, newest first, bounded to what one re-serve
-    /// request may name — what it asks its parent to re-serve after each
-    /// evidence round. Durable: read from the carrier edges verified at admission,
-    /// joined on acceptance (a carrier of a block this chain refused commits
-    /// nothing here), so a child restarted while its parent was down still
-    /// asks, and asks only about its own blocks.
+    /// carrier proof, distinct, newest first, bounded to
+    /// `recentCarrierCapacity` — the runs it re-reads from its co-hosted
+    /// parent level when it starts. Durable: read from the carrier edges
+    /// verified at admission, joined on acceptance (a carrier of a block this
+    /// chain refused commits nothing here), so a restarted child re-reads the
+    /// credit a push delivered before the restart, and only for its own blocks.
     func recentCarriers() async throws -> [String] {
         try await store.incomingCarriers(limit: Self.recentCarrierCapacity)
     }
 
     /// The committing parent blocks behind one block accepted here with a
-    /// carrier proof (§9.10) — what to ask the parent for on its admission.
-    /// From this chain's own verified edges, never a wire claim; a malformed
-    /// edge fails the whole ask closed (the round re-ask still covers it).
-    /// Bounded at the source to what one request may name, so a block
-    /// carried by more parent forks than that never builds an unsendable ask.
+    /// carrier proof (§9.10) — whose runs to read from the parent level on its
+    /// admission. From this chain's own verified edges; a malformed edge fails
+    /// the whole read closed. Bounded like `recentCarriers`, so a block carried
+    /// by many parent forks costs a bounded number of reads.
     func incomingCarriers(of childBlock: String) async throws -> [String] {
         Array(
             try await store.incomingParentCarrierBlockCIDs(forChildBlockCID: childBlock)
@@ -2011,7 +2012,9 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         )
     }
 
-    static let recentCarrierCapacity = maximumParentRunReportRequestCarriers
+    /// The most carriers one re-read names: each costs one O(1) parent read
+    /// and at most one credit.
+    static let recentCarrierCapacity = 256
 
     public enum ParentReportApplication: Sendable {
         /// The attributed batch is durable and applied; the commit, if the
@@ -2070,9 +2073,8 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     }
 
     /// Refusal counts by case, for `/metrics`. `notStronger` is routine — a
-    /// re-serve the child asked for, or a push that lost a race to a stronger
-    /// one; the
-    /// others are the likeliest symptom of a parent-side accounting bug, and
+    /// re-read of a run already credited, or a push that lost a race to a
+    /// stronger one; the others are the likeliest symptom of a parent-side accounting bug, and
     /// `locationConflict` is the one that is permanent.
     func parentReportCounters() -> (applied: UInt64, refusals: [String: UInt64]) {
         (parentReportsAppliedCount, parentReportRefusalCounts)

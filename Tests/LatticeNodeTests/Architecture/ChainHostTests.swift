@@ -457,4 +457,6 @@ private actor GatedAnchorParentLevel: ParentLevel {
         await gate.wait()
         return genesisCID
     }
+
+    func runReport(carrier: String, directory: String) async -> ParentRunReport? { nil }
 }

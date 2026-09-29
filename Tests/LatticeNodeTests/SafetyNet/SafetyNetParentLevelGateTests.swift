@@ -18,6 +18,7 @@ final class SafetyNetParentLevelGateTests: XCTestCase {
         "hasProducedParentState",
         "store.issuedParentGenesisLink",
         "anchoredChildGenesisCIDs",
+        "runReport",
     ]
 
     /// A call through the parent process, optionally through its store.

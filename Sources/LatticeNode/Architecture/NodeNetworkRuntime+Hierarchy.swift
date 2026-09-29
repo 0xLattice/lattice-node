@@ -1067,13 +1067,6 @@ extension NodeNetworkRuntime {
                     generation: generation,
                     process: process
                 )
-            } else {
-                // The round is complete — its evidence retained, its
-                // candidates queued: ask for the runs of the committers this
-                // chain already accepted blocks from (§9.10).
-                await self.requestParentRunReports(
-                    generation: generation, process: process
-                )
             }
         }
     }
@@ -1538,78 +1531,6 @@ extension NodeNetworkRuntime {
               let role = hierarchyState.hierarchyRecords[peer.key]?.role else { return }
 
         switch (message.topic, role) {
-        case (NodeNetworkTopic.parentRunReportRequest, .child(let childPath)):
-            // A child asks for the runs of committers it names — on admitting
-            // a block one of them carried, and after each evidence round.
-            // Not behind the per-peer query guard: a dropped ask would be a
-            // credit the child recovers only by chance, and the guard never
-            // bounded rate anyway (one message per session is handled at a
-            // time; Tally paces the plane). The serve below is a set lookup
-            // for a directory already served, one anchored-genesis lookup
-            // for one that is not, like the genesis-anchor arm; each named
-            // committer is then one O(1) read, at most
-            // `maximumParentRunReportRequestCarriers` of them. A committer
-            // this node does not serve is silence, never a claim.
-            guard let request = try?
-                    ParentRunReportRequestMessage.decoded(message.payload),
-                  let directory = childPath.last
-            else { return }
-            // A child re-asks right after its hello, while this node's
-            // serve-on-hello may still be walking the graph; serve first
-            // (idempotent, gated on the directory being anchored here) so the
-            // answer is never silence for want of a settled table. Unlike the
-            // hello path this does not wait for evidence-ready: that gate
-            // sequences what this node publishes, not who may ask.
-            guard isCurrentRuntime(generation: generation, process: process) else { return }
-            if let chain,
-               chain.networkCapabilities.contains(.runReportServing) {
-                await chain.serveRuns(for: directory)
-            }
-            SyncTrace.log("run-report request from child dir=\(directory) committers=\(request.carrierCIDs.count)")
-            for carrier in request.carrierCIDs {
-                guard isCurrentRuntime(generation: generation, process: process),
-                      hierarchyState.hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID,
-                      let report = await process.runReport(
-                          carrier: carrier, directory: directory
-                      ),
-                      let payload = try? ParentRunReportMessage(report).encoded()
-                else {
-                    SyncTrace.log("run-report request committer=\(carrier.prefix(16)) silence")
-                    continue
-                }
-                SyncTrace.log("run-report answer committer=\(carrier.prefix(16)) run=\(report.runWork) own=\(report.ownWork)")
-                _ = await hierarchy.sendMessage(
-                    to: peer,
-                    topic: NodeNetworkTopic.parentRunReport,
-                    payload: payload
-                )
-            }
-
-        case (NodeNetworkTopic.parentRunReport, .parent):
-            // The parent's word on the run behind one of this chain's blocks
-            // (§9.10). The service binds it and derives the credit under its
-            // own lease; a refusal is counted there, never acted on here.
-            guard let report = try? ParentRunReportMessage.decoded(message.payload),
-                  let chain,
-                  chain.networkCapabilities.contains(.parentRunReports)
-            else { return }
-            SyncTrace.log("run-report received committer=\(report.report.blockHash.prefix(16)) run=\(report.report.runWork) own=\(report.report.ownWork)")
-            // Applied under the process gate, which an admission may hold
-            // while it waits for a fact from this very session. Awaited here
-            // it would hold the session's delivery, and the fact behind it,
-            // until that wait timed out (traced: 15 s silences on every run
-            // report). Detached instead; reports are monotone, so order is
-            // immaterial.
-            let previous = hierarchyState.runReportApplyTail
-            hierarchyState.runReportApplyTail = Task { [weak self] in
-                await previous?.value
-                guard !Task.isCancelled, let self,
-                      await self.isCurrentRuntime(
-                        generation: generation, process: process
-                      ) else { return }
-                try? await chain.applyParentRunReport(report.report)
-            }
-
         case (NodeNetworkTopic.childEvidenceAvailable, .parent):
             guard
                 let available = try? ChildEvidenceAvailableMessage.decoded(
@@ -1952,7 +1873,7 @@ extension NodeNetworkRuntime {
                 generation: generation,
                 process: process
             )
-        } else if case .child(let childPath) = role {
+        } else if case .child = role {
             guard await waitForChildEvidenceReady(peer: peer) else {
                 // Only this session ends: a reconnect that replaced it while
                 // the wait was suspended keeps its record and hello deadline.
@@ -1965,14 +1886,6 @@ extension NodeNetworkRuntime {
                 }
                 await hierarchy.recycleSession(ifCurrent: peer)
                 return
-            }
-            // A child wired in: serve its runs from now on. The service
-            // refuses a directory this chain never anchored a child genesis
-            // for, so a hello alone names nothing (idempotent otherwise).
-            if let directory = childPath.last,
-               let chain,
-               chain.networkCapabilities.contains(.runReportServing) {
-                await chain.serveRuns(for: directory)
             }
             // A child wired in builds against this chain's current context:
             // the push task sends it to every ready child that lacks it.
@@ -2325,84 +2238,6 @@ extension NodeNetworkRuntime {
                     }
                 }
             }
-        }
-    }
-
-    /// Ask the parent for the runs of the committers this chain recently
-    /// accepted blocks from — after every evidence catch-up round: the
-    /// fallback for pushes missed while the session was down. The blocks a
-    /// round itself brings are queued as candidates, not yet accepted, so
-    /// they are asked for one by one as they are admitted (the service's
-    /// requester). Nothing to ask means nothing is sent.
-    private func requestParentRunReports(
-        generation: UInt64,
-        process: ChainProcess
-    ) async {
-        guard let chain,
-              chain.networkCapabilities.contains(.recentCarriers)
-        else { return }
-        let carriers = await chain.recentCarriers()
-        await requestParentRunReports(
-            carriers: carriers, generation: generation, process: process
-        )
-    }
-
-    /// Ask the parent for the runs of the committers of a block just
-    /// admitted here (§9.10) — one message for all of them. Public for the
-    /// service's admission effects.
-    public func requestParentRunReports(carriers: [String]) async {
-        guard isRunning, let process else { return }
-        await requestParentRunReports(
-            carriers: carriers, generation: runtimeGeneration, process: process
-        )
-    }
-
-    private func requestParentRunReports(
-        carriers: [String],
-        generation: UInt64,
-        process: ChainProcess
-    ) async {
-        guard !configuration.address.isNexus,
-              isCurrentRuntime(generation: generation, process: process),
-              let parent = configuredParentPeer(),
-              !carriers.isEmpty,
-              let payload = try? ParentRunReportRequestMessage(
-                  requestID: makeRequestID(),
-                  carrierCIDs: carriers
-              ).encoded()
-        else { return }
-        let sent = await hierarchy.sendMessage(
-            to: parent,
-            topic: NodeNetworkTopic.parentRunReportRequest,
-            payload: payload
-        )
-        SyncTrace.log("run-report request committers=\(carriers.count) sent=\(sent)")
-    }
-
-    /// Push one run report to every authenticated child of its directory
-    /// (§9.10). A push that does not land is re-served by the child's own
-    /// ask — on admitting a block that committer carried, and after each
-    /// evidence round — so no delivery result is acted on.
-    public func announceParentRunReport(_ report: ParentRunReport) async {
-        guard isRunning, let process,
-              let payload = try? ParentRunReportMessage(report).encoded()
-        else { return }
-        let generation = runtimeGeneration
-        let children = hierarchyRoles.compactMap {
-            key, role -> AuthenticatedPeer? in
-            guard case .child(let path) = role,
-                  path.last == report.directory else { return nil }
-            return hierarchyState.hierarchyRecords[key]?.session
-        }
-        for peer in children {
-            guard isCurrentRuntime(generation: generation, process: process),
-                  hierarchyState.hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID
-            else { continue }
-            _ = await hierarchy.sendMessage(
-                to: peer,
-                topic: NodeNetworkTopic.parentRunReport,
-                payload: payload
-            )
         }
     }
 

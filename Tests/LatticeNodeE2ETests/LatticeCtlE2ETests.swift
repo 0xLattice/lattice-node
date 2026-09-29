@@ -717,7 +717,7 @@ final class LatticeCtlE2ETests: XCTestCase {
         }
     }
 
-    /// Lattice §9.10 through three real levels and the real wire: Nexus's
+    /// Lattice §9.10 through three real levels in one host: Nexus's
     /// work reaches the grandchild through the middle chain, each level
     /// talking only to its immediate parent — across an outage of the middle
     /// chain, the case where the parent mines blocks that commit nothing
@@ -732,12 +732,13 @@ final class LatticeCtlE2ETests: XCTestCase {
     /// (and so its child Stalls) dropped from `lattice.json`; three more
     /// full Nexus blocks are mined alone, so the run of the last block that
     /// carried Market grows and nothing else mints. Both return with the
-    /// next restart; Market is credited on its re-ask, and Stalls — which
-    /// mined nothing — is credited through Market (Market's push of the run
-    /// the credit changed, or Stalls's own ask; the wire cannot order those
-    /// two, so the push itself is pinned by the multichain unit test). Then
-    /// the host restarts twice, the second time by SIGKILL: each hello
-    /// re-serves Stalls's committers' runs and every one is refused as not
+    /// next restart; Market is credited when it starts and re-reads its
+    /// committers' runs, and Stalls — which mined nothing — is credited
+    /// through Market (Market's push of the run the credit changed, or
+    /// Stalls's own start re-read; the start cannot order those two, so the
+    /// push itself is pinned by the multichain unit test). Then the host
+    /// restarts twice, the second time by SIGKILL: each start re-reads
+    /// Stalls's committers' runs and every one is refused as not
     /// stronger, and after the crash nothing new is credited — only a credit
     /// replayed from its own fact log explains that. The counters are the
     /// ones an operator watches on /metrics.
@@ -815,8 +816,9 @@ final class LatticeCtlE2ETests: XCTestCase {
         let fullTree = try await restartWithout(host, ["Nexus/Market", "Nexus/Market/Stalls"])
         for _ in 0..<3 { _ = try await mineFullBlock(host.nexusRPC) }
 
-        // Market returns: on its hello Nexus re-serves the runs of Market's
-        // committers, and the last carrier's run now holds the outage blocks.
+        // Market returns: when it starts it re-reads from Nexus the runs of
+        // its committers, and the last carrier's run now holds the outage
+        // blocks.
         // Counters restart with the process, so any credit here is new.
         try await restoreTree(host, fullTree)
         try await waitFor("Market back", seconds: 60) { await active(marketRPC) }
@@ -836,11 +838,11 @@ final class LatticeCtlE2ETests: XCTestCase {
         XCTAssertEqual(marketConflicts, 0, "a location conflict is a parent naming the wrong block")
         XCTAssertEqual(stallsConflicts, 0)
 
-        // Durable: a restarted Stalls is re-served its committers' runs on
-        // its hello and refuses every one as not stronger — which only a
+        // Durable: a restarted Stalls re-reads its committers' runs when it
+        // starts and refuses every one as not stronger — which only a
         // credit replayed from its own fact log explains. Twice: the first
-        // restart also absorbs any push Stalls missed while reconnecting
-        // after Market's outage, so by the second nothing served can be new
+        // restart also absorbs any push Stalls missed while it restarted
+        // after Market's outage, so by the second nothing read can be new
         // — and the second is a crash of the host process, not a graceful
         // stop.
         for restart in [1, 2] {
@@ -853,12 +855,12 @@ final class LatticeCtlE2ETests: XCTestCase {
             try await waitFor("Stalls back (restart \(restart))", seconds: 60) {
                 await active(stallsRPC)
             }
-            try await waitFor("re-served runs refused as not stronger (restart \(restart))", seconds: 60) {
+            try await waitFor("re-read runs refused as not stronger (restart \(restart))", seconds: 60) {
                 (await metric(stallsRPC, refused, label: "reason=\"notStronger\"") ?? 0) >= 1
             }
         }
         // Counters restart with the process: what this one shows is only
-        // what the re-serve after the crash did — read once the answers have
+        // what the re-read after the crash did — read once the credits have
         // had time to land, not at the first refusal.
         try await Task.sleep(for: e2eScaled(.seconds(2)))
         let appliedAfterCrashValue = await metric(stallsRPC, applied)
@@ -973,7 +975,7 @@ final class LatticeCtlE2ETests: XCTestCase {
         try await waitForStableHeight(host.nexusRPC)
 
         // Market returns with nothing but its own store: the owed block is
-        // admitted from the durable edge, its committer's run is asked for,
+        // admitted from the durable edge, its committer's run is read,
         // and the outage work is credited. Counters restart with the process.
         try await restoreTree(host, fullTree)
         try await waitFor("Market back", seconds: 60) { await active(marketRPC) }

@@ -350,36 +350,6 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
         }
     }
 
-    func testParentRunReportIsCanonical() throws {
-        try assertCanonical(ParentRunReportMessage.self, seed: 0x14) { g in
-            let run = UInt64.random(in: 1...UInt64.max, using: &g)
-            let own = UInt64.random(in: 0...run, using: &g)
-            return ParentRunReportMessage(
-                directory: self.randomAtom(&g),
-                carrierCID: self.randomCID(&g),
-                childBlockCID: self.randomCID(&g),
-                grinds: self.randomCIDs(&g, count: self.randomInt(&g, 1...6)),
-                runWork: WorkSum(UInt256(run)),
-                ownWork: WorkSum(UInt256(own)),
-                revision: UInt64.random(in: 0...UInt64.max, using: &g)
-            )
-        }
-    }
-
-    func testParentRunReportRequestIsCanonical() throws {
-        try assertCanonical(ParentRunReportRequestMessage.self, seed: 0x15) { g in
-            ParentRunReportRequestMessage(
-                requestID: self.nonZeroID(&g),
-                carrierCIDs: self.randomCIDs(
-                    &g,
-                    count: self.randomInt(
-                        &g, 1...maximumParentRunReportRequestCarriers
-                    )
-                )
-            )
-        }
-    }
-
     func testChildEvidenceAvailableIsCanonical() throws {
         try assertCanonical(ChildEvidenceAvailableMessage.self, seed: 0x16) { g in
             ChildEvidenceAvailableMessage(

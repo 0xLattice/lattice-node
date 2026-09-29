@@ -137,17 +137,10 @@ actor HierarchyRetryRecorder {
     private var evidenceIndexRequests = 0
     private var helloSessions: [Data] = []
     private var indexSessions: [Data] = []
-    private var runReportRequests: [ParentRunReportRequestMessage] = []
 
     init(withholdFirstHello: Bool = false) {
         self.withholdFirstHello = withholdFirstHello
     }
-
-    func recordRunReportRequest(_ request: ParentRunReportRequestMessage) {
-        runReportRequests.append(request)
-    }
-
-    func runReportRequestsSeen() -> [ParentRunReportRequestMessage] { runReportRequests }
 
     func record(_ topic: String, sessionID: Data) -> Bool {
         switch topic {
@@ -219,29 +212,6 @@ final class HierarchyRetryPeer: IvyDelegate, Sendable {
                 topic: NodeNetworkTopic.childEvidenceIndexResponse,
                 payload: payload
             )
-        case NodeNetworkTopic.parentRunReportRequest:
-            // A parent re-serving the runs of the committers a child names
-            // (§9.10): one report per committer, as the real serve arm does.
-            guard let request = try? ParentRunReportRequestMessage.decoded(
-                message.payload
-            ) else { return }
-            await recorder.recordRunReportRequest(request)
-            for carrier in request.carrierCIDs {
-                guard let payload = try? ParentRunReportMessage(
-                    directory: "Retry",
-                    carrierCID: carrier,
-                    childBlockCID: testCID("run-report-child-block"),
-                    grinds: [carrier],
-                    runWork: WorkSum(UInt256(9)),
-                    ownWork: WorkSum(UInt256(4)),
-                    revision: 7
-                ).encoded() else { continue }
-                _ = await ivy.sendMessage(
-                    to: peer,
-                    topic: NodeNetworkTopic.parentRunReport,
-                    payload: payload
-                )
-            }
         default:
             break
         }
