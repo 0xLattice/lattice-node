@@ -2207,7 +2207,8 @@ public actor ChainService {
     /// (`ChainProcess.recentCarriers`): the credit a push delivered before a
     /// restart, or one the parent served only after a push was refused. The
     /// carriers of each block this level accepts are read in the same order,
-    /// so never before the parent serves the directory. The drain holds no
+    /// each after `serveParentRuns` again, so never before the parent serves
+    /// the directory — however this level's genesis activated. The drain holds no
     /// lease of this level, so `serveParentRuns` may take the parent's gate
     /// (§2.4). Tip changes run `tipChanged` on a second task, coalesced, so
     /// a parked candidate's wake never waits behind a credit or the serve.
@@ -2243,6 +2244,11 @@ public actor ChainService {
                             await self.creditParentRuns(carriers: carriers)
                         }
                     case .rereadCarriers(let carriers):
+                        // The open-time serve may have run before the parent
+                        // anchored this genesis (it serves nothing then), and
+                        // a genesis admitted in-band queues no second serve:
+                        // serve first. Idempotent, and O(1) once served.
+                        await serveParentRuns()
                         await self.creditParentRuns(carriers: carriers)
                     }
                 }

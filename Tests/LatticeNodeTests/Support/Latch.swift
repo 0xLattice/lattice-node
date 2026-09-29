@@ -1,7 +1,7 @@
 /// A one-shot signal: `wait()` suspends until `open()` is called, whether
 /// that happens before or after the wait.
 actor Latch {
-    private var isOpen = false
+    private(set) var isOpen = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
     /// Someone is parked on the latch right now.

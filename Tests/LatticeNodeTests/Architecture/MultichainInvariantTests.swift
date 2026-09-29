@@ -566,6 +566,73 @@ final class MultichainInvariantTests: XCTestCase {
         await childService.shutdown()
     }
 
+    /// A child level whose mailbox opened before the parent anchored its
+    /// genesis, and whose genesis then activated without the service's
+    /// out-of-band hook (as an in-band admission does), gets no second serve
+    /// at activation. Its carrier reads still serve the directory first, so
+    /// a block carried after that is credited its carrier's run.
+    func testCarrierRunsAreCreditedWhenGenesisActivatesWithoutASecondServe() async throws {
+        let nexus = try await ChainProcess.open(configuration: try configuration(
+            path: ["Nexus"], storage: temporaryDirectory(),
+            privateKeyHex: String(repeating: "8a", count: 32)
+        ))
+        let child = try await ChainProcess.open(configuration: try configuration(
+            path: ["Nexus", "Payments"], storage: temporaryDirectory(),
+            privateKeyHex: String(repeating: "8b", count: 32)
+        ))
+        let childService = levelService(child, parent: nexus)
+        let openServeRan = Latch()
+        // Later serves (before each carrier read) wait here, so the read
+        // lands once the parent block above the carrier exists.
+        let readGate = Latch()
+        _ = await childService.openParentMailbox(
+            tipChanged: {},
+            serveParentRuns: {
+                if await openServeRan.isOpen { await readGate.wait() }
+                await nexus.serveRuns(for: "Payments")
+                await openServeRan.open()
+            }
+        )
+        // The open-time serve finds no anchor: nothing is served.
+        await openServeRan.wait()
+        let servedAtOpen = await nexus.servedRunDirectoryList()
+        XCTAssertEqual(servedAtOpen, [])
+
+        // Nexus anchors the genesis; the child activates it directly on the
+        // process, so `genesisActivatedOutOfBand` queues no serve.
+        let seed = ChildGenesisSeed(spec: NexusGenesis.spec, premineTo: nil, timestamp: 1)
+        let genesis = try await ChildGenesisBuilder.build(
+            seed: seed, chainPath: ["Nexus", "Payments"], fetcher: nexus
+        )
+        let recording = try await record(
+            anchorOf: genesis, directory: "Payments", on: nexus,
+            previous: try await nexus.canonicalTipBlock(),
+            chainPath: ["Nexus"], timestamp: 1
+        )
+        let up = try await child.activateChildGenesis(
+            seed: seed, confirmParentRecordedGenesis: { _ in true }
+        )
+        XCTAssertTrue(up)
+        let servedAfterActivation = await nexus.servedRunDirectoryList()
+        XCTAssertEqual(servedAfterActivation, [], "no serve was queued at activation")
+
+        // Block 1, carried and admitted through the service, with a plain
+        // parent block above its carrier.
+        let block1 = try await carry(
+            childOf: genesis, transactions: [], directory: "Payments",
+            parent: nexus, parentTip: recording, child: child,
+            timestamp: 2, through: childService
+        )
+        _ = try await mine(on: nexus, previous: block1.carrier, timestamp: 3)
+        await readGate.open()
+        try await eventually("block 1's carrier run credited") {
+            await child.parentReportCounters().applied == 1
+        }
+        let served = await nexus.servedRunDirectoryList()
+        XCTAssertEqual(served, ["Payments"], "the carrier read served the directory")
+        await childService.shutdown()
+    }
+
     /// A restarted child level keeps the credit a push would have brought:
     /// the run grew while the child was down (nothing was sent), and when
     /// the level starts again its mailbox has the parent serve the directory
