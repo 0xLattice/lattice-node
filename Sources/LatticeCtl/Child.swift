@@ -18,6 +18,7 @@ import FoundationNetworking
 import ArgumentParser
 import Lattice
 import LatticeCtlCore
+import LatticeMiningCoordinator
 import LatticeProcessWait
 import LatticeNode
 import UInt256
@@ -304,6 +305,10 @@ struct Child: AsyncParsableCommand {
                     // used to retry; this loop's own budget bounds it.
                     guard let expiry = await observedTemplateExpiry(
                         rootChain.rpc,
+                        // The body the deploy coordinator below sends.
+                        body: try MiningTemplateRequestBody.make(
+                            recipients: [], deployment: false, minimumWork: []
+                        ),
                         timeoutSeconds: topology.mine?
                             .resolvedTemplateTimeoutSeconds
                             ?? TopologyMine.defaultTemplateTimeoutSeconds

@@ -125,6 +125,7 @@ let package = Package(
                 "LatticeCtlCore",
                 "LatticeProcessWait",
                 "LatticeMinerCore",
+                "LatticeMiningCoordinator",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy"),
                 .product(name: "VolumeBroker", package: "VolumeBroker"),

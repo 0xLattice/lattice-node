@@ -9,6 +9,7 @@ import FoundationNetworking
 import ArgumentParser
 import LatticeCtlCore
 import LatticeMinerCore
+import LatticeMiningCoordinator
 import LatticeProcessWait
 
 struct Mine: AsyncParsableCommand {
@@ -140,6 +141,11 @@ struct Mine: AsyncParsableCommand {
             var longestCompletedRound = Duration.zero
             var templateExpiry: Duration?
             var unusableTemplateSince: ContinuousClock.Instant?
+            let templateRequestBody = try MiningTemplateRequestBody.make(
+                recipients: settings.mine.recipientEntries,
+                deployment: false,
+                minimumWork: settings.mine.minimumWorkEntries
+            )
             log("mining loop start"
                 + (settings.mine.minBlockIntervalSeconds.map {
                     ", pacing parent blocks at least \($0)s apart"
@@ -155,10 +161,14 @@ struct Mine: AsyncParsableCommand {
                         // did not answer for that long.
                         unusableTemplateSince = unusableTemplateSince
                             ?? ContinuousClock.now
-                        // Template lifetime is node-wide, so an empty body
-                        // observes it.
+                        // Template lifetime is node-wide, but the node
+                        // adopts each request's plan for its descendants, so
+                        // the probe sends the coordinator's own body: any
+                        // other would churn their candidates.
                         templateExpiry = await observedTemplateExpiry(
-                            settings.rpc, timeoutSeconds: templateTimeout
+                            settings.rpc,
+                            body: templateRequestBody,
+                            timeoutSeconds: templateTimeout
                         )
                     }
                     guard let expiry = templateExpiry else {
@@ -417,7 +427,7 @@ func runCoordinatorOnce(
 /// is derived from this plus measured batch time, so no template lifetime is
 /// hardcoded on this side of the RPC.
 func observedTemplateExpiry(
-    _ rpc: UInt16, timeoutSeconds: UInt64
+    _ rpc: UInt16, body: Data, timeoutSeconds: UInt64
 ) async -> Duration? {
     guard let url = URL(
         string: "http://127.0.0.1:\(rpc)/v1/mining/templates"
@@ -425,7 +435,7 @@ func observedTemplateExpiry(
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.httpBody = Data(#"{"recipients":[]}"#.utf8)
+    request.httpBody = body
     request.timeoutInterval = TimeInterval(timeoutSeconds)
     guard let (data, response) = try? await URLSession.shared.data(
         for: request
