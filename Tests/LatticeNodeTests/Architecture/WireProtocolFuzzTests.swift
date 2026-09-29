@@ -23,9 +23,8 @@ import XCTest
 /// unit-test run.
 final class WireProtocolFuzzTests: XCTestCase {
 
-    private var iterations: Int {
-        ProcessInfo.processInfo.environment["LATTICE_FUZZ_ITERATIONS"]
-            .flatMap(Int.init) ?? 400
+    private func iterations() throws -> Int {
+        try TestBudget.resolve("LATTICE_FUZZ_ITERATIONS", default: 400)
     }
 
     /// Real CIDs from this network, because several validators demand a
@@ -282,7 +281,7 @@ final class WireProtocolFuzzTests: XCTestCase {
         let base = try TestSeed.resolve(default: 0x5EED_1A77_1CE0_0001)
         var generator = SplitMix64(state: base.value)
         var rejected = 0
-        for iteration in 0..<iterations {
+        for iteration in 0..<(try iterations()) {
             let seed = seeds[iteration % seeds.count]
             // Captured BEFORE the mutation advances the generator: with the
             // seed name and iteration this recreates the mutant exactly, and
@@ -290,10 +289,10 @@ final class WireProtocolFuzzTests: XCTestCase {
             let startState = generator.state
             let mutant = mutate(seed.data, using: &generator)
             let provenance = """
-                \(base) LATTICE_FUZZ_ITERATIONS=\(iteration + 1), \
-                iteration \(iteration), seed \(seed.name), \
+                \(base) LATTICE_FUZZ_ITERATIONS=\(iteration + 1) \
+                (iteration \(iteration), seed \(seed.name), \
                 generator state before mutation \(startState), \
-                mutant hex \(mutant.map { String(format: "%02x", $0) }.joined())
+                mutant hex \(mutant.map { String(format: "%02x", $0) }.joined()))
                 """
             for probe in probes {
                 if probe.run(mutant, provenance) {

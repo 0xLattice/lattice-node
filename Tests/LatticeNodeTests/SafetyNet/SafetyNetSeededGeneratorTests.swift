@@ -61,6 +61,25 @@ final class SafetyNetSeededGeneratorTests: XCTestCase {
         }
     }
 
+    func testABudgetDefaultsUnlessTheVariableIsSet() throws {
+        XCTAssertEqual(try TestBudget.resolve("BUDGET", default: 7, environment: [:]), 7)
+        XCTAssertEqual(
+            try TestBudget.resolve("BUDGET", default: 7, environment: ["BUDGET": " 42 "]),
+            42
+        )
+    }
+
+    func testAMalformedBudgetFailsNamingTheVariable() {
+        for bad in ["", "0", "-3", "4O", "0x10", "1e3", "99999999999999999999"] {
+            XCTAssertThrowsError(
+                try TestBudget.resolve("BUDGET", default: 7, environment: ["BUDGET": bad]),
+                "\(bad) was accepted"
+            ) { error in
+                XCTAssertTrue("\(error)".contains("BUDGET="), "\(error)")
+            }
+        }
+    }
+
     func testASeedPrintsTheAssignmentThatReplaysIt() throws {
         let seed = try TestSeed.resolve(default: 0x5EED_1A77_1CE0_0001, environment: [:])
         XCTAssertEqual("\(seed)", "LATTICE_TEST_SEED=0x5eed1a771ce00001")
