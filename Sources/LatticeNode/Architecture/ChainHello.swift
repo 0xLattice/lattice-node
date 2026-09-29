@@ -15,7 +15,10 @@ public enum ChainHelloError: Error, Equatable, Sendable {
 public struct ChainHello: Codable, Equatable, Sendable {
     /// Version 5: blocks commit a `rewardRecipient` credited the reward plus
     /// fees, and transactions carry no `fee` (Lattice 39 flag day).
-    public static let protocolVersion: UInt16 = 5
+    /// Version 6: child-block proofs are exchanged through each node's
+    /// child-evidence index (`lattice.overlay.child-evidence.root.v1`); the
+    /// portable-attachment topics are gone.
+    public static let protocolVersion: UInt16 = 6
     /// Deliberately tight pre-decode guard: `decode` runs on an UNAUTHENTICATED
     /// peer's bytes, so unlike post-session messages (bounded by the transport
     /// frame) this caps unauthenticated JSON parse work. A hello is only a version

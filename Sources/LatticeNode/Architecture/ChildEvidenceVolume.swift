@@ -12,7 +12,7 @@ enum ChildEvidenceVolumeError: Error, Equatable, Sendable {
 /// envelope. Child-chain validation content remains owned and served by the
 /// child chain.
 struct ChildEvidenceVolume: Sendable {
-    private struct Manifest: Scalar {
+    struct Manifest: Scalar {
         let childCID: String
         let envelope: Data
     }

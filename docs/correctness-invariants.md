@@ -76,9 +76,9 @@ places are their own claim until a test covers them too.
   parent-evidence inbox entry is consumed)
 - **NODE-SEMANTICS-004.b** — Candidate admission's outcome blame
   (`candidateBlame`) never names the supplier of a `localFailure` outcome.
-- **NODE-SEMANTICS-004.c** — The portable-attachment decision blames on the
-  bytes alone: an attachment that verifies is never blamed, even when the
-  runtime generation or the session changed while it was checked.
+- **NODE-SEMANTICS-004.c** — The child-evidence sync blames on the bytes
+  alone: a proof that verifies is never blamed, and a pass that fails is
+  blamed only on the sole supplier of a complete fetch.
 - **NODE-SEMANTICS-004.d** — A store error thrown out of candidate admission
   never penalizes a peer.
   Gap: #213

@@ -875,9 +875,9 @@ final class BlockFetcherTests: XCTestCase {
     func testRootedPackageSeedInheritsWeighedFromTheRootlessAttemptItSupersedes()
         throws
     {
-        // Range-sync seeds a weighed rootless attempt; a recovered portable
-        // attachment then seeds the same CID with its package (rooted, default
-        // flag). The package supersedes the rootless attempt and must inherit
+        // Range-sync seeds a weighed rootless attempt; a proof recovered from
+        // a peer's child-evidence index then seeds the same CID with its
+        // package (rooted, default flag). The package supersedes the rootless attempt and must inherit
         // its tier — otherwise every below-tip child block executes eagerly.
         var fetcher = BlockFetcher()
         XCTAssertTrue(fetcher.observe(.init(

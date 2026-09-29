@@ -14,11 +14,10 @@ forever:
   predecessor walk replaced the descent; the pages are still served for
   older peers.)
 - **The parent's evidence archive.** Every child block a parent ever carried
-  keeps its proof and edge rows durably, and the portable-attachment index
-  re-advertises all of it to every syncing child, forever (measured: 13.5
-  evidence rows per canonical child block). (Receiver retired: a child no
-  longer walks the index — proofs are solicited per block through the locate
-  path; the index is still served for older children.)
+  keeps its proof and edge rows durably, and the child-evidence index
+  serves all of it to every syncing child, forever (measured: 13.5
+  evidence rows per canonical child block). (A child reads only the
+  entries for blocks it wants or holds.)
 - **Acquisition effort.** A bare advertised CID gives a node no way to decline
   work, so every hoarded sibling costs every peer a content fetch, an evidence
   solicitation, and a full import attempt — competing for the same bounded
@@ -125,9 +124,9 @@ this design.
 
 ### You serve what you keep
 
-Served surfaces — accepted-leaf pages and the portable-attachment index
-(the leaf page is requested only as a frontier pull; the attachment index is
-legacy-served), content exchange — advertise the operator's
+Served surfaces — accepted-leaf pages and the child-evidence index
+(the leaf page is requested only as a frontier pull), content exchange —
+advertise the operator's
 retained set, nothing more. An archive
 node that keeps everything serves everything; a lean node serves the
 canonical chain plus its retained fringe. Availability, like finality, is

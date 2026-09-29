@@ -115,95 +115,108 @@ extension NodeStore {
             scope: issuedRecoveryRetentionScope,
             roots: recoveryRoots
         )
-        try database.transaction {
-                for fact in facts {
-                    let existing = try database.row(
-                        ImportFactRow.self,
-                        "SELECT payload FROM admission_facts WHERE fact_id = ?1",
-                        params: [.blob(fact.key)]
-                    )
-                    if let existing {
-                        guard try existing.payload == fact.value else {
-                            throw NodeStoreError.conflictingImportFact
-                        }
-                    }
-                }
-
-                let replay = try database.row(
-                    ImportBatchRow.self,
-                    "SELECT seq, volume_roots FROM admission_batches WHERE payload = ?1",
-                    params: [.blob(payload)]
-                )
-                if let existing = replay {
-                    let existingSequence = try existing.sequence
-                    guard try existing.volumeRoots == rootsPayload else {
-                        throw NodeStoreError.conflictingImportBatch
-                    }
+        let indexUpdate = try await prepareChildEvidenceIndex(
+            [preparedHierarchyArtifacts?.carrierEvidence,
+             preparedIncomingCarrierEvidence].compactMap { $0 }
+        )
+        do {
+            try database.transaction {
                     for fact in facts {
                         let existing = try database.row(
                             ImportFactRow.self,
                             "SELECT payload FROM admission_facts WHERE fact_id = ?1",
                             params: [.blob(fact.key)]
                         )
-                        guard try existing?.payload == fact.value else {
-                            throw NodeStoreError.corrupt(
-                                "an admission batch is missing its normalized fact"
-                            )
+                        if let existing {
+                            guard try existing.payload == fact.value else {
+                                throw NodeStoreError.conflictingImportFact
+                            }
                         }
                     }
-                    try validateAcceptedBlockRows(
-                        acceptedBlocks,
-                        admissionSequence: existingSequence
-                    )
-                } else {
-                    try database.execute(
-                        "INSERT INTO admission_batches (payload, volume_roots) VALUES (?1, ?2)",
-                        params: [.blob(payload), .blob(rootsPayload)]
-                    )
-                    guard let admissionSequence = try database.row(
+
+                    let replay = try database.row(
                         ImportBatchRow.self,
-                        "SELECT seq FROM admission_batches WHERE payload = ?1",
+                        "SELECT seq, volume_roots FROM admission_batches WHERE payload = ?1",
                         params: [.blob(payload)]
-                    )?.sequence else {
-                        throw NodeStoreError.corrupt("missing newly staged admission batch")
-                    }
-                    for fact in facts {
+                    )
+                    if let existing = replay {
+                        let existingSequence = try existing.sequence
+                        guard try existing.volumeRoots == rootsPayload else {
+                            throw NodeStoreError.conflictingImportBatch
+                        }
+                        for fact in facts {
+                            let existing = try database.row(
+                                ImportFactRow.self,
+                                "SELECT payload FROM admission_facts WHERE fact_id = ?1",
+                                params: [.blob(fact.key)]
+                            )
+                            guard try existing?.payload == fact.value else {
+                                throw NodeStoreError.corrupt(
+                                    "an admission batch is missing its normalized fact"
+                                )
+                            }
+                        }
+                        try validateAcceptedBlockRows(
+                            acceptedBlocks,
+                            admissionSequence: existingSequence
+                        )
+                    } else {
                         try database.execute(
-                            "INSERT OR IGNORE INTO admission_facts (fact_id, payload) VALUES (?1, ?2)",
-                            params: [.blob(fact.key), .blob(fact.value)]
+                            "INSERT INTO admission_batches (payload, volume_roots) VALUES (?1, ?2)",
+                            params: [.blob(payload), .blob(rootsPayload)]
+                        )
+                        guard let admissionSequence = try database.row(
+                            ImportBatchRow.self,
+                            "SELECT seq FROM admission_batches WHERE payload = ?1",
+                            params: [.blob(payload)]
+                        )?.sequence else {
+                            throw NodeStoreError.corrupt("missing newly staged admission batch")
+                        }
+                        for fact in facts {
+                            try database.execute(
+                                "INSERT OR IGNORE INTO admission_facts (fact_id, payload) VALUES (?1, ?2)",
+                                params: [.blob(fact.key), .blob(fact.value)]
+                            )
+                        }
+                        try persistAcceptedBlockRows(
+                            acceptedBlocks,
+                            admissionSequence: admissionSequence,
+                            status: persistence.status
                         )
                     }
-                    try persistAcceptedBlockRows(
-                        acceptedBlocks,
-                        admissionSequence: admissionSequence,
-                        status: persistence.status
+                    if let preparedHierarchyArtifacts {
+                        try persistHierarchyArtifacts(preparedHierarchyArtifacts)
+                    }
+                    if let preparedIncomingCarrierEvidence {
+                        try persistCarrierEvidence(preparedIncomingCarrierEvidence)
+                    }
+                    if let indexUpdate {
+                        try persistChildEvidenceRoot(indexUpdate)
+                    }
+                    let admittedParentAttachments = [
+                        preparedHierarchyArtifacts?.carrierEvidence?
+                            .proofAttachment.rawCID,
+                        preparedIncomingCarrierEvidence?.proofAttachment.rawCID,
+                    ].compactMap { $0 }
+                    for attachmentCID in Set(admittedParentAttachments) {
+                        try deleteParentEvidenceInbox(attachmentCID: attachmentCID)
+                    }
+                    try persistPendingChildProofRouteRows(
+                        try pendingRoutesIncludingPreparedProofs(
+                            pendingRoutes,
+                            carrierCIDs: Set(acceptedBlocks.map(\.blockCID))
+                        ),
+                        capacity: persistence.pendingChildProofCapacity
                     )
-                }
-                if let preparedHierarchyArtifacts {
-                    try persistHierarchyArtifacts(preparedHierarchyArtifacts)
-                }
-                if let preparedIncomingCarrierEvidence {
-                    try persistCarrierEvidence(preparedIncomingCarrierEvidence)
-                }
-                let admittedParentAttachments = [
-                    preparedHierarchyArtifacts?.carrierEvidence?
-                        .proofAttachment.rawCID,
-                    preparedIncomingCarrierEvidence?.proofAttachment.rawCID,
-                ].compactMap { $0 }
-                for attachmentCID in Set(admittedParentAttachments) {
-                    try deleteParentEvidenceInbox(attachmentCID: attachmentCID)
-                }
-                try persistPendingChildProofRouteRows(
-                    try pendingRoutesIncludingPreparedProofs(
-                        pendingRoutes,
-                        carrierCIDs: Set(acceptedBlocks.map(\.blockCID))
-                    ),
-                    capacity: persistence.pendingChildProofCapacity
-                )
-                if let consensusRevisionFloor = persistence.consensusRevisionFloor {
-                    try persistConsensusRevisionFloor(consensusRevisionFloor)
-                }
+                    if let consensusRevisionFloor = persistence.consensusRevisionFloor {
+                        try persistConsensusRevisionFloor(consensusRevisionFloor)
+                    }
+            }
+        } catch {
+            await abandonChildEvidenceIndex(indexUpdate)
+            throw error
         }
+        try await finishChildEvidenceIndex(indexUpdate)
         if preparedHierarchyArtifacts?.carrierEvidence != nil
             || preparedIncomingCarrierEvidence != nil
         {

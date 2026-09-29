@@ -14,32 +14,27 @@ import XCTest
 import cashew
 @testable import LatticeNode
 
+private func awaitedUnwrap<T>(
+    _ value: T?,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) throws -> T {
+    try XCTUnwrap(value, file: file, line: line)
+}
+
 private actor ContentRequestRecorder {
     private var values: [String] = []
     func append(root: String) { values.append(root) }
     func snapshot() -> [String] { values }
 }
 
-private struct PortableAttachmentTestPayload: Sendable {
-    let summary: PortableAttachmentSummary
-    let content: [String: Data]
-}
+/// An overlay peer serving its child-evidence index, and the proofs it
+/// names, as ordinary Volumes.
+private actor EvidenceIndexPeer: IvyContentSource {
+    private let broker: MemoryBroker
+    private var served: [String] = []
 
-private actor PortableAttachmentQueuePeer: IvyDelegate, IvyContentSource {
-    private let attachments: [PortableAttachmentTestPayload]
-    private let firstAdmissionGate: CandidateBuildGate
-    private var servedAttachments = Set<String>()
-
-    init(
-        attachments: [PortableAttachmentTestPayload],
-        firstAdmissionGate: CandidateBuildGate
-    ) {
-        self.attachments = attachments.sorted {
-            ($0.summary.edgeCID, $0.summary.rootCID)
-                < ($1.summary.edgeCID, $1.summary.rootCID)
-        }
-        self.firstAdmissionGate = firstAdmissionGate
-    }
+    init(broker: MemoryBroker) { self.broker = broker }
 
     func content(
         rootCID: String,
@@ -50,20 +45,13 @@ private actor PortableAttachmentQueuePeer: IvyDelegate, IvyContentSource {
     }
 
     func volume(rootCID: String, maxDataBytes: Int) async -> [ContentEntry] {
-        guard let attachment = attachments.first(where: {
-            $0.summary.attachmentCID == rootCID
-        }) else { return [] }
-        if !servedAttachments.contains(rootCID) {
-            if servedAttachments.count == 1 {
-                while await firstAdmissionGate.enteredCount() == 0 {
-                    try? await Task.sleep(for: .milliseconds(1))
-                }
-            }
-            servedAttachments.insert(rootCID)
+        guard let volume = await broker.fetchVolumeLocal(root: rootCID) else {
+            return []
         }
+        served.append(rootCID)
         var remaining = maxDataBytes
         var entries: [ContentEntry] = []
-        for (cid, data) in attachment.content.sorted(by: { $0.key < $1.key }) {
+        for (cid, data) in volume.entries.sorted(by: { $0.key < $1.key }) {
             guard data.count <= remaining else { return [] }
             remaining -= data.count
             entries.append(ContentEntry(cid: cid, data: data))
@@ -71,7 +59,15 @@ private actor PortableAttachmentQueuePeer: IvyDelegate, IvyContentSource {
         return entries
     }
 
-    func servedRoots() -> Set<String> { servedAttachments }
+    func servedRoots() -> [String] { served }
+}
+
+extension NodeNetworkRuntime {
+    fileprivate func childEvidenceRootPeers() -> Set<PeerKey> {
+        Set(overlayState.overlayRecords.records.filter {
+            $0.value.evidenceRoot != nil
+        }.keys)
+    }
 }
 
 private actor ChildEvidenceRecorder {
@@ -696,11 +692,16 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
         XCTAssertNil(attachment.serialized.entries[childCID])
     }
 
-    func testPortableAttachmentsKeepDistinctRootsForTheSameChildWhileAdmissionIsBlocked()
+    /// A cold-synced child block whose proof this node cannot recover
+    /// locally resolves `.childProof` through overlay peers' child-evidence
+    /// indexes: a peer serving an entry that does not bind its key is blamed
+    /// and its root dropped, and an honest peer's proofs (two grinds for the
+    /// one block) are then admitted as weighed package seeds.
+    func testColdSyncResolvesAChildProofThroughPeerIndexesAndBlamesJunk()
         async throws
     {
         let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-portable-root-queue-\(UUID().uuidString)",
+            "lattice-evidence-index-\(UUID().uuidString)",
             isDirectory: true
         )
         addTeardownBlock { try? FileManager.default.removeItem(at: storage) }
@@ -790,35 +791,40 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
         XCTAssertEqual(Set(edges.compactMap(\.edgeCID)).count, 1)
         XCTAssertEqual(Set(proofs.map(\.rootCID)).count, 2)
 
-        var attachments: [PortableAttachmentTestPayload] = []
-        for (proof, edge) in zip(proofs, edges) {
-            let package = ChildValidationPackage(
-                proof: proof
-            )
-            let envelope = try ChildValidationPackageEnvelope(package)
+        // The honest index holds both grinds; the junk index files one
+        // grind's proof under a grind it does not prove.
+        let honestBroker = MemoryBroker()
+        let junkBroker = MemoryBroker()
+        var honestEntries: [ChildEvidenceIndex.Entry] = []
+        var attachments: [ChildEvidenceVolume] = []
+        for proof in proofs {
             let attachment = try ChildEvidenceVolume(
-                envelopeBytes: try envelope.encode(),
+                envelopeBytes: try ChildValidationPackageEnvelope(
+                    ChildValidationPackage(proof: proof)
+                ).encode(),
                 childCID: leafHeader.rawCID
             )
-            let attachmentBroker = MemoryBroker()
-            try await attachment.store(
-                storer: attachmentBroker
-            )
-            let fetchedAttachment = await attachmentBroker.fetchVolumeLocal(
-                root: attachment.rawCID
-            )
-            let attachmentVolume = try XCTUnwrap(fetchedAttachment)
-            XCTAssertEqual(attachmentVolume.root, attachment.serialized.root)
-            XCTAssertEqual(attachmentVolume.entries, attachment.serialized.entries)
-            attachments.append(PortableAttachmentTestPayload(
-                summary: PortableAttachmentSummary(
-                    edgeCID: try XCTUnwrap(edge.edgeCID),
-                    rootCID: proof.rootCID,
-                    attachmentCID: attachment.rawCID
-                ),
-                content: attachment.serialized.entries
+            try await attachment.store(storer: honestBroker)
+            try await attachment.store(storer: junkBroker)
+            attachments.append(attachment)
+            honestEntries.append(ChildEvidenceIndex.Entry(
+                childCID: leafHeader.rawCID,
+                rootCID: proof.rootCID,
+                attachmentCID: attachment.rawCID
             ))
         }
+        let honestRoot = try awaitedUnwrap(try await ChildEvidenceIndex.inserting(
+            honestEntries, into: nil, fetcher: honestBroker, storer: honestBroker
+        )).root
+        let junkRoot = try awaitedUnwrap(try await ChildEvidenceIndex.inserting(
+            [ChildEvidenceIndex.Entry(
+                childCID: leafHeader.rawCID,
+                rootCID: proofs[1].rootCID,
+                attachmentCID: attachments[0].rawCID
+            )],
+            into: nil, fetcher: junkBroker, storer: junkBroker
+        )).root
+
         let parentPeerKey = try PeerKey(middlePeerKey)
         let runtime = try NodeNetworkRuntime(
             configuration: targetConfiguration,
@@ -858,7 +864,6 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
         let roots = NetworkEventRecorder()
         let unavailable = NetworkEventRecorder()
         let eager = NetworkEventRecorder()
-        let firstAdmissionGate = CandidateBuildGate()
         let handlers = ClosureChainInterface(
             admission: { admission in
                 if !admission.weighed {
@@ -881,9 +886,6 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                 ))[admission.header.rawCID] != nil else {
                     throw NetworkTestError.failedPhase("child Volume unavailable")
                 }
-                if (await roots.snapshot()).isEmpty {
-                    _ = await firstAdmissionGate.enter()
-                }
                 await roots.append(rootCID)
                 return NodeImportOutcome(
                     decision: .acceptedSide(ChainCommit(
@@ -895,38 +897,23 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             }
         )
 
-        let evidencePeer = Ivy(config: IvyConfig(
-            signingKey: signingKey(0x76),
-            listenPort: 0,
-            stunServers: [],
-            healthConfig: PeerHealthConfig(enabled: false),
-            mode: .overlay
-        ))
-        let delegate = PortableAttachmentQueuePeer(
-            attachments: attachments,
-            firstAdmissionGate: firstAdmissionGate
-        )
-        await evidencePeer.installTestDelegate(delegate)
-        await evidencePeer.setContentSource(delegate)
-        let blockKey = signingKey(0x77)
-        let blockAdvertiser = Ivy(config: IvyConfig(
-            signingKey: blockKey,
-            listenPort: 0,
-            stunServers: [],
-            healthConfig: PeerHealthConfig(enabled: false),
-            mode: .overlay
-        ))
-        let replacement = Ivy(config: IvyConfig(
-            signingKey: signingKey(0x78),
-            listenPort: 0,
-            stunServers: [],
-            healthConfig: PeerHealthConfig(enabled: false),
-            mode: .overlay
-        ))
+        func overlayPeer(_ byte: UInt8) -> Ivy {
+            Ivy(config: IvyConfig(
+                signingKey: signingKey(byte),
+                listenPort: 0,
+                stunServers: [],
+                healthConfig: PeerHealthConfig(enabled: false),
+                mode: .overlay
+            ))
+        }
+        let honestPeer = overlayPeer(0x76)
+        let honestSource = EvidenceIndexPeer(broker: honestBroker)
+        await honestPeer.setContentSource(honestSource)
+        let junkPeer = overlayPeer(0x79)
+        let junkSource = EvidenceIndexPeer(broker: junkBroker)
+        await junkPeer.setContentSource(junkSource)
+        let blockAdvertiser = overlayPeer(0x77)
         await blockAdvertiser.setContentSource(
-            VolumeSource(one: leafSerializedVolume)
-        )
-        await replacement.setContentSource(
             VolumeSource(one: leafSerializedVolume)
         )
         let parent = Ivy(config: IvyConfig(
@@ -937,57 +924,58 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             privateContentExchangeEnabled: true,
             mode: .privateNetwork
         ))
-        // Parent authentication authorizes the attachment; availability is
-        // independent. The exact overlay advertiser serves the complete child
-        // genesis Volume.
+        let target = PeerID(publicKey: targetConfiguration.processPublicKey)
+        let targetEndpoint = PeerEndpoint(
+            publicKey: targetConfiguration.processPublicKey,
+            host: "127.0.0.1",
+            port: overlayPort
+        )
+        let overlayHello = try ChainHello(
+            nexusGenesisCID: targetConfiguration.nexusGenesisCID,
+            chainPath: targetConfiguration.chainPath
+        ).encode()
+        /// Pushes `root` until the runtime holds it for `peer`: a push that
+        /// lands before the hello is processed is dropped.
+        func push(_ root: String, from peer: Ivy, key: PeerKey) async throws {
+            for _ in 0..<200 {
+                if await runtime.childEvidenceRootPeers().contains(key) { return }
+                _ = await peer.sendMessage(
+                    to: target,
+                    topic: NodeNetworkTopic.childEvidenceRoot,
+                    payload: try ChildEvidenceRootMessage(rootCID: root).encoded()
+                )
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            throw NetworkTestError.failedPhase("peer root registered")
+        }
         do {
             try await parent.start()
             try await runtime.start(process: process, chain: handlers)
-            let childPeer = PeerID(publicKey: targetConfiguration.processPublicKey)
             for _ in 0..<100 {
-                if (await parent.connectedPeers).contains(childPeer) { break }
+                if (await parent.connectedPeers).contains(target) { break }
                 try await Task.sleep(for: .milliseconds(10))
             }
-            let hierarchyHello = try ChainHello(
-                nexusGenesisCID: targetConfiguration.nexusGenesisCID,
-                chainPath: middleConfiguration.chainPath
-            ).encode()
-            guard (await parent.connectedPeers).contains(childPeer),
+            guard (await parent.connectedPeers).contains(target),
                   case .enqueued = await parent.sendMessage(
-                    to: childPeer,
+                    to: target,
                     topic: NodeNetworkTopic.hierarchyHello,
-                    payload: hierarchyHello
+                    payload: try ChainHello(
+                        nexusGenesisCID: targetConfiguration.nexusGenesisCID,
+                        chainPath: middleConfiguration.chainPath
+                    ).encode()
                   ) else {
                 throw NetworkTestError.failedStart
             }
+            let junkKey = peerKey(signingKey(0x79))
             try await connectAndHello(
-                evidencePeer,
-                peerID: PeerID(publicKey: targetConfiguration.processPublicKey),
-                endpoint: PeerEndpoint(
-                    publicKey: targetConfiguration.processPublicKey,
-                    host: "127.0.0.1",
-                    port: overlayPort
-                ),
-                hello: try ChainHello(
-                    nexusGenesisCID: targetConfiguration.nexusGenesisCID,
-                    chainPath: targetConfiguration.chainPath
-                ).encode()
+                junkPeer, peerID: target, endpoint: targetEndpoint, hello: overlayHello
             )
+            try await push(junkRoot, from: junkPeer, key: junkKey)
             try await connectAndHello(
-                blockAdvertiser,
-                peerID: PeerID(publicKey: targetConfiguration.processPublicKey),
-                endpoint: PeerEndpoint(
-                    publicKey: targetConfiguration.processPublicKey,
-                    host: "127.0.0.1",
-                    port: overlayPort
-                ),
-                hello: try ChainHello(
-                    nexusGenesisCID: targetConfiguration.nexusGenesisCID,
-                    chainPath: targetConfiguration.chainPath
-                ).encode()
+                blockAdvertiser, peerID: target, endpoint: targetEndpoint, hello: overlayHello
             )
             guard case .enqueued = await blockAdvertiser.sendMessage(
-                to: PeerID(publicKey: targetConfiguration.processPublicKey),
+                to: target,
                 topic: NodeNetworkTopic.blockAnnouncement,
                 payload: try BlockAnnouncementMessage(
                     blockCID: leafHeader.rawCID
@@ -998,96 +986,50 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             try await waitForEventCount(
                 1,
                 in: unavailable,
-                phase: "overlay block before portable parent proof"
+                phase: "overlay block before any proof"
             )
-            // Availability hints are dropped until the evidence peer's hello has
-            // been processed on its own session; re-send until both are served.
+            // The junk entry is fetched, fails to bind its grind, and its
+            // complete supplier is blamed: its root is dropped.
             for _ in 0..<200 {
-                if (await delegate.servedRoots()).count == 2 { break }
-                for attachment in attachments {
-                    _ = await evidencePeer.sendMessage(
-                        to: PeerID(publicKey: targetConfiguration.processPublicKey),
-                        topic: NodeNetworkTopic.portableAttachmentAvailable,
-                        payload: try PortableAttachmentAvailableMessage(
-                            edgeCID: attachment.summary.edgeCID,
-                            rootCID: attachment.summary.rootCID,
-                            attachmentCID: attachment.summary.attachmentCID
-                        ).encoded()
-                    )
-                }
-                try await Task.sleep(for: .milliseconds(100))
+                if !(await runtime.childEvidenceRootPeers().contains(junkKey)) { break }
+                try await Task.sleep(for: .milliseconds(50))
             }
-            let initiallyServedRoots = await delegate.servedRoots()
-            guard initiallyServedRoots.count == 2 else {
-                throw NetworkTestError.failedPhase(
-                    "distinct portable attachment roots"
-                )
-            }
-            XCTAssertEqual(
-                initiallyServedRoots,
-                Set(attachments.map(\.summary.attachmentCID))
-            )
+            let junkServed = await junkSource.servedRoots()
+            XCTAssertTrue(junkServed.contains(attachments[0].rawCID))
+            let junkDropped = await !runtime.childEvidenceRootPeers().contains(junkKey)
+            XCTAssertTrue(junkDropped, "the junk peer's root was not dropped")
+            let beforeHonest = await roots.snapshot()
+            XCTAssertTrue(beforeHonest.isEmpty, "junk was admitted: \(beforeHonest)")
 
-            await blockAdvertiser.stop()
-            await firstAdmissionGate.release(1)
-            try await waitForEventCount(
-                1,
-                in: roots,
-                phase: "first root before advertiser replacement"
-            )
             try await connectAndHello(
-                replacement,
-                peerID: PeerID(publicKey: targetConfiguration.processPublicKey),
-                endpoint: PeerEndpoint(
-                    publicKey: targetConfiguration.processPublicKey,
-                    host: "127.0.0.1",
-                    port: overlayPort
-                ),
-                hello: try ChainHello(
-                    nexusGenesisCID: targetConfiguration.nexusGenesisCID,
-                    chainPath: targetConfiguration.chainPath
-                ).encode()
+                honestPeer, peerID: target, endpoint: targetEndpoint, hello: overlayHello
             )
-            guard case .enqueued = await replacement.sendMessage(
-                to: PeerID(publicKey: targetConfiguration.processPublicKey),
-                topic: NodeNetworkTopic.blockAnnouncement,
-                payload: try BlockAnnouncementMessage(
-                    blockCID: leafHeader.rawCID
-                ).encoded()
-            ) else {
-                throw NetworkTestError.failedSend
-            }
+            try await push(honestRoot, from: honestPeer, key: peerKey(signingKey(0x76)))
             try await waitForEventCount(
                 2,
                 in: roots,
-                phase: "replacement advertiser retry"
+                phase: "both grinds from the honest index"
             )
             let admittedRoots = await roots.snapshot()
-            let servedRoots = await delegate.servedRoots()
-            XCTAssertEqual(
-                servedRoots,
-                Set(attachments.map(\.summary.attachmentCID))
-            )
-            XCTAssertEqual(admittedRoots.count, 2)
             XCTAssertEqual(Set(admittedRoots), Set(proofs.map(\.rootCID)))
+            let honestServed = Set(await honestSource.servedRoots())
+            XCTAssertTrue(honestServed.isSuperset(of: attachments.map(\.rawCID)))
             let eagerAdmissions = await eager.snapshot()
             XCTAssertTrue(
                 eagerAdmissions.isEmpty,
-                "a portable attachment is a network block: weighed, \(eagerAdmissions)"
+                "a proof from a peer index is a network block: weighed, \(eagerAdmissions)"
             )
         } catch {
-            await firstAdmissionGate.releaseAll()
-            await replacement.stop()
+            await honestPeer.stop()
+            await junkPeer.stop()
             await blockAdvertiser.stop()
-            await evidencePeer.stop()
             await parent.stop()
             await runtime.stop()
             throw error
         }
-        await firstAdmissionGate.releaseAll()
-        await replacement.stop()
+        await honestPeer.stop()
+        await junkPeer.stop()
         await blockAdvertiser.stop()
-        await evidencePeer.stop()
         await parent.stop()
         await runtime.stop()
     }

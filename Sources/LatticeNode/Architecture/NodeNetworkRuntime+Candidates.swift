@@ -214,37 +214,12 @@ extension NodeNetworkRuntime {
     }
 
     /// `NetworkInterface.announceCarriedEvidence`: the service admitted a
-    /// carrier-linked block under `package` outside the candidate worker.
+    /// carrier-linked block under a package outside the candidate worker,
+    /// which may have changed the child-evidence index root.
     func announceCarriedEvidence(_ package: AuthenticatedChildPackage) async {
         guard isRunning, let process else { return }
-        await announcePortableAttachment(
-            package,
+        scheduleChildEvidenceRootAnnounce(
             generation: runtimeGeneration,
-            process: process
-        )
-    }
-
-    /// Announces the portable attachment a carrier-linked admission under
-    /// `authenticated` stored, so overlay peers can fetch the block's proof.
-    private func announcePortableAttachment(
-        _ authenticated: AuthenticatedChildPackage,
-        generation: UInt64,
-        process: ChainProcess
-    ) async {
-        guard let edge = await DirectChildEdge.derive(
-                from: authenticated.package.proof
-              ), let edgeCID = edge.edgeCID,
-              let portableAttachmentCID = try? await process
-                .store.portableEvidenceVolumeCID(
-                    scope: .incomingCarrier,
-                    edgeCID: edgeCID,
-                    rootCID: authenticated.package.proof.rootCID
-                ) else { return }
-        await announcePortableAttachmentAvailability(
-            edgeCID: edgeCID,
-            rootCID: authenticated.package.proof.rootCID,
-            attachmentCID: portableAttachmentCID,
-            generation: generation,
             process: process
         )
     }
@@ -558,13 +533,14 @@ extension NodeNetworkRuntime {
             guard isCurrentRuntime(generation: generation, process: process) else {
                 return
             }
-            if let authenticated = authenticatedPackage {
-                await announcePortableAttachment(
-                    authenticated,
-                    generation: generation,
-                    process: process
-                )
-            }
+        }
+        if authenticatedPackage != nil {
+            // An admission under a package may have added a proof to the
+            // child-evidence index: push the root if it moved.
+            scheduleChildEvidenceRootAnnounce(
+                generation: generation,
+                process: process
+            )
         }
 
         syncTrace("admit \(candidate.blockCID.prefix(12)) weighed=\(candidate.weighed) decision=\(outcome.decision)")
@@ -605,16 +581,15 @@ extension NodeNetworkRuntime {
                 return
             }
         }
-        // A cold-synced block arrives without the portable package the live path
+        // A cold-synced block arrives without the package the live path
         // carries. When it needs a child proof this node cannot recover locally
-        // (its own parent never mined the carriers), solicit the package from the
-        // block's supplier so the retry admits it exactly like the live path.
+        // (its own parent never mined the carriers), look it up in the overlay
+        // peers' child-evidence indexes; each proof found is enqueued as a
+        // package seed, so the retry admits it exactly like the live path.
         if authenticatedPackage == nil,
            case .unavailable(.childProof(_, let childCID)?) = outcome.decision {
-            await requestPortableAttachmentLocate(
-                for: childCID,
-                candidate: candidate,
-                supplierPublicKey: attempt.attribution.soleRemoteSupplierPublicKey,
+            wantChildEvidence(
+                childCID,
                 generation: generation,
                 process: process
             )

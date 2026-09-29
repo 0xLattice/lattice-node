@@ -143,6 +143,14 @@ extension NodeNetworkRuntime {
             guard isCurrentRuntime(generation: generation, process: process) else {
                 return
             }
+            await sendChildEvidenceRoot(
+                to: peer,
+                generation: generation,
+                process: process
+            )
+            guard isCurrentRuntime(generation: generation, process: process) else {
+                return
+            }
             // The peer's frontier is pulled by `pullFrontierIfAtEdge` once its
             // tip is known (its own hello-reply announcement) and we are at
             // the live edge with respect to it — never blindly here.
@@ -195,35 +203,12 @@ extension NodeNetworkRuntime {
                 generation: generation,
                 process: process
             )
-        case NodeNetworkTopic.portableAttachmentAvailable:
-            guard let available = try? PortableAttachmentAvailableMessage
+        case NodeNetworkTopic.childEvidenceRoot:
+            guard let root = try? ChildEvidenceRootMessage
                 .decoded(message.payload) else { return }
-            let handled = enqueuePortableEvidence(
-                PortableAttachmentSummary(
-                    edgeCID: available.edgeCID,
-                    rootCID: available.rootCID,
-                    attachmentCID: available.attachmentCID
-                ),
+            receiveChildEvidenceRoot(
+                root.rootCID,
                 from: peer,
-                generation: generation,
-                process: process
-            )
-            if !handled { await overlay.recycleSession(ifCurrent: peer) }
-        case NodeNetworkTopic.portableAttachmentIndexRequest:
-            guard let request = try? PortableAttachmentIndexRequestMessage
-                .decoded(message.payload) else { return }
-            await servePortableAttachmentIndex(
-                request,
-                to: peer,
-                generation: generation,
-                process: process
-            )
-        case NodeNetworkTopic.portableAttachmentLocateRequest:
-            guard let request = try? PortableAttachmentLocateRequestMessage
-                .decoded(message.payload) else { return }
-            await servePortableAttachmentLocate(
-                request,
-                to: peer,
                 generation: generation,
                 process: process
             )
@@ -377,7 +362,6 @@ extension NodeNetworkRuntime {
             // Answers a peer's one-shot frontier pull (see
             // `pullFrontierIfAtEdge`) with one page of accepted leaves; older
             // peers' cursored descent still pages through the same handler.
-            // The portable-attachment-index pair stays legacy-served only.
             guard
                 let request = try? AcceptedLeavesRequestMessage.decoded(
                     message.payload
@@ -846,444 +830,6 @@ extension NodeNetworkRuntime {
         }
     }
 
-    func announcePortableAttachmentAvailability(
-        edgeCID: String,
-        rootCID: String,
-        attachmentCID: String,
-        generation: UInt64,
-        process: ChainProcess
-    ) async {
-        guard let payload = try? PortableAttachmentAvailableMessage(
-            edgeCID: edgeCID,
-            rootCID: rootCID,
-            attachmentCID: attachmentCID
-        ).encoded() else { return }
-        for peer in readyOverlayPeers {
-            guard isCurrentRuntime(generation: generation, process: process) else {
-                return
-            }
-            _ = await overlay.sendMessage(
-                to: peer,
-                topic: NodeNetworkTopic.portableAttachmentAvailable,
-                payload: payload
-            )
-        }
-    }
-
-    /// Legacy-served: this node no longer walks a peer's evidence index (a
-    /// never-validated carrier's proof is solicited per block through the
-    /// locate path instead), but keeps answering so an older child still
-    /// recovers from it. Scheduled for deletion with the accepted-leaves
-    /// server the release after the fleet upgrades past this one.
-    private func servePortableAttachmentIndex(
-        _ request: PortableAttachmentIndexRequestMessage,
-        to peer: AuthenticatedPeer,
-        generation: UInt64,
-        process: ChainProcess
-    ) async {
-        guard !configuration.address.isNexus else { return }
-        let after = request.after.map {
-            ChildRootAttachmentSummary(
-                edgeCID: $0.edgeCID,
-                rootCID: $0.rootCID,
-                attachmentCID: $0.attachmentCID
-            )
-        }
-        guard let entries = try? await process.store.childRootAttachmentSummaries(
-            scope: .incomingCarrier,
-            directory: configuration.address.directory,
-            after: after,
-            limit: PortableAttachmentIndexResponseMessage.maximumEntries + 1
-        ), isCurrentRuntime(generation: generation, process: process) else {
-            return
-        }
-        let page = entries.prefix(
-            PortableAttachmentIndexResponseMessage.maximumEntries
-        ).map {
-            PortableAttachmentSummary(
-                edgeCID: $0.edgeCID,
-                rootCID: $0.rootCID,
-                attachmentCID: $0.attachmentCID
-            )
-        }
-        guard let payload = try? PortableAttachmentIndexResponseMessage(
-            requestID: request.requestID,
-            after: request.after,
-            entries: Array(page),
-            hasMore: entries.count > page.count
-        ).encoded() else { return }
-        _ = await overlay.sendMessage(
-            to: peer,
-            topic: NodeNetworkTopic.portableAttachmentIndexResponse,
-            payload: payload
-        )
-    }
-
-    /// Answer a per-block evidence request: if this process holds the recovered
-    /// incoming-carrier package for the asked child block, tell the requester the
-    /// attachment is available (the same message the live announce path emits), so
-    /// it recovers the package through the ordinary portable-evidence path. A peer
-    /// that cannot recover the block stays silent.
-    private func servePortableAttachmentLocate(
-        _ request: PortableAttachmentLocateRequestMessage,
-        to peer: AuthenticatedPeer,
-        generation: UInt64,
-        process: ChainProcess
-    ) async {
-        guard !configuration.address.isNexus else { return }
-        guard let package = try? await process
-                .recoveredAuthenticatedChildPackage(for: request.childCID),
-              let edge = await DirectChildEdge.derive(from: package.package.proof),
-              let edgeCID = edge.edgeCID,
-              let attachmentCID = try? await process.store.portableEvidenceVolumeCID(
-                scope: .incomingCarrier,
-                edgeCID: edgeCID,
-                rootCID: package.package.proof.rootCID
-              )
-        else {
-            // A silent miss here on a block only this node can prove is a
-            // chain-liveness event: no follower can ever cross that block.
-            syncTrace("locate-serve \(request.childCID) miss")
-            return
-        }
-        syncTrace("locate-serve \(request.childCID) hit")
-        guard isCurrentRuntime(generation: generation, process: process),
-              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
-              let payload = try? PortableAttachmentAvailableMessage(
-                edgeCID: edgeCID,
-                rootCID: package.package.proof.rootCID,
-                attachmentCID: attachmentCID
-              ).encoded()
-        else { return }
-        _ = await overlay.sendMessage(
-            to: peer,
-            topic: NodeNetworkTopic.portableAttachmentAvailable,
-            payload: payload
-        )
-    }
-
-    /// Solicit per-block evidence from the peers that can serve the block: the
-    /// candidate's advertisers and the peer that supplied its content. Used when a
-    /// cold-synced block needs a child proof this node cannot recover locally
-    /// (its own parent never mined the carriers), so the block's supplier conveys
-    /// the portable package the live path would have carried.
-    func requestPortableAttachmentLocate(
-        for childCID: String,
-        candidate: Candidate,
-        supplierPublicKey: String?,
-        generation: UInt64,
-        process: ChainProcess
-    ) async {
-        guard !configuration.address.isNexus else { return }
-        var peers: [AuthenticatedPeer] = readyPeers(for: candidate.providers)
-        if let supplierPublicKey, let key = try? PeerKey(supplierPublicKey),
-           let peer = overlayState.overlayRecords[key]?.readyPeer,
-           !peers.contains(where: { $0.key == key }) {
-            peers.append(peer)
-        }
-        // Blocks reached through the predecessor walk carry no advertiser, and
-        // pin-resolved content need not attribute a sole supplier. Fall back to
-        // the current overlay peers so the block's holder is still asked; each
-        // peer either has the package or stays silent (same reach as the live
-        // announce broadcast), bounded by the exact-source cap.
-        if peers.isEmpty {
-            peers = readyOverlayPeers
-        }
-        guard !peers.isEmpty,
-              let payload = try? PortableAttachmentLocateRequestMessage(
-                requestID: makeRequestID(),
-                childCID: childCID
-              ).encoded() else { return }
-        for peer in peers.prefix(Self.maximumExactContentSources) {
-            guard isCurrentRuntime(generation: generation, process: process) else {
-                return
-            }
-            let sent = await overlay.sendMessage(
-                to: peer,
-                topic: NodeNetworkTopic.portableAttachmentLocateRequest,
-                payload: payload
-            )
-            syncTrace(
-                "locate-request \(childCID) "
-                    + "peer=\(peer.key.hex.prefix(8)) sent=\(sent)"
-            )
-        }
-    }
-
-    private func enqueuePortableEvidence(
-        _ summary: PortableAttachmentSummary,
-        from peer: AuthenticatedPeer,
-        generation: UInt64,
-        process: ChainProcess
-    ) -> Bool {
-        guard !configuration.address.isNexus,
-              isCurrentRuntime(generation: generation, process: process),
-              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
-            return false
-        }
-        let lease = EvidenceVolumeLease(
-            plane: .overlay,
-            sessionID: peer.sessionID,
-            attachmentCID: summary.attachmentCID
-        )
-        guard !sessionLeases.activeEvidenceVolumes.contains(lease),
-              sessionLeases.portableEvidenceWork[lease] == nil else { return true }
-        let work = PortableEvidenceWork(
-            summary: summary,
-            peer: peer,
-            generation: generation,
-            process: process
-        )
-        let activePortable = sessionLeases.activeEvidenceVolumes.lazy.filter {
-            $0.plane == .overlay
-        }.count
-        guard sessionLeases.portableEvidenceWork.count + parentEvidence.activeOperationCount
-                + activePortable
-                < Self.maximumEvidenceCandidates - 1 else {
-            // Overflow drops the item, never the session: for a NATed
-            // follower the announcing peer may be the ONLY session, and a
-            // catch-up burst would tear down its own evidence source. The
-            // dropped item is re-solicited when the waiting candidate's
-            // window expires and re-enters admission.
-            syncTrace(
-                "evidence-overflow drop \(summary.attachmentCID)"
-            )
-            return true
-        }
-        sessionLeases.portableEvidenceWork[lease] = work
-        sessionLeases.portableEvidenceOrder.append(lease)
-        startPortableEvidenceWorker()
-        return true
-    }
-
-    private func startPortableEvidenceWorker() {
-        overlayState.portableEvidenceWorker.start { token in
-            Task { [weak self] in
-                await self?.drainPortableEvidence(token: token)
-            }
-        }
-    }
-
-    /// Drains while the slot still holds this worker: one stopped by a
-    /// stop, and replaced by the restart's, neither drains the new queue
-    /// nor empties the new worker's handle.
-    func drainPortableEvidence(token: LifetimeToken) async {
-        defer {
-            if overlayState.portableEvidenceWorker.clear(token),
-               !sessionLeases.portableEvidenceOrder.isEmpty {
-                startPortableEvidenceWorker()
-            }
-        }
-        while overlayState.portableEvidenceWorker.holds(token),
-              !sessionLeases.portableEvidenceOrder.isEmpty {
-            let lease = sessionLeases.portableEvidenceOrder.removeFirst()
-            guard let work = sessionLeases.portableEvidenceWork.removeValue(forKey: lease)
-            else { continue }
-            let handled = await recoverPortableAttachment(
-                work.summary,
-                from: work.peer,
-                generation: work.generation,
-                process: work.process
-            )
-            syncTrace(
-                "evidence-recover \(work.summary.attachmentCID) "
-                    + "handled=\(handled)"
-            )
-            if !handled {
-                await overlay.recycleSession(ifCurrent: work.peer)
-            }
-        }
-    }
-
-    private func recoverPortableAttachment(
-        _ summary: PortableAttachmentSummary,
-        from peer: AuthenticatedPeer,
-        generation: UInt64,
-        process: ChainProcess
-    ) async -> Bool {
-        guard !configuration.address.isNexus,
-              isCurrentRuntime(generation: generation, process: process),
-              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
-            return false
-        }
-        let lease = EvidenceVolumeLease(
-            plane: .overlay,
-            sessionID: peer.sessionID,
-            attachmentCID: summary.attachmentCID
-        )
-        if sessionLeases.activeEvidenceVolumes.contains(lease) { return true }
-        // Reserve one slot for the structurally-required parent endpoint (a
-        // connectivity reservation, NOT validation trust — parent facts are still
-        // verified and never vouch for the child transition) so overlay churn
-        // cannot starve consensus-critical hierarchy evidence.
-        // nil: a slot is free. The stale and lease checks also pass on the
-        // first step: both were just made above with no suspension between.
-        let slotWait: Bool? = await Timers.poll(
-            every: planeConfigurations.overlay.requestTimeout,
-            onCancel: false
-        ) {
-            guard isCurrentRuntime(
-                generation: generation,
-                process: process
-            ), overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
-                return .done(true)
-            }
-            if sessionLeases.activeEvidenceVolumes.contains(lease) { return .done(true) }
-            return sessionLeases.activeEvidenceVolumes.count >= Self.maximumEvidenceCandidates - 1
-                ? .again
-                : .done(nil)
-        }
-        if let slotWait { return slotWait }
-        sessionLeases.activeEvidenceVolumes.insert(lease)
-        defer { releaseEvidenceVolume(lease) }
-        if let evidence = try? await process.store.issuedChildEvidence(
-            scope: .incomingCarrier,
-            edgeCID: summary.edgeCID,
-            rootCID: summary.rootCID
-        ) {
-            guard isCurrentRuntime(
-                generation: generation,
-                process: process
-            ), overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID else {
-                return true
-            }
-            // A rejected enqueue is LOCAL congestion (ready pool full), not
-            // peer misbehavior: the recovery succeeded, so never let callers
-            // recycle the session over it. The rejection already requested
-            // inventory recovery, which re-derives the item later.
-            // A portable attachment carries the same verified proof the
-            // parent serves: a network block, weighed.
-            _ = enqueueCandidate(CandidateSeed(
-                blockCID: evidence.edge.childCID,
-                package: AuthenticatedChildPackage(
-                    package: ChildValidationPackage(proof: evidence.proof)
-                ),
-                weighed: true
-            ), generation: generation)
-            return true
-        }
-        // The peer advertising an attachment is responsible for serving its
-        // immutable CAS graph. Binding resolution to that exact authenticated
-        // session prevents a false summary from being blamed on an honest
-        // third-party content provider.
-        let source = IvyRootContentSource(
-            ivy: overlay,
-            peer: peer,
-            maximumMembers: 1,
-            maximumStorageBytes: ChildEvidenceVolume.maximumFramedBytes,
-            maximumArchiveBytes: ChildEvidenceVolume.maximumArchiveBytes
-        )
-        let resolved: (
-            value: ChildEvidenceVolume?,
-            attribution: IvyRootContentSource.Attribution
-        )
-        switch await Timers.retryWhileCapacityUnavailable(
-            every: planeConfigurations.overlay.requestTimeout,
-            attempt: {
-                await source.withRootTracing(
-                    summary.attachmentCID
-                ) { session in
-                    await Self.resolveEvidenceVolume(
-                        summary.attachmentCID,
-                        source: session
-                    )
-                }
-            },
-            capacityUnavailable: { $0.attribution.localCapacityUnavailable },
-            stillCurrent: {
-                isCurrentRuntime(generation: generation, process: process)
-                    && overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID
-            }
-        ) {
-        case .value(let fetched):
-            resolved = fetched
-        case .cancelled, .stale:
-            return true
-        }
-        let verified = await Self.verifiedPortableAttachment(
-            resolved.value,
-            summary: summary,
-            maximumEncodedSize: configuration.resourcePolicy.maximumParentWitnessBytes
-        )
-        switch Self.portableAttachmentDisposition(
-            verified,
-            current: isCurrentRuntime(generation: generation, process: process)
-                && overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
-            complete: resolved.attribution.allResponsesComplete,
-            soleSupplier: resolved.attribution.soleRemoteSupplierPublicKey
-        ) {
-        case .stale:
-            return true
-        case .reject(let blamed):
-            if let blamed {
-                await overlay.reportDeficientContent(
-                    rootCID: summary.attachmentCID,
-                    servedBy: PeerID(publicKey: blamed)
-                )
-            }
-            return false
-        case .enqueue(let attachment):
-            // See above: a rejected enqueue after a VERIFIED recovery is local
-            // congestion; only verification failures return false (and recycle).
-            _ = enqueueCandidate(CandidateSeed(
-                blockCID: attachment.edge.childCID,
-                package: AuthenticatedChildPackage(package: attachment.package),
-                weighed: true
-            ), generation: generation)
-            return true
-        }
-    }
-
-    /// The package and edge a fetched attachment proves for `summary`, or nil
-    /// when its bytes do not: they decode within the witness bound, prove the
-    /// summary's root, and derive the summary's edge. Depends on the bytes
-    /// alone.
-    nonisolated static func verifiedPortableAttachment(
-        _ attachment: ChildEvidenceVolume?,
-        summary: PortableAttachmentSummary,
-        maximumEncodedSize: Int
-    ) async -> (package: ChildValidationPackage, edge: DirectChildEdge)? {
-        guard let attachment,
-              let envelope = try? ChildValidationPackageEnvelope.decode(
-                attachment.envelopeBytes,
-                maximumEncodedSize: maximumEncodedSize
-              ),
-              let package = try? envelope.makeValidationPackage(),
-              package.proof.rootCID == summary.rootCID,
-              let edge = await DirectChildEdge.derive(from: package.proof),
-              edge.edgeCID == summary.edgeCID else {
-            return nil
-        }
-        return (package, edge)
-    }
-
-    enum PortableAttachmentDisposition<Verified> {
-        /// Verified on the session that is still current.
-        case enqueue(Verified)
-        /// Verified, but the runtime or the session changed while it was
-        /// fetched and checked: nothing to act on, and the supplier served
-        /// good bytes.
-        case stale
-        /// The bytes failed; `blame` is the sole supplier of a complete fetch.
-        case reject(blame: String?)
-    }
-
-    /// What to do with a checked attachment. Blame follows the bytes alone:
-    /// bytes that fail are their sole supplier's fault whatever the node's
-    /// state, and bytes that verify are never blamed, even when the runtime
-    /// or the session changed before they could be used.
-    nonisolated static func portableAttachmentDisposition<Verified>(
-        _ verified: Verified?,
-        current: Bool,
-        complete: Bool,
-        soleSupplier: String?
-    ) -> PortableAttachmentDisposition<Verified> {
-        guard let verified else {
-            return .reject(blame: complete ? soleSupplier : nil)
-        }
-        return current ? .enqueue(verified) : .stale
-    }
-
     nonisolated static func resolveEvidenceVolume(
         _ cid: String,
         childCID: String? = nil,
@@ -1540,5 +1086,322 @@ extension NodeNetworkRuntime {
             pending.timeout.cancel()
             pending.continuation.resume(returning: [])
         }
+    }
+}
+
+// MARK: - Child-evidence index sync
+
+extension NodeNetworkRuntime {
+    /// Child blocks awaiting a proof lookup are bounded; a block refused
+    /// here is wanted again at its next parked retry.
+    static let maximumWantedChildEvidence = 256
+
+    /// Tells one peer this node's current child-evidence root (on hello).
+    func sendChildEvidenceRoot(
+        to peer: AuthenticatedPeer,
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        guard !configuration.address.isNexus,
+              let root = try? await process.childEvidenceRoot(),
+              let payload = try? ChildEvidenceRootMessage(rootCID: root).encoded(),
+              isCurrentRuntime(generation: generation, process: process),
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID
+        else { return }
+        _ = await overlay.sendMessage(
+            to: peer,
+            topic: NodeNetworkTopic.childEvidenceRoot,
+            payload: payload
+        )
+    }
+
+    /// The root may have changed: push it to every ready peer if it did.
+    /// Requests made while a push runs coalesce into one more push.
+    func scheduleChildEvidenceRootAnnounce(
+        generation: UInt64,
+        process: ChainProcess
+    ) {
+        guard !configuration.address.isNexus,
+              isCurrentRuntime(generation: generation, process: process) else {
+            return
+        }
+        overlayState.childEvidenceAnnounceDirty = true
+        overlayState.childEvidenceAnnounce.start { token in
+            Task { [weak self] in
+                await self?.announceChildEvidenceRoot(
+                    token: token,
+                    generation: generation,
+                    process: process
+                )
+            }
+        }
+    }
+
+    func announceChildEvidenceRoot(
+        token: LifetimeToken,
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        defer {
+            if overlayState.childEvidenceAnnounce.clear(token),
+               overlayState.childEvidenceAnnounceDirty {
+                scheduleChildEvidenceRootAnnounce(
+                    generation: generation,
+                    process: process
+                )
+            }
+        }
+        while overlayState.childEvidenceAnnounce.holds(token),
+              overlayState.childEvidenceAnnounceDirty {
+            overlayState.childEvidenceAnnounceDirty = false
+            guard let root = try? await process.childEvidenceRoot(),
+                  overlayState.childEvidenceAnnounce.holds(token),
+                  root != overlayState.announcedChildEvidenceRoot,
+                  let payload = try? ChildEvidenceRootMessage(rootCID: root).encoded()
+            else { continue }
+            overlayState.announcedChildEvidenceRoot = root
+            for peer in readyOverlayPeers {
+                guard overlayState.childEvidenceAnnounce.holds(token) else { return }
+                _ = await overlay.sendMessage(
+                    to: peer,
+                    topic: NodeNetworkTopic.childEvidenceRoot,
+                    payload: payload
+                )
+            }
+        }
+    }
+
+    /// Keeps a peer's latest root; a new one is walked against ours, and
+    /// searched for the blocks still waiting on a proof.
+    func receiveChildEvidenceRoot(
+        _ rootCID: String,
+        from peer: AuthenticatedPeer,
+        generation: UInt64,
+        process: ChainProcess
+    ) {
+        guard !configuration.address.isNexus,
+              isCurrentRuntime(generation: generation, process: process) else {
+            return
+        }
+        let root = PeerEvidenceRoot(sessionID: peer.sessionID, rootCID: rootCID)
+        let lookup = !overlayState.wantedChildEvidence.isEmpty
+        let changed = overlayState.overlayRecords.update(session: peer) { record in
+            guard record.evidenceRoot != root else { return false }
+            record.evidenceRoot = root
+            record.evidenceWalkDirty = true
+            record.evidenceLookupDirty = record.evidenceLookupDirty || lookup
+            return true
+        } ?? false
+        guard changed else { return }
+        startChildEvidenceSync(generation: generation, process: process)
+    }
+
+    /// A block needs a proof this node lacks: look it up in the latest roots
+    /// of up to `maximumExactContentSources` ready peers now, and in every
+    /// root that changes until it is found.
+    func wantChildEvidence(
+        _ childCID: String,
+        generation: UInt64,
+        process: ChainProcess
+    ) {
+        guard !configuration.address.isNexus,
+              isCurrentRuntime(generation: generation, process: process) else {
+            return
+        }
+        if !overlayState.wantedChildEvidence.contains(childCID) {
+            guard overlayState.wantedChildEvidence.count
+                    < Self.maximumWantedChildEvidence else {
+                syncTrace("child-evidence want-overflow \(childCID)")
+                return
+            }
+            overlayState.wantedChildEvidence.insert(childCID)
+        }
+        let peers = overlayState.overlayRecords.records
+            .filter { $0.value.readyPeer != nil && $0.value.evidenceRoot != nil }
+            .keys
+            .shuffled()
+            .prefix(Self.maximumExactContentSources)
+        for key in peers {
+            overlayState.overlayRecords.updateExisting(key) {
+                $0.evidenceLookupDirty = true
+            }
+        }
+        startChildEvidenceSync(generation: generation, process: process)
+    }
+
+    private func startChildEvidenceSync(
+        generation: UInt64,
+        process: ChainProcess
+    ) {
+        overlayState.childEvidenceSync.start { token in
+            Task { [weak self] in
+                await self?.runChildEvidenceSync(
+                    token: token,
+                    generation: generation,
+                    process: process
+                )
+            }
+        }
+    }
+
+    /// The one serial worker: one peer root at a time, so its fetches are
+    /// bounded by construction.
+    func runChildEvidenceSync(
+        token: LifetimeToken,
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        defer {
+            if overlayState.childEvidenceSync.clear(token),
+               nextChildEvidencePeer() != nil,
+               isCurrentRuntime(generation: generation, process: process) {
+                startChildEvidenceSync(generation: generation, process: process)
+            }
+        }
+        while overlayState.childEvidenceSync.holds(token),
+              isCurrentRuntime(generation: generation, process: process),
+              let key = nextChildEvidencePeer() {
+            guard let (lookup, walk, root) = overlayState.overlayRecords
+                .updateExisting(key, { record in
+                    defer {
+                        record.evidenceLookupDirty = false
+                        record.evidenceWalkDirty = false
+                    }
+                    return (
+                        record.evidenceLookupDirty,
+                        record.evidenceWalkDirty,
+                        record.evidenceRoot
+                    )
+                }),
+                  let record = root,
+                  let peer = overlayState.overlayRecords[key]?.readyPeer,
+                  peer.sessionID == record.sessionID else { continue }
+            await syncChildEvidence(
+                from: peer,
+                rootCID: record.rootCID,
+                lookup: lookup,
+                walk: walk,
+                generation: generation,
+                process: process
+            )
+        }
+    }
+
+    /// The next peer, in key order, with a root still to be walked or
+    /// searched.
+    private func nextChildEvidencePeer() -> PeerKey? {
+        overlayState.overlayRecords.records
+            .filter { $0.value.evidenceWalkDirty || $0.value.evidenceLookupDirty }
+            .keys
+            .min(by: { $0.hex < $1.hex })
+    }
+
+    /// Fetches, from one peer's root, the proofs this node lacks for the
+    /// blocks it wants (`lookup`) and for the blocks its own index holds
+    /// (`walk`), through one budgeted session bound to that peer. Every
+    /// verified proof is a package seed; a failure is blamed on the sole
+    /// supplier of a complete fetch, whose root is then dropped.
+    private func syncChildEvidence(
+        from peer: AuthenticatedPeer,
+        rootCID: String,
+        lookup: Bool,
+        walk: Bool,
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        var wanted: [String] = []
+        if lookup {
+            for childCID in overlayState.wantedChildEvidence.sorted()
+                .prefix(Self.maximumEvidenceCandidates) {
+                if await process.hasAcceptedBlock(childCID) {
+                    overlayState.wantedChildEvidence.remove(childCID)
+                } else {
+                    wanted.append(childCID)
+                }
+            }
+        }
+        let localRoot = walk ? (try? await process.childEvidenceRoot()) ?? nil : nil
+        guard !wanted.isEmpty || (localRoot != nil && localRoot != rootCID),
+              isCurrentRuntime(generation: generation, process: process) else {
+            return
+        }
+        let source = IvyRootContentSource(
+            ivy: overlay,
+            peer: peer,
+            policy: configuration.resourcePolicy
+        )
+        let local = process.childEvidenceFetcher
+        let wantedKeys = wanted
+        let maximumEncodedSize = configuration.resourcePolicy.maximumParentWitnessBytes
+        let result = await source.withRootTracing(rootCID) { session in
+            await ChildEvidenceIndex.collect(
+                peerRoot: rootCID,
+                localRoot: localRoot,
+                wanted: wantedKeys,
+                peer: CoalescingFetcher(session),
+                local: local,
+                maximumEncodedSize: maximumEncodedSize,
+                weighs: { proof, childCID in
+                    await process.childEvidenceWeighs(proof, childCID: childCID)
+                }
+            )
+        }
+        let collected = result.value
+        syncTrace(
+            "child-evidence sync peer=\(peer.key.hex.prefix(8)) "
+                + "root=\(rootCID.prefix(12)) wanted=\(wanted.count) "
+                + "found=\(collected.verified.count) failed=\(collected.failed)"
+        )
+        let blamed = Self.childEvidenceBlame(
+            failed: collected.failed && !collected.localFailure,
+            complete: result.attribution.allResponsesComplete,
+            soleSupplier: result.attribution.soleRemoteSupplierPublicKey
+        )
+        if let blamed {
+            await overlay.reportDeficientContent(
+                rootCID: rootCID,
+                servedBy: PeerID(publicKey: blamed)
+            )
+        }
+        guard isCurrentRuntime(generation: generation, process: process),
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID
+                == peer.sessionID else {
+            return
+        }
+        for (entry, package) in collected.verified {
+            // A rejected enqueue is local congestion, not the peer's fault:
+            // the block stays wanted and is looked up again.
+            if enqueueCandidate(CandidateSeed(
+                blockCID: entry.childCID,
+                package: AuthenticatedChildPackage(package: package),
+                weighed: true
+            ), generation: generation) {
+                overlayState.wantedChildEvidence.remove(entry.childCID)
+            }
+        }
+        if blamed != nil {
+            overlayState.overlayRecords.update(session: peer) {
+                $0.evidenceRoot = nil
+            }
+            await overlay.recycleSession(ifCurrent: peer)
+        } else if collected.failed, !collected.verified.isEmpty {
+            // The session's budget ran out mid-pass: the roots still differ,
+            // so the rest is fetched on another pass.
+            overlayState.overlayRecords.update(session: peer) {
+                $0.evidenceWalkDirty = true
+                $0.evidenceLookupDirty = $0.evidenceLookupDirty || lookup
+            }
+        }
+    }
+
+    /// Blame follows the bytes alone: a pass that failed is its sole
+    /// supplier's fault when every response was complete, and never
+    /// otherwise; a pass that verified is never blamed.
+    nonisolated static func childEvidenceBlame(
+        failed: Bool,
+        complete: Bool,
+        soleSupplier: String?
+    ) -> String? {
+        failed && complete ? soleSupplier : nil
     }
 }

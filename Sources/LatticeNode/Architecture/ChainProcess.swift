@@ -480,6 +480,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         let carrierEvidence = try await Self.canonicalCarrierEvidence(
             blockHeader,
             authenticatedPackage: authenticatedChildPackage,
+            chainPath: configuration.chainPath,
             fetcher: attemptFetcher
         )
         let stage: @Sendable (BlockImportStagingContext) async throws -> Void = {
@@ -577,6 +578,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         let evidence = try await Self.canonicalCarrierEvidence(
             blockHeader,
             authenticatedPackage: authenticatedChildPackage,
+            chainPath: configuration.chainPath,
             fetcher: attemptFetcher
         )
         try await persistHierarchyArtifacts(
@@ -687,6 +689,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             carrierEvidence = try await Self.canonicalCarrierEvidence(
                 blockHeader,
                 authenticatedPackage: authenticatedPackage,
+                chainPath: configuration.chainPath,
                 fetcher: attemptFetcher
             )
         } else {
@@ -2293,9 +2296,12 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
 
     /// Proof bytes authenticate the parent path. Child validation content is
     /// resolved from this child process's local or exact peer source.
+    /// `weighs`: the proof contributes work to the child, the objective
+    /// predicate for entering the child-evidence index.
     private nonisolated static func canonicalCarrierEvidence(
         _ header: BlockHeader,
         authenticatedPackage: AuthenticatedChildPackage?,
+        chainPath: [String],
         fetcher: any Fetcher
     ) async throws -> ImportCarrierEvidence {
         guard let authenticatedPackage else {
@@ -2305,7 +2311,45 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         let child = try await resolvedCandidate(header, fetcher: fetcher)
         return ImportCarrierEvidence(
             proof: package.proof,
-            childCID: try BlockHeader(node: child).rawCID
+            childCID: try BlockHeader(node: child).rawCID,
+            weighs: await Self.proofWeighs(
+                package.proof, child: child, chainPath: chainPath
+            )
+        )
+    }
+
+    private nonisolated static func proofWeighs(
+        _ proof: ChildBlockProof,
+        child: Block,
+        chainPath: [String]
+    ) async -> Bool {
+        guard case .success(let verified) = await proof.verifySecuringWork(
+            child: child,
+            chainPath: chainPath
+        ) else { return false }
+        return verified.contribution != nil
+    }
+
+    /// The child-evidence index's root; nil while it is empty.
+    func childEvidenceRoot() async throws -> String? {
+        try await store.childEvidenceRoot()
+    }
+
+    /// Reads this process's own Volumes: the child-evidence index a peer's
+    /// root is compared against.
+    nonisolated var childEvidenceFetcher: any Fetcher { localFetcher }
+
+    /// Whether `proof` contributes work to the child block `childCID`, or
+    /// nil when that block is not held locally and it cannot be judged.
+    func childEvidenceWeighs(
+        _ proof: ChildBlockProof,
+        childCID: String
+    ) async -> Bool? {
+        guard let child = try? await BlockHeader(
+            rawCID: childCID, node: nil, encryptionInfo: nil
+        ).resolve(fetcher: localFetcher).node else { return nil }
+        return await Self.proofWeighs(
+            proof, child: child, chainPath: configuration.chainPath
         )
     }
 

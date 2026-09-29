@@ -246,11 +246,21 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// The tallest tip the peer announced, with the session it came on.
         /// Kept across a reconnect: every reader compares its session.
         var announcedTip: (height: UInt64, peer: AuthenticatedPeer)?
+        /// The peer's latest child-evidence index root (only the latest is
+        /// kept: it supersedes every earlier one), and whether it is still
+        /// to be walked against ours or searched for wanted blocks.
+        /// Owner: Overlay.receiveChildEvidenceRoot / Overlay.wantChildEvidence /
+        ///     Overlay.runChildEvidenceSync / Overlay.syncChildEvidence.
+        var evidenceRoot: PeerEvidenceRoot?
+        var evidenceWalkDirty = false
+        var evidenceLookupDirty = false
 
         var isEmpty: Bool {
             session == nil && helloDeadline == nil && frontierPull == nil
                 && ancestryClaim == nil
                 && announcedTip == nil
+                && evidenceRoot == nil
+                && !evidenceWalkDirty && !evidenceLookupDirty
         }
 
         var liveSessionID: Data? { sessionPeer?.sessionID }
@@ -460,11 +470,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         }
     }
 
-    struct PortableEvidenceWork: Sendable {
-        let summary: PortableAttachmentSummary
-        let peer: AuthenticatedPeer
-        let generation: UInt64
-        let process: ChainProcess
+    /// An overlay peer's latest child-evidence index root, bound to the
+    /// session that pushed it.
+    struct PeerEvidenceRoot: Equatable {
+        let sessionID: Data
+        let rootCID: String
     }
 
     /// State keyed by session ID rather than peer key: in-flight serves and
@@ -479,8 +489,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         var servingReadEndpoints: Set<Data> = []
         var activeTransactionVolumes = Set<TransactionVolumeLease>()
         var activeEvidenceVolumes = Set<EvidenceVolumeLease>()
-        var portableEvidenceOrder: [EvidenceVolumeLease] = []
-        var portableEvidenceWork: [EvidenceVolumeLease: PortableEvidenceWork] = [:]
 
         mutating func discardServing(_ sessionID: Data) {
             servingAcceptedLeaves.remove(sessionID)
@@ -554,7 +562,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     var isRunning = false
     /// Overlay-plane state: sessions and records of the public overlay,
     /// its request tables, range sync, read-URL discovery, peer search and
-    /// the portable-evidence worker. Only overlay code touches it; the
+    /// the child-evidence index sync. Only overlay code touches it; the
     /// hierarchy side reaches it through the named seams.
     struct OverlayState {
         /// Per overlay peer key: the one authenticated session (pre- or
@@ -587,9 +595,22 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// peers it already holds.
         /// Owner: Lifecycle.clearRuntimeState / NodeNetworkRuntime.schedulePeerSearch.
         var peerSearchTask = TaskSlot()
-        /// Owner: Lifecycle.clearRuntimeState / Overlay.startPortableEvidenceWorker /
-        ///     Overlay.drainPortableEvidence.
-        var portableEvidenceWorker = TaskSlot()
+        /// Child blocks parked on a proof this node lacks, to be looked up
+        /// in peers' indexes.
+        /// Owner: Lifecycle.clearRuntimeState / Overlay.wantChildEvidence /
+        ///     Overlay.syncChildEvidence.
+        var wantedChildEvidence = Set<String>()
+        /// The one serial worker that looks up and walks peers' roots.
+        /// Owner: Lifecycle.clearRuntimeState / Overlay.startChildEvidenceSync /
+        ///     Overlay.runChildEvidenceSync.
+        var childEvidenceSync = TaskSlot()
+        /// Pushes this node's root when it changes; the dirty flag coalesces
+        /// every change made while a push runs into one more push.
+        /// Owner: Lifecycle.clearRuntimeState / Overlay.scheduleChildEvidenceRootAnnounce /
+        ///     Overlay.announceChildEvidenceRoot.
+        var childEvidenceAnnounce = TaskSlot()
+        var childEvidenceAnnounceDirty = false
+        var announcedChildEvidenceRoot: String?
     }
 
     /// Hierarchy-plane state: parent/child sessions and records, their
@@ -735,9 +756,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     )
     /// Owner: Hierarchy.recoverParentEvidence / Lifecycle.clearRuntimeState /
     ///     Overlay.handleOverlay / Overlay.reserveTransactionVolume /
-    ///     Overlay.receiveTransactionVolume / Overlay.enqueuePortableEvidence /
-    ///     Overlay.drainPortableEvidence / Overlay.recoverPortableAttachment /
-    ///     Overlay.discardServingSessions.
+    ///     Overlay.receiveTransactionVolume / Overlay.discardServingSessions.
     var sessionLeases = SessionLeases()
     /// Evidence recoveries waiting for an evidence Volume slot: each is
     /// woken when a slot is released, or by its own timeout (which also
@@ -1412,7 +1431,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         if let sync = overlayState.rangeSync.state { keys.insert(sync.peer.key) }
         keys.formUnion(hierarchyState.pendingEvidenceIndexes.values.map(\.peer.key))
         keys.formUnion(parentStateQueryGuard.peers.keys)
-        keys.formUnion(sessionLeases.portableEvidenceWork.values.map(\.peer.key))
         for hex in blockFetcher.debugSnapshot().providerKeys
             .union(parentEvidence.debugSnapshot().peerIDs) {
             if let key = try? PeerKey(hex) { keys.insert(key) }
@@ -1424,7 +1442,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         sessions.formUnion(sessionLeases.servingReadEndpoints)
         sessions.formUnion(sessionLeases.activeTransactionVolumes.map(\.sessionID))
         sessions.formUnion(sessionLeases.activeEvidenceVolumes.map(\.sessionID))
-        sessions.formUnion(sessionLeases.portableEvidenceOrder.map(\.sessionID))
 
         return NetworkDebugSnapshot(
             overlay: overlayState.overlayRecords.records.mapValues {

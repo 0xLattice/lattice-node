@@ -109,9 +109,7 @@ final class WireProtocolFuzzTests: XCTestCase {
                 // one here would test my guess, not the protocol.
                 readURLs: []
             )),
-            try seed(PortableAttachmentLocateRequestMessage(
-                requestID: 25, childCID: cids[4]
-            )),
+            try seed(ChildEvidenceRootMessage(rootCID: cids[4])),
         ]
     }
 
@@ -226,7 +224,7 @@ final class WireProtocolFuzzTests: XCTestCase {
             probe(AncestorRangeResponseMessage.self),
             probe(ReadEndpointRequestMessage.self),
             probe(ReadEndpointResponseMessage.self),
-            probe(PortableAttachmentLocateRequestMessage.self),
+            probe(ChildEvidenceRootMessage.self),
         ]
     }
 

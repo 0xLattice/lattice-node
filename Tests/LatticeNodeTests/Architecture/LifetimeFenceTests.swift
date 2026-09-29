@@ -120,13 +120,15 @@ final class LifetimeFenceTests: NetworkTrustTestCase {
         XCTAssertTrue(newerStillArmed)
     }
 
-    // MARK: - #202 item 2: the portable-evidence worker
+    // MARK: - #202 item 2: the child-evidence sync worker
 
-    func testAStalePortableDrainerLeavesTheNewerWorkerAndItsQueue() async throws {
+    func testAStaleEvidenceSyncWorkerLeavesTheNewerWorkerAndItsWork() async throws {
         let target = try await overlayRuntime(keyByte: 0xe4, requestTimeout: .seconds(5))
-        let outcome = await target.runtime.runStalePortableDrainerAfterRestart()
-        XCTAssertTrue(outcome.newerStillHeld, "the stale drainer emptied the newer handle")
-        XCTAssertEqual(outcome.queued, 1, "the stale drainer took the new generation's work")
+        let outcome = await target.runtime.runStaleEvidenceSyncAfterRestart(
+            process: target.process
+        )
+        XCTAssertTrue(outcome.newerStillHeld, "the stale worker emptied the newer handle")
+        XCTAssertEqual(outcome.queued, 1, "the stale worker took the new generation's work")
     }
 }
 
@@ -143,29 +145,30 @@ extension NodeNetworkRuntime {
         return overlayState.rangeSync.reentryTask.holds(newer)
     }
 
-    /// A drainer started before a stop runs after the restart started its
-    /// own and queued work for it.
-    fileprivate func runStalePortableDrainerAfterRestart() async -> (
-        newerStillHeld: Bool, queued: Int
-    ) {
-        guard let stale = overlayState.portableEvidenceWorker.start({ _ in Task {} })
+    /// A sync worker started before a stop runs after the restart started
+    /// its own and marked a peer for it.
+    fileprivate func runStaleEvidenceSyncAfterRestart(
+        process: ChainProcess
+    ) async -> (newerStillHeld: Bool, queued: Int) {
+        guard let stale = overlayState.childEvidenceSync.start({ _ in Task {} })
         else { return (false, -1) }
-        overlayState.portableEvidenceWorker.cancel()  // the stop
-        guard let newer = overlayState.portableEvidenceWorker.start({ _ in Task {} })
+        overlayState.childEvidenceSync.cancel()  // the stop
+        guard let newer = overlayState.childEvidenceSync.start({ _ in Task {} })
         else { return (false, -1) }
-        let lease = EvidenceVolumeLease(
-            plane: .overlay,
-            sessionID: Data([1]),
-            attachmentCID: "restart-generation-work"
+        let key = try! PeerKey(String(repeating: "ab", count: 32))
+        overlayState.overlayRecords.update(key) { $0.evidenceWalkDirty = true }
+        await runChildEvidenceSync(
+            token: stale,
+            generation: runtimeGeneration,
+            process: process
         )
-        sessionLeases.portableEvidenceOrder.append(lease)
-        await drainPortableEvidence(token: stale)
         let outcome = (
-            overlayState.portableEvidenceWorker.holds(newer),
-            sessionLeases.portableEvidenceOrder.count
+            overlayState.childEvidenceSync.holds(newer),
+            overlayState.overlayRecords.records.values
+                .filter(\.evidenceWalkDirty).count
         )
-        sessionLeases.portableEvidenceOrder.removeAll()
-        overlayState.portableEvidenceWorker.cancel()
+        overlayState.overlayRecords.remove(key)
+        overlayState.childEvidenceSync.cancel()
         return outcome
     }
 }
