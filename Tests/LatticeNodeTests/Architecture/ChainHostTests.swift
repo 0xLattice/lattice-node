@@ -41,17 +41,18 @@ final class ChainHostTests: XCTestCase {
     /// The CID `seed` builds to for the hosted child, and the child's storage
     /// seeded with it (what `lattice child deploy` writes).
     private func seedChild(
-        root: URL, timestamp: Int64
+        root: URL, timestamp: Int64, address: ChainAddress? = nil
     ) async throws -> (seed: ChildGenesisSeed, genesisCID: String) {
+        let address = address ?? child
         let seed = ChildGenesisSeed(
             spec: NexusGenesis.spec, premineTo: nil, timestamp: timestamp
         )
         let genesis = try await ChildGenesisBuilder.build(
             seed: seed,
-            chainPath: child.components,
+            chainPath: address.components,
             fetcher: CoalescingFetcher(CompositeContentSource([MemoryBroker()]))
         )
-        let childStorage = root.appendingPathComponent(child.key, isDirectory: true)
+        let childStorage = root.appendingPathComponent(address.key, isDirectory: true)
         try FileManager.default.createDirectory(
             at: childStorage, withIntermediateDirectories: true
         )
@@ -246,6 +247,69 @@ final class ChainHostTests: XCTestCase {
         let after = try await parent().status().height ?? 0
         XCTAssertGreaterThan(after, before)
 
+        await host.stopAll()
+    }
+
+    /// Nexus, a child and a grandchild in one host: Nexus's template asks its
+    /// hosted child for a candidate, whose build asks its own hosted
+    /// grandchild, so one mined Nexus block carries both — and each level
+    /// admits its carried block.
+    func testOneNexusBlockCarriesTheHostedChildAndGrandchild() async throws {
+        let root = temporaryDirectory(create: true)
+        let (_, childGenesis) = try await seedChild(root: root, timestamp: 1_000)
+        let (_, grandchildGenesis) = try await seedChild(
+            root: root, timestamp: 2_000, address: grandchild
+        )
+        let host = try ChainHost(chains: [
+            nexus: configure(nexus, root: root, keyByte: 1),
+            child: configure(child, root: root, keyByte: 2),
+            grandchild: configure(grandchild, root: root, keyByte: 3),
+        ])
+        let failed = try await host.startAll()
+        XCTAssertTrue(failed.isEmpty)
+        let parent = try await service(host, nexus)
+        let payments = try await service(host, child)
+        try await anchor(childGenesis, on: host)
+        try await eventually("the child activates", within: .seconds(60)) {
+            await payments.status().tipCID == childGenesis
+        }
+
+        // The grandchild's anchor is a Payments transaction: Nexus blocks
+        // carry the Payments blocks that commit it.
+        _ = try await payments.submitTransaction(SubmitTransactionRequest(
+            transaction: try signedGenesisAnchorTransaction(
+                directory: grandchild.directory,
+                childGenesisCID: grandchildGenesis,
+                chainPath: child.components
+            )
+        ))
+        try await eventually("Payments records the anchor", within: .seconds(120)) {
+            _ = try? await self.mine(parent)
+            return await payments.explorerChildGenesisCID(
+                directory: self.grandchild.directory
+            ) == grandchildGenesis
+        }
+        let refunds = try await service(host, grandchild)
+        try await eventually("the grandchild activates", within: .seconds(60)) {
+            await refunds.status().tipCID == grandchildGenesis
+        }
+
+        var carriedBoth = false
+        try await eventually("a Nexus block carries both levels", within: .seconds(120)) {
+            let template = try await parent.miningTemplate(
+                MiningTemplateRequest(rewards: [])
+            )
+            let carried = template.block.children.node?[self.child.directory]?
+                .node?.children.node?[self.grandchild.directory] != nil
+            let mined = try await parent.submitWork(SubmitWorkRequest(
+                workID: template.workID, nonce: solvedNonce(for: template)
+            ))
+            carriedBoth = carriedBoth || (carried && mined.accepted)
+            return carriedBoth
+        }
+        try await eventually("the grandchild admits its carried block", within: .seconds(120)) {
+            (await refunds.status().height ?? 0) >= 1
+        }
         await host.stopAll()
     }
 
@@ -459,4 +523,6 @@ private actor GatedAnchorParentLevel: ParentLevel {
     }
 
     func runReport(carrier: String, directory: String) async -> ParentRunReport? { nil }
+
+    nonisolated var contentSource: any ContentSource { InMemoryContentSource([:]) }
 }

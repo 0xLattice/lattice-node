@@ -1,5 +1,6 @@
 import Foundation
 import Lattice
+import cashew
 
 /// A child level's view of its co-hosted parent level: the parent facts a
 /// child block's admission needs, read from the parent's own validated
@@ -28,6 +29,28 @@ public protocol ParentLevel: AnyObject, Sendable {
     /// into `directory` (§9.10). Nil while the parent does not serve runs for
     /// `directory` or `carrier` commits nothing there.
     func runReport(carrier: String, directory: String) async -> ParentRunReport?
+    /// The parent's local content, for a candidate build against its
+    /// provisional carrier: broker-local reads only, never the network.
+    var contentSource: any ContentSource { get }
+}
+
+/// A parent level's view of a co-hosted child level. Notifications never
+/// block; only `candidate` is awaited, and only from the parent's template
+/// path while it holds its own lease, under the template's deadline
+/// (`ChildCandidateBudget`). The child's build takes only the child's own
+/// lease and makes only gate-free upward reads (`ParentLevel`), so the lease
+/// order is parent before child, never the reverse.
+public protocol ChildLevel: AnyObject, Sendable {
+    var directory: String { get }
+    /// Enqueues `change` for the child and returns.
+    func parentChanged(_ change: ParentChange)
+    /// The child's candidate for `context`, or nil when it has none this
+    /// round: it is walking, busy past the deadline, or holds its own
+    /// carried block awaiting admission.
+    func candidate(for context: ChildCandidateRequestContext) async -> DirectChildCandidate?
+    /// The CID of the candidate the child last built, when it binds
+    /// `parentStateCID`: a template-digest input.
+    func candidateCID(parentStateCID: String) async -> String?
 }
 
 /// What the parent level tells a hosted child (`ChainService.ParentMailbox`):
@@ -131,7 +154,7 @@ extension ParentLevel {
 
 /// `ParentLevel` over the co-hosted parent's process. Weak: the host owns
 /// the parent level, and a stopped parent answers nothing.
-final class LocalParentLevel: @unchecked Sendable, ParentLevel {
+final class LocalParentLevel: @unchecked Sendable, ParentLevel, ContentSource {
     private weak var process: ChainProcess?
 
     init(_ process: ChainProcess) {
@@ -161,5 +184,63 @@ final class LocalParentLevel: @unchecked Sendable, ParentLevel {
 
     func runReport(carrier: String, directory: String) async -> ParentRunReport? {
         await process?.runReport(carrier: carrier, directory: directory)
+    }
+
+    var contentSource: any ContentSource { self }
+
+    func fetch(_ cids: Set<String>) async -> [String: Data] {
+        await process?.fetch(cids) ?? [:]
+    }
+}
+
+/// `ChildLevel` over the co-hosted child's service, process and runtime.
+/// Weak: the host owns the child level, and a stopped child is not carried.
+final class LocalChildLevel: @unchecked Sendable, ChildLevel {
+    let directory: String
+    private let mailbox: ChainService.ParentMailbox
+    private weak var service: ChainService?
+    private weak var process: ChainProcess?
+    private weak var network: NodeNetworkRuntime?
+
+    init(
+        directory: String,
+        mailbox: ChainService.ParentMailbox,
+        service: ChainService,
+        process: ChainProcess,
+        network: NodeNetworkRuntime
+    ) {
+        self.directory = directory
+        self.mailbox = mailbox
+        self.service = service
+        self.process = process
+        self.network = network
+    }
+
+    func parentChanged(_ change: ParentChange) {
+        mailbox.send(change)
+    }
+
+    func candidate(
+        for context: ChildCandidateRequestContext
+    ) async -> DirectChildCandidate? {
+        guard let service, let process, let network else { return nil }
+        // A candidate this chain built that the parent's evidence names as
+        // carried and still holds in the inbox (undecided), now ready for or
+        // in its admission: the carried block is about to be this chain's
+        // weighed tip, and a candidate built now, on the tip before it, would
+        // only be its sibling. The inbox is written only from the configured
+        // parent's evidence, so no overlay peer can populate this set.
+        let pendingHandoff = (try? await process.store.pendingHandoffChildCIDs()) ?? []
+        guard await network.offerGate(pendingHandoff: pendingHandoff) else {
+            SyncTrace.log("child candidate withheld: own carried candidate awaiting admission")
+            return nil
+        }
+        return await ChildCandidateBudget.withinDeadline {
+            try? await service.hostedMiningCandidate(for: context)
+        }
+    }
+
+    func candidateCID(parentStateCID: String) async -> String? {
+        await service?.candidateCID(parentStateCID: parentStateCID)
     }
 }

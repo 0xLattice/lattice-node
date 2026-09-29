@@ -106,19 +106,13 @@ extension NodeNetworkRuntime {
         blockFetcher.hasParentAttempt(blockCID)
     }
 
-    /// Seam: the candidate offer's gate against admission. Deferred while
-    /// any of `pendingHandoff` (own candidates the parent names as carried)
-    /// is ready for or in its admission: the flag is set and the admission
-    /// drain re-arms the offer. Open otherwise, which also clears a deferral
-    /// the drain never got to read (its attempt left the fetcher without an
-    /// admission).
+    /// Seam: the local candidate's gate against admission. Closed while any
+    /// of `pendingHandoff` (own candidates the parent names as carried) is
+    /// ready for or in its admission: the carried block is about to be this
+    /// chain's weighed tip, and a candidate built now would only be its
+    /// sibling. The parent's next template asks again.
     func offerGate(pendingHandoff: [String]) -> Bool {
-        if pendingHandoff.contains(where: { blockFetcher.isAwaitingAdmission($0) }) {
-            candidateOfferDeferredByAdmission = true
-            return false
-        }
-        candidateOfferDeferredByAdmission = false
-        return true
+        !pendingHandoff.contains(where: { blockFetcher.isAwaitingAdmission($0) })
     }
 
     func candidateProvider(
@@ -174,14 +168,6 @@ extension NodeNetworkRuntime {
                 process: process
             ) else { return }
             serviceBlockFetcher()
-            // An offer deferred behind an admission is owed a look whatever
-            // that admission decided: an acceptance reports a state change,
-            // a park reports nothing. Only then; an admission a peer drove
-            // (a duplicate, an invalid block) is not a reason to build.
-            if candidateOfferDeferredByAdmission {
-                candidateOfferDeferredByAdmission = false
-                scheduleCandidateOffer(generation: generation, process: process)
-            }
             await advanceRangeSync(generation: generation, process: process)
         }
     }

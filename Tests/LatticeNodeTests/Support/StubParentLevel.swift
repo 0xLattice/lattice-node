@@ -1,4 +1,5 @@
 import Lattice
+import cashew
 @testable import LatticeNode
 
 /// A `ParentLevel` whose facts the test sets. Records each continuity
@@ -19,6 +20,10 @@ actor StubParentLevel: ParentLevel {
         self.produced = produced
         self.withheld = withheld
         self.base = base
+    }
+
+    nonisolated var contentSource: any ContentSource {
+        base?.contentSource ?? InMemoryContentSource([:])
     }
 
     func hasProducedState(_ stateCID: String) async -> Bool {

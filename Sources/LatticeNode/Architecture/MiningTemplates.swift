@@ -13,7 +13,6 @@ public struct DirectChildCandidate: Sendable {
     public let directory: String
     public let block: Block
     let searchWitness: ChildSchedulingWitness?
-    let advertiserPeerKey: PeerKey?
 
     public init(
         directory: String,
@@ -23,19 +22,6 @@ public struct DirectChildCandidate: Sendable {
         self.directory = directory
         self.block = block
         self.searchWitness = searchWitness
-        advertiserPeerKey = nil
-    }
-
-    init(
-        directory: String,
-        block: Block,
-        searchWitness: ChildSchedulingWitness? = nil,
-        advertiserPeerKey: PeerKey?
-    ) {
-        self.directory = directory
-        self.block = block
-        self.searchWitness = searchWitness
-        self.advertiserPeerKey = advertiserPeerKey
     }
 }
 

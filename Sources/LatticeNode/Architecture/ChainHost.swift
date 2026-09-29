@@ -155,9 +155,13 @@ public actor ChainHost {
                     await parentService?.serveRuns(for: directory)
                 }
             )
-            await parent.service.attachChildLevel(directory: directory) {
-                mailbox.send($0)
-            }
+            await parent.service.attachChildLevel(LocalChildLevel(
+                directory: directory,
+                mailbox: mailbox,
+                service: node.service,
+                process: node.process,
+                network: node.network
+            ))
             // A tip change while the child was starting found no listener.
             mailbox.send(.tipChanged)
         }

@@ -27,9 +27,9 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
         var foreignState: [String] {
             switch self {
             case .overlay:
-                return ["hierarchyState", "blockFetcher", "candidateOfferDeferredByAdmission"]
+                return ["hierarchyState", "blockFetcher"]
             case .hierarchy:
-                return ["overlayState", "blockFetcher", "candidateOfferDeferredByAdmission"]
+                return ["overlayState", "blockFetcher"]
             case .fetcher:
                 return ["overlayState", "hierarchyState"]
             }

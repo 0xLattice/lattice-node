@@ -1,6 +1,7 @@
 import Foundation
 import Ivy
 import Lattice
+import Synchronization
 import Tally
 import UInt256
 import VolumeBroker
@@ -32,8 +33,53 @@ public struct NetworkCandidateImport: Sendable {
     }
 }
 
+/// The deadline a template's child candidate asks run under: set once by the
+/// template path, inherited down the hosted tree.
 enum ChildCandidateBudget {
     @TaskLocal static var deadline: ContinuousClock.Instant?
+
+    /// `build`'s result, or nil when the task's deadline passes first. The
+    /// build is not cancelled: it runs on under its own level's lease, and
+    /// the memo it leaves serves the next ask. No deadline waits for it.
+    static func withinDeadline<T: Sendable>(
+        _ build: @escaping @Sendable () async -> T?
+    ) async -> T? {
+        guard let deadline else { return await build() }
+        let remaining = deadline - ContinuousClock.now
+        guard remaining > .zero else { return nil }
+        let first = FirstResult<T>()
+        return await withCheckedContinuation { continuation in
+            first.arm(continuation)
+            let timer = Timers.deadline(after: remaining, generation: 0) { _ in
+                first.resolve(nil)
+            }
+            // `Task {}`: the build inherits the deadline, so a grandchild's
+            // ask is bounded by the same template.
+            Task {
+                let result = await build()
+                timer.cancel()
+                first.resolve(result)
+            }
+        }
+    }
+
+    /// Resumes its continuation with the first value resolved; later ones
+    /// are dropped.
+    private final class FirstResult<T: Sendable>: Sendable {
+        private let continuation = Mutex<CheckedContinuation<T?, Never>?>(nil)
+
+        func arm(_ continuation: CheckedContinuation<T?, Never>) {
+            self.continuation.withLock { $0 = continuation }
+        }
+
+        func resolve(_ value: T?) {
+            let continuation = self.continuation.withLock { slot in
+                defer { slot = nil }
+                return slot
+            }
+            continuation?.resume(returning: value)
+        }
+    }
 }
 
 final class RuntimeCallbackEpoch: @unchecked Sendable {
@@ -323,14 +369,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// parent's anchor.
         var declaredReadURL: String?
         var evidence = ChildEvidenceState()
-        /// The latest candidate the child pushed; carries its own session.
-        var offer: CachedChildCandidate?
-        /// The context sequence the child was last sent, so the push task
-        /// sends it only what it lacks. Recorded after the send, and only
-        /// while that session is still live; carries its own session.
-        var pushedSequence: SessionSequence?
         /// The latest evidence hint this node's own send budget refused
-        /// for the child, re-sent on the next push run. A hint carries one
+        /// for the child, re-sent on the next resend run. A hint carries one
         /// index entry; the admission it triggers scans the index from the
         /// child's cursor, so the newest re-sent hint also recovers older
         /// refused ones.
@@ -338,8 +378,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
 
         var isEmpty: Bool {
             helloDeadline == nil && session == nil && role == nil
-                && declaredReadURL == nil && evidence.isEmpty && offer == nil
-                && pushedSequence == nil && refusedHint == nil
+                && declaredReadURL == nil && evidence.isEmpty
+                && refusedHint == nil
         }
 
         /// The accepted session; before its hello, the session the hello
@@ -603,13 +643,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
     }
 
     /// Hierarchy-plane state: parent/child sessions and records, their
-    /// request tables, the parent tip context pushed down and the one
-    /// received from the parent, the child candidate offer and the carried
-    /// hold, and the child rotations. Only hierarchy code touches it; the
+    /// request tables, the evidence flows and the refused-hint resend. Only hierarchy code touches it; the
     /// overlay side reaches it through the named seams.
     struct HierarchyState {
         /// Per hierarchy peer key: the state bound to its connection.
-        /// Owner: Hierarchy.resendRefusedChildEvidenceHints / Hierarchy.pushParentTipContext /
+        /// Owner: Hierarchy.resendRefusedChildEvidenceHints /
         ///     Hierarchy.waitForChildEvidenceReady / Hierarchy.markChildEvidenceReady /
         ///     Hierarchy.cancelChildEvidenceReadyWaiters /
         ///     Hierarchy.announceChildEvidenceAvailability /
@@ -641,13 +679,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         ///     Hierarchy.evidenceIndexRequestTimedOut / Lifecycle.clearRuntimeState /
         ///     Hierarchy.purgeHierarchyRequests.
         var pendingEvidenceIndexes: [UInt64: PendingChildEvidenceIndex] = [:]
-        /// Owner: Hierarchy.refreshParentTipContext / Lifecycle.clearRuntimeState.
-        var parentTipContext: ParentTipContext?
-        /// Owner: Hierarchy.refreshParentTipContext.
-        var nextParentTipSequence: UInt64 = 0
-        /// Owner: Hierarchy.scheduleParentTipPush / Hierarchy.runParentTipPushes /
+        /// One coalescing task that re-sends refused evidence hints.
+        /// Owner: Hierarchy.scheduleRefusedHintResend / Hierarchy.runRefusedHintResends /
         ///     Lifecycle.clearRuntimeState.
-        var parentTipPushTask = TaskSlot()
+        var refusedHintResendTask = TaskSlot()
         /// Parent evidence whose import could not decide on a fact the
         /// parent will send: in memory only, bounded, random eviction.
         /// Owner: Hierarchy.parentEvidenceOrphaned /
@@ -677,38 +712,13 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// Owner: Hierarchy.parentEvidenceRetryTrigger /
         ///     Lifecycle.clearRuntimeState.
         var parentHelloReleaseSession: Data?
-        /// Owner: Hierarchy.scheduleParentTipPush / Hierarchy.runParentTipPushes /
+        /// Owner: Hierarchy.scheduleRefusedHintResend / Hierarchy.runRefusedHintResends /
         ///     Lifecycle.clearRuntimeState.
-        var parentTipPushDirty = false
-        /// Owner: Hierarchy.updateDescendantPlan / Lifecycle.clearRuntimeState.
-        var descendantRewards: [MiningReward] = []
-        /// Owner: Hierarchy.updateDescendantPlan / Lifecycle.clearRuntimeState.
-        var descendantMinimumWork: [MiningMinimumWork] = []
-        /// Owner: Hierarchy.clearHierarchyAuthorization / Hierarchy.handleHierarchy /
-        ///     Lifecycle.clearRuntimeState.
-        var receivedParentTip: ReceivedParentTipContext?
+        var refusedHintResendDirty = false
         /// A page request is being prepared (its cursor read) and not yet
         /// pending: no second round starts meanwhile.
         /// Owner: Hierarchy.requestEvidenceIndex / Lifecycle.clearRuntimeState.
         var evidenceRoundStarting = false
-        /// One coalescing offer task: an input change while a build runs marks it
-        /// dirty and the task runs again; nothing is queued.
-        /// Owner: Hierarchy.scheduleCandidateOffer / Hierarchy.runCandidateOffers /
-        ///     Lifecycle.clearRuntimeState.
-        var candidateOfferTask = TaskSlot()
-        /// Owner: Hierarchy.scheduleCandidateOffer / Hierarchy.runCandidateOffers /
-        ///     Lifecycle.clearRuntimeState.
-        var candidateOfferDirty = false
-        /// Owner: Hierarchy.offerCandidate / Lifecycle.clearRuntimeState.
-        var nextCandidateOfferSequence: UInt64 = 0
-        /// Owner: Hierarchy.offerCandidate / Hierarchy.clearHierarchyAuthorization /
-        ///     Lifecycle.clearRuntimeState.
-        var lastOfferedCandidateCID: String?
-        /// Owner: Hierarchy.clearHierarchyAuthorization / Hierarchy.selectedChildPeers /
-        ///     Lifecycle.clearRuntimeState.
-        var childPeerRotation: [String: Int] = [:]
-        /// Owner: Hierarchy.selectedChildPeers / Lifecycle.clearRuntimeState.
-        var childPathRotation = 0
         /// Owner: Hierarchy.authenticatedChildDirectories / Lifecycle.clearRuntimeState.
         var childProofPathRotation = 0
         /// Directories already backfilled this generation, so the late-child
@@ -793,52 +803,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// `WeakChain`, so the runtime never keeps the service alive.
     /// Owner: Lifecycle.startNow / Lifecycle.clearRuntimeState.
     var chain: (any ChainInterface)?
-    /// The template context this chain last pushed to its children: its
-    /// validated tip and the miner's plan for the subtree. Re-pushed whenever
-    /// any of it changes; a child builds its candidate against it.
-    struct ParentTipContext {
-        let sequence: UInt64
-        let tipCID: String
-        let tipData: Data
-        let rewards: [MiningReward]
-        let minimumWork: [MiningMinimumWork]
-        /// Per child directory, the child block the tip's branch last
-        /// committed into it (the nearest committer's commitment): what a
-        /// template does not carry again.
-        let carriedChildren: [String: String]
-        /// The child directories the context was minted for: a directory
-        /// that connects later is owed a fresh context on the same tip.
-        let directories: Set<String>
-    }
-    /// The latest candidate each child peer pushed for this chain's tip. A
-    /// template reads it; nothing is requested at template time.
-    struct CachedChildCandidate {
-        let sequence: UInt64
-        let sessionID: Data
-        let childCID: String
-        let candidate: DirectChildCandidate
-    }
-    /// A sequence read on one session: a new session restarts sequences,
-    /// so a value from an earlier session says nothing about this one.
-    struct SessionSequence {
-        let sessionID: Data
-        let sequence: UInt64
-    }
-    /// The parent's context as last received (this chain being the child),
-    /// bound to the session it came on: a new session restarts sequences.
-    struct ReceivedParentTipContext {
-        let sequence: UInt64
-        let peer: AuthenticatedPeer
-        let tipCID: String
-        let tip: Block
-        let rewards: [MiningReward]
-        let minimumWork: [MiningMinimumWork]
-    }
-    /// Set when the offer gate deferred behind an own carried candidate's
-    /// admission; the admission drain then re-arms the offer.
-    /// Owner: Candidates.drainCandidateImports / Candidates.offerGate /
-    ///     Lifecycle.clearRuntimeState.
-    var candidateOfferDeferredByAdmission = false
 
     /// A recovery waiting for an evidence Volume slot, and the timer that
     /// ends its wait if no slot is released first.
@@ -1494,7 +1458,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         keys.formUnion(hierarchyState.pendingEvidenceIndexes.values.map(\.peer.key))
         keys.formUnion(parentStateQueryGuard.peers.keys)
         keys.formUnion(sessionLeases.portableEvidenceWork.values.map(\.peer.key))
-        if let receivedParentTip = hierarchyState.receivedParentTip { keys.insert(receivedParentTip.peer.key) }
         for hex in blockFetcher.debugSnapshot().providerKeys
             .union(parentEvidence.debugSnapshot().peerIDs) {
             if let key = try? PeerKey(hex) { keys.insert(key) }
@@ -1530,7 +1493,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
             rangeSyncAnchor: overlayState.rangeSync.state.map {
                 ($0.requestedAfterCID, $0.requestedHeight)
             },
-            candidateOfferHeld: candidateOfferDeferredByAdmission,
             refusedChildEvidenceHintCount: recordedRefusedHints.count
         )
     }
@@ -1583,18 +1545,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
             }
         }
         return result
-    }
-
-    static func pruneChildPeerRotations(
-        _ rotations: inout [String: Int],
-        activeRoles: [HierarchyPeer]
-    ) {
-        let activePaths: Set<String> = Set(
-            activeRoles.compactMap { role in
-            guard case .child(let path) = role else { return nil }
-            return path.joined(separator: "/")
-        })
-        rotations = rotations.filter { activePaths.contains($0.key) }
     }
 
     func configuredParentPeer() -> AuthenticatedPeer? {
