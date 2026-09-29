@@ -4,6 +4,8 @@ import FoundationNetworking
 #endif
 import XCTest
 import LatticeCtlCore
+import LatticeNode
+@testable import LatticeNodeDaemon
 
 final class LatticeCtlTopologyTests: XCTestCase {
     private func chain(
@@ -129,19 +131,64 @@ final class LatticeCtlTopologyTests: XCTestCase {
         ).validated())
     }
 
-    func testOrderedPathsAreParentBeforeChild() {
-        let topology = Topology(chains: [
-            "Nexus/Payments/Receipts": chain(4201),
-            "Nexus": chain(4001),
-            "Nexus/Payments": chain(4101),
-            "Nexus/Assets": chain(4301),
+    /// `lattice-node --config` builds each level from its tree entry: ports,
+    /// peers and identity from the file and data root, the parent endpoint
+    /// from the host.
+    func testDaemonConfiguresEachLevelFromTheTree() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ctl-host-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let layout = HostLayout(root: root.path)
+        let command = try LatticeNodeCommand.parse([
+            "--config", root.appendingPathComponent(Topology.fileName).path,
         ])
-        let ordered = topology.orderedPaths()
-        XCTAssertEqual(ordered.first, "Nexus")
-        XCTAssertLessThan(
-            ordered.firstIndex(of: "Nexus/Payments")!,
-            ordered.firstIndex(of: "Nexus/Payments/Receipts")!
+        var nexus = chain(4001)
+        nexus.peers = []
+        let nexusConfiguration = try command.hostedLevel(
+            path: "Nexus", chain: nexus, layout: layout
+        ).configure(nil)
+        XCTAssertTrue(
+            nexusConfiguration.bootstrapPeers.isEmpty,
+            "an explicit empty list means no peers"
         )
+
+        let level = try command.hostedLevel(
+            path: "Nexus/Payments", chain: chain(4101), layout: layout
+        )
+        let parent = ParentEndpoint(
+            publicKey: nexusConfiguration.processPublicKey,
+            host: "127.0.0.1", port: 4002
+        )
+        let configuration = try level.configure(parent)
+        XCTAssertEqual(level.address.key, "Nexus/Payments")
+        XCTAssertEqual(configuration.listenPort, 4101)
+        XCTAssertEqual(configuration.factListenPort, 4102)
+        XCTAssertEqual(configuration.rpcPort, 4103)
+        XCTAssertEqual(configuration.parentEndpoint, parent)
+        XCTAssertEqual(
+            configuration.storagePath.path,
+            layout.chainDirectory(for: "Nexus/Payments").path
+        )
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: layout.identityKey(for: "Nexus/Payments").path
+        ))
+
+        let single = try LatticeNodeCommand.parse([
+            "--config", "lattice.json", "--parent", "\(parent.publicKey)@127.0.0.1:4002",
+        ])
+        do {
+            try await single.runHost(configPath: "lattice.json")
+            XCTFail("--parent must be refused with --config")
+        } catch {}
+        let ports = try LatticeNodeCommand.parse([
+            "--config", "lattice.json", "--listen-port", "5001",
+        ])
+        do {
+            try await ports.runHost(configPath: "lattice.json")
+            XCTFail("--listen-port must be refused with --config")
+        } catch {
+            XCTAssertTrue("\(error)".contains("--listen-port"))
+        }
     }
 
     func testRoundTripThroughDisk() throws {
@@ -354,10 +401,63 @@ final class LatticeCtlTopologyTests: XCTestCase {
     func testLayoutSeparatesIdentityFromWipeableChains() {
         let layout = HostLayout(root: "/var/lib/lattice")
         XCTAssertTrue(layout.identityKey(for: "Nexus/Payments").path
-            .hasSuffix("identity/Nexus-Payments.key"))
+            .hasSuffix("identity/Nexus%2FPayments.key"))
+        XCTAssertNotEqual(
+            layout.identityKey(for: "Nexus/A/B"),
+            layout.identityKey(for: "Nexus/A-B"),
+            "two levels of one host must never share a key"
+        )
         XCTAssertTrue(layout.chainDirectory(for: "Nexus/Payments").path
             .hasSuffix("chains/Nexus/Payments"))
         XCTAssertFalse(layout.identityKey(for: "Nexus").path
             .contains("/chains/"))
+    }
+
+    /// A stop removes the pidfile only while it names the pid the stop
+    /// signalled: a daemon a restart spawned meanwhile keeps its pidfile.
+    func testAStopLeavesAPidFileNamingAnotherPid() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ctl-pid-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let layout = HostLayout(root: root.path)
+        let url = layout.pidFile(for: "lattice-node")
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try Data("4243 lattice-node".utf8).write(to: url)
+        layout.removePidFile(for: "lattice-node", ifNaming: 4242)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        layout.removePidFile(for: "lattice-node", ifNaming: 4243)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testLegacyIdentityKeysMigrateUnlessAmbiguous() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ctl-keys-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let layout = HostLayout(root: root.path)
+        let identity = root.appendingPathComponent("identity")
+        try FileManager.default.createDirectory(
+            at: identity, withIntermediateDirectories: true
+        )
+        try Data("key".utf8).write(to: identity.appendingPathComponent("Nexus-Payments.key"))
+        try layout.migrateIdentityKeys(for: ["Nexus", "Nexus/Payments"])
+        XCTAssertEqual(
+            try Data(contentsOf: layout.identityKey(for: "Nexus/Payments")),
+            Data("key".utf8)
+        )
+
+        try Data("key".utf8).write(to: identity.appendingPathComponent("Nexus-A-B.key"))
+        XCTAssertThrowsError(
+            try layout.migrateIdentityKeys(for: ["Nexus", "Nexus/A", "Nexus/A/B", "Nexus/A-B"])
+        ) { error in
+            XCTAssertEqual(
+                error as? HostLayoutError,
+                .ambiguousLegacyIdentityKey(
+                    file: identity.appendingPathComponent("Nexus-A-B.key").path,
+                    paths: ["Nexus/A-B", "Nexus/A/B"]
+                )
+            )
+        }
     }
 }

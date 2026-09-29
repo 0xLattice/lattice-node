@@ -80,6 +80,7 @@ let package = Package(
             name: "LatticeNodeDaemon",
             dependencies: [
                 "LatticeNode",
+                "LatticeCtlCore",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy"),
                 .product(name: "Hummingbird", package: "hummingbird"),

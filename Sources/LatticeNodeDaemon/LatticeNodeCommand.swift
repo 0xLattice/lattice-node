@@ -37,7 +37,7 @@ func runVolumeMaintenance(
 struct LatticeNodeCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "lattice-node",
-        abstract: "Run one Lattice chain process"
+        abstract: "Run one Lattice chain process, or with --config every chain of a lattice.json tree"
     )
 
     @Option(help: "Absolute slash-separated path, always beginning with Nexus")
@@ -97,7 +97,17 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Operator-declared browsable base URL for this chain's public read surface (e.g. https://toy.example.com — a TLS-fronted hostname a browser can dial, distinct from the IP-literal P2P plane). Advertised through the parent rendezvous so explorers can reach this chain; consumers verify the served genesis against the parent's on-chain anchor. Leave unset for nodes without a public TLS surface.")
     var publicReadUrl: String?
 
+    @Option(help: "Host every chain of this lattice.json tree in this one process: per-chain ports, peers and public-read settings come from the file, and each child is wired to its co-hosted parent over loopback. Only --rpc-bind, --minimum-peer-key-bits, --overlay-max-connections-per-netgroup and --peer-search-interval apply to every level; every other single-chain option is refused.")
+    var config: String?
+
+    @Option(help: "Data root for --config: chains/<path> holds each chain's storage and identity/ its keys. Defaults to the config file's directory.")
+    var dataRoot: String?
+
     mutating func run() async throws {
+        if let config {
+            try await runHost(configPath: config)
+            return
+        }
         let processStartTime = Date()
         guard let address = ChainAddress(string: chainPath) else {
             throw ValidationError("--chain-path must be absolute and begin with Nexus")
@@ -151,45 +161,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         let process = node.process
         let service = node.service
 
-        // A deployed child holds its own self-contained genesis bytes: the
-        // parent only RECORDED the CID. If the deployer seeded `child-genesis.json`
-        // into this data directory, rebuild the identical genesis and self-admit
-        // it — but only after confirming, over the authenticated parent fact plane,
-        // that the parent actually recorded THIS CID. That is the same record
-        // honest followers demand before admitting the genesis, so a genesis the
-        // parent never recorded cannot self-activate here either. Retry until
-        // active so a child spawned slightly ahead of its parent's anchor (or its
-        // parent connection) still comes up once the record lands.
-        let genesisSeedURL = storage.appendingPathComponent("child-genesis.json")
-        let genesisSeedTask: Task<Void, Never>?
-        if address.components.count > 1,
-           let seedData = try? Data(contentsOf: genesisSeedURL),
-           let seed = try? JSONDecoder().decode(
-               ChildGenesisSeed.self, from: seedData
-           ) {
-            genesisSeedTask = Task {
-                while !Task.isCancelled {
-                    if await process.status().phase == .active { return }
-                    if (try? await process.activateSeededChildGenesis(
-                        seed: seed,
-                        confirmParentRecordedGenesis: {
-                            [weak network] childGenesisCID in
-                            guard let network else { return false }
-                            return await network
-                                .confirmParentRecordedChildGenesis(
-                                    childGenesisCID: childGenesisCID
-                                )
-                        }
-                    )) == true {
-                        return
-                    }
-                    // Not `Task.sleep(for:)`: see ChainService.scheduleExecutionWalkRetry.
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                }
-            }
-        } else {
-            genesisSeedTask = nil
-        }
+        let genesisSeedTask = node.activateSeededChildGenesis(storage: storage)
 
         let peersProvider: @Sendable () async -> ExplorerPeersResponse = { [weak network] in
             guard let network else {
@@ -307,7 +279,7 @@ private func storageComponent(_ value: String) -> String {
     return value.addingPercentEncoding(withAllowedCharacters: allowed)!
 }
 
-private func loadOrCreateIdentity(at url: URL) throws -> String {
+func loadOrCreateIdentity(at url: URL) throws -> String {
     let fileManager = FileManager.default
     if fileManager.fileExists(atPath: url.path) {
         let attributes = try fileManager.attributesOfItem(atPath: url.path)
@@ -335,7 +307,7 @@ private func loadOrCreateIdentity(at url: URL) throws -> String {
     return value
 }
 
-private func parsePeerEndpoint(_ value: String) throws -> PeerEndpoint {
+func parsePeerEndpoint(_ value: String) throws -> PeerEndpoint {
     let parsed = try parseEndpoint(value)
     return PeerEndpoint(publicKey: parsed.key, host: parsed.host, port: parsed.port)
 }
@@ -870,15 +842,47 @@ private func decode<Value: Decodable>(
     }
 }
 
+/// The one body decoder of the loopback operator POST routes. It first
+/// refuses what a web page could send: a body that is not declared JSON (a
+/// cross-origin form or text/plain POST is a "simple" request that needs no
+/// CORS preflight; requiring application/json forces the preflight the
+/// read-only CORS policy denies), and a Host naming anything but loopback (a
+/// DNS-rebinding page reaching this listener under a hostname it controls).
 private func decode<Value: Decodable, Context: RequestContext>(
     _ request: Request,
     context: Context
 ) async throws -> Value {
+    try requireLoopbackJSON(request)
     do {
         return try await request.decode(as: Value.self, context: context)
     } catch {
         throw HTTPError(.badRequest)
     }
+}
+
+private func requireLoopbackJSON(_ request: Request) throws {
+    let hosts = [request.head.authority].compactMap { $0 }
+        + request.headers.filter { $0.name.canonicalName == "host" }.map(\.value)
+    for host in hosts where !isLoopbackAuthority(host) {
+        throw HTTPError(.forbidden, message: "operator routes answer only a loopback Host")
+    }
+    let mediaType = request.headers[.contentType]?
+        .split(separator: ";").first?
+        .trimmingCharacters(in: .whitespaces).lowercased()
+    guard mediaType == "application/json" else {
+        throw HTTPError(.unsupportedMediaType, message: "Content-Type must be application/json")
+    }
+}
+
+private func isLoopbackAuthority(_ authority: String) -> Bool {
+    var host = Substring(authority.lowercased())
+    if host.hasPrefix("[") {
+        guard let close = host.firstIndex(of: "]") else { return false }
+        host = host[host.index(after: host.startIndex)..<close]
+    } else if let colon = host.lastIndex(of: ":") {
+        host = host[..<colon]
+    }
+    return ["127.0.0.1", "localhost", "::1"].contains(String(host))
 }
 
 private func serviceCall<Value: Encodable, Context: RequestContext>(
