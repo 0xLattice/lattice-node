@@ -308,14 +308,9 @@ class NetworkTrustTestCase: XCTestCase {
                         .withRoot(blockCID) { session in
                             try await admit(session)
                         }
-                },
-                validateEvidenceSource: { [weak runtime] blockCID, requirement in
-                    await runtime?.resolveExecutionEvidence(
-                        for: blockCID,
-                        requirement: requirement
-                    )
                 }
-            )
+            ),
+            parentLevel: runtime.parentLevel
         )
     }
 
@@ -450,13 +445,12 @@ class NetworkTrustTestCase: XCTestCase {
             ),
             listenPort: overlayPort,
             factListenPort: hierarchyPort,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            parentEndpoint: ParentEndpoint(
-                publicKey: parentPeerKey.hex,
-                host: "127.0.0.1",
-                port: parentPort
-            )
-        )
+            rpcPort: NetworkTransportTestPorts.allocate()
+        ).withParentEndpoint(ParentEndpoint(
+            publicKey: parentPeerKey.hex,
+            host: "127.0.0.1",
+            port: parentPort
+        ))
         let runtime = try NodeNetworkRuntime(
             configuration: configuration,
             planeConfigurations: try NodeNetworkPlaneConfigurations(

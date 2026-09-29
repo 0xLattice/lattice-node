@@ -973,13 +973,11 @@ extension NodeNetworkRuntime {
     /// Ends the key's hierarchy authorization, given the record the caller
     /// took out: by session when a session ended (`remove(_:ifBoundTo:)`,
     /// so a newer session's record and state are never touched), by key
-    /// only when a connect replaces the key's session. Returns the live
-    /// candidates its parent-fact requests held; the caller requeues them
-    /// at once (`reReadyCandidates`).
+    /// only when a connect replaces the key's session.
     func clearHierarchyAuthorization(
         for key: PeerKey,
         removed: HierarchyPeerRecord?
-    ) -> [CandidateSeed] {
+    ) {
         removed?.helloDeadline?.task.cancel()
         cancelParentEvidence(for: key)
         for waiter in removed?.evidence.waiters ?? [] {
@@ -1000,15 +998,13 @@ extension NodeNetworkRuntime {
             // gone (those got no admission-time route seeded for it).
             hierarchyState.backfilledChildDirectories.remove(directory)
         }
-        var requeue: [CandidateSeed] = []
         if case .parent? = removedRole {
-            requeue = purgeHierarchyRequests(for: key)
+            purgeHierarchyRequests()
         }
         if hierarchyState.receivedParentTip?.peer.key == key {
             hierarchyState.receivedParentTip = nil
             hierarchyState.lastOfferedCandidateCID = nil
         }
-        return requeue
     }
 
     private func scheduleParentEvidencePage(
@@ -1542,74 +1538,6 @@ extension NodeNetworkRuntime {
               let role = hierarchyState.hierarchyRecords[peer.key]?.role else { return }
 
         switch (message.topic, role) {
-        case (NodeNetworkTopic.parentChainFactRequest,
-              .child(let childPath)):
-            // Not behind the query guard: both answers are constant-time
-            // reads (an indexed link, the executed-from-genesis frontier),
-            // and a silently dropped question costs the child the whole
-            // request timeout, which is how a budget here was diagnosed.
-            guard let request = try?
-                    ParentChainFactMessage.decoded(message.payload)
-            else { return }
-            let found: Bool
-            switch request.fact {
-            case .genesis(let childGenesisCID, let parentStateCID):
-                guard let directory = childPath.last else { return }
-                found = (try? await process.store.issuedParentGenesisLink(
-                    directory: directory,
-                    childGenesisCID: childGenesisCID,
-                    parentStateCID: parentStateCID
-                )) != nil
-            case .continuity(_, let toStateCID):
-                // `decoded` already refused any `from` but the empty state, so
-                // this is only ever the anchor question — answered by the
-                // executed-from-genesis frontier, walking no chain and
-                // independently of height. That is why this path needs neither
-                // a visit budget nor a rate limit.
-                found = await process.hasProducedParentState(toStateCID)
-            }
-            SyncTrace.log("parent fact \(request.requestID) from \(childPath.joined(separator: "/")) found=\(found)")
-            guard found else { return }
-            _ = await hierarchy.sendMessage(
-                to: peer,
-                topic: NodeNetworkTopic.parentChainFactResponse,
-                payload: message.payload
-            )
-
-        case (NodeNetworkTopic.parentChainFactResponse, .parent):
-            guard let response = try?
-                    ParentChainFactMessage.decoded(
-                        message.payload
-                    ) else { return }
-            if let verification = hierarchyState.pendingGenesisVerifications[
-                response.requestID
-            ], verification.peer.key == peer.key,
-               verification.peer.sessionID == peer.sessionID,
-               response == verification.request {
-                resolveGenesisVerification(
-                    response.requestID,
-                    confirmed: true
-                )
-                return
-            }
-            guard let pending = hierarchyState.pendingParentChainFacts[
-                    response.requestID
-                  ],
-                  pending.peer.key == peer.key,
-                  pending.peer.sessionID == peer.sessionID,
-                  response == pending.request else {
-                return
-            }
-            hierarchyState.pendingParentChainFacts.removeValue(
-                forKey: response.requestID
-            )
-            SyncTrace.log("parent fact \(response.requestID) answered for \(pending.blockCID.prefix(12))")
-            await acceptParentChainFact(
-                pending: pending,
-                generation: generation,
-                process: process
-            )
-
         case (NodeNetworkTopic.parentRunReportRequest, .child(let childPath)):
             // A child asks for the runs of committers it names — on admitting
             // a block one of them carried, and after each evidence round.
@@ -2069,9 +1997,9 @@ extension NodeNetworkRuntime {
                 if let removed = hierarchyState.hierarchyRecords.remove(
                     peer.key, ifBoundTo: peer.sessionID
                 ) {
-                    reReadyCandidates(clearHierarchyAuthorization(
+                    clearHierarchyAuthorization(
                         for: peer.key, removed: removed
-                    ))
+                    )
                 }
                 await hierarchy.recycleSession(ifCurrent: peer)
                 return
@@ -2243,62 +2171,17 @@ extension NodeNetworkRuntime {
         await hierarchy.recycleSession(ifCurrent: peer)
     }
 
-    /// Verify-not-trust gate for deployer-seeded self-admission: ask the
-    /// authenticated immediate parent whether it recorded exactly this child
-    /// genesis CID (bound to the empty parent state a self-contained genesis
-    /// commits to). The parent answers only on a positive match and stays silent
-    /// otherwise, so an unrecorded — or mismatched — CID resolves `false` when the
-    /// request times out. `false` on a missing parent session too; the caller
-    /// retries until the parent connects and confirms.
-    public func confirmParentRecordedChildGenesis(
-        childGenesisCID: String
+    /// Verify-not-trust gate for a self-contained child genesis: whether the
+    /// co-hosted parent level recorded exactly this genesis CID for this
+    /// chain's directory, bound to the empty parent state. A local read; the
+    /// caller retries until the parent's record lands.
+    nonisolated func parentRecordedChildGenesis(
+        _ childGenesisCID: String
     ) async -> Bool {
-        guard !configuration.address.isNexus,
-              hierarchyState.pendingGenesisVerifications.count < Self.maximumPendingRequests,
-              let parent = configuredParentPeer() else {
-            return false
-        }
-        let request = ParentChainFactMessage(
-            requestID: makeRequestID(),
-            fact: .genesis(
-                childGenesisCID: childGenesisCID,
-                parentStateCID: LatticeState.emptyHeader.rawCID
-            )
-        )
-        guard let payload = try? request.encoded() else { return false }
-        let delay = Timers.nanoseconds(
-            planeConfigurations.hierarchy.requestTimeout
-        )
-        return await withCheckedContinuation { continuation in
-            hierarchyState.pendingGenesisVerifications[request.requestID] =
-                PendingGenesisVerification(
-                    peer: parent,
-                    request: request,
-                    continuation: continuation
-                )
-            Task { [weak self] in
-                _ = await self?.hierarchy.sendMessage(
-                    to: parent,
-                    topic: NodeNetworkTopic.parentChainFactRequest,
-                    payload: payload
-                )
-                _ = await Timers.sleep(nanoseconds: delay)
-                await self?.resolveGenesisVerification(
-                    request.requestID,
-                    confirmed: false
-                )
-            }
-        }
-    }
-
-    private func resolveGenesisVerification(
-        _ requestID: UInt64,
-        confirmed: Bool
-    ) {
-        guard let pending = hierarchyState.pendingGenesisVerifications.removeValue(
-            forKey: requestID
-        ) else { return }
-        pending.continuation.resume(returning: confirmed)
+        await parentLevel?.recordedGenesisLink(
+            directory: configuration.address.directory,
+            childGenesisCID: childGenesisCID
+        ) != nil
     }
 
     /// Ask the authenticated immediate parent for the genesis CID it recorded for
@@ -2396,9 +2279,8 @@ extension NodeNetworkRuntime {
                         genesisCID: genesisCID,
                         remoteSource: session,
                         confirmParentRecordedGenesis: { [weak self] cid in
-                            await self?.confirmParentRecordedChildGenesis(
-                                childGenesisCID: cid
-                            ) ?? false
+                            await self?.parentRecordedChildGenesis(cid)
+                                ?? false
                         }
                     )
                 }) ?? false
@@ -2415,6 +2297,7 @@ extension NodeNetworkRuntime {
                     // awaitingGenesis, or the whole chain above the genesis stays
                     // orphaned and the child never canonicalizes past height 0.
                     await predecessorConnectedOutOfBand(genesisCID)
+                    await chain?.genesisActivatedOutOfBand()
                     await requestEvidenceIndex(
                         generation: generation,
                         process: process
@@ -2428,149 +2311,12 @@ extension NodeNetworkRuntime {
         }
     }
 
-    /// Validate-tier evidence (deferred execution): a weighed CHILD block's
-    /// `.execution` admission recovers its own proof package from the store but
-    /// still needs the cross-chain fact the live path obtains from the
-    /// configured parent — the parent-state continuity (or genesis) link. The
-    /// walk hands the requirement here; this is the SAME request the live
-    /// candidate path sends (`requestParentChainFact`), awaited, and the merged
-    /// package is returned for the `.execution` re-admit. Nil when the fact is
-    /// not obtainable now (no parent session, request budget, timeout); the
-    /// walk then parks and retries. Without this, every weighed child block
-    /// parks the walk on `.unavailable(.parentStateContinuity)` forever.
-    public func resolveExecutionEvidence(
-        for blockCID: String,
-        requirement: CrossChainEvidenceRequirement
-    ) async -> AuthenticatedChildPackage? {
-        guard isRunning, let process, !configuration.address.isNexus,
-              let fact = parentFact(for: requirement) else {
-            return nil
-        }
-        let generation = runtimeGeneration
-        guard let package = try? await process.recoveredAuthenticatedChildPackage(
-            for: blockCID
-        ), isCurrentRuntime(generation: generation, process: process) else {
-            return nil
-        }
-        return await awaitParentFact(
-            fact,
-            for: blockCID,
-            package: package,
-            generation: generation,
-            process: process
-        )
-    }
-
-    #if DEBUG
-    /// Test seam: `resolveExecutionEvidence` with the block's package supplied
-    /// instead of recovered from the store — the request, await and every
-    /// resumption path are the production ones.
-    public func resolveExecutionEvidenceForTesting(
-        for blockCID: String,
-        requirement: CrossChainEvidenceRequirement,
-        package: AuthenticatedChildPackage
-    ) async -> AuthenticatedChildPackage? {
-        guard isRunning, let process, let fact = parentFact(for: requirement) else {
-            return nil
-        }
-        return await awaitParentFact(
-            fact,
-            for: blockCID,
-            package: package,
-            generation: runtimeGeneration,
-            process: process
-        )
-    }
-    #endif
-
-    private func parentFact(
-        for requirement: CrossChainEvidenceRequirement
-    ) -> ParentChainFact? {
-        let parentPath = Array(configuration.chainPath.dropLast())
-        switch requirement {
-        case .parentGenesis(
-            let requiredPath, let directory, let childGenesisCID, let parentStateCID
-        ) where requiredPath == parentPath
-                && directory == configuration.address.directory:
-            return .genesis(
-                childGenesisCID: childGenesisCID,
-                parentStateCID: parentStateCID
-            )
-        case .parentStateContinuity(let requiredPath, let fromStateCID, let toStateCID)
-            where requiredPath == parentPath:
-            return .continuity(fromStateCID: fromStateCID, toStateCID: toStateCID)
-        default:
-            return nil
-        }
-    }
-
-    /// Send the parent-fact request and await its outcome: the merged package
-    /// on a fact, nil on refusal, timeout, parent disconnect or reset. Every
-    /// removal of the pending entry resumes the continuation (see
-    /// `discardPendingParentChainFacts`), so the walk never stays suspended.
-    private func awaitParentFact(
-        _ fact: ParentChainFact,
-        for blockCID: String,
-        package: AuthenticatedChildPackage,
-        generation: UInt64,
-        process: ChainProcess
-    ) async -> AuthenticatedChildPackage? {
-        SyncTrace.log(
-            "validate evidence request block=\(blockCID.prefix(12)) fact=\(fact)"
-        )
-        return await withCheckedContinuation { continuation in
-            Task { [weak self] in
-                guard let self else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                await self.requestParentChainFact(
-                    fact,
-                    for: blockCID,
-                    package: package,
-                    generation: generation,
-                    process: process,
-                    continuation: continuation
-                )
-            }
-        }
-    }
-
-    /// The one teardown path for pending parent-fact requests: a walk's
-    /// continuation is resumed nil, a live candidate's entry is returned for
-    /// the caller to requeue (`reReadyCandidates`) or drop. No other site may
-    /// drop an entry without going through here.
-    func discardPendingParentChainFacts(
-        where predicate: (PendingParentChainFact) -> Bool
-    ) -> [CandidateSeed] {
-        let discarded = hierarchyState.pendingParentChainFacts.values.filter(predicate)
-        hierarchyState.pendingParentChainFacts = hierarchyState.pendingParentChainFacts.filter {
-            !predicate($0.value)
-        }
-        var live: [CandidateSeed] = []
-        for pending in discarded {
-            if let continuation = pending.continuation {
-                continuation.resume(returning: nil)
-            } else {
-                live.append(pending.candidateSeed)
-            }
-        }
-        return live
-    }
-
-    /// Drops the hierarchy requests a gone parent session can never answer
-    /// and returns the live candidates they held, to requeue. The genesis
-    /// verify and resolve tables are not purged here: they resolve on their
-    /// own timeouts (or restart).
-    func purgeHierarchyRequests(for key: PeerKey) -> [CandidateSeed] {
+    /// Drops the hierarchy requests a gone parent session can never answer.
+    /// The genesis resolve table is not purged here: it resolves on its own
+    /// timeout (or restart).
+    func purgeHierarchyRequests() {
         // Only the parent sends these requests' answers.
         hierarchyState.pendingEvidenceIndexes.removeAll()
-        // A response can never arrive on the gone session: its live
-        // candidates are requeued, and a validate walk's request resolves
-        // nil (it is not a candidate — re-seeding an accepted main-chain
-        // block would be wrong — and an unresumed continuation would
-        // suspend the walk for the process lifetime).
-        return discardPendingParentChainFacts(where: { $0.peer.key == key })
     }
 
     /// Seam: the parent-evidence inbox has room again; the configured
@@ -2676,144 +2422,6 @@ extension NodeNetworkRuntime {
                 payload: payload
             )
         }
-    }
-
-    func requestParentChainFact(
-        _ fact: ParentChainFact,
-        for blockCID: String,
-        package: AuthenticatedChildPackage,
-        generation: UInt64,
-        process: ChainProcess,
-        continuation: CheckedContinuation<AuthenticatedChildPackage?, Never>? = nil
-    ) async {
-        guard !configuration.address.isNexus,
-              isCurrentRuntime(generation: generation, process: process),
-              hierarchyState.pendingParentChainFacts.count
-                < Self.maximumPendingRequests,
-              !hierarchyState.pendingParentChainFacts.values.contains(where: {
-                  $0.blockCID == blockCID
-                    && $0.request.fact == fact
-              }),
-              let parent = configuredParentPeer() else {
-            continuation?.resume(returning: nil)
-            return
-        }
-        let request = ParentChainFactMessage(
-            requestID: makeRequestID(),
-            fact: fact
-        )
-        guard let payload = try? request.encoded() else {
-            continuation?.resume(returning: nil)
-            return
-        }
-        hierarchyState.pendingParentChainFacts[request.requestID] =
-            PendingParentChainFact(
-                peer: parent,
-                request: request,
-                blockCID: blockCID,
-                package: package,
-                continuation: continuation
-            )
-        // Armed BEFORE the send suspends: the entry must always have a
-        // bounded life, whatever happens during or after the send. A failed
-        // enqueue is transient — the same timeout used for an unanswered
-        // parent response requeues the candidate (or resolves the walk's
-        // request nil); a disconnect does so sooner.
-        Timers.deadline(
-            after: planeConfigurations.hierarchy.requestTimeout,
-            generation: generation
-        ) { [weak self] generation in
-            await self?.parentChainFactRequestTimedOut(
-                request.requestID,
-                generation: generation
-            )
-        }
-        let sent = await hierarchy.sendMessage(
-            to: parent,
-            topic: NodeNetworkTopic.parentChainFactRequest,
-            payload: payload
-        )
-        SyncTrace.log("parent fact \(request.requestID) requested for \(blockCID.prefix(12)) walk=\(continuation != nil) sent=\(sent)")
-        guard isCurrentRuntime(
-            generation: generation,
-            process: process
-        ) else {
-            _ = discardPendingParentChainFacts(
-                where: { $0.request.requestID == request.requestID }
-            )
-            return
-        }
-    }
-
-    private func acceptParentChainFact(
-        pending: PendingParentChainFact,
-        generation: UInt64,
-        process: ChainProcess
-    ) async {
-        guard isCurrentRuntime(generation: generation, process: process) else {
-            pending.continuation?.resume(returning: nil)
-            return
-        }
-        let parentPath = Array(configuration.chainPath.dropLast())
-        let localFact: AuthenticatedChildPackage
-        switch pending.request.fact {
-        case .genesis(let childGenesisCID, let parentStateCID):
-            localFact = AuthenticatedChildPackage(package: ChildValidationPackage(
-                proof: pending.package.package.proof,
-                parentGenesisLink: ParentGenesisLink(
-                    parentPath: parentPath,
-                    directory: configuration.address.directory,
-                    childGenesisCID: childGenesisCID,
-                    parentStateCID: parentStateCID
-                )
-            ))
-        case .continuity(let fromStateCID, let toStateCID):
-            localFact = AuthenticatedChildPackage(package: ChildValidationPackage(
-                proof: pending.package.package.proof,
-                parentStateContinuityLink: ParentStateContinuityLink(
-                    parentPath: parentPath,
-                    fromStateCID: fromStateCID,
-                    toStateCID: toStateCID
-                )
-            ))
-        }
-        guard let merged = BlockFetcher.mergePackages(
-            pending.package,
-            localFact
-        ) else {
-            pending.continuation?.resume(returning: nil)
-            return
-        }
-        // The validate walk asked for this fact: hand the merged package back
-        // to its `.execution` re-admit; there is no live candidate to re-ready.
-        if let continuation = pending.continuation {
-            continuation.resume(returning: merged)
-            return
-        }
-        // A parent fact that arrives SUCCESSFULLY must re-ready the candidate that
-        // was blocked waiting for it, as the timeout path does, so the fact's
-        // arrival is itself the trigger. The merged package keeps the pending
-        // proof, so the attempt is the same.
-        reReadyCandidates([CandidateSeed(
-            blockCID: pending.blockCID,
-            package: merged
-        )])
-    }
-
-    private func parentChainFactRequestTimedOut(
-        _ requestID: UInt64,
-        generation: UInt64
-    ) {
-        guard isCurrentGeneration(generation),
-              let pending = hierarchyState.pendingParentChainFacts.removeValue(
-                forKey: requestID
-              ) else { return }
-        SyncTrace.log("parent fact \(requestID) timed out for \(pending.blockCID.prefix(12)) walk=\(pending.continuation != nil)")
-        if let continuation = pending.continuation {
-            continuation.resume(returning: nil)
-            return
-        }
-        reReadyCandidates([pending.candidateSeed])
     }
 
     /// Returns whether a request was sent: none is while a round is in

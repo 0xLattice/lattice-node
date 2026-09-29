@@ -10,11 +10,25 @@ public struct Node: Sendable {
     public let service: ChainService
 
     /// Open the process, restore its local transactions and start the
-    /// network runtime against the service.
-    public static func build(configuration: NodeConfiguration) async throws -> Node {
-        let network = try NodeNetworkRuntime(configuration: configuration)
+    /// network runtime against the service. A child level reads its parent
+    /// facts from `parentLevel`: every child has one and Nexus has none.
+    public static func build(
+        configuration: NodeConfiguration,
+        parentLevel: (any ParentLevel)? = nil
+    ) async throws -> Node {
+        precondition(
+            (configuration.chainPath.count > 1) == (parentLevel != nil),
+            "a child level requires its parent level, and Nexus has none"
+        )
+        let network = try NodeNetworkRuntime(
+            configuration: configuration, parentLevel: parentLevel
+        )
         let process = try await ChainProcess.open(configuration: configuration)
-        let service = ChainService(process: process, network: WeakNetwork(network))
+        let service = ChainService(
+            process: process,
+            network: WeakNetwork(network),
+            parentLevel: parentLevel
+        )
         try await service.restoreLocalTransactions()
         do {
             try await network.start(process: process, chain: WeakChain(service))

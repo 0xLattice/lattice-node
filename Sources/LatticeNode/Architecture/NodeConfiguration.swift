@@ -30,12 +30,14 @@ public struct ChainAddress: Hashable, Sendable, CustomStringConvertible {
 
 }
 
-public struct ParentEndpoint: Codable, Hashable, Sendable {
-    public let publicKey: String
-    public let host: String
-    public let port: UInt16
+/// Where a child's hierarchy plane dials its parent: the co-hosted parent
+/// level's fact plane, wired by `ChainHost`.
+struct ParentEndpoint: Hashable, Sendable {
+    let publicKey: String
+    let host: String
+    let port: UInt16
 
-    public init(publicKey: String, host: String, port: UInt16) {
+    init(publicKey: String, host: String, port: UInt16) {
         self.publicKey = publicKey
         self.host = host
         self.port = port
@@ -50,9 +52,6 @@ public enum NodeConfigurationError: Error, Equatable, CustomStringConvertible {
     case invalidChainPath
     case invalidPrivateKey
     case invalidPorts
-    case invalidParentEndpoint
-    case missingParentEndpoint
-    case unexpectedParentEndpoint
     case invalidPublicReadURL
 
     public var description: String {
@@ -61,9 +60,6 @@ public enum NodeConfigurationError: Error, Equatable, CustomStringConvertible {
             "chain path must be Nexus-rooted, consensus-valid, and fit the setup wire frame"
         case .invalidPrivateKey: "process private key must be a 32-byte Ed25519 key"
         case .invalidPorts: "overlay, fact-plane, and RPC ports must be nonzero and distinct"
-        case .invalidParentEndpoint: "the parent endpoint must have a valid peer key, host, and port"
-        case .missingParentEndpoint: "a child process requires its authenticated immediate-parent endpoint"
-        case .unexpectedParentEndpoint: "the Nexus process has no parent endpoint"
         case .invalidPublicReadURL:
             "the public read URL must be an absolute http(s) base URL with a host and no credentials, query, or fragment"
         }
@@ -80,7 +76,9 @@ public struct NodeConfiguration: Sendable {
     public let factListenPort: UInt16
     public let rpcPort: UInt16
     public let bootstrapPeers: [PeerEndpoint]
-    public let parentEndpoint: ParentEndpoint?
+    /// The co-hosted parent level's fact plane, which `ChainHost` wires for
+    /// every child; nil on Nexus.
+    private(set) var parentEndpoint: ParentEndpoint?
     public let minPeerKeyBits: Int
     /// Per-netgroup inbound/outbound overlay connection cap. Ivy buckets peers by
     /// the connection's observed remote host (/16), an anti-eclipse defense that
@@ -137,7 +135,6 @@ public struct NodeConfiguration: Sendable {
         factListenPort: UInt16 = 4002,
         rpcPort: UInt16 = 8080,
         bootstrapPeers: [PeerEndpoint] = [],
-        parentEndpoint: ParentEndpoint? = nil,
         minPeerKeyBits: Int = 0,
         overlayMaxConnectionsPerNetgroup: Int = IvyConfig.defaultMaxConnections,
         externalAddress: String? = nil,
@@ -164,28 +161,6 @@ public struct NodeConfiguration: Sendable {
               Set([listenPort, factListenPort, rpcPort]).count == 3 else {
             throw NodeConfigurationError.invalidPorts
         }
-        if address.isNexus, parentEndpoint != nil {
-            throw NodeConfigurationError.unexpectedParentEndpoint
-        }
-        if !address.isNexus, parentEndpoint == nil {
-            throw NodeConfigurationError.missingParentEndpoint
-        }
-        let normalizedParentEndpoint: ParentEndpoint?
-        if let parentEndpoint {
-            let host = parentEndpoint.host.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let key = try? PeerKey(parentEndpoint.publicKey),
-                  !host.isEmpty,
-                  parentEndpoint.port != 0 else {
-                throw NodeConfigurationError.invalidParentEndpoint
-            }
-            normalizedParentEndpoint = ParentEndpoint(
-                publicKey: key.hex,
-                host: host,
-                port: parentEndpoint.port
-            )
-        } else {
-            normalizedParentEndpoint = nil
-        }
         // Operator input fails loudly (unlike wire ingest, which is tolerant):
         // a declared-but-invalid URL is a deployment mistake, not peer noise.
         let declaredReadURL: String?
@@ -208,13 +183,20 @@ public struct NodeConfiguration: Sendable {
         self.factListenPort = factListenPort
         self.rpcPort = rpcPort
         self.bootstrapPeers = bootstrapPeers
-        self.parentEndpoint = normalizedParentEndpoint
         self.minPeerKeyBits = minPeerKeyBits
         self.overlayMaxConnectionsPerNetgroup = max(1, overlayMaxConnectionsPerNetgroup)
         self.externalAddress = externalAddress
         self.publicReadURL = declaredReadURL
         self.peerSearchInterval = max(0, peerSearchInterval)
         self.resourcePolicy = resourcePolicy
+    }
+
+    /// This child configuration dialing `parent`'s fact plane.
+    func withParentEndpoint(_ parent: ParentEndpoint) -> NodeConfiguration {
+        precondition(!address.isNexus, "the Nexus level has no parent")
+        var configuration = self
+        configuration.parentEndpoint = parent
+        return configuration
     }
 
     public var chainPath: [String] { address.components }

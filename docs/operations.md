@@ -15,9 +15,10 @@ ground truth for what each verb performs.
 
 ## Process model
 
-Operate each chain as an independent service. Every invocation needs one
-absolute Nexus-inclusive `--chain-path`; a non-Nexus process additionally needs
-the authenticated immediate parent supplied by `--parent`.
+A single-chain invocation runs Nexus with one absolute `--chain-path`. A child
+chain runs only in the same `lattice-node` process as its ancestry: list the
+tree in a `lattice.json` and host it with `--config` (see below); a non-Nexus
+`--chain-path` is refused.
 
 ```bash
 lattice-node \
@@ -367,24 +368,22 @@ of a new chain, or restart the child after writing it. Without a seed read at
 startup, the child can activate only by fetching the recorded genesis from a
 child-overlay peer, and a brand-new chain has none.
 
+A child runs in the same process as its whole ancestry: list every level in
+`lattice.json` and start the tree host.
+
 ```bash
-lattice-node \
-  --chain-path Nexus/Payments \
-  --parent <nexus-key>@10.0.0.10:4002 \
-  --data-directory /var/lib/lattice/chains/Nexus/Payments \
-  --identity-key /var/lib/lattice/identity/payments.key \
-  --listen-port 4101 \
-  --fact-listen-port 4102 \
-  --rpc-port 8180
+lattice-node --config /var/lib/lattice/lattice.json
 ```
 
-The parent endpoint is a live verdict boundary, not merely a bootstrap hint.
-Back up the configured parent key and child process identity as operational
-secrets. Losing the live parent does not revoke already imported history or
-fork choice, but new child imports that change parent state wait until the
-authenticated immediate parent can acknowledge the exact continuity or genesis
-query. Same-chain peers may restore the required Volumes; they cannot relay the
-parent's unsigned session-bound answer.
+Each level keeps its own ports, storage (`chains/<path>`) and identity
+(`identity/<path>.key`) under the configuration's directory, or `--data-root`.
+A chain added to the file is hosted from the next start. The child's data
+directory for the seed above is its `chains/<path>` directory.
+
+A child reads the parent facts its imports need (the recorded genesis and
+parent-state continuity) from its parent level's own validated state in the
+same process; there is no remote parent. Back up each level's identity key as
+an operational secret.
 
 For application testing, deploy a normal child with test-oriented parameters.
 Nexus retains its one pinned genesis.
@@ -521,17 +520,12 @@ Plan the roll accordingly:
 - Roll one node first and let it accept a block before proceeding, so the
   one-way step is taken deliberately rather than fleet-wide at once.
 
-### Roll parents before children
+### Parents and children roll together
 
-The parent-chain fact topic moved to `...v2` because the ANSWER changed
-meaning, not merely the request's shape. A `v1` parent attests any *connected*
-state — including one it only weighed, a declared post-state it never executed.
-A `v2` parent attests only what it **executed**.
-
-A child cannot tell the two apart from the reply, which echoes the request
-either way. Left at `v1`, an upgraded child would bind a withdrawal to an
-unexecuted claim whenever its parent had not rolled yet — the exact exposure
-this change closes, reappearing inside the upgrade window.
+A child reads its parent facts from its co-hosted parent level in the same
+process, so a tree upgrades as one: restart the `lattice-node --config` process
+on the new image. The parent attests only states it **executed**, never one it
+only weighed.
 
 The topic bump makes that impossible rather than merely discouraged: a `v1`
 parent does not recognise the topic, drops it unread, and the child parks and
@@ -587,7 +581,10 @@ matched backup pair or wipe the entire process directory and resync.
 ### Child remains `awaitingGenesis`
 
 - Verify its `--chain-path` is absolute and exactly matches the intended child.
-- Verify `--parent` names the immediate parent's process key and fact port.
+- Verify the child and its whole ancestry are listed in the `lattice.json` the
+  process was started with (`--config`), and that the parent level is running:
+  a child whose parent level failed is not started, and stopping a level stops
+  every level below it.
 - Confirm a separately signed parent transaction carrying the matching
   `GenesisAction` was mined. The parent's `GET /api/chain/children` listing
   helps, but it returns at most 100 children with no offset, so absence from it
@@ -601,8 +598,8 @@ matched backup pair or wipe the entire process directory and resync.
   different CID that the parent will not confirm. The child can then activate
   only through the fetch path, so confirm a child-overlay peer serves the
   genesis block (a brand-new chain has none), or replace the seed and restart.
-- Check hierarchy-plane connectivity; an overlay peer cannot substitute for the
-  configured parent fact link.
+- The parent record is read from the co-hosted parent level; an overlay peer
+  cannot substitute for it.
 
 ### No peers
 
@@ -622,6 +619,8 @@ matched backup pair or wipe the entire process directory and resync.
 - Keep process private keys mode `0600`; startup rejects broader permissions.
 - Keep RPC loopback-only. Authenticate any proxy that exposes it beyond the
   host.
-- Treat `--parent` as a pinned live-verdict configuration.
+- Host each child in the same process as its ancestry (`lattice.json`): its
+  parent facts are read from the co-hosted parent level, never from a remote
+  process.
 - Firewall the hierarchy plane to intended parent/child hosts where possible.
 - Use distinct storage and identity paths per chain process.

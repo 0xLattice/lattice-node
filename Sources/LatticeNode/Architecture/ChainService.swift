@@ -81,6 +81,10 @@ public actor ChainService {
     private let pool: TransactionPool
     private let templates: MiningTemplateBook
     private let network: any NetworkInterface
+    /// The co-hosted parent level's facts; nil on Nexus.
+    private let parentLevel: (any ParentLevel)?
+    /// Hosted children told when this level's tip moves, by directory.
+    private var childLevels: [String: @Sendable (ParentChange) -> Void] = [:]
     private let maximumChildCandidates: Int
     private var liveMempoolRoots = Set<String>()
     private var mempoolUnavailable = false
@@ -108,11 +112,10 @@ public actor ChainService {
     // retry re-arms it — there is no push signal on body arrival, and once
     // weighed sync completes the fetcher may hold no timed wait to re-drive
     // it, so the walk owns its own liveness retry rather than borrowing the
-    // fetcher's. Cross-chain evidence for the walk comes from
-    // NetworkInterface.resolveExecutionEvidence: a weighed CHILD block's
-    // `.execution` needs the parent fact (state continuity / genesis link) the
-    // live path obtains from the configured parent; nil parks the walk on the
-    // retry timer as an availability gap.
+    // fetcher's. Cross-chain evidence for the walk comes from `parentLevel`:
+    // a weighed CHILD block's `.execution` needs the parent fact (state
+    // continuity / genesis link) the co-hosted parent level holds; nil parks
+    // the walk on the retry timer as an availability gap.
     private let executionWalkRetryInterval: Duration
     private var executionWalkRetryTask: Task<Void, Never>?
     private var executionWalkParkedCount: UInt64 = 0
@@ -145,6 +148,7 @@ public actor ChainService {
     public init(
         process: ChainProcess,
         network: any NetworkInterface,
+        parentLevel: (any ParentLevel)? = nil,
         executionWalkRetryInterval: Duration = .seconds(4),
         mempoolMaxCount: Int = 10_000,
         mempoolMaxNonReadyPerSigner: Int = 64,
@@ -157,6 +161,7 @@ public actor ChainService {
         self.executionWalkRetryInterval = executionWalkRetryInterval
         self.process = process
         self.network = network
+        self.parentLevel = parentLevel
         self.pool = TransactionPool(
             maxCount: mempoolMaxCount,
             maxBytes: 64 * 1024 * 1024,
@@ -790,7 +795,7 @@ public actor ChainService {
             persistLocal: true
         )
         scheduleTransactionPublication(admission.cid)
-        if admission.inserted { publishChainStateChange() }
+        if admission.inserted { publishChainStateChange(tipChanged: false) }
         return SubmitTransactionResponse(
             transactionCID: admission.cid,
             mempoolCount: await pool.count,
@@ -812,7 +817,7 @@ public actor ChainService {
             transaction,
             persistLocal: false
         ).inserted
-        if inserted { publishChainStateChange() }
+        if inserted { publishChainStateChange(tipChanged: false) }
         return inserted
     }
 
@@ -1702,14 +1707,18 @@ public actor ChainService {
             do {
                 outcome = try await attempt(nil)
                 // A CHILD block on the validate tier recovers its own proof but
-                // may still need a cross-chain fact from the parent. Obtain it
-                // exactly as the live path does and re-admit with the merged
-                // package; if it cannot be obtained now, fall through to the
-                // availability park below.
+                // may still need a cross-chain fact from the parent. Read it
+                // from the parent level exactly as the live path does and
+                // re-admit with the merged package; if the parent does not
+                // hold it yet, fall through to the availability park below.
                 if case .unavailable(let requirement?) = outcome.decision,
-                   let package = await network.resolveExecutionEvidence(
-                       for: next,
-                       requirement: requirement
+                   let parentLevel,
+                   let recovered = try? await process
+                       .recoveredAuthenticatedChildPackage(for: next),
+                   let package = await parentLevel.evidence(
+                       for: requirement,
+                       child: process.configuration.address,
+                       package: recovered
                    ) {
                     outcome = try await attempt(package)
                 }
@@ -2088,11 +2097,33 @@ public actor ChainService {
     }
 
     /// Fire-and-forget: never hold the service lease across the network.
-    /// Untracked: touches only the network, never the store.
-    private func publishChainStateChange() {
+    /// Untracked: touches only the network, never the store. A change that
+    /// can move the tip also tells the hosted children, which never blocks.
+    private func publishChainStateChange(tipChanged: Bool = true) {
+        if tipChanged {
+            for notify in childLevels.values { notify(.tipChanged) }
+        }
         Task { [network] in
             await network.chainStateChanged()
         }
+    }
+
+    /// This chain's genesis activated outside candidate admission (seeded or
+    /// adopted): its tip moved from nothing, so its hosted children and its
+    /// network hear it like any other tip change.
+    func genesisActivatedOutOfBand() {
+        guard !stopped else { return }
+        publishChainStateChange()
+    }
+
+    /// The host tells a hosted child in `directory` each time this level's
+    /// tip moves. `notify` must not block. Replaces the directory's previous
+    /// child, as a restarted child level does.
+    func attachChildLevel(
+        directory: String,
+        _ notify: @escaping @Sendable (ParentChange) -> Void
+    ) {
+        childLevels[directory] = notify
     }
 
     private nonisolated static func poolDisposition(

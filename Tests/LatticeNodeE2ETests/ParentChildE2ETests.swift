@@ -9,6 +9,7 @@ import Darwin
 import Glibc
 #endif
 import Lattice
+import LatticeCtlCore
 import LatticeMinerCore
 import LatticeNode
 import Ivy
@@ -477,7 +478,7 @@ final class ParentChildE2ETests: XCTestCase {
         let nexusIdentity = try workspace.makeIdentity(named: "nexus")
         let childIdentity = try workspace.makeIdentity(named: "payments")
         let ports = try E2EPorts.allocate(count: 6)
-        let nexus = nexusNode(
+        let nexus = try treeHostNode(
             binary: binary,
             workspace: workspace,
             name: "nexus",
@@ -535,33 +536,25 @@ final class ParentChildE2ETests: XCTestCase {
         XCTAssertEqual(recorded.chainPath.last, "Payments")
         XCTAssertEqual(recorded.genesisHash, genesisCID)
 
-        // Bring the child node up via the seed + self-admit path: seed
-        // `child-genesis.json` into its data directory, then start it.
-        let childStorage = workspace.url.appendingPathComponent(
-            "payments",
-            isDirectory: true
-        )
-        try FileManager.default.createDirectory(
-            at: childStorage,
-            withIntermediateDirectories: true
-        )
-        try JSONEncoder().encode(seed).write(
-            to: childStorage.appendingPathComponent("child-genesis.json")
-        )
-        let child = childNode(
+        // Bring the child up via the seed + self-admit path: seed
+        // `child-genesis.json` into its data directory, then host it in its
+        // parent's process.
+        let child = try childNode(
             binary: binary,
             workspace: workspace,
             name: "payments",
             directory: "Payments",
             identity: childIdentity,
-            parentPublicKey: nexusIdentity.publicKey,
-            parentFactPort: ports[1],
+            host: nexus,
             overlayPort: ports[3],
             factPort: ports[4],
             rpcPort: ports[5]
         )
+        try JSONEncoder().encode(seed).write(
+            to: child.storageURL.appendingPathComponent("child-genesis.json")
+        )
         cluster.add(child)
-        try child.start()
+        try await nexus.host(child)
 
         // The child self-admits its genesis and is active at height 0.
         let active = try await child.waitForStatus { status in
@@ -636,7 +629,7 @@ final class ParentChildE2ETests: XCTestCase {
         let joinerChildIdentity = try workspace.makeIdentity(named: "join-child")
         let ports = try E2EPorts.allocate(count: 12)
 
-        let sourceNexus = nexusNode(
+        let sourceNexus = try treeHostNode(
             binary: binary,
             workspace: workspace,
             name: "src-nexus",
@@ -686,31 +679,22 @@ final class ParentChildE2ETests: XCTestCase {
         )
 
         // The source child is deployer-seeded; the joiner later ADOPTS.
-        let sourceChildStorage = workspace.url.appendingPathComponent(
-            "src-child",
-            isDirectory: true
-        )
-        try FileManager.default.createDirectory(
-            at: sourceChildStorage,
-            withIntermediateDirectories: true
-        )
-        try JSONEncoder().encode(seed).write(
-            to: sourceChildStorage.appendingPathComponent("child-genesis.json")
-        )
-        let sourceChild = childNode(
+        let sourceChild = try childNode(
             binary: binary,
             workspace: workspace,
             name: "src-child",
             directory: "Shallow",
             identity: sourceChildIdentity,
-            parentPublicKey: sourceNexusIdentity.publicKey,
-            parentFactPort: ports[1],
+            host: sourceNexus,
             overlayPort: ports[3],
             factPort: ports[4],
             rpcPort: ports[5]
         )
+        try JSONEncoder().encode(seed).write(
+            to: sourceChild.storageURL.appendingPathComponent("child-genesis.json")
+        )
         cluster.add(sourceChild)
-        try sourceChild.start()
+        try await sourceNexus.host(sourceChild)
         _ = try await sourceChild.waitForStatus { status in
             status.phase == .active && status.tipCID == genesisCID
         }
@@ -739,7 +723,7 @@ final class ParentChildE2ETests: XCTestCase {
 
         // The permissionless joiner: its own parent node first, then a child
         // that ADOPTS the genesis from that parent's directory (no seed file).
-        let joinerNexus = nexusNode(
+        let joinerNexus = try treeHostNode(
             binary: binary,
             workspace: workspace,
             name: "join-nexus",
@@ -757,14 +741,13 @@ final class ParentChildE2ETests: XCTestCase {
             timeout: .seconds(300)
         ) { $0.phase == .active && ($0.height ?? 0) >= parentHeight }
 
-        let joinerChild = childNode(
+        let joinerChild = try childNode(
             binary: binary,
             workspace: workspace,
             name: "join-child",
             directory: "Shallow",
             identity: joinerChildIdentity,
-            parentPublicKey: joinerNexusIdentity.publicKey,
-            parentFactPort: ports[7],
+            host: joinerNexus,
             overlayPort: ports[9],
             factPort: ports[10],
             rpcPort: ports[11],
@@ -773,7 +756,7 @@ final class ParentChildE2ETests: XCTestCase {
             ]
         )
         cluster.add(joinerChild)
-        try joinerChild.start()
+        try await joinerNexus.host(joinerChild)
         try await waitForConvergence(
             producer: sourceChild,
             joiner: joinerChild,
@@ -781,11 +764,12 @@ final class ParentChildE2ETests: XCTestCase {
             phase: "cold sync"
         )
 
-        // Churn: bounce the ONLY serving child, extend the chain, and require
-        // the joiner to follow on the fresh session.
-        try await sourceChild.stop()
+        // Churn: bounce the ONLY serving child (with the parent whose
+        // process hosts it), extend the chain, and require the joiner to
+        // follow on the fresh session.
+        try await sourceNexus.stop()
         try await Task.sleep(for: e2eScaled(.seconds(2)))
-        try sourceChild.start()
+        try sourceNexus.start()
         _ = try await sourceChild.waitForStatus(
             timeout: .seconds(120)
         ) { $0.phase == .active && ($0.height ?? 0) >= childDepth }
@@ -892,34 +876,86 @@ final class ParentChildE2ETests: XCTestCase {
         )
     }
 
+    /// A Nexus node whose process hosts a tree (`lattice-node --config`
+    /// under `<workspace>/<name>`), so it can host children.
+    private func treeHostNode(
+        binary: URL,
+        workspace: E2EWorkspace,
+        name: String,
+        identity: E2EIdentity,
+        overlayPort: UInt16,
+        factPort: UInt16,
+        rpcPort: UInt16
+    ) throws -> E2ENode {
+        let root = workspace.url.appendingPathComponent(name, isDirectory: true)
+        return E2ENode(
+            binary: binary,
+            configuration: E2ENode.Configuration(
+                name: name,
+                chainPath: "Nexus",
+                storage: try hostedLevel("Nexus", identity: identity, root: root),
+                identity: identity,
+                overlayPort: overlayPort,
+                factPort: factPort,
+                rpcPort: rpcPort,
+                hostRoot: root
+            ),
+            logDirectory: workspace.logs
+        )
+    }
+
+    /// A child of `host`'s tree. It runs in `host`'s process once hosted
+    /// (`E2ENode.host`).
     private func childNode(
         binary: URL,
         workspace: E2EWorkspace,
         name: String,
         directory: String,
         identity: E2EIdentity,
-        parentPublicKey: String,
-        parentFactPort: UInt16,
+        host: E2ENode,
         overlayPort: UInt16,
         factPort: UInt16,
         rpcPort: UInt16,
         overlayPeers: [E2ENode.OverlayPeer] = []
-    ) -> E2ENode {
-        E2ENode(
+    ) throws -> E2ENode {
+        let root = try XCTUnwrap(host.hostRoot, "\(directory) needs a tree host")
+        let path = "Nexus/\(directory)"
+        return E2ENode(
             binary: binary,
             configuration: E2ENode.Configuration(
                 name: name,
-                chainPath: "Nexus/\(directory)",
-                storage: workspace.url.appendingPathComponent(name, isDirectory: true),
+                chainPath: path,
+                storage: try hostedLevel(path, identity: identity, root: root),
                 identity: identity,
                 overlayPort: overlayPort,
                 factPort: factPort,
                 rpcPort: rpcPort,
                 overlayPeers: overlayPeers,
-                parent: .init(publicKey: parentPublicKey, factPort: parentFactPort)
+                hostRoot: root
             ),
             logDirectory: workspace.logs
         )
+    }
+
+    /// Places `identity` where the tree at `root` keys `path`, and returns
+    /// the level's storage directory there.
+    private func hostedLevel(
+        _ path: String, identity: E2EIdentity, root: URL
+    ) throws -> URL {
+        let layout = HostLayout(root: root.path)
+        let key = layout.identityKey(for: path)
+        try FileManager.default.createDirectory(
+            at: key.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try FileManager.default.copyItem(at: identity.file, to: key)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: key.path
+        )
+        let storage = layout.chainDirectory(for: path)
+        try FileManager.default.createDirectory(
+            at: storage, withIntermediateDirectories: true
+        )
+        return storage
     }
 
     private func overlayPeer(
@@ -1320,7 +1356,7 @@ final class ParentChildE2ETests: XCTestCase {
         let joinerChildIdentity = try workspace.makeIdentity(named: "join-child")
         let ports = try E2EPorts.allocate(count: 12)
 
-        let sourceNexus = nexusNode(
+        let sourceNexus = try treeHostNode(
             binary: binary,
             workspace: workspace,
             name: "src-nexus",
@@ -1379,31 +1415,22 @@ final class ParentChildE2ETests: XCTestCase {
         )
 
         // The source child is deployer-seeded; the joiner later ADOPTS.
-        let sourceChildStorage = workspace.url.appendingPathComponent(
-            "src-child",
-            isDirectory: true
-        )
-        try FileManager.default.createDirectory(
-            at: sourceChildStorage,
-            withIntermediateDirectories: true
-        )
-        try JSONEncoder().encode(seed).write(
-            to: sourceChildStorage.appendingPathComponent("child-genesis.json")
-        )
-        let sourceChild = childNode(
+        let sourceChild = try childNode(
             binary: binary,
             workspace: workspace,
             name: "src-child",
             directory: "Deep",
             identity: sourceChildIdentity,
-            parentPublicKey: sourceNexusIdentity.publicKey,
-            parentFactPort: ports[1],
+            host: sourceNexus,
             overlayPort: ports[3],
             factPort: ports[4],
             rpcPort: ports[5]
         )
+        try JSONEncoder().encode(seed).write(
+            to: sourceChild.storageURL.appendingPathComponent("child-genesis.json")
+        )
         cluster.add(sourceChild)
-        try sourceChild.start()
+        try await sourceNexus.host(sourceChild)
         _ = try await sourceChild.waitForStatus { status in
             status.phase == .active && status.tipCID == genesisCID
         }
@@ -1521,7 +1548,7 @@ final class ParentChildE2ETests: XCTestCase {
 
         // The permissionless joiner: its own parent node first, then a child
         // that ADOPTS the genesis from that parent's directory (no seed file).
-        let joinerNexus = nexusNode(
+        let joinerNexus = try treeHostNode(
             binary: binary,
             workspace: workspace,
             name: "join-nexus",
@@ -1539,14 +1566,13 @@ final class ParentChildE2ETests: XCTestCase {
             timeout: .seconds(300)
         ) { $0.phase == .active && ($0.height ?? 0) >= window }
 
-        let joinerChild = childNode(
+        let joinerChild = try childNode(
             binary: binary,
             workspace: workspace,
             name: "join-child",
             directory: "Deep",
             identity: joinerChildIdentity,
-            parentPublicKey: joinerNexusIdentity.publicKey,
-            parentFactPort: ports[7],
+            host: joinerNexus,
             overlayPort: ports[9],
             factPort: ports[10],
             rpcPort: ports[11],
@@ -1555,17 +1581,17 @@ final class ParentChildE2ETests: XCTestCase {
             ]
         )
         cluster.add(joinerChild)
-        try joinerChild.start()
+        try await joinerNexus.host(joinerChild)
 
         // Mid-sync churn: once catch-up is visibly under way, bounce the
-        // ONLY serving node. Progress must resume without restarting
-        // discovery from scratch.
+        // ONLY serving node (with the parent whose process hosts it).
+        // Progress must resume without restarting discovery from scratch.
         _ = try await joinerChild.waitForStatus(
             timeout: .seconds(300)
         ) { $0.phase == .active && ($0.height ?? 0) >= 25 }
-        try await sourceChild.stop()
+        try await sourceNexus.stop()
         try await Task.sleep(for: e2eScaled(.seconds(2)))
-        try sourceChild.start()
+        try sourceNexus.start()
         _ = try await sourceChild.waitForStatus(
             timeout: .seconds(120)
         ) { $0.phase == .active && ($0.height ?? 0) >= childDepth }
@@ -2111,11 +2137,6 @@ private final class LoopbackTCPFaultProxy: @unchecked Sendable {
 private final class E2ENode {
     private static let requestTimeout: TimeInterval = 10
 
-    struct Parent {
-        let publicKey: String
-        let factPort: UInt16
-    }
-
     struct OverlayPeer {
         let publicKey: String
         let port: UInt16
@@ -2130,7 +2151,9 @@ private final class E2ENode {
         let factPort: UInt16
         let rpcPort: UInt16
         let overlayPeers: [OverlayPeer]
-        let parent: Parent?
+        /// The data root of the tree this node runs in (`lattice-node
+        /// --config`), or nil for a lone Nexus process.
+        let hostRoot: URL?
 
         init(
             name: String,
@@ -2141,7 +2164,7 @@ private final class E2ENode {
             factPort: UInt16,
             rpcPort: UInt16,
             overlayPeers: [OverlayPeer] = [],
-            parent: Parent? = nil
+            hostRoot: URL? = nil
         ) {
             self.name = name
             self.chainPath = chainPath
@@ -2151,7 +2174,7 @@ private final class E2ENode {
             self.factPort = factPort
             self.rpcPort = rpcPort
             self.overlayPeers = overlayPeers
-            self.parent = parent
+            self.hostRoot = hostRoot
         }
     }
 
@@ -2163,6 +2186,10 @@ private final class E2ENode {
     private var session: URLSession?
     private var logHandles: [FileHandle] = []
     private var launchCount = 0
+    /// The children this node's process hosts. A child runs only co-hosted
+    /// with its parent, so it has no process of its own: hosting one
+    /// restarts this node with it (configuration applies on restart).
+    private var hostedChildren: [E2ENode] = []
 
     init(binary: URL, configuration: Configuration, logDirectory: URL) {
         self.binary = binary
@@ -2172,13 +2199,31 @@ private final class E2ENode {
     }
 
     var storageURL: URL { configuration.storage }
+    var hostRoot: URL? { configuration.hostRoot }
 
     func setOverlayPeers(_ peers: [OverlayPeer]) {
         precondition(process?.isRunning != true, "stop a node before changing its peers")
         overlayPeers = peers
     }
 
+    /// Restarts this node's process hosting `child` as well.
+    func host(_ child: E2ENode) async throws {
+        precondition(configuration.hostRoot != nil, "only a tree host hosts children")
+        if !hostedChildren.contains(where: { $0 === child }) {
+            hostedChildren.append(child)
+        }
+        try await stop()
+        try start()
+        // The child answers on its own RPC port, from this process.
+        child.closeSession()
+        child.session = URLSession(configuration: .ephemeral)
+    }
+
     func start() throws {
+        precondition(
+            configuration.chainPath == "Nexus",
+            "a child runs in its parent's process: host it"
+        )
         guard process?.isRunning != true else { return }
         launchCount += 1
         closeSession()
@@ -2191,7 +2236,7 @@ private final class E2ENode {
         let nextSession = URLSession(configuration: .ephemeral)
         let next = Process()
         next.executableURL = binary
-        next.arguments = launchArguments()
+        next.arguments = try launchArguments()
         // Field-diagnosis traces land in the per-node stderr log, which the
         // harness already retains and CI uploads on failure — without this,
         // a wedged phase (e.g. awaitingGenesis) leaves blind artifacts.
@@ -2409,11 +2454,13 @@ private final class E2ENode {
     }
 
     private var reservedPorts: [UInt16] {
-        [
-            configuration.overlayPort,
-            configuration.factPort,
-            configuration.rpcPort,
-        ]
+        ([self] + hostedChildren).flatMap {
+            [
+                $0.configuration.overlayPort,
+                $0.configuration.factPort,
+                $0.configuration.rpcPort,
+            ]
+        }
     }
 
     private func send<Response: Decodable>(
@@ -2457,7 +2504,26 @@ private final class E2ENode {
         return try JSONDecoder().decode(Response.self, from: data)
     }
 
-    private func launchArguments() -> [String] {
+    private func launchArguments() throws -> [String] {
+        if let root = configuration.hostRoot {
+            // The tree's own configuration: each level's ports and peers,
+            // an explicit empty list meaning no default bootstrap peers.
+            var chains: [String: TopologyChain] = [:]
+            for node in [self] + hostedChildren {
+                chains[node.configuration.chainPath] = TopologyChain(
+                    listen: node.configuration.overlayPort,
+                    fact: node.configuration.factPort,
+                    rpc: node.configuration.rpcPort,
+                    peers: node.overlayPeers.map {
+                        "\($0.publicKey)@127.0.0.1:\($0.port)"
+                    }
+                )
+            }
+            try Topology(chains: chains).save(root: root)
+            return [
+                "--config", root.appendingPathComponent(Topology.fileName).path,
+            ]
+        }
         var arguments = [
             "--chain-path", configuration.chainPath,
             "--data-directory", configuration.storage.path,
@@ -2469,9 +2535,6 @@ private final class E2ENode {
             // shipped defaults would send these nodes at the public network.
             "--no-default-peers",
         ]
-        if let parent = configuration.parent {
-            arguments += ["--parent", "\(parent.publicKey)@127.0.0.1:\(parent.factPort)"]
-        }
         for peer in overlayPeers {
             arguments += ["--peer", "\(peer.publicKey)@127.0.0.1:\(peer.port)"]
         }

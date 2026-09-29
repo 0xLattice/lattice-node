@@ -103,25 +103,32 @@ no identity or private-key flag.
 
 ## Start a child process
 
-All chain paths are absolute and Nexus-inclusive. Start a child with its full
-path and its immediate parent's authenticated fact endpoint:
+All chain paths are absolute and Nexus-inclusive. A child runs in the same
+process as its parent: list both chains in a `lattice.json` and start the tree
+host.
 
-```bash
-swift run lattice-node \
-  --chain-path Nexus/Payments \
-  --parent <nexus-process-public-key>@127.0.0.1:4002 \
-  --listen-port 4101 \
-  --fact-listen-port 4102 \
-  --rpc-port 8180
+```json
+{
+  "chains": {
+    "Nexus": {"listen": 4001, "fact": 4002, "rpc": 8080},
+    "Nexus/Payments": {"listen": 4101, "fact": 4102, "rpc": 8180}
+  }
+}
 ```
 
-It initially reports `awaitingGenesis`. To give a new chain its genesis:
+```bash
+swift run lattice-node --config lattice.json
+```
+
+Each chain keeps its storage in `chains/<path>` and its identity in
+`identity/<path>.key` beside the file. The child initially reports
+`awaitingGenesis`. To give a new chain its genesis:
 
 1. Build the self-contained child genesis offline from a seed: the child spec,
    an optional premine recipient, and a timestamp. The same seed always yields
    the same genesis CID.
 2. Write that seed as `child-genesis.json` into the child's data directory
-   before starting the child. The node reads the file only at startup, so a
+   (`chains/Nexus/Payments`) before starting the child. The node reads the file only at startup, so a
    child that was already running must be restarted after the file is written.
 3. Construct and sign a parent transaction carrying the genesis CID in a
    `GenesisAction` for directory `Payments`.

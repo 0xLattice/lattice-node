@@ -179,6 +179,7 @@ let package = Package(
             dependencies: [
                 "LatticeNode",
                 "LatticeNodeDaemon",
+                "LatticeCtlCore",
                 "LatticeMinerCore",
                 "LatticeMiningCoordinatorTool",
                 "LatticeMiner",

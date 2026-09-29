@@ -116,16 +116,6 @@ final class WireProtocolFuzzTests: XCTestCase {
             try seed(PortableAttachmentLocateRequestMessage(
                 requestID: 25, childCID: cids[4]
             )),
-            // `from` is the empty state, the only continuity shape the
-            // protocol defines — a seed with any other `from` would not
-            // survive its own validator.
-            try seed(ParentChainFactMessage(
-                requestID: 27,
-                fact: .continuity(
-                    fromStateCID: LatticeState.emptyHeader.rawCID,
-                    toStateCID: cids[3]
-                )
-            )),
             try seed(ParentRunReportMessage(
                 directory: "Payments",
                 carrierCID: cids[0],
@@ -256,7 +246,6 @@ final class WireProtocolFuzzTests: XCTestCase {
             probe(ReadEndpointRequestMessage.self),
             probe(ReadEndpointResponseMessage.self),
             probe(PortableAttachmentLocateRequestMessage.self),
-            probe(ParentChainFactMessage.self),
             probe(ParentRunReportMessage.self),
             probe(ParentRunReportRequestMessage.self),
         ]

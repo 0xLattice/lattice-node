@@ -2469,6 +2469,249 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         XCTAssertTrue(carried.decision.isAccepted, "\(carried.decision)")
     }
 
+    // MARK: - Local parent facts
+
+    /// The parent state the carried block's scripted admission requires
+    /// continuity to (`carryFirstCandidate`).
+    private static let carriedParentState = testCID("carried-parent-state")
+
+    /// A fixture whose child reads its parent facts through a
+    /// `StubParentLevel` over the parent's own process, holding the carried
+    /// block's parent state unless `withheld`.
+    private func stubbedParentFixture(
+        keyByte: UInt8, withheld: Bool
+    ) async throws -> (fixture: ProvisionalRootFixture, parent: StubParentLevel) {
+        let fixture = try await provisionalRootFixture(keyByte: keyByte) {
+            StubParentLevel(
+                produced: [Self.carriedParentState], withheld: withheld, base: $0
+            )
+        }
+        let parent = try XCTUnwrap(fixture.childRuntime.parentLevel as? StubParentLevel)
+        return (fixture, parent)
+    }
+
+    /// Starts both levels and has the parent carry the child's first
+    /// candidate. Returns its CID. The child admits through its service once
+    /// the package holds the continuity link to `carriedParentState`; until
+    /// then its admission needs that parent fact (a weighed admission never
+    /// asks for one, so the requirement is scripted).
+    private func carryFirstCandidate(
+        _ fixture: ProvisionalRootFixture
+    ) async throws -> String {
+        let parentService = networkService(
+            process: fixture.parentProcess, runtime: fixture.parentRuntime
+        )
+        let childService = networkService(
+            process: fixture.childProcess, runtime: fixture.childRuntime
+        )
+        try await fixture.parentRuntime.start(
+            process: fixture.parentProcess, chain: inertNetworkHandlers()
+        )
+        try await fixture.childRuntime.start(
+            process: fixture.childProcess,
+            chain: ClosureChainInterface(
+                childCandidateBuilder: { context, parentSource in
+                    try await childService.miningCandidate(
+                        for: context, parentContentSource: parentSource
+                    )
+                },
+                admission: { admission in
+                    guard admission.authenticatedChildPackage?.package
+                        .parentStateContinuityLink?.toStateCID
+                        == Self.carriedParentState
+                    else {
+                        return NodeImportOutcome(
+                            decision: .unavailable(.parentStateContinuity(
+                                parentPath: ["Nexus"],
+                                fromStateCID: LatticeState.emptyHeader.rawCID,
+                                toStateCID: Self.carriedParentState
+                            )),
+                            parentCarrierLink: nil,
+                            sameChainPredecessor: nil
+                        )
+                    }
+                    return try await childService.importNetworkCandidate(
+                        admission.header,
+                        authenticatedChildPackage: admission.authenticatedChildPackage,
+                        preparingChildDirectories: admission.preparingChildDirectories,
+                        contentSource: admission.contentSource,
+                        weighed: admission.weighed
+                    )
+                }
+            )
+        )
+        let first = try await firstHeldCandidate(fixture)
+        let carrier = try await storeCarrier(of: first, fixture: fixture)
+        try await admitCarrier(carrier, service: parentService, fixture: fixture)
+        return try BlockHeader(node: first.block).rawCID
+    }
+
+    /// A carried block whose admission needs its parent's state continuity
+    /// reads it from the parent level and is admitted at once.
+    func testACarriedBlockIsAdmittedOnTheParentLevelsFact() async throws {
+        let (fixture, parent) = try await stubbedParentFixture(
+            keyByte: 0xa1, withheld: false
+        )
+        do {
+            let carried = try await carryFirstCandidate(fixture)
+            try await eventually("the carried block is admitted") {
+                await fixture.childProcess.hasAcceptedBlock(carried)
+            }
+            let asked = await parent.continuityQuestions
+            XCTAssertFalse(asked.isEmpty, "admission read the parent level's fact")
+            XCTAssertEqual(Set(asked), [Self.carriedParentState])
+        } catch {
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+            throw error
+        }
+        await fixture.childRuntime.stop()
+        await fixture.parentRuntime.stop()
+    }
+
+    /// A fact the parent level does not hold yet parks the block with no
+    /// timer: it is not asked again until the parent's tip moves, and then
+    /// it is admitted.
+    func testABlockParkedOnAParentFactReReadiesOnTheParentTip() async throws {
+        let (fixture, parent) = try await stubbedParentFixture(
+            keyByte: 0xa2, withheld: true
+        )
+        do {
+            let carried = try await carryFirstCandidate(fixture)
+            try await eventually("admission asked the parent level") {
+                await !parent.continuityQuestions.isEmpty
+            }
+            try await alwaysDuring("parked on the missing fact", .seconds(2)) {
+                await !fixture.childProcess.hasAcceptedBlock(carried)
+            }
+            let parked = await parent.continuityQuestions.count
+            try await alwaysDuring("no timer asks again", .seconds(2)) {
+                await parent.continuityQuestions.count == parked
+            }
+
+            await parent.release()
+            await fixture.childRuntime.parentChanged(.tipChanged)
+            try await eventually("admitted once the parent's tip moves") {
+                await fixture.childProcess.hasAcceptedBlock(carried)
+            }
+        } catch {
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+            throw error
+        }
+        await fixture.childRuntime.stop()
+        await fixture.parentRuntime.stop()
+    }
+
+    /// Lost-wake window: the parent's tip moves (and the fact lands) after
+    /// admission read the fact but before the block parks, so the wake finds
+    /// no park to re-ready. The park still sees the tip moved and re-checks,
+    /// and the block is admitted with no further wake.
+    func testATipChangeBetweenTheFactReadAndTheParkStillReReadies() async throws {
+        let (fixture, parent) = try await stubbedParentFixture(
+            keyByte: 0xa4, withheld: true
+        )
+        let runtime = fixture.childRuntime
+        await parent.onNextWithheldQuestion { [weak runtime] in
+            await runtime?.parentChanged(.tipChanged)
+        }
+        do {
+            let carried = try await carryFirstCandidate(fixture)
+            try await eventually("admitted without another wake") {
+                await fixture.childProcess.hasAcceptedBlock(carried)
+            }
+            let tipChanges = await runtime.parentTipChanges
+            XCTAssertEqual(tipChanges, 1, "the only wake fired before the park")
+        } catch {
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+            throw error
+        }
+        await fixture.childRuntime.stop()
+        await fixture.parentRuntime.stop()
+    }
+
+    /// A parked block holds no request state: nothing is pending on the
+    /// parent, so each tip change asks at most once and nothing
+    /// accumulates while the parent still lacks the fact.
+    func testParentFactWaitsHoldNoPendingState() async throws {
+        let (fixture, parent) = try await stubbedParentFixture(
+            keyByte: 0xa3, withheld: true
+        )
+        do {
+            let carried = try await carryFirstCandidate(fixture)
+            try await eventually("admission asked the parent level") {
+                await !parent.continuityQuestions.isEmpty
+            }
+            let before = await parent.continuityQuestions.count
+            let wakes = 20
+            for _ in 0..<wakes {
+                await fixture.childRuntime.parentChanged(.tipChanged)
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            try await alwaysDuring("still parked", .milliseconds(500)) {
+                await !fixture.childProcess.hasAcceptedBlock(carried)
+            }
+            let asked = await parent.continuityQuestions.count - before
+            XCTAssertLessThanOrEqual(asked, wakes, "one read per wake at most")
+            let tracked = await fixture.childRuntime.blockFetcher.tracks(carried)
+            XCTAssertTrue(tracked, "the block stays parked, not dropped")
+
+            await parent.release()
+            await fixture.childRuntime.parentChanged(.tipChanged)
+            try await eventually("admitted on the next tip change") {
+                await fixture.childProcess.hasAcceptedBlock(carried)
+            }
+        } catch {
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+            throw error
+        }
+        await fixture.childRuntime.stop()
+        await fixture.parentRuntime.stop()
+    }
+
+    /// The validate walk reads a weighed child block's parent fact from the
+    /// parent level: while the parent lacks it the walk parks, and its retry
+    /// executes the block once the parent holds it.
+    func testTheValidateWalkReadsTheParentFactLocally() async throws {
+        let (fixture, parent) = try await stubbedParentFixture(
+            keyByte: 0xa4, withheld: true
+        )
+        let parentProcess = fixture.parentProcess
+        let childService = ChainService(
+            process: fixture.childProcess,
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                chainStateChangePublisher: {},
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in },
+                executionBodySource: { _, admit in
+                    try await admit(parentProcess)
+                }
+            ),
+            parentLevel: parent,
+            executionWalkRetryInterval: .milliseconds(200)
+        )
+        _ = try await weighedOnlyChildBlock(fixture)
+        // Behind: the request arms the walk.
+        _ = try? await childService.miningCandidate(
+            for: fixture.context, parentContentSource: parentProcess
+        )
+        try await eventually("the walk asked the parent level") {
+            await !parent.continuityQuestions.isEmpty
+        }
+        try await alwaysDuring("the walk parks without the fact", .seconds(1)) {
+            await fixture.childProcess.metricsTipHeights().validated == 0
+        }
+
+        await parent.release()
+        try await eventually("the walk executes the block") {
+            await fixture.childProcess.metricsTipHeights().validated == 1
+        }
+        await childService.shutdown()
+    }
+
     /// A weighed block ahead of the validated tip with no walk stepping —
     /// parked on a fact it cannot get, or never armed — does not withhold
     /// the child's candidate: the child builds on its validated tip, since
@@ -2544,11 +2787,10 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
     /// walk reached.
     func testChildCandidateWaitsWhileTheExecutionWalkSteps() async throws {
         let fixture = try await provisionalRootFixture(keyByte: 0x9d)
-        let weighedOnly = try await weighedOnlyChildBlock(fixture)
+        _ = try await weighedOnlyChildBlock(fixture)
         let gate = Latch()
         let changes = NetworkEventRecorder()
         let parentProcess = fixture.parentProcess
-        let package = weighedOnly.package
         let childService = ChainService(
             process: fixture.childProcess,
             network: ClosureNetworkInterface(
@@ -2559,9 +2801,9 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                 executionBodySource: { _, admit in
                     await gate.wait()
                     return try await admit(parentProcess)
-                },
-                validateEvidenceSource: { _, _ in package }
-            )
+                }
+            ),
+            parentLevel: fixture.childRuntime.parentLevel
         )
         // Behind and not parked: the request itself is refused and arms the
         // walk, whose first step then holds at the gate.
@@ -2684,7 +2926,8 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
     private func provisionalRootFixture(
         keyByte: UInt8,
         childInboxCapacity: Int = 64,
-        childOrphanCapacity: Int = 1_024
+        childOrphanCapacity: Int = 1_024,
+        parentLevel: (LocalParentLevel) -> any ParentLevel = { $0 }
     ) async throws -> ProvisionalRootFixture {
         let parentStorage = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-provisional-parent-\(UUID().uuidString)",
@@ -2719,22 +2962,23 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             listenPort: NetworkTransportTestPorts.allocate(),
             factListenPort: NetworkTransportTestPorts.allocate(),
             rpcPort: NetworkTransportTestPorts.allocate(),
-            parentEndpoint: ParentEndpoint(
-                publicKey: parentConfiguration.processPublicKey,
-                host: "127.0.0.1",
-                port: parentConfiguration.factListenPort
-            ),
             resourcePolicy: NodeResourcePolicy(
                 maximumPendingParentEvidence: childInboxCapacity,
                 maximumOrphanedParentEvidence: childOrphanCapacity
             )
-        )
+        
+    ).withParentEndpoint(ParentEndpoint(
+            publicKey: parentConfiguration.processPublicKey,
+            host: "127.0.0.1",
+            port: parentConfiguration.factListenPort
+        ))
         let parentRuntime = try NodeNetworkRuntime(configuration: parentConfiguration)
-        let childRuntime = try NodeNetworkRuntime(
-            configuration: childConfiguration
-        )
         let parentProcess = try await ChainProcess.open(
             configuration: parentConfiguration
+        )
+        let childRuntime = try NodeNetworkRuntime(
+            configuration: childConfiguration,
+            parentLevel: parentLevel(LocalParentLevel(parentProcess))
         )
         let childProcess = try await ChainProcess.open(
             configuration: childConfiguration

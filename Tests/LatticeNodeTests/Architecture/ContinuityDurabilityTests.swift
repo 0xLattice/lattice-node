@@ -233,38 +233,48 @@ final class ContinuityDurabilityTests: XCTestCase {
         )
     }
 
-    /// The serving surface answers ONE question, so there is no cost to
-    /// ration. A non-anchor `from` is not a question any correct child can ask,
-    /// and is refused as malformed before it can reach the consensus actor —
-    /// which is what replaced the old visit budget and the rate limiter alike.
-    func testNonAnchorContinuityQuestionIsRefusedAsMalformed() throws {
+    /// The parent level answers ONE continuity question: from the empty
+    /// state, where every child block anchors. Any other `from` is not a
+    /// question a correct child can have, so it never reaches the parent,
+    /// where it would be an ancestry walk rather than a frontier read.
+    func testNonAnchorContinuityIsNeverAskedOfTheParent() async throws {
         let anchor = LatticeState.emptyHeader.rawCID
         let someState = NexusGenesis.expectedBlockHash
-        // Both must be well-formed and distinct, or this test would be decided
-        // by the canonical-CID or from==to checks and never reach the anchor
-        // rule it exists to pin.
-        XCTAssertTrue(CIDIdentity.isCanonical(anchor))
-        XCTAssertTrue(CIDIdentity.isCanonical(someState))
         XCTAssertNotEqual(anchor, someState)
+        let parent = StubParentLevel(produced: [anchor, someState])
+        let child = try XCTUnwrap(ChainAddress(["Nexus", "Payments"]))
+        let package = AuthenticatedChildPackage(package: ChildValidationPackage(
+            proof: ChildBlockProof(
+                rootCID: someState, directoryPath: ["Payments"], entries: []
+            )
+        ))
 
-        // The protocol's own shape survives.
-        XCTAssertNoThrow(
-            try ParentChainFactMessage(
-                requestID: 1,
-                fact: .continuity(fromStateCID: anchor, toStateCID: someState)
-            ).validate()
+        // The protocol's own shape is answered, as a link.
+        let answered = await parent.evidence(
+            for: .parentStateContinuity(
+                parentPath: ["Nexus"], fromStateCID: anchor, toStateCID: someState
+            ),
+            child: child,
+            package: package
+        )
+        XCTAssertEqual(
+            answered?.package.parentStateContinuityLink,
+            ParentStateContinuityLink(
+                parentPath: ["Nexus"], fromStateCID: anchor, toStateCID: someState
+            )
         )
 
-        // A general reachability question does not: it is the only way to
-        // reach an ancestry walk, and no correct child can ask for one.
-        XCTAssertThrowsError(
-            try ParentChainFactMessage(
-                requestID: 1,
-                fact: .continuity(fromStateCID: someState, toStateCID: anchor)
-            ).validate()
-        ) { error in
-            XCTAssertEqual(error as? NodeNetworkWireError, .malformed)
-        }
+        // A general reachability question is not asked at all.
+        let refused = await parent.evidence(
+            for: .parentStateContinuity(
+                parentPath: ["Nexus"], fromStateCID: someState, toStateCID: anchor
+            ),
+            child: child,
+            package: package
+        )
+        XCTAssertNil(refused)
+        let asked = await parent.continuityQuestions
+        XCTAssertEqual(asked, [someState])
     }
 
     /// An UPGRADED store — rows written before validation facts existed, so the

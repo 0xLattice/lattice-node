@@ -7,7 +7,8 @@ were removed because those roles do not exist in Lattice.
 ## Rules that every deployment must preserve
 
 1. Supply one absolute `--chain-path` beginning with `Nexus`.
-2. Give every child an explicit authenticated immediate parent with `--parent`.
+2. Run every child in the same `lattice-node` process as its ancestry, listed
+   in one `lattice.json` and hosted with `--config`.
 3. Keep the unauthenticated HTTP API on loopback. To serve public reads
    directly, use `--public-read-port`: a second listener on all interfaces
    carrying ONLY the bounded GET read routes (the read-replica allowlist,
@@ -109,17 +110,22 @@ docker run --network host \
 
 ## Child process
 
-Allocate independent ports, storage, and identity for each child:
+A child runs in the same process as its ancestry. Give each chain its own ports
+in `lattice.json`; the host keeps each chain's storage in `chains/<path>` and
+its identity in `identity/<path>.key` under the data root:
+
+```json
+{
+  "chains": {
+    "Nexus": {"listen": 4001, "fact": 4002, "rpc": 8080},
+    "Nexus/Payments": {"listen": 4101, "fact": 4102, "rpc": 8180}
+  }
+}
+```
 
 ```bash
 lattice-node \
-  --chain-path Nexus/Payments \
-  --parent <nexus-key>@10.0.0.10:4002 \
-  --data-directory /var/lib/lattice/chains/Nexus/Payments \
-  --identity-key /var/lib/lattice/identity/payments.key \
-  --listen-port 4101 \
-  --fact-listen-port 4102 \
-  --rpc-port 8180
+  --config /var/lib/lattice/lattice.json
 ```
 
 The child waits until a separately signed parent `GenesisAction` transaction

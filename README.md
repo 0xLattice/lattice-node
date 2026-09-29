@@ -48,15 +48,20 @@ swift run lattice-node \
 RPC is intentionally loopback-only. The daemon rejects non-loopback
 `--rpc-bind` values.
 
-To run a child, configure its complete identity and immediate parent:
+A child runs in the same `lattice-node` process as its ancestry. List every
+chain of the tree in a `lattice.json` and host it with `--config`:
+
+```json
+{
+  "chains": {
+    "Nexus": {"listen": 4001, "fact": 4002, "rpc": 8080},
+    "Nexus/Payments": {"listen": 4101, "fact": 4102, "rpc": 8180}
+  }
+}
+```
 
 ```bash
-swift run lattice-node \
-  --chain-path Nexus/Payments \
-  --parent <nexus-process-public-key>@127.0.0.1:4002 \
-  --listen-port 4101 \
-  --fact-listen-port 4102 \
-  --rpc-port 8180
+swift run lattice-node --config lattice.json
 ```
 
 The child starts in `awaitingGenesis`. A child genesis is self-contained: it is

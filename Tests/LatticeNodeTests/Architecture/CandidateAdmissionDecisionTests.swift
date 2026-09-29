@@ -163,14 +163,15 @@ final class CandidateAdmissionDecisionTests: XCTestCase {
         case .wait(.evidence): "wait evidence"
         case .wait(.content): "wait content"
         case .wait(.later): "wait later"
+        case .wait(.parentFact): "wait parent fact"
         case .predecessor(let cid): "predecessor \(cid)"
         case .connected: "connected"
         }
     }
 
     /// `unavailable` always waits: for a new provider when the body was not
-    /// served, on a timer for a missing parent fact, and for new evidence
-    /// otherwise.
+    /// served, for the parent's tip to move on a missing parent fact, and
+    /// for new evidence otherwise.
     ///
     /// Establishes: NODE-SEMANTICS-003.a
     func testUnavailableWaitsByWhatIsMissing() {
@@ -186,11 +187,11 @@ final class CandidateAdmissionDecisionTests: XCTestCase {
         for shortfall in [false, true] {
             XCTAssertEqual(
                 resolve(.unavailable(Self.parentGenesis), contentShortfall: shortfall),
-                "wait later"
+                "wait parent fact"
             )
             XCTAssertEqual(
                 resolve(.unavailable(Self.parentContinuity), contentShortfall: shortfall),
-                "wait later"
+                "wait parent fact"
             )
         }
     }

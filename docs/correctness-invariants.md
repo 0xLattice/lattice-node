@@ -52,8 +52,9 @@ places are their own claim until a test covers them too.
   (`candidateResolution`) turns an `unavailable` outcome with no missing
   same-chain ancestor into a wait, never a decision: a body no provider
   served waits for a provider (`.wait(.content)`), a missing parent fact
-  (genesis or state continuity) waits on a timer (`.wait(.later)`), and any
-  other missing evidence waits for new evidence (`.wait(.evidence)`).
+  (genesis or state continuity) waits for the parent level's tip to move
+  (`.wait(.parentFact)`), and any other missing evidence waits for new
+  evidence (`.wait(.evidence)`).
 - **NODE-SEMANTICS-003.b** — Candidate admission's outcome blame
   (`candidateBlame`) never names the supplier of an `unavailable` outcome,
   whatever it waits for. Reporting bytes that fail their CID is separate and

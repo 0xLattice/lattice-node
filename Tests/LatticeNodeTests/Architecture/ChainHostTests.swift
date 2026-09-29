@@ -11,6 +11,7 @@ import cashew
 final class ChainHostTests: XCTestCase {
     private let nexus = ChainAddress(["Nexus"])!
     private let child = ChainAddress(["Nexus", "Payments"])!
+    private let grandchild = ChainAddress(["Nexus", "Payments", "Refunds"])!
 
     private func configure(
         _ address: ChainAddress, root: URL, keyByte: UInt8
@@ -20,15 +21,14 @@ final class ChainHostTests: XCTestCase {
         let listen = NetworkTransportTestPorts.allocate()
         let fact = NetworkTransportTestPorts.allocate()
         let rpc = NetworkTransportTestPorts.allocate()
-        return { parentEndpoint in
+        return {
             try NodeConfiguration(
                 chainPath: address.components,
                 storagePath: storage,
                 privateKeyHex: key,
                 listenPort: listen,
                 factListenPort: fact,
-                rpcPort: rpc,
-                parentEndpoint: parentEndpoint
+                rpcPort: rpc
             )
         }
     }
@@ -88,6 +88,77 @@ final class ChainHostTests: XCTestCase {
         XCTAssertFalse(childRuns)
         await host.stopAll()
         _ = otherWriter
+    }
+
+    /// A child whose parent level is not running has no parent facts, so it
+    /// is refused at start rather than run failing closed forever.
+    func testAChildWhoseParentFailedToStartIsRefused() async throws {
+        let root = temporaryDirectory(create: true)
+        let childStorage = root.appendingPathComponent(child.key, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: childStorage, withIntermediateDirectories: true
+        )
+        let otherWriter = try StorageDirectoryLock(directory: childStorage)
+        let host = try ChainHost(chains: [
+            nexus: configure(nexus, root: root, keyByte: 1),
+            child: configure(child, root: root, keyByte: 2),
+            grandchild: configure(grandchild, root: root, keyByte: 3),
+        ])
+        let failed = try await host.startAll()
+        XCTAssertEqual(failed.map(\.path), [child, grandchild])
+        XCTAssertEqual(
+            failed.last?.error as? ChainHostError,
+            .parentNotRunning(child: grandchild.key, parent: child.key)
+        )
+        let nexusRuns = await host.node(nexus) != nil
+        let grandchildRuns = await host.node(grandchild) != nil
+        XCTAssertTrue(nexusRuns)
+        XCTAssertFalse(grandchildRuns)
+        await host.stopAll()
+        _ = otherWriter
+    }
+
+    /// Stopping a mid-level stops every level below it, children first, and
+    /// leaves its ancestors running.
+    func testStoppingAMidLevelStopsItsDescendants() async throws {
+        let root = temporaryDirectory(create: true)
+        let host = try ChainHost(chains: [
+            nexus: configure(nexus, root: root, keyByte: 1),
+            child: configure(child, root: root, keyByte: 2),
+            grandchild: configure(grandchild, root: root, keyByte: 3),
+        ])
+        let failed = try await host.startAll()
+        XCTAssertTrue(failed.isEmpty)
+        let stopped = await host.stop(child)
+        XCTAssertEqual(stopped, [grandchild])
+        let childRuns = await host.node(child) != nil
+        let grandchildRuns = await host.node(grandchild) != nil
+        let nexusRuns = await host.node(nexus) != nil
+        XCTAssertFalse(childRuns)
+        XCTAssertFalse(grandchildRuns)
+        XCTAssertTrue(nexusRuns)
+        await host.stopAll()
+    }
+
+    /// The parent's own state-change publish reaches the hosted child level:
+    /// a mined parent block wakes the child's parent-fact waits through the
+    /// closure the host attached.
+    func testAParentTipChangeReachesTheHostedChild() async throws {
+        let root = temporaryDirectory(create: true)
+        let host = try ChainHost(chains: [
+            nexus: configure(nexus, root: root, keyByte: 1),
+            child: configure(child, root: root, keyByte: 2),
+        ])
+        let failed = try await host.startAll()
+        XCTAssertTrue(failed.isEmpty)
+        let childNode = await host.node(child)
+        let childNetwork = try XCTUnwrap(childNode).network
+        let before = await childNetwork.parentTipChanges
+        _ = try await mine(service(host, nexus))
+        try await eventually("the child hears the parent's tip move") {
+            await childNetwork.parentTipChanges > before
+        }
+        await host.stopAll()
     }
 
     /// The deployed child is hosted from the start, seeded but not yet

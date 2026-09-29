@@ -252,11 +252,6 @@ extension NodeNetworkRuntime {
                 * Self.maximumCandidateWaitTicks
         )
         hierarchyState.pendingEvidenceIndexes.removeAll()
-        _ = discardPendingParentChainFacts(where: { _ in true })
-        for pending in hierarchyState.pendingGenesisVerifications.values {
-            pending.continuation.resume(returning: false)
-        }
-        hierarchyState.pendingGenesisVerifications.removeAll()
         for pending in hierarchyState.pendingGenesisResolves.values {
             pending.continuation.resume(returning: nil)
         }

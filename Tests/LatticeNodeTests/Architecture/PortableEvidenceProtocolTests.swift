@@ -199,61 +199,16 @@ final class PortableEvidenceProtocolTests: XCTestCase {
         ).encoded())
     }
 
-    func testParentChainFactsAreExactSessionBoundQueries() throws {
-        let genesis = ParentChainFactMessage(
-            requestID: 1,
-            fact: .genesis(
-                childGenesisCID: protocolCID("child-genesis"),
-                parentStateCID: protocolCID("deployment-parent-state")
-            )
-        )
-        XCTAssertEqual(
-            try ParentChainFactMessage.decoded(genesis.encoded()),
-            genesis
-        )
-
-        let continuity = ParentChainFactMessage(
-            requestID: 2,
-            fact: .continuity(
-                fromStateCID: LatticeState.emptyHeader.rawCID,
-                toStateCID: protocolCID("to-state")
-            )
-        )
-        XCTAssertEqual(
-            try ParentChainFactMessage.decoded(continuity.encoded()),
-            continuity
-        )
-        XCTAssertEqual(
-            NodeNetworkTopic.plane(for: NodeNetworkTopic.parentChainFactRequest),
-            .hierarchy
-        )
-        XCTAssertEqual(
-            NodeNetworkTopic.plane(for: NodeNetworkTopic.parentChainFactResponse),
-            .hierarchy
-        )
-
-        XCTAssertThrowsError(try ParentChainFactMessage(
-            requestID: 0,
-            fact: genesis.fact
-        ).encoded())
-        XCTAssertThrowsError(try ParentChainFactMessage(
-            requestID: 4,
-            fact: .continuity(
-                fromStateCID: protocolCID("same-state"),
-                toStateCID: protocolCID("same-state")
-            )
-        ).encoded())
-        // A general reachability question is not a shape this protocol
-        // defines: every child block anchors at the parent chain's genesis,
-        // so any other `from` is malformed. This is what keeps a served
-        // continuity query O(1) instead of an ancestry walk run for a peer.
-        XCTAssertThrowsError(try ParentChainFactMessage(
-            requestID: 5,
-            fact: .continuity(
-                fromStateCID: protocolCID("from-state"),
-                toStateCID: protocolCID("to-state")
-            )
-        ).encoded())
+    /// Parent facts are read from the co-hosted parent level, never asked
+    /// on the wire: the retired topics belong to no plane, so a peer that
+    /// still sends one is dropped unread.
+    func testParentChainFactTopicsAreRetired() {
+        XCTAssertNil(NodeNetworkTopic.plane(
+            for: "lattice.hierarchy.parent-chain-fact.request.v2"
+        ))
+        XCTAssertNil(NodeNetworkTopic.plane(
+            for: "lattice.hierarchy.parent-chain-fact.response.v2"
+        ))
     }
 
 

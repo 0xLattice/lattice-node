@@ -769,13 +769,12 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             privateKeyHex: String(repeating: "74", count: 32),
             listenPort: NetworkTransportTestPorts.allocate(),
             factListenPort: NetworkTransportTestPorts.allocate(),
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            parentEndpoint: ParentEndpoint(
-                publicKey: rootPeerKey,
-                host: "127.0.0.1",
-                port: NetworkTransportTestPorts.allocate()
-            )
-        )
+            rpcPort: NetworkTransportTestPorts.allocate()
+        ).withParentEndpoint(ParentEndpoint(
+            publicKey: rootPeerKey,
+            host: "127.0.0.1",
+            port: NetworkTransportTestPorts.allocate()
+        ))
         let middlePeerKey = middleConfiguration.processPublicKey
         let overlayPort = NetworkTransportTestPorts.allocate()
         let hierarchyPort = NetworkTransportTestPorts.allocate()
@@ -786,13 +785,12 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             privateKeyHex: String(repeating: "75", count: 32),
             listenPort: overlayPort,
             factListenPort: hierarchyPort,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            parentEndpoint: ParentEndpoint(
-                publicKey: middlePeerKey,
-                host: "127.0.0.1",
-                port: parentPort
-            )
-        )
+            rpcPort: NetworkTransportTestPorts.allocate()
+        ).withParentEndpoint(ParentEndpoint(
+            publicKey: middlePeerKey,
+            host: "127.0.0.1",
+            port: parentPort
+        ))
 
         let content = InMemoryContentStore()
         try await LatticeState.emptyHeader.storeRecursively(
@@ -1277,82 +1275,6 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             await fixture.runtime.stop()
             throw error
         }
-    }
-
-    /// When the parent session drops while it is in flight, the request must
-    /// resolve nil (the walk parks and retries) — never stay suspended: an
-    /// unresumed continuation would leave the walk worker alive and every
-    /// later reserve a no-op for the process lifetime.
-    func testExecutionEvidenceRequestResolvesNilWhenTheParentSessionDrops()
-        async throws
-    {
-        let fixture = try await hierarchyRetryFixture(
-            keyByte: 0x68,
-            summary: nil
-        )
-        addTeardownBlock {
-            try? FileManager.default.removeItem(at: fixture.storage)
-        }
-        let package = AuthenticatedChildPackage(
-            package: ChildValidationPackage(proof: ChildBlockProof(
-                rootCID: "proof-root",
-                directoryPath: ["Retry"],
-                entries: []
-            ))
-        )
-        do {
-            try await fixture.parent.start()
-            try await fixture.runtime.start(
-                process: fixture.process,
-                chain: duplicateNetworkHandlers()
-            )
-            try await eventually("parent role granted") {
-                !(await fixture.recorder.sessionTrace()).hellos.isEmpty
-            }
-            // In flight: the parent never answers.
-            let resolved = Task { [runtime = fixture.runtime] in
-                await runtime.resolveExecutionEvidenceForTesting(
-                    for: testCID("child-block"),
-                    requirement: .parentStateContinuity(
-                        parentPath: ["Nexus"],
-                        // The protocol's only continuity shape: anchored at
-                        // the parent chain's genesis. A synthetic `from` is
-                        // refused as malformed and never reaches the wire.
-                        fromStateCID: LatticeState.emptyHeader.rawCID,
-                        toStateCID: testCID("to-state")
-                    ),
-                    package: package
-                )
-            }
-            try await eventually("request sent to the parent") {
-                await fixture.recorder.parentFactRequestCount() >= 1
-            }
-            await fixture.parent.stop()
-
-            // Bounded: a leaked continuation never returns.
-            let outcome = await withTaskGroup(
-                of: Bool.self, returning: Bool.self
-            ) { group in
-                group.addTask { await resolved.value == nil }
-                group.addTask {
-                    try? await Task.sleep(nanoseconds: scaledNanoseconds(.seconds(10)))
-                    return false
-                }
-                let first = await group.next() ?? false
-                group.cancelAll()
-                return first
-            }
-            XCTAssertTrue(
-                outcome,
-                "an in-flight evidence request must resolve nil on parent drop"
-            )
-        } catch {
-            await fixture.parent.stop()
-            await fixture.runtime.stop()
-            throw error
-        }
-        await fixture.parent.stop()
-        await fixture.runtime.stop()
     }
 
     func testRecoveredNoncanonicalCarrierAnnouncesEvidenceAfterEmptyIndex()

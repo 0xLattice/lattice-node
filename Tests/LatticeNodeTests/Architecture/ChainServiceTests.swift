@@ -2370,12 +2370,7 @@ final class ChainServiceTests: XCTestCase {
         let childProcess = try await ChainProcess.open(configuration: NodeConfiguration(
             chainPath: ["Nexus", "Payments"],
             storagePath: childDirectory,
-            privateKeyHex: String(repeating: "02", count: 32),
-            parentEndpoint: ParentEndpoint(
-                publicKey: parentProcess.configuration.processPublicKey,
-                host: "127.0.0.1",
-                port: 4002
-            )
+            privateKeyHex: String(repeating: "02", count: 32)
         ))
         let activated = try await childProcess.activateSeededChildGenesis(
             seed: seed,
@@ -4077,12 +4072,7 @@ final class ChainServiceTests: XCTestCase {
         let process = try await ChainProcess.open(configuration: NodeConfiguration(
             chainPath: ["Nexus", "Payments"],
             storagePath: directory,
-            privateKeyHex: String(repeating: "02", count: 32),
-            parentEndpoint: ParentEndpoint(
-                publicKey: parent.configuration.processPublicKey,
-                host: "127.0.0.1",
-                port: 4002
-            )
+            privateKeyHex: String(repeating: "02", count: 32)
         ))
         for module in policyModules {
             try await module.storeRecursively(storer: process)

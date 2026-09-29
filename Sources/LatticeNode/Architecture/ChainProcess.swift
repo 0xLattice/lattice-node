@@ -212,7 +212,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// `NexusGenesis`. Before activating, `confirmParentRecordedGenesis` must
     /// confirm the parent actually recorded THIS rebuilt CID (the parent holds
     /// the committed `genesisState`, not this child node, so the confirmation is
-    /// verify-not-trust over the authenticated parent fact plane). Fail-closed: a
+    /// a read of the co-hosted parent level's record). Fail-closed: a
     /// genesis the parent never recorded — or a CID that differs from the record —
     /// yields `false` and the chain stays `awaitingGenesis` for the caller to
     /// retry, so no honest node self-admits an unrecorded fork. Returns whether the

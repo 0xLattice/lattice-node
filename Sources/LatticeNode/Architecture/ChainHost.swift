@@ -4,28 +4,33 @@ public enum ChainHostError: Error, Equatable, CustomStringConvertible {
     /// A child is configured without its immediate parent. A host runs a
     /// child only co-hosted with its whole ancestry.
     case notAncestorClosed(child: String, missingParent: String)
+    /// A child's parent level is not running (it failed to start), so the
+    /// child has no parent facts to admit blocks against.
+    case parentNotRunning(child: String, parent: String)
 
     public var description: String {
         switch self {
         case .notAncestorClosed(let child, let parent):
             "\(child) has no hosted parent \(parent); a hosted chain set must include every ancestor"
+        case .parentNotRunning(let child, let parent):
+            "\(child) cannot start: its parent \(parent) is not running"
         }
     }
 }
 
 /// One process hosting a chain tree: one `Node` per level, built and started
-/// parent-first and stopped in reverse. Each child's parent endpoint is its
-/// co-hosted parent's fact plane on loopback, so the hierarchy plane runs
-/// unchanged between levels of the same process.
+/// parent-first and stopped in reverse. Each child reads its parent facts
+/// from its co-hosted parent level (`LocalParentLevel`) and is told when the
+/// parent's tip moves. Its parent endpoint is the parent's fact plane on
+/// loopback, which still carries the parent's evidence.
 ///
 /// The level set is fixed when the host is built: a chain added to the
 /// configuration takes effect when the process restarts. Only the host's
 /// owner calls it, one call at a time: `startAll`, then `stop` for a child
 /// level that failed, then `stopAll`.
 public actor ChainHost {
-    /// This level's configuration, given the endpoint the host wired for its
-    /// parent (nil for Nexus).
-    public typealias Configure = @Sendable (ParentEndpoint?) throws -> NodeConfiguration
+    /// This level's configuration. The host wires a child's parent endpoint.
+    public typealias Configure = @Sendable () throws -> NodeConfiguration
     private struct Level {
         let configuration: NodeConfiguration
         var running: Running?
@@ -70,8 +75,9 @@ public actor ChainHost {
     }
 
     /// Starts every level, parent-first. A child that fails to start is
-    /// skipped and returned, and the rest of the tree still starts; only a
-    /// root that fails to start throws.
+    /// skipped and returned, and so is every descendant of it
+    /// (`parentNotRunning`); the rest of the tree still starts. Only a root
+    /// that fails to start throws.
     @discardableResult
     public func startAll() async throws -> [(path: ChainAddress, error: any Error)] {
         var failed: [(path: ChainAddress, error: any Error)] = []
@@ -89,14 +95,30 @@ public actor ChainHost {
     /// Stops every running level, children first.
     public func stopAll() async {
         for address in paths.reversed() {
-            await stop(address)
+            await stopLevel(address)
         }
     }
 
-    /// Stops one level and leaves the rest running: how the host contains a
-    /// child level that failed. Returns once the level's services have ended
-    /// and its network has stopped.
-    public func stop(_ address: ChainAddress) async {
+    /// Stops one level and every level below it, children first, and leaves
+    /// the rest running: how the host contains a child level that failed,
+    /// since a child cannot run without its parent level. Returns the
+    /// descendants it stopped, once every stopped level's services have
+    /// ended and its network has stopped.
+    @discardableResult
+    public func stop(_ address: ChainAddress) async -> [ChainAddress] {
+        let descendants = paths.reversed().filter {
+            $0.components.count > address.components.count
+                && $0.components.starts(with: address.components)
+                && levels[$0]?.running != nil
+        }
+        for descendant in descendants {
+            await stopLevel(descendant)
+        }
+        await stopLevel(address)
+        return descendants
+    }
+
+    private func stopLevel(_ address: ChainAddress) async {
         guard var running = levels[address]?.running else { return }
         levels[address]?.running = nil
         let services = running.services.take()
@@ -104,8 +126,7 @@ public actor ChainHost {
         services?.cancel()
         seeded?.cancel()
         await services?.value
-        // The seed task is joined after the network stops, which resumes its
-        // parent-record wait.
+        // The seed task is joined after the network stops.
         await running.node.shutdown {
             await seeded?.value
         }
@@ -113,7 +134,25 @@ public actor ChainHost {
 
     private func start(_ address: ChainAddress) async throws {
         guard let level = levels[address], level.running == nil else { return }
-        let node = try await Node.build(configuration: level.configuration)
+        let parent = address.parent.flatMap { levels[$0]?.running?.node }
+        if let parentAddress = address.parent, parent == nil {
+            throw ChainHostError.parentNotRunning(
+                child: address.key, parent: parentAddress.key
+            )
+        }
+        let node = try await Node.build(
+            configuration: level.configuration,
+            parentLevel: parent.map { LocalParentLevel($0.process) }
+        )
+        if let parent {
+            await parent.service.attachChildLevel(
+                directory: address.directory
+            ) { [weak network = node.network] change in
+                Task { await network?.parentChanged(change) }
+            }
+            // A tip change while the child was starting found no listener.
+            await node.network.parentChanged(.tipChanged)
+        }
         var running = Running(node: node)
         if let services {
             running.services.start { _ in services.serve(node) }
@@ -132,14 +171,14 @@ public actor ChainHost {
         in levels: [ChainAddress: Level]
     ) throws -> NodeConfiguration {
         guard let parentAddress = address.parent else {
-            return try configure(nil)
+            return try configure()
         }
         guard let parent = levels[parentAddress] else {
             throw ChainHostError.notAncestorClosed(
                 child: address.key, missingParent: parentAddress.key
             )
         }
-        return try configure(ParentEndpoint(
+        return try configure().withParentEndpoint(ParentEndpoint(
             publicKey: parent.configuration.processPublicKey,
             host: "127.0.0.1",
             port: parent.configuration.factListenPort
@@ -162,13 +201,13 @@ extension Node {
     /// A deployed child holds its own self-contained genesis bytes: the
     /// parent only RECORDED the CID. If the deployer seeded
     /// `child-genesis.json` into `storage`, rebuild the identical genesis and
-    /// self-admit it — but only after confirming, over the authenticated
-    /// parent fact plane, that the parent actually recorded THIS CID. That is
-    /// the same record honest followers demand before admitting the genesis,
-    /// so a genesis the parent never recorded cannot self-activate here
-    /// either. Retries until active so a child started slightly ahead of its
-    /// parent's anchor (or its parent connection) still comes up once the
-    /// record lands. Nil when there is no seed to activate.
+    /// self-admit it — but only after confirming, from the co-hosted parent
+    /// level, that the parent actually recorded THIS CID. That is the same
+    /// record honest followers demand before admitting the genesis, so a
+    /// genesis the parent never recorded cannot self-activate here either.
+    /// Retries until active so a child started slightly ahead of its
+    /// parent's anchor still comes up once the record lands. Nil when there
+    /// is no seed to activate.
     public func activateSeededChildGenesis(storage: URL) -> Task<Void, Never>? {
         guard process.configuration.chainPath.count > 1,
               let seedData = try? Data(
@@ -182,10 +221,11 @@ extension Node {
         let process = process
         let confirm: @Sendable (String) async -> Bool = {
             [weak network] childGenesisCID in
-            guard let network else { return false }
-            return await network.confirmParentRecordedChildGenesis(
-                childGenesisCID: childGenesisCID
-            )
+            await network?.parentRecordedChildGenesis(childGenesisCID) ?? false
+        }
+        // Out of band: the hosted children hear the tip move.
+        let activated: @Sendable () async -> Void = { [weak service] in
+            await service?.genesisActivatedOutOfBand()
         }
         return Task { [weak process] in
             while !Task.isCancelled {
@@ -195,6 +235,7 @@ extension Node {
                     seed: seed,
                     confirmParentRecordedGenesis: confirm
                 )) == true {
+                    await activated()
                     return
                 }
                 guard await Timers.sleep(nanoseconds: 1_000_000_000) else {

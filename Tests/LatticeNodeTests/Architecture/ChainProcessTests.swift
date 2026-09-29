@@ -3201,21 +3201,10 @@ final class ChainProcessTests: XCTestCase {
         storage: URL,
         resourcePolicy: NodeResourcePolicy = .default
     ) throws -> NodeConfiguration {
-        let parentKey = try Curve25519.Signing.PrivateKey(
-            rawRepresentation: Data(repeating: 2, count: 32)
-        )
-        let parentEndpoint = path.count == 1 ? nil : ParentEndpoint(
-            publicKey: try PeerKey(
-                rawRepresentation: parentKey.publicKey.rawRepresentation
-            ).hex,
-            host: "127.0.0.1",
-            port: 4001
-        )
-        return try NodeConfiguration(
+        try NodeConfiguration(
             chainPath: path,
             storagePath: storage,
             privateKeyHex: String(repeating: "01", count: 32),
-            parentEndpoint: parentEndpoint,
             resourcePolicy: resourcePolicy
         )
     }
