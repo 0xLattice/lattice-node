@@ -128,7 +128,7 @@ key.
 A parent never requests a child candidate and never waits on a child to
 serve a template. The parent pushes its template context to each
 authenticated direct child whenever it changes: its validated tip block and
-the miner's reward plan and minimum work for the child's subtree (`parent
+the miner's recipients and minimum work for the child's subtree (`parent
 tip available`). The child builds its candidate against the tip's post-state
 — the only thing a candidate takes from a carrier — reading the tip's content
 from the parent's own session, and pushes the candidate up whenever any of

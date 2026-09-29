@@ -244,7 +244,7 @@ may request a Volume, including a same-key replacement connection. Entry CIDs,
 bounded framing, and atomic publication are transport/storage details; node
 protocol messages never request arbitrary CID selections.
 A parent pushes its template context to each authenticated direct child
-whenever it changes — its validated tip block and the miner's reward plan and
+whenever it changes — its validated tip block and the miner's recipients and
 minimum work for the child's subtree — and the child pushes back its current
 candidate for that tip whenever one of its inputs changes. Both messages
 carry a sequence that is monotonic per session; a lower one is dropped. The

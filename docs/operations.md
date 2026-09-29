@@ -186,14 +186,16 @@ lattice-mining-coordinator \
 Custom workers (GPU or remote hardware) implement the contract in
 [mining-workers.md](mining-workers.md) and slot in via `--worker-executable`.
 
-**Run one miner payout plan per node.** A node serves one miner plan at a
-time: the rewards and minimum work a template request names for the chains
+**Run one recipient plan per node.** A node serves one miner plan at a
+time: the recipients and minimum work a template request names for the chains
 below Nexus. A request with a different plan replaces the last one, and each
 hosted child rebuilds its candidate for it; until it has, templates carry no
 candidate built for the other plan, so no child block pays the wrong miner.
-Miners with different payout plans sharing one node therefore thrash: each
+Miners with different recipient plans sharing one node therefore thrash: each
 request undoes the other's, and their templates mostly carry no child
-blocks. Coordinators that share one plan (one rewards file) may share a node.
+blocks. Coordinators that share one plan (the same `--recipient` and
+`--min-work` entries) may share a node. A recipient is only an address: no
+reward transaction is signed anywhere.
 
 ### Minimum work per block
 

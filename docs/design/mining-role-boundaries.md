@@ -20,7 +20,8 @@ assignment, deserializes it locally, searches the assigned nonce range, and
 returns a nonce result or no result. It does not construct blocks, choose
 transactions, resolve block content roots, know child-chain topology, gossip
 blocks, generate child proofs, publish to Ivy, or send wallet private keys.
-Reward transactions are signed outside the node and supplied as public payloads.
+Rewards are paid to a recipient address the coordinator names per chain; the
+block header carries it and nothing is signed for it.
 It must not gossip blocks.
 
 ## Worker Protocol
@@ -85,10 +86,10 @@ through the node network runtime and same-chain overlay.
 ## Private-Key Boundary
 
 Workers and coordinators must not send private key material to the node in
-template/work requests. Reward signing happens before the coordinator reads the
-reward plan. The template endpoint receives only the resulting transaction body
-and signatures. Process identity remains a network identity, never a payout
-identity.
+template/work requests. A reward needs no signature: the template endpoint
+receives only a recipient address per chain, which the block's
+`rewardRecipient` commits and its proof of work covers. Process identity
+remains a network identity, never a payout identity.
 
 ## SOTA Basis
 

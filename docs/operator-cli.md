@@ -161,7 +161,7 @@ of work covers, so nothing is signed on the mining host and there is no batch
 or cursor to keep:
 
 - Worker or node failures retry in place, forever.
-- Run one miner payout plan per node. A node serves one plan at a time (the
+- Run one miner recipient plan per node. A node serves one plan at a time (the
   recipients and minimum work a template names for child chains), so miners with
   different plans on one node thrash and their templates mostly carry no
   child blocks. See [operations.md](operations.md#external-mining-services).
@@ -285,6 +285,7 @@ proving the credited balances
 - **Child stuck `awaitingGenesis`** — its anchor never landed, or the parent
   link is wrong; see the child-chain section of
   [operations.md](operations.md).
-- **`REWARD BATCH STALLED` in the mine log** — see the mining rules above;
-  re-emit the batch.
+- **Blocks mined but no reward credited** — the chain has no entry in
+  `mine.recipients`, so its reward and fees burn; `lattice mine status`
+  lists the configured recipients.
 - **Identity key refused on load** — it is group/other-readable; `chmod 600`.
