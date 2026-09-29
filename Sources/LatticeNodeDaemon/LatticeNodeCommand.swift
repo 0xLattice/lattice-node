@@ -348,8 +348,7 @@ func makeApplication(
         ExplorerPeersResponse(count: 0, peers: [])
     },
     discoverProviders: @Sendable @escaping (String) async -> [String] = { _ in [] },
-    processStartTime: Date = Date(),
-    extraRoutes: (Router<BasicRequestContext>) -> Void = { _ in }
+    processStartTime: Date = Date()
 ) -> Application<RouterResponder<BasicRequestContext>> {
     let router = Router()
     addPublicReadRoutes(
@@ -384,7 +383,6 @@ func makeApplication(
         )
     }
     addOperatorWriteRoutes(to: router, service: service)
-    extraRoutes(router)
     return Application(
         responder: router.buildResponder(),
         configuration: .init(address: .hostname(host, port: port))
@@ -850,7 +848,7 @@ private func decode<Value: Decodable>(
 /// CORS preflight; requiring application/json forces the preflight the
 /// read-only CORS policy denies), and a Host naming anything but loopback (a
 /// DNS-rebinding page reaching this listener under a hostname it controls).
-func decode<Value: Decodable, Context: RequestContext>(
+private func decode<Value: Decodable, Context: RequestContext>(
     _ request: Request,
     context: Context
 ) async throws -> Value {
@@ -862,7 +860,7 @@ func decode<Value: Decodable, Context: RequestContext>(
     }
 }
 
-func requireLoopbackJSON(_ request: Request) throws {
+private func requireLoopbackJSON(_ request: Request) throws {
     let hosts = [request.head.authority].compactMap { $0 }
         + request.headers.filter { $0.name.canonicalName == "host" }.map(\.value)
     for host in hosts where !isLoopbackAuthority(host) {

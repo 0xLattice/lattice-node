@@ -3,10 +3,10 @@
 // `deploy` runs the full arc against the LOCAL parent process: build the
 // self-contained child genesis OFFLINE (empty parentState) → submit ONE signed
 // GenesisAction anchor recording its CID in the parent's genesisState → wait for
-// the parent to record it → record the child in the topology and attach it to
-// the running host → child active. The seed and signed anchor are durable
-// before submission, so an interrupted deploy resumes on re-run instead of
-// orphaning a recorded CID.
+// the parent to record it → record the child in the topology and restart the
+// running host so it hosts the child → child active. The seed and signed
+// anchor are durable before submission, so an interrupted deploy resumes on
+// re-run instead of orphaning a recorded CID.
 // `adopt` joins an EXISTING child permissionlessly: the child level
 // re-derives its genesis through the authenticated parent link, never from "a
 // node that tracks it".
@@ -373,7 +373,10 @@ struct Child: AsyncParsableCommand {
             try topology.validated().save(root: layout.root)
             // The child's own directory now carries the seed.
             try? FileManager.default.removeItem(at: pendingURL)
-            try await attachLevel(childPath, topology: topology)
+            guard try await restartHostIfRunning(layout) else {
+                print("\(childPath): added; `lattice up` starts it")
+                return
+            }
             try await waitActive(childPath, rpc: ports.2)
             print("\(childPath): active")
         }
@@ -401,11 +404,10 @@ struct Child: AsyncParsableCommand {
             )
             _ = try topology.validated()
             try topology.save(root: layout.root)
-            guard runningPid(layout, hostProcessName) != nil else {
+            guard try await restartHostIfRunning(layout) else {
                 print("\(path): added; `lattice up` starts it")
                 return
             }
-            try await attachLevel(path, topology: topology)
             print("\(path): started; awaiting authenticated genesis from the parent")
         }
     }

@@ -247,26 +247,6 @@ public struct Topology: Codable {
     }
 }
 
-/// Body and answer of the daemon's loopback host-control routes: the chain
-/// to attach, stop or start.
-public struct HostLevelRequest: Codable, Sendable {
-    public let path: String
-
-    public init(path: String) {
-        self.path = path
-    }
-}
-
-/// The chain paths `lattice.json` hosts, as the daemon's host-control route
-/// lists them.
-public struct HostLevels: Codable, Sendable {
-    public let paths: [String]
-
-    public init(paths: [String]) {
-        self.paths = paths
-    }
-}
-
 public enum HostLayoutError: Error, Equatable, CustomStringConvertible {
     /// A pre-encoding identity key file that several chains map to.
     case ambiguousLegacyIdentityKey(file: String, paths: [String])

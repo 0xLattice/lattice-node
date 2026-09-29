@@ -717,30 +717,30 @@ final class LatticeCtlE2ETests: XCTestCase {
         }
     }
 
-    /// Lattice §9.10 through three real nodes and the real wire: Nexus's
+    /// Lattice §9.10 through three real levels and the real wire: Nexus's
     /// work reaches the grandchild through the middle chain, each level
     /// talking only to its immediate parent — across an outage of the middle
-    /// chain's node, the case where the parent mines blocks that commit
-    /// nothing into the child and only the run report carries them.
+    /// chain, the case where the parent mines blocks that commit nothing
+    /// into the child and only the run report carries them.
     ///
     /// Shape: a CLI host brings up Nexus, Market and its grandchild Stalls
     /// and the coordinator co-mines them. The coordinator then stops, and
     /// full Nexus blocks are mined by hand through the RPC it uses — to
     /// Nexus's own target, so each is a chain block carrying Market's
     /// candidate (which carries Stalls's) — until both descendants' tips sit
-    /// on chain committers. Market's level goes down; three more full Nexus
-    /// blocks are mined alone, so the run of the last block that carried
-    /// Market grows and nothing else mints. Market returns and is credited
-    /// on its re-ask; Stalls — which never went away and mined nothing — is
-    /// credited through Market (Market's push of the run the credit changed,
-    /// or Stalls's own ask; the wire cannot order those two, so the push
-    /// itself is pinned by the multichain unit test). Then Stalls restarts
-    /// twice, the second time with the whole host SIGKILLed: each hello
-    /// re-serves its committers' runs and every one is refused as not
-    /// stronger, and after
-    /// the crash nothing new is credited — only a credit replayed from its
-    /// own fact log explains that. The counters are the ones an operator
-    /// watches on /metrics.
+    /// on chain committers. Market goes down: the host restarts with Market
+    /// (and so its child Stalls) dropped from `lattice.json`; three more
+    /// full Nexus blocks are mined alone, so the run of the last block that
+    /// carried Market grows and nothing else mints. Both return with the
+    /// next restart; Market is credited on its re-ask, and Stalls — which
+    /// mined nothing — is credited through Market (Market's push of the run
+    /// the credit changed, or Stalls's own ask; the wire cannot order those
+    /// two, so the push itself is pinned by the multichain unit test). Then
+    /// the host restarts twice, the second time by SIGKILL: each hello
+    /// re-serves Stalls's committers' runs and every one is refused as not
+    /// stronger, and after the crash nothing new is credited — only a credit
+    /// replayed from its own fact log explains that. The counters are the
+    /// ones an operator watches on /metrics.
     func testNexusWorkReachesTheGrandchildAcrossAMiddleChainOutage() async throws {
         let scratch = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-node-e2e-ctlkeys-\(UUID().uuidString)")
@@ -809,26 +809,25 @@ final class LatticeCtlE2ETests: XCTestCase {
             return market > marketBeforeCarry && stalls > stallsBeforeCarry
         }
 
-        // Outage: Market's level goes down. Nexus mines on alone, and with no
-        // Market candidate to carry, its blocks commit nothing into Market —
-        // work only a run report can deliver.
-        try await stopChain(host, "Nexus/Market")
+        // Outage: Market (with its child) goes down. Nexus mines on alone,
+        // and with no Market candidate to carry, its blocks commit nothing
+        // into Market — work only a run report can deliver.
+        let fullTree = try await restartWithout(host, ["Nexus/Market", "Nexus/Market/Stalls"])
         for _ in 0..<3 { _ = try await mineFullBlock(host.nexusRPC) }
-        let stallsAppliedBeforeValue = await metric(stallsRPC, applied)
-        let stallsAppliedBefore = try XCTUnwrap(stallsAppliedBeforeValue)
 
         // Market returns: on its hello Nexus re-serves the runs of Market's
         // committers, and the last carrier's run now holds the outage blocks.
-        // Counters restart with the level, so any credit here is new.
-        try await startChain(host, "Nexus/Market")
+        // Counters restart with the process, so any credit here is new.
+        try await restoreTree(host, fullTree)
         try await waitFor("Market back", seconds: 60) { await active(marketRPC) }
         try await waitFor("Market credited Nexus's run", seconds: 60) {
             (await metric(marketRPC, applied) ?? 0) >= 1
         }
-        // Two levels down: Stalls, which never went away and mined nothing,
-        // is credited the same work through Market.
+        // Two levels down: Stalls, which mined nothing, is credited the same
+        // work through Market.
+        try await waitFor("Stalls back", seconds: 60) { await active(stallsRPC) }
         try await waitFor("Stalls credited Market's run", seconds: 60) {
-            (await metric(stallsRPC, applied) ?? 0) > stallsAppliedBefore
+            (await metric(stallsRPC, applied) ?? 0) >= 1
         }
         let marketConflictsValue = await metric(marketRPC, refused, label: "reason=\"locationConflict\"")
         let stallsConflictsValue = await metric(stallsRPC, refused, label: "reason=\"locationConflict\"")
@@ -841,17 +840,16 @@ final class LatticeCtlE2ETests: XCTestCase {
         // its hello and refuses every one as not stronger — which only a
         // credit replayed from its own fact log explains. Twice: the first
         // restart also absorbs any push Stalls missed while reconnecting
-        // during Market's outage, so by the second nothing served can be new
-        // — and the second is a crash of the whole host process, not a
-        // graceful stop of one level.
+        // after Market's outage, so by the second nothing served can be new
+        // — and the second is a crash of the host process, not a graceful
+        // stop.
         for restart in [1, 2] {
             if restart == 1 {
-                try await stopChain(host, "Nexus/Market/Stalls")
-                try await startChain(host, "Nexus/Market/Stalls")
+                _ = try await runCtl(["down"], root: host.root)
             } else {
                 try await crashHost(host)
-                _ = try await runCtl(["up"], root: host.root)
             }
+            _ = try await runCtl(["up"], root: host.root)
             try await waitFor("Stalls back (restart \(restart))", seconds: 60) {
                 await active(stallsRPC)
             }
@@ -922,11 +920,13 @@ final class LatticeCtlE2ETests: XCTestCase {
     }
 
     /// The shape merged mining produces, with a stop in it: the coordinator
-    /// mines all three chains; Market's level is stopped mid-round (the
-    /// deploy case — its shutdown is where a parent-carried block
+    /// mines all three chains; Market is stopped mid-round (the deploy case
+    /// — the host restarts with Market and its child dropped from
+    /// `lattice.json`, and Market's shutdown is where a parent-carried block
     /// it had just deferred gets cut off with no retry in memory), while
     /// the coordinator's next solves keep carrying that block's sibling on
-    /// Nexus's chain. Mining then stops; Market restarts. It must admit the
+    /// Nexus's chain. Mining then stops; Market returns with the next
+    /// restart. It must admit the
     /// owed block from its durable edge and be credited the Nexus work above
     /// that block's committer — the run its own tip could never be credited
     /// through, sitting on a carrier Nexus never admitted. The losing
@@ -963,9 +963,9 @@ final class LatticeCtlE2ETests: XCTestCase {
             return market >= 1 && stalls >= 1
         }
         // Stop Market mid-round, while the coordinator keeps mining.
-        try await stopChain(host, "Nexus/Market")
         let nexusAtCrashValue = await nexusWeighedHeight()
         let nexusAtCrash = try XCTUnwrap(nexusAtCrashValue, "Nexus metrics")
+        let fullTree = try await restartWithout(host, ["Nexus/Market", "Nexus/Market/Stalls"])
         try await waitFor("Nexus mined on through the crash", seconds: 120) {
             (await nexusWeighedHeight() ?? 0) >= nexusAtCrash + 3
         }
@@ -974,8 +974,8 @@ final class LatticeCtlE2ETests: XCTestCase {
 
         // Market returns with nothing but its own store: the owed block is
         // admitted from the durable edge, its committer's run is asked for,
-        // and the outage work is credited. Counters restart with the level.
-        try await startChain(host, "Nexus/Market")
+        // and the outage work is credited. Counters restart with the process.
+        try await restoreTree(host, fullTree)
         try await waitFor("Market back", seconds: 60) { await active(marketRPC) }
         try await waitFor("Market credited the outage work after the restart", seconds: 90) {
             (await metric(marketRPC, applied) ?? 0) >= 1
@@ -985,21 +985,36 @@ final class LatticeCtlE2ETests: XCTestCase {
         XCTAssertEqual(conflicts, 0)
     }
 
-    /// Stop one chain's level in the running host, leaving the rest of the
-    /// tree running; `startChain` brings it back. The stop returns once the
-    /// level has released its storage.
-    private func stopChain(_ host: CtlHost, _ path: String) async throws {
-        let _: HostLevel = try await postJSON(
-            host.nexusRPC, "/v1/host/levels/stop", HostLevel(path: path),
-            timeout: 60
-        )
+    /// Take chains down while the rest of the tree runs, the way an
+    /// operator does: drop them from `lattice.json` and `lattice up`, which
+    /// restarts the host without them (a child goes with its parent). Their
+    /// storage stays; `restoreTree` brings them back. Returns the file as it
+    /// was.
+    private func restartWithout(
+        _ host: CtlHost, _ paths: [String]
+    ) async throws -> Data {
+        let url = host.root.appendingPathComponent("lattice.json")
+        let full = try Data(contentsOf: url)
+        var topology = try JSONSerialization.jsonObject(with: full) as! [String: Any]
+        var chains = topology["chains"] as! [String: Any]
+        for path in paths { chains[path] = nil }
+        topology["chains"] = chains
+        try JSONSerialization.data(
+            withJSONObject: topology, options: [.prettyPrinted, .sortedKeys]
+        ).write(to: url)
+        let up = try await runCtl(["up"], root: host.root)
+        try check(up.contains("restarting"), "up restarts the host without \(paths): \(up)")
+        try await waitFor("Nexus back alone", seconds: 60) {
+            await self.health(host.nexusRPC)?["phase"] as? String == "active"
+        }
+        return full
     }
 
-    private func startChain(_ host: CtlHost, _ path: String) async throws {
-        let _: HostLevel = try await postJSON(
-            host.nexusRPC, "/v1/host/levels/start", HostLevel(path: path),
-            timeout: 60
-        )
+    /// Restore `lattice.json` and restart the host with every chain in it.
+    private func restoreTree(_ host: CtlHost, _ full: Data) async throws {
+        try full.write(to: host.root.appendingPathComponent("lattice.json"))
+        let up = try await runCtl(["up"], root: host.root)
+        try check(up.contains("restarting"), "up restarts the host with the whole tree: \(up)")
     }
 
     /// Crash the one process hosting the tree outright with SIGKILL;
@@ -1029,10 +1044,6 @@ final class LatticeCtlE2ETests: XCTestCase {
             }
         }
         try? FileManager.default.removeItem(at: pidFile)
-    }
-
-    private struct HostLevel: Codable {
-        let path: String
     }
 
     /// Alive and not a zombie: a container's PID 1 may never reap, so a
@@ -1367,10 +1378,16 @@ final class LatticeCtlE2ETests: XCTestCase {
     /// Exited, judged by the pid as well as by Foundation: a child's
     /// termination notice can go missing, and then `isRunning` and
     /// `waitUntilExit()` never learn of the exit (it parked this suite for
-    /// over an hour; the pid was long gone).
+    /// over an hour; the pid was long gone). An unreaped child still
+    /// answers `kill(pid, 0)`, so it is also asked of `waitpid`: reaped
+    /// now, or ECHILD because it was reaped already.
     private func hasExited(_ running: RunningCtl) -> Bool {
-        !running.process.isRunning
-            || kill(running.process.processIdentifier, 0) != 0
+        if !running.process.isRunning { return true }
+        let pid = running.process.processIdentifier
+        var status: Int32 = 0
+        let waited = waitpid(pid, &status, WNOHANG)
+        if waited == pid || (waited == -1 && errno == ECHILD) { return true }
+        return kill(pid, 0) != 0
     }
 
     /// Waits, bounded, for a run that is expected to finish on its own.
@@ -1378,6 +1395,9 @@ final class LatticeCtlE2ETests: XCTestCase {
         let deadline = Date().addingTimeInterval(30)
         while !hasExited(running), Date() < deadline {
             usleep(50_000)
+        }
+        if !hasExited(running) {
+            XCTFail("pid \(running.process.processIdentifier) did not exit within 30s")
         }
         try? running.handle.close()
         return try output(of: running)

@@ -138,14 +138,14 @@ lattice mine status  # cursor position and batch runway
 |---|---|
 | `init [--peer …]` | Scaffold the root, mint identities, write `lattice.json`, print peer strings. Without `--peer` the tree carries no `peers` key, so the node uses its built-in default bootstrap peers. |
 | `identity` | Every chain's public key and peer string (no log scraping). |
-| `up [--foreground]` | Start the one `lattice-node` hosting the tree under a spawn lock; if it already runs, attach the chains in `lattice.json` it does not host yet. `--foreground` stays as PID 1 and restarts it if it exits (containers). |
+| `up [--foreground]` | Start the one `lattice-node` hosting the tree under a spawn lock. The node reads `lattice.json` once, at start: if it already runs but `lattice.json` now lists a different set of chains, `up` restarts it (`down` + `up`) so it hosts them; there is no runtime attach. `--foreground` stays as PID 1 and restarts it if it exits (containers). |
 | `down` | Stop the tree (the node stops its chains children first). SIGTERM, then SIGKILL after a grace. Also stops chain processes an older one-process-per-chain `lattice` left running. |
 | `status` | One table for the tree, from local loopback RPC only. |
 | `mine start/stop/status` | Supervised rewarded mining (below). `stop` is graceful: the in-flight batch finishes and the cursor is persisted. |
 | `child deploy` | Create a new child of a running local parent (below). |
-| `child adopt <path>` | Join an *existing* child: adds it to the tree and starts it; genesis is re-derived through the authenticated parent link, never copied from a node. |
+| `child adopt <path>` | Join an *existing* child: adds it to the tree and, if the node runs, restarts it to host the child; genesis is re-derived through the authenticated parent link, never copied from a node. |
 | `tx send/deposit/receipt/withdraw` | Sign a transaction with a key file and submit it to one chain in the tree (below). |
-| `wipe <chain>` | Remove one stopped chain's state, refused while any node holds its storage lock (`state.db` + `volumes.db` as a unit). Identity is never touched — a wiped Nexus recreates the pinned genesis; a wiped child returns to `awaitingGenesis`. |
+| `wipe <chain>` | Remove one stopped chain's state under the spawn lock, refused while any node holds its storage lock (`state.db` + `volumes.db` as a unit). Identity is never touched — a wiped Nexus recreates the pinned genesis; a wiped child returns to `awaitingGenesis`. |
 | `emit-systemd` | Print units that run `up --foreground` and `mine run` under systemd. |
 
 All verbs take `--root` (default: current directory).
@@ -188,9 +188,10 @@ submitted to the parent → ordinary one-round coordinator runs are driven from
 the tree root (or `--external-mining-wait-seconds` of polling) until the parent
 lists the recorded CID → the child's data directory is seeded with
 `child-genesis.json`, the child appears in `lattice.json` with auto-allocated
-ports, is attached to the running node, and comes up `active` on that genesis
-CID. If the parent does not
-record the anchor, **nothing is added to the tree or started**.
+ports, the running node is restarted so it hosts the child (configuration
+takes effect on restart; nothing is attached to a running node), and the child
+comes up `active` on that genesis CID. If the parent does not record the
+anchor, **nothing is added to the tree or started**.
 
 An interrupted or timed-out deploy is resumable, never lost: once submitted,
 the anchor can still land after the command dies, and the pending file is the
