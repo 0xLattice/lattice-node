@@ -186,6 +186,15 @@ lattice-mining-coordinator \
 Custom workers (GPU or remote hardware) implement the contract in
 [mining-workers.md](mining-workers.md) and slot in via `--worker-executable`.
 
+**Run one miner payout plan per node.** A node serves one miner plan at a
+time: the rewards and minimum work a template request names for the chains
+below Nexus. A request with a different plan replaces the last one, and each
+hosted child rebuilds its candidate for it; until it has, templates carry no
+candidate built for the other plan, so no child block pays the wrong miner.
+Miners with different payout plans sharing one node therefore thrash: each
+request undoes the other's, and their templates mostly carry no child
+blocks. Coordinators that share one plan (one rewards file) may share a node.
+
 ### Minimum work per block
 
 A chain whose genesis sits at the maximum target hands out near-free blocks

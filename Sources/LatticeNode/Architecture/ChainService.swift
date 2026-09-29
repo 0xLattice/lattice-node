@@ -112,9 +112,11 @@ public actor ChainService {
     /// not change builds the same block: the carrier's timestamp is the
     /// block's. A children-only parent block leaves the post-state, so the
     /// block it carried is rebuilt as is and the parent's carried-CID skip
-    /// leaves it out; either tip moving, or the carrier outliving a
-    /// template's lifetime, stamps a fresh one.
-    private var readyCarrier: (key: String, block: Block)?
+    /// leaves it out; either tip moving stamps a fresh one. So does the
+    /// carrier outliving a template's lifetime, but only while the parent's
+    /// tip is the one it was stamped on (`parentTipCID`): a children-only
+    /// parent block on top must still rebuild the carried block as is.
+    private var readyCarrier: (key: String, parentTipCID: String, block: Block)?
     /// Set with the parent mailbox: whether this level may build now (no own
     /// carried block awaits admission), and how the parent level hears that
     /// this level's snapshot changed.
@@ -1225,6 +1227,13 @@ public actor ChainService {
     /// Test seam: no snapshot rebuild is running or owed.
     func candidateRebuildIdle() -> Bool {
         candidateRebuild.isEmpty
+    }
+
+    /// Test seam: how far ahead of the wall clock a rebuild reads the time.
+    private var carrierClockOffsetForTesting: Int64 = 0
+
+    func advanceCarrierClockForTesting(milliseconds: Int64) {
+        carrierClockOffsetForTesting += milliseconds
     }
 
     /// Test seam: runs `body` while holding this service's operation lease.
@@ -2346,10 +2355,14 @@ public actor ChainService {
         guard let tip = await parentLevel.validatedTip() else { return nil }
         let carrierKey = tip.block.postState.rawCID + "|"
             + (await process.deepestValidatedCanonicalTip()?.cid ?? "")
-        let now = Int64(Date().timeIntervalSince1970 * 1_000)
+        var now = Int64(Date().timeIntervalSince1970 * 1_000)
+        #if DEBUG
+        now += carrierClockOffsetForTesting
+        #endif
         let carrier: Block
         if let ready = readyCarrier, ready.key == carrierKey,
-           now - ready.block.timestamp < Int64(Self.templateLifetimeMilliseconds) {
+           ready.parentTipCID != tip.cid
+            || now - ready.block.timestamp < Int64(Self.templateLifetimeMilliseconds) {
             carrier = ready.block
         } else {
             guard let fresh = Self.provisionalCarrier(
@@ -2357,7 +2370,7 @@ public actor ChainService {
                 tipCID: tip.cid,
                 timestamp: max(now, tip.block.timestamp + 1)
             ) else { return nil }
-            readyCarrier = (carrierKey, fresh)
+            readyCarrier = (carrierKey, tip.cid, fresh)
             carrier = fresh
         }
         let plan = descendantPlan

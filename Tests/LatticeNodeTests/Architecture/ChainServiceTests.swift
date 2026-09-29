@@ -2633,6 +2633,39 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertNil(again.block.children.node?["Payments"], "carried once, not twice")
     }
 
+    /// A children-only parent block leaves the post-state and the child's
+    /// tip, so the child rebuilds the block the parent carried as is — even
+    /// once the carrier is older than a template's lifetime — and the
+    /// carried-CID skip leaves it out; re-stamping it would build a sibling.
+    func testAChildrenOnlyParentBlockAfterTheCarrierAgesKeepsTheCarriedCID() async throws {
+        let fixture = try await activeChildService(spec: NexusGenesis.spec)
+        let merged = await mergedMiningService(fixture)
+        await merged.service.serveRuns(for: "Payments")
+        try await settle(merged.child)
+        let first = try XCTUnwrap(merged.child.readyCandidate())
+
+        // On the parent tip it was stamped on, an aged carrier is re-stamped.
+        await merged.child.advanceCarrierClockForTesting(milliseconds: 31_000)
+        try await settle(merged.child)
+        let restamped = try XCTUnwrap(merged.child.readyCandidate())
+        XCTAssertNotEqual(restamped.cid, first.cid, "an aged carrier kept its timestamp")
+
+        let carrying = try await merged.service.miningTemplate(MiningTemplateRequest())
+        let carried = try XCTUnwrap(carrying.block.children.node?["Payments"]?.rawCID)
+        XCTAssertEqual(carried, restamped.cid)
+        let mined = try await merged.service.submitWork(SubmitWorkRequest(
+            workID: carrying.workID, nonce: solvedNonce(for: carrying)
+        ))
+        XCTAssertTrue(mined.accepted)
+
+        await merged.child.advanceCarrierClockForTesting(milliseconds: 31_000)
+        try await settle(merged.child)
+        let offered = try XCTUnwrap(merged.child.readyCandidate())
+        XCTAssertEqual(offered.cid, carried, "the aged carrier was re-stamped: a sibling")
+        let again = try await merged.service.miningTemplate(MiningTemplateRequest())
+        XCTAssertNil(again.block.children.node?["Payments"], "carried once, not twice")
+    }
+
     func testContextualChildCandidateBindsNewParentCarrierState() async throws {
         let parentProcess = try await nexusProcess()
         let parentGenesis = try await parentProcess.canonicalTipBlock()
