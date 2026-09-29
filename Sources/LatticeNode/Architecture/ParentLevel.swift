@@ -54,27 +54,31 @@ public protocol ChildLevel: AnyObject, Sendable {
     var readyCandidate: ReadyCandidate? { get }
 }
 
-/// A hosted child's pre-built merged-mining candidate and the parent state it
-/// binds: its provisional carrier's `prevState`, the parent's validated
-/// tip's post-state when it was built.
+/// A hosted child's pre-built merged-mining candidate, the parent state it
+/// binds (its provisional carrier's `prevState`, the parent's validated tip's
+/// post-state when it was built), and the plan it was built on (the child's
+/// part of the miner's plan, which pays that miner).
 public struct ReadyCandidate: Sendable {
     public let candidate: DirectChildCandidate
     public let cid: String
     public let parentStateCID: String
+    public let plan: DescendantPlan
 
-    public init?(_ candidate: DirectChildCandidate) {
+    public init?(_ candidate: DirectChildCandidate, plan: DescendantPlan) {
         guard let cid = try? BlockHeader(node: candidate.block).rawCID else {
             return nil
         }
         self.candidate = candidate
         self.cid = cid
         parentStateCID = candidate.block.parentState.rawCID
+        self.plan = plan
     }
 }
 
 /// The miner's plan for a level's subtree (rewards and minimum work), from
 /// the last template request: what a hosted child builds its candidate
-/// against. A parent sends each child its subtree's part when it changes.
+/// against. A parent sends each child its subtree's part when it changes,
+/// and carries a child's snapshot only when it was built on that part.
 public struct DescendantPlan: Sendable {
     public let rewards: [MiningReward]
     public let minimumWork: [MiningMinimumWork]

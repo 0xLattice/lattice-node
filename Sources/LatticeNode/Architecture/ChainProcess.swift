@@ -1510,11 +1510,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         }
     }
 
-    /// The block at the deepest validated main-chain tip. Mirrors
-    /// `canonicalTipBlock()` but honours the deferred-execution gate so callers
-    /// that BUILD ON the tip (mining templates, mempool reconciliation) never
-    /// act on a merely weighed tip. Identical to `canonicalTipBlock()` under
-    /// all-eager admission.
     /// `validatedTipBlock` without the operation gate, for a co-hosted
     /// child's candidate rebuild (`ParentLevel.validatedTip`, §2.4): the
     /// same ungated walk `readSnapshot` makes, resolved from local content.
@@ -1526,6 +1521,11 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         return (validated.cid, block)
     }
 
+    /// The block at the deepest validated main-chain tip. Mirrors
+    /// `canonicalTipBlock()` but honours the deferred-execution gate so callers
+    /// that BUILD ON the tip (mining templates, mempool reconciliation) never
+    /// act on a merely weighed tip. Identical to `canonicalTipBlock()` under
+    /// all-eager admission.
     public func validatedTipBlock() async throws -> Block {
         await acquireOperation()
         defer { releaseOperation() }

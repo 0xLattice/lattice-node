@@ -250,6 +250,55 @@ final class ChainHostTests: XCTestCase {
         await host.stopAll()
     }
 
+    /// A child's tip move reaches Nexus's digest with no Nexus block: once the
+    /// child admits its carried block, its rebuilt snapshot moves the digest a
+    /// miner compares, and the next template carries the child's next block.
+    func testAChildTipMoveMovesTheParentDigest() async throws {
+        let root = temporaryDirectory(create: true)
+        let (_, genesisCID) = try await seedChild(root: root, timestamp: 1_000)
+        let host = try ChainHost(chains: [
+            nexus: configure(nexus, root: root, keyByte: 1),
+            child: configure(child, root: root, keyByte: 2),
+        ])
+        let failed = try await host.startAll()
+        XCTAssertTrue(failed.isEmpty)
+        let parent = try await service(host, nexus)
+        let payments = try await service(host, child)
+        try await anchor(genesisCID, on: host)
+        try await eventually("the child activates", within: .seconds(60)) {
+            await payments.status().tipCID == genesisCID
+        }
+        try await eventually("a Nexus block carries the child", within: .seconds(120)) {
+            let template = try await parent.miningTemplate(MiningTemplateRequest())
+            let carried = template.block.children.node?[self.child.directory] != nil
+            let mined = try await parent.submitWork(SubmitWorkRequest(
+                workID: template.workID, nonce: solvedNonce(for: template)
+            ))
+            return carried && mined.accepted
+        }
+        let parentTip = await parent.status().tipCID
+        let before = try await parent.miningTemplate(MiningTemplateRequest())
+        func carriedHeight(_ template: MiningTemplateResponse) -> UInt64 {
+            template.block.children.node?[child.directory]?.node?.height ?? 0
+        }
+        if carriedHeight(before) < 2 {
+            // Not admitted and rebuilt yet: the tip move is what moves the digest.
+            try await eventually("the child's tip move moves the digest", within: .seconds(120)) {
+                await parent.status().templateDigest != before.templateDigest
+            }
+        }
+        var after = before
+        try await eventually("a template carries the child's next block", within: .seconds(120)) {
+            after = try await parent.miningTemplate(MiningTemplateRequest())
+            return carriedHeight(after) >= 2
+        }
+        let tipAfter = await parent.status().tipCID
+        XCTAssertEqual(tipAfter, parentTip, "no Nexus block moved the digest")
+        let status = await parent.status().templateDigest
+        XCTAssertEqual(after.templateDigest, status)
+        await host.stopAll()
+    }
+
     /// Nexus, a child and a grandchild in one host: the grandchild's snapshot
     /// composes into the child's, which Nexus's template carries, so one
     /// mined Nexus block carries both — each level admits its carried block,

@@ -1931,8 +1931,13 @@ final class ChainServiceTests: XCTestCase {
             process: fixture.process,
             parentLevel: LocalParentLevel(fixture.parent)
         )
+        // The grandchild's snapshot is built on its part of the miner's plan.
         try await payments.attachStubChildren(
-            ["Grandchild"], on: fixture.process
+            ["Grandchild"],
+            on: fixture.process,
+            plan: DescendantPlan(minimumWork: [MiningMinimumWork(
+                chainPath: ["Nexus", "Payments", "Grandchild"], work: work
+            )])
         ) { context in
             let genesis = try await BlockBuilder.buildChildGenesis(
                 spec: NexusGenesis.spec,
@@ -2465,35 +2470,82 @@ final class ChainServiceTests: XCTestCase {
         )
     }
 
-    /// A change on the child reaches the parent's digest (M1): the child's
-    /// state changing (here a transaction entering its pool) rebuilds its
-    /// snapshot, which changes the parent's digest, and the next template
-    /// carries the fresh candidate.
-    func testAChildStateChangeRebuildsItsSnapshotAndMovesTheParentDigest() async throws {
+    /// A transaction entering a hosted child's pool rebuilds no snapshot:
+    /// peer gossip never churns the snapshot or the parent's digest. The
+    /// next rebuild (here, a hosted child's change) picks it up.
+    func testAMempoolInsertAloneRebuildsNoSnapshot() async throws {
         let fixture = try await activeChildService(spec: NexusGenesis.spec)
         let merged = await mergedMiningService(fixture)
         try await settle(merged.child)
         let before = try await merged.service.miningTemplate(MiningTemplateRequest())
         let first = try XCTUnwrap(merged.child.readyCandidate())
-        XCTAssertEqual(before.block.children.node?["Payments"]?.rawCID, first.cid)
 
-        let transaction = try signedTransaction(
-            key: CryptoUtils.generateKeyPair(),
-            chainPath: ["Nexus", "Payments"]
-        )
-        _ = try await merged.child.submitTransaction(
-            SubmitTransactionRequest(transaction: transaction)
-        )
-        try await eventually("the child rebuilds its snapshot") {
-            merged.child.readyCandidate()?.cid != first.cid
-        }
-        try await settle(merged.child)
+        _ = try await merged.child.submitTransaction(SubmitTransactionRequest(
+            transaction: try signedTransaction(
+                key: CryptoUtils.generateKeyPair(),
+                chainPath: ["Nexus", "Payments"]
+            )
+        ))
+        let idle = await merged.child.candidateRebuildIdle()
+        XCTAssertTrue(idle, "a mempool insert scheduled a rebuild")
+        XCTAssertEqual(merged.child.readyCandidate()?.cid, first.cid)
         let digest = await merged.service.status().templateDigest
-        XCTAssertNotEqual(digest, before.templateDigest)
-        let after = try await merged.service.miningTemplate(MiningTemplateRequest())
-        let carried = try XCTUnwrap(merged.child.readyCandidate())
-        XCTAssertEqual(after.block.children.node?["Payments"]?.rawCID, carried.cid)
-        XCTAssertEqual(carried.candidate.block.transactions.node?.count, 1)
+        XCTAssertEqual(digest, before.templateDigest)
+
+        try await settle(merged.child)
+        let rebuilt = try XCTUnwrap(merged.child.readyCandidate())
+        XCTAssertEqual(rebuilt.candidate.block.transactions.node?.count, 1)
+    }
+
+    /// A node serves one miner's plan at a time: a template request with a
+    /// new plan adopts it, and until the child rebuilds on it no template
+    /// carries the child's snapshot built for the previous plan.
+    func testATemplateNeverCarriesASnapshotBuiltForAnotherPlan() async throws {
+        let fixture = try await activeChildService(spec: NexusGenesis.spec)
+        let payments = makeService(
+            process: fixture.process,
+            parentLevel: LocalParentLevel(fixture.parent)
+        )
+        let building = Latch()
+        let release = Latch()
+        addTeardownBlock { await release.open() }
+        let held = HeldGate()
+        let parent = makeService(process: fixture.parent)
+        await host(payments, in: "Payments", under: parent) { _ in
+            guard await held.isHeld else { return true }
+            await building.open()
+            await release.wait()
+            return true
+        }
+        func plan(_ bits: Int) -> MiningTemplateRequest {
+            MiningTemplateRequest(minimumWork: [MiningMinimumWork(
+                chainPath: ["Nexus", "Payments"], work: UInt256(1) << bits
+            )])
+        }
+        let first = try await settledTemplate((parent, payments), plan(2))
+        let firstSnapshot = try XCTUnwrap(payments.readyCandidate())
+        XCTAssertEqual(first.block.children.node?["Payments"]?.rawCID, firstSnapshot.cid)
+
+        // The second plan's rebuild is held: the first plan's snapshot
+        // stands, and is not carried.
+        await held.hold()
+        let second = try await parent.miningTemplate(plan(3))
+        await building.wait()
+        XCTAssertNil(second.block.children.node?["Payments"])
+        XCTAssertEqual(payments.readyCandidate()?.cid, firstSnapshot.cid)
+
+        await held.release()
+        await release.open()
+        try await eventually("the child rebuilds on the second plan") {
+            await payments.candidateRebuildIdle()
+                && payments.readyCandidate()?.plan.minimumWork.first?.work
+                    == UInt256(1) << 3
+        }
+        let carrying = try await parent.miningTemplate(plan(3))
+        XCTAssertEqual(
+            carrying.block.children.node?["Payments"]?.rawCID,
+            payments.readyCandidate()?.cid
+        )
     }
 
     /// A grandchild's snapshot reaches the top (M2): a grandchild becoming
@@ -4498,6 +4550,12 @@ private func XCTAssertThrowsErrorAsync<T>(
 }
 
 
+
+private actor HeldGate {
+    private(set) var isHeld = false
+    func hold() { isHeld = true }
+    func release() { isHeld = false }
+}
 
 private actor ShutdownReturned {
     private(set) var value = false

@@ -112,7 +112,8 @@ public actor ChainService {
     /// not change builds the same block: the carrier's timestamp is the
     /// block's. A children-only parent block leaves the post-state, so the
     /// block it carried is rebuilt as is and the parent's carried-CID skip
-    /// leaves it out; either tip moving stamps a fresh carrier.
+    /// leaves it out; either tip moving, or the carrier outliving a
+    /// template's lifetime, stamps a fresh one.
     private var readyCarrier: (key: String, block: Block)?
     /// Set with the parent mailbox: whether this level may build now (no own
     /// carried block awaits admission), and how the parent level hears that
@@ -1098,6 +1099,14 @@ public actor ChainService {
         liveMempoolRoots = roots
     }
 
+    /// A Nexus template for `request`, carrying the hosted children's
+    /// snapshots. The node serves one miner's plan at a time: a request whose
+    /// plan (rewards and minimum work for descendant chains) differs from the
+    /// last adopts it, and each child whose part changed rebuilds on it. A
+    /// snapshot built on another plan is never carried — that child is left
+    /// out of the template, never paid to the wrong miner — so the template
+    /// that changes the plan carries no mismatched child, and the rebuilt
+    /// snapshots move the digest.
     public func miningTemplate(
         _ request: MiningTemplateRequest
     ) async throws -> MiningTemplateResponse {
@@ -1112,6 +1121,12 @@ public actor ChainService {
         // and never reaches a child.
         let rewardPlan = try await validatedRewardPlan(request.rewards)
         let minimumWorkPlan = try validatedMinimumWorkPlan(request.minimumWork)
+        // Adopted before the digest and the build, which carry only the
+        // snapshots built on it.
+        sendDescendantPlan(DescendantPlan(
+            rewards: rewardPlan.descendants,
+            minimumWork: minimumWorkPlan.descendants
+        ))
         // Read before the build: a child's snapshot may move while it runs,
         // and a digest read after could name a snapshot the template does
         // not carry. Read before, such a move only makes the digest stale,
@@ -1122,12 +1137,6 @@ public actor ChainService {
             minimumWork: request.minimumWork,
             parentCarrier: nil
         )
-        // This template carries the children's snapshots as they stand; a
-        // snapshot rebuilt for a changed plan changes the digest.
-        sendDescendantPlan(DescendantPlan(
-            rewards: rewardPlan.descendants,
-            minimumWork: minimumWorkPlan.descendants
-        ))
         let issuance = await templates.issueTrackingInsertion(assembled)
         let template = issuance.template
         guard template.remainingLifetimeMilliseconds > 0 else {
@@ -1180,7 +1189,8 @@ public actor ChainService {
     }
 
     /// Each hosted child's snapshot a template on `tipCID` can carry: one
-    /// in the child's own directory, binding `parentStateCID` (the tip's
+    /// in the child's own directory, built on the child's part of this
+    /// level's plan, binding `parentStateCID` (the tip's
     /// post-state, every carrier's `prevState`), and not the block the tip's
     /// branch already carries for the directory — a children-only carrier
     /// leaves the post-state, so a carried snapshot still binds, and
@@ -1193,7 +1203,10 @@ public actor ChainService {
         let snapshots = childLevels.compactMap { directory, level -> ReadyCandidate? in
             guard let ready = level.readyCandidate,
                   ready.candidate.directory == directory,
-                  ready.parentStateCID == parentStateCID else { return nil }
+                  ready.parentStateCID == parentStateCID,
+                  ready.plan.same(as: descendantPlan.narrowed(
+                      to: process.configuration.chainPath + [directory]
+                  )) else { return nil }
             return ready
         }
         guard !snapshots.isEmpty else { return [] }
@@ -2216,10 +2229,13 @@ public actor ChainService {
     /// Untracked: touches only the network, never the store. A change that
     /// can move the tip also tells the hosted children, which never blocks.
     private func publishChainStateChange(tipChanged: Bool = true) {
+        // A mempool change alone (`tipChanged: false`) rebuilds no snapshot:
+        // the next rebuild picks its transactions up, so peer gossip never
+        // churns the snapshot, the retained candidates or the digest.
         if tipChanged {
             for level in childLevels.values { level.parentChanged(.tipChanged) }
+            scheduleCandidateRebuild()
         }
-        scheduleCandidateRebuild()
         Task { [network] in
             await network.chainStateChanged()
         }
@@ -2330,11 +2346,12 @@ public actor ChainService {
         guard let tip = await parentLevel.validatedTip() else { return nil }
         let carrierKey = tip.block.postState.rawCID + "|"
             + (await process.deepestValidatedCanonicalTip()?.cid ?? "")
+        let now = Int64(Date().timeIntervalSince1970 * 1_000)
         let carrier: Block
-        if let ready = readyCarrier, ready.key == carrierKey {
+        if let ready = readyCarrier, ready.key == carrierKey,
+           now - ready.block.timestamp < Int64(Self.templateLifetimeMilliseconds) {
             carrier = ready.block
         } else {
-            let now = Int64(Date().timeIntervalSince1970 * 1_000)
             guard let fresh = Self.provisionalCarrier(
                 on: tip.block,
                 tipCID: tip.cid,
@@ -2343,15 +2360,16 @@ public actor ChainService {
             readyCarrier = (carrierKey, fresh)
             carrier = fresh
         }
+        let plan = descendantPlan
         let candidate = try? await miningCandidate(
             for: ChildCandidateRequestContext(
                 parentCarrier: carrier,
-                rewards: descendantPlan.rewards,
-                minimumWork: descendantPlan.minimumWork
+                rewards: plan.rewards,
+                minimumWork: plan.minimumWork
             ),
             parentContentSource: parentLevel.contentSource
         )
-        return candidate.flatMap(ReadyCandidate.init)
+        return candidate.flatMap { ReadyCandidate($0, plan: plan) }
     }
 
     /// One entry of a child level's parent mailbox, drained in order.

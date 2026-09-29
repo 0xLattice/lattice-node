@@ -25,9 +25,13 @@ final class StubChildLevel: ChildLevel, Sendable {
 
     var readyCandidate: ReadyCandidate? { snapshot.value }
 
-    /// Publishes `candidate` as this child's snapshot (nil withdraws it).
-    func publish(_ candidate: DirectChildCandidate?) {
-        snapshot.swap(candidate.flatMap(ReadyCandidate.init))
+    /// Publishes `candidate`, built on `plan`, as this child's snapshot (nil
+    /// withdraws it).
+    func publish(
+        _ candidate: DirectChildCandidate?,
+        plan: DescendantPlan = DescendantPlan()
+    ) {
+        snapshot.swap(candidate.flatMap { ReadyCandidate($0, plan: plan) })
     }
 }
 
@@ -43,11 +47,13 @@ extension ChainService {
     /// One stub child level per directory, each publishing `provider`'s
     /// candidate in its directory, built — as a hosted child's rebuild
     /// builds — against a provisional carrier on `process`'s validated tip
-    /// (`process` is this level's own). Returns that carrier.
+    /// (`process` is this level's own) and published as built on `plan`.
+    /// Returns that carrier.
     @discardableResult
     func attachStubChildren(
         _ directories: [String],
         on process: ChainProcess,
+        plan: DescendantPlan = DescendantPlan(),
         provider: @escaping @Sendable (
             ChildCandidateRequestContext
         ) async throws -> [DirectChildCandidate]
@@ -62,10 +68,9 @@ extension ChainService {
             ChildCandidateRequestContext(parentCarrier: carrier, rewards: [])
         )
         for directory in directories {
-            attachChildLevel(StubChildLevel(
-                directory: directory,
-                candidate: built.first { $0.directory == directory }
-            ))
+            let level = StubChildLevel(directory: directory)
+            level.publish(built.first { $0.directory == directory }, plan: plan)
+            attachChildLevel(level)
         }
         return carrier
     }
