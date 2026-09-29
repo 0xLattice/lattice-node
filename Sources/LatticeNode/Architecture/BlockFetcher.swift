@@ -31,7 +31,7 @@ struct BlockFetcher {
         case later
         /// A parent fact (genesis link, state continuity) the parent level
         /// does not hold yet. No timer retries it: the parent's tip change
-        /// does (`retryParentFactWaits`).
+        /// does, for the parks whose fact now holds (`retryParentFactWaits`).
         case parentFact
     }
 
@@ -128,6 +128,9 @@ struct BlockFetcher {
         var evidenceRetries: Int = 0
         /// Seeded with the configured parent's evidence (`Seed.fromParent`).
         var fromParent = false
+        /// The parent fact a `.wait(.parentFact)` park waits on; nil when no
+        /// parent level can answer it, so no tip change wakes it.
+        var parentFact: ParentFact?
     }
 
     private struct BlockRecord {
@@ -463,6 +466,7 @@ struct BlockFetcher {
         _ ticket: Ticket,
         resolution: Resolution,
         deficientProviders: Set<CandidateProvider> = [],
+        parentFact: ParentFact? = nil,
         now: ContinuousClock.Instant = .now
     ) -> Bool {
         guard active == ticket,
@@ -472,6 +476,7 @@ struct BlockFetcher {
               case .active(ticket) = attempt.state else {
             return false
         }
+        attempt.parentFact = parentFact
 
         for provider in deficientProviders
             where record.providers[provider.publicKey] == provider {
@@ -695,14 +700,31 @@ struct BlockFetcher {
         _ = scheduleIfReady(key)
     }
 
-    /// The parent level's tip moved: every attempt parked on a parent fact
-    /// tries again, since the fact may hold now.
-    mutating func retryParentFactWaits() {
+    /// The distinct parent facts parked attempts wait on: what the runtime
+    /// reads from the parent level when its tip moves.
+    func parentFactWaits() -> Set<ParentFact> {
+        var facts = Set<ParentFact>()
+        for record in records.values {
+            for attempt in record.attempts.values {
+                if case .waiting(.parentFact, _) = attempt.state,
+                   let fact = attempt.parentFact {
+                    facts.insert(fact)
+                }
+            }
+        }
+        return facts
+    }
+
+    /// The parent level now holds `held`: exactly the attempts parked on
+    /// one of those facts try again; every other park stays parked.
+    mutating func retryParentFactWaits(holding held: Set<ParentFact>) {
+        guard !held.isEmpty else { return }
         for blockCID in Array(records.keys) {
             guard var record = records[blockCID] else { continue }
             for rootCID in Array(record.attempts.keys) {
                 guard var attempt = record.attempts[rootCID],
-                      case .waiting(.parentFact, _) = attempt.state
+                      case .waiting(.parentFact, _) = attempt.state,
+                      let fact = attempt.parentFact, held.contains(fact)
                 else { continue }
                 attempt.state = .ready
                 record.attempts[rootCID] = attempt

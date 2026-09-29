@@ -38,8 +38,10 @@ Examples:
 - `Payments` — invalid chain path.
 - `/Nexus/Payments`, `Nexus/`, and `Nexus//Payments` — invalid.
 
-The Nexus process has no parent. Every child must configure `--parent` with the
-authenticated immediate parent's fact-plane public key and endpoint.
+Nexus has no parent. Every child runs in the same `lattice-node` process as
+its whole ancestry, configured through `lattice.json` (`--config`): it reads its
+parent facts from the co-hosted parent level, and the host wires its parent
+endpoint to the parent's fact plane on loopback.
 
 ## Runtime components
 
@@ -171,7 +173,7 @@ and leave it only after an import decides the block.
 3. External mining includes that transaction in a parent block like any other.
    The accepted block records `directory -> genesisCID` in the parent's
    committed genesis state.
-4. The child process, started with its absolute path and parent fact endpoint,
+4. The child level, co-hosted with its ancestry (`lattice.json`, `--config`),
    opens its durable store in `awaitingGenesis` and runs two genesis paths
    concurrently. If its data directory holds the seed as `child-genesis.json`
    at startup (the file is read only then), it rebuilds the genesis locally.

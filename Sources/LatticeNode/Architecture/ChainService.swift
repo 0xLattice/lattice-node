@@ -2108,6 +2108,13 @@ public actor ChainService {
         }
     }
 
+    /// This chain's genesis activated outside candidate admission (seeded or
+    /// adopted): its tip moved from nothing, so its hosted children and its
+    /// network hear it like any other tip change.
+    func genesisActivatedOutOfBand() {
+        publishChainStateChange()
+    }
+
     /// The host tells a hosted child in `directory` each time this level's
     /// tip moves. `notify` must not block. Replaces the directory's previous
     /// child, as a restarted child level does.

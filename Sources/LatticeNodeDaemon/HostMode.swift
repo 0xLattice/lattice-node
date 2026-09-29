@@ -108,7 +108,9 @@ extension LatticeNodeCommand {
                     break events
                 }
                 logHostError("\(reason); stopping \(address.key)")
-                await host.stop(address)
+                for descendant in await host.stop(address) {
+                    logHostError("stopped \(descendant.key): its ancestor \(address.key) stopped")
+                }
             }
         }
         await host.stopAll()

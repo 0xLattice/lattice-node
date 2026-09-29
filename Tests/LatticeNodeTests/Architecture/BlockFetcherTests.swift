@@ -85,23 +85,35 @@ final class BlockFetcherTests: XCTestCase {
         XCTAssertEqual(fetcher.next()?.blockCID, blockCID)
     }
 
-    /// A parent-fact park has no timer: only the parent's tip change
-    /// (`retryParentFactWaits`) re-readies it, and it wakes every such park
-    /// while leaving other waits alone.
-    func testParentFactWaitsWakeOnTheParentTipNotTheClock() throws {
+    /// A parent-fact park has no timer: only the parent's tip change re-
+    /// readies it, and only when the parent now holds the fact it waits on.
+    /// Every other park stays parked, however often the tip moves.
+    func testParentFactWaitsWakeOnlyWhenTheirFactHolds() throws {
         var fetcher = BlockFetcher()
-        for cid in ["fact-a", "fact-b", "later"] {
+        for cid in ["fact-a", "fact-a2", "fact-b", "later"] {
             XCTAssertTrue(fetcher.observe(.init(blockCID: cid, package: nil)).accepted)
         }
+        let factA = ParentFact.continuity(toStateCID: "state-a")
+        let factB = ParentFact.genesis(directory: "Payments", childGenesisCID: "g")
         var parked: [String] = []
         while let candidate = fetcher.next() {
             parked.append(candidate.blockCID)
+            let fact: ParentFact? = switch candidate.blockCID {
+            case "fact-a", "fact-a2": factA
+            case "fact-b": factB
+            default: nil
+            }
             XCTAssertTrue(fetcher.complete(
                 candidate.ticket,
-                resolution: .wait(candidate.blockCID == "later" ? .later : .parentFact)
+                resolution: .wait(fact == nil ? .later : .parentFact),
+                parentFact: fact
             ))
         }
-        XCTAssertEqual(Set(parked), ["fact-a", "fact-b", "later"])
+        XCTAssertEqual(Set(parked), ["fact-a", "fact-a2", "fact-b", "later"])
+        XCTAssertEqual(
+            fetcher.parentFactWaits(), [factA, factB],
+            "each distinct fact is read once, however many parks wait on it"
+        )
 
         // Past every pacing interval, short of the expiry window.
         fetcher.retry(now: .now.advanced(by: .seconds(60 * 60)))
@@ -112,13 +124,19 @@ final class BlockFetcherTests: XCTestCase {
         }
         XCTAssertEqual(byClock, ["later"], "the clock retries only the .later wait")
 
-        fetcher.retryParentFactWaits()
+        // The tip moved and the parent holds nothing new: nothing wakes.
+        fetcher.retryParentFactWaits(holding: [])
+        XCTAssertNil(fetcher.next())
+
+        // The parent now holds fact A: exactly its parks wake.
+        fetcher.retryParentFactWaits(holding: [factA])
         var byTip: [String] = []
         while let candidate = fetcher.next() {
             byTip.append(candidate.blockCID)
             XCTAssertTrue(fetcher.complete(candidate.ticket, resolution: .terminal))
         }
-        XCTAssertEqual(Set(byTip), ["fact-a", "fact-b"])
+        XCTAssertEqual(Set(byTip), ["fact-a", "fact-a2"])
+        XCTAssertEqual(fetcher.parentFactWaits(), [factB], "fact B's park stays parked")
     }
 
     private func provider(

@@ -35,15 +35,35 @@ extension NodeNetworkRuntime {
     }
 
     /// The co-hosted parent level changed. Delivered off the parent's lease;
-    /// it only wakes the candidates parked on a parent fact.
-    func parentChanged(_ change: ParentChange) {
+    /// it only wakes the candidates parked on a parent fact that now holds.
+    func parentChanged(_ change: ParentChange) async {
         switch change {
         case .tipChanged:
             parentTipChanges &+= 1
-            guard isRunning else { return }
-            blockFetcher.retryParentFactWaits()
-            serviceBlockFetcher()
+            await retryHeldParentFacts()
         }
+    }
+
+    /// Re-readies the parks whose parent fact the parent level holds now.
+    /// Each distinct fact is read once, however many parks wait on it, and
+    /// a park whose fact still does not hold stays parked: a parent catching
+    /// up publishes once per block, and each publish costs a few local reads,
+    /// not a re-admission of every parked candidate.
+    func retryHeldParentFacts() async {
+        guard isRunning, let parentLevel else { return }
+        let generation = runtimeGeneration
+        // Collected in the same synchronous segment as the wake's counter
+        // bump: a park that lands after this sees the bump (`importCandidate`).
+        let waits = blockFetcher.parentFactWaits()
+        var held = Set<ParentFact>()
+        for fact in waits {
+            if await parentLevel.holds(fact) { held.insert(fact) }
+        }
+        guard isRunning, isCurrentGeneration(generation), !held.isEmpty else {
+            return
+        }
+        blockFetcher.retryParentFactWaits(holding: held)
+        serviceBlockFetcher()
     }
 
     /// Seam: a predecessor activated outside admission (an adopted genesis)
@@ -171,7 +191,8 @@ extension NodeNetworkRuntime {
     private func completeCandidate(
         _ candidate: Candidate,
         resolution: BlockFetcher.Resolution,
-        deficientProviders: Set<CandidateProvider> = []
+        deficientProviders: Set<CandidateProvider> = [],
+        parentFact: ParentFact? = nil
     ) {
         SyncTrace.log(
             "complete \(candidate.blockCID) \(resolution) "
@@ -180,7 +201,8 @@ extension NodeNetworkRuntime {
         _ = blockFetcher.complete(
             candidate.ticket,
             resolution: resolution,
-            deficientProviders: deficientProviders
+            deficientProviders: deficientProviders,
+            parentFact: parentFact
         )
         serviceBlockFetcher()
     }
@@ -535,9 +557,13 @@ extension NodeNetworkRuntime {
         // A parent fact the admission lacks is read from the co-hosted parent
         // level. When the parent holds it the candidate re-readies with the
         // merged package once parked; when not, it parks until the parent's
-        // tip moves (`parentChanged`).
+        // tip moves and the parent holds it (`parentChanged`).
         let parentTipChanges = self.parentTipChanges
         var parentFactPackage: AuthenticatedChildPackage?
+        var parentFact: ParentFact?
+        if case .unavailable(let requirement?) = outcome.decision {
+            parentFact = ParentFact(requirement, child: configuration.address)
+        }
         if case .unavailable(let requirement?) = outcome.decision,
            let authenticatedPackage, let parentLevel {
             parentFactPackage = await parentLevel.evidence(
@@ -599,7 +625,8 @@ extension NodeNetworkRuntime {
         completeCandidate(
             candidate,
             resolution: resolution,
-            deficientProviders: failedOverlayProviders
+            deficientProviders: failedOverlayProviders,
+            parentFact: parentFact
         )
         if let parentFactPackage {
             reReadyCandidates([CandidateSeed(
@@ -608,9 +635,9 @@ extension NodeNetworkRuntime {
             )])
         } else if case .wait(.parentFact) = resolution,
                   self.parentTipChanges != parentTipChanges {
-            // The tip moved while the fact was read: the wake already fired.
-            blockFetcher.retryParentFactWaits()
-            serviceBlockFetcher()
+            // The tip moved while the fact was read: that wake collected
+            // the parked facts before this park, so check again.
+            await retryHeldParentFacts()
         }
         await orphanUndecidedParentEvidence(
             candidate, package: authenticatedPackage,

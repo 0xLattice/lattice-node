@@ -17,7 +17,8 @@ The suites are grouped by the boundary they actually cross:
   overlay/fact-plane separation, bounded/canonical wire input, real
   peer-to-runtime async delegate delivery, root-scoped content attribution,
   per-connection hierarchy authorization, lifecycle fencing, proof
-  distribution, and session-bound immediate-parent fact authentication.
+  distribution, and immediate-parent facts read from the co-hosted parent
+  level (`LocalParentLevel`).
 - `MultichainInvariantTests`: direct-parent-only package acceptance, ancestor-path rejection, and durable exact-edge recovery across process reopen.
 - `ChainServiceTests`: transaction, child-deploy, template, work-submission, reconciliation ordering, and publication despite optional hierarchy availability failures.
 - `DaemonHTTPTests`: real loopback HTTP route contracts.

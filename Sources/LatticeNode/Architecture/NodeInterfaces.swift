@@ -129,6 +129,9 @@ public protocol ChainInterface: AnyObject, Sendable {
     /// The committers this chain asks its parent to re-serve after each
     /// evidence catch-up round.
     func recentCarriers() async -> [String]
+    /// This chain's genesis activated outside candidate admission (adopted
+    /// from the parent's record): its tip moved from nothing.
+    func genesisActivatedOutOfBand() async
 }
 
 /// The service's view of the runtime. Holds the runtime weakly, so the
@@ -273,5 +276,9 @@ final class WeakChain: @unchecked Sendable, ChainInterface {
     func recentCarriers() async -> [String] {
         guard let service else { return [] }
         return (try? await service.recentCarriers()) ?? []
+    }
+
+    func genesisActivatedOutOfBand() async {
+        await service?.genesisActivatedOutOfBand()
     }
 }

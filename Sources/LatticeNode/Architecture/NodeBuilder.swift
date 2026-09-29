@@ -11,11 +11,15 @@ public struct Node: Sendable {
 
     /// Open the process, restore its local transactions and start the
     /// network runtime against the service. A child level reads its parent
-    /// facts from `parentLevel`.
+    /// facts from `parentLevel`: every child has one and Nexus has none.
     public static func build(
         configuration: NodeConfiguration,
         parentLevel: (any ParentLevel)? = nil
     ) async throws -> Node {
+        precondition(
+            (configuration.chainPath.count > 1) == (parentLevel != nil),
+            "a child level requires its parent level, and Nexus has none"
+        )
         let network = try NodeNetworkRuntime(
             configuration: configuration, parentLevel: parentLevel
         )

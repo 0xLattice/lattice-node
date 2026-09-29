@@ -31,7 +31,54 @@ public enum ParentChange: Sendable {
     case tipChanged
 }
 
+/// A parent fact a child admission can read from its co-hosted parent
+/// level: the key a `.wait(.parentFact)` park waits on.
+enum ParentFact: Hashable, Sendable {
+    /// The parent executed a block producing `toStateCID`, from genesis.
+    case continuity(toStateCID: String)
+    /// The parent recorded `childGenesisCID` for `directory`.
+    case genesis(directory: String, childGenesisCID: String)
+
+    /// The fact `requirement` names, or nil when the requirement is not a
+    /// fact `child`'s immediate parent level can answer.
+    init?(_ requirement: CrossChainEvidenceRequirement, child: ChainAddress) {
+        let parentPath = Array(child.components.dropLast())
+        switch requirement {
+        case .parentGenesis(
+            let requiredPath, let directory, let childGenesisCID, let parentStateCID
+        ) where requiredPath == parentPath && directory == child.directory
+            // A self-contained genesis commits to the empty parent state.
+            && parentStateCID == LatticeState.emptyHeader.rawCID:
+            self = .genesis(directory: directory, childGenesisCID: childGenesisCID)
+        case .parentStateContinuity(let requiredPath, let fromStateCID, let toStateCID)
+            where requiredPath == parentPath
+            // Every child block anchors its `parentState` at the parent
+            // chain's genesis, so the only continuity Lattice asks for runs
+            // from the empty state: the executed-from-genesis frontier
+            // answers it without walking the chain.
+            && fromStateCID == LatticeState.emptyHeader.rawCID
+            && fromStateCID != toStateCID:
+            self = .continuity(toStateCID: toStateCID)
+        default:
+            return nil
+        }
+    }
+}
+
 extension ParentLevel {
+    /// Whether the parent holds `fact` now: the one cheap local read a
+    /// parked candidate's wake is gated on.
+    func holds(_ fact: ParentFact) async -> Bool {
+        switch fact {
+        case .continuity(let toStateCID):
+            await hasProducedState(toStateCID)
+        case .genesis(let directory, let childGenesisCID):
+            await recordedGenesisLink(
+                directory: directory, childGenesisCID: childGenesisCID
+            )?.parentStateCID == LatticeState.emptyHeader.rawCID
+        }
+    }
+
     /// `package` merged with the parent fact `requirement` names, when the
     /// parent holds it. Nil when it does not (yet), or when the requirement
     /// is not a fact of `child`'s immediate parent.
@@ -40,37 +87,29 @@ extension ParentLevel {
         child: ChainAddress,
         package: AuthenticatedChildPackage
     ) async -> AuthenticatedChildPackage? {
-        let parentPath = Array(child.components.dropLast())
+        guard let parentFact = ParentFact(requirement, child: child) else {
+            return nil
+        }
         let fact: ChildValidationPackage
-        switch requirement {
-        case .parentGenesis(
-            let requiredPath, let directory, let childGenesisCID, let parentStateCID
-        ) where requiredPath == parentPath && directory == child.directory:
+        switch parentFact {
+        case .genesis(let directory, let childGenesisCID):
             guard let link = await recordedGenesisLink(
                 directory: directory, childGenesisCID: childGenesisCID
-            ), link.parentStateCID == parentStateCID else { return nil }
+            ), link.parentStateCID == LatticeState.emptyHeader.rawCID
+            else { return nil }
             fact = ChildValidationPackage(
                 proof: package.package.proof, parentGenesisLink: link
             )
-        case .parentStateContinuity(let requiredPath, let fromStateCID, let toStateCID)
-            where requiredPath == parentPath:
-            // Every child block anchors its `parentState` at the parent
-            // chain's genesis, so the only continuity Lattice asks for runs
-            // from the empty state: the executed-from-genesis frontier
-            // answers it without walking the chain.
-            guard fromStateCID == LatticeState.emptyHeader.rawCID,
-                  fromStateCID != toStateCID,
-                  await hasProducedState(toStateCID) else { return nil }
+        case .continuity(let toStateCID):
+            guard await hasProducedState(toStateCID) else { return nil }
             fact = ChildValidationPackage(
                 proof: package.package.proof,
                 parentStateContinuityLink: ParentStateContinuityLink(
-                    parentPath: parentPath,
-                    fromStateCID: fromStateCID,
+                    parentPath: Array(child.components.dropLast()),
+                    fromStateCID: LatticeState.emptyHeader.rawCID,
                     toStateCID: toStateCID
                 )
             )
-        default:
-            return nil
         }
         return BlockFetcher.mergePackages(
             package, AuthenticatedChildPackage(package: fact)

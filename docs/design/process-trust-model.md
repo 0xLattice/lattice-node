@@ -21,17 +21,14 @@ the process's storage interface.
 
 ## Configured parent route
 
-A non-Nexus process must be started with both:
+A non-Nexus chain runs only in the same `lattice-node` process as its whole
+ancestry, configured through `lattice.json` (`--config`). The host wires its
+parent endpoint to the co-hosted parent level's fact plane on loopback.
 
-- its complete path, such as `Nexus/Payments`; and
-- its immediate parent fact endpoint, such as
-  `<nexus-process-key>@parent.example:4002`.
-
-The configured endpoint is the authenticated immediate-parent process. It
-serves two narrow local verdicts from its recovered graph of connected,
-validated blocks: exact child deployment and forward state continuity. Those
-verdicts are session-bound acknowledgements, not signed or portable
-certificates. Nexus rejects a parent configuration because it is the single
+The co-hosted parent level answers two narrow facts from its own validated
+state, read in-process: exact child deployment and forward state continuity
+(a state the parent executed from genesis). They are local reads, not signed or
+portable certificates. Nexus has no parent level because it is the single
 root.
 
 ## Verify content independently
@@ -146,10 +143,10 @@ child topology. Data availability remains separate: Ivy and VolumeBroker move
 proof Volumes, while each chain process independently validates its own blocks.
 ## Operational consequence
 
-Treat `--parent` as the authenticated process boundary for immediate-parent
-validity and as one route for availability. Other peers may supply identical
-Volumes, but they cannot replace the live parent verdict needed for a new
-parent-state movement. Keep process identity keys stable, restrict the hierarchy
+Treat the co-hosted parent level as the only source of immediate-parent
+validity; its loopback endpoint is one route for availability. Other peers may
+supply identical Volumes, but they cannot replace the parent level's fact
+needed for a new parent-state movement. Keep process identity keys stable, restrict the hierarchy
 port to intended relationships, and back up identity separately from wipeable
 chain storage.
 

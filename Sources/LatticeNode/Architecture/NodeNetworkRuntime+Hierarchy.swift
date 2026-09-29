@@ -2297,6 +2297,7 @@ extension NodeNetworkRuntime {
                     // awaitingGenesis, or the whole chain above the genesis stays
                     // orphaned and the child never canonicalizes past height 0.
                     await predecessorConnectedOutOfBand(genesisCID)
+                    await chain?.genesisActivatedOutOfBand()
                     await requestEvidenceIndex(
                         generation: generation,
                         process: process

@@ -95,4 +95,6 @@ final class ClosureChainInterface: ChainInterface {
     func recentCarriers() async -> [String] {
         await recentCarrierProvider?() ?? []
     }
+
+    func genesisActivatedOutOfBand() async {}
 }

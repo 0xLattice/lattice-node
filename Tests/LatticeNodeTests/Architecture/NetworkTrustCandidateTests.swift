@@ -2593,6 +2593,34 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         await fixture.parentRuntime.stop()
     }
 
+    /// Lost-wake window: the parent's tip moves (and the fact lands) after
+    /// admission read the fact but before the block parks, so the wake finds
+    /// no park to re-ready. The park still sees the tip moved and re-checks,
+    /// and the block is admitted with no further wake.
+    func testATipChangeBetweenTheFactReadAndTheParkStillReReadies() async throws {
+        let (fixture, parent) = try await stubbedParentFixture(
+            keyByte: 0xa4, withheld: true
+        )
+        let runtime = fixture.childRuntime
+        await parent.onNextWithheldQuestion { [weak runtime] in
+            await runtime?.parentChanged(.tipChanged)
+        }
+        do {
+            let carried = try await carryFirstCandidate(fixture)
+            try await eventually("admitted without another wake") {
+                await fixture.childProcess.hasAcceptedBlock(carried)
+            }
+            let tipChanges = await runtime.parentTipChanges
+            XCTAssertEqual(tipChanges, 1, "the only wake fired before the park")
+        } catch {
+            await fixture.childRuntime.stop()
+            await fixture.parentRuntime.stop()
+            throw error
+        }
+        await fixture.childRuntime.stop()
+        await fixture.parentRuntime.stop()
+    }
+
     /// A parked block holds no request state: nothing is pending on the
     /// parent, so each tip change asks at most once and nothing
     /// accumulates while the parent still lacks the fact.
