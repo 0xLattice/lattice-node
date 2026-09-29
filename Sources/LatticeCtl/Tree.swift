@@ -194,19 +194,28 @@ private func hostedChains(_ layout: HostLayout) -> Set<String>? {
 /// Stops a process by pidfile: SIGTERM, then SIGKILL if it lingers, then
 /// waits until it is gone, so a spawn after this finds its locks and ports
 /// free. Watches the pid it signalled, never a re-read pidfile, and
-/// removes the pidfile only while it still names that pid. Callers hold
-/// the spawn lock.
-func stopProcess(_ layout: HostLayout, _ name: String) async throws {
+/// removes the pidfile only while it still names that pid. `grace` is how
+/// long SIGTERM gets; `onKill` runs right after the SIGKILL, for anything
+/// else the killed process leaves behind. Callers hold the spawn lock.
+/// Returns false when the process was not running.
+@discardableResult
+func stopProcess(
+    _ layout: HostLayout, _ name: String,
+    grace: Duration = .seconds(30),
+    onKill: () -> Void = {}
+) async throws -> Bool {
     guard let recorded = recordedPid(layout, name),
-          isAlive(recorded.pid, named: recorded.name) else { return }
+          isAlive(recorded.pid, named: recorded.name) else { return false }
     let pid = recorded.pid
     let alive = { isAlive(pid, named: recorded.name) }
     kill(pid, SIGTERM)
-    for _ in 0..<300 where alive() {
+    let deadline = ContinuousClock.now + grace
+    while alive(), ContinuousClock.now < deadline {
         try await Task.sleep(for: .milliseconds(100))
     }
     if alive() {
         kill(pid, SIGKILL)
+        onKill()
         for _ in 0..<100 where alive() {
             try await Task.sleep(for: .milliseconds(100))
         }
@@ -215,6 +224,7 @@ func stopProcess(_ layout: HostLayout, _ name: String) async throws {
         }
     }
     layout.removePidFile(for: name, ifNaming: pid)
+    return true
 }
 
 /// Restarts the running host so it serves the chains `lattice.json` lists
@@ -273,8 +283,9 @@ struct Down: AsyncParsableCommand {
 
     func run() async throws {
         let layout = rootOption.layout
-        // Under the spawn lock, so no concurrent `up` or restart spawns
-        // while this stops.
+        // Under the spawn lock, so no `up`, restart or deploy spawns while
+        // this stops. A running `up --foreground` respawns once the lock is
+        // released, as documented: it is the supervisor, so stop it first.
         try await withSpawnLock(layout) {
             // An upgrade from one process per chain can leave those processes
             // running under their own pidfiles, children after parents.
