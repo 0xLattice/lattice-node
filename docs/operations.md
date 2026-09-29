@@ -32,9 +32,9 @@ lattice-node \
   --peer <public-key>@<host>:4001
 ```
 
-RPC must remain on loopback. The same-chain overlay port may be public. Expose
-the hierarchy fact port only where configured direct parents and children need
-it.
+RPC must remain on loopback. The same-chain overlay port may be public. Never
+expose the hierarchy port: co-hosted levels dial it on loopback and no remote
+peer needs it, but its listener binds all interfaces, so firewall it.
 
 ## Bootstrap peers
 
@@ -480,7 +480,7 @@ systemctl start lattice-node lattice-miner
 
 An empty Nexus directory recreates the exact pinned genesis automatically. An
 empty child directory returns to `awaitingGenesis` and must import its genesis
-again, which requires its configured parent to confirm the recorded CID.
+again, which requires its co-hosted parent level to confirm the recorded CID.
 
 Before running a recursive removal, resolve and verify the explicit path. Never
 target a home directory, workspace root, or an unresolved environment variable.

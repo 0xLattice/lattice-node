@@ -113,6 +113,40 @@ final class ChainHostTests: XCTestCase {
         XCTAssertEqual(paths, [nexus, child])
     }
 
+    /// Each level grants the hierarchy child role only to the process key of
+    /// the child level it hosts.
+    func testEachParentPinsTheChildRoleToItsHostedChildKey() async throws {
+        let root = temporaryDirectory()
+        let host = try ChainHost(chains: [
+            nexus: configure(nexus, root: root, keyByte: 1),
+            child: configure(child, root: root, keyByte: 2),
+            grandchild: configure(grandchild, root: root, keyByte: 3),
+        ])
+        let nexusConfiguration = await host.configuration(nexus)
+        let childConfiguration = await host.configuration(child)
+        let grandchildConfiguration = await host.configuration(grandchild)
+        let parent = try XCTUnwrap(nexusConfiguration)
+        let middle = try XCTUnwrap(childConfiguration)
+        let leaf = try XCTUnwrap(grandchildConfiguration)
+        XCTAssertEqual(parent.hostedChildKeys, [child.directory: middle.processPublicKey])
+        XCTAssertEqual(middle.hostedChildKeys, [grandchild.directory: leaf.processPublicKey])
+        XCTAssertEqual(leaf.hostedChildKeys, [:])
+
+        let childHello = ChainHello(
+            nexusGenesisCID: parent.nexusGenesisCID, chainPath: child.components
+        )
+        XCTAssertEqual(
+            NodeNetworkRuntime.hierarchyRole(
+                for: childHello, peerKey: middle.processPublicKey, configuration: parent
+            ),
+            .child(child.components)
+        )
+        // The grandchild's key claiming the child's path is not the hosted one.
+        XCTAssertNil(NodeNetworkRuntime.hierarchyRole(
+            for: childHello, peerKey: leaf.processPublicKey, configuration: parent
+        ))
+    }
+
     /// A child that cannot start (here: another writer holds its storage)
     /// is skipped and reported; the rest of the tree runs.
     func testAChildThatFailsToStartLeavesTheTreeRunning() async throws {

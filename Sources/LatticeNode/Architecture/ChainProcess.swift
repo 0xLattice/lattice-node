@@ -249,7 +249,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     fetcher: localFetcher
                 )
             } catch {
-                SyncTrace.log(
+                syncTrace(
                     "child-genesis seed does not build directory=\(directory)"
                         + " error=\(error)"
                 )
@@ -271,7 +271,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         // A seed rebuilt to another genesis, or fetched content that does not
         // hash back to the requested CID, is not the anchored genesis.
         guard header.rawCID == anchoredCID else {
-            SyncTrace.log(
+            syncTrace(
                 "child-genesis mismatch directory=\(directory)"
                     + " anchored=\(anchoredCID) built=\(header.rawCID)"
             )
@@ -1120,7 +1120,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 // answer the caller with silence, so trace the difference:
                 // an unreadable anchor is exactly the miss this lookup exists
                 // to rule out.
-                SyncTrace.log(
+                syncTrace(
                     "anchored-child genesis unreadable"
                         + " directory=\(directory) error=\(error)"
                 )
@@ -2516,10 +2516,9 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 carrierCID: carrierCID,
                 rootCID: proof.rootCID
             ) != nil else {
-                SyncTrace.log(
-                    "child proof deferred: no relay link yet carrier="
-                        + carrierCID.prefix(12) + " root=" + proof.rootCID.prefix(12)
-                        + " directory=" + prepared.directory
+                store.syncTrace(
+                    "child proof deferred: no relay link yet carrier=\(carrierCID.prefix(12))"
+                        + " root=\(proof.rootCID.prefix(12)) directory=\(prepared.directory)"
                 )
                 continue
             }

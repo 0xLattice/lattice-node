@@ -95,7 +95,7 @@ extension NodeNetworkRuntime {
         process: ChainProcess
     ) async {
         if message.topic == NodeNetworkTopic.overlayHello {
-            SyncTrace.log(
+            syncTrace(
                 "overlay hello peer=\(peer.key.hex.prefix(8)) "
                     + "expected=\(expectsOverlayHello(from: peer))"
             )
@@ -135,7 +135,7 @@ extension NodeNetworkRuntime {
                     topic: NodeNetworkTopic.blockAnnouncement,
                     payload: payload
                 )
-                SyncTrace.log(
+                syncTrace(
                     "hello reply peer=\(peer.key.hex.prefix(8)) "
                         + "tip=\(helloTip.height) sent=\(sent)"
                 )
@@ -409,7 +409,7 @@ extension NodeNetworkRuntime {
             let page = Array(
                 leaves.blockCIDs.prefix(AcceptedLeavesResponseMessage.maximumLeaves)
             ).sorted()
-            SyncTrace.log(
+            syncTrace(
                 "frontier serve peer=\(peer.key.hex.prefix(8)) leaves=\(page.count)"
             )
             guard
@@ -440,7 +440,7 @@ extension NodeNetworkRuntime {
             guard var pull = overlayState.overlayRecords[peer.key]?.frontierPull,
                   pull.sessionID == peer.sessionID,
                   pull.requestID == response.requestID else {
-                SyncTrace.log(
+                syncTrace(
                     "frontier page rejected peer=\(peer.key.hex.prefix(8)) "
                         + "leaves=\(response.blockCIDs.count)"
                 )
@@ -448,7 +448,7 @@ extension NodeNetworkRuntime {
             }
             pull.requestID = nil
             overlayState.overlayRecords.update(session: peer) { $0.frontierPull = pull }
-            SyncTrace.log(
+            syncTrace(
                 "frontier page peer=\(peer.key.hex.prefix(8)) "
                     + "leaves=\(response.blockCIDs.count)"
             )
@@ -943,10 +943,10 @@ extension NodeNetworkRuntime {
         else {
             // A silent miss here on a block only this node can prove is a
             // chain-liveness event: no follower can ever cross that block.
-            SyncTrace.log("locate-serve \(request.childCID) miss")
+            syncTrace("locate-serve \(request.childCID) miss")
             return
         }
-        SyncTrace.log("locate-serve \(request.childCID) hit")
+        syncTrace("locate-serve \(request.childCID) hit")
         guard isCurrentRuntime(generation: generation, process: process),
               overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID,
               let payload = try? PortableAttachmentAvailableMessage(
@@ -1003,7 +1003,7 @@ extension NodeNetworkRuntime {
                 topic: NodeNetworkTopic.portableAttachmentLocateRequest,
                 payload: payload
             )
-            SyncTrace.log(
+            syncTrace(
                 "locate-request \(childCID) "
                     + "peer=\(peer.key.hex.prefix(8)) sent=\(sent)"
             )
@@ -1045,7 +1045,7 @@ extension NodeNetworkRuntime {
             // catch-up burst would tear down its own evidence source. The
             // dropped item is re-solicited when the waiting candidate's
             // window expires and re-enters admission.
-            SyncTrace.log(
+            syncTrace(
                 "evidence-overflow drop \(summary.attachmentCID)"
             )
             return true
@@ -1085,7 +1085,7 @@ extension NodeNetworkRuntime {
                 generation: work.generation,
                 process: work.process
             )
-            SyncTrace.log(
+            syncTrace(
                 "evidence-recover \(work.summary.attachmentCID) "
                     + "handled=\(handled)"
             )
@@ -1397,7 +1397,7 @@ extension NodeNetworkRuntime {
               let claim = overlayState.overlayRecords[peer.key]?.ancestryClaim,
               claim.sessionID == peer.sessionID, !claim.asked
         else { return }
-        SyncTrace.log(
+        syncTrace(
             "ancestry sync peer=\(peer.key.hex.prefix(8)) peerHeight=\(claim.height)"
         )
         // Marked asked the moment the slot is taken, before the ancestor
@@ -1478,7 +1478,7 @@ extension NodeNetworkRuntime {
                 requestID: requestID
             )
         }
-        SyncTrace.log(
+        syncTrace(
             "frontier pull peer=\(peer.key.hex.prefix(8)) "
                 + "peerHeight=\(peerHeight) ours=\(ourHeight)"
         )

@@ -42,7 +42,11 @@ final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
         // Long enough that neither the withheld volume fetch nor the range
         // sync can time out on its own during the test: every release below
         // must be attributable to the disconnect, not to a timer.
-        let target = try await overlayRuntime(keyByte: 0xd1, requestTimeout: .seconds(60))
+        let target = try await overlayRuntime(
+            keyByte: 0xd1,
+            requestTimeout: .seconds(60),
+            hostedChildren: ["Payments": peerKey(signingKey(0xd3))]
+        )
         let hierarchyEndpoint = PeerEndpoint(
             publicKey: target.process.configuration.processPublicKey,
             host: "127.0.0.1",
@@ -207,7 +211,11 @@ final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
     /// (`didConnect`, then its hello), so the interleaving is exact: the
     /// real transport would keep whichever session wins Ivy's tie-break.
     func testAStaleHelloFollowUpCannotEndTheReconnectedSession() async throws {
-        let target = try await overlayRuntime(keyByte: 0xd6, requestTimeout: .seconds(60))
+        let target = try await overlayRuntime(
+            keyByte: 0xd6,
+            requestTimeout: .seconds(60),
+            hostedChildren: ["Payments": peerKey(signingKey(0xd7))]
+        )
         let childKey = signingKey(0xd7)
         let childPeerKey = peerKey(childKey)
         let childPath = ["Nexus", "Payments"]

@@ -54,7 +54,7 @@ Background on *why* things are shaped the way they are — design notes, not API
 - [design/chain-addressing.md](design/chain-addressing.md) — the chain path / directory mental model.
 - [design/block-fetching.md](design/block-fetching.md) — the event-order-independent boundary between Volume availability and block import.
 - [design/modular-import-pipeline.md](design/modular-import-pipeline.md) — orthogonal node capabilities, atomic Lattice semantics, and asynchronous selected-Volume persistence.
-- [design/process-trust-model.md](design/process-trust-model.md) — configured parent authority, separate hierarchy facts, and independent content verification.
+- [design/process-trust-model.md](design/process-trust-model.md) — co-hosted parent authority, in-process parent facts, loopback evidence, and independent content verification.
 - [design/mining-role-boundaries.md](design/mining-role-boundaries.md) — the node/coordinator/worker mining contract.
 - [design/consensus-fork-choice.md](design/consensus-fork-choice.md) — the node's operational duties around Lattice-owned consensus.
 - [design/proof-derived-work.md](design/proof-derived-work.md) — proof-derived child work, run attribution, and parent-state continuity.

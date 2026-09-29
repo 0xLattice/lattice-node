@@ -131,7 +131,7 @@ proof protocol or descendant-tree export exists.
 | Provider timeout or partial Volume | Retry another exact advertiser; no blame for absence |
 | Malformed or wrong complete Volume | Penalize the supplier and retry discovery |
 | Missing predecessor | Park the candidate and acquire that predecessor |
-| Missing parent continuity fact | Ask the configured immediate parent; timeout remains retryable |
+| Missing parent continuity fact | Park on the fact; the co-hosted parent level's tip change re-readies it |
 | Invalid proof or state transition | Reject that candidate |
 | Crash after durable batch | Replay facts and recompute fork choice |
 | Parent offline after facts are known | Keep verified history and consensus active |

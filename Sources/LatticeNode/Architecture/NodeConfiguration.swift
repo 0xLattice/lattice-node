@@ -31,7 +31,7 @@ public struct ChainAddress: Hashable, Sendable, CustomStringConvertible {
 }
 
 /// Where a child's hierarchy plane dials its parent: the co-hosted parent
-/// level's fact plane, wired by `ChainHost`.
+/// level's hierarchy plane (loopback, evidence only), wired by `ChainHost`.
 struct ParentEndpoint: Hashable, Sendable {
     let publicKey: String
     let host: String
@@ -76,9 +76,13 @@ public struct NodeConfiguration: Sendable {
     public let factListenPort: UInt16
     public let rpcPort: UInt16
     public let bootstrapPeers: [PeerEndpoint]
-    /// The co-hosted parent level's fact plane, which `ChainHost` wires for
+    /// The co-hosted parent level's hierarchy plane, which `ChainHost` wires for
     /// every child; nil on Nexus.
     private(set) var parentEndpoint: ParentEndpoint?
+    /// The process keys of the co-hosted child levels, by directory, which
+    /// `ChainHost` wires: only the key hosted for a directory is granted the
+    /// child role on the hierarchy plane.
+    private(set) var hostedChildKeys: [String: String] = [:]
     public let minPeerKeyBits: Int
     /// Per-netgroup inbound/outbound overlay connection cap. Ivy buckets peers by
     /// the connection's observed remote host (/16), an anti-eclipse defense that
@@ -191,11 +195,19 @@ public struct NodeConfiguration: Sendable {
         self.resourcePolicy = resourcePolicy
     }
 
-    /// This child configuration dialing `parent`'s fact plane.
+    /// This child configuration dialing `parent`'s hierarchy plane.
     func withParentEndpoint(_ parent: ParentEndpoint) -> NodeConfiguration {
         precondition(!address.isNexus, "the Nexus level has no parent")
         var configuration = self
         configuration.parentEndpoint = parent
+        return configuration
+    }
+
+    /// This configuration hosting the child level `directory`, whose
+    /// process key is `publicKey`.
+    func withHostedChild(directory: String, publicKey: String) -> NodeConfiguration {
+        var configuration = self
+        configuration.hostedChildKeys[directory] = publicKey
         return configuration
     }
 

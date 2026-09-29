@@ -2,8 +2,8 @@
 
 `lattice` operates one host's chain tree from a single declarative file. One
 `lattice-node` process (`lattice-node --config lattice.json`) hosts every chain
-in the tree; a child authenticates against its co-hosted parent's fact plane
-over loopback. The CLI makes that tree a value — `lattice.json` — and every
+in the tree; a child reads its parent facts from its co-hosted parent level
+in-process and takes its parent's evidence over the loopback hierarchy plane. The CLI makes that tree a value — `lattice.json` — and every
 verb reconciles reality against it. No remote control plane: state lives in
 the file, one pidfile (`run/lattice-node.pid`), and each chain's own storage.
 

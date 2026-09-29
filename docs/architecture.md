@@ -2,27 +2,31 @@
 
 ## Process boundary
 
-One `lattice-node` process owns exactly one absolute chain path. `Nexus` is the
-only root; every other process is configured with a complete Nexus-inclusive
-path and one immediate parent endpoint.
+One `lattice-node` process hosts a chain tree: one level per absolute chain
+path, each child co-hosted with its whole ancestry (`ChainHost`). `Nexus` is
+the only root. The set of levels comes from `lattice.json` (`--config`) and
+takes effect when the process starts.
 
 ```text
-Nexus process
-  chain: Nexus
-  overlay: 4001
-  hierarchy facts: 4002
-  RPC: 127.0.0.1:8080
-
-Payments process
-  chain: Nexus/Payments
-  parent: <nexus-key>@<nexus-host>:4002
-  overlay: 4101
-  hierarchy facts: 4102
-  RPC: 127.0.0.1:8180
+lattice-node process
+  Nexus level
+    chain: Nexus
+    overlay: 4001
+    hierarchy (dialed on loopback; firewall): 4002
+    RPC: 127.0.0.1:8080
+  Nexus/Payments level
+    chain: Nexus/Payments
+    parent level: Nexus (in-process; evidence over 127.0.0.1:4002)
+    overlay: 4101
+    hierarchy (dialed on loopback; firewall): 4102
+    RPC: 127.0.0.1:8180
 ```
 
-A parent never owns its child's chain state, mempool, persistence, sync, or fork
-choice. External orchestration starts and stops independent chain processes.
+Each level keeps its own identity key, storage directory, overlay, and RPC
+port. A parent level never owns its child's chain state, mempool,
+persistence, sync, or fork choice. The host starts levels parent-first and
+stops them children-first; stopping one level stops its descendants and
+leaves the rest running.
 
 ## Identity and addressing
 
@@ -41,7 +45,8 @@ Examples:
 Nexus has no parent. Every child runs in the same `lattice-node` process as
 its whole ancestry, configured through `lattice.json` (`--config`): it reads its
 parent facts from the co-hosted parent level, and the host wires its parent
-endpoint to the parent's fact plane on loopback.
+endpoint to the parent level's hierarchy plane on loopback, which carries
+only child evidence.
 
 ## Runtime components
 
@@ -53,7 +58,7 @@ LatticeNodeDaemon
   ├─ NodeStore             state.db: semantic facts, indexes, root references
   ├─ DiskBroker            volumes.db: materialized CAS volumes
   ├─ Ivy overlay           same-chain peers and content
-  ├─ Ivy hierarchy plane   authenticated direct parent/child facts
+  ├─ Ivy hierarchy plane   child-evidence delivery, dialed on loopback
   └─ loopback HTTP         thin JSON adapter over ChainService
 ```
 
@@ -99,7 +104,7 @@ cache state, and attribution never depend on ambient task-local state.
 
 Ivy applies bounded transport admission before awaiting the runtime's inbound
 delegate, so peer work is backpressured at the transport boundary. On the
-private hierarchy plane, only the exact configured immediate parent bypasses
+private hierarchy plane, only the co-hosted parent level's key bypasses
 the receiver's local Tally admission; all normal hierarchy and overlay traffic
 remains reputation-gated, and the bypass grants no consensus authority.
 Its optional public-address discovery runs after listener readiness and never
@@ -112,12 +117,20 @@ The planes are deliberately separate:
 1. The public overlay admits peers that claim the same Nexus genesis and
    absolute chain path. It carries block and transaction
    Volume inventories plus content-addressed retrieval.
-2. The private hierarchy plane has no relay role. It carries direct-child
-   candidate pushes, parent-issued proofs, genesis links, and exact
-   parent-state continuity answers. A configured parent key gates parent facts;
-   a claimed path alone grants no authority. Exact-CID exchange is explicitly
-   enabled on this plane, but only a connection that completed its own
-   compatible hierarchy hello may use it.
+2. The private hierarchy plane has no relay role. It is dialed on loopback
+   between a co-hosted parent level and its child levels (the listener binds
+   all interfaces, so firewall the hierarchy port), and carries only child
+   evidence: the evidence-available hint, the evidence index, the per-block
+   evidence request, and the evidence Volumes. The parent level's key is the
+   one parent; the child role goes only to the process key of the child
+   level the host runs for that directory, so a claimed path alone grants no
+   authority. Exact-CID exchange is explicitly enabled on this plane, but
+   only a connection that completed its own compatible hierarchy hello may
+   use it.
+
+Parent facts (genesis links and parent-state continuity), run reports, and
+merged-mining candidates pass in-process between co-hosted levels, never over
+a network plane.
 
 Hierarchy CAS reads are bounded, exact selections rather than database access:
 there is no enumeration or mutation API, the bytes are non-secret availability,
@@ -125,37 +138,36 @@ and the receiver independently checks CIDs and Lattice evidence. A replacement
 connection must send a fresh hello even when it authenticates with the same
 key.
 
-A parent never requests a child candidate and never waits on a child to
-serve a template. The parent pushes its template context to each
-authenticated direct child whenever it changes: its validated tip block and
-the miner's recipients and minimum work for the child's subtree (`parent
-tip available`). The child builds its candidate against the tip's post-state
-— the only thing a candidate takes from a carrier — reading the tip's content
-from the parent's own session, and pushes the candidate up whenever any of
-its inputs changed: that context, its own validated tip, its mempool, a
-grandchild's push (`child candidate available`). Pushes carry a per-session
-sequence; a lower one is a reordered stale push and is dropped. The parent
-keeps only the latest candidate per child peer, and a template takes every
-held candidate whose parent state is the current tip's post-state. A child
-that has not pushed yet, or whose candidate is for an older tip, is simply
-not carried that round; nothing is asked and nothing is awaited.
+A parent never waits on a child to serve a template. Each hosted child level
+keeps one pre-built candidate against its parent level's validated tip's
+post-state — the only thing a candidate takes from a carrier — and the
+miner's recipients and minimum work for its subtree, and rebuilds it, one
+build at a time, whenever an input changed: the parent's tip, its own
+tip, the plan, a grandchild's candidate (a mempool change alone waits for
+the next rebuild). The build
+takes only the child's own lease and reads its parent level without taking
+the parent's gate or lease (`ParentLevel`), and the parent's template path
+reads each child's latest candidate synchronously (`ChildLevel`), so the
+lock order is acyclic; a SafetyNet gate enforces both. A template takes
+every candidate whose parent state is the current tip's post-state and
+whose plan is the current one. A child that has not built yet, or whose
+candidate is for an older tip, is simply not carried that round; nothing is
+asked and nothing is awaited.
 
 A candidate's content is retained by the chain that built it, as its own
 budgeted policy (`maximumRetainedCandidateOffers`, oldest offer first), never
 by a parent's reservation: the parent commits the candidate's block node it
 holds, and the carried block's import at the child later owns the roots
-the offer pinned. Once the parent's evidence names a candidate carried, its
-row is a handoff and no wave of newer offers evicts it. An offer the parent
-never carried costs nothing for long; an offer evicted before its block
-landed is a lost fork, the cache-eviction outcome the design already takes.
-Every hierarchy level applies the same rule; nothing is relayed down.
+the candidate pinned. Once the parent's evidence names a candidate carried,
+its row is a handoff and no wave of newer candidates evicts it. A candidate
+the parent never carried costs nothing for long; one evicted before its
+block landed is a lost fork, the cache-eviction outcome the design already
+takes. Every hierarchy level applies the same rule; nothing is relayed down.
 
 A miner learns its work is stale from one template digest, served by the
 template and by the status route alike: the validated tip, the mempool, and
 the child candidates held, so a fresh candidate at any level refreshes the
-miner's work within one status probe. A reconnecting child is omitted from
-templates until the final page of its durable evidence index is ordered into
-that session, and is pushed the current context as soon as it is. The index
+miner's work within one status probe. A child's evidence index
 resumes from a durable `(source, ordinal)` cursor against one fixed cut; a
 changed parent store source restarts at zero. Validated attachments enter a
 durable inbox protected from VolumeBroker pruning before the cursor advances

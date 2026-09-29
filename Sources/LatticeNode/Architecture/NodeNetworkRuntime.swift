@@ -1065,7 +1065,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 $0.ancestryClaim = nil
             }
             scheduleOverlayHelloDeadline(for: peer, generation: generation)
-            SyncTrace.log("overlay connect peer=\(peer.key.hex.prefix(8))")
+            syncTrace("overlay connect peer=\(peer.key.hex.prefix(8))")
             topic = NodeNetworkTopic.overlayHello
         } else if ivy === hierarchy {
             guard peer.route == .direct else {
@@ -1534,8 +1534,12 @@ public actor NodeNetworkRuntime: IvyDelegate {
                 expectedChainPath: expectedPath
             )).map { .parent }
         }
+        // A child path is granted only to the key of the level hosted for
+        // it: any other key claiming a child path is refused.
         guard remote.chainPath.count == configuration.chainPath.count + 1,
-            Array(remote.chainPath.dropLast()) == configuration.chainPath
+            Array(remote.chainPath.dropLast()) == configuration.chainPath,
+            let directory = remote.chainPath.last,
+            configuration.hostedChildKeys[directory] == peerKey
         else {
             return nil
         }

@@ -165,8 +165,20 @@ final class SafetyNetParentLevelGateTests: XCTestCase {
             members.subtracting(Self.parentLevelMembers), [],
             "ChainService reaches its parent outside ParentLevel"
         )
+        XCTAssertEqual(try conformers(of: "ParentLevel"), ["LocalParentLevel"])
+    }
+
+    /// The allowlisted `LocalChildLevel` is the one `ChildLevel`: no other
+    /// type can hand a parent a child view that reaches beyond the child.
+    func testLocalChildLevelIsTheOnlyChildLevel() throws {
+        XCTAssertEqual(try conformers(of: "ChildLevel"), ["LocalChildLevel"])
+    }
+
+    /// Every type in `Sources` that conforms to `protocolName`.
+    private func conformers(of protocolName: String) throws -> Set<String> {
         let conformer = try NSRegularExpression(
-            pattern: #"(class|actor|struct|enum)\s+(\w+)[^{]*[:,]\s*ParentLevel\b"#
+            pattern: #"(class|actor|struct|enum)\s+(\w+)[^{]*[:,]\s*"#
+                + protocolName + #"\b"#
         )
         var conformers: Set<String> = []
         for file in try SourceTree.swiftFiles(under: "Sources") {
@@ -177,7 +189,7 @@ final class SafetyNetParentLevelGateTests: XCTestCase {
                 conformers.insert(String(text[Range(match.range(at: 2), in: text)!]))
             }
         }
-        XCTAssertEqual(conformers, ["LocalParentLevel"])
+        return conformers
     }
 
     /// The parent never awaits a child (§2.4): `ChildLevel` declares no
