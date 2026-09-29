@@ -28,7 +28,18 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import time
+
+# The signed reward batch and its cursor are gone. A host still configured
+# for them would otherwise mine with no recipient and burn every reward.
+for retired in ("REWARD_BATCH", "CURSOR_FILE"):
+    if retired in os.environ:
+        sys.exit(
+            "%s is no longer supported: reward batches were replaced by "
+            "RECIPIENTS (<chain path>=<address>, comma-separated); unset %s "
+            "and set RECIPIENTS" % (retired, retired)
+        )
 
 NODE_URL = os.environ.get("NODE_URL", "http://127.0.0.1:8080")
 COORDINATOR = os.environ.get(
