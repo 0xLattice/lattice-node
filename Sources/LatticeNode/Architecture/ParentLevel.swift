@@ -39,11 +39,13 @@ public protocol ParentLevel: AnyObject, Sendable {
     var contentSource: any ContentSource { get }
 }
 
-/// A parent level's view of a co-hosted child level. Nothing here waits on
-/// the child: notifications enqueue, and `readyCandidate` reads the snapshot
-/// the child last published (`ChainService.buildReadyCandidate`), built
-/// under the child's own lease against the parent's validated tip. The
-/// parent's template path never awaits a child (§2.4).
+/// A parent level's view of a co-hosted child level. Notifications enqueue,
+/// and `readyCandidate` reads the snapshot the child last published
+/// (`ChainService.buildReadyCandidate`), built under the child's own lease
+/// against the parent's validated tip. The parent's template path never
+/// awaits a child (§2.4). The one awaited member, `admitMined`, is called
+/// only by the parent's mined handoff with the parent's lease released: a
+/// downward await never holds a parent lock.
 public protocol ChildLevel: AnyObject, Sendable {
     var directory: String { get }
     /// Enqueues `change` for the child and returns.
@@ -52,6 +54,11 @@ public protocol ChildLevel: AnyObject, Sendable {
     /// walking, holds its own carried block awaiting admission, or has not
     /// built yet. The caller checks its binding.
     var readyCandidate: ReadyCandidate? { get }
+    /// This host mined a grind carrying the child's `block` (the node from
+    /// the mined block, in memory) under `proof`: the child admits it through
+    /// its normal candidate path (and hands its own hosted children theirs)
+    /// and reports whether it admitted.
+    func admitMined(block: Block, proof: ChildBlockProof) async -> Bool
 }
 
 /// A hosted child's pre-built merged-mining candidate, the parent state it
@@ -275,5 +282,9 @@ final class LocalChildLevel: @unchecked Sendable, ChildLevel {
 
     var readyCandidate: ReadyCandidate? {
         service?.readyCandidate()
+    }
+
+    func admitMined(block: Block, proof: ChildBlockProof) async -> Bool {
+        await service?.admitMinedCarriage(block: block, proof: proof) ?? false
     }
 }

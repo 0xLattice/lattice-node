@@ -51,6 +51,8 @@ final class ClosureNetworkInterface: NetworkInterface {
         try await childProofPublisher(publication)
     }
 
+    func announceCarriedEvidence(_ package: AuthenticatedChildPackage) async {}
+
     func publishAcceptedBlock(_ blockCID: String) async throws {
         try await acceptedBlockPublisher(blockCID)
     }

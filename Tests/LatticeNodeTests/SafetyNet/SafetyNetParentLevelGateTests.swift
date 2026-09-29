@@ -10,9 +10,11 @@ import XCTest
 /// allowlisted process and store reads below, and each allowlisted
 /// `ChainProcess` method must itself take no operation gate; a child reaches
 /// its parent only through `ParentLevel`, and `LocalChildLevel` reaches only
-/// its own level. The parent's template path reads its children's snapshots:
-/// `ChildLevel` has no `async` member, and a `ChainService` uses only its
-/// synchronous members, so no parent path can await a child.
+/// its own level. The parent's template path reads its children's snapshots
+/// through synchronous members. `ChildLevel`'s one `async` member,
+/// `admitMined`, is awaited only by the mined handoff, which runs with the
+/// parent's lease released and takes none itself, so no parent path awaits
+/// a child while holding a lease.
 ///
 /// Comments and string contents are skipped.
 /// Plain `XCTAssert` only (`XCTContext` is unavailable on corelibs XCTest).
@@ -32,6 +34,7 @@ final class SafetyNetParentLevelGateTests: XCTestCase {
     /// its own level's service, process and runtime, and its mailbox.
     private static let childLevelAllowlist: Set<String> = [
         "service.readyCandidate",
+        "service.admitMinedCarriage",
         "mailbox.send",
     ]
 
@@ -42,9 +45,9 @@ final class SafetyNetParentLevelGateTests: XCTestCase {
     ]
 
     /// Every `ChildLevel` member a `ChainService` may use on a hosted child:
-    /// all synchronous.
+    /// all synchronous but `admitMined`, the mined handoff's downward await.
     private static let childLevelMembers: Set<String> = [
-        "parentChanged", "readyCandidate", "directory",
+        "parentChanged", "readyCandidate", "directory", "admitMined",
     ]
 
     /// A call through the parent process, optionally through its store.
@@ -200,9 +203,13 @@ final class SafetyNetParentLevelGateTests: XCTestCase {
         let protocolBody = try body(
             after: "public protocol ChildLevel", in: try code("ParentLevel.swift")
         )
-        XCTAssertFalse(
-            protocolBody.contains("async"),
-            "ChildLevel declares an async member: a parent could await a child"
+        XCTAssertEqual(
+            protocolBody.components(separatedBy: "async").count - 1, 1,
+            "ChildLevel declares an async member besides admitMined"
+        )
+        XCTAssertTrue(
+            protocolBody.contains("func admitMined(") && protocolBody.contains(") async -> Bool"),
+            "the one async ChildLevel member is no longer admitMined"
         )
         let service = try code("ChainService.swift")
         let regex = try NSRegularExpression(
@@ -215,6 +222,30 @@ final class SafetyNetParentLevelGateTests: XCTestCase {
         XCTAssertEqual(
             members.subtracting(Self.childLevelMembers), [],
             "ChainService reaches a hosted child outside its synchronous members"
+        )
+        // The one downward await: only the mined handoff awaits a child,
+        // and only with this level's lease released. `handOffMined` and the
+        // child side that re-enters it take no lease, and `submitWork`
+        // releases its lease before handing off.
+        XCTAssertEqual(
+            service.components(separatedBy: ".admitMined(").count - 1, 1,
+            "a hosted child is awaited outside the mined handoff"
+        )
+        let handOff = try body(after: "private func handOffMined(", in: service)
+        XCTAssertTrue(handOff.contains(".admitMined("))
+        let admit = try body(after: "func admitMinedCarriage(", in: service)
+        for leaseFree in [handOff, admit] {
+            XCTAssertFalse(
+                leaseFree.contains("acquireOperation"),
+                "the mined handoff takes this level's lease"
+            )
+        }
+        let submit = try body(after: "public func submitWork(", in: service)
+        let release = try XCTUnwrap(submit.range(of: "ownsOperation = false"))
+        let handOffCall = try XCTUnwrap(submit.range(of: "handOffMined("))
+        XCTAssertLessThan(
+            release.upperBound, handOffCall.lowerBound,
+            "submitWork hands off before releasing its lease"
         )
         let template = try body(after: "private func buildMiningTemplate(", in: service)
         XCTAssertFalse(

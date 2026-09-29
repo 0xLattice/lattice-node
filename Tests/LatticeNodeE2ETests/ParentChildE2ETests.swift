@@ -1585,9 +1585,11 @@ final class ParentChildE2ETests: XCTestCase {
         ])
         cluster.add(joinerNexus)
         try joinerNexus.start()
+        // The source parent froze where its targets separated, which ASERT
+        // decides (possibly before `window`): the joiner catches up to that.
         _ = try await joinerNexus.waitForStatus(
             timeout: .seconds(300)
-        ) { $0.phase == .active && ($0.height ?? 0) >= window }
+        ) { $0.phase == .active && ($0.height ?? 0) >= parentAfterCarriers }
 
         let joinerChild = try childNode(
             binary: binary,

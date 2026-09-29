@@ -213,6 +213,42 @@ extension NodeNetworkRuntime {
         serviceBlockFetcher()
     }
 
+    /// `NetworkInterface.announceCarriedEvidence`: the service admitted a
+    /// carrier-linked block under `package` outside the candidate worker.
+    func announceCarriedEvidence(_ package: AuthenticatedChildPackage) async {
+        guard isRunning, let process else { return }
+        await announcePortableAttachment(
+            package,
+            generation: runtimeGeneration,
+            process: process
+        )
+    }
+
+    /// Announces the portable attachment a carrier-linked admission under
+    /// `authenticated` stored, so overlay peers can fetch the block's proof.
+    private func announcePortableAttachment(
+        _ authenticated: AuthenticatedChildPackage,
+        generation: UInt64,
+        process: ChainProcess
+    ) async {
+        guard let edge = await DirectChildEdge.derive(
+                from: authenticated.package.proof
+              ), let edgeCID = edge.edgeCID,
+              let portableAttachmentCID = try? await process
+                .store.portableEvidenceVolumeCID(
+                    scope: .incomingCarrier,
+                    edgeCID: edgeCID,
+                    rootCID: authenticated.package.proof.rootCID
+                ) else { return }
+        await announcePortableAttachmentAvailability(
+            edgeCID: edgeCID,
+            rootCID: authenticated.package.proof.rootCID,
+            attachmentCID: portableAttachmentCID,
+            generation: generation,
+            process: process
+        )
+    }
+
     private func importCandidate(
         _ candidate: Candidate,
         generation: UInt64,
@@ -522,24 +558,12 @@ extension NodeNetworkRuntime {
             guard isCurrentRuntime(generation: generation, process: process) else {
                 return
             }
-            if let authenticated = authenticatedPackage,
-               let edge = await DirectChildEdge.derive(
-                    from: authenticated.package.proof
-               ), let edgeCID = edge.edgeCID {
-                if let portableAttachmentCID = try? await process
-                        .store.portableEvidenceVolumeCID(
-                            scope: .incomingCarrier,
-                            edgeCID: edgeCID,
-                            rootCID: authenticated.package.proof.rootCID
-                        ) {
-                    await announcePortableAttachmentAvailability(
-                        edgeCID: edgeCID,
-                        rootCID: authenticated.package.proof.rootCID,
-                        attachmentCID: portableAttachmentCID,
-                        generation: generation,
-                        process: process
-                    )
-                }
+            if let authenticated = authenticatedPackage {
+                await announcePortableAttachment(
+                    authenticated,
+                    generation: generation,
+                    process: process
+                )
             }
         }
 

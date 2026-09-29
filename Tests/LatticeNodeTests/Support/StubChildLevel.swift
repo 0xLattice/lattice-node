@@ -8,19 +8,27 @@ final class StubChildLevel: ChildLevel, Sendable {
     let directory: String
     private let snapshot = Published<ReadyCandidate>()
     private let notify: @Sendable (ParentChange) -> Void
+    private let admit: @Sendable (Block, ChildBlockProof) async -> Bool
 
+    /// `admit` answers each mined handoff; by default the child admits.
     init(
         directory: String,
         candidate: DirectChildCandidate? = nil,
-        notify: @escaping @Sendable (ParentChange) -> Void = { _ in }
+        notify: @escaping @Sendable (ParentChange) -> Void = { _ in },
+        admit: @escaping @Sendable (Block, ChildBlockProof) async -> Bool = { _, _ in true }
     ) {
         self.directory = directory
         self.notify = notify
+        self.admit = admit
         publish(candidate)
     }
 
     func parentChanged(_ change: ParentChange) {
         notify(change)
+    }
+
+    func admitMined(block: Block, proof: ChildBlockProof) async -> Bool {
+        await admit(block, proof)
     }
 
     var readyCandidate: ReadyCandidate? { snapshot.value }
@@ -54,6 +62,7 @@ extension ChainService {
         _ directories: [String],
         on process: ChainProcess,
         plan: DescendantPlan = DescendantPlan(),
+        admit: @escaping @Sendable (Block, ChildBlockProof) async -> Bool = { _, _ in true },
         provider: @escaping @Sendable (
             ChildCandidateRequestContext
         ) async throws -> [DirectChildCandidate]
@@ -70,7 +79,7 @@ extension ChainService {
             )
         )
         for directory in directories {
-            let level = StubChildLevel(directory: directory)
+            let level = StubChildLevel(directory: directory, admit: admit)
             level.publish(built.first { $0.directory == directory }, plan: plan)
             attachChildLevel(level)
         }
