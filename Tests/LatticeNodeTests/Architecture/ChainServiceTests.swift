@@ -1162,30 +1162,30 @@ final class ChainServiceTests: XCTestCase {
         func childService(
             _ fixture: ActiveChildServiceFixture,
             directories: [String]
-        ) -> ChainService {
-            makeService(
-                process: fixture.process,
-                childCandidateProvider: { context in
-                    guard !directories.isEmpty else { return [] }
-                    let genesis = try await BlockBuilder.buildChildGenesis(
-                        spec: NexusGenesis.spec,
-                        parentState: context.parentCarrier.prevState,
-                        timestamp: context.parentCarrier.timestamp,
-                        target: .max,
-                        fetcher: fixture.process
-                    )
-                    let child = try await BlockBuilder.buildBlock(
-                        previous: genesis,
-                        transactions: [],
-                        parentChainBlock: context.parentCarrier,
-                        timestamp: context.parentCarrier.timestamp + 1,
-                        fetcher: fixture.process
-                    )
-                    return directories.map {
-                        DirectChildCandidate(directory: $0, block: child)
-                    }
+        ) async throws -> ChainService {
+            let service = makeService(process: fixture.process)
+            try await service.attachStubChildren(
+                directories, on: fixture.process
+            ) { context in
+                let genesis = try await BlockBuilder.buildChildGenesis(
+                    spec: NexusGenesis.spec,
+                    parentState: context.parentCarrier.prevState,
+                    timestamp: context.parentCarrier.timestamp,
+                    target: .max,
+                    fetcher: fixture.process
+                )
+                let child = try await BlockBuilder.buildBlock(
+                    previous: genesis,
+                    transactions: [],
+                    parentChainBlock: context.parentCarrier,
+                    timestamp: context.parentCarrier.timestamp + 1,
+                    fetcher: fixture.process
+                )
+                return directories.map {
+                    DirectChildCandidate(directory: $0, block: child)
                 }
-            )
+            }
+            return service
         }
 
         func candidate(
@@ -1194,7 +1194,7 @@ final class ChainServiceTests: XCTestCase {
             transaction: Transaction? = nil
         ) async throws -> (DirectChildCandidate, ChainProcess) {
             let fixture = try await activeChildService(spec: spec(maxBlockSize))
-            let service = childService(fixture, directories: childDirectories)
+            let service = try await childService(fixture, directories: childDirectories)
             if let transaction {
                 _ = try await service.submitTransaction(
                     SubmitTransactionRequest(transaction: transaction)
@@ -1277,7 +1277,7 @@ final class ChainServiceTests: XCTestCase {
         let stableFixture = try await activeChildService(
             spec: spec(oneRotatingSize)
         )
-        let stableService = childService(
+        let stableService = try await childService(
             stableFixture,
             directories: ["A", "B"]
         )
@@ -1339,19 +1339,6 @@ final class ChainServiceTests: XCTestCase {
         let publishedBlocks = PublishedBlocks()
         let service = makeService(
             process: process,
-            childCandidateProvider: { context in
-                let child = try await BlockBuilder.buildBlock(
-                    previous: activeChild.block,
-                    transactions: [],
-                    parentChainBlock: context.parentCarrier,
-                    timestamp: context.parentCarrier.timestamp,
-                    fetcher: process
-                )
-                return [DirectChildCandidate(
-                    directory: "Payments",
-                    block: child
-                )]
-            },
             childProofPublisher: {
                 await publishedProofs.record($0)
                 throw TestPublicationError.failed
@@ -1360,6 +1347,19 @@ final class ChainServiceTests: XCTestCase {
                 await publishedBlocks.record(blockCID)
             }
         )
+        try await service.attachStubChildren(["Payments"], on: process) { context in
+            let child = try await BlockBuilder.buildBlock(
+                previous: activeChild.block,
+                transactions: [],
+                parentChainBlock: context.parentCarrier,
+                timestamp: context.parentCarrier.timestamp,
+                fetcher: process
+            )
+            return [DirectChildCandidate(
+                directory: "Payments",
+                block: child
+            )]
+        }
         let template = try await service.miningTemplate(MiningTemplateRequest())
         var nonce: UInt64 = 0
         while template.block.replacingNonce(nonce).proofOfWorkHash()
@@ -1411,23 +1411,23 @@ final class ChainServiceTests: XCTestCase {
         let publishedBlocks = PublishedBlocks()
         let service = makeService(
             process: process,
-            childCandidateProvider: { context in
-                let child = try await BlockBuilder.buildBlock(
-                    previous: activeChild.block,
-                    transactions: [],
-                    parentChainBlock: context.parentCarrier,
-                    timestamp: context.parentCarrier.timestamp,
-                    fetcher: process
-                )
-                return [DirectChildCandidate(
-                    directory: "Payments",
-                    block: child
-                )]
-            },
             acceptedBlockPublisher: { blockCID in
                 await publishedBlocks.record(blockCID)
             }
         )
+        try await service.attachStubChildren(["Payments"], on: process) { context in
+            let child = try await BlockBuilder.buildBlock(
+                previous: activeChild.block,
+                transactions: [],
+                parentChainBlock: context.parentCarrier,
+                timestamp: context.parentCarrier.timestamp,
+                fetcher: process
+            )
+            return [DirectChildCandidate(
+                directory: "Payments",
+                block: child
+            )]
+        }
         let template = try await service.miningTemplate(MiningTemplateRequest())
         XCTAssertLessThan(
             template.block.target,
@@ -1726,8 +1726,8 @@ final class ChainServiceTests: XCTestCase {
         // there: the filter never makes a search easier.
         let parentWork = UInt256(1) << 8
         XCTAssertGreaterThan(minimumWorkTarget(parentWork), parentTarget)
-        let merged = mergedMiningService(fixture)
-        let template = try await merged.service.miningTemplate(
+        let merged = await mergedMiningService(fixture)
+        let template = try await settledTemplate(merged,
             MiningTemplateRequest(minimumWork: [
                 MiningMinimumWork(chainPath: ["Nexus"], work: parentWork),
                 MiningMinimumWork(
@@ -1736,7 +1736,7 @@ final class ChainServiceTests: XCTestCase {
                 ),
             ])
         )
-        let lastChildCandidate = await merged.children.last()
+        let lastChildCandidate = merged.child.readyCandidate()?.candidate.block
         let childBlock = try XCTUnwrap(lastChildCandidate)
         let childTip = try await fixture.process.canonicalTipBlock()
         XCTAssertEqual(template.block.target, parentTarget)
@@ -1805,14 +1805,14 @@ final class ChainServiceTests: XCTestCase {
         let parentThreshold = minimumWorkTarget(parentWork)
         XCTAssertLessThan(parentThreshold, parentTarget)
         XCTAssertGreaterThan(parentTarget, UInt256.max >> 5)
-        let merged = mergedMiningService(fixture)
+        let merged = await mergedMiningService(fixture)
         // No minimum work for the child: its threshold is its schedule.
-        let template = try await merged.service.miningTemplate(
+        let template = try await settledTemplate(merged,
             MiningTemplateRequest(minimumWork: [
                 MiningMinimumWork(chainPath: ["Nexus"], work: parentWork),
             ])
         )
-        let lastChildCandidate = await merged.children.last()
+        let lastChildCandidate = merged.child.readyCandidate()?.candidate.block
         let childBlock = try XCTUnwrap(lastChildCandidate)
         XCTAssertEqual(template.block.target, parentTarget)
         XCTAssertEqual(childBlock.target, .max)
@@ -1865,8 +1865,8 @@ final class ChainServiceTests: XCTestCase {
         let childThreshold = minimumWorkTarget(childWork)
         XCTAssertLessThan(childThreshold, parentTarget)
         XCTAssertGreaterThan(parentTarget, UInt256.max >> 5)
-        let merged = mergedMiningService(fixture)
-        let template = try await merged.service.miningTemplate(
+        let merged = await mergedMiningService(fixture)
+        let template = try await settledTemplate(merged,
             MiningTemplateRequest(minimumWork: [
                 MiningMinimumWork(
                     chainPath: ["Nexus", "Payments"],
@@ -1874,7 +1874,7 @@ final class ChainServiceTests: XCTestCase {
                 ),
             ])
         )
-        let lastChildCandidate = await merged.children.last()
+        let lastChildCandidate = merged.child.readyCandidate()?.candidate.block
         let childBlock = try XCTUnwrap(lastChildCandidate)
         XCTAssertEqual(template.block.target, parentTarget)
         XCTAssertEqual(childBlock.target, .max)
@@ -1929,35 +1929,43 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertLessThan(threshold, parentTarget)
         let payments = makeService(
             process: fixture.process,
-            childCandidateProvider: { context in
-                let genesis = try await BlockBuilder.buildChildGenesis(
-                    spec: NexusGenesis.spec,
-                    parentState: context.parentCarrier.prevState,
-                    timestamp: context.parentCarrier.timestamp,
-                    target: .max,
-                    fetcher: fixture.process
-                )
-                let grandchild = try await BlockBuilder.buildBlock(
-                    previous: genesis,
-                    transactions: [],
-                    parentChainBlock: context.parentCarrier,
-                    timestamp: context.parentCarrier.timestamp + 1,
-                    fetcher: fixture.process
-                )
-                return [DirectChildCandidate(
-                    directory: "Grandchild",
-                    block: grandchild
-                )]
-            }
+            parentLevel: LocalParentLevel(fixture.parent)
         )
-        let merged = mergedMiningService(fixture, child: payments)
-        let template = try await merged.service.miningTemplate(
+        // The grandchild's snapshot is built on its part of the miner's plan.
+        try await payments.attachStubChildren(
+            ["Grandchild"],
+            on: fixture.process,
+            plan: DescendantPlan(minimumWork: [MiningMinimumWork(
+                chainPath: ["Nexus", "Payments", "Grandchild"], work: work
+            )])
+        ) { context in
+            let genesis = try await BlockBuilder.buildChildGenesis(
+                spec: NexusGenesis.spec,
+                parentState: context.parentCarrier.prevState,
+                timestamp: context.parentCarrier.timestamp,
+                target: .max,
+                fetcher: fixture.process
+            )
+            let grandchild = try await BlockBuilder.buildBlock(
+                previous: genesis,
+                transactions: [],
+                parentChainBlock: context.parentCarrier,
+                timestamp: context.parentCarrier.timestamp + 1,
+                fetcher: fixture.process
+            )
+            return [DirectChildCandidate(
+                directory: "Grandchild",
+                block: grandchild
+            )]
+        }
+        let merged = await mergedMiningService(fixture, child: payments)
+        let template = try await settledTemplate(merged,
             MiningTemplateRequest(minimumWork: [MiningMinimumWork(
                 chainPath: ["Nexus", "Payments", "Grandchild"],
                 work: work
             )])
         )
-        let lastChildCandidate = await merged.children.last()
+        let lastChildCandidate = merged.child.readyCandidate()?.candidate.block
         let childBlock = try XCTUnwrap(lastChildCandidate)
         let grandchildHeader: BlockHeader? = childBlock.children.node?["Grandchild"]
         XCTAssertEqual(template.block.target, parentTarget)
@@ -1992,29 +2000,62 @@ final class ChainServiceTests: XCTestCase {
         )
     }
 
-    /// A parent service whose child candidates come from the fixture's child
-    /// service (or `child`), forwarding the miner's plan exactly as the
-    /// hierarchy plane.
+    /// A parent service on the fixture's parent process hosting a child
+    /// level on the fixture's child process (or `child`), wired as the host
+    /// wires one.
     private func mergedMiningService(
         _ fixture: ActiveChildServiceFixture,
         child: ChainService? = nil
-    ) -> (service: ChainService, children: MinedChildCandidates) {
-        let children = MinedChildCandidates()
-        let childService = child ?? fixture.service
-        let service = makeService(
-            process: fixture.parent,
-            childCandidateProvider: { context in
-                // The same entry point the daemon relays the hierarchy plane
-                // through, so these tests pin its pass-through.
-                let candidate = try await childService.miningCandidate(
-                    for: context,
-                    parentContentSource: FetcherContentSource(fixture.parent)
-                )
-                await children.record(candidate.block)
-                return [candidate]
+    ) async -> (service: ChainService, child: ChainService) {
+        let childService = child ?? makeService(
+            process: fixture.process,
+            parentLevel: LocalParentLevel(fixture.parent)
+        )
+        let service = makeService(process: fixture.parent)
+        await host(childService, in: "Payments", under: service)
+        return (service, childService)
+    }
+
+    /// Wires `child` as `parent`'s hosted child level in `directory`, as
+    /// `ChainHost` does: the child's rebuilds pass `gate`, and a new
+    /// snapshot marks the parent's own rebuild.
+    private func host(
+        _ child: ChainService,
+        in directory: String,
+        under parent: ChainService,
+        gate: @escaping @Sendable ([String]) async -> Bool = { _ in true }
+    ) async {
+        let mailbox = await child.openParentMailbox(
+            tipChanged: {},
+            serveParentRuns: {},
+            candidateGate: gate,
+            candidateChanged: { [weak parent] in
+                await parent?.childCandidateChanged()
             }
         )
-        return (service, children)
+        await parent.attachChildLevel(LocalChildLevel(
+            directory: directory, mailbox: mailbox, service: child
+        ))
+    }
+
+    /// Waits until `level`'s snapshot rebuilds from what stands now.
+    private func settle(_ level: ChainService) async throws {
+        await level.childCandidateChanged()
+        try await eventually("the snapshot rebuilds") {
+            await level.candidateRebuildIdle()
+        }
+    }
+
+    /// A template carrying the hosted child's snapshot rebuilt for
+    /// `request`'s plan: the first template sends the plan, the child
+    /// rebuilds on it, and the second carries what it built.
+    private func settledTemplate(
+        _ merged: (service: ChainService, child: ChainService),
+        _ request: MiningTemplateRequest
+    ) async throws -> MiningTemplateResponse {
+        _ = try await merged.service.miningTemplate(request)
+        try await settle(merged.child)
+        return try await merged.service.miningTemplate(request)
     }
 
     /// Target 0 is met by no hash and Lattice rejects it, so no target can
@@ -2105,17 +2146,17 @@ final class ChainServiceTests: XCTestCase {
     /// candidate as much as this chain's own tip.
     func testTemplateDigestTracksTipMempoolAndChildCandidates() async throws {
         let process = try await nexusProcess()
-        let candidates = DigestInputs()
-        let service = makeService(
-            process: process,
-            childCandidateDigestProvider: { _ in await candidates.lines() }
-        )
+        let service = makeService(process: process)
+        let payments = StubChildLevel(directory: "Payments")
+        await service.attachChildLevel(payments)
         let first = try await service.miningTemplate(MiningTemplateRequest())
         let firstStatus = await service.status().templateDigest
         XCTAssertEqual(first.templateDigest, firstStatus, "status serves what the template carries")
 
         // A child candidate arriving changes the digest without any tip move.
-        await candidates.set(["Payments:bafyreicandidate"])
+        payments.publish(DirectChildCandidate(
+            directory: "Payments", block: try await ongoingChild(on: process)
+        ))
         let withChild = try await service.miningTemplate(MiningTemplateRequest())
         XCTAssertNotEqual(withChild.templateDigest, first.templateDigest)
         let withChildStatus = await service.status().templateDigest
@@ -2161,24 +2202,22 @@ final class ChainServiceTests: XCTestCase {
         let provisionalParents = ProvisionalParents()
         let service = makeService(
             process: process,
-            childCandidateProvider: { context in
-                await provisionalParents.record(context.parentCarrier)
-                return [DirectChildCandidate(
-                    directory: "Existing",
-                    block: child
-                )]
-            },
             childProofPublisher: { await publication.record($0) }
         )
+        try await service.attachStubChildren(["Existing"], on: process) { context in
+            await provisionalParents.record(context.parentCarrier)
+            return [DirectChildCandidate(
+                directory: "Existing",
+                block: child
+            )]
+        }
 
         let template = try await service.miningTemplate(MiningTemplateRequest())
         let recordedProvisional = await provisionalParents.first()
         let provisional = try XCTUnwrap(recordedProvisional)
-        XCTAssertEqual(
-            provisional.transactions.rawCID,
-            template.block.transactions.rawCID
-        )
-        XCTAssertEqual(provisional.timestamp, template.block.timestamp)
+        // The child built on the tip the template builds on: the provisional
+        // carrier shares the template's parent, schedule and `prevState`.
+        XCTAssertEqual(provisional.parent?.rawCID, template.block.parent?.rawCID)
         XCTAssertEqual(provisional.target, template.block.target)
         XCTAssertEqual(provisional.nextTarget, template.block.nextTarget)
         XCTAssertEqual(provisional.prevState.rawCID, template.block.prevState.rawCID)
@@ -2247,20 +2286,22 @@ final class ChainServiceTests: XCTestCase {
         let consumer = try await nexusProcess()
         let rawChild = try XCTUnwrap(Block(data: childData))
         let service = makeService(
-            process: consumer,
-            childCandidateProvider: { _ in
-                [
-                    DirectChildCandidate(
-                        directory: "Incomplete",
-                        block: rawChild
-                    ),
-                    DirectChildCandidate(
-                        directory: "Healthy",
-                        block: rawChild
-                    ),
-                ]
-            }
+            process: consumer
         )
+        try await service.attachStubChildren(
+            ["Incomplete", "Healthy"], on: consumer
+        ) { _ in
+            [
+                DirectChildCandidate(
+                    directory: "Incomplete",
+                    block: rawChild
+                ),
+                DirectChildCandidate(
+                    directory: "Healthy",
+                    block: rawChild
+                ),
+            ]
+        }
 
         let template = try await service.miningTemplate(MiningTemplateRequest())
         XCTAssertEqual(
@@ -2296,25 +2337,333 @@ final class ChainServiceTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in
-                    ["A", "B"].map {
-                        DirectChildCandidate(
-                            directory: $0,
-                            block: child
-                        )
-                    }
-                },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in }
             ),
             maximumChildCandidates: 1
         )
+        try await service.attachStubChildren(["A", "B"], on: process) { _ in
+            ["A", "B"].map {
+                DirectChildCandidate(
+                    directory: $0,
+                    block: child
+                )
+            }
+        }
 
         let template = try await service.miningTemplate(
             MiningTemplateRequest()
         )
         let children = try XCTUnwrap(template.block.children.node)
         XCTAssertEqual(Set(children.entries.keys), ["A"])
+    }
+
+    /// A block ongoing under Nexus's genesis state: what a hosted child in
+    /// any directory may offer a template on that genesis.
+    private func ongoingChild(
+        on process: ChainProcess, timestamp: Int64 = 2
+    ) async throws -> Block {
+        let parent = try await process.canonicalTipBlock()
+        let childGenesis = try await BlockBuilder.buildChildGenesis(
+            spec: ChainSpec(
+                maxNumberOfTransactionsPerBlock: 100,
+                maxStateGrowth: 100_000,
+                premine: 0,
+                targetBlockTime: 1_000,
+                initialReward: 10,
+                halvingInterval: 100,
+                halfLife: 10
+            ),
+            parentState: parent.postState,
+            transactions: [],
+            timestamp: 1,
+            target: UInt256.max,
+            fetcher: process
+        )
+        return try await BlockBuilder.buildBlock(
+            previous: childGenesis,
+            timestamp: timestamp,
+            nonce: 0,
+            fetcher: process
+        )
+    }
+
+    /// A snapshot binding another parent state than the template's tip
+    /// post-state (built on an older tip) is neither carried nor a digest
+    /// input; one binding it is both.
+    func testAStaleSnapshotBindingIsSkipped() async throws {
+        let process = try await nexusProcess()
+        let service = makeService(process: process)
+        let fresh = try await ongoingChild(on: process)
+        let otherState = try await BlockBuilder.buildChildGenesis(
+            spec: NexusGenesis.spec,
+            parentState: LatticeState.emptyHeader,
+            timestamp: 1,
+            target: .max,
+            fetcher: process
+        )
+        let stale = try await BlockBuilder.buildBlock(
+            previous: otherState, timestamp: 2, nonce: 0, fetcher: process
+        )
+        XCTAssertNotEqual(stale.parentState.rawCID, fresh.parentState.rawCID)
+        let staleLevel = StubChildLevel(
+            directory: "Stale",
+            candidate: DirectChildCandidate(directory: "Stale", block: stale)
+        )
+        await service.attachChildLevel(staleLevel)
+        await service.attachChildLevel(StubChildLevel(
+            directory: "Fresh",
+            candidate: DirectChildCandidate(directory: "Fresh", block: fresh)
+        ))
+        let template = try await service.miningTemplate(MiningTemplateRequest())
+        XCTAssertEqual(
+            Set(template.block.children.node?.entries.keys.map { $0 } ?? []), ["Fresh"]
+        )
+
+        // The stale snapshot moving leaves the digest where it was.
+        staleLevel.publish(DirectChildCandidate(
+            directory: "Stale",
+            block: try await BlockBuilder.buildBlock(
+                previous: otherState, timestamp: 3, nonce: 0, fetcher: process
+            )
+        ))
+        let digest = await service.status().templateDigest
+        XCTAssertEqual(digest, template.templateDigest)
+    }
+
+    /// The parent's template never waits on a child's build (M3): with the
+    /// hosted child's rebuild held, a template returns at once without it,
+    /// and once the build finishes the snapshot changes the digest and the
+    /// next template carries it.
+    func testASlowChildBuildNeverDelaysTheParentTemplate() async throws {
+        let fixture = try await activeChildService(spec: NexusGenesis.spec)
+        let parent = makeService(process: fixture.parent)
+        let child = makeService(
+            process: fixture.process,
+            parentLevel: LocalParentLevel(fixture.parent)
+        )
+        let building = Latch()
+        let release = Latch()
+        addTeardownBlock { await release.open() }
+        await host(child, in: "Payments", under: parent) { _ in
+            await building.open()
+            await release.wait()
+            return true
+        }
+        await building.wait()
+
+        let started = ContinuousClock.now
+        let held = try await parent.miningTemplate(MiningTemplateRequest())
+        XCTAssertLessThan(ContinuousClock.now - started, .seconds(2))
+        XCTAssertNil(held.block.children.node?["Payments"])
+
+        await release.open()
+        try await eventually("the child publishes its snapshot") {
+            child.readyCandidate() != nil
+        }
+        let status = await parent.status().templateDigest
+        XCTAssertNotEqual(status, held.templateDigest)
+        let carrying = try await parent.miningTemplate(MiningTemplateRequest())
+        XCTAssertEqual(
+            carrying.block.children.node?["Payments"]?.rawCID,
+            child.readyCandidate()?.cid
+        )
+    }
+
+    /// A transaction entering a hosted child's pool rebuilds no snapshot:
+    /// peer gossip never churns the snapshot or the parent's digest. The
+    /// next rebuild (here, a hosted child's change) picks it up.
+    func testAMempoolInsertAloneRebuildsNoSnapshot() async throws {
+        let fixture = try await activeChildService(spec: NexusGenesis.spec)
+        let merged = await mergedMiningService(fixture)
+        try await settle(merged.child)
+        let before = try await merged.service.miningTemplate(MiningTemplateRequest())
+        let first = try XCTUnwrap(merged.child.readyCandidate())
+
+        _ = try await merged.child.submitTransaction(SubmitTransactionRequest(
+            transaction: try signedTransaction(
+                key: CryptoUtils.generateKeyPair(),
+                chainPath: ["Nexus", "Payments"]
+            )
+        ))
+        let idle = await merged.child.candidateRebuildIdle()
+        XCTAssertTrue(idle, "a mempool insert scheduled a rebuild")
+        XCTAssertEqual(merged.child.readyCandidate()?.cid, first.cid)
+        let digest = await merged.service.status().templateDigest
+        XCTAssertEqual(digest, before.templateDigest)
+
+        try await settle(merged.child)
+        let rebuilt = try XCTUnwrap(merged.child.readyCandidate())
+        XCTAssertEqual(rebuilt.candidate.block.transactions.node?.count, 1)
+    }
+
+    /// A node serves one miner's plan at a time: a template request with a
+    /// new plan adopts it, and until the child rebuilds on it no template
+    /// carries the child's snapshot built for the previous plan.
+    func testATemplateNeverCarriesASnapshotBuiltForAnotherPlan() async throws {
+        let fixture = try await activeChildService(spec: NexusGenesis.spec)
+        let payments = makeService(
+            process: fixture.process,
+            parentLevel: LocalParentLevel(fixture.parent)
+        )
+        let building = Latch()
+        let release = Latch()
+        addTeardownBlock { await release.open() }
+        let held = HeldGate()
+        let parent = makeService(process: fixture.parent)
+        await host(payments, in: "Payments", under: parent) { _ in
+            guard await held.isHeld else { return true }
+            await building.open()
+            await release.wait()
+            return true
+        }
+        func plan(_ bits: Int) -> MiningTemplateRequest {
+            MiningTemplateRequest(minimumWork: [MiningMinimumWork(
+                chainPath: ["Nexus", "Payments"], work: UInt256(1) << bits
+            )])
+        }
+        let first = try await settledTemplate((parent, payments), plan(2))
+        let firstSnapshot = try XCTUnwrap(payments.readyCandidate())
+        XCTAssertEqual(first.block.children.node?["Payments"]?.rawCID, firstSnapshot.cid)
+
+        // The second plan's rebuild is held: the first plan's snapshot
+        // stands, and is not carried.
+        await held.hold()
+        let second = try await parent.miningTemplate(plan(3))
+        await building.wait()
+        XCTAssertNil(second.block.children.node?["Payments"])
+        XCTAssertEqual(payments.readyCandidate()?.cid, firstSnapshot.cid)
+
+        await held.release()
+        await release.open()
+        try await eventually("the child rebuilds on the second plan") {
+            await payments.candidateRebuildIdle()
+                && payments.readyCandidate()?.plan.minimumWork.first?.work
+                    == UInt256(1) << 3
+        }
+        let carrying = try await parent.miningTemplate(plan(3))
+        XCTAssertEqual(
+            carrying.block.children.node?["Payments"]?.rawCID,
+            payments.readyCandidate()?.cid
+        )
+    }
+
+    /// A grandchild's snapshot reaches the top (M2): a grandchild becoming
+    /// ready rebuilds the child's snapshot, which then carries it, and so
+    /// changes Nexus's digest.
+    func testAGrandchildBecomingReadyRebuildsTheChildAndMovesTheParentDigest() async throws {
+        let fixture = try await activeChildService(spec: NexusGenesis.spec)
+        let payments = makeService(
+            process: fixture.process,
+            parentLevel: LocalParentLevel(fixture.parent)
+        )
+        let grandchild = StubChildLevel(directory: "Grandchild")
+        await payments.attachChildLevel(grandchild)
+        let merged = await mergedMiningService(fixture, child: payments)
+        try await settle(payments)
+        let before = try await merged.service.miningTemplate(MiningTemplateRequest())
+        let without = try XCTUnwrap(payments.readyCandidate())
+        XCTAssertNil(without.candidate.block.children.node?["Grandchild"])
+
+        // The grandchild builds on Payments' tip, as its rebuild would.
+        let tip = try await fixture.process.validatedTipBlock()
+        let carrier = try XCTUnwrap(ChainService.provisionalCarrier(
+            on: tip,
+            tipCID: try BlockHeader(node: tip).rawCID,
+            timestamp: tip.timestamp + 1
+        ))
+        let genesis = try await BlockBuilder.buildChildGenesis(
+            spec: NexusGenesis.spec,
+            parentState: carrier.prevState,
+            timestamp: carrier.timestamp,
+            target: .max,
+            fetcher: fixture.process
+        )
+        grandchild.publish(DirectChildCandidate(
+            directory: "Grandchild",
+            block: try await BlockBuilder.buildBlock(
+                previous: genesis,
+                transactions: [],
+                parentChainBlock: carrier,
+                timestamp: carrier.timestamp + 1,
+                fetcher: fixture.process
+            )
+        ))
+        // What the host's `candidateChanged` hook does for the grandchild.
+        try await settle(payments)
+
+        let with = try XCTUnwrap(payments.readyCandidate())
+        XCTAssertNotEqual(with.cid, without.cid)
+        XCTAssertEqual(
+            with.candidate.block.children.node?["Grandchild"]?.rawCID,
+            grandchild.readyCandidate?.cid
+        )
+        let digest = await merged.service.status().templateDigest
+        XCTAssertNotEqual(digest, before.templateDigest)
+        let after = try await merged.service.miningTemplate(MiningTemplateRequest())
+        XCTAssertEqual(after.block.children.node?["Payments"]?.rawCID, with.cid)
+    }
+
+    /// A child block the template's own tip already carries is not carried
+    /// again: a children-only carrier leaves the post-state, so the child
+    /// rebuilds the same block on the same carrier `prevState`, which still
+    /// binds the next template, and carrying it twice would only credit the
+    /// same block once more.
+    func testTheTipsCarriedChildBlockIsNotCarriedAgain() async throws {
+        let fixture = try await activeChildService(spec: NexusGenesis.spec)
+        let merged = await mergedMiningService(fixture)
+        // The host has the parent serve a hosted child's runs, which also
+        // names the child block the branch last carried.
+        await merged.service.serveRuns(for: "Payments")
+        try await settle(merged.child)
+
+        let carrying = try await merged.service.miningTemplate(MiningTemplateRequest())
+        let carried = try XCTUnwrap(carrying.block.children.node?["Payments"]?.rawCID)
+        let mined = try await merged.service.submitWork(SubmitWorkRequest(
+            workID: carrying.workID, nonce: solvedNonce(for: carrying)
+        ))
+        XCTAssertTrue(mined.accepted)
+
+        // The parent's tip moved: the child rebuilds on it.
+        try await settle(merged.child)
+        let again = try await merged.service.miningTemplate(MiningTemplateRequest())
+        let offered = try XCTUnwrap(merged.child.readyCandidate())
+        XCTAssertEqual(offered.parentStateCID, again.block.prevState.rawCID)
+        XCTAssertEqual(offered.cid, carried, "the child offers the carried block again")
+        XCTAssertNil(again.block.children.node?["Payments"], "carried once, not twice")
+    }
+
+    /// A children-only parent block leaves the post-state and the child's
+    /// tip, so the child rebuilds the block the parent carried as is — even
+    /// once the carrier is older than a template's lifetime — and the
+    /// carried-CID skip leaves it out; re-stamping it would build a sibling.
+    func testAChildrenOnlyParentBlockAfterTheCarrierAgesKeepsTheCarriedCID() async throws {
+        let fixture = try await activeChildService(spec: NexusGenesis.spec)
+        let merged = await mergedMiningService(fixture)
+        await merged.service.serveRuns(for: "Payments")
+        try await settle(merged.child)
+        let first = try XCTUnwrap(merged.child.readyCandidate())
+
+        // On the parent tip it was stamped on, an aged carrier is re-stamped.
+        await merged.child.advanceCarrierClockForTesting(milliseconds: 31_000)
+        try await settle(merged.child)
+        let restamped = try XCTUnwrap(merged.child.readyCandidate())
+        XCTAssertNotEqual(restamped.cid, first.cid, "an aged carrier kept its timestamp")
+
+        let carrying = try await merged.service.miningTemplate(MiningTemplateRequest())
+        let carried = try XCTUnwrap(carrying.block.children.node?["Payments"]?.rawCID)
+        XCTAssertEqual(carried, restamped.cid)
+        let mined = try await merged.service.submitWork(SubmitWorkRequest(
+            workID: carrying.workID, nonce: solvedNonce(for: carrying)
+        ))
+        XCTAssertTrue(mined.accepted)
+
+        await merged.child.advanceCarrierClockForTesting(milliseconds: 31_000)
+        try await settle(merged.child)
+        let offered = try XCTUnwrap(merged.child.readyCandidate())
+        XCTAssertEqual(offered.cid, carried, "the aged carrier was re-stamped: a sibling")
+        let again = try await merged.service.miningTemplate(MiningTemplateRequest())
+        XCTAssertNil(again.block.children.node?["Payments"], "carried once, not twice")
     }
 
     func testContextualChildCandidateBindsNewParentCarrierState() async throws {
@@ -2542,39 +2891,6 @@ final class ChainServiceTests: XCTestCase {
             max(previous.timestamp + 1, carrierTimestamp)
         )
     }
-
-    /// Many carriers on one parent tip share one parent state, so they
-    /// share one candidate: the child rebuilds only when an input of the
-    /// candidate changed, and a carrier's timestamp is not one. Twenty
-    /// requests cost one build and hold one candidate.
-    func testCarriersOnOneParentTipShareOneChildCandidate() async throws {
-        let fixture = try await activeChildService(spec: NexusGenesis.spec)
-        var candidateCIDs: Set<String> = []
-
-        for offset in 1...20 {
-            let carrier = try await BlockBuilder.buildBlock(
-                previous: fixture.parentCarrier,
-                timestamp: fixture.parentCarrier.timestamp + Int64(offset),
-                nonce: UInt64(offset),
-                fetcher: fixture.parent
-            )
-            let candidate = try await fixture.service.miningCandidate(
-                for: ChildCandidateRequestContext(
-                    parentCarrier: carrier,
-                    rewards: []
-                ),
-                parentContentSource: FetcherContentSource(fixture.parent)
-            )
-            candidateCIDs.insert(try BlockHeader(node: candidate.block).rawCID)
-        }
-
-        XCTAssertEqual(candidateCIDs.count, 1, "one candidate for one parent state")
-    }
-
-
-
-
-
 
     // MARK: - Bulk-sync common-ancestor negotiation (Stage 1)
 
@@ -3999,29 +4315,26 @@ final class ChainServiceTests: XCTestCase {
 
     private func makeService(
         process: ChainProcess,
-        childCandidateProvider: @escaping ClosureNetworkInterface.ChildCandidateProvider = { _ in [] },
         chainStateChangePublisher: @escaping ClosureNetworkInterface.ChainStateChangePublisher = {},
-        childCandidateDigestProvider:
-            @escaping ClosureNetworkInterface.ChildCandidateDigestProvider = { _ in [] },
         childProofPublisher: @escaping ClosureNetworkInterface.ChildProofPublisher = { _ in },
         acceptedBlockPublisher: @escaping ClosureNetworkInterface.AcceptedBlockPublisher = { _ in },
         acceptedTransactionPublisher:
             @escaping ClosureNetworkInterface.AcceptedTransactionPublisher = { _ in },
         executionBodySource: ClosureNetworkInterface.ExecutionBodyImport? = nil,
         executionWalkRetryInterval: Duration = .seconds(4),
-        mempoolMaxCount: Int = 10_000
+        mempoolMaxCount: Int = 10_000,
+        parentLevel: (any ParentLevel)? = nil
     ) -> ChainService {
         ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childCandidateProvider: childCandidateProvider,
                 chainStateChangePublisher: chainStateChangePublisher,
-                childCandidateDigestProvider: childCandidateDigestProvider,
                 childProofPublisher: childProofPublisher,
                 acceptedBlockPublisher: acceptedBlockPublisher,
                 acceptedTransactionPublisher: acceptedTransactionPublisher,
                 executionBodySource: executionBodySource
             ),
+            parentLevel: parentLevel,
             executionWalkRetryInterval: executionWalkRetryInterval,
             mempoolMaxCount: mempoolMaxCount
         )
@@ -4166,13 +4479,6 @@ final class ChainServiceTests: XCTestCase {
 
 }
 
-private actor MinedChildCandidates {
-    private var blocks: [Block] = []
-
-    func record(_ block: Block) { blocks.append(block) }
-
-    func last() -> Block? { blocks.last }
-}
 
 
 private actor AttemptCounter {
@@ -4277,10 +4583,11 @@ private func XCTAssertThrowsErrorAsync<T>(
 }
 
 
-private actor DigestInputs {
-    private var value: [String] = []
-    func set(_ lines: [String]) { value = lines }
-    func lines() -> [String] { value }
+
+private actor HeldGate {
+    private(set) var isHeld = false
+    func hold() { isHeld = true }
+    func release() { isHeld = false }
 }
 
 private actor ShutdownReturned {

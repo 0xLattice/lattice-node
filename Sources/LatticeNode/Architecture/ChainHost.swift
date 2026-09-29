@@ -153,11 +153,20 @@ public actor ChainHost {
                 },
                 serveParentRuns: { [weak parentService = parent.service] in
                     await parentService?.serveRuns(for: directory)
+                },
+                candidateGate: { [weak network = node.network] pendingHandoff in
+                    await network?.offerGate(pendingHandoff: pendingHandoff) ?? false
+                },
+                // Marks the parent's own rebuild; takes no lease (§2.4).
+                candidateChanged: { [weak parentService = parent.service] in
+                    await parentService?.childCandidateChanged()
                 }
             )
-            await parent.service.attachChildLevel(directory: directory) {
-                mailbox.send($0)
-            }
+            await parent.service.attachChildLevel(LocalChildLevel(
+                directory: directory,
+                mailbox: mailbox,
+                service: node.service
+            ))
             // A tip change while the child was starting found no listener.
             mailbox.send(.tipChanged)
         }

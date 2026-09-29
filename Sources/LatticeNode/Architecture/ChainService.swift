@@ -2,6 +2,7 @@ import Crypto
 import Foundation
 import Ivy
 import Lattice
+import Synchronization
 import UInt256
 import VolumeBroker
 import cashew
@@ -83,10 +84,44 @@ public actor ChainService {
     private let network: any NetworkInterface
     /// The co-hosted parent level's facts; nil on Nexus.
     private let parentLevel: (any ParentLevel)?
-    /// Hosted children told when this level's tip moves or a run into their
-    /// directory changes, by directory. Each is its child's
-    /// `ParentMailbox.send`: an enqueue, never a wait.
-    private var childLevels: [String: @Sendable (ParentChange) -> Void] = [:]
+    /// Hosted children, by directory: told when this level's tip moves, a
+    /// run into their directory changes or the miner's plan for them changes
+    /// (an enqueue, never a wait); their pre-built candidates are read by
+    /// this level's template path without waiting on them.
+    private var childLevels: [String: any ChildLevel] = [:]
+    /// The miner's plan this level's hosted children build against: on
+    /// Nexus, the last template request's plan for its descendants; on a
+    /// child, its subtree's part from its parent. Each hosted child is sent
+    /// its own subtree's part when that part changes.
+    private var descendantPlan = DescendantPlan()
+    private var sentDescendantPlans: [String: DescendantPlan] = [:]
+    /// This child level's pre-built candidate for its co-hosted parent's
+    /// templates, which read it without waiting on this level
+    /// (`ChildLevel.readyCandidate`). Rebuilt by one coalesced task
+    /// (`scheduleCandidateRebuild`) when the parent's tip, this level's
+    /// state, a hosted child's candidate, or the plan changes.
+    private nonisolated let readySnapshot = Published<ReadyCandidate>()
+    /// The plan for this child level's subtree its parent last sent
+    /// (`ParentChange.plan`), newest only; adopted at each rebuild.
+    private nonisolated let parentPlan = Published<DescendantPlan>()
+    private var candidateRebuild = TaskSlot()
+    private var candidateRebuildDirty = false
+    /// The provisional carrier the snapshot was built against, reused while
+    /// the parent's tip post-state (the one carrier field a candidate binds)
+    /// and this level's validated tip stand, so a rebuild whose inputs did
+    /// not change builds the same block: the carrier's timestamp is the
+    /// block's. A children-only parent block leaves the post-state, so the
+    /// block it carried is rebuilt as is and the parent's carried-CID skip
+    /// leaves it out; either tip moving stamps a fresh one. So does the
+    /// carrier outliving a template's lifetime, but only while the parent's
+    /// tip is the one it was stamped on (`parentTipCID`): a children-only
+    /// parent block on top must still rebuild the carried block as is.
+    private var readyCarrier: (key: String, parentTipCID: String, block: Block)?
+    /// Set with the parent mailbox: whether this level may build now (no own
+    /// carried block awaits admission), and how the parent level hears that
+    /// this level's snapshot changed.
+    private var candidateGate: (@Sendable (_ pendingHandoff: [String]) async -> Bool)?
+    private var candidateChanged: (@Sendable () async -> Void)?
     /// This child level's mailbox from its co-hosted parent level, and the one
     /// task that drains it in order (`openParentMailbox`). Nil on Nexus and
     /// until the host opens it.
@@ -97,6 +132,10 @@ public actor ChainService {
     /// parent's serve walk.
     private var parentTipSignal: AsyncStream<Void>.Continuation?
     private var parentTipDrain: Task<Void, Never>?
+    /// Each plan the parent sends (`parentPlan`) signals a rebuild, drained
+    /// by its own task.
+    private var parentPlanSignal: AsyncStream<Void>.Continuation?
+    private var parentPlanDrain: Task<Void, Never>?
     private let maximumChildCandidates: Int
     private var liveMempoolRoots = Set<String>()
     private var mempoolUnavailable = false
@@ -215,6 +254,8 @@ public actor ChainService {
         parentMailbox = nil
         parentTipSignal?.finish()
         parentTipSignal = nil
+        parentPlanSignal?.finish()
+        parentPlanSignal = nil
         if let drain = parentMailboxDrain {
             await drain.value
             parentMailboxDrain = nil
@@ -223,6 +264,13 @@ public actor ChainService {
             await drain.value
             parentTipDrain = nil
         }
+        if let drain = parentPlanDrain {
+            await drain.value
+            parentPlanDrain = nil
+        }
+        // A rebuild re-checks `stopped` between builds; join the one running.
+        await candidateRebuild.take()?.value
+        readySnapshot.swap(nil)
         while true {
             if let worker = canonicalCommitWorker ?? executionWalkWorker
                 ?? transactionPublicationWorker
@@ -263,6 +311,7 @@ public actor ChainService {
             && executionWalkWorker == nil && executionWalkRetryTask == nil
             && transactionPublicationWorker == nil
             && parentMailboxDrain == nil && parentTipDrain == nil
+            && parentPlanDrain == nil && candidateRebuild.isEmpty
             && carrierProofDeliveries.isEmpty && ingressInFlight == 0
     }
     #endif
@@ -1052,6 +1101,14 @@ public actor ChainService {
         liveMempoolRoots = roots
     }
 
+    /// A Nexus template for `request`, carrying the hosted children's
+    /// snapshots. The node serves one miner's plan at a time: a request whose
+    /// plan (rewards and minimum work for descendant chains) differs from the
+    /// last adopts it, and each child whose part changed rebuilds on it. A
+    /// snapshot built on another plan is never carried — that child is left
+    /// out of the template, never paid to the wrong miner — so the template
+    /// that changes the plan carries no mismatched child, and the rebuilt
+    /// snapshots move the digest.
     public func miningTemplate(
         _ request: MiningTemplateRequest
     ) async throws -> MiningTemplateResponse {
@@ -1063,9 +1120,20 @@ public actor ChainService {
         }
         // Children build their next candidates against this miner's plan for
         // them. Read before the build, so a refused plan refuses the request
-        // and never leaves an issued template behind.
+        // and never reaches a child.
         let rewardPlan = try await validatedRewardPlan(request.rewards)
         let minimumWorkPlan = try validatedMinimumWorkPlan(request.minimumWork)
+        // Adopted before the digest and the build, which carry only the
+        // snapshots built on it.
+        sendDescendantPlan(DescendantPlan(
+            rewards: rewardPlan.descendants,
+            minimumWork: minimumWorkPlan.descendants
+        ))
+        // Read before the build: a child's snapshot may move while it runs,
+        // and a digest read after could name a snapshot the template does
+        // not carry. Read before, such a move only makes the digest stale,
+        // so the miner refreshes.
+        let digest = await templateDigestLocked()
         let assembled = try await buildMiningTemplate(
             rewards: request.rewards,
             minimumWork: request.minimumWork,
@@ -1076,17 +1144,6 @@ public actor ChainService {
         guard template.remainingLifetimeMilliseconds > 0 else {
             await templates.discard(workID: template.workID)
             throw MiningTemplateError.expired
-        }
-        let digest = await templateDigestLocked()
-        // Pushed after the template so the miner never waits on it.
-        let descendantRewards = rewardPlan.descendants
-        let descendantMinimumWork = minimumWorkPlan.descendants
-        // Untracked: touches only the network, never the store.
-        Task { [network] in
-            await network.updateDescendantPlan(
-                rewards: descendantRewards,
-                minimumWork: descendantMinimumWork
-            )
         }
         return MiningTemplateResponse(
             template: template,
@@ -1110,23 +1167,86 @@ public actor ChainService {
         lines.append("mempool:" + (await pool.snapshot()
             .filter { $0.disposition != .unavailable }
             .map(\.cid).sorted().joined(separator: ",")))
-        if let tip {
-            lines += await network.childCandidateDigestInput(
-                parentStateCID: tip.postState.rawCID
+        if let tip, let tipCID {
+            lines += await childCandidateDigestInput(
+                parentStateCID: tip.postState.rawCID, tipCID: tipCID
             )
         }
         let digest = SHA256.hash(data: Data(lines.joined(separator: "\n").utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
+    /// The candidates a template built on `tipCID` (post-state
+    /// `parentStateCID`) can carry, one `directory:candidateCID` line per
+    /// hosted child, sorted: a template-digest input. A snapshot for another
+    /// parent state, or the block the tip's branch already carries, is not
+    /// carried, so it is not an input.
+    private func childCandidateDigestInput(
+        parentStateCID: String,
+        tipCID: String
+    ) async -> [String] {
+        await readyChildCandidates(parentStateCID: parentStateCID, tipCID: tipCID)
+            .map { "\($0.candidate.directory):\($0.cid)" }
+            .sorted()
+    }
 
+    /// Each hosted child's snapshot a template on `tipCID` can carry: one
+    /// in the child's own directory, built on the child's part of this
+    /// level's plan, binding `parentStateCID` (the tip's
+    /// post-state, every carrier's `prevState`), and not the block the tip's
+    /// branch already carries for the directory — a children-only carrier
+    /// leaves the post-state, so a carried snapshot still binds, and
+    /// carrying it again would only credit the same block once more.
+    /// Reads the snapshots without waiting on any child (§2.4).
+    private func readyChildCandidates(
+        parentStateCID: String,
+        tipCID: String
+    ) async -> [ReadyCandidate] {
+        let snapshots = childLevels.compactMap { directory, level -> ReadyCandidate? in
+            guard let ready = level.readyCandidate,
+                  ready.candidate.directory == directory,
+                  ready.parentStateCID == parentStateCID,
+                  ready.plan.same(as: descendantPlan.narrowed(
+                      to: process.configuration.chainPath + [directory]
+                  )) else { return nil }
+            return ready
+        }
+        guard !snapshots.isEmpty else { return [] }
+        let carried = await process.carriedChildBlocks(
+            on: tipCID, directories: snapshots.map(\.candidate.directory).sorted()
+        )
+        return snapshots.filter { carried[$0.candidate.directory] != $0.cid }
+    }
 
+    /// This child level's snapshot, read without waiting on this actor.
+    nonisolated func readyCandidate() -> ReadyCandidate? {
+        readySnapshot.value
+    }
 
+    #if DEBUG
+    /// Test seam: no snapshot rebuild is running or owed.
+    func candidateRebuildIdle() -> Bool {
+        candidateRebuild.isEmpty
+    }
+
+    /// Test seam: how far ahead of the wall clock a rebuild reads the time.
+    private var carrierClockOffsetForTesting: Int64 = 0
+
+    func advanceCarrierClockForTesting(milliseconds: Int64) {
+        carrierClockOffsetForTesting += milliseconds
+    }
+
+    /// Test seam: runs `body` while holding this service's operation lease.
+    func withOperationForTesting(_ body: @Sendable () async -> Void) async {
+        await acquireOperation()
+        defer { releaseOperation() }
+        await body()
+    }
+    #endif
 
     /// A child candidate for one parent request, built from every field of the
-    /// request context, so a caller relaying the hierarchy plane cannot drop
-    /// part of the miner's plan.
-    public func miningCandidate(
+    /// request context, so no caller can drop part of the miner's plan.
+    func miningCandidate(
         for context: ChildCandidateRequestContext,
         parentContentSource: any ContentSource
     ) async throws -> DirectChildCandidate {
@@ -1134,11 +1254,11 @@ public actor ChainService {
         defer { exitIngress() }
         // A candidate builds on the validated tip. While the validate walk is
         // stepping, that tip is about to move and the build is the very work
-        // that starves the walk, so none is built. The walk reports a state
-        // change after every step and once more when it stops — caught up
-        // or parked — and the offer follows; a parked walk never withholds
-        // one, since building on the validated tip is how a chain outweighs
-        // a branch it cannot validate.
+        // that starves the walk, so none is built: this level publishes no
+        // snapshot, and the walk's stop reports the state change that
+        // rebuilds it. A parked
+        // walk never withholds one, since building on the validated tip is
+        // how a chain outweighs a branch it cannot validate.
         guard executionWalkWorker == nil else {
             SyncTrace.log("child candidate deferred: validate walk stepping")
             throw ChainServiceError.validateWalkInProgress
@@ -1147,7 +1267,7 @@ public actor ChainService {
         // awaits validation. Another at the same height would only fork it
         // — one sibling per parent block, and the validated tip crawls under
         // the reorgs — so the walk is armed here if nothing armed it, and
-        // its stop reports the change that builds the next candidate.
+        // its stop reports the state change that rebuilds the snapshot.
         if !executionWalkParked {
             let validated = await process.deepestValidatedCanonicalTip()?.height
             if let target = await process.canonicalTipHeight(),
@@ -1172,8 +1292,8 @@ public actor ChainService {
         }
     }
 
-    /// Hierarchy-only child candidate construction. The authenticated parent
-    /// supplies the provisional carrier whose `prevState` this block must bind.
+    /// Hierarchy-only child candidate construction. The parent level supplies
+    /// the provisional carrier whose `prevState` this block must bind.
     /// Private and without defaults: `miningCandidate(for:)` is the only way
     /// in, so no caller can build a candidate from part of the miner's plan.
     private func miningCandidate(
@@ -1188,23 +1308,6 @@ public actor ChainService {
         guard !process.configuration.address.isNexus,
               (try? BlockHeader(node: parentCarrier)) != nil else {
             throw ChainServiceError.invalidParentCarrier
-        }
-        // The same inputs build the same candidate, up to its timestamp: a
-        // state change that touched none of them (a transaction the pool
-        // would not select, a walk step that moved nothing here) rebuilds
-        // nothing. Every input a candidate is a function of is in this key.
-        // Policies may read the block timestamp, which follows the carrier's,
-        // so with policies the carrier timestamp selects transactions too.
-        let spec = try await chainSpec(for: try await process.validatedTipBlock())
-        let inputs = await templateDigestLocked()
-            + "|" + parentCarrier.prevState.rawCID
-            + "|" + rewards.map { $0.transaction.body.rawCID }.joined(separator: ",")
-            + "|" + minimumWork.map { "\($0.chainPath.joined(separator: "/"))=\($0.work)" }
-                .joined(separator: ",")
-            + (spec.wasmPolicies.isEmpty ? "" : "|\(parentCarrier.timestamp)")
-        if inputs == lastCandidateInputs, let candidate = lastCandidate {
-            SyncTrace.log("child candidate unchanged h=\(candidate.block.height)")
-            return candidate
         }
         let fetcher = CoalescingFetcher(CompositeContentSource([
             process,
@@ -1233,17 +1336,12 @@ public actor ChainService {
             children: template.childCandidates,
             capacity: Self.templateCapacity
         )
-        let candidate = DirectChildCandidate(
+        return DirectChildCandidate(
             directory: process.configuration.address.directory,
             block: template.block,
             searchWitness: template.searchWitness
         )
-        lastCandidateInputs = inputs
-        lastCandidate = candidate
-        return candidate
     }
-    private var lastCandidateInputs: String?
-    private var lastCandidate: DirectChildCandidate?
 
     private func buildMiningTemplate(
         rewards: [MiningReward],
@@ -1307,6 +1405,17 @@ public actor ChainService {
         try await syncLiveMempoolRootsLocked(
             Set(await pool.snapshot().map(\.cid))
         )
+        // Merged-mining: attach ongoing (height >= 1) direct-child candidates
+        // the hosted child levels pre-built against this level's validated
+        // tip. Child geneses are self-contained and self-mined — they are
+        // never carried here; they enter parent state as ordinary
+        // GenesisAction transactions and come up separately. Read once per
+        // template: every carrier the fit search below previews has the
+        // tip's post-state as `prevState`, the one field a child binds.
+        let provided = await validatedProvidedChildren(
+            parentStateCID: previous.postState.rawCID,
+            tipCID: try BlockHeader(node: previous).rawCID
+        )
 
         while true {
             let transactions = (reward.map { [$0] } ?? []) + pooled
@@ -1341,17 +1450,6 @@ public actor ChainService {
 
             let selectedTransactions = try await blockTransactions(
                 in: provisional.block
-            )
-            // Merged-mining: attach ongoing (height >= 1) direct-child candidates
-            // supplied by their processes. Child geneses are self-contained and
-            // self-mined — they are never carried here; they enter parent state
-            // as ordinary GenesisAction transactions and come up separately.
-            let provided = try await validatedProvidedChildren(
-                context: ChildCandidateRequestContext(
-                    parentCarrier: provisional.block,
-                    rewards: rewardPlan.descendants,
-                    minimumWork: minimumWorkPlan.descendants
-                )
             )
             var optionalChildren = provided
             if !optionalChildren.isEmpty {
@@ -1888,7 +1986,7 @@ public actor ChainService {
             let key = "\(report.directory)/\(report.blockHash)"
             if let last = pushedRunWork[key], last >= report.runWork { continue }
             pushedRunWork[key] = report.runWork
-            childLevels[report.directory]?(.runs([report]))
+            childLevels[report.directory]?.parentChanged(.runs([report]))
         }
     }
 
@@ -2140,8 +2238,12 @@ public actor ChainService {
     /// Untracked: touches only the network, never the store. A change that
     /// can move the tip also tells the hosted children, which never blocks.
     private func publishChainStateChange(tipChanged: Bool = true) {
+        // A mempool change alone (`tipChanged: false`) rebuilds no snapshot:
+        // the next rebuild picks its transactions up, so peer gossip never
+        // churns the snapshot, the retained candidates or the digest.
         if tipChanged {
-            for notify in childLevels.values { notify(.tipChanged) }
+            for level in childLevels.values { level.parentChanged(.tipChanged) }
+            scheduleCandidateRebuild()
         }
         Task { [network] in
             await network.chainStateChanged()
@@ -2159,15 +2261,128 @@ public actor ChainService {
         parentMailbox?.yield(.serveParentRuns)
     }
 
-    /// The host tells a hosted child in `directory` each time this level's
-    /// tip moves or a run into `directory` changes. `notify` must not block:
-    /// it is the child's `ParentMailbox.send`. Replaces the directory's
-    /// previous child, as a restarted child level does.
-    func attachChildLevel(
-        directory: String,
-        _ notify: @escaping @Sendable (ParentChange) -> Void
-    ) {
-        childLevels[directory] = notify
+    /// The host attaches a hosted child level: told each time this level's
+    /// tip moves, a run into its directory changes or its plan changes
+    /// (never blocking), and its snapshot read by this level's templates.
+    /// Replaces the directory's previous child, as a restarted child level
+    /// does, and sends it the plan as it stands.
+    func attachChildLevel(_ level: any ChildLevel) {
+        childLevels[level.directory] = level
+        sentDescendantPlans[level.directory] = nil
+        sendDescendantPlan(descendantPlan)
+    }
+
+    /// Adopts `plan` for this level's hosted children and sends each child
+    /// its subtree's part when that part changed: a coalesced enqueue.
+    private func sendDescendantPlan(_ plan: DescendantPlan) {
+        descendantPlan = plan
+        for (directory, level) in childLevels {
+            let part = plan.narrowed(
+                to: process.configuration.chainPath + [directory]
+            )
+            // A child starts on the empty plan: only a change is sent.
+            if (sentDescendantPlans[directory] ?? DescendantPlan()).same(as: part) {
+                continue
+            }
+            sentDescendantPlans[directory] = part
+            level.parentChanged(.plan(part))
+        }
+    }
+
+    /// The admission the candidate gate withheld this level's snapshot for
+    /// decided or parked.
+    func candidateGateReopened() {
+        scheduleCandidateRebuild()
+    }
+
+    /// A hosted child published a new snapshot. On a child level, this
+    /// level's own candidate carries it, so it is rebuilt; on Nexus, the
+    /// template digest reads it, so nothing else moves.
+    func childCandidateChanged() {
+        scheduleCandidateRebuild()
+    }
+
+    /// Rebuilds this child level's snapshot: one build at a time, and a
+    /// change during a build runs one more, with the inputs that stand then.
+    private func scheduleCandidateRebuild() {
+        guard parentLevel != nil, candidateGate != nil, !stopped else { return }
+        candidateRebuildDirty = true
+        candidateRebuild.start { token in
+            Task { [weak self] in
+                await self?.runCandidateRebuilds(token: token)
+            }
+        }
+    }
+
+    private func runCandidateRebuilds(token: LifetimeToken) async {
+        defer { candidateRebuild.clear(token) }
+        while candidateRebuildDirty, !stopped, candidateRebuild.holds(token) {
+            candidateRebuildDirty = false
+            let built = await buildReadyCandidate()
+            guard !stopped, candidateRebuild.holds(token) else { return }
+            if readySnapshot.swap(built)?.cid != built?.cid {
+                SyncTrace.log("ready candidate \(built.map { "h=\($0.candidate.block.height) \($0.cid.prefix(12))" } ?? "withdrawn")")
+                // Outside this level's lease: the parent level only marks
+                // its own rebuild (§2.4).
+                await candidateChanged?()
+            }
+        }
+    }
+
+    /// This level's candidate against a provisional carrier on the parent's
+    /// validated tip, read gate-free, under this level's own lease only. Nil
+    /// while the validate walk steps or is behind, while an own carried
+    /// block awaits admission (a candidate now would only be its sibling),
+    /// or before the parent or this level can build.
+    private func buildReadyCandidate() async -> ReadyCandidate? {
+        guard let parentLevel, let candidateGate else { return nil }
+        // The plan this level and its hosted children build against.
+        if let plan = parentPlan.value, !plan.same(as: descendantPlan) {
+            sendDescendantPlan(plan)
+        }
+        guard await process.status().phase == .active else { return nil }
+        // A candidate this chain built that the parent's evidence names as
+        // carried and still holds in the inbox (undecided), now ready for or
+        // in its admission: the carried block is about to be this chain's
+        // weighed tip. The inbox is written only from the configured
+        // parent's evidence, so no overlay peer can populate this set; the
+        // admission's end reports the change that rebuilds.
+        let pendingHandoff = (try? await process.store.pendingHandoffChildCIDs()) ?? []
+        guard await candidateGate(pendingHandoff) else {
+            SyncTrace.log("ready candidate withheld: own carried candidate awaiting admission")
+            return nil
+        }
+        guard let tip = await parentLevel.validatedTip() else { return nil }
+        let carrierKey = tip.block.postState.rawCID + "|"
+            + (await process.deepestValidatedCanonicalTip()?.cid ?? "")
+        var now = Int64(Date().timeIntervalSince1970 * 1_000)
+        #if DEBUG
+        now += carrierClockOffsetForTesting
+        #endif
+        let carrier: Block
+        if let ready = readyCarrier, ready.key == carrierKey,
+           ready.parentTipCID != tip.cid
+            || now - ready.block.timestamp < Int64(Self.templateLifetimeMilliseconds) {
+            carrier = ready.block
+        } else {
+            guard let fresh = Self.provisionalCarrier(
+                on: tip.block,
+                tipCID: tip.cid,
+                timestamp: max(now, tip.block.timestamp + 1)
+            ) else { return nil }
+            readyCarrier = (carrierKey, tip.cid, fresh)
+            carrier = fresh
+        }
+        let plan = descendantPlan
+        let candidate = try? await miningCandidate(
+            for: ChildCandidateRequestContext(
+                parentCarrier: carrier,
+                rewards: plan.rewards,
+                minimumWork: plan.minimumWork
+            ),
+            parentContentSource: parentLevel.contentSource
+        )
+        return candidate.flatMap { ReadyCandidate($0, plan: plan) }
     }
 
     /// One entry of a child level's parent mailbox, drained in order.
@@ -2188,11 +2403,16 @@ public actor ChainService {
     struct ParentMailbox: Sendable {
         fileprivate let continuation: AsyncStream<ParentMailboxItem>.Continuation
         fileprivate let tipSignal: AsyncStream<Void>.Continuation
+        fileprivate let plan: Published<DescendantPlan>
+        fileprivate let planSignal: AsyncStream<Void>.Continuation
 
         func send(_ change: ParentChange) {
             switch change {
             case .tipChanged: tipSignal.yield()
             case .runs(let reports): continuation.yield(.runs(reports))
+            case .plan(let plan):
+                self.plan.swap(plan)
+                planSignal.yield()
             }
         }
     }
@@ -2211,11 +2431,17 @@ public actor ChainService {
     /// the directory — however this level's genesis activated. The drain holds no
     /// lease of this level, so `serveParentRuns` may take the parent's gate
     /// (§2.4). Tip changes run `tipChanged` on a second task, coalesced, so
-    /// a parked candidate's wake never waits behind a credit or the serve.
-    /// `shutdown` finishes both and joins them.
+    /// a parked candidate's wake never waits behind a credit or the serve,
+    /// and then rebuild this level's snapshot; a plan change, kept newest
+    /// only, rebuilds it from a third. `candidateGate` says whether this level
+    /// may build a candidate now; `candidateChanged` tells the parent level
+    /// this level's snapshot changed. `shutdown` finishes all three and
+    /// joins them.
     func openParentMailbox(
         tipChanged: @escaping @Sendable () async -> Void,
-        serveParentRuns: @escaping @Sendable () async -> Void
+        serveParentRuns: @escaping @Sendable () async -> Void,
+        candidateGate: @escaping @Sendable (_ pendingHandoff: [String]) async -> Bool,
+        candidateChanged: @escaping @Sendable () async -> Void
     ) -> ParentMailbox {
         precondition(parentMailbox == nil, "one parent mailbox per level")
         let (stream, continuation) = AsyncStream.makeStream(
@@ -2224,12 +2450,19 @@ public actor ChainService {
         let (tips, tipSignal) = AsyncStream.makeStream(
             of: Void.self, bufferingPolicy: .bufferingNewest(1)
         )
+        let (plans, planSignal) = AsyncStream.makeStream(
+            of: Void.self, bufferingPolicy: .bufferingNewest(1)
+        )
         if stopped {
             continuation.finish()
             tipSignal.finish()
+            planSignal.finish()
         } else {
+            self.candidateGate = candidateGate
+            self.candidateChanged = candidateChanged
             parentMailbox = continuation
             parentTipSignal = tipSignal
+            parentPlanSignal = planSignal
             parentMailboxDrain = Task { [weak self] in
                 for await item in stream {
                     guard let self else { return }
@@ -2253,12 +2486,24 @@ public actor ChainService {
                     }
                 }
             }
-            parentTipDrain = Task {
-                for await _ in tips { await tipChanged() }
+            parentTipDrain = Task { [weak self] in
+                for await _ in tips {
+                    await tipChanged()
+                    await self?.scheduleCandidateRebuild()
+                }
+            }
+            parentPlanDrain = Task { [weak self] in
+                for await _ in plans { await self?.scheduleCandidateRebuild() }
             }
             continuation.yield(.serveParentRuns)
+            scheduleCandidateRebuild()
         }
-        return ParentMailbox(continuation: continuation, tipSignal: tipSignal)
+        return ParentMailbox(
+            continuation: continuation,
+            tipSignal: tipSignal,
+            plan: parentPlan,
+            planSignal: planSignal
+        )
     }
 
     private nonisolated static func poolDisposition(
@@ -2469,13 +2714,17 @@ public actor ChainService {
         )
     }
 
-    /// Bounded, deduplicated set of authenticated ongoing (height >= 1) direct
-    /// child candidates supplied by their processes, each binding this exact
-    /// provisional carrier's prevState and offering a valid scheduling target.
+    /// Bounded, deduplicated set of ongoing (height >= 1) direct child
+    /// candidates the hosted child levels pre-built, each binding
+    /// `parentStateCID` (every carrier's `prevState`) and offering a valid
+    /// scheduling target.
     private func validatedProvidedChildren(
-        context: ChildCandidateRequestContext
-    ) async throws -> [DirectChildCandidate] {
-        let candidates = try await network.directChildCandidates(context)
+        parentStateCID: String,
+        tipCID: String
+    ) async -> [DirectChildCandidate] {
+        let candidates = await readyChildCandidates(
+            parentStateCID: parentStateCID, tipCID: tipCID
+        ).map(\.candidate)
         var directories: Set<String> = []
         var accepted: [DirectChildCandidate] = []
         for candidate in candidates.sorted(by: candidateOrder) {
@@ -2486,8 +2735,7 @@ public actor ChainService {
                   ChainAddress(
                       process.configuration.chainPath + [candidate.directory]
                   ) != nil,
-                  candidate.block.parentState.rawCID
-                      == context.parentCarrier.prevState.rawCID else {
+                  candidate.block.parentState.rawCID == parentStateCID else {
                 continue
             }
             guard await schedulingTargets(for: candidate) != nil,
@@ -2496,7 +2744,40 @@ public actor ChainService {
             }
             accepted.append(candidate)
         }
+        SyncTrace.log("child candidates: \(accepted.count) of \(childLevels.count) hosted children")
         return accepted
+    }
+
+    /// The carrier a child builds against: a block on its parent's tip whose
+    /// `prevState` is the tip's post-state — the one field the builder takes
+    /// from a carrier — stamped with `timestamp`. Every real carrier the
+    /// parent mines on that tip has the same `prevState`, so the candidate
+    /// fits any of them.
+    static func provisionalCarrier(
+        on tip: Block,
+        tipCID: String,
+        timestamp: Int64
+    ) -> Block? {
+        guard let emptyTransactions = try? HeaderImpl<
+                  MerkleDictionaryImpl<VolumeImpl<Transaction>>
+              >(node: MerkleDictionaryImpl<VolumeImpl<Transaction>>()),
+              let emptyChildren = try? HeaderImpl<ChildIndex>(node: ChildIndex()),
+              tip.height < UInt64.max else { return nil }
+        return Block(
+            version: tip.version,
+            parent: VolumeImpl<Block>(rawCID: tipCID),
+            transactions: emptyTransactions,
+            target: tip.nextTarget,
+            nextTarget: tip.nextTarget,
+            spec: tip.spec,
+            parentState: tip.parentState,
+            prevState: tip.postState.removingNode(),
+            postState: tip.postState.removingNode(),
+            children: emptyChildren,
+            height: tip.height + 1,
+            timestamp: timestamp,
+            nonce: 0
+        )
     }
 
     private func candidateOrder(
@@ -2670,6 +2951,24 @@ extension WorkDisposition {
         case .temporarilyInvalid: self = .temporarilyInvalid
         case .invalid: self = .invalid
         case .localFailure: self = .localFailure
+        }
+    }
+}
+
+/// A value one side publishes and another reads without waiting on the
+/// publisher's actor: a child level's snapshot (read by its parent's
+/// template path) and the plan a parent sends a child.
+final class Published<Value: Sendable>: Sendable {
+    private let current = Mutex<Value?>(nil)
+
+    var value: Value? { current.withLock { $0 } }
+
+    /// Publishes `value`; the value it replaced.
+    @discardableResult
+    func swap(_ value: Value?) -> Value? {
+        current.withLock { current in
+            defer { current = value }
+            return current
         }
     }
 }

@@ -2610,7 +2610,6 @@ final class ChainProcessTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in }
             )
@@ -2899,7 +2898,6 @@ final class ChainProcessTests: XCTestCase {
         let producerService = ChainService(
             process: producer,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in }
             )

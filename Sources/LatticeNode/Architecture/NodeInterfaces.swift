@@ -11,50 +11,31 @@ public struct DirectChildProofPublication: Sendable {
     public let proof: ChildBlockProof
 }
 
-/// The runtime requests authenticated direct-child candidates against this
-/// exact provisional carrier. It owns the bounded deadline and returns partial
-/// success when only some children respond.
+/// What a hosted child level builds its candidate against: the provisional
+/// carrier on its parent's validated tip, and the miner's plan for the
+/// child's subtree.
 public struct ChildCandidateRequestContext: Sendable {
     public let parentCarrier: Block
     public let rewards: [MiningReward]
     /// The requesting miner's minimum work for descendant chains.
     public let minimumWork: [MiningMinimumWork]
-    public let excludedDirectories: Set<String>
 
     public init(
         parentCarrier: Block,
         rewards: [MiningReward],
-        minimumWork: [MiningMinimumWork] = [],
-        excludedDirectories: Set<String> = []
+        minimumWork: [MiningMinimumWork] = []
     ) {
         self.parentCarrier = parentCarrier
         self.rewards = rewards
         self.minimumWork = minimumWork
-        self.excludedDirectories = excludedDirectories
     }
 }
 
 /// What `ChainService` needs from the network runtime.
 public protocol NetworkInterface: AnyObject, Sendable {
-    /// Authenticated direct-child candidates bound to this exact provisional
-    /// carrier.
-    func directChildCandidates(
-        _ context: ChildCandidateRequestContext
-    ) async throws -> [DirectChildCandidate]
-    /// Something a template or a child candidate is a function of changed on
-    /// this chain: the validated tip, the mempool, a credit. The runtime
-    /// re-pushes the parent context to children and rebuilds this chain's own
-    /// candidate.
+    /// Something changed on this chain: the validated tip, the mempool, a
+    /// credit. The runtime re-sends the evidence hints its send budget refused.
     func chainStateChanged() async
-    /// The miner's reward plan and minimum work for this chain's descendants,
-    /// as supplied with a template request; pushed to children with the tip.
-    func updateDescendantPlan(
-        rewards: [MiningReward],
-        minimumWork: [MiningMinimumWork]
-    ) async
-    /// The child candidates a template built on the given parent state can
-    /// carry, as `directory:cid` lines: one input of the template digest.
-    func childCandidateDigestInput(parentStateCID: String) async -> [String]
     func publishChildProof(_ publication: DirectChildProofPublication) async throws
     func publishAcceptedBlock(_ blockCID: String) async throws
     func publishTransaction(_ volumeRootCID: String) async throws
@@ -78,7 +59,7 @@ public protocol NetworkInterface: AnyObject, Sendable {
 
 /// Which optional `ChainInterface` operations a network-runtime generation
 /// may use. A missing capability disables the network behaviour behind it
-/// (transaction relay, inventory sync, candidate offers).
+/// (transaction relay, inventory sync).
 public struct ChainNetworkCapabilities: OptionSet, Sendable {
     public let rawValue: UInt8
 
@@ -86,12 +67,11 @@ public struct ChainNetworkCapabilities: OptionSet, Sendable {
         self.rawValue = rawValue
     }
 
-    public static let childCandidates = ChainNetworkCapabilities(rawValue: 1 << 0)
     public static let transactions = ChainNetworkCapabilities(rawValue: 1 << 1)
     public static let transactionInventory = ChainNetworkCapabilities(rawValue: 1 << 2)
 
     public static let all: ChainNetworkCapabilities = [
-        .childCandidates, .transactions, .transactionInventory,
+        .transactions, .transactionInventory,
     ]
 }
 
@@ -100,10 +80,6 @@ public struct ChainNetworkCapabilities: OptionSet, Sendable {
 /// is in `networkCapabilities`.
 public protocol ChainInterface: AnyObject, Sendable {
     var networkCapabilities: ChainNetworkCapabilities { get }
-    func miningCandidate(
-        for context: ChildCandidateRequestContext,
-        parentContentSource: any ContentSource
-    ) async throws -> DirectChildCandidate?
     func importNetworkCandidate(
         _ admission: NetworkCandidateImport
     ) async throws -> NodeImportOutcome
@@ -112,6 +88,9 @@ public protocol ChainInterface: AnyObject, Sendable {
     /// This chain's genesis activated outside candidate admission (adopted
     /// from the parent's record): its tip moved from nothing.
     func genesisActivatedOutOfBand() async
+    /// An admission the candidate gate waited on (an own carried block)
+    /// decided or parked: the ready candidate it withheld is rebuilt.
+    func candidateGateReopened() async
 }
 
 /// The service's view of the runtime. Holds the runtime weakly, so the
@@ -125,31 +104,8 @@ final class WeakNetwork: @unchecked Sendable, NetworkInterface {
         self.runtime = runtime
     }
 
-    func directChildCandidates(
-        _ context: ChildCandidateRequestContext
-    ) async throws -> [DirectChildCandidate] {
-        guard let runtime else { return [] }
-        return await runtime.directChildCandidates(context)
-    }
-
     func chainStateChanged() async {
         await runtime?.chainStateChanged()
-    }
-
-    func updateDescendantPlan(
-        rewards: [MiningReward],
-        minimumWork: [MiningMinimumWork]
-    ) async {
-        await runtime?.updateDescendantPlan(
-            rewards: rewards,
-            minimumWork: minimumWork
-        )
-    }
-
-    func childCandidateDigestInput(parentStateCID: String) async -> [String] {
-        await runtime?.childCandidateDigestInput(
-            parentStateCID: parentStateCID
-        ) ?? []
     }
 
     func publishChildProof(_ publication: DirectChildProofPublication) async throws {
@@ -201,17 +157,6 @@ final class WeakChain: @unchecked Sendable, ChainInterface {
         self.service = service
     }
 
-    func miningCandidate(
-        for context: ChildCandidateRequestContext,
-        parentContentSource: any ContentSource
-    ) async throws -> DirectChildCandidate? {
-        guard let service else { return nil }
-        return try await service.miningCandidate(
-            for: context,
-            parentContentSource: parentContentSource
-        )
-    }
-
     func importNetworkCandidate(
         _ admission: NetworkCandidateImport
     ) async throws -> NodeImportOutcome {
@@ -237,5 +182,9 @@ final class WeakChain: @unchecked Sendable, ChainInterface {
 
     func genesisActivatedOutOfBand() async {
         await service?.genesisActivatedOutOfBand()
+    }
+
+    func candidateGateReopened() async {
+        await service?.candidateGateReopened()
     }
 }

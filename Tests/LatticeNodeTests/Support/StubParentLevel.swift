@@ -1,4 +1,5 @@
 import Lattice
+import cashew
 @testable import LatticeNode
 
 /// A `ParentLevel` whose facts the test sets. Records each continuity
@@ -19,6 +20,10 @@ actor StubParentLevel: ParentLevel {
         self.produced = produced
         self.withheld = withheld
         self.base = base
+    }
+
+    nonisolated var contentSource: any ContentSource {
+        base?.contentSource ?? InMemoryContentSource([:])
     }
 
     func hasProducedState(_ stateCID: String) async -> Bool {
@@ -51,6 +56,10 @@ actor StubParentLevel: ParentLevel {
 
     func runReport(carrier: String, directory: String) async -> ParentRunReport? {
         await base?.runReport(carrier: carrier, directory: directory)
+    }
+
+    func validatedTip() async -> (cid: String, block: Block)? {
+        await base?.validatedTip()
     }
 
     /// The parent now answers from what it holds.

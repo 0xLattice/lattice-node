@@ -14,79 +14,6 @@ import XCTest
 import cashew
 @testable import LatticeNode
 
-private actor MinimumWorkRecorder {
-    private var values: [[MiningMinimumWork]] = []
-
-    func record(_ value: [MiningMinimumWork]) {
-        values.append(value)
-    }
-
-    func last() -> [MiningMinimumWork]? { values.last }
-    func count() -> Int { values.count }
-}
-
-private actor HierarchyVolumeProbe: IvyDelegate, IvyContentSource {
-    private let hello: Data
-    private var helloCount = 0
-    private var volumeRequests = 0
-
-    init(hello: Data) {
-        self.hello = hello
-    }
-
-    func ivy(
-        _ ivy: Ivy,
-        didReceiveMessage message: PeerMessage,
-        from peer: AuthenticatedPeer
-    ) async {
-        switch message.topic {
-        case NodeNetworkTopic.hierarchyHello:
-            helloCount += 1
-            _ = await ivy.sendMessage(
-                to: peer,
-                topic: NodeNetworkTopic.hierarchyHello,
-                payload: hello
-            )
-        case NodeNetworkTopic.childEvidenceIndexRequest:
-            guard let request = try? ChildEvidenceIndexRequestMessage.decoded(
-                message.payload
-            ), let response = try? ChildEvidenceIndexResponseMessage(
-                requestID: request.requestID,
-                childPath: request.childPath,
-                sourceID: testEvidenceSourceID,
-                cursor: 0,
-                through: 0,
-                entries: [],
-                next: 0
-            ).encoded() else { return }
-            _ = await ivy.sendMessage(
-                to: peer,
-                topic: NodeNetworkTopic.childEvidenceIndexResponse,
-                payload: response
-            )
-        default:
-            break
-        }
-    }
-
-    func content(
-        rootCID: String,
-        cids: [String],
-        maxDataBytes: Int
-    ) -> [ContentEntry] {
-        []
-    }
-
-    func volume(rootCID: String, maxDataBytes: Int) -> [ContentEntry] {
-        volumeRequests += 1
-        return []
-    }
-
-    func didReceiveHello() -> Bool { helloCount > 0 }
-    func resetVolumeRequests() { volumeRequests = 0 }
-    func volumeRequestCount() -> Int { volumeRequests }
-}
-
 /// Answers nothing until released (at teardown), long after any request
 /// deadline.
 private struct StallingContentSource: IvyContentSource {
@@ -151,12 +78,6 @@ private struct ProbedContentSource: IvyContentSource {
     }
 }
 
-/// The block a child's candidate builder returns instead of building one.
-private actor CandidateOverride {
-    private(set) var block: Block?
-    func set(_ block: Block?) { self.block = block }
-}
-
 private struct ProvisionalRootFixture {
     let childConfiguration: NodeConfiguration
     let parentRuntime: NodeNetworkRuntime
@@ -168,266 +89,6 @@ private struct ProvisionalRootFixture {
 }
 
 final class NetworkTrustCandidateTests: NetworkTrustTestCase {
-    func testContextualCandidateWireBindsCarrierRewardAndCommittedContent() async throws {
-        let parent = try await canonicalNetworkBlock()
-        let parentCID = try BlockHeader(node: parent).rawCID
-        let parentData = try XCTUnwrap(parent.toData())
-        let childReward = MiningReward(
-            chainPath: ["Nexus", "Payments"],
-            transaction: try unsignedTransaction(path: ["Nexus", "Payments"])
-        )
-        let descendantReward = MiningReward(
-            chainPath: ["Nexus", "Payments", "Receipts"],
-            transaction: try unsignedTransaction(
-                path: ["Nexus", "Payments", "Receipts"]
-            )
-        )
-        let request = ParentTipContextMessage(
-            sequence: 11,
-            childPath: ["Nexus", "Payments"],
-            tipCID: parentCID,
-            tipData: parentData,
-            rewards: [childReward, descendantReward]
-        )
-        let decodedRequest = try ParentTipContextMessage.decoded(
-            request.encoded()
-        )
-        XCTAssertEqual(decodedRequest.sequence, 11)
-        XCTAssertEqual(decodedRequest.rewards.map(\.chainPath), [
-            ["Nexus", "Payments"],
-            ["Nexus", "Payments", "Receipts"],
-        ])
-        XCTAssertNotNil(decodedRequest.rewards[0].transaction.body.node)
-
-        let response = ChildCandidateAvailableMessage(
-            sequence: 11,
-            childPath: ["Nexus", "Payments"],
-            childCID: parentCID,
-            blockData: parentData,
-            searchWitness: nil
-        )
-        let decodedResponse = try ChildCandidateAvailableMessage.decoded(
-            response.encoded()
-        )
-        XCTAssertEqual(decodedResponse.childCID, parentCID)
-        XCTAssertNil(decodedResponse.searchWitness)
-
-        var forgedTarget = try response.encoded()
-        let targetOffset = 8 + 2
-            + (2 + "Nexus".utf8.count)
-            + (2 + "Payments".utf8.count)
-            + 2 + parentCID.utf8.count
-        forgedTarget.insert(
-            contentsOf: Data(repeating: 0x66, count: 64),
-            at: targetOffset
-        )
-        XCTAssertThrowsError(
-            try ChildCandidateAvailableMessage.decoded(forgedTarget)
-        )
-
-        XCTAssertThrowsError(try ParentTipContextMessage(
-            sequence: 12,
-            childPath: ["Nexus", "Payments"],
-            tipCID: parentCID,
-            tipData: parentData,
-            rewards: [MiningReward(
-                chainPath: ["Nexus", "Other"],
-                transaction: try unsignedTransaction(path: ["Nexus", "Other"])
-            )]
-        ).encoded())
-    }
-
-    func testCandidateWireRejectsMismatchedAndOversizedContent() async throws {
-        let block = try await canonicalNetworkBlock()
-        let childCID = try BlockHeader(node: block).rawCID
-        let blockData = try XCTUnwrap(block.toData())
-        func candidate(_ data: Data) -> ChildCandidateAvailableMessage {
-            ChildCandidateAvailableMessage(
-                sequence: 19,
-                childPath: ["Nexus", "Payments"],
-                childCID: childCID,
-                blockData: data,
-                searchWitness: nil
-            )
-        }
-
-        XCTAssertThrowsError(try candidate(blockData + Data([0])).encoded())
-        XCTAssertThrowsError(try candidate(
-            Data(repeating: 0, count: Int(IvyConfig.defaultProtocolMaxFrameSize))
-        ).encoded())
-
-        XCTAssertThrowsError(try ChildEvidenceAvailableMessage(
-            childPath: ["Nexus", "Payments"],
-            sourceID: testEvidenceSourceID,
-            ordinal: 1,
-            childCID: childCID,
-            rootCID: childCID,
-            attachmentCID: "not-a-cid"
-        ).encoded()) { error in
-            XCTAssertEqual(error as? NodeNetworkWireError, .malformed)
-        }
-    }
-
-    /// A miner's minimum work rides the candidate request only when it has
-    /// entries, so a request without one keeps the exact bytes it always had.
-    func testCandidateRequestCarriesMinimumWorkOnlyWhenPresent() async throws {
-        let parent = try await canonicalNetworkBlock()
-        let parentCID = try BlockHeader(node: parent).rawCID
-        let parentData = try XCTUnwrap(parent.toData())
-        func request(
-            _ minimumWork: [MiningMinimumWork]
-        ) -> ParentTipContextMessage {
-            ParentTipContextMessage(
-                sequence: 21,
-                childPath: ["Nexus", "Payments"],
-                tipCID: parentCID,
-                tipData: parentData,
-                rewards: [],
-                minimumWork: minimumWork
-            )
-        }
-
-        let legacy = try request([]).encoded()
-        XCTAssertEqual(legacy.suffix(parentData.count), parentData)
-        XCTAssertTrue(
-            try ParentTipContextMessage.decoded(legacy).minimumWork.isEmpty
-        )
-
-        let entries = [
-            MiningMinimumWork(
-                chainPath: ["Nexus", "Payments"],
-                work: UInt256(1) << 32
-            ),
-            MiningMinimumWork(
-                chainPath: ["Nexus", "Payments", "Receipts"],
-                work: UInt256(9)
-            ),
-        ]
-        let encoded = try request(entries).encoded()
-        XCTAssertGreaterThan(encoded.count, legacy.count)
-        XCTAssertEqual(
-            try ParentTipContextMessage.decoded(encoded).minimumWork,
-            entries
-        )
-
-        // Another subtree, zero work, a truncated trailer, and an empty one
-        // (which a present-only-when-used field can never encode) are refused.
-        XCTAssertThrowsError(try request([MiningMinimumWork(
-            chainPath: ["Nexus", "Other"],
-            work: UInt256(1)
-        )]).encoded())
-        XCTAssertThrowsError(try request([MiningMinimumWork(
-            chainPath: ["Nexus", "Payments"],
-            work: .zero
-        )]).encoded())
-        // More work than the hardest valid target (1) can represent.
-        XCTAssertThrowsError(try request([MiningMinimumWork(
-            chainPath: ["Nexus", "Payments"],
-            work: workForTarget(UInt256(1)) + UInt256(1)
-        )]).encoded())
-        // Beyond the payload cap the rewards field also honours.
-        XCTAssertThrowsError(try request((0..<20_000).map {
-            MiningMinimumWork(
-                chainPath: ["Nexus", "Payments", "d\($0)"],
-                work: UInt256(1) << 16
-            )
-        }).encoded())
-        XCTAssertThrowsError(
-            try ParentTipContextMessage.decoded(encoded + Data([0]))
-        )
-
-        // The operator's opt-in to commit the minimum-work target is one
-        // The wire carries a search plan and nothing more: there is no
-        // trailing commit byte, so a filter cannot travel as a commitment.
-        XCTAssertEqual(
-            try ParentTipContextMessage.decoded(encoded).minimumWork,
-            entries
-        )
-        XCTAssertThrowsError(
-            try ParentTipContextMessage.decoded(encoded + Data([1])),
-            "a trailing byte is not part of this message"
-        )
-        XCTAssertEqual(
-            try ParentTipContextMessage(
-                sequence: 21,
-                childPath: ["Nexus", "Payments"],
-                tipCID: parentCID,
-                tipData: parentData,
-                rewards: []
-            ).encoded(),
-            legacy
-        )
-        XCTAssertThrowsError(
-            try ParentTipContextMessage.decoded(legacy + Data([1]))
-        )
-        // An empty minimum-work trailer (tag 1, length 4, "[]") is refused.
-        var emptyTrailer = legacy
-        emptyTrailer.append(contentsOf: [1, 2, 0, 0, 0])
-        emptyTrailer.append(Data("[]".utf8))
-        XCTAssertThrowsError(
-            try ParentTipContextMessage.decoded(emptyTrailer)
-        )
-    }
-
-    /// The context carries the parent's tip and the miner's plan, and
-    /// nothing about what the parent carried: a carried-child trailer (tag
-    /// 2) is an unknown tag, refused like any other.
-    func testParentTipContextNamesNoCarriedChild() async throws {
-        XCTAssertEqual(
-            NodeNetworkTopic.parentTipAvailable,
-            "lattice.hierarchy.parent-tip.available.v1"
-        )
-        let parent = try await canonicalNetworkBlock()
-        let parentCID = try BlockHeader(node: parent).rawCID
-        let bare = try ParentTipContextMessage(
-            sequence: 23,
-            childPath: ["Nexus", "Payments"],
-            tipCID: parentCID,
-            tipData: try XCTUnwrap(parent.toData()),
-            rewards: []
-        ).encoded()
-        // Tag 2, a two-byte length, the name.
-        var named = bare
-        named.append(contentsOf: [2, 0, UInt8(parentCID.utf8.count)])
-        named.append(Data(parentCID.utf8))
-        XCTAssertThrowsError(try ParentTipContextMessage.decoded(named))
-    }
-
-    func testCandidateRequestEnforcesHierarchyRewardAndFrameBounds() async throws {
-        XCTAssertEqual(
-            ParentTipContextMessage.maximumRewardBytes,
-            ChainServiceLimits.maximumPayloadBytes
-        )
-        let parent = try await canonicalNetworkBlock()
-        let parentCID = try BlockHeader(node: parent).rawCID
-        let parentData = try XCTUnwrap(parent.toData())
-        let maximumDepthPath = ["Nexus"] + Array(
-            repeating: String(repeating: "x", count: 64),
-            count: 256
-        )
-        let valid = try ParentTipContextMessage(
-            sequence: 15,
-            childPath: maximumDepthPath,
-            tipCID: parentCID,
-            tipData: parentData,
-            rewards: []
-        ).encoded()
-        XCTAssertLessThan(
-            valid.count,
-            ParentTipContextMessage.maximumEncodedBytes
-        )
-
-        // The reward list has no invented count cap; it is bounded structurally by
-        // the wire capacity (UInt16 count prefix) and the reward-byte cap. The
-        // total message is still bounded by the frame size below.
-        XCTAssertThrowsError(try ParentTipContextMessage.decoded(Data(
-            repeating: 0,
-            count: ParentTipContextMessage.maximumEncodedBytes + 1
-        ))) { error in
-            XCTAssertEqual(error as? NodeNetworkWireError, .oversized)
-        }
-    }
-
     func testCandidateSlotsGiveEveryPathOnePeerBeforeDuplicateClaims() {
         let slots = NodeNetworkRuntime.interleavedChildPeerIndices(
             peerCounts: [4] + Array(repeating: 1, count: 63),
@@ -495,406 +156,6 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         XCTAssertFalse(second.indices.contains(0))
     }
 
-    func testDisconnectedChildPathsCannotAccumulatePeerRotationState() {
-        var rotations = Dictionary(uniqueKeysWithValues: (0..<1_000).map {
-            ("Nexus/stale-\($0)", $0)
-        })
-        rotations["Nexus/active"] = 3
-        NodeNetworkRuntime.pruneChildPeerRotations(
-            &rotations,
-            activeRoles: [.child(["Nexus", "active"])]
-        )
-        XCTAssertEqual(rotations, ["Nexus/active": 3])
-    }
-
-    /// A child never asks for a parent template. The parent pushes its
-    /// context (its validated tip) when the child wires in; the child builds
-    /// its candidate against the tip's post-state, reading the tip from the
-    /// parent's own session and nothing from anyone else, and pushes the
-    /// candidate up; the parent's next template finds it already held.
-    func testChildPushesACandidateForThePushedParentTipAndTheParentHoldsIt()
-        async throws
-    {
-        let descendantKey = signingKey(0x91)
-        let fixture = try await provisionalRootFixture(keyByte: 0x8f)
-        let parentTip = try await fixture.parentProcess.validatedTipBlock()
-        let parentTipCID = try BlockHeader(node: parentTip).rawCID
-        let builds = NetworkEventRecorder()
-        let childHandlers = ClosureChainInterface(
-            childCandidateBuilder: { context, parentSource in
-                // The carrier the child builds against is the parent's tip's
-                // post-state, and the tip itself is fetched from the parent.
-                guard context.parentCarrier.prevState.rawCID
-                    == parentTip.postState.rawCID else {
-                    throw NetworkTestError.failedPhase("carrier on the parent tip")
-                }
-                let fetched = await parentSource.fetch([parentTipCID])
-                guard fetched[parentTipCID] == parentTip.toData() else {
-                    throw NetworkTestError.failedPhase(
-                        "parent tip content from the parent session"
-                    )
-                }
-                await builds.append(parentTipCID)
-                return fixture.candidate
-            },
-            admission: { _ in throw CancellationError() }
-        )
-        let descendantHello = try ChainHello(
-            nexusGenesisCID: fixture.childConfiguration.nexusGenesisCID,
-            chainPath: fixture.childConfiguration.chainPath + ["Leaf"]
-        ).encode()
-        let probe = HierarchyVolumeProbe(hello: descendantHello)
-        let descendant = Ivy(config: IvyConfig(
-            signingKey: descendantKey,
-            listenPort: 0,
-            stunServers: [],
-            healthConfig: PeerHealthConfig(enabled: false),
-            privateContentExchangeEnabled: true,
-            mode: .privateNetwork
-        ))
-        await descendant.installTestDelegate(probe)
-        await descendant.setContentSource(probe)
-
-        do {
-            try await fixture.parentRuntime.start(
-                process: fixture.parentProcess,
-                chain: inertNetworkHandlers()
-            )
-            try await fixture.childRuntime.start(
-                process: fixture.childProcess,
-                chain: childHandlers
-            )
-            try await descendant.start()
-            try await descendant.connect(to: PeerEndpoint(
-                publicKey: fixture.childConfiguration.processPublicKey,
-                host: "127.0.0.1",
-                port: fixture.childConfiguration.factListenPort
-            ))
-            for _ in 0..<250 {
-                if await probe.didReceiveHello() { break }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            guard await probe.didReceiveHello() else {
-                throw NetworkTestError.failedPhase("descendant hierarchy hello")
-            }
-            await probe.resetVolumeRequests()
-
-            // No template was requested, and the parent asked for nothing:
-            // the candidate is simply held once the child pushed it.
-            try await waitForChildCandidate(fixture)
-            let candidates = await fixture.parentRuntime.directChildCandidates(
-                fixture.context
-            )
-            let descendantVolumeRequests = await probe.volumeRequestCount()
-            XCTAssertEqual(candidates.count, 1)
-            XCTAssertEqual(descendantVolumeRequests, 0)
-            let buildsAfterFirst = await builds.snapshot().count
-            XCTAssertEqual(buildsAfterFirst, 1, "built once per context")
-            // Asking again costs no round trip and no rebuild.
-            let again = await fixture.parentRuntime.directChildCandidates(
-                fixture.context
-            )
-            XCTAssertEqual(again.count, 1)
-            let buildsAfterSecond = await builds.snapshot().count
-            XCTAssertEqual(buildsAfterSecond, 1)
-            let digestInput = await fixture.parentRuntime.childCandidateDigestInput(
-                parentStateCID: fixture.context.parentCarrier.prevState.rawCID
-            )
-            let candidateCID = try BlockHeader(node: fixture.candidate.block).rawCID
-            XCTAssertEqual(digestInput, ["Payments:\(candidateCID)"])
-        } catch {
-            await descendant.stop()
-            await fixture.childRuntime.stop()
-            await fixture.parentRuntime.stop()
-            throw error
-        }
-        await descendant.stop()
-        await fixture.childRuntime.stop()
-        await fixture.parentRuntime.stop()
-    }
-
-    /// The parent pushes a miner's minimum work to the child that builds the
-    /// block, and only the entries at or below that child; the same plan
-    /// again pushes nothing, a changed plan pushes once more.
-    func testParentPushesDescendantMinimumWorkAndTheChildBuildsWithIt() async throws {
-        let fixture = try await provisionalRootFixture(keyByte: 0x96)
-        let received = MinimumWorkRecorder()
-        let childHandlers = ClosureChainInterface(
-            childCandidateBuilder: { context, _ in
-                await received.record(context.minimumWork)
-                return fixture.candidate
-            },
-            admission: { _ in throw CancellationError() }
-        )
-        do {
-            try await fixture.parentRuntime.start(
-                process: fixture.parentProcess,
-                chain: inertNetworkHandlers()
-            )
-            try await fixture.childRuntime.start(
-                process: fixture.childProcess,
-                chain: childHandlers
-            )
-            try await waitForChildCandidate(fixture)
-            let initialPlan = await received.last()
-            XCTAssertEqual(initialPlan, [])
-
-            let childEntry = MiningMinimumWork(
-                chainPath: ["Nexus", "Payments"],
-                work: UInt256(1) << 8
-            )
-            await fixture.parentRuntime.updateDescendantPlan(
-                rewards: [],
-                minimumWork: [
-                    MiningMinimumWork(
-                        chainPath: ["Nexus"],
-                        work: UInt256(1) << 20
-                    ),
-                    childEntry,
-                ]
-            )
-            for _ in 0..<250 {
-                if await received.last() == [childEntry] { break }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            // The parent's own minimum is the parent's business, not the
-            // child's: only the child's entry crosses.
-            let forwarded = await received.last()
-            XCTAssertEqual(forwarded, [childEntry])
-            let builds = await received.count()
-
-            // The same plan again is not a change: nothing is pushed.
-            await fixture.parentRuntime.updateDescendantPlan(
-                rewards: [],
-                minimumWork: [
-                    MiningMinimumWork(
-                        chainPath: ["Nexus"],
-                        work: UInt256(1) << 20
-                    ),
-                    childEntry,
-                ]
-            )
-            try await alwaysDuring("a repeated plan builds nothing new", .milliseconds(300)) {
-                await received.count() == builds
-            }
-            let buildsAfterRepeat = await received.count()
-            XCTAssertEqual(buildsAfterRepeat, builds)
-            let candidates = await fixture.parentRuntime.directChildCandidates(
-                ChildCandidateRequestContext(
-                    parentCarrier: fixture.context.parentCarrier,
-                    rewards: [],
-                    minimumWork: [childEntry]
-                )
-            )
-            XCTAssertEqual(candidates.count, 1)
-        } catch {
-            await fixture.childRuntime.stop()
-            await fixture.parentRuntime.stop()
-            throw error
-        }
-        await fixture.childRuntime.stop()
-        await fixture.parentRuntime.stop()
-    }
-
-    /// When the parent's tip moves, the candidate the child pushed for the
-    /// old tip is not carried (its parent state is stale); the parent pushes
-    /// the new tip, the child rebuilds on it and pushes again, and only then
-    /// is a candidate held for the new tip. A restarted parent session
-    /// starts the child over the same way.
-    func testParentTipChangeDropsTheStaleCandidateUntilTheChildRepushes()
-        async throws
-    {
-        let fixture = try await provisionalRootFixture(keyByte: 0x9a)
-        let childService = networkService(
-            process: fixture.childProcess,
-            runtime: fixture.childRuntime
-        )
-        let childHandlers = ClosureChainInterface(
-            childCandidateBuilder: { [weak childService] context, parentSource in
-                guard let childService else { return nil }
-                return try await childService.miningCandidate(
-                    for: context,
-                    parentContentSource: parentSource
-                )
-            },
-            admission: { _ in throw CancellationError() }
-        )
-        do {
-            try await fixture.parentRuntime.start(
-                process: fixture.parentProcess,
-                chain: inertNetworkHandlers()
-            )
-            try await fixture.childRuntime.start(
-                process: fixture.childProcess,
-                chain: childHandlers
-            )
-            for _ in 0..<250 {
-                if await childService.status().phase == .active { break }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            try await waitForChildCandidate(fixture)
-
-            // The parent's tip moves to a block that CHANGES its state (an
-            // empty block leaves the post-state, and so every candidate
-            // built on it, exactly as valid as before): anchoring another
-            // child genesis.
-            let oldTip = try await fixture.parentProcess.validatedTipBlock()
-            let otherGenesis = try await ChildGenesisBuilder.build(
-                seed: ChildGenesisSeed(
-                    spec: NexusGenesis.spec, premineTo: nil,
-                    timestamp: oldTip.timestamp + 500
-                ),
-                chainPath: ["Nexus", "Other"],
-                fetcher: fixture.parentProcess
-            )
-            let otherAnchor = try signedGenesisAnchorTransaction(
-                directory: "Other",
-                childGenesisCID: try BlockHeader(node: otherGenesis).rawCID,
-                chainPath: ["Nexus"]
-            )
-            try await VolumeImpl<Transaction>(node: otherAnchor).storeRecursively(
-                storer: fixture.parentProcess
-            )
-            let next = try await BlockBuilder.buildBlock(
-                previous: oldTip,
-                transactions: [otherAnchor],
-                timestamp: oldTip.timestamp + 1_000,
-                nonce: 3,
-                fetcher: fixture.parentProcess
-            )
-            XCTAssertNotEqual(next.postState.rawCID, oldTip.postState.rawCID)
-            let admitted = try await fixture.parentProcess.importBlock(
-                try BlockHeader(node: next)
-            )
-            XCTAssertTrue(admitted.decision.isAccepted)
-            await fixture.parentRuntime.chainStateChanged()
-            let newProvisional = try await BlockBuilder.buildBlock(
-                previous: next,
-                timestamp: next.timestamp + 1_000,
-                nonce: 4,
-                fetcher: fixture.parentProcess
-            )
-            let newContext = ChildCandidateRequestContext(
-                parentCarrier: newProvisional,
-                rewards: []
-            )
-            // The child rebuilds on the new tip and pushes; until then the
-            // stale candidate is not carried for the new tip.
-            var heldForNewTip: [DirectChildCandidate] = []
-            for _ in 0..<500 {
-                heldForNewTip = await fixture.parentRuntime.directChildCandidates(
-                    newContext
-                )
-                if !heldForNewTip.isEmpty { break }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            XCTAssertEqual(heldForNewTip.count, 1, "rebuilt for the new tip")
-            XCTAssertEqual(
-                heldForNewTip.first?.block.parentState.rawCID,
-                next.postState.rawCID
-            )
-            // The old context no longer has a candidate: the child's latest
-            // replaced it.
-            let heldForOldTip = await fixture.parentRuntime.directChildCandidates(
-                fixture.context
-            )
-            XCTAssertTrue(heldForOldTip.isEmpty)
-        } catch {
-            await fixture.childRuntime.stop()
-            await fixture.parentRuntime.stop()
-            throw error
-        }
-        await fixture.childRuntime.stop()
-        await fixture.parentRuntime.stop()
-    }
-
-    /// The parent carries the child's block A, and does not carry A again
-    /// nor count it as a template input. The child, not yet having admitted
-    /// A, offers A', a sibling on A's parent: that is carried, and fork
-    /// choice at the child settles the two.
-    func testTheCarriedChildBlockIsNotCarriedAgainButASiblingIs() async throws {
-        let fixture = try await provisionalRootFixture(keyByte: 0x9e)
-        let parentService = networkService(
-            process: fixture.parentProcess,
-            runtime: fixture.parentRuntime
-        )
-        let childService = networkService(
-            process: fixture.childProcess,
-            runtime: fixture.childRuntime
-        )
-        let override = CandidateOverride()
-        let childHandlers = ClosureChainInterface(
-            childCandidateBuilder: { [weak childService] context, parentSource in
-                if let block = await override.block {
-                    return DirectChildCandidate(directory: "Payments", block: block)
-                }
-                guard let childService else { return nil }
-                return try await childService.miningCandidate(
-                    for: context,
-                    parentContentSource: parentSource
-                )
-            },
-            admission: { _ in throw CancellationError() }
-        )
-        func stopAll() async {
-            await fixture.childRuntime.stop()
-            await fixture.parentRuntime.stop()
-        }
-        do {
-            try await fixture.parentRuntime.start(
-                process: fixture.parentProcess,
-                chain: inertNetworkHandlers()
-            )
-            try await fixture.childRuntime.start(
-                process: fixture.childProcess,
-                chain: childHandlers
-            )
-            let first = try await firstHeldCandidate(fixture)
-            XCTAssertEqual(first.block.height, 1)
-            let carrier = try await storeCarrier(
-                of: first, fixture: fixture
-            )
-            try await admitCarrier(
-                carrier, service: parentService, fixture: fixture
-            )
-            try await eventually("the parent's context is on the carrier") {
-                await fixture.parentRuntime.parentTipContextCIDForTesting()
-                    == carrier.rawCID
-            }
-            let onCarrier = try await contextOnValidatedTip(fixture)
-            let afterCarry = await fixture.parentRuntime.directChildCandidates(onCarrier)
-            XCTAssertTrue(afterCarry.isEmpty, "the carried block is not carried again")
-            let afterCarryDigest = await fixture.parentRuntime.childCandidateDigestInput(
-                parentStateCID: onCarrier.parentCarrier.prevState.rawCID
-            )
-            XCTAssertTrue(afterCarryDigest.isEmpty, "nor is it a template input")
-
-            // A sibling of A: built on A's parent, the child genesis.
-            let sibling = try await siblingOf(first, fixture: fixture)
-            let siblingCID = try BlockHeader(node: sibling).rawCID
-            await override.set(sibling)
-            await fixture.childRuntime.chainStateChanged()
-            try await eventually("the parent holds the sibling offer") {
-                await fixture.parentRuntime.heldOfferCIDsForTesting()
-                    .contains(siblingCID)
-            }
-            let siblings = await fixture.parentRuntime.directChildCandidates(onCarrier)
-            XCTAssertEqual(
-                try siblings.map { try BlockHeader(node: $0.block).rawCID },
-                [siblingCID],
-                "a sibling of the carried block is carried"
-            )
-            let siblingDigest = await fixture.parentRuntime.childCandidateDigestInput(
-                parentStateCID: onCarrier.parentCarrier.prevState.rawCID
-            )
-            XCTAssertEqual(siblingDigest, ["Payments:\(siblingCID)"])
-            await stopAll()
-        } catch {
-            await stopAll()
-            throw error
-        }
-    }
-
     /// An overlay peer announces the carried block and never serves it.
     /// The carry decision reads nothing an overlay peer says: the child
     /// admits the block from the parent's evidence, and its extension is
@@ -910,12 +171,6 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             runtime: fixture.childRuntime
         )
         let childHandlers = ClosureChainInterface(
-            childCandidateBuilder: { context, parentSource in
-                try await childService.miningCandidate(
-                    for: context,
-                    parentContentSource: parentSource
-                )
-            },
             admission: { admission in
                 try await childService.importNetworkCandidate(
                     admission.header,
@@ -963,13 +218,11 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             try await eventually("the child admits the carried block", within: .seconds(90)) {
                 await fixture.childProcess.hasAcceptedBlock(firstCID)
             }
-            var next: [DirectChildCandidate] = []
-            try await eventually("the extension is carried") {
-                let context = try await self.contextOnValidatedTip(fixture)
-                next = await fixture.parentRuntime.directChildCandidates(context)
-                return next.first?.block.parent?.rawCID == firstCID
-            }
-            XCTAssertEqual(next.first?.block.height, 2)
+            let next = try await childCandidate(
+                fixture, for: try await contextOnValidatedTip(fixture)
+            )
+            XCTAssertEqual(next.block.parent?.rawCID, firstCID)
+            XCTAssertEqual(next.block.height, 2)
             await stopAll()
         } catch {
             await stopAll()
@@ -1007,12 +260,6 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             runtime: fixture.childRuntime
         )
         let childHandlers = ClosureChainInterface(
-            childCandidateBuilder: { context, parentSource in
-                try await childService.miningCandidate(
-                    for: context,
-                    parentContentSource: parentSource
-                )
-            },
             admission: { admission in
                 if admission.header.rawCID == filler.childCID {
                     return NodeImportOutcome(
@@ -1146,12 +393,6 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             runtime: fixture.childRuntime
         )
         return ClosureChainInterface(
-            childCandidateBuilder: { context, parentSource in
-                try await childService.miningCandidate(
-                    for: context,
-                    parentContentSource: parentSource
-                )
-            },
             admission: { admission in
                 if let outcome = try await stub(admission.header.rawCID, admission) {
                     return outcome
@@ -2375,15 +1616,49 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         ))
     }
 
+    /// The child's first candidate, once the parent holds the child as an
+    /// evidence-ready hierarchy peer: the parent's evidence for a block it
+    /// carries reaches the child from then on.
     private func firstHeldCandidate(
         _ fixture: ProvisionalRootFixture
     ) async throws -> DirectChildCandidate {
-        var held: [DirectChildCandidate] = []
-        try await eventually("the child's first candidate is held") {
-            held = await fixture.parentRuntime.directChildCandidates(fixture.context)
-            return !held.isEmpty
+        try await eventually("the parent holds the child evidence-ready") {
+            await fixture.parentRuntime.hasEvidenceReadyChildForTesting()
         }
-        return try XCTUnwrap(held.first)
+        // What the parent's template asks for: a carrier on its validated
+        // tip, stamped now.
+        let tip = try await fixture.parentProcess.validatedTipBlock()
+        let context = ChildCandidateRequestContext(
+            parentCarrier: try await BlockBuilder.buildBlock(
+                previous: tip,
+                timestamp: max(
+                    Int64(Date().timeIntervalSince1970 * 1_000), tip.timestamp + 1
+                ),
+                fetcher: fixture.parentProcess
+            ),
+            rewards: []
+        )
+        return try await childCandidate(fixture, for: context)
+    }
+
+    /// The child's candidate for `context`, built as its hosted level builds
+    /// it: against the parent's local content.
+    private func childCandidate(
+        _ fixture: ProvisionalRootFixture,
+        for context: ChildCandidateRequestContext
+    ) async throws -> DirectChildCandidate {
+        let childService = networkService(
+            process: fixture.childProcess, runtime: fixture.childRuntime
+        )
+        var built: DirectChildCandidate?
+        try await eventually("the child builds its candidate") {
+            built = try? await childService.miningCandidate(
+                for: context, parentContentSource: fixture.parentProcess
+            )
+            return built != nil
+        }
+        await childService.shutdown()
+        return try XCTUnwrap(built)
     }
 
     /// Connects `attacker` to the child's overlay and announces `cid` every
@@ -2510,11 +1785,6 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         try await fixture.childRuntime.start(
             process: fixture.childProcess,
             chain: ClosureChainInterface(
-                childCandidateBuilder: { context, parentSource in
-                    try await childService.miningCandidate(
-                        for: context, parentContentSource: parentSource
-                    )
-                },
                 admission: { admission in
                     guard admission.authenticatedChildPackage?.package
                         .parentStateContinuityLink?.toStateCID
@@ -2682,7 +1952,6 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         let childService = ChainService(
             process: fixture.childProcess,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
                 chainStateChangePublisher: {},
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
@@ -2721,62 +1990,34 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         let fixture = try await provisionalRootFixture(keyByte: 0x9c)
         // No evidence source: the walk the deferral arms parks on the
         // continuity fact it cannot get, and the retry is out of the way.
-        let childRuntime = fixture.childRuntime
         let childService = ChainService(
             process: fixture.childProcess,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
-                chainStateChangePublisher: { [weak childRuntime] in
-                    await childRuntime?.chainStateChanged()
-                },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in }
             ),
             executionWalkRetryInterval: .seconds(60)
-        )
-        let childHandlers = ClosureChainInterface(
-            childCandidateBuilder: { [weak childService] context, parentSource in
-                guard let childService else { return nil }
-                return try await childService.miningCandidate(
-                    for: context,
-                    parentContentSource: parentSource
-                )
-            },
-            admission: { _ in throw CancellationError() }
         )
         let weighedOnly = try await weighedOnlyChildBlock(fixture)
         let tips = await fixture.childProcess.metricsTipHeights()
         XCTAssertEqual(tips.weighed, 1)
         XCTAssertEqual(tips.validated, 0)
 
-        do {
-            try await fixture.parentRuntime.start(
-                process: fixture.parentProcess,
-                chain: inertNetworkHandlers()
+        var built: DirectChildCandidate?
+        for _ in 0..<250 {
+            built = try? await childService.miningCandidate(
+                for: fixture.context, parentContentSource: fixture.parentProcess
             )
-            try await fixture.childRuntime.start(
-                process: fixture.childProcess,
-                chain: childHandlers
-            )
-            var held: [DirectChildCandidate] = []
-            for _ in 0..<250 {
-                held = await fixture.parentRuntime.directChildCandidates(fixture.context)
-                if !held.isEmpty { break }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-            XCTAssertEqual(held.count, 1, "offered with the walk parked")
-            XCTAssertEqual(held.first?.block.height, 1, "built on the validated tip")
-            XCTAssertNotEqual(
-                held.first.map { try? BlockHeader(node: $0.block).rawCID },
-                weighedOnly.header.rawCID
-            )
-        } catch {
-            await fixture.childRuntime.stop()
-            await fixture.parentRuntime.stop()
-            throw error
+            if built != nil { break }
+            try await Task.sleep(for: .milliseconds(20))
         }
-        await fixture.childRuntime.stop()
-        await fixture.parentRuntime.stop()
+        XCTAssertNotNil(built, "built with the walk parked")
+        XCTAssertEqual(built?.block.height, 1, "built on the validated tip")
+        XCTAssertNotEqual(
+            built.map { try? BlockHeader(node: $0.block).rawCID },
+            weighedOnly.header.rawCID
+        )
+        await childService.shutdown()
     }
 
     /// A child whose last candidate landed and awaits validation builds no
@@ -2794,7 +2035,6 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         let childService = ChainService(
             process: fixture.childProcess,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
                 chainStateChangePublisher: { await changes.append("change") },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
@@ -3054,21 +2294,13 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
             )
         )
     }
-
-    private func waitForChildCandidate(
-        _ fixture: ProvisionalRootFixture
-    ) async throws {
-        try await eventually("direct child candidate session") {
-            await fixture.parentRuntime.directChildCandidates(fixture.context).count == 1
-        }
-    }
 }
 
 extension NodeNetworkRuntime {
-    /// The child block of every offer the child peers pushed and this
-    /// chain holds.
-    fileprivate func heldOfferCIDsForTesting() -> [String] {
-        hierarchyState.hierarchyRecords.records.values.compactMap(\.offer?.childCID)
+    fileprivate func hasEvidenceReadyChildForTesting() -> Bool {
+        hierarchyState.hierarchyRecords.records.values.contains {
+            $0.evidence.ready
+        }
     }
 
     /// Holds every evidence Volume slot with overlay work, as a burst of
@@ -3148,10 +2380,5 @@ extension NodeNetworkRuntime {
         where lease.attachmentCID.hasPrefix("lane-filler-") {
             releaseEvidenceVolume(lease)
         }
-    }
-
-    /// The tip the context pushed to children was minted on.
-    fileprivate func parentTipContextCIDForTesting() -> String? {
-        hierarchyState.parentTipContext?.tipCID
     }
 }

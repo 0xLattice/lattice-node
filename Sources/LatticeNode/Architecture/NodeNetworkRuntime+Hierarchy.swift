@@ -7,201 +7,26 @@ import VolumeBroker
 import cashew
 
 extension NodeNetworkRuntime {
-    /// The miner's plan for this chain's descendants, as last supplied with a
-    /// template request. Children build their candidates against it, so a
-    /// change is pushed to them like a tip change.
-    public func updateDescendantPlan(
-        rewards: [MiningReward],
-        minimumWork: [MiningMinimumWork]
-    ) async {
-        guard isRunning, let process else { return }
-        hierarchyState.descendantRewards = rewards
-        hierarchyState.descendantMinimumWork = minimumWork
-        scheduleParentTipPush(generation: runtimeGeneration, process: process)
-    }
-
-    /// Something a template or a child candidate is a function of changed
-    /// here: the validated tip, the mempool, a credit. As a parent, re-push
-    /// the context to children if it differs; as a child, rebuild and push
-    /// our candidate. Both are coalescing tasks: this call costs a flag, and
-    /// the tip is re-read once per task run, not once per event.
+    /// Something this chain's evidence publication may be owed a retry on
+    /// changed here: the validated tip, the mempool, a credit. Re-sends the
+    /// evidence hints this node's own send budget refused. Coalescing: this
+    /// call costs a flag, and the task reads the refused hints once per run.
     public func chainStateChanged() async {
         guard isRunning, let process else { return }
-        let generation = runtimeGeneration
-        scheduleParentTipPush(generation: generation, process: process)
-        scheduleCandidateOffer(generation: generation, process: process)
+        scheduleRefusedHintResend(generation: runtimeGeneration, process: process)
     }
 
-    /// The candidates a template built on the given parent state can carry,
-    /// one line per directory as `directory:candidateCID` (several peers,
-    /// several CIDs), sorted — an input to the template digest a miner
-    /// compares to learn its work is stale. A held candidate for another
-    /// parent state is not carried, so it is not an input.
-    public func childCandidateDigestInput(parentStateCID: String) -> [String] {
-        var byDirectory: [String: [String]] = [:]
-        for (key, role) in hierarchyRoles {
-            guard case .child(let path) = role, let directory = path.last,
-                  isChildEvidenceReady(key),
-                  let offer = hierarchyState.hierarchyRecords[key]?.offer,
-                  offer.candidate.block.parentState.rawCID == parentStateCID,
-                  offer.childCID != hierarchyState.parentTipContext?.carriedChildren[directory]
-            else { continue }
-            byDirectory[directory, default: []].append(offer.childCID)
-        }
-        return byDirectory.keys.sorted().map {
-            "\($0):\(byDirectory[$0]!.sorted().joined(separator: ","))"
-        }
-    }
-
-    /// The child candidates held for one exact provisional carrier: each
-    /// ready child peer's latest pushed candidate, if it was built for this
-    /// chain's current tip (its `parentState` is the carrier's `prevState`).
-    /// Nothing is requested here; a child that has not pushed yet, or whose
-    /// candidate is for an older tip, is simply not carried this round.
-    public func directChildCandidates(
-        _ context: ChildCandidateRequestContext
-    ) async -> [DirectChildCandidate] {
-        guard isRunning, let process else { return [] }
-        let wantedParentState = context.parentCarrier.prevState.rawCID
-        let children = selectedChildPeers().filter {
-            guard let directory = $0.2.last else { return false }
-            return !context.excludedDirectories.contains(directory)
-        }
-        // What the template's own tip carries, and what the pushed context
-        // names: the push task re-mints only after the tip validates, and a
-        // template built in that window on a children-only carrier (same
-        // post-state) would otherwise carry the block the tip just carried
-        // once more; a template on an older tip is still not worth a block
-        // the current branch already carries.
-        var carriedChildren = hierarchyState.parentTipContext?.carriedChildren ?? [:]
-        if let tipCID = context.parentCarrier.parent?.rawCID {
-            let onTip = await process.carriedChildBlocks(
-                on: tipCID,
-                directories: children.compactMap { $0.2.last }
-            )
-            carriedChildren.merge(onTip) { _, tip in tip }
-        }
-        let carriedOnContext = hierarchyState.parentTipContext?.carriedChildren ?? [:]
-        var candidates: [(Int, DirectChildCandidate)] = []
-        var stale = 0
-        var carried = 0
-        for (rank, key, path) in children {
-            guard let offer = hierarchyState.hierarchyRecords[key]?.offer else { continue }
-            guard offer.candidate.block.parentState.rawCID == wantedParentState
-            else {
-                stale += 1
-                continue
-            }
-            // The block this chain's branch already carries for the
-            // directory: a children-only carrier leaves the post-state, so
-            // the offer still fits the tip, and carrying it again would
-            // only credit the same block once more.
-            if let directory = path.last,
-               offer.childCID == carriedChildren[directory]
-                || offer.childCID == carriedOnContext[directory] {
-                carried += 1
-                continue
-            }
-            candidates.append((rank, offer.candidate))
-        }
-        SyncTrace.log("child candidates: \(candidates.count) held of \(children.count) ready child peers (stale=\(stale) carried=\(carried)) excluded=\(context.excludedDirectories.sorted())")
-        // A path claim is not authority. Several authenticated claimants may
-        // serve one directory; rotate priority so a grindable lexicographic
-        // key cannot own a slot.
-        var selectedDirectories: Set<String> = []
-        let selected = candidates.sorted { $0.0 < $1.0 }.compactMap {
-            selectedDirectories.insert($0.1.directory).inserted ? $0.1 : nil
-        }
-        return selected.sorted { $0.directory < $1.directory }
-    }
-
-    /// A per-session sequence as it stands for the peer's current session;
-    /// nil when it was read on an earlier session.
-    private func sequence(_ recorded: SessionSequence?, on peer: AuthenticatedPeer) -> UInt64? {
-        guard let recorded, recorded.sessionID == peer.sessionID else { return nil }
-        return recorded.sequence
-    }
-
-    /// Re-reads this chain's validated tip and, if the context children build
-    /// against changed (tip, rewards, minimum work), mints the next one for
-    /// the push task to send. Only the push task calls this, so two reads
-    /// never race to label an older tip with the newer sequence.
-    private func refreshParentTipContext(
-        process: ChainProcess,
-        generation: UInt64
-    ) async {
-        guard isCurrentRuntime(generation: generation, process: process) else {
-            return
-        }
-        let hasChildren = hierarchyRoles.map(\.value).contains {
-            if case .child = $0 { return true }
-            return false
-        }
-        guard hasChildren || hierarchyState.parentTipContext != nil else { return }
-        let rewards = hierarchyState.descendantRewards
-        let minimumWork = hierarchyState.descendantMinimumWork
-        // Cheap first: the validated tip's CID without resolving the block.
-        // A walk step publishes a state change per block, and this must
-        // not cost the process gate three times per step when nothing the
-        // children build against changed.
-        let directories = Set(hierarchyRoles.map(\.value).compactMap { role -> String? in
-            guard case .child(let path) = role else { return nil }
-            return path.last
-        })
-        if let current = hierarchyState.parentTipContext,
-           let cheapTip = await process.deepestValidatedCanonicalTip()?.cid,
-           cheapTip == current.tipCID,
-           current.directories == directories,
-           Self.sameRewardPlan(current.rewards, rewards),
-           current.minimumWork == minimumWork {
-            return
-        }
-        guard let tip = try? await process.validatedTipBlock(),
-              let tipCID = try? BlockHeader(node: tip).rawCID,
-              let tipData = tip.toData(),
-              isCurrentRuntime(generation: generation, process: process)
-        else { return }
-        if let current = hierarchyState.parentTipContext,
-           current.tipCID == tipCID,
-           current.directories == directories,
-           Self.sameRewardPlan(current.rewards, rewards),
-           current.minimumWork == minimumWork {
-            return
-        }
-        let carried = await process.carriedChildBlocks(
-            on: tipCID, directories: directories.sorted()
-        )
-        guard isCurrentRuntime(generation: generation, process: process) else { return }
-        hierarchyState.nextParentTipSequence &+= 1
-        let context = ParentTipContext(
-            sequence: hierarchyState.nextParentTipSequence,
-            tipCID: tipCID,
-            tipData: tipData,
-            rewards: rewards,
-            minimumWork: minimumWork,
-            carriedChildren: carried,
-            directories: directories
-        )
-        hierarchyState.parentTipContext = context
-        SyncTrace.log("parent tip context \(context.sequence): h=\(tip.height) tip=\(tipCID.prefix(12)) carried=\(carried.keys.sorted())")
-    }
-
-    /// Pushes the latest context to every ready child. Coalescing, like the
-    /// child's offer task: a burst of blocks marks it dirty once and the task
-    /// pushes the context that stands when it runs. No pause between runs:
-    /// a child's candidate is stale the moment this chain's tip moves, so
-    /// every delay here is a round in which the child is not carried.
-    private func scheduleParentTipPush(
+    private func scheduleRefusedHintResend(
         generation: UInt64,
         process: ChainProcess
     ) {
         guard isCurrentRuntime(generation: generation, process: process) else {
             return
         }
-        hierarchyState.parentTipPushDirty = true
-        hierarchyState.parentTipPushTask.start { token in
+        hierarchyState.refusedHintResendDirty = true
+        hierarchyState.refusedHintResendTask.start { token in
             Task { [weak self] in
-                await self?.runParentTipPushes(
+                await self?.runRefusedHintResends(
                     token: token,
                     generation: generation,
                     process: process
@@ -210,38 +35,21 @@ extension NodeNetworkRuntime {
         }
     }
 
-    private func runParentTipPushes(
+    private func runRefusedHintResends(
         token: LifetimeToken,
         generation: UInt64,
         process: ChainProcess
     ) async {
         // A run cancelled by a stop that a restart followed must not clear
         // the restart's handle.
-        defer { hierarchyState.parentTipPushTask.clear(token) }
-        while hierarchyState.parentTipPushDirty, !Task.isCancelled,
-              hierarchyState.parentTipPushTask.holds(token),
+        defer { hierarchyState.refusedHintResendTask.clear(token) }
+        while hierarchyState.refusedHintResendDirty, !Task.isCancelled,
+              hierarchyState.refusedHintResendTask.holds(token),
               isCurrentRuntime(generation: generation, process: process) {
-            hierarchyState.parentTipPushDirty = false
+            hierarchyState.refusedHintResendDirty = false
             await resendRefusedChildEvidenceHints(
                 generation: generation, process: process
             )
-            await refreshParentTipContext(process: process, generation: generation)
-            guard !Task.isCancelled,
-                  isCurrentRuntime(generation: generation, process: process),
-                  let context = hierarchyState.parentTipContext else { return }
-            for (key, role) in hierarchyRoles {
-                // Each push suspends: the next child is pushed only while
-                // this run still owns the slot and its generation runs.
-                guard hierarchyState.parentTipPushTask.holds(token),
-                      isCurrentRuntime(generation: generation, process: process)
-                else { return }
-                guard case .child(let childPath) = role,
-                      isChildEvidenceReady(key),
-                      let peer = hierarchyState.hierarchyRecords[key]?.session,
-                      sequence(hierarchyState.hierarchyRecords[key]?.pushedSequence, on: peer) != context.sequence
-                else { continue }
-                await pushParentTipContext(context, to: peer, childPath: childPath)
-            }
         }
     }
 
@@ -286,237 +94,6 @@ extension NodeNetworkRuntime {
         await hierarchySendReturnedForTesting?(topic, sent)
         #endif
         return sent
-    }
-
-    private static func sameRewardPlan(
-        _ lhs: [MiningReward], _ rhs: [MiningReward]
-    ) -> Bool {
-        guard lhs.count == rhs.count else { return false }
-        for (a, b) in zip(lhs, rhs) {
-            guard a.chainPath == b.chainPath,
-                  a.transaction.body.rawCID == b.transaction.body.rawCID,
-                  a.transaction.signatures == b.transaction.signatures
-            else { return false }
-        }
-        return true
-    }
-
-    private func pushParentTipContext(
-        _ context: ParentTipContext,
-        to peer: AuthenticatedPeer,
-        childPath: [String]
-    ) async {
-        guard let process else { return }
-        let rewards = context.rewards.filter {
-            $0.chainPath.count >= childPath.count
-                && Array($0.chainPath.prefix(childPath.count)) == childPath
-        }
-        let minimumWork = context.minimumWork.filter {
-            $0.chainPath.count >= childPath.count
-                && Array($0.chainPath.prefix(childPath.count)) == childPath
-        }
-        guard let resolvedRewards = await resolvedMiningRewards(
-            rewards, process: process, generation: runtimeGeneration
-        ), let payload = try? ParentTipContextMessage(
-            sequence: context.sequence,
-            childPath: childPath,
-            tipCID: context.tipCID,
-            tipData: context.tipData,
-            rewards: resolvedRewards,
-            minimumWork: minimumWork
-        ).encoded() else {
-            SyncTrace.log("parent tip push to \(childPath.joined(separator: "/")) not built")
-            return
-        }
-        let sent = await sendToHierarchyPeer(
-            peer,
-            topic: NodeNetworkTopic.parentTipAvailable,
-            payload: payload
-        )
-        if case .enqueued = sent {
-            // The session may have ended while the send was suspended: the
-            // record, if any, belongs to it only while it is still live.
-            hierarchyState.hierarchyRecords.update(session: peer) {
-                $0.pushedSequence = SessionSequence(
-                    sessionID: peer.sessionID, sequence: context.sequence
-                )
-            }
-        } else {
-            SyncTrace.log("parent tip push to \(childPath.joined(separator: "/")) not sent: \(sent)")
-        }
-    }
-
-    /// Rebuild this chain's candidate for its parent and push it. Coalescing:
-    /// a change during a build marks the task dirty and it runs once more,
-    /// with the inputs that stand then, and no pause: a candidate the parent
-    /// already left behind is not carried, so the rebuild is the only way
-    /// into the next carrier.
-    func scheduleCandidateOffer(
-        generation: UInt64,
-        process: ChainProcess
-    ) {
-        guard isCurrentRuntime(generation: generation, process: process),
-              hierarchyState.receivedParentTip != nil,
-              chain?.networkCapabilities.contains(.childCandidates) == true
-        else { return }
-        hierarchyState.candidateOfferDirty = true
-        hierarchyState.candidateOfferTask.start { token in
-            Task { [weak self] in
-                await self?.runCandidateOffers(
-                    token: token,
-                    generation: generation,
-                    process: process
-                )
-            }
-        }
-    }
-
-    private func runCandidateOffers(
-        token: LifetimeToken,
-        generation: UInt64,
-        process: ChainProcess
-    ) async {
-        defer { hierarchyState.candidateOfferTask.clear(token) }
-        while hierarchyState.candidateOfferDirty, !Task.isCancelled,
-              hierarchyState.candidateOfferTask.holds(token),
-              isCurrentRuntime(generation: generation, process: process) {
-            hierarchyState.candidateOfferDirty = false
-            await offerCandidate(generation: generation, process: process)
-        }
-    }
-
-    private func offerCandidate(
-        generation: UInt64,
-        process: ChainProcess
-    ) async {
-        // Nothing to offer before this chain's genesis is active; the next
-        // state change (activation commits) offers.
-        guard await process.status().phase == .active else { return }
-        // A candidate this chain built that the parent's evidence names as
-        // carried and still holds in the inbox (undecided), now ready for
-        // or in its admission: the carried block is about to be this
-        // chain's weighed tip, and a candidate built now, on the tip before
-        // it, would only be its sibling. The inbox is written only from the
-        // configured parent's evidence, so no overlay peer can populate
-        // this set; an announcement can at most re-ready an inbox entry's
-        // own attempt. Offer once the admission decides or parks; the
-        // drain re-arms the offer either way. An open gate also clears a
-        // deferral the drain never got to read.
-        let pendingHandoff = (try? await process.store.pendingHandoffChildCIDs()) ?? []
-        guard isCurrentRuntime(generation: generation, process: process) else {
-            return
-        }
-        guard offerGate(pendingHandoff: pendingHandoff) else {
-            SyncTrace.log("candidate offer deferred: own carried candidate awaiting admission")
-            return
-        }
-        guard let context = hierarchyState.receivedParentTip,
-              hierarchyState.hierarchyRecords[context.peer.key]?.session?.sessionID
-                == context.peer.sessionID,
-              hierarchyState.hierarchyRecords[context.peer.key]?.role == .parent,
-              let chain,
-              chain.networkCapabilities.contains(.childCandidates),
-              let carrier = Self.provisionalCarrier(
-                on: context.tip,
-                tipCID: context.tipCID
-              ) else { return }
-        let parentSource = IvyRootContentSource(
-            ivy: hierarchy,
-            peer: context.peer,
-            policy: configuration.resourcePolicy
-        )
-        let deadline = ContinuousClock.now
-            + planeConfigurations.hierarchy.requestTimeout
-        let built: DirectChildCandidate?
-        do {
-            built = try await parentSource.withRoot(
-                context.tipCID,
-                operation: { session in
-                    try await ChildCandidateBudget.$deadline.withValue(deadline) {
-                        try await chain.miningCandidate(
-                            for: ChildCandidateRequestContext(
-                                parentCarrier: carrier,
-                                rewards: context.rewards,
-                                minimumWork: context.minimumWork
-                            ),
-                            parentContentSource: session
-                        )
-                    }
-                }
-            )
-        } catch {
-            SyncTrace.log("candidate offer build failed: \(error)")
-            return
-        }
-        guard let candidate = built,
-              isCurrentRuntime(generation: generation, process: process),
-              hierarchyState.hierarchyRecords[context.peer.key]?.session?.sessionID
-                == context.peer.sessionID,
-              candidate.directory == configuration.address.directory,
-              let blockData = candidate.block.toData(),
-              let childCID = try? BlockHeader(node: candidate.block).rawCID
-        else { return }
-        // The same candidate again says nothing new to the parent.
-        if childCID == hierarchyState.lastOfferedCandidateCID { return }
-        hierarchyState.nextCandidateOfferSequence &+= 1
-        guard let payload = try? ChildCandidateAvailableMessage(
-            sequence: hierarchyState.nextCandidateOfferSequence,
-            childPath: configuration.chainPath,
-            childCID: childCID,
-            blockData: blockData,
-            searchWitness: candidate.searchWitness
-        ).encoded() else { return }
-        let sent = await hierarchy.sendMessage(
-            to: context.peer,
-            topic: NodeNetworkTopic.childCandidateAvailable,
-            payload: payload
-        )
-        // The parent session (or the runtime) may have ended while the send
-        // was suspended; its end reset the last-offered mark, which a late
-        // write would re-set against the next session.
-        guard isCurrentRuntime(generation: generation, process: process),
-              hierarchyState.hierarchyRecords[context.peer.key]?.session?.sessionID
-                == context.peer.sessionID else { return }
-        if case .enqueued = sent {
-            hierarchyState.lastOfferedCandidateCID = childCID
-            SyncTrace.log("candidate offered \(hierarchyState.nextCandidateOfferSequence): h=\(candidate.block.height) for tip=\(context.tipCID.prefix(12))")
-        } else {
-            // Not sent: the next change rebuilds and tries again; the
-            // last-offered mark is untouched so the retry is not deduplicated.
-            SyncTrace.log("candidate offer not sent: \(sent)")
-        }
-    }
-
-    /// The carrier a child builds against without a parent template: a block
-    /// on the parent's tip whose `prevState` is the tip's post-state — the
-    /// one field the builder takes from a carrier — stamped now. Every real
-    /// carrier the parent later mines on that tip has the same `prevState`,
-    /// so the candidate fits any of them.
-    private static func provisionalCarrier(
-        on tip: Block,
-        tipCID: String
-    ) -> Block? {
-        guard let emptyTransactions = try? HeaderImpl<
-                  MerkleDictionaryImpl<VolumeImpl<Transaction>>
-              >(node: MerkleDictionaryImpl<VolumeImpl<Transaction>>()),
-              let emptyChildren = try? HeaderImpl<ChildIndex>(node: ChildIndex()),
-              tip.height < UInt64.max else { return nil }
-        let now = Int64(Date().timeIntervalSince1970 * 1_000)
-        return Block(
-            version: tip.version,
-            parent: VolumeImpl<Block>(rawCID: tipCID),
-            transactions: emptyTransactions,
-            target: tip.nextTarget,
-            nextTarget: tip.nextTarget,
-            spec: tip.spec,
-            parentState: tip.parentState,
-            prevState: tip.postState.removingNode(),
-            postState: tip.postState.removingNode(),
-            children: emptyChildren,
-            height: tip.height + 1,
-            timestamp: max(now, tip.timestamp + 1),
-            nonce: 0
-        )
     }
 
     func parentEvidenceSession(
@@ -843,10 +420,10 @@ extension NodeNetworkRuntime {
                 // costs a retry, never the session. Recycling here made
                 // every busy round a reconnect, and a child bootstrapping
                 // through it never became ready. The hint is re-sent on the
-                // next push run; a child scans the index only on a hello or
+                // next resend run; a child scans the index only on a hello or
                 // an admission, so a refused hint left alone strands the
                 // entry until the next delivered one.
-                SyncTrace.log("child evidence announcement to \(childPath.joined(separator: "/")) not enqueued: \(result); re-sent on the next push run")
+                SyncTrace.log("child evidence announcement to \(childPath.joined(separator: "/")) not enqueued: \(result); re-sent on the next resend run")
                 hierarchyState.hierarchyRecords.update(session: peer) { $0.refusedHint = payload }
                 if bootstrapping {
                     finishChildEvidencePublication(
@@ -984,10 +561,6 @@ extension NodeNetworkRuntime {
             waiter.continuation.resume(returning: false)
         }
         let removedRole = removed?.role
-        Self.pruneChildPeerRotations(
-            &hierarchyState.childPeerRotation,
-            activeRoles: hierarchyRoles.map(\.value)
-        )
         if case .child(let path)? = removedRole, let directory = path.last,
            !hierarchyRoles.map(\.value).contains(where: { role in
                guard case .child(let other) = role else { return false }
@@ -1000,10 +573,6 @@ extension NodeNetworkRuntime {
         }
         if case .parent? = removedRole {
             purgeHierarchyRequests()
-        }
-        if hierarchyState.receivedParentTip?.peer.key == key {
-            hierarchyState.receivedParentTip = nil
-            hierarchyState.lastOfferedCandidateCID = nil
         }
     }
 
@@ -1660,115 +1229,6 @@ extension NodeNetworkRuntime {
                 process: process
             )
 
-        case (NodeNetworkTopic.parentTipAvailable, .parent):
-            guard let context = try? ParentTipContextMessage.decoded(
-                    message.payload
-                  ), context.childPath == configuration.chainPath,
-                  let tip = _contentBoundBlock(
-                    cid: context.tipCID,
-                    data: context.tipData
-                  ) else {
-                SyncTrace.log("parent tip dropped: undecodable or unbound")
-                return
-            }
-            // Sequences are per session: a lower one on the same session is
-            // a reordered stale push; a new session starts over.
-            if let current = hierarchyState.receivedParentTip,
-               current.peer.sessionID == peer.sessionID,
-               context.sequence <= current.sequence {
-                SyncTrace.log("parent tip dropped: stale sequence \(context.sequence) <= \(current.sequence)")
-                return
-            }
-            hierarchyState.receivedParentTip = ReceivedParentTipContext(
-                sequence: context.sequence,
-                peer: peer,
-                tipCID: context.tipCID,
-                tip: tip,
-                rewards: context.rewards,
-                minimumWork: context.minimumWork
-            )
-            SyncTrace.log("parent tip \(context.sequence): h=\(tip.height) tip=\(context.tipCID.prefix(12)) rewards=\(context.rewards.count)")
-            scheduleCandidateOffer(generation: generation, process: process)
-
-        case (NodeNetworkTopic.childCandidateAvailable, .child(let childPath)):
-            // Only a child this chain has wired in, and only once there is a
-            // context to build against: a legitimate child pushes for a
-            // context it received. Nothing is decoded for anyone else.
-            guard isChildEvidenceReady(peer.key),
-                  hierarchyState.parentTipContext != nil else {
-                SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: not ready or no context")
-                return
-            }
-            // The frame's head names the candidate; what it names decides
-            // whether the block is decoded at all. The same candidate
-            // again, or a reordered older one, says nothing new: no
-            // decode, no rebuild, whatever sequence it wears.
-            guard let head = ChildCandidateAvailableMessage.peek(message.payload),
-                  head.childPath == childPath,
-                  let directory = childPath.last else {
-                SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: malformed head")
-                return
-            }
-            // Sequences are per session: a candidate cached from an
-            // earlier session of this peer (a restart Ivy replaced before
-            // the disconnect reached us) neither dedupes nor orders this one.
-            if let cached = hierarchyState.hierarchyRecords[peer.key]?.offer,
-               cached.sessionID == peer.sessionID {
-                if cached.childCID == head.childCID {
-                    SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: already held")
-                    return
-                }
-                if head.sequence <= cached.sequence {
-                    SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: stale sequence")
-                    return
-                }
-            }
-            guard let offer = try? ChildCandidateAvailableMessage.decoded(
-                    message.payload
-                  ), offer.childPath == childPath else {
-                SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: undecodable")
-                return
-            }
-            guard let block = _contentBoundBlock(
-                    cid: offer.childCID,
-                    data: offer.blockData
-                  ) else {
-                SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: unbound")
-                return
-            }
-            let candidate = DirectChildCandidate(
-                directory: directory,
-                block: block,
-                searchWitness: offer.searchWitness,
-                advertiserPeerKey: peer.key
-            )
-            guard await schedulingTargets(for: candidate) != nil else {
-                SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: no scheduling target")
-                return
-            }
-            guard isCurrentRuntime(generation: generation, process: process),
-                  hierarchyState.hierarchyRecords[peer.key]?.session?.sessionID == peer.sessionID else {
-                return
-            }
-            if let cached = hierarchyState.hierarchyRecords[peer.key]?.offer,
-               cached.sessionID == peer.sessionID,
-               offer.sequence <= cached.sequence {
-                SyncTrace.log("child candidate from \(childPath.joined(separator: "/")) dropped: stale sequence")
-                return
-            }
-            hierarchyState.hierarchyRecords.update(session: peer) {
-                $0.offer = CachedChildCandidate(
-                    sequence: offer.sequence,
-                    sessionID: peer.sessionID,
-                    childCID: offer.childCID,
-                    candidate: candidate
-                )
-            }
-            SyncTrace.log("child candidate cached from \(childPath.joined(separator: "/")): h=\(block.height) parentState=\(block.parentState.rawCID.prefix(12)) seq=\(offer.sequence)")
-            // This chain's own candidate now carries a fresher child: rebuild
-            // it for our parent, if we have one.
-            scheduleCandidateOffer(generation: generation, process: process)
-
         default:
             break
         }
@@ -1885,9 +1345,7 @@ extension NodeNetworkRuntime {
                 await hierarchy.recycleSession(ifCurrent: peer)
                 return
             }
-            // A child wired in builds against this chain's current context:
-            // the push task sends it to every ready child that lacks it.
-            scheduleParentTipPush(generation: generation, process: process)
+            scheduleRefusedHintResend(generation: generation, process: process)
             scheduleChildProofRecovery(
                 generation: generation,
                 process: process
@@ -2362,88 +1820,6 @@ extension NodeNetworkRuntime {
             generation: generation,
             process: process
         )
-    }
-
-    private func resolvedMiningRewards(
-        _ rewards: [MiningReward],
-        process: ChainProcess,
-        generation: UInt64
-    ) async -> [MiningReward]? {
-        var resolved: [MiningReward] = []
-        resolved.reserveCapacity(rewards.count)
-        for reward in rewards {
-            if reward.transaction.body.node != nil {
-                resolved.append(reward)
-                continue
-            }
-            guard
-                let data = try? await process.fetch(
-                    rawCid: reward.transaction.body.rawCID
-                  ), let body = TransactionBody(data: data),
-                isCurrentRuntime(generation: generation, process: process),
-                  body.toData() == data,
-                  let header = try? HeaderImpl<TransactionBody>(node: body),
-                header.rawCID == reward.transaction.body.rawCID
-            else {
-                return nil
-            }
-            resolved.append(
-                MiningReward(
-                chainPath: reward.chainPath,
-                transaction: Transaction(
-                    signatures: reward.transaction.signatures,
-                    body: header
-                )
-            ))
-        }
-        return resolved
-    }
-
-    private func selectedChildPeers() -> [(Int, PeerKey, [String])] {
-        var paths: [String: [String]] = [:]
-        var peers: [String: [PeerKey]] = [:]
-        for (key, role) in hierarchyRoles {
-            guard case .child(let path) = role,
-                  isChildEvidenceReady(key) else {
-                continue
-            }
-            let pathKey = path.joined(separator: "/")
-            paths[pathKey] = path
-            peers[pathKey, default: []].append(key)
-        }
-
-        let pathKeys = peers.keys.sorted()
-        let pathRotation = Self.rotatedPeerIndices(
-            peerCount: pathKeys.count,
-            start: hierarchyState.childPathRotation,
-            limit: min(pathKeys.count, Self.maximumDirectChildren)
-        )
-        hierarchyState.childPathRotation = pathRotation.next
-
-        var selectedPaths: [(path: [String], peers: [PeerKey])] = []
-        for pathIndex in pathRotation.indices {
-            let pathKey = pathKeys[pathIndex]
-            guard let path = paths[pathKey] else { continue }
-            let keys = peers[pathKey]!.sorted { $0.hex < $1.hex }
-            let start = (hierarchyState.childPeerRotation[pathKey] ?? 0) % keys.count
-            let rotation = Self.rotatedPeerIndices(
-                peerCount: keys.count,
-                start: start,
-                limit: min(Self.maximumPeersPerChildPath, keys.count)
-            )
-            selectedPaths.append((path, rotation.indices.map { keys[$0] }))
-            hierarchyState.childPeerRotation[pathKey] = rotation.next
-        }
-
-        var selected: [(Int, PeerKey, [String])] = []
-        for (pathIndex, peerIndex) in Self.interleavedChildPeerIndices(
-            peerCounts: selectedPaths.map { $0.peers.count },
-            limit: Self.maximumDirectChildren
-        ) {
-            let path = selectedPaths[pathIndex]
-            selected.append((selected.count, path.peers[peerIndex], path.path))
-        }
-        return selected
     }
 
     func authenticatedChildDirectories() -> [String] {

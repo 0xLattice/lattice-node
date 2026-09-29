@@ -166,6 +166,10 @@ chain's node, feeding one pre-signed reward per block, in nonce order:
   loop holds. Re-emit the batch from the key's next expected nonce.
 - Re-emit before the batch runs out (`mine status` shows the runway) and
   before a halving boundary.
+- Run one miner payout plan per node. A node serves one plan at a time (the
+  rewards and minimum work a template names for child chains), so miners with
+  different plans on one node thrash and their templates mostly carry no
+  child blocks. See [operations.md](operations.md#external-mining-services).
 
 ## Deploying a child chain
 

@@ -8,17 +8,7 @@ import cashew
 /// operations are no-ops; an omitted body source admits broker-only and an
 /// omitted evidence source finds nothing.
 final class ClosureNetworkInterface: NetworkInterface {
-    typealias ChildCandidateProvider = @Sendable (
-        ChildCandidateRequestContext
-    ) async throws -> [DirectChildCandidate]
     typealias ChainStateChangePublisher = @Sendable () async -> Void
-    typealias DescendantPlanPublisher = @Sendable (
-        _ rewards: [MiningReward],
-        _ minimumWork: [MiningMinimumWork]
-    ) async -> Void
-    typealias ChildCandidateDigestProvider = @Sendable (
-        _ parentStateCID: String
-    ) async -> [String]
     typealias ChildProofPublisher = @Sendable (
         DirectChildProofPublication
     ) async throws -> Void
@@ -33,54 +23,28 @@ final class ClosureNetworkInterface: NetworkInterface {
             -> NodeImportOutcome
     ) async throws -> NodeImportOutcome
 
-    private let childCandidateProvider: ChildCandidateProvider
     private let chainStateChangePublisher: ChainStateChangePublisher
-    private let descendantPlanPublisher: DescendantPlanPublisher
-    private let childCandidateDigestProvider: ChildCandidateDigestProvider
     private let childProofPublisher: ChildProofPublisher
     private let acceptedBlockPublisher: AcceptedBlockPublisher
     private let acceptedTransactionPublisher: AcceptedTransactionPublisher
     private let executionBodySource: ExecutionBodyImport?
 
     init(
-        childCandidateProvider: @escaping ChildCandidateProvider,
         chainStateChangePublisher: @escaping ChainStateChangePublisher = {},
-        descendantPlanPublisher: @escaping DescendantPlanPublisher = { _, _ in },
-        childCandidateDigestProvider: @escaping ChildCandidateDigestProvider = { _ in [] },
         childProofPublisher: @escaping ChildProofPublisher,
         acceptedBlockPublisher: @escaping AcceptedBlockPublisher,
         acceptedTransactionPublisher: @escaping AcceptedTransactionPublisher = { _ in },
         executionBodySource: ExecutionBodyImport? = nil
     ) {
-        self.childCandidateProvider = childCandidateProvider
         self.chainStateChangePublisher = chainStateChangePublisher
-        self.descendantPlanPublisher = descendantPlanPublisher
-        self.childCandidateDigestProvider = childCandidateDigestProvider
         self.childProofPublisher = childProofPublisher
         self.acceptedBlockPublisher = acceptedBlockPublisher
         self.acceptedTransactionPublisher = acceptedTransactionPublisher
         self.executionBodySource = executionBodySource
     }
 
-    func directChildCandidates(
-        _ context: ChildCandidateRequestContext
-    ) async throws -> [DirectChildCandidate] {
-        try await childCandidateProvider(context)
-    }
-
     func chainStateChanged() async {
         await chainStateChangePublisher()
-    }
-
-    func updateDescendantPlan(
-        rewards: [MiningReward],
-        minimumWork: [MiningMinimumWork]
-    ) async {
-        await descendantPlanPublisher(rewards, minimumWork)
-    }
-
-    func childCandidateDigestInput(parentStateCID: String) async -> [String] {
-        await childCandidateDigestProvider(parentStateCID)
     }
 
     func publishChildProof(_ publication: DirectChildProofPublication) async throws {

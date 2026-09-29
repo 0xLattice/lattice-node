@@ -276,10 +276,6 @@ class NetworkTrustTestCase: XCTestCase {
         ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { [weak runtime] context in
-                    guard let runtime else { return [] }
-                    return await runtime.directChildCandidates(context)
-                },
                 chainStateChangePublisher: { [weak runtime] in
                     await runtime?.chainStateChanged()
                 },

@@ -252,6 +252,7 @@ extension NodeNetworkRuntime {
         sessionLeases.servingAncestorRange.removeAll()
         clearRangeSync()
         candidateWorker.cancel()
+        candidateOfferDeferredByAdmission = false
         blockFetcher.reset(
             retryWindow: planeConfigurations.overlay.requestTimeout
                 * Self.maximumCandidateWaitTicks
@@ -265,21 +266,9 @@ extension NodeNetworkRuntime {
         sessionLeases.portableEvidenceOrder.removeAll()
         sessionLeases.portableEvidenceWork.removeAll()
         parentEvidence.reset()
-        hierarchyState.parentTipContext = nil
-        hierarchyState.parentTipPushTask.cancel()
-        hierarchyState.parentTipPushDirty = false
-        hierarchyState.descendantRewards = []
-        hierarchyState.descendantMinimumWork = []
-        hierarchyState.receivedParentTip = nil
+        hierarchyState.refusedHintResendTask.cancel()
+        hierarchyState.refusedHintResendDirty = false
         hierarchyState.evidenceRoundStarting = false
-        hierarchyState.candidateOfferTask.cancel()
-        hierarchyState.candidateOfferDirty = false
-        hierarchyState.lastOfferedCandidateCID = nil
-        // Sequences are per session, and a restart is a new session.
-        hierarchyState.nextCandidateOfferSequence = 0
-        candidateOfferDeferredByAdmission = false
-        hierarchyState.childPeerRotation.removeAll()
-        hierarchyState.childPathRotation = 0
         hierarchyState.childProofPathRotation = 0
         hierarchyState.backfilledChildDirectories.removeAll()
         chain = nil

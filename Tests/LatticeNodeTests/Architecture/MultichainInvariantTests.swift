@@ -79,7 +79,6 @@ final class MultichainInvariantTests: XCTestCase {
         let parentService = ChainService(
             process: parent,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in }
             )
@@ -132,7 +131,6 @@ final class MultichainInvariantTests: XCTestCase {
         var childService: ChainService? = ChainService(
             process: try child(),
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in }
             )
@@ -527,7 +525,6 @@ final class MultichainInvariantTests: XCTestCase {
         let childService = ChainService(
             process: child,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in }
             ),
@@ -1192,7 +1189,6 @@ final class MultichainInvariantTests: XCTestCase {
         ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in }
             )
@@ -1206,7 +1202,6 @@ final class MultichainInvariantTests: XCTestCase {
         ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in }
             ),
@@ -1245,6 +1240,8 @@ final class MultichainInvariantTests: XCTestCase {
             self.served = served
         }
 
+        nonisolated var contentSource: any ContentSource { base.contentSource }
+
         func hasProducedState(_ stateCID: String) async -> Bool {
             await base.hasProducedState(stateCID)
         }
@@ -1259,6 +1256,10 @@ final class MultichainInvariantTests: XCTestCase {
 
         func anchoredGenesisCID(directory: String) async -> String? {
             await base.anchoredGenesisCID(directory: directory)
+        }
+
+        func validatedTip() async -> (cid: String, block: Block)? {
+            await base.validatedTip()
         }
 
         func runReport(carrier: String, directory: String) async -> ParentRunReport? {

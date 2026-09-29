@@ -57,7 +57,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
@@ -93,7 +92,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
@@ -162,7 +160,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
@@ -228,7 +225,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
@@ -317,7 +313,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
@@ -403,7 +398,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
@@ -529,7 +523,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
@@ -563,7 +556,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
@@ -651,7 +643,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
@@ -777,7 +768,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
@@ -917,28 +907,25 @@ final class DaemonHTTPTests: XCTestCase {
         let releaseProvider = Latch()
         let service = ChainService(
             process: process,
-            // Invoked from inside `buildMiningTemplate()` while `miningTemplate()`
-            // still holds the operation gate — parking here lets the test hold
-            // that gate open for a controlled duration.
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in
-                    await providerEntered.open()
-                    await releaseProvider.wait()
-                    return []
-                },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
         )
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
 
+        // Holds the operation gate, as a gated operation in flight does, for
+        // a controlled duration.
         let blockedTemplate = Task {
-            _ = try? await service.miningTemplate(MiningTemplateRequest())
+            await service.withOperationForTesting {
+                await providerEntered.open()
+                await releaseProvider.wait()
+            }
         }
         await providerEntered.wait()
 
         // A concurrent call to the GATED status() must queue behind the
-        // in-flight mining-template build.
+        // in-flight operation.
         let statusCompleted = CompletionFlag()
         let blockedStatus = Task { () -> ChainServiceStatusResponse in
             let result = await service.status()
@@ -993,7 +980,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
