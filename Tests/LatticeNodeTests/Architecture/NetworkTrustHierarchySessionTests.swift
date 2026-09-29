@@ -236,6 +236,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
     func testHierarchyHelloGrantsOnlyExactParentOrImmediateChildRole() throws {
         let parent = signingKey(43)
         let other = signingKey(44)
+        let hostedChild = signingKey(45)
         let configuration = try NodeConfiguration(
             chainPath: ["Nexus", "Payments"],
             storagePath: URL(fileURLWithPath: "/tmp/lattice-hierarchy-hello-test"),
@@ -244,7 +245,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             publicKey: peerKey(parent).hex,
             host: "127.0.0.1",
             port: 4002
-        ))
+        )).withHostedChild(directory: "Receipts", publicKey: peerKey(hostedChild).hex)
         let parentHello = ChainHello(
             nexusGenesisCID: configuration.nexusGenesisCID,
             chainPath: ["Nexus"]
@@ -271,7 +272,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         XCTAssertEqual(
             NodeNetworkRuntime.hierarchyRole(
                 for: childHello,
-                peerKey: peerKey(other).hex,
+                peerKey: peerKey(hostedChild).hex,
                 configuration: configuration
             ),
             .child(childPath)
@@ -281,8 +282,47 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
                 nexusGenesisCID: configuration.nexusGenesisCID,
                 chainPath: ["Nexus", "Other", "Receipts"]
             ),
-            peerKey: peerKey(other).hex,
+            peerKey: peerKey(hostedChild).hex,
             configuration: configuration
+        ))
+    }
+
+    func testHierarchyHelloRefusesAChildPathFromAKeyNotHostedForIt() throws {
+        let hostedChild = signingKey(45)
+        let claimant = signingKey(46)
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus", "Payments"],
+            storagePath: URL(fileURLWithPath: "/tmp/lattice-hierarchy-hello-test"),
+            privateKeyHex: String(repeating: "2d", count: 32)
+        ).withHostedChild(directory: "Receipts", publicKey: peerKey(hostedChild).hex)
+        let hello = { (directory: String) in
+            ChainHello(
+                nexusGenesisCID: configuration.nexusGenesisCID,
+                chainPath: ["Nexus", "Payments", directory]
+            )
+        }
+        // Any other key claiming the hosted child's path is refused.
+        XCTAssertNil(NodeNetworkRuntime.hierarchyRole(
+            for: hello("Receipts"),
+            peerKey: peerKey(claimant).hex,
+            configuration: configuration
+        ))
+        // The hosted child's key cannot claim a sibling it is not hosted for.
+        XCTAssertNil(NodeNetworkRuntime.hierarchyRole(
+            for: hello("Refunds"),
+            peerKey: peerKey(hostedChild).hex,
+            configuration: configuration
+        ))
+        // A level that hosts no child grants the child role to no one.
+        let unhosted = try NodeConfiguration(
+            chainPath: ["Nexus", "Payments"],
+            storagePath: URL(fileURLWithPath: "/tmp/lattice-hierarchy-hello-test"),
+            privateKeyHex: String(repeating: "2d", count: 32)
+        )
+        XCTAssertNil(NodeNetworkRuntime.hierarchyRole(
+            for: hello("Receipts"),
+            peerKey: peerKey(hostedChild).hex,
+            configuration: unhosted
         ))
     }
 

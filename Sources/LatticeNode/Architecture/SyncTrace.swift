@@ -5,9 +5,10 @@ import Foundation
 /// logging facility. Zero cost when disabled.
 ///
 /// `LATTICE_SYNC_TRACE=1` writes to stderr, which `lattice up` sends to the
-/// chain's log file. Any other non-empty value is treated as a file path;
-/// the pid is suffixed so sibling node processes sharing the env (root +
-/// child under one `lattice up`) never interleave writes.
+/// host's log file. Any other non-empty value is treated as a file path;
+/// the pid is suffixed so separate node processes sharing the env never
+/// interleave writes. One process hosts every level of its chain tree, so
+/// each line names the chain it traces (`[Nexus/Payments]`).
 enum SyncTrace {
     private static let destination: FileHandle? = {
         guard let value = ProcessInfo.processInfo
@@ -28,11 +29,29 @@ enum SyncTrace {
 
     static var enabled: Bool { destination != nil }
 
-    static func log(_ message: @autoclosure () -> String) {
+    static func log(chain: [String], _ message: @autoclosure () -> String) {
         guard let destination else { return }
-        destination.write(
-            Data("sync-trace \(Date().timeIntervalSince1970) \(message())\n"
-                .utf8)
-        )
+        destination.write(Data(
+            "sync-trace \(Date().timeIntervalSince1970) [\(chain.joined(separator: "/"))] \(message())\n"
+                .utf8
+        ))
+    }
+}
+
+extension ChainProcess {
+    nonisolated func syncTrace(_ message: @autoclosure () -> String) {
+        SyncTrace.log(chain: configuration.chainPath, message())
+    }
+}
+
+extension NodeNetworkRuntime {
+    nonisolated func syncTrace(_ message: @autoclosure () -> String) {
+        SyncTrace.log(chain: configuration.chainPath, message())
+    }
+}
+
+extension NodeStore {
+    nonisolated func syncTrace(_ message: @autoclosure () -> String) {
+        SyncTrace.log(chain: chainPath, message())
     }
 }

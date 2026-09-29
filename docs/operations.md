@@ -491,7 +491,7 @@ systemctl start lattice-node lattice-miner
 
 An empty Nexus directory recreates the exact pinned genesis automatically. An
 empty child directory returns to `awaitingGenesis` and must import its genesis
-again, which requires its configured parent to confirm the recorded CID.
+again, which requires its co-hosted parent level to confirm the recorded CID.
 
 Before running a recursive removal, resolve and verify the explicit path. Never
 target a home directory, workspace root, or an unresolved environment variable.

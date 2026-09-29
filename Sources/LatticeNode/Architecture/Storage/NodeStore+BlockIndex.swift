@@ -425,7 +425,7 @@ extension NodeStore {
         // never a wipe: only the disagreeing rows are rewritten.
         for (cid, leaf) in leafFlags.sorted(by: { $0.key < $1.key })
         where leaf != (childrenByParent[cid] == nil) {
-            SyncTrace.log("boot audit: repairing leaf flag block=\(cid.prefix(12))")
+            syncTrace("boot audit: repairing leaf flag block=\(cid.prefix(12))")
             try database.execute(
                 "UPDATE accepted_blocks SET leaf = ?1 WHERE block_cid = ?2",
                 params: [.int(childrenByParent[cid] == nil ? 1 : 0), .text(cid)]

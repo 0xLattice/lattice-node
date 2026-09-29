@@ -22,8 +22,10 @@ public enum ChainHostError: Error, Equatable, CustomStringConvertible {
 /// parent-first and stopped in reverse. Each child reads its parent facts
 /// from its co-hosted parent level (`LocalParentLevel`) and is told, in
 /// order, when the parent's tip moves and when a run the parent credits into
-/// its directory changes. Its parent endpoint is the parent's fact plane on
-/// loopback, which still carries the parent's evidence.
+/// its directory changes. Its parent endpoint is the parent's hierarchy
+/// plane on loopback, which carries only the parent's evidence. Each parent
+/// grants the hierarchy child role only to the process keys of the child
+/// levels it hosts.
 ///
 /// The level set is fixed when the host is built: a chain added to the
 /// configuration takes effect when the process restarts. Only the host's
@@ -33,7 +35,7 @@ public actor ChainHost {
     /// This level's configuration. The host wires a child's parent endpoint.
     public typealias Configure = @Sendable () throws -> NodeConfiguration
     private struct Level {
-        let configuration: NodeConfiguration
+        var configuration: NodeConfiguration
         var running: Running?
     }
 
@@ -58,6 +60,18 @@ public actor ChainHost {
                     address, chains[address]!, in: levels
                 ),
                 running: nil
+            )
+        }
+        // Each parent grants the hierarchy child role only to the process
+        // key of the child level it hosts.
+        for address in levels.keys {
+            guard let parent = address.parent,
+                  let child = levels[address]?.configuration,
+                  let hosting = levels[parent]?.configuration
+            else { continue }
+            levels[parent]?.configuration = hosting.withHostedChild(
+                directory: address.directory,
+                publicKey: child.processPublicKey
             )
         }
     }

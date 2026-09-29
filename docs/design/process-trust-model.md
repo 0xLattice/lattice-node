@@ -1,29 +1,32 @@
 # Process trust model
 
-## One process, one chain
+## One process, one chain tree
 
-Each process owns one absolute Nexus-inclusive chain path. External
-orchestration decides which processes run; a node starts and supervises no
-descendant processes.
+One `lattice-node` process hosts a chain tree: one level per absolute
+Nexus-inclusive chain path, each child co-hosted with its whole ancestry
+(`ChainHost`). The levels come from `lattice.json` (`--config`); a node spawns
+no other processes.
 
-The process topology follows direct chain relationships without collapsing
-them into one runtime:
+The levels follow direct chain relationships without collapsing them into one
+chain runtime:
 
 ```text
-Nexus process  ── authenticated facts ──▶  Nexus/Payments process
+Nexus level  ── in-process facts, loopback evidence ──▶  Nexus/Payments level
 ```
 
-The parent owns only its own chain. The child owns only its own chain. Neither
-process grants the other database access, enumeration, mutation, or consensus
-authority. An accepted direct relationship may request an exact set of CAS
-objects by CID; those read-only bytes are protocol availability, not access to
-the process's storage interface.
+The parent level owns only its own chain. The child level owns only its own
+chain. Neither grants the other database access, enumeration, mutation, or
+consensus authority. A child reads its parent facts through the narrow
+`ParentLevel` view, and a parent reads a child only through `ChildLevel`
+(its latest candidate, and enqueue-only notifications). An accepted direct
+relationship may request an exact set of CAS objects by CID; those read-only
+bytes are protocol availability, not access to the level's storage interface.
 
-## Configured parent route
+## Co-hosted parent level
 
 A non-Nexus chain runs only in the same `lattice-node` process as its whole
-ancestry, configured through `lattice.json` (`--config`). The host wires its
-parent endpoint to the co-hosted parent level's fact plane on loopback.
+ancestry. The host wires its parent endpoint to the co-hosted parent level's
+hierarchy plane on loopback, which carries only child evidence.
 
 The co-hosted parent level answers two narrow facts from its own validated
 state, read in-process: exact child deployment and forward state continuity
@@ -35,29 +38,31 @@ root.
 
 Transport identity and content validity answer different questions:
 
-- The configured key answers: "did this local parent-chain verdict come from my
-  configured immediate-parent process?"
+- The host answers: "did this parent-chain verdict come from my co-hosted
+  parent level?" It is the node's own validation of its own parent chain.
 - CIDs, proof of work, child-inclusion proofs, recursively validated state
   transitions, and consensus validation answer: "are these bytes valid?"
 
 Arbitrary peers provide only content-addressed Volumes. They cannot provide a
-parent verdict. The parent process derives a verdict only after validating its
+parent verdict. The parent level derives a verdict only after validating its
 own connected chain; the child never accepts a peer's claim that data was
-validated. A deployment should normally run and validate its own parent process
-recursively to Nexus. If an operator instead configures a remote parent process,
-that process is an explicit trust boundary: authentication proves identity, not
-honesty.
+validated. Because every child is co-hosted with its ancestry, the node
+validates its own parent chains recursively to Nexus; there is no remote
+parent to trust.
 
 ## Separate planes
 
-Same-chain overlay traffic and parent/child facts use separate Ivy instances.
-The hierarchy plane disables relay and carries only direct relationship facts.
-This prevents a public overlay peer from becoming a parent merely by claiming a
-path.
+Same-chain overlay traffic and parent/child evidence use separate Ivy
+instances. The hierarchy plane runs on loopback between co-hosted levels,
+disables relay, and carries only child-evidence delivery; parent facts, run
+reports, and candidates pass in-process. A public overlay peer therefore
+cannot become a parent merely by claiming a path.
 
-Direct children authenticate and advertise their absolute path on the hierarchy
-plane. The parent may request a candidate or publish a proof only for an
-immediate child whose path equals `parentPath + [directory]`.
+Direct children authenticate and advertise their absolute path on the
+hierarchy plane. The parent grants the child role only to the process key of
+the child level the host runs for that directory, whose path equals
+`parentPath + [directory]`; any other key claiming a child path is refused.
+The parent publishes a proof only to that child.
 
 Exact-CID exchange is explicitly enabled only on this private Ivy plane. A
 connection must complete its own compatible hierarchy hello before it may read
@@ -65,18 +70,11 @@ content; reconnecting with the same key does not inherit the previous
 connection's authorization. Requests cannot enumerate storage and must name a
 complete bounded selection. The response is non-secret content-addressed
 availability: the receiver verifies every CID and all Lattice evidence before
-the bytes can affect state. Any accepted replica for a locally issued direct
-child path may participate; a path claim remains routing, not branch authority.
+the bytes can affect state.
 
-During one bounded child-candidate round, the parent also serves the exact
-provisional carrier only when that carrier CID is the request root. The lease
-is reference-counted, scoped to the runtime generation, and removed after the
-round. It is never persisted and cannot be smuggled into a request rooted at
-unrelated durable content.
-
-The hierarchy receiver gives its one configured immediate parent a narrow
+The hierarchy receiver gives its co-hosted parent level a narrow
 transport-liveness exemption from its local Tally bucket. That exemption is
-limited to the private plane's exact configured bootstrap key; it does not
+limited to the private plane's exact parent key; it does not
 weaken the hierarchy hello, path, authenticated-parent, fact, or Lattice
 validation gates. Overlay peers and all other hierarchy peers remain
 Tally-gated.
@@ -90,10 +88,10 @@ incoming edge after validation and may relay complete content-verified root
 Volumes to same-chain peers.
 
 No child sends an edge inventory, accepted topology, coverage claim, or work
-back to its parent. Downstream, the parent maintains run state for the
-directories it hosts (spec §9.10) and serves each carrier's run to that
-directory's children beside bounded candidate and proof publication; upstream,
-it learns nothing. The child owns the exact vertical relation used for
+back to its parent. Downstream, the parent level maintains run state for the
+directories it hosts (spec §9.10) and hands each carrier's run to that
+directory's child level in-process, beside proof publication; upstream, it
+learns nothing but each hosted child's latest candidate. The child owns the exact vertical relation used for
 consensus projection.
 ## Genesis authority
 
@@ -105,10 +103,10 @@ The CID is checked before configured root bootstrap, never used as a
 peer-admission signature permit. Every child genesis is self-contained content
 that commits to the empty parent state. It becomes authoritative only after an
 accepted parent block stores the exact `GenesisAction(directory, childCID)`.
-The authenticated immediate-parent process acknowledges the exact tuple
+The co-hosted parent level answers for the exact tuple
 `(directory, childCID, empty parent state)` from its durable accepted facts
-before the child imports that genesis. The acknowledgement is unsigned, non-portable, and never persisted by
-the child as peer authority.
+before the child imports that genesis. The answer is a local read: unsigned,
+non-portable, and never persisted by the child as peer authority.
 
 Signature and signer fields inside a genesis block carry no authority and need
 no special empty shape. The exact genesis CID is the authorization: local
@@ -118,15 +116,14 @@ transactions after genesis remain signature-strict.
 ## Parent-state continuity and work
 
 For a non-genesis child candidate, equal parent-state references need no fact.
-Otherwise the child asks its authenticated immediate-parent process whether the
-new reference is transitively reachable from the predecessor's reference in
-that process's connected, validated block graph. Parent canonicity does not
-affect this immutable reachability fact. The response is a positive,
-session-bound acknowledgement of the exact request; silence or timeout remains
-retryable unavailability.
+Otherwise the child reads, from its co-hosted parent level, whether the parent
+executed from its genesis a block producing the candidate's `parentState`.
+Parent canonicity does not affect this immutable fact. A fact the parent
+level does not hold yet parks the candidate until the parent's tip moves; it
+is retryable unavailability, never a refusal.
 
 Grandparent validity is induction, not evidence relay. A parent block enters the
-parent's durable graph only after the parent process has applied this same rule
+parent's durable graph only after the parent level has applied this same rule
 against its own immediate parent. The child therefore never receives a
 grandparent path or verdict. Recovery replays node-owned immutable
 `ChainBlockFact`s and recomputes fork choice; it never restores a remote
@@ -140,19 +137,17 @@ fork choice only after the terminal child is accepted and connected.
 
 The parent therefore publishes no work totals, revisions, readiness marker, or
 child topology. Data availability remains separate: Ivy and VolumeBroker move
-proof Volumes, while each chain process independently validates its own blocks.
+proof Volumes, while each chain level independently validates its own blocks.
 ## Operational consequence
 
 Treat the co-hosted parent level as the only source of immediate-parent
 validity; its loopback endpoint is one route for availability. Other peers may
 supply identical Volumes, but they cannot replace the parent level's fact
-needed for a new parent-state movement. Keep process identity keys stable, restrict the hierarchy
-port to intended relationships, and back up identity separately from wipeable
-chain storage.
+needed for a new parent-state movement. Keep each level's identity key stable,
+keep the hierarchy port on loopback, and back up identity separately from
+wipeable chain storage.
 
-The parent acknowledgement authenticates a process identity, not honesty. It
-is unsigned and non-portable by design, so a Byzantine configured parent can
-equivocate between child nodes — reachable to one, silent to another — without
-leaving cryptographic evidence. Accepting that residual is the price of
-refusing light-client certificates; operators who cannot accept it run their
-own parent processes recursively to Nexus.
+A child trusts its parent level as it trusts its own binary: a bug in parent
+validation reaches the child directly, with no second implementation in
+between. There is no remote parent whose answer could differ between child
+nodes, and no light-client certificate.

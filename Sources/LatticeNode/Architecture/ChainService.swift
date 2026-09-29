@@ -1260,7 +1260,7 @@ public actor ChainService {
         // walk never withholds one, since building on the validated tip is
         // how a chain outweighs a branch it cannot validate.
         guard executionWalkWorker == nil else {
-            SyncTrace.log("child candidate deferred: validate walk stepping")
+            syncTrace("child candidate deferred: validate walk stepping")
             throw ChainServiceError.validateWalkInProgress
         }
         // Behind but not parked: this chain's last candidate landed and
@@ -1272,7 +1272,7 @@ public actor ChainService {
             let validated = await process.deepestValidatedCanonicalTip()?.height
             if let target = await process.canonicalTipHeight(),
                (validated.map { Int64($0) } ?? -1) < Int64(target) {
-                SyncTrace.log("child candidate deferred: validated \(validated.map(String.init) ?? "none") behind weighed \(target)")
+                syncTrace("child candidate deferred: validated \(validated.map(String.init) ?? "none") behind weighed \(target)")
                 reserveExecutionWalkWorker()
                 throw ChainServiceError.validateWalkInProgress
             }
@@ -1284,10 +1284,10 @@ public actor ChainService {
                 rewards: context.rewards,
                 minimumWork: context.minimumWork
             )
-            SyncTrace.log("child candidate built h=\(candidate.block.height)")
+            syncTrace("child candidate built h=\(candidate.block.height)")
             return candidate
         } catch {
-            SyncTrace.log("child candidate build failed: \(error)")
+            syncTrace("child candidate build failed: \(error)")
             throw error
         }
     }
@@ -1857,13 +1857,13 @@ public actor ChainService {
                 // network — a silent permanent stall at this height. Log it
                 // and re-attempt on the availability-park timer so it stays
                 // observable and never wedges silently.
-                SyncTrace.log(
+                syncTrace(
                     "validate walk h=\(nextHeight) store error: \(error)"
                 )
                 scheduleExecutionWalkRetry()
                 return false
             }
-            SyncTrace.log(
+            syncTrace(
                 "validate walk h=\(nextHeight) decision=\(outcome.decision)"
             )
             switch outcome.decision {
@@ -1956,7 +1956,7 @@ public actor ChainService {
         case .refused(let outcome):
             traced = "refused \(ChainProcess.refusalName(outcome))"
         }
-        SyncTrace.log("run-report applied: \(traced)")
+        syncTrace("run-report applied: \(traced)")
         if case .credited(_, let childBlock) = application {
             await pushChangedRuns(of: childBlock)
         }
@@ -1981,7 +1981,7 @@ public actor ChainService {
     /// child that has not yet admitted the block it carries.
     private func pushChangedRuns(of blockHash: String) async {
         for report in await process.runReports(changedBy: blockHash) {
-            SyncTrace.log("run changed by \(blockHash.prefix(16)): dir=\(report.directory) committer=\(report.blockHash.prefix(16)) run=\(report.runWork) own=\(report.ownWork)")
+            syncTrace("run changed by \(blockHash.prefix(16)): dir=\(report.directory) committer=\(report.blockHash.prefix(16)) run=\(report.runWork) own=\(report.ownWork)")
             guard report.runWork > report.ownWork else { continue }
             let key = "\(report.directory)/\(report.blockHash)"
             if let last = pushedRunWork[key], last >= report.runWork { continue }
@@ -2321,7 +2321,7 @@ public actor ChainService {
             let built = await buildReadyCandidate()
             guard !stopped, candidateRebuild.holds(token) else { return }
             if readySnapshot.swap(built)?.cid != built?.cid {
-                SyncTrace.log("ready candidate \(built.map { "h=\($0.candidate.block.height) \($0.cid.prefix(12))" } ?? "withdrawn")")
+                syncTrace("ready candidate \(built.map { "h=\($0.candidate.block.height) \($0.cid.prefix(12))" } ?? "withdrawn")")
                 // Outside this level's lease: the parent level only marks
                 // its own rebuild (§2.4).
                 await candidateChanged?()
@@ -2349,7 +2349,7 @@ public actor ChainService {
         // admission's end reports the change that rebuilds.
         let pendingHandoff = (try? await process.store.pendingHandoffChildCIDs()) ?? []
         guard await candidateGate(pendingHandoff) else {
-            SyncTrace.log("ready candidate withheld: own carried candidate awaiting admission")
+            syncTrace("ready candidate withheld: own carried candidate awaiting admission")
             return nil
         }
         guard let tip = await parentLevel.validatedTip() else { return nil }
@@ -2744,7 +2744,7 @@ public actor ChainService {
             }
             accepted.append(candidate)
         }
-        SyncTrace.log("child candidates: \(accepted.count) of \(childLevels.count) hosted children")
+        syncTrace("child candidates: \(accepted.count) of \(childLevels.count) hosted children")
         return accepted
     }
 
@@ -2970,5 +2970,11 @@ final class Published<Value: Sendable>: Sendable {
             defer { current = value }
             return current
         }
+    }
+}
+
+extension ChainService {
+    nonisolated func syncTrace(_ message: @autoclosure () -> String) {
+        SyncTrace.log(chain: process.configuration.chainPath, message())
     }
 }
