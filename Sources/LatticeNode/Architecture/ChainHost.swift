@@ -180,20 +180,20 @@ extension Node {
             return nil
         }
         let process = process
-        let network = network
-        return Task { [weak process, weak network] in
+        let confirm: @Sendable (String) async -> Bool = {
+            [weak network] childGenesisCID in
+            guard let network else { return false }
+            return await network.confirmParentRecordedChildGenesis(
+                childGenesisCID: childGenesisCID
+            )
+        }
+        return Task { [weak process] in
             while !Task.isCancelled {
                 guard let process else { return }
                 if await process.status().phase == .active { return }
                 if (try? await process.activateSeededChildGenesis(
                     seed: seed,
-                    confirmParentRecordedGenesis: { childGenesisCID in
-                        guard let network else { return false }
-                        return await network
-                            .confirmParentRecordedChildGenesis(
-                                childGenesisCID: childGenesisCID
-                            )
-                    }
+                    confirmParentRecordedGenesis: confirm
                 )) == true {
                     return
                 }
