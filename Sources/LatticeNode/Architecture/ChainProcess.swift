@@ -209,8 +209,9 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// CID the parent committed for this chain's directory. The parent only
     /// RECORDS the CID; the genesis bytes come from `source`:
     /// - `.seed`: the deployer seeded this node, which rebuilds the identical
-    ///   genesis. A rebuild that is not `anchoredCID` (a corrected re-deploy,
-    ///   a stale seed) is logged and not activated.
+    ///   genesis. A seed that does not build, or builds another CID than
+    ///   `anchoredCID` (a corrected re-deploy, a stale seed), is logged and
+    ///   answers `.notAnchoredGenesis`.
     /// - `.fetch`: this node adopted the child and fetches the genesis by
     ///   `anchoredCID` (content-addressed and self-verifying) through a
     ///   child-overlay provider. A miss yields `false` for the next trigger.
@@ -239,11 +240,21 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         switch source {
         case .seed(let seed):
             fetcher = localFetcher
-            node = try await ChildGenesisBuilder.build(
-                seed: seed,
-                chainPath: context.path,
-                fetcher: localFetcher
-            )
+            // A seed that does not build is no more the anchored genesis
+            // than one that builds another CID.
+            do {
+                node = try await ChildGenesisBuilder.build(
+                    seed: seed,
+                    chainPath: context.path,
+                    fetcher: localFetcher
+                )
+            } catch {
+                SyncTrace.log(
+                    "child-genesis seed does not build directory=\(directory)"
+                        + " error=\(error)"
+                )
+                return .notAnchoredGenesis
+            }
         case .fetch(let remoteSource):
             fetcher = try Self.attemptFetcher(
                 package: nil,

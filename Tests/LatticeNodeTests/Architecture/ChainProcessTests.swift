@@ -1466,6 +1466,27 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertEqual(tip, fixture.childHeader.rawCID)
     }
 
+    /// A seed that does not even build (here: a premine to an empty owner)
+    /// is not the anchored genesis either, so the caller falls back to the
+    /// fetch; it is never mistaken for a parent that did not confirm.
+    func testASeedThatDoesNotBuildIsNotTheAnchoredGenesis() async throws {
+        let fixture = try await childBootstrapFixture()
+        let process = try await ChainProcess.open(
+            configuration: fixture.configuration
+        )
+        let broken = ChildGenesisSeed(
+            spec: NexusGenesis.spec, premineTo: "", timestamp: 1
+        )
+        let outcome = try await process.activateChildGenesis(
+            anchoredCID: fixture.childHeader.rawCID,
+            from: .seed(broken),
+            confirmParentRecordedGenesis: { _ in true }
+        )
+        XCTAssertEqual(outcome, .notAnchoredGenesis)
+        let phase = await process.status().phase
+        XCTAssertEqual(phase, .awaitingGenesis)
+    }
+
     /// An adopting node holds no seed: the same entry point fetches the
     /// anchored CID from its remote source. A source that lacks it leaves
     /// the chain awaiting; one that serves it activates the genesis.

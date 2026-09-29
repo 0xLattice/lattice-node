@@ -33,8 +33,8 @@ public enum ChildGenesisActivation: Sendable, Equatable {
     case activated
     /// The chain is past `awaitingGenesis` (or is Nexus): nothing to do.
     case notAwaiting
-    /// The seed rebuilds to another CID than the anchored one, or the source
-    /// did not serve the anchored genesis.
+    /// The seed does not build, or builds another CID than the anchored
+    /// one, or the source did not serve the anchored genesis.
     case notAnchoredGenesis
     /// The parent's record did not confirm the genesis, or it did not
     /// bootstrap.

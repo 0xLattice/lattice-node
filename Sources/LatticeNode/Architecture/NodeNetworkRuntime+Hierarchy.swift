@@ -2153,7 +2153,7 @@ extension NodeNetworkRuntime {
     }
 
     /// One trigger of `activateGenesisIfRecorded`: this level's start, a
-    /// parent tip change, (adopted only) a child overlay hello, or the slow
+    /// parent tip change, a child overlay hello, or the slow
     /// retry after a failed fetch or confirm. One
     /// attempt runs at a time; a trigger that lands during an attempt runs
     /// one more after it, so no trigger is lost.
@@ -2185,12 +2185,11 @@ extension NodeNetworkRuntime {
         }
     }
 
-    /// A same-chain overlay peer completed its hello. An adopting child
-    /// fetches its genesis from a child-overlay provider, and this peer may
-    /// be one; a seeded child needs no provider.
+    /// A same-chain overlay peer completed its hello. A child still
+    /// awaiting its genesis may fetch it from this peer, seeded or not (a
+    /// seed that is not the anchored genesis falls back to the fetch). On an
+    /// active chain the attempt returns at once.
     func overlayPeerMayProvideGenesis() {
-        guard !FileManager.default.fileExists(atPath: genesisSeedURL.path)
-        else { return }
         triggerGenesisActivation()
     }
 
