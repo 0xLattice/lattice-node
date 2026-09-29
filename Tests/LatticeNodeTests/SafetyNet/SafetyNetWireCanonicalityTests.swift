@@ -267,20 +267,6 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
         }
     }
 
-    func testChildGenesisAnchorRequestIsCanonical() throws {
-        try assertCanonical(ChildGenesisAnchorRequestMessage.self, seed: 0x0b) { g in
-            ChildGenesisAnchorRequestMessage(requestID: self.nonZeroID(&g))
-        }
-    }
-
-    func testChildGenesisAnchorResponseIsCanonical() throws {
-        try assertCanonical(ChildGenesisAnchorResponseMessage.self, seed: 0x0c) { g in
-            ChildGenesisAnchorResponseMessage(
-                requestID: self.nonZeroID(&g), genesisCID: self.randomCID(&g)
-            )
-        }
-    }
-
     func testReadEndpointRequestIsCanonical() throws {
         try assertCanonical(ReadEndpointRequestMessage.self, seed: 0x0d) { g in
             ReadEndpointRequestMessage(

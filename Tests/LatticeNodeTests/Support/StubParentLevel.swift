@@ -45,6 +45,10 @@ actor StubParentLevel: ParentLevel {
         )
     }
 
+    func anchoredGenesisCID(directory: String) async -> String? {
+        await base?.anchoredGenesisCID(directory: directory)
+    }
+
     /// The parent now answers from what it holds.
     func release() { withheld = false }
 

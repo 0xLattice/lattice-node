@@ -21,6 +21,13 @@ public struct ChildGenesisSeed: Codable, Sendable {
     }
 }
 
+/// Where a child node gets its self-contained genesis bytes: rebuilt from
+/// the deployer's seed, or fetched by CID from a child-overlay provider.
+public enum ChildGenesisSource: Sendable {
+    case seed(ChildGenesisSeed)
+    case fetch(any ContentSource)
+}
+
 public enum ChildGenesisBuilder {
     /// Deterministically builds the self-contained child genesis (empty
     /// parentState, like a root genesis) that the parent only RECORDS by CID and

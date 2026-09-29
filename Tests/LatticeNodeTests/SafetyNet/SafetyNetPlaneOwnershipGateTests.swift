@@ -52,6 +52,8 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
         // Serving and discovering read URLs includes the wired children's.
         "anyChildDeclaredReadURL",
         "declaredReadURLs",
+        // A new same-chain peer may serve an adopting child its genesis.
+        "overlayPeerMayProvideGenesis",
     ]
 
     /// Overlay members hierarchy code may call.

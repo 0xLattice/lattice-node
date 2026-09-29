@@ -43,15 +43,10 @@ public struct Node: Sendable {
 
     /// Stop in dependency order: the network runtime first, so no ingress
     /// reaches the service, then the service stops and joins its background
-    /// work. `afterNetworkStops` runs between the two, for caller tasks that
-    /// the network's stop unblocks. Afterwards nothing but the caller holds
-    /// the process; its stores and storage lock close when the caller drops
-    /// it. Idempotent.
-    public func shutdown(
-        afterNetworkStops: () async -> Void = {}
-    ) async {
+    /// work. Afterwards nothing but the caller holds the process; its stores
+    /// and storage lock close when the caller drops it. Idempotent.
+    public func shutdown() async {
         await network.stop()
-        await afterNetworkStops()
         await service.shutdown()
     }
 }

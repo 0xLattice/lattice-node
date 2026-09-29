@@ -17,6 +17,7 @@ final class SafetyNetParentLevelGateTests: XCTestCase {
     private static let allowlist: Set<String> = [
         "hasProducedParentState",
         "store.issuedParentGenesisLink",
+        "anchoredChildGenesisCIDs",
     ]
 
     /// A call through the parent process, optionally through its store.

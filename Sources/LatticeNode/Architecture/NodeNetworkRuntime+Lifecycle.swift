@@ -120,10 +120,7 @@ extension NodeNetworkRuntime {
                 generation: runtimeGeneration,
                 process: process
             )
-            scheduleAdoptedGenesisBootstrap(
-                generation: runtimeGeneration,
-                process: process
-            )
+            triggerGenesisActivation()
             schedulePeerSearch(
                 generation: runtimeGeneration,
                 process: process
@@ -229,7 +226,8 @@ extension NodeNetworkRuntime {
         sessionLeases.activeTransactionVolumes.removeAll()
         hierarchyState.childProofRecoveryTask.cancel()
         genesisAnnounceTask.cancel()
-        hierarchyState.adoptedGenesisTask.cancel()
+        hierarchyState.genesisActivationTask.cancel()
+        hierarchyState.genesisActivationRequested = false
         hierarchyState.parentEvidenceOrphans.removeAll()
         hierarchyState.orphansAwaitingRoom.removeAll()
         hierarchyState.refetchedOrphans.removeAll()
@@ -252,10 +250,6 @@ extension NodeNetworkRuntime {
                 * Self.maximumCandidateWaitTicks
         )
         hierarchyState.pendingEvidenceIndexes.removeAll()
-        for pending in hierarchyState.pendingGenesisResolves.values {
-            pending.continuation.resume(returning: nil)
-        }
-        hierarchyState.pendingGenesisResolves.removeAll()
         parentStateQueryGuard.removeAll()
         overlayState.rangeSync.reentryTask.cancel()
         sessionLeases.activeEvidenceVolumes.removeAll()

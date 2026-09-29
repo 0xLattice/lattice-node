@@ -35,11 +35,13 @@ extension NodeNetworkRuntime {
     }
 
     /// The co-hosted parent level changed. Delivered off the parent's lease;
-    /// it only wakes the candidates parked on a parent fact that now holds.
+    /// it wakes the candidates parked on a parent fact that now holds, and a
+    /// chain still awaiting its genesis looks for the parent's anchor.
     func parentChanged(_ change: ParentChange) async {
         switch change {
         case .tipChanged:
             parentTipChanges &+= 1
+            triggerGenesisActivation()
             await retryHeldParentFacts()
         }
     }

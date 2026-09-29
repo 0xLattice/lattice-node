@@ -113,6 +113,7 @@ extension NodeNetworkRuntime {
                   expectsOverlayHello(from: peer) else { return }
             removeOverlayHelloDeadline(for: peer.key, session: peer.sessionID)?.task.cancel()
             overlayState.overlayRecords.update(session: peer) { $0.session = .ready(peer) }
+            overlayPeerMayProvideGenesis()
             // Advertise the ACQUIRED (canonical, weighed-inclusive) tip: every
             // receiver measures its gap, its range-sync target and its edge
             // against acquired heights, so advertising the validated tip would
@@ -233,9 +234,8 @@ extension NodeNetworkRuntime {
             else { return }
             // The state walk behind declaredReadURLs runs only when this node
             // has anything to declare, single-flight per session, AND under
-            // the same global parent-state query capacity as the
-            // hierarchy-plane resolve of the identical subtrie — an overlay
-            // peer flood cannot multiply tip-state walks. Every other outcome
+            // a global parent-state query capacity — an overlay peer flood
+            // cannot multiply tip-state walks. Every other outcome
             // still answers empty: a fast negative beats making the asker
             // burn its timeout.
             var urls: [String] = []

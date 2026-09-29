@@ -100,10 +100,6 @@ final class WireProtocolFuzzTests: XCTestCase {
                 blockCIDs: [cids[1]],
                 hasMore: false
             )),
-            try seed(ChildGenesisAnchorRequestMessage(requestID: 21)),
-            try seed(ChildGenesisAnchorResponseMessage(
-                requestID: 22, genesisCID: cids[3]
-            )),
             try seed(ReadEndpointRequestMessage(requestID: 26, genesisCID: cids[2])),
             try seed(ReadEndpointResponseMessage(
                 requestID: 17,
@@ -241,8 +237,6 @@ final class WireProtocolFuzzTests: XCTestCase {
             probe(ForwardRangeResponseMessage.self),
             probe(AncestorRangeRequestMessage.self),
             probe(AncestorRangeResponseMessage.self),
-            probe(ChildGenesisAnchorRequestMessage.self),
-            probe(ChildGenesisAnchorResponseMessage.self),
             probe(ReadEndpointRequestMessage.self),
             probe(ReadEndpointResponseMessage.self),
             probe(PortableAttachmentLocateRequestMessage.self),

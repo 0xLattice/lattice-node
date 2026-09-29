@@ -3005,7 +3005,7 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
         let carrierHeader = try BlockHeader(node: carrier)
         let carrierAdmission = try await parentProcess.importBlock(carrierHeader)
         XCTAssertTrue(carrierAdmission.decision.isAccepted)
-        let activated = try await childProcess.activateSeededChildGenesis(
+        let activated = try await childProcess.activateChildGenesis(
             seed: seed,
             confirmParentRecordedGenesis: { _ in true }
         )

@@ -804,7 +804,7 @@ final class ChainProcessTests: XCTestCase {
         let fixture = try await childBootstrapFixture()
         let parentSource = fixture.source
         var process: ChainProcess? = try await ChainProcess.open(configuration: fixture.configuration)
-        let bootstrapped = try await process!.activateSeededChildGenesis(
+        let bootstrapped = try await process!.activateChildGenesis(
             seed: fixture.seed, confirmParentRecordedGenesis: { _ in true }
         )
         XCTAssertTrue(bootstrapped)
@@ -903,7 +903,7 @@ final class ChainProcessTests: XCTestCase {
         let fixture = try await childBootstrapFixture()
         let parentSource = fixture.source
         var process: ChainProcess? = try await ChainProcess.open(configuration: fixture.configuration)
-        let bootstrapped = try await process!.activateSeededChildGenesis(
+        let bootstrapped = try await process!.activateChildGenesis(
             seed: fixture.seed, confirmParentRecordedGenesis: { _ in true }
         )
         XCTAssertTrue(bootstrapped)
@@ -960,7 +960,7 @@ final class ChainProcessTests: XCTestCase {
         let fixture = try await childBootstrapFixture()
         let parentSource = fixture.source
         var process: ChainProcess? = try await ChainProcess.open(configuration: fixture.configuration)
-        let bootstrapped = try await process!.activateSeededChildGenesis(
+        let bootstrapped = try await process!.activateChildGenesis(
             seed: fixture.seed, confirmParentRecordedGenesis: { _ in true }
         )
         XCTAssertTrue(bootstrapped)
@@ -1043,7 +1043,7 @@ final class ChainProcessTests: XCTestCase {
         let fixture = try await childBootstrapFixture()
         let parentSource = fixture.source
         let process = try await ChainProcess.open(configuration: fixture.configuration)
-        let bootstrapped = try await process.activateSeededChildGenesis(
+        let bootstrapped = try await process.activateChildGenesis(
             seed: fixture.seed, confirmParentRecordedGenesis: { _ in true }
         )
         XCTAssertTrue(bootstrapped)
@@ -1150,7 +1150,7 @@ final class ChainProcessTests: XCTestCase {
         let fixture = try await childBootstrapFixture()
         let parentSource = fixture.source
         let process = try await ChainProcess.open(configuration: fixture.configuration)
-        let bootstrapped = try await process.activateSeededChildGenesis(
+        let bootstrapped = try await process.activateChildGenesis(
             seed: fixture.seed, confirmParentRecordedGenesis: { _ in true }
         )
         XCTAssertTrue(bootstrapped)
@@ -1227,7 +1227,7 @@ final class ChainProcessTests: XCTestCase {
         let fixture = try await childBootstrapFixture()
         let parentSource = fixture.source
         let process = try await ChainProcess.open(configuration: fixture.configuration)
-        let bootstrapped = try await process.activateSeededChildGenesis(
+        let bootstrapped = try await process.activateChildGenesis(
             seed: fixture.seed, confirmParentRecordedGenesis: { _ in true }
         )
         XCTAssertTrue(bootstrapped)
@@ -1347,7 +1347,7 @@ final class ChainProcessTests: XCTestCase {
         )
         XCTAssertNil(retainedRelay, "a deferred block persists no relay evidence")
 
-        let bootstrapped = try await process.activateSeededChildGenesis(
+        let bootstrapped = try await process.activateChildGenesis(
             seed: fixture.seed,
             confirmParentRecordedGenesis: { _ in true }
         )
@@ -1404,7 +1404,7 @@ final class ChainProcessTests: XCTestCase {
         var process: ChainProcess? = try await ChainProcess.open(
             configuration: fixture.configuration
         )
-        let bootstrapped = try await process!.activateSeededChildGenesis(
+        let bootstrapped = try await process!.activateChildGenesis(
             seed: fixture.seed,
             confirmParentRecordedGenesis: { _ in true }
         )
@@ -1434,6 +1434,65 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertNil(retry.sameChainPredecessor)
     }
 
+    /// The one activation entry point admits only the anchored CID: a seed
+    /// that rebuilds to another genesis is refused before the parent record
+    /// is even asked, and stays awaiting for the next trigger.
+    func testSeededChildGenesisActivatesOnlyAtTheAnchoredCID() async throws {
+        let fixture = try await childBootstrapFixture()
+        let process = try await ChainProcess.open(
+            configuration: fixture.configuration
+        )
+        let mismatched = try await process.activateChildGenesis(
+            anchoredCID: testCID("another-genesis"),
+            from: .seed(fixture.seed),
+            confirmParentRecordedGenesis: { _ in
+                XCTFail("asked the parent to confirm a genesis it did not anchor")
+                return true
+            }
+        )
+        XCTAssertFalse(mismatched)
+        var phase = await process.status().phase
+        XCTAssertEqual(phase, .awaitingGenesis)
+
+        let activated = try await process.activateChildGenesis(
+            anchoredCID: fixture.childHeader.rawCID,
+            from: .seed(fixture.seed),
+            confirmParentRecordedGenesis: { _ in true }
+        )
+        XCTAssertTrue(activated)
+        phase = await process.status().phase
+        XCTAssertEqual(phase, .active)
+        let tip = await process.status().tipCID
+        XCTAssertEqual(tip, fixture.childHeader.rawCID)
+    }
+
+    /// An adopting node holds no seed: the same entry point fetches the
+    /// anchored CID from its remote source. A source that lacks it leaves
+    /// the chain awaiting; one that serves it activates the genesis.
+    func testAdoptedChildGenesisIsFetchedByTheAnchoredCID() async throws {
+        let fixture = try await childBootstrapFixture()
+        let process = try await ChainProcess.open(
+            configuration: fixture.configuration
+        )
+        let missed = try await process.activateChildGenesis(
+            anchoredCID: fixture.childHeader.rawCID,
+            from: .fetch(InMemoryContentStore()),
+            confirmParentRecordedGenesis: { _ in true }
+        )
+        XCTAssertFalse(missed)
+        var phase = await process.status().phase
+        XCTAssertEqual(phase, .awaitingGenesis)
+
+        let activated = try await process.activateChildGenesis(
+            anchoredCID: fixture.childHeader.rawCID,
+            from: .fetch(fixture.source),
+            confirmParentRecordedGenesis: { _ in true }
+        )
+        XCTAssertTrue(activated)
+        phase = await process.status().phase
+        XCTAssertEqual(phase, .active)
+    }
+
     func testSeededChildGenesisIsNotActivatedWithoutTheParentRecord() async throws {
         let fixture = try await childBootstrapFixture()
         let process = try await ChainProcess.open(
@@ -1441,7 +1500,7 @@ final class ChainProcessTests: XCTestCase {
         )
         // Fail-closed: with no parent record confirming this genesis CID, the
         // node must refuse to self-admit and stay awaiting for the retry path.
-        let activated = try await process.activateSeededChildGenesis(
+        let activated = try await process.activateChildGenesis(
             seed: fixture.seed,
             confirmParentRecordedGenesis: { _ in false }
         )
@@ -3227,7 +3286,7 @@ final class ChainProcessTests: XCTestCase {
         let source = InMemoryContentStore()
         try await LatticeState.emptyHeader.storeRecursively(storer: source)
         // A self-contained child genesis the process rebuilds from `seed` and
-        // self-admits (activateSeededChildGenesis). The genesis is never carried;
+        // self-admits (activateChildGenesis). The genesis is never carried;
         // `package`/`proof` below only exercise the block-1 carrier-proof plumbing.
         let seed = ChildGenesisSeed(
             spec: NexusGenesis.spec, premineTo: nil, timestamp: 1
