@@ -97,7 +97,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Operator-declared browsable base URL for this chain's public read surface (e.g. https://toy.example.com — a TLS-fronted hostname a browser can dial, distinct from the IP-literal P2P plane). Advertised through the parent rendezvous so explorers can reach this chain; consumers verify the served genesis against the parent's on-chain anchor. Leave unset for nodes without a public TLS surface.")
     var publicReadUrl: String?
 
-    @Option(help: "Host every chain of this lattice.json tree in this one process: per-chain ports, peers and public-read settings come from the file, and each child is wired to its co-hosted parent over loopback. The single-chain options --parent, --data-directory, --identity-key, --peer, --public-read-port, --public-read-url and --external-address do not apply.")
+    @Option(help: "Host every chain of this lattice.json tree in this one process: per-chain ports, peers and public-read settings come from the file, and each child is wired to its co-hosted parent over loopback. Only --rpc-bind, --minimum-peer-key-bits, --overlay-max-connections-per-netgroup and --peer-search-interval apply to every level; every other single-chain option is refused.")
     var config: String?
 
     @Option(help: "Data root for --config: chains/<path> holds each chain's storage and identity/ its keys. Defaults to the config file's directory.")
@@ -836,15 +836,47 @@ private func decode<Value: Decodable>(
     }
 }
 
-private func decode<Value: Decodable, Context: RequestContext>(
+/// The one body decoder of the loopback operator POST routes. It first
+/// refuses what a web page could send: a body that is not declared JSON (a
+/// cross-origin form or text/plain POST is a "simple" request that needs no
+/// CORS preflight; requiring application/json forces the preflight the
+/// read-only CORS policy denies), and a Host naming anything but loopback (a
+/// DNS-rebinding page reaching this listener under a hostname it controls).
+func decode<Value: Decodable, Context: RequestContext>(
     _ request: Request,
     context: Context
 ) async throws -> Value {
+    try requireLoopbackJSON(request)
     do {
         return try await request.decode(as: Value.self, context: context)
     } catch {
         throw HTTPError(.badRequest)
     }
+}
+
+func requireLoopbackJSON(_ request: Request) throws {
+    let hosts = [request.head.authority].compactMap { $0 }
+        + request.headers.filter { $0.name.canonicalName == "host" }.map(\.value)
+    for host in hosts where !isLoopbackAuthority(host) {
+        throw HTTPError(.forbidden, message: "operator routes answer only a loopback Host")
+    }
+    let mediaType = request.headers[.contentType]?
+        .split(separator: ";").first?
+        .trimmingCharacters(in: .whitespaces).lowercased()
+    guard mediaType == "application/json" else {
+        throw HTTPError(.unsupportedMediaType, message: "Content-Type must be application/json")
+    }
+}
+
+private func isLoopbackAuthority(_ authority: String) -> Bool {
+    var host = Substring(authority.lowercased())
+    if host.hasPrefix("[") {
+        guard let close = host.firstIndex(of: "]") else { return false }
+        host = host[host.index(after: host.startIndex)..<close]
+    } else if let colon = host.lastIndex(of: ":") {
+        host = host[..<colon]
+    }
+    return ["127.0.0.1", "localhost", "::1"].contains(String(host))
 }
 
 private func serviceCall<Value: Encodable, Context: RequestContext>(

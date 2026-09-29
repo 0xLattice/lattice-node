@@ -257,6 +257,28 @@ public struct HostLevelRequest: Codable, Sendable {
     }
 }
 
+/// The chain paths `lattice.json` hosts, as the daemon's host-control route
+/// lists them.
+public struct HostLevels: Codable, Sendable {
+    public let paths: [String]
+
+    public init(paths: [String]) {
+        self.paths = paths
+    }
+}
+
+public enum HostLayoutError: Error, Equatable, CustomStringConvertible {
+    /// A pre-encoding identity key file that several chains map to.
+    case ambiguousLegacyIdentityKey(file: String, paths: [String])
+
+    public var description: String {
+        switch self {
+        case .ambiguousLegacyIdentityKey(let file, let paths):
+            "identity key \(file) could belong to any of \(paths.joined(separator: ", ")); rename it to the right chain's identityKey file by hand"
+        }
+    }
+}
+
 public struct CtlError: Error, CustomStringConvertible {
     public let description: String
     public init(_ description: String) { self.description = description }
@@ -272,11 +294,40 @@ public struct HostLayout: Sendable {
             ?? FileManager.default.currentDirectoryPath)
     }
 
+    /// Percent-encoded like `pendingDeploy`: `-` is a legal directory atom,
+    /// so flattening `/` to `-` gave `Nexus/A/B` and `Nexus/A-B` one key,
+    /// and one process cannot host two levels with one key.
     public func identityKey(for path: String) -> URL {
         root.appendingPathComponent("identity")
-            .appendingPathComponent(
-                path.replacingOccurrences(of: "/", with: "-") + ".key"
-            )
+            .appendingPathComponent(Self.encoded(path) + ".key")
+    }
+
+    /// Renames each chain's key file from the old flattened name to
+    /// `identityKey(for:)`, so an upgraded host keeps its identities. A
+    /// flattened name that more than one of `paths` maps to is ambiguous and
+    /// is refused rather than guessed.
+    public func migrateIdentityKeys(for paths: some Collection<String>) throws {
+        let manager = FileManager.default
+        for path in paths {
+            let flattened = path.replacingOccurrences(of: "/", with: "-")
+            let legacy = root.appendingPathComponent("identity")
+                .appendingPathComponent(flattened + ".key")
+            let current = identityKey(for: path)
+            guard legacy.path != current.path,
+                  manager.fileExists(atPath: legacy.path),
+                  !manager.fileExists(atPath: current.path) else {
+                continue
+            }
+            let sharing = paths.filter {
+                $0.replacingOccurrences(of: "/", with: "-") == flattened
+            }
+            guard sharing.count == 1 else {
+                throw HostLayoutError.ambiguousLegacyIdentityKey(
+                    file: legacy.path, paths: sharing.sorted()
+                )
+            }
+            try manager.moveItem(at: legacy, to: current)
+        }
     }
 
     public func chainDirectory(for path: String) -> URL {
@@ -290,13 +341,16 @@ public struct HostLayout: Sendable {
         // Percent-encoded, not `/`-flattened: `-` is a legal directory atom,
         // so flattening would give `Nexus/A/B` and `Nexus/A-B` one file, and
         // one child's genesis seed would overwrite the other's.
-        let encoded = path.addingPercentEncoding(
+        return root.appendingPathComponent("pending-deploy")
+            .appendingPathComponent(Self.encoded(path) + ".json")
+    }
+
+    private static func encoded(_ path: String) -> String {
+        path.addingPercentEncoding(
             withAllowedCharacters: CharacterSet.alphanumerics.union(
                 CharacterSet(charactersIn: "._-")
             )
         ) ?? path
-        return root.appendingPathComponent("pending-deploy")
-            .appendingPathComponent(encoded + ".json")
     }
 
     public func pidFile(for path: String) -> URL {

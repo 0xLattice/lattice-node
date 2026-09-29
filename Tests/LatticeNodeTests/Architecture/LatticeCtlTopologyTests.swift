@@ -180,6 +180,15 @@ final class LatticeCtlTopologyTests: XCTestCase {
             try await single.runHost(configPath: "lattice.json")
             XCTFail("--parent must be refused with --config")
         } catch {}
+        let ports = try LatticeNodeCommand.parse([
+            "--config", "lattice.json", "--listen-port", "5001",
+        ])
+        do {
+            try await ports.runHost(configPath: "lattice.json")
+            XCTFail("--listen-port must be refused with --config")
+        } catch {
+            XCTAssertTrue("\(error)".contains("--listen-port"))
+        }
     }
 
     func testRoundTripThroughDisk() throws {
@@ -392,10 +401,45 @@ final class LatticeCtlTopologyTests: XCTestCase {
     func testLayoutSeparatesIdentityFromWipeableChains() {
         let layout = HostLayout(root: "/var/lib/lattice")
         XCTAssertTrue(layout.identityKey(for: "Nexus/Payments").path
-            .hasSuffix("identity/Nexus-Payments.key"))
+            .hasSuffix("identity/Nexus%2FPayments.key"))
+        XCTAssertNotEqual(
+            layout.identityKey(for: "Nexus/A/B"),
+            layout.identityKey(for: "Nexus/A-B"),
+            "two levels of one host must never share a key"
+        )
         XCTAssertTrue(layout.chainDirectory(for: "Nexus/Payments").path
             .hasSuffix("chains/Nexus/Payments"))
         XCTAssertFalse(layout.identityKey(for: "Nexus").path
             .contains("/chains/"))
+    }
+
+    func testLegacyIdentityKeysMigrateUnlessAmbiguous() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ctl-keys-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let layout = HostLayout(root: root.path)
+        let identity = root.appendingPathComponent("identity")
+        try FileManager.default.createDirectory(
+            at: identity, withIntermediateDirectories: true
+        )
+        try Data("key".utf8).write(to: identity.appendingPathComponent("Nexus-Payments.key"))
+        try layout.migrateIdentityKeys(for: ["Nexus", "Nexus/Payments"])
+        XCTAssertEqual(
+            try Data(contentsOf: layout.identityKey(for: "Nexus/Payments")),
+            Data("key".utf8)
+        )
+
+        try Data("key".utf8).write(to: identity.appendingPathComponent("Nexus-A-B.key"))
+        XCTAssertThrowsError(
+            try layout.migrateIdentityKeys(for: ["Nexus", "Nexus/A", "Nexus/A/B", "Nexus/A-B"])
+        ) { error in
+            XCTAssertEqual(
+                error as? HostLayoutError,
+                .ambiguousLegacyIdentityKey(
+                    file: identity.appendingPathComponent("Nexus-A-B.key").path,
+                    paths: ["Nexus/A-B", "Nexus/A/B"]
+                )
+            )
+        }
     }
 }

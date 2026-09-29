@@ -5,16 +5,16 @@ import Glibc
 import Darwin
 #endif
 
-enum StorageDirectoryLockError: Error, Equatable {
+public enum StorageDirectoryLockError: Error, Equatable {
     case unavailable
     case alreadyLocked
 }
 
 /// A process-lifetime writer lock for one node storage directory.
-final class StorageDirectoryLock: Sendable {
+public final class StorageDirectoryLock: Sendable {
     private let descriptor: Int32
 
-    init(directory: URL) throws {
+    public init(directory: URL) throws {
         let path = directory.appendingPathComponent(".lattice-node.lock").path
         let descriptor = open(
             path,

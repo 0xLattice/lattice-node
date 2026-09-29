@@ -1307,11 +1307,11 @@ final class LatticeCtlE2ETests: XCTestCase {
         // 4. It is a real anchor: let miners record it and bring the child up.
         _ = try await runCtl(["mine", "start"], root: host.root)
         try await waitFor("the deploy finishes", seconds: 240) {
-            !again.process.isRunning
+            self.hasExited(again)
         }
         let finished = try awaitExit(again)
         try check(
-            again.process.terminationStatus == 0,
+            line(ChainAddress.nexus + "/Market:", in: finished) == "active",
             "the resumed deploy completed: \(finished)"
         )
         let childRPC = try childRPC(host, "Nexus/Market")
@@ -1364,20 +1364,38 @@ final class LatticeCtlE2ETests: XCTestCase {
         String(decoding: try Data(contentsOf: running.log), as: UTF8.self)
     }
 
-    /// Waits for a run that is expected to finish on its own.
+    /// Exited, judged by the pid as well as by Foundation: a child's
+    /// termination notice can go missing, and then `isRunning` and
+    /// `waitUntilExit()` never learn of the exit (it parked this suite for
+    /// over an hour; the pid was long gone).
+    private func hasExited(_ running: RunningCtl) -> Bool {
+        !running.process.isRunning
+            || kill(running.process.processIdentifier, 0) != 0
+    }
+
+    /// Waits, bounded, for a run that is expected to finish on its own.
     private func awaitExit(_ running: RunningCtl) throws -> String {
-        running.process.waitUntilExit()
+        let deadline = Date().addingTimeInterval(30)
+        while !hasExited(running), Date() < deadline {
+            usleep(50_000)
+        }
         try? running.handle.close()
         return try output(of: running)
     }
 
     /// SIGKILL: no exit handlers and no stdio flush, only what already
     /// reached the file.
+    /// Waits on the pid itself, bounded, not `waitUntilExit()` (see
+    /// `hasExited`).
     private func sigkill(_ running: RunningCtl) throws -> String {
+        let pid = running.process.processIdentifier
         if running.process.isRunning {
-            _ = kill(running.process.processIdentifier, SIGKILL)
+            _ = kill(pid, SIGKILL)
         }
-        running.process.waitUntilExit()
+        let deadline = Date().addingTimeInterval(30)
+        while !hasExited(running), Date() < deadline {
+            usleep(50_000)
+        }
         try? running.handle.close()
         return try output(of: running)
     }

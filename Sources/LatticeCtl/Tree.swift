@@ -186,6 +186,7 @@ struct Up: AsyncParsableCommand {
         try await withSpawnLock(layout) {
             if let pid = runningPid(layout, hostProcessName) {
                 print("already running (pid \(pid))")
+                try await attachUnhosted(topology)
                 return
             }
             try spawnHost(layout: layout)
@@ -203,6 +204,23 @@ struct Up: AsyncParsableCommand {
     }
 }
 
+/// Attaches the chains `lattice.json` lists that the running host does not
+/// host yet, parent-first.
+func attachUnhosted(_ topology: Topology) async throws {
+    guard let root = topology.chains[ChainAddress.nexus] else { return }
+    guard let url = URL(string: "http://127.0.0.1:\(root.rpc)/v1/host/levels") else {
+        throw CtlError("bad RPC URL")
+    }
+    var request = URLRequest(url: url)
+    request.timeoutInterval = 5
+    let (data, _) = try await URLSession.shared.data(for: request)
+    let hosted = Set(try JSONDecoder().decode(HostLevels.self, from: data).paths)
+    for path in topology.chains.keys.sorted() where !hosted.contains(path) {
+        try await attachLevel(path, topology: topology)
+        print("\(path): attached")
+    }
+}
+
 struct Down: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Stop the process hosting the tree; it stops the chains children first."
@@ -212,16 +230,27 @@ struct Down: AsyncParsableCommand {
 
     func run() async throws {
         let layout = rootOption.layout
-        guard let pid = runningPid(layout, hostProcessName) else { return }
+        // An upgrade from one process per chain can leave those processes
+        // running under their own pidfiles, children after parents.
+        let legacy = ((try? Topology.load(root: layout.root))?.chains.keys)
+            .map { $0.sorted().reversed() } ?? []
+        for path in legacy where runningPid(layout, path) != nil {
+            print("warning: \(path) still runs as its own process from an older lattice; stopping it")
+            try await stop(layout, path)
+        }
+        guard runningPid(layout, hostProcessName) != nil else { return }
+        try await stop(layout, hostProcessName)
+        print("stopped")
+    }
+
+    private func stop(_ layout: HostLayout, _ name: String) async throws {
+        guard let pid = runningPid(layout, name) else { return }
         kill(pid, SIGTERM)
-        for _ in 0..<300 where runningPid(layout, hostProcessName) != nil {
+        for _ in 0..<300 where runningPid(layout, name) != nil {
             try await Task.sleep(for: .milliseconds(100))
         }
-        if runningPid(layout, hostProcessName) != nil { kill(pid, SIGKILL) }
-        try? FileManager.default.removeItem(
-            at: layout.pidFile(for: hostProcessName)
-        )
-        print("stopped")
+        if runningPid(layout, name) != nil { kill(pid, SIGKILL) }
+        try? FileManager.default.removeItem(at: layout.pidFile(for: name))
     }
 }
 
@@ -281,7 +310,17 @@ struct Wipe: AsyncParsableCommand {
         guard directory.path.hasPrefix(container.path + "/") else {
             throw CtlError("refusing to remove unexpected path \(directory.path)")
         }
+        // The node's own writer lock: held by any process still serving this
+        // chain, whatever the pidfiles say.
+        let lock: StorageDirectoryLock?
+        do {
+            lock = FileManager.default.fileExists(atPath: directory.path)
+                ? try StorageDirectoryLock(directory: directory) : nil
+        } catch StorageDirectoryLockError.alreadyLocked {
+            throw CtlError("\(chain) storage is in use by a running node; `lattice down` first")
+        }
         try? FileManager.default.removeItem(at: directory)
+        _ = lock
         print("\(chain): chain state wiped; identity preserved")
     }
 }

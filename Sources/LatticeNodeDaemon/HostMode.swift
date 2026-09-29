@@ -3,43 +3,72 @@ import Foundation
 import Hummingbird
 import LatticeCtlCore
 import LatticeNode
+import Synchronization
 
 extension HostLevelRequest: ResponseEncodable {}
+extension HostLevels: ResponseEncodable {}
 
-/// Each level's listeners and maintenance, from its current `lattice.json`
-/// entry.
+/// What ends or narrows a running host: a stop signal, or a level whose
+/// listener failed.
+enum HostEvent: Sendable {
+    case signal
+    case failed(ChainAddress, String)
+}
+
+/// Each level's `lattice.json` entry, snapshotted when the host boots or the
+/// level is attached, so a restart serves the settings the level came up
+/// with.
+actor LevelEntries {
+    private var entries: [String: TopologyChain]
+
+    init(_ entries: [String: TopologyChain]) {
+        self.entries = entries
+    }
+
+    func entry(_ path: String) -> TopologyChain? { entries[path] }
+
+    func set(_ path: String, _ entry: TopologyChain) { entries[path] = entry }
+}
+
+/// Counts stop signals: the first stops the tree, a second exits at once.
+final class SignalCount: Sendable {
+    private let count = Atomic<Int>(0)
+
+    func next() -> Int {
+        count.wrappingAdd(1, ordering: .relaxed).newValue
+    }
+}
+
+/// Each level's listeners and maintenance.
 struct DaemonLevelServices: ChainHostServices {
     let command: LatticeNodeCommand
     let configURL: URL
     let layout: HostLayout
+    let entries: LevelEntries
     let processStartTime: Date
-    let failures: AsyncStream<String?>.Continuation
+    let events: AsyncStream<HostEvent>.Continuation
 
     func serve(_ node: Node, on host: ChainHost) -> Task<Void, Never> {
-        command.serveLevel(
-            node: node,
-            chain: (try? command.loadTopology(configURL))?
-                .chains[node.process.configuration.address.key],
-            host: host,
-            configURL: configURL,
-            layout: layout,
-            processStartTime: processStartTime,
-            failures: failures
-        )
+        Task {
+            await command.serveLevel(
+                node: node,
+                chain: await entries.entry(node.process.configuration.address.key),
+                services: self,
+                host: host
+            )
+        }
     }
 }
 
 extension LatticeNodeCommand {
     /// One process hosting every chain of a `lattice.json` tree. Each level
     /// keeps its own ports, identity and storage, exactly as the process that
-    /// used to run it; only the process boundary is gone.
+    /// used to run it; only the process boundary is gone. A child level that
+    /// fails is stopped alone; only a root failure or a signal ends the
+    /// process.
     func runHost(configPath: String) async throws {
         let processStartTime = Date()
-        guard parent == nil, dataDirectory == nil, identityKey == nil,
-              peer.isEmpty, publicReadPort == nil, publicReadUrl == nil,
-              externalAddress == nil else {
-            throw ValidationError("--config takes every per-chain setting from the file; --parent, --data-directory, --identity-key, --peer, --public-read-port, --public-read-url and --external-address apply only without it")
-        }
+        try refuseSingleChainOptions()
         guard ["127.0.0.1", "::1", "localhost"].contains(rpcBind.lowercased()) else {
             throw ValidationError("the unauthenticated HTTP API may bind only to loopback")
         }
@@ -48,8 +77,8 @@ extension LatticeNodeCommand {
             root: dataRoot ?? configURL.deletingLastPathComponent().path
         )
         let topology = try loadTopology(configURL)
-        // A listener failure's reason, or nil for a stop signal.
-        let (events, failures) = AsyncStream<String?>.makeStream()
+        try layout.migrateIdentityKeys(for: topology.chains.keys)
+        let (events, continuation) = AsyncStream<HostEvent>.makeStream()
         var chains: [ChainAddress: ChainHost.Configure] = [:]
         for (path, chain) in topology.chains {
             let level = try hostedLevel(path: path, chain: chain, layout: layout)
@@ -57,37 +86,85 @@ extension LatticeNodeCommand {
         }
         let host = try ChainHost(chains: chains, services: DaemonLevelServices(
             command: self, configURL: configURL, layout: layout,
-            processStartTime: processStartTime, failures: failures
+            entries: LevelEntries(topology.chains),
+            processStartTime: processStartTime, events: continuation
         ))
 
         // Stop on a signal by stopping the levels, children first, rather
-        // than letting each listener take the signal on its own.
+        // than letting each listener take the signal on its own. A second
+        // signal while that runs exits at once.
         signal(SIGTERM, SIG_IGN)
         signal(SIGINT, SIG_IGN)
+        let signals = SignalCount()
         let signalSources = [SIGTERM, SIGINT].map { number in
             let source = DispatchSource.makeSignalSource(
                 signal: number, queue: .global()
             )
-            source.setEventHandler { failures.yield(nil) }
+            source.setEventHandler {
+                if signals.next() > 1 { Foundation.exit(1) }
+                continuation.yield(.signal)
+            }
             source.resume()
             return source
         }
         defer { signalSources.forEach { $0.cancel() } }
 
         do {
-            try await host.startAll()
+            for (path, error) in try await host.startAll() {
+                logHostError("\(path.key) failed to start: \(error)")
+            }
         } catch {
             await host.stopAll()
             throw error
         }
         var failure: String?
-        for await event in events {
-            failure = event
-            break
+        events: for await event in events {
+            switch event {
+            case .signal:
+                break events
+            case .failed(let address, let reason):
+                if address.parent == nil {
+                    failure = reason
+                    break events
+                }
+                logHostError("\(reason); stopping \(address.key)")
+                do {
+                    try await host.stop(address)
+                } catch {
+                    logHostError("\(error)")
+                }
+            }
         }
         await host.stopAll()
         if let failure {
             throw CtlError(failure)
+        }
+    }
+
+    /// Host mode takes every per-chain setting from the file, so a
+    /// single-chain option given alongside it would be silently ignored.
+    private func refuseSingleChainOptions() throws {
+        let defaults = try Self.parse([])
+        let given = [
+            ("--chain-path", chainPath != defaults.chainPath),
+            ("--data-directory", dataDirectory != nil),
+            ("--identity-key", identityKey != nil),
+            ("--listen-port", listenPort != defaults.listenPort),
+            ("--fact-listen-port", factListenPort != defaults.factListenPort),
+            ("--rpc-port", rpcPort != defaults.rpcPort),
+            ("--peer", !peer.isEmpty),
+            ("--no-default-peers", noDefaultPeers),
+            ("--parent", parent != nil),
+            ("--public-read-port", publicReadPort != nil),
+            ("--public-read-rate", publicReadRate != defaults.publicReadRate),
+            ("--public-read-expensive-rate",
+             publicReadExpensiveRate != defaults.publicReadExpensiveRate),
+            ("--public-read-max-rate", publicReadMaxRate != defaults.publicReadMaxRate),
+            ("--external-address", externalAddress != nil),
+            ("--public-read-url", publicReadUrl != nil),
+        ].filter(\.1).map(\.0)
+        guard given.isEmpty else {
+            throw ValidationError("--config takes every per-chain setting from the file; \(given.joined(separator: ", ")) apply only without it")
         }
     }
 
@@ -141,23 +218,20 @@ extension LatticeNodeCommand {
 
     /// A level's loopback RPC listener, its optional public read listener and
     /// its volume maintenance, for as long as the level runs. A listener that
-    /// fails while its level runs stops the whole host, as it stopped the
-    /// process that ran the level. The root level also serves the host
-    /// control routes.
+    /// fails is reported, and the host stops that level. The root level also
+    /// serves the host control routes.
     func serveLevel(
         node: Node,
         chain: TopologyChain?,
-        host: ChainHost,
-        configURL: URL,
-        layout: HostLayout,
-        processStartTime: Date,
-        failures: AsyncStream<String?>.Continuation
-    ) -> Task<Void, Never> {
+        services: DaemonLevelServices,
+        host: ChainHost
+    ) async {
         let configuration = node.process.configuration
         let address = configuration.address
         let network = node.network
         let service = node.service
         let process = node.process
+        let events = services.events
         let peersProvider: @Sendable () async -> ExplorerPeersResponse = { [weak network] in
             guard let network else {
                 return ExplorerPeersResponse(count: 0, peers: [])
@@ -176,17 +250,11 @@ extension LatticeNodeCommand {
             port: Int(configuration.rpcPort),
             peers: peersProvider,
             discoverProviders: providerDiscovery,
-            processStartTime: processStartTime,
-            extraRoutes: address.isNexus ? { router in
+            processStartTime: services.processStartTime,
+            extraRoutes: address.parent == nil ? { router in
                 addHostControlRoutes(
                     to: router, host: host, attach: { path in
-                        let topology = try self.loadTopology(configURL)
-                        guard let chain = topology.chains[path] else {
-                            throw HTTPError(.notFound, message: "\(path) is not in \(configURL.path)")
-                        }
-                        return try self.hostedLevel(
-                            path: path, chain: chain, layout: layout
-                        )
+                        try await self.attachableLevel(path, services: services)
                     }
                 )
             } : { _ in }
@@ -215,83 +283,124 @@ extension LatticeNodeCommand {
                 print("  public-read: http://0.0.0.0:\(publicReadPort)")
                 print("  public-read rate limits: \(limits.bannerDescription)")
             } catch {
-                failures.yield("\(address.key) public read limits: \(error)")
+                events.yield(.failed(address, "\(address.key) public read limits: \(error)"))
             }
         }
         if let declared = configuration.publicReadURL {
             print("  public-read-url: \(declared)")
         }
         let apps = applications
-        return Task {
-            await withTaskGroup(of: Void.self) { group in
-                for app in apps {
-                    group.addTask {
-                        do {
-                            try await app.runService(gracefulShutdownSignals: [])
-                        } catch where !Task.isCancelled {
-                            failures.yield("\(address.key) listener failed: \(error)")
-                        } catch {}
-                    }
-                }
+        await withTaskGroup(of: Void.self) { group in
+            for app in apps {
                 group.addTask {
-                    await runVolumeMaintenance {
-                        _ = try await process.pruneUnpinnedVolumes()
-                    }
+                    do {
+                        try await app.runService(gracefulShutdownSignals: [])
+                    } catch where !Task.isCancelled {
+                        events.yield(.failed(address, "\(address.key) listener failed: \(error)"))
+                    } catch {}
+                }
+            }
+            group.addTask {
+                await runVolumeMaintenance {
+                    _ = try await process.pruneUnpinnedVolumes()
                 }
             }
         }
     }
+
+    /// A chain newly added to the config file, ready to attach: its entry is
+    /// snapshotted for its listeners, and its key migrated or created.
+    private func attachableLevel(
+        _ path: String, services: DaemonLevelServices
+    ) async throws -> (address: ChainAddress, configure: ChainHost.Configure) {
+        let topology = try loadTopology(services.configURL)
+        guard let chain = topology.chains[path] else {
+            throw HTTPError(.notFound, message: "\(path) is not in \(services.configURL.path)")
+        }
+        try services.layout.migrateIdentityKeys(for: topology.chains.keys)
+        let level = try hostedLevel(path: path, chain: chain, layout: services.layout)
+        await services.entries.set(path, chain)
+        return level
+    }
+}
+
+private func logHostError(_ message: String) {
+    FileHandle.standardError.write(Data("lattice-node: \(message)\n".utf8))
 }
 
 /// Loopback host control, on the root level's operator application only:
-/// attach a level newly added to the config file, or stop and start one
-/// level while the rest of the tree keeps running. The root itself is not
-/// stoppable here — it serves these routes — so it stops with the process.
+/// list the hosted levels, attach a level newly added to the config file, or
+/// stop and start one level while the rest of the tree keeps running. The
+/// root itself is not stoppable here — it serves these routes — so it stops
+/// with the process.
 private func addHostControlRoutes(
     to router: Router<BasicRequestContext>,
     host: ChainHost,
-    attach: @escaping @Sendable (String) throws -> (
+    attach: @escaping @Sendable (String) async throws -> (
         address: ChainAddress, configure: ChainHost.Configure
     )
 ) {
+    router.get("v1/host/levels") { _, _ in
+        HostLevels(paths: await host.paths.map(\.key))
+    }
     router.post("v1/host/levels") { request, context in
-        let address = try await hostLevel(request)
-        let level = try attach(address.key)
-        do {
+        let address = try await hostLevel(request, context)
+        return try await hostCall(address) {
+            let level = try await attach(address.key)
             try await host.attach(level.address, configure: level.configure)
-        } catch let error as ChainHostError {
-            throw HTTPError(.conflict, message: error.description)
         }
-        return HostLevelRequest(path: address.key)
     }
     router.post("v1/host/levels/stop") { request, context in
-        let address = try await hostLevel(request)
-        guard !address.isNexus else {
+        let address = try await hostLevel(request, context)
+        guard address.parent != nil else {
             throw HTTPError(.badRequest, message: "the root level serves host control; stop the process instead")
         }
-        guard await host.configuration(address) != nil else {
-            throw HTTPError(.notFound, message: "\(address.key) is not hosted here")
+        return try await hostCall(address) {
+            guard await host.configuration(address) != nil else {
+                throw ChainHostError.unknownChain(address.key)
+            }
+            try await host.stop(address)
         }
-        await host.stop(address)
-        return HostLevelRequest(path: address.key)
     }
     router.post("v1/host/levels/start") { request, context in
-        let address = try await hostLevel(request)
-        do {
+        let address = try await hostLevel(request, context)
+        return try await hostCall(address) {
             try await host.start(address)
-        } catch let error as ChainHostError {
-            throw HTTPError(.notFound, message: error.description)
         }
-        return HostLevelRequest(path: address.key)
     }
 }
 
-private func hostLevel(_ request: Request) async throws -> ChainAddress {
-    let body = try await request.body.collect(upTo: 4096)
-    guard let input = try? JSONDecoder().decode(
-        HostLevelRequest.self, from: Data(body.readableBytesView)
-    ), let address = ChainAddress(string: input.path) else {
-        throw HTTPError(.badRequest, message: "body must be {\"path\": <chain path>}")
+private func hostLevel(
+    _ request: Request, _ context: BasicRequestContext
+) async throws -> ChainAddress {
+    let input: HostLevelRequest = try await decode(request, context: context)
+    guard let address = ChainAddress(string: input.path) else {
+        throw HTTPError(.badRequest, message: "path must be an absolute chain path")
     }
     return address
+}
+
+/// Host errors as statuses: an unknown level is 404, a lock a stopped level
+/// still holds is 503 (retry later), any other refusal is 409; anything else
+/// (a level that failed to build) stays a 500, naming the failure.
+private func hostCall(
+    _ address: ChainAddress, _ operation: () async throws -> Void
+) async throws -> HostLevelRequest {
+    do {
+        try await operation()
+    } catch let error as ChainHostError {
+        switch error {
+        case .unknownChain:
+            throw HTTPError(.notFound, message: error.description)
+        case .storageStillHeld:
+            throw HTTPError(.serviceUnavailable, message: error.description)
+        default:
+            throw HTTPError(.conflict, message: error.description)
+        }
+    } catch let error as HTTPError {
+        throw error
+    } catch {
+        throw HTTPError(.internalServerError, message: "\(error)")
+    }
+    return HostLevelRequest(path: address.key)
 }

@@ -13,13 +13,14 @@ final class ChainHostTests: XCTestCase {
     private let child = ChainAddress(["Nexus", "Payments"])!
 
     private func configure(
-        _ address: ChainAddress, root: URL, keyByte: UInt8
+        _ address: ChainAddress, root: URL, keyByte: UInt8,
+        rpcPort: UInt16? = nil
     ) -> ChainHost.Configure {
         let storage = root.appendingPathComponent(address.key, isDirectory: true)
         let key = String(repeating: String(format: "%02x", keyByte), count: 32)
         let listen = NetworkTransportTestPorts.allocate()
         let fact = NetworkTransportTestPorts.allocate()
-        let rpc = NetworkTransportTestPorts.allocate()
+        let rpc = rpcPort ?? NetworkTransportTestPorts.allocate()
         return { parentEndpoint in
             try NodeConfiguration(
                 chainPath: address.components,
@@ -65,6 +66,54 @@ final class ChainHostTests: XCTestCase {
         )
         let paths = await host.paths
         XCTAssertEqual(paths, [nexus, child])
+    }
+
+    /// A stop that arrives while the level is still being built waits for
+    /// the build and then tears it down, releasing the storage for the next
+    /// start.
+    func testAStopDuringAStartWaitsForItThenStops() async throws {
+        let root = temporaryDirectory(create: true)
+        let host = try ChainHost(chains: [
+            nexus: configure(nexus, root: root, keyByte: 1),
+        ])
+        let address = nexus
+        let starting = Task { try await host.start(address) }
+        try await eventually("the start is in flight", poll: .milliseconds(1)) {
+            let busy = await host.isBusy(self.nexus)
+            let running = await host.node(self.nexus) != nil
+            return busy || running
+        }
+        try await host.stop(nexus)
+        try await starting.value
+        let stopped = await host.node(nexus)
+        XCTAssertNil(stopped)
+        try await host.start(nexus)
+        let restarted = await host.node(nexus) != nil
+        XCTAssertTrue(restarted)
+        try await host.stop(nexus)
+    }
+
+    /// A child that cannot start (here: it would bind its parent's RPC port)
+    /// is skipped and reported; the rest of the tree runs.
+    func testAChildThatFailsToStartLeavesTheTreeRunning() async throws {
+        let root = temporaryDirectory(create: true)
+        let nexusConfigure = configure(nexus, root: root, keyByte: 1)
+        let nexusRPC = try nexusConfigure(nil).rpcPort
+        let host = try ChainHost(chains: [
+            nexus: nexusConfigure,
+            child: configure(child, root: root, keyByte: 2, rpcPort: nexusRPC),
+        ])
+        let failed = try await host.startAll()
+        XCTAssertEqual(failed.map(\.path), [child])
+        XCTAssertEqual(
+            failed.first?.error as? ChainHostError,
+            .portInUse(port: nexusRPC, path: child.key, heldBy: nexus.key)
+        )
+        let nexusRuns = await host.node(nexus) != nil
+        let childRuns = await host.node(child) != nil
+        XCTAssertTrue(nexusRuns)
+        XCTAssertFalse(childRuns)
+        try await host.stop(nexus)
     }
 
     func testADeployedChildActivatesIsCarriedAndEachLevelRestartsAlone() async throws {
@@ -124,7 +173,7 @@ final class ChainHostTests: XCTestCase {
         }
 
         // The child stops; Nexus keeps mining.
-        await host.stop(child)
+        try await host.stop(child)
         let stoppedChild = await host.node(child)
         XCTAssertNil(stoppedChild)
         let before = try await parent().status().height ?? 0
@@ -139,7 +188,7 @@ final class ChainHostTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(restarted?.height ?? 0, 1)
 
         // Nexus stops and starts; the child keeps serving meanwhile.
-        await host.stop(nexus)
+        try await host.stop(nexus)
         let childWhileNexusDown = await childStatus(host)
         XCTAssertEqual(childWhileNexusDown?.phase, .active)
         try await host.start(nexus)

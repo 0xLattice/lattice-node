@@ -138,14 +138,14 @@ lattice mine status  # cursor position and batch runway
 |---|---|
 | `init [--peer …]` | Scaffold the root, mint identities, write `lattice.json`, print peer strings. Without `--peer` the tree carries no `peers` key, so the node uses its built-in default bootstrap peers. |
 | `identity` | Every chain's public key and peer string (no log scraping). |
-| `up [--foreground]` | Start missing processes, parents first, under a spawn lock. `--foreground` stays as PID 1 and restarts exits (containers). |
-| `down` | Stop the tree, children first. SIGTERM, then SIGKILL after a grace. |
+| `up [--foreground]` | Start the one `lattice-node` hosting the tree under a spawn lock; if it already runs, attach the chains in `lattice.json` it does not host yet. `--foreground` stays as PID 1 and restarts it if it exits (containers). |
+| `down` | Stop the tree (the node stops its chains children first). SIGTERM, then SIGKILL after a grace. Also stops chain processes an older one-process-per-chain `lattice` left running. |
 | `status` | One table for the tree, from local loopback RPC only. |
 | `mine start/stop/status` | Supervised rewarded mining (below). `stop` is graceful: the in-flight batch finishes and the cursor is persisted. |
 | `child deploy` | Create a new child of a running local parent (below). |
 | `child adopt <path>` | Join an *existing* child: adds it to the tree and starts it; genesis is re-derived through the authenticated parent link, never copied from a node. |
 | `tx send/deposit/receipt/withdraw` | Sign a transaction with a key file and submit it to one chain in the tree (below). |
-| `wipe <chain>` | Remove one stopped chain's state (`state.db` + `volumes.db` as a unit). Identity is never touched — a wiped Nexus recreates the pinned genesis; a wiped child returns to `awaitingGenesis`. |
+| `wipe <chain>` | Remove one stopped chain's state, refused while any node holds its storage lock (`state.db` + `volumes.db` as a unit). Identity is never touched — a wiped Nexus recreates the pinned genesis; a wiped child returns to `awaitingGenesis`. |
 | `emit-systemd` | Print units that run `up --foreground` and `mine run` under systemd. |
 
 All verbs take `--root` (default: current directory).
