@@ -37,7 +37,7 @@ func runVolumeMaintenance(
 struct LatticeNodeCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "lattice-node",
-        abstract: "Run one Lattice chain process"
+        abstract: "Run one Lattice chain process, or with --config every chain of a lattice.json tree"
     )
 
     @Option(help: "Absolute slash-separated path, always beginning with Nexus")
@@ -97,7 +97,17 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Operator-declared browsable base URL for this chain's public read surface (e.g. https://toy.example.com — a TLS-fronted hostname a browser can dial, distinct from the IP-literal P2P plane). Advertised through the parent rendezvous so explorers can reach this chain; consumers verify the served genesis against the parent's on-chain anchor. Leave unset for nodes without a public TLS surface.")
     var publicReadUrl: String?
 
+    @Option(help: "Host every chain of this lattice.json tree in this one process: per-chain ports, peers and public-read settings come from the file, and each child is wired to its co-hosted parent over loopback. The single-chain options --parent, --data-directory, --identity-key, --peer, --public-read-port, --public-read-url and --external-address do not apply.")
+    var config: String?
+
+    @Option(help: "Data root for --config: chains/<path> holds each chain's storage and identity/ its keys. Defaults to the config file's directory.")
+    var dataRoot: String?
+
     mutating func run() async throws {
+        if let config {
+            try await runHost(configPath: config)
+            return
+        }
         let processStartTime = Date()
         guard let address = ChainAddress(string: chainPath) else {
             throw ValidationError("--chain-path must be absolute and begin with Nexus")
@@ -151,45 +161,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         let process = node.process
         let service = node.service
 
-        // A deployed child holds its own self-contained genesis bytes: the
-        // parent only RECORDED the CID. If the deployer seeded `child-genesis.json`
-        // into this data directory, rebuild the identical genesis and self-admit
-        // it — but only after confirming, over the authenticated parent fact plane,
-        // that the parent actually recorded THIS CID. That is the same record
-        // honest followers demand before admitting the genesis, so a genesis the
-        // parent never recorded cannot self-activate here either. Retry until
-        // active so a child spawned slightly ahead of its parent's anchor (or its
-        // parent connection) still comes up once the record lands.
-        let genesisSeedURL = storage.appendingPathComponent("child-genesis.json")
-        let genesisSeedTask: Task<Void, Never>?
-        if address.components.count > 1,
-           let seedData = try? Data(contentsOf: genesisSeedURL),
-           let seed = try? JSONDecoder().decode(
-               ChildGenesisSeed.self, from: seedData
-           ) {
-            genesisSeedTask = Task {
-                while !Task.isCancelled {
-                    if await process.status().phase == .active { return }
-                    if (try? await process.activateSeededChildGenesis(
-                        seed: seed,
-                        confirmParentRecordedGenesis: {
-                            [weak network] childGenesisCID in
-                            guard let network else { return false }
-                            return await network
-                                .confirmParentRecordedChildGenesis(
-                                    childGenesisCID: childGenesisCID
-                                )
-                        }
-                    )) == true {
-                        return
-                    }
-                    // Not `Task.sleep(for:)`: see ChainService.scheduleExecutionWalkRetry.
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                }
-            }
-        } else {
-            genesisSeedTask = nil
-        }
+        let genesisSeedTask = node.activateSeededChildGenesis(storage: storage)
 
         let peersProvider: @Sendable () async -> ExplorerPeersResponse = { [weak network] in
             guard let network else {
@@ -299,7 +271,7 @@ private func storageComponent(_ value: String) -> String {
     return value.addingPercentEncoding(withAllowedCharacters: allowed)!
 }
 
-private func loadOrCreateIdentity(at url: URL) throws -> String {
+func loadOrCreateIdentity(at url: URL) throws -> String {
     let fileManager = FileManager.default
     if fileManager.fileExists(atPath: url.path) {
         let attributes = try fileManager.attributesOfItem(atPath: url.path)
@@ -327,7 +299,7 @@ private func loadOrCreateIdentity(at url: URL) throws -> String {
     return value
 }
 
-private func parsePeerEndpoint(_ value: String) throws -> PeerEndpoint {
+func parsePeerEndpoint(_ value: String) throws -> PeerEndpoint {
     let parsed = try parseEndpoint(value)
     return PeerEndpoint(publicKey: parsed.key, host: parsed.host, port: parsed.port)
 }
@@ -368,7 +340,8 @@ func makeApplication(
         ExplorerPeersResponse(count: 0, peers: [])
     },
     discoverProviders: @Sendable @escaping (String) async -> [String] = { _ in [] },
-    processStartTime: Date = Date()
+    processStartTime: Date = Date(),
+    extraRoutes: (Router<BasicRequestContext>) -> Void = { _ in }
 ) -> Application<RouterResponder<BasicRequestContext>> {
     let router = Router()
     addPublicReadRoutes(
@@ -403,6 +376,7 @@ func makeApplication(
         )
     }
     addOperatorWriteRoutes(to: router, service: service)
+    extraRoutes(router)
     return Application(
         responder: router.buildResponder(),
         configuration: .init(address: .hostname(host, port: port))

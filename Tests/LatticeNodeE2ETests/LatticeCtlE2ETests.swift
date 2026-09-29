@@ -728,15 +728,16 @@ final class LatticeCtlE2ETests: XCTestCase {
     /// full Nexus blocks are mined by hand through the RPC it uses — to
     /// Nexus's own target, so each is a chain block carrying Market's
     /// candidate (which carries Stalls's) — until both descendants' tips sit
-    /// on chain committers. Market's node goes down; three more full Nexus
+    /// on chain committers. Market's level goes down; three more full Nexus
     /// blocks are mined alone, so the run of the last block that carried
     /// Market grows and nothing else mints. Market returns and is credited
     /// on its re-ask; Stalls — which never went away and mined nothing — is
     /// credited through Market (Market's push of the run the credit changed,
     /// or Stalls's own ask; the wire cannot order those two, so the push
     /// itself is pinned by the multichain unit test). Then Stalls restarts
-    /// twice, the second time by SIGKILL: each hello re-serves its
-    /// committers' runs and every one is refused as not stronger, and after
+    /// twice, the second time with the whole host SIGKILLed: each hello
+    /// re-serves its committers' runs and every one is refused as not
+    /// stronger, and after
     /// the crash nothing new is credited — only a credit replayed from its
     /// own fact log explains that. The counters are the ones an operator
     /// watches on /metrics.
@@ -808,7 +809,7 @@ final class LatticeCtlE2ETests: XCTestCase {
             return market > marketBeforeCarry && stalls > stallsBeforeCarry
         }
 
-        // Outage: Market's node goes down. Nexus mines on alone, and with no
+        // Outage: Market's level goes down. Nexus mines on alone, and with no
         // Market candidate to carry, its blocks commit nothing into Market —
         // work only a run report can deliver.
         try await stopChain(host, "Nexus/Market")
@@ -818,8 +819,8 @@ final class LatticeCtlE2ETests: XCTestCase {
 
         // Market returns: on its hello Nexus re-serves the runs of Market's
         // committers, and the last carrier's run now holds the outage blocks.
-        // Counters restart with the process, so any credit here is new.
-        _ = try await runCtl(["up"], root: host.root)
+        // Counters restart with the level, so any credit here is new.
+        try await startChain(host, "Nexus/Market")
         try await waitFor("Market back", seconds: 60) { await active(marketRPC) }
         try await waitFor("Market credited Nexus's run", seconds: 60) {
             (await metric(marketRPC, applied) ?? 0) >= 1
@@ -841,10 +842,16 @@ final class LatticeCtlE2ETests: XCTestCase {
         // credit replayed from its own fact log explains. Twice: the first
         // restart also absorbs any push Stalls missed while reconnecting
         // during Market's outage, so by the second nothing served can be new
-        // — and the second is a crash, not a graceful stop.
-        for (restart, signal) in [(1, SIGTERM), (2, SIGKILL)] {
-            try await stopChain(host, "Nexus/Market/Stalls", signal: signal)
-            _ = try await runCtl(["up"], root: host.root)
+        // — and the second is a crash of the whole host process, not a
+        // graceful stop of one level.
+        for restart in [1, 2] {
+            if restart == 1 {
+                try await stopChain(host, "Nexus/Market/Stalls")
+                try await startChain(host, "Nexus/Market/Stalls")
+            } else {
+                try await crashHost(host)
+                _ = try await runCtl(["up"], root: host.root)
+            }
             try await waitFor("Stalls back (restart \(restart))", seconds: 60) {
                 await active(stallsRPC)
             }
@@ -915,8 +922,8 @@ final class LatticeCtlE2ETests: XCTestCase {
     }
 
     /// The shape merged mining produces, with a stop in it: the coordinator
-    /// mines all three chains; Market's node is stopped mid-round (SIGTERM,
-    /// the deploy case — its shutdown grace is where a parent-carried block
+    /// mines all three chains; Market's level is stopped mid-round (the
+    /// deploy case — its shutdown is where a parent-carried block
     /// it had just deferred gets cut off with no retry in memory), while
     /// the coordinator's next solves keep carrying that block's sibling on
     /// Nexus's chain. Mining then stops; Market restarts. It must admit the
@@ -967,8 +974,8 @@ final class LatticeCtlE2ETests: XCTestCase {
 
         // Market returns with nothing but its own store: the owed block is
         // admitted from the durable edge, its committer's run is asked for,
-        // and the outage work is credited. Counters restart with the process.
-        _ = try await runCtl(["up"], root: host.root)
+        // and the outage work is credited. Counters restart with the level.
+        try await startChain(host, "Nexus/Market")
         try await waitFor("Market back", seconds: 60) { await active(marketRPC) }
         try await waitFor("Market credited the outage work after the restart", seconds: 90) {
             (await metric(marketRPC, applied) ?? 0) >= 1
@@ -978,41 +985,54 @@ final class LatticeCtlE2ETests: XCTestCase {
         XCTAssertEqual(conflicts, 0)
     }
 
-    /// Stop one chain's node the way `lattice down` would (SIGTERM, then
-    /// SIGKILL if it lingers), or crash it outright with SIGKILL, leaving the
-    /// rest of the tree running; `lattice up` brings it back.
-    private func stopChain(
-        _ host: CtlHost, _ path: String, signal: Int32 = SIGTERM
-    ) async throws {
+    /// Stop one chain's level in the running host, leaving the rest of the
+    /// tree running; `startChain` brings it back. The stop returns once the
+    /// level has released its storage.
+    private func stopChain(_ host: CtlHost, _ path: String) async throws {
+        let _: HostLevel = try await postJSON(
+            host.nexusRPC, "/v1/host/levels/stop", HostLevel(path: path),
+            timeout: 60
+        )
+    }
+
+    private func startChain(_ host: CtlHost, _ path: String) async throws {
+        let _: HostLevel = try await postJSON(
+            host.nexusRPC, "/v1/host/levels/start", HostLevel(path: path),
+            timeout: 60
+        )
+    }
+
+    /// Crash the one process hosting the tree outright with SIGKILL;
+    /// `lattice up` brings it back.
+    private func crashHost(_ host: CtlHost) async throws {
         let pidFile = host.root.appendingPathComponent("run")
-            .appendingPathComponent(path.replacingOccurrences(of: "/", with: "-") + ".pid")
+            .appendingPathComponent("lattice-node.pid")
         let text = try String(contentsOf: pidFile, encoding: .utf8)
         guard let pid = text.split(separator: " ").first.flatMap({ Int32($0) }) else {
-            throw CtlE2EError("no pid recorded for \(path)")
+            throw CtlE2EError("no pid recorded for the host")
         }
-        kill(pid, signal)
-        if signal != SIGKILL {
-            let grace = ContinuousClock.now + e2eScaled(.seconds(10))
-            while ContinuousClock.now < grace, isAlive(pid) {
-                try await Task.sleep(for: .milliseconds(200))
-            }
-            if isAlive(pid) { kill(pid, SIGKILL) }
-        }
-        try await waitFor("\(path) stopped", seconds: 30) { !self.isAlive(pid) }
+        kill(pid, SIGKILL)
+        try await waitFor("host stopped", seconds: 30) { !self.isAlive(pid) }
         // A SIGKILLed multithreaded node reads as a zombie ("Zl") once its
         // main thread exits while its other threads can still hold the
-        // descriptor table, and with it the storage flock the next start
-        // takes (it would exit with storageInUse). Wait for the lock too.
-        let lock = host.root.appendingPathComponent("chains")
-            .appendingPathComponent(path)
-            .appendingPathComponent(".lattice-node.lock")
-        try await waitFor("\(path) released its storage", seconds: 30) {
-            let descriptor = open(lock.path, O_RDWR)
-            guard descriptor >= 0 else { return true }
-            defer { close(descriptor) }
-            return flock(descriptor, LOCK_EX | LOCK_NB) == 0
+        // descriptor table, and with it the storage flocks the next start
+        // takes (it would exit with storageInUse). Wait for the locks too.
+        for path in ["Nexus", "Nexus/Market", "Nexus/Market/Stalls"] {
+            let lock = host.root.appendingPathComponent("chains")
+                .appendingPathComponent(path)
+                .appendingPathComponent(".lattice-node.lock")
+            try await waitFor("\(path) released its storage", seconds: 30) {
+                let descriptor = open(lock.path, O_RDWR)
+                guard descriptor >= 0 else { return true }
+                defer { close(descriptor) }
+                return flock(descriptor, LOCK_EX | LOCK_NB) == 0
+            }
         }
         try? FileManager.default.removeItem(at: pidFile)
+    }
+
+    private struct HostLevel: Codable {
+        let path: String
     }
 
     /// Alive and not a zombie: a container's PID 1 may never reap, so a

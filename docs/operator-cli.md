@@ -1,10 +1,11 @@
 # Operator CLI (`lattice`)
 
-`lattice` operates one host's chain-process tree from a single declarative
-file. Lattice runs one process per chain; a child authenticates against its
-immediate parent's fact plane. The CLI makes that tree a value — `lattice.json`
-— and every verb reconciles reality against it. No resident daemon, no remote
-control plane: state lives in the file, pidfiles, and each node's own storage.
+`lattice` operates one host's chain tree from a single declarative file. One
+`lattice-node` process (`lattice-node --config lattice.json`) hosts every chain
+in the tree; a child authenticates against its co-hosted parent's fact plane
+over loopback. The CLI makes that tree a value — `lattice.json` — and every
+verb reconciles reality against it. No remote control plane: state lives in
+the file, one pidfile (`run/lattice-node.pid`), and each chain's own storage.
 
 ## Quickstart: join the network and mine
 
@@ -53,8 +54,8 @@ lattice mine status  # cursor position and batch runway
 ```
 
 - Every key in `chains` is an absolute Nexus-rooted path; a child requires its
-  immediate parent in the same file (the CLI derives `--parent` from the local
-  parent's identity and fact port — you never wire it by hand).
+  immediate parent in the same file (the node wires each child to its
+  co-hosted parent's identity and fact port — you never wire it by hand).
 - `peers` is that chain's overlay bootstrap peers. Omit it and a Nexus process
   uses the default bootstrap peers built into the binary; a list REPLACES them;
   an explicitly empty `"peers": []` means no bootstrap peers at all. Child
@@ -187,8 +188,9 @@ submitted to the parent → ordinary one-round coordinator runs are driven from
 the tree root (or `--external-mining-wait-seconds` of polling) until the parent
 lists the recorded CID → the child's data directory is seeded with
 `child-genesis.json`, the child appears in `lattice.json` with auto-allocated
-ports, and it comes up `active` on that genesis CID. If the parent does not
-record the anchor, **nothing is added to the tree or spawned**.
+ports, is attached to the running node, and comes up `active` on that genesis
+CID. If the parent does not
+record the anchor, **nothing is added to the tree or started**.
 
 An interrupted or timed-out deploy is resumable, never lost: once submitted,
 the anchor can still land after the command dies, and the pending file is the
@@ -279,7 +281,7 @@ proving the credited balances
 
 - **`status` says `running, rpc unreachable`** — the process is up but not
   serving yet (recovery), or the pidfile survived a crash; check
-  `log/<chain>.log` under the root.
+  `log/lattice-node.log` under the root.
 - **Child stuck `awaitingGenesis`** — its anchor never landed, or the parent
   link is wrong; see the child-chain section of
   [operations.md](operations.md).

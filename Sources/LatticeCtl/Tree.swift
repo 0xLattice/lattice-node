@@ -1,6 +1,6 @@
-// Tree lifecycle: reconcile running lattice-node processes against the
-// topology. `up` spawns and exits (pidfiles + loopback health are the
-// record); `down` stops by pidfile; `status` reads only local loopback RPC —
+// Tree lifecycle: one lattice-node process hosts the whole topology. `up`
+// spawns it and exits (its pidfile + loopback health are the record); `down`
+// stops it by pidfile; `status` reads only local loopback RPC —
 // it never claims fleet truth. `wipe` removes chain state, never identity.
 
 import Foundation
@@ -124,71 +124,28 @@ func health(rpc: UInt16) async -> [String: Any]? {
     return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
 }
 
-func spawnChain(
-    _ path: String,
-    topology: Topology,
-    layout: HostLayout
-) throws {
-    let chain = topology.chains[path]!
+/// The pidfile and log name of the one daemon hosting the whole tree.
+let hostProcessName = "lattice-node"
+
+/// Starts the one `lattice-node` hosting every chain in the tree. It wires
+/// each child to its co-hosted parent itself.
+func spawnHost(layout: HostLayout) throws {
     let manager = FileManager.default
     for directory in [
-        layout.chainDirectory(for: path),
-        layout.pidFile(for: path).deletingLastPathComponent(),
-        layout.logFile(for: path).deletingLastPathComponent(),
+        layout.pidFile(for: hostProcessName).deletingLastPathComponent(),
+        layout.logFile(for: hostProcessName).deletingLastPathComponent(),
     ] {
         try manager.createDirectory(
             at: directory, withIntermediateDirectories: true
         )
     }
-    var arguments = [
-        "--chain-path", path,
-        "--data-directory", layout.chainDirectory(for: path).path,
-        "--identity-key", layout.identityKey(for: path).path,
-        "--listen-port", String(chain.listen),
-        "--fact-listen-port", String(chain.fact),
-        "--rpc-port", String(chain.rpc),
-    ]
-    let components = path.components(separatedBy: "/")
-    if components.count > 1 {
-        let parentPath = components.dropLast().joined(separator: "/")
-        let parent = topology.chains[parentPath]!
-        let parentKey = try publicKey(
-            ofIdentity: layout.identityKey(for: parentPath)
-        )
-        arguments += ["--parent", "\(parentKey)@127.0.0.1:\(parent.fact)"]
-    }
-    // Absent = no peer source configured, so the node uses its built-in
-    // defaults. A list REPLACES them, and an explicit empty list means none.
-    if let peers = chain.peers {
-        if peers.isEmpty {
-            arguments += ["--no-default-peers"]
-        }
-        for peer in peers {
-            arguments += ["--peer", peer]
-        }
-    }
-    if let publicRead = chain.publicRead {
-        arguments += ["--public-read-port", String(publicRead)]
-    }
-    if let rate = chain.publicReadRate {
-        arguments += ["--public-read-rate", String(rate)]
-    }
-    if let rate = chain.publicReadExpensiveRate {
-        arguments += ["--public-read-expensive-rate", String(rate)]
-    }
-    if let rate = chain.publicReadMaxRate {
-        arguments += ["--public-read-max-rate", String(rate)]
-    }
-    if let externalAddress = chain.externalAddress {
-        arguments += ["--external-address", externalAddress]
-    }
-    if let publicReadUrl = chain.publicReadUrl {
-        arguments += ["--public-read-url", publicReadUrl]
-    }
     let process = Process()
     process.executableURL = try nodeBinary()
-    process.arguments = arguments
-    let log = layout.logFile(for: path)
+    process.arguments = [
+        "--config", layout.root.appendingPathComponent(Topology.fileName).path,
+        "--data-root", layout.root.path,
+    ]
+    let log = layout.logFile(for: hostProcessName)
     _ = manager.createFile(atPath: log.path, contents: nil)
     let handle = try FileHandle(forWritingTo: log)
     handle.seekToEndOfFile()
@@ -196,40 +153,51 @@ func spawnChain(
     process.standardError = handle
     try process.run()
     try writePidFile(
-        layout, path, pid: process.processIdentifier, name: "lattice-node"
+        layout, hostProcessName, pid: process.processIdentifier,
+        name: "lattice-node"
+    )
+}
+
+/// Adds a chain already written to `lattice.json` to the running daemon,
+/// through the root chain's loopback host-control route.
+func attachLevel(_ path: String, topology: Topology) async throws {
+    guard let root = topology.chains[ChainAddress.nexus] else {
+        throw CtlError("the tree has no \(ChainAddress.nexus) root")
+    }
+    let _: HostLevelRequest = try await post(
+        rpc: root.rpc, path: "v1/host/levels",
+        body: HostLevelRequest(path: path)
     )
 }
 
 struct Up: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Start every chain process in the tree that is not already running."
+        abstract: "Start the one process hosting every chain in the tree, unless it is already running."
     )
 
     @OptionGroup var rootOption: RootOption
 
-    @Flag(name: .long, help: "Stay in the foreground and restart processes that exit (container PID 1).")
+    @Flag(name: .long, help: "Stay in the foreground and restart the process if it exits (container PID 1).")
     var foreground = false
 
     func run() async throws {
         let layout = rootOption.layout
         let topology = try Topology.load(root: layout.root).validated()
         try await withSpawnLock(layout) {
-            for path in topology.orderedPaths() {
-                if let pid = runningPid(layout, path) {
-                    print("\(path): already running (pid \(pid))")
-                    continue
-                }
-                try spawnChain(path, topology: topology, layout: layout)
-                print("\(path): started (pid \(runningPid(layout, path) ?? -1))")
+            if let pid = runningPid(layout, hostProcessName) {
+                print("already running (pid \(pid))")
+                return
             }
+            try spawnHost(layout: layout)
+            print("started \(topology.chains.count) chain(s) (pid \(runningPid(layout, hostProcessName) ?? -1))")
         }
         guard foreground else { return }
         while true {
             try await Task.sleep(for: .seconds(10))
-            for path in topology.orderedPaths()
-            where runningPid(layout, path) == nil {
-                print("\(path): exited; restarting")
-                try spawnChain(path, topology: topology, layout: layout)
+            try await withSpawnLock(layout) {
+                guard runningPid(layout, hostProcessName) == nil else { return }
+                print("exited; restarting")
+                try spawnHost(layout: layout)
             }
         }
     }
@@ -237,24 +205,23 @@ struct Up: AsyncParsableCommand {
 
 struct Down: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Stop every running chain process in the tree, children first."
+        abstract: "Stop the process hosting the tree; it stops the chains children first."
     )
 
     @OptionGroup var rootOption: RootOption
 
     func run() async throws {
         let layout = rootOption.layout
-        let topology = try Topology.load(root: layout.root).validated()
-        for path in topology.orderedPaths().reversed() {
-            guard let pid = runningPid(layout, path) else { continue }
-            kill(pid, SIGTERM)
-            for _ in 0..<50 where runningPid(layout, path) != nil {
-                try await Task.sleep(for: .milliseconds(100))
-            }
-            if runningPid(layout, path) != nil { kill(pid, SIGKILL) }
-            try? FileManager.default.removeItem(at: layout.pidFile(for: path))
-            print("\(path): stopped")
+        guard let pid = runningPid(layout, hostProcessName) else { return }
+        kill(pid, SIGTERM)
+        for _ in 0..<300 where runningPid(layout, hostProcessName) != nil {
+            try await Task.sleep(for: .milliseconds(100))
         }
+        if runningPid(layout, hostProcessName) != nil { kill(pid, SIGKILL) }
+        try? FileManager.default.removeItem(
+            at: layout.pidFile(for: hostProcessName)
+        )
+        print("stopped")
     }
 }
 
@@ -268,9 +235,10 @@ struct Status: AsyncParsableCommand {
     func run() async throws {
         let layout = rootOption.layout
         let topology = try Topology.load(root: layout.root).validated()
-        for path in topology.orderedPaths() {
+        let running = runningPid(layout, hostProcessName) != nil
+        for path in topology.chains.keys.sorted() {
             let chain = topology.chains[path]!
-            guard runningPid(layout, path) != nil else {
+            guard running else {
                 print("\(path): down")
                 continue
             }
@@ -303,8 +271,8 @@ struct Wipe: AsyncParsableCommand {
         guard topology.chains[chain] != nil else {
             throw CtlError("\(chain) is not in the tree")
         }
-        guard runningPid(layout, chain) == nil else {
-            throw CtlError("\(chain) is running; `lattice down` first")
+        guard runningPid(layout, hostProcessName) == nil else {
+            throw CtlError("the tree is running; `lattice down` first")
         }
         let directory = layout.chainDirectory(for: chain)
             .standardizedFileURL

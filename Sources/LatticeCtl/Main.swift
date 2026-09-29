@@ -119,7 +119,7 @@ struct Identity: AsyncParsableCommand {
     func run() async throws {
         let layout = rootOption.layout
         let topology = try Topology.load(root: layout.root).validated()
-        for path in topology.orderedPaths() {
+        for path in topology.chains.keys.sorted() {
             let pubkey = try publicKey(
                 ofIdentity: layout.identityKey(for: path)
             )

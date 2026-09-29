@@ -1,15 +1,16 @@
-// The declarative unit `lattice` operates on: one host's chain-process tree.
+// The declarative unit `lattice` operates on: one host's chain tree.
 //
-// Lattice runs one process per chain; a child authenticates against its
-// immediate parent's fact plane. This file makes that tree a value: each
-// entry is one process, parents are derived from chain paths, and every
-// verb reconciles against it rather than accumulating flag invocations.
+// One lattice-node process hosts every chain in the tree; a child
+// authenticates against its co-hosted parent's fact plane over loopback.
+// This file makes that tree a value: each entry is one chain, parents are
+// derived from chain paths, and every verb reconciles against it rather than
+// accumulating flag invocations.
 
 import Foundation
 import Lattice
 import LatticeNode
 
-public struct TopologyChain: Codable {
+public struct TopologyChain: Codable, Sendable {
     public var listen: UInt16
     public var fact: UInt16
     public var rpc: UInt16
@@ -206,13 +207,6 @@ public struct Topology: Codable {
         )
     }
 
-    /// Parent-before-child order, so `up` can wire children to a parent
-    /// that is already running.
-    public func orderedPaths() -> [String] {
-        chains.keys.sorted { $0.components(separatedBy: "/").count
-            < $1.components(separatedBy: "/").count || $0 < $1 }
-    }
-
     public func validated() throws -> Topology {
         var ports: Set<UInt16> = []
         for (path, chain) in chains {
@@ -250,6 +244,16 @@ public struct Topology: Codable {
             throw CtlError("mine.roundDeadlineMultiplier must be at least 1; a round deadline shorter than the round's own bound would kill every healthy round")
         }
         return self
+    }
+}
+
+/// Body and answer of the daemon's loopback host-control routes: the chain
+/// to attach, stop or start.
+public struct HostLevelRequest: Codable, Sendable {
+    public let path: String
+
+    public init(path: String) {
+        self.path = path
     }
 }
 
