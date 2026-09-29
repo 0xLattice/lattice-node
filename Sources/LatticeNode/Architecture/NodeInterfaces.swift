@@ -81,14 +81,6 @@ public protocol NetworkInterface: AnyObject, Sendable {
             _ remoteSource: (any ContentSource)?
         ) async throws -> NodeImportOutcome
     ) async throws -> NodeImportOutcome
-    /// Cross-chain evidence for the validate walk: a weighed CHILD block's
-    /// `.execution` needs the parent fact (state continuity / genesis link) the
-    /// live path obtains from the configured parent. Nil is an availability
-    /// gap; the walk parks on its retry timer.
-    func resolveExecutionEvidence(
-        for blockCID: String,
-        requirement: CrossChainEvidenceRequirement
-    ) async -> AuthenticatedChildPackage?
 }
 
 /// Which optional `ChainInterface` operations a network-runtime generation
@@ -221,19 +213,6 @@ final class WeakNetwork: @unchecked Sendable, NetworkInterface {
             .withRoot(blockCID) { session in
                 try await admit(session)
             }
-    }
-
-    func resolveExecutionEvidence(
-        for blockCID: String,
-        requirement: CrossChainEvidenceRequirement
-    ) async -> AuthenticatedChildPackage? {
-        // A weighed child block's validate tier needs the parent fact (state
-        // continuity / genesis link) the live path requests from the
-        // configured parent; the same request, awaited.
-        await runtime?.resolveExecutionEvidence(
-            for: blockCID,
-            requirement: requirement
-        )
     }
 }
 

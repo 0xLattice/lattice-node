@@ -37,10 +37,10 @@ func runVolumeMaintenance(
 struct LatticeNodeCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "lattice-node",
-        abstract: "Run one Lattice chain process, or with --config every chain of a lattice.json tree"
+        abstract: "Run the Nexus chain process, or with --config every chain of a lattice.json tree"
     )
 
-    @Option(help: "Absolute slash-separated path, always beginning with Nexus")
+    @Option(help: "Absolute slash-separated path, always beginning with Nexus. Without --config only Nexus runs: a child chain runs co-hosted with its ancestry, from a lattice.json tree.")
     var chainPath = "Nexus"
 
     @Option(help: "Storage directory; defaults to ~/.lattice/chains/<chain-path>")
@@ -66,9 +66,6 @@ struct LatticeNodeCommand: AsyncParsableCommand {
 
     @Flag(help: "Start with no built-in default bootstrap peers. Without --peer this means no bootstrap peers at all; the node then finds peers only through discovery or inbound connections.")
     var noDefaultPeers = false
-
-    @Option(help: "Immediate parent fact endpoint as public-key@host:port")
-    var parent: String?
 
     @Option(help: "Minimum overlay peer-key work bits")
     var minimumPeerKeyBits = 0
@@ -112,6 +109,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         guard let address = ChainAddress(string: chainPath) else {
             throw ValidationError("--chain-path must be absolute and begin with Nexus")
         }
+        guard address.isNexus else {
+            throw ValidationError("a child chain runs only co-hosted with its ancestry: host its lattice.json tree with --config")
+        }
         guard ["127.0.0.1", "::1", "localhost"].contains(rpcBind.lowercased()) else {
             throw ValidationError("the unauthenticated HTTP API may bind only to loopback")
         }
@@ -130,7 +130,6 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         let keyURL = identityKey.map { URL(fileURLWithPath: $0) }
             ?? storage.appendingPathComponent("process.key")
         let privateKeyHex = try loadOrCreateIdentity(at: keyURL)
-        let parentEndpoint = try parent.map(parseParentEndpoint)
         let explicitPeers = try peer.map(parsePeerEndpoint)
         // An operator peer source is authoritative: a supplied list replaces
         // the built-in defaults, and --no-default-peers expresses the empty
@@ -148,7 +147,6 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             factListenPort: factListenPort,
             rpcPort: rpcPort,
             bootstrapPeers: overlayPeers,
-            parentEndpoint: parentEndpoint,
             minPeerKeyBits: minimumPeerKeyBits,
             overlayMaxConnectionsPerNetgroup: overlayMaxConnectionsPerNetgroup,
             externalAddress: externalAddress,
@@ -160,8 +158,6 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         let network = node.network
         let process = node.process
         let service = node.service
-
-        let genesisSeedTask = node.activateSeededChildGenesis(storage: storage)
 
         let peersProvider: @Sendable () async -> ExplorerPeersResponse = { [weak network] in
             guard let network else {
@@ -222,9 +218,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         // gracefully stopped its listener; the node then shuts down behind
         // it, on success and on error alike: tasks that touch the store are
         // joined, the network stops, and the service joins its own work.
-        // The seed task is joined after the network stops, which resumes
-        // its parent-record wait. The stores close when `run()` returns and
-        // drops the node.
+        // The stores close when `run()` returns and drops the node.
         let result: Result<Void, any Error>
         do {
             if let publicReadApp {
@@ -246,12 +240,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         } catch {
             result = .failure(error)
         }
-        genesisSeedTask?.cancel()
         volumeMaintenance.cancel()
         await volumeMaintenance.value
-        await node.shutdown {
-            await genesisSeedTask?.value
-        }
+        await node.shutdown()
         try result.get()
     }
 
@@ -310,11 +301,6 @@ func loadOrCreateIdentity(at url: URL) throws -> String {
 func parsePeerEndpoint(_ value: String) throws -> PeerEndpoint {
     let parsed = try parseEndpoint(value)
     return PeerEndpoint(publicKey: parsed.key, host: parsed.host, port: parsed.port)
-}
-
-private func parseParentEndpoint(_ value: String) throws -> ParentEndpoint {
-    let parsed = try parseEndpoint(value)
-    return ParentEndpoint(publicKey: parsed.key, host: parsed.host, port: parsed.port)
 }
 
 private func parseEndpoint(_ value: String) throws -> (key: String, host: String, port: UInt16) {

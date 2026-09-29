@@ -20,15 +20,14 @@ final class ChainHostTests: XCTestCase {
         let listen = NetworkTransportTestPorts.allocate()
         let fact = NetworkTransportTestPorts.allocate()
         let rpc = NetworkTransportTestPorts.allocate()
-        return { parentEndpoint in
+        return {
             try NodeConfiguration(
                 chainPath: address.components,
                 storagePath: storage,
                 privateKeyHex: key,
                 listenPort: listen,
                 factListenPort: fact,
-                rpcPort: rpc,
-                parentEndpoint: parentEndpoint
+                rpcPort: rpc
             )
         }
     }

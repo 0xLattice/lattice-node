@@ -364,23 +364,6 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
         }
     }
 
-    func testParentChainFactIsCanonical() throws {
-        try assertCanonical(ParentChainFactMessage.self, seed: 0x13) { g in
-            let fact: ParentChainFact = self.randomBool(&g)
-                ? .genesis(
-                    childGenesisCID: self.randomCID(&g),
-                    parentStateCID: self.randomCID(&g)
-                )
-                // `from` must be the empty state: the one continuity shape
-                // the protocol defines.
-                : .continuity(
-                    fromStateCID: LatticeState.emptyHeader.rawCID,
-                    toStateCID: self.randomCID(&g)
-                )
-            return ParentChainFactMessage(requestID: self.nonZeroID(&g), fact: fact)
-        }
-    }
-
     func testParentRunReportIsCanonical() throws {
         try assertCanonical(ParentRunReportMessage.self, seed: 0x14) { g in
             let run = UInt64.random(in: 1...UInt64.max, using: &g)

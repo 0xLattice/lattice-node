@@ -29,6 +29,10 @@ struct BlockFetcher {
         case evidence
         case content
         case later
+        /// A parent fact (genesis link, state continuity) the parent level
+        /// does not hold yet. No timer retries it: the parent's tip change
+        /// does (`retryParentFactWaits`).
+        case parentFact
     }
 
     struct AttemptKey: Hashable, Sendable {
@@ -524,7 +528,7 @@ struct BlockFetcher {
                 record = records[ticket.key.blockCID] ?? record
                 if attempt.expiresAt == nil {
                     attempt.expiresAt = now.advanced(
-                        by: reason == .later
+                        by: reason == .later || reason == .parentFact
                             ? .seconds(2 * 60 * 60)
                             : reason == .evidence
                                 ? evidenceRetryWindow
@@ -634,18 +638,11 @@ struct BlockFetcher {
                             // whole successor chain behind one lost message.
                             // A fresh window is armed at the next park.
                             //
-                            // `.later` is the same shape and needs the same
-                            // treatment: a missing parent genesis or continuity
-                            // fact parks here, and that solicitation is ALSO
-                            // fired only from inside an admission attempt. It
-                            // used to resolve within a round trip, so the
-                            // expiry was unreachable in practice — but an
-                            // unanswered parent query is now the EXPECTED
-                            // steady state while a parent has not yet upgraded
-                            // (it does not serve the v2 fact topic at all), so
-                            // a roll window longer than this ceiling would
-                            // otherwise fossilize the park and every successor
-                            // behind it, with no wake path short of a restart.
+                            // `.later` gets the same treatment: a
+                            // depended-upon candidate outliving its window
+                            // re-enters admission rather than fossilizing
+                            // every successor behind it. A `.parentFact` park
+                            // is kept: the parent's tip change wakes it.
                             attempt.expiresAt = nil
                             attempt.state = .ready
                             record.attempts[rootCID] = attempt
@@ -690,11 +687,29 @@ struct BlockFetcher {
         guard var record = records[blockCID],
               var attempt = record.attempts[rootCID],
               case .waiting(let reason, _) = attempt.state,
-              reason == .evidence || reason == .later else { return }
+              reason == .evidence || reason == .later || reason == .parentFact
+        else { return }
         attempt.state = .ready
         record.attempts[rootCID] = attempt
         records[blockCID] = record
         _ = scheduleIfReady(key)
+    }
+
+    /// The parent level's tip moved: every attempt parked on a parent fact
+    /// tries again, since the fact may hold now.
+    mutating func retryParentFactWaits() {
+        for blockCID in Array(records.keys) {
+            guard var record = records[blockCID] else { continue }
+            for rootCID in Array(record.attempts.keys) {
+                guard var attempt = record.attempts[rootCID],
+                      case .waiting(.parentFact, _) = attempt.state
+                else { continue }
+                attempt.state = .ready
+                record.attempts[rootCID] = attempt
+            }
+            records[blockCID] = record
+        }
+        fillReadyCapacity()
     }
 
     /// Wake successors parked behind `predecessorCID` when it became canonical

@@ -204,20 +204,10 @@ final class MetricsTests: XCTestCase {
             "lattice-metrics-test-\(UUID().uuidString)"
         )
         addTeardownBlock { try? FileManager.default.removeItem(at: storage) }
-        let parentEndpoint = try chainPath.count == 1 ? nil : ParentEndpoint(
-            publicKey: NodeConfiguration(
-                chainPath: ["Nexus"],
-                storagePath: storage,
-                privateKeyHex: String(repeating: "02", count: 32)
-            ).processPublicKey,
-            host: "127.0.0.1",
-            port: 4002
-        )
         return try await ChainProcess.open(configuration: NodeConfiguration(
             chainPath: chainPath,
             storagePath: storage,
-            privateKeyHex: String(repeating: "01", count: 32),
-            parentEndpoint: parentEndpoint
+            privateKeyHex: String(repeating: "01", count: 32)
         ))
     }
 

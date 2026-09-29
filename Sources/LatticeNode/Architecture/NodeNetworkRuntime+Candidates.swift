@@ -18,11 +18,11 @@ extension NodeNetworkRuntime {
         return result.accepted
     }
 
-    /// Seam: candidates a parent fact was holding, handed back when the fact
-    /// arrives, times out or its session ends. `observe` flips only a
-    /// `.waiting(.evidence)` attempt back to `.ready`, never a
-    /// `.waiting(.later)` one, so each is also retried explicitly; without
-    /// that it would wedge until the wall-clock poll (or 2h expiry).
+    /// Seam: candidates a parent fact was holding, handed back with the
+    /// fact merged in. `observe` flips only a `.waiting(.evidence)` attempt
+    /// back to `.ready`, never a `.waiting(.parentFact)` one, so each is also
+    /// retried explicitly; without that it would wait for the parent's next
+    /// tip change.
     func reReadyCandidates(_ seeds: [CandidateSeed]) {
         for seed in seeds {
             _ = blockFetcher.observe(seed)
@@ -30,6 +30,18 @@ extension NodeNetworkRuntime {
                 blockCID: seed.blockCID,
                 rootCID: seed.recoveryRootCID
             )
+            serviceBlockFetcher()
+        }
+    }
+
+    /// The co-hosted parent level changed. Delivered off the parent's lease;
+    /// it only wakes the candidates parked on a parent fact.
+    func parentChanged(_ change: ParentChange) {
+        switch change {
+        case .tipChanged:
+            parentTipChanges &+= 1
+            guard isRunning else { return }
+            blockFetcher.retryParentFactWaits()
             serviceBlockFetcher()
         }
     }
@@ -520,44 +532,21 @@ extension NodeNetworkRuntime {
                 servedBy: PeerID(publicKey: blamed)
             )
         }
+        // A parent fact the admission lacks is read from the co-hosted parent
+        // level. When the parent holds it the candidate re-readies with the
+        // merged package once parked; when not, it parks until the parent's
+        // tip moves (`parentChanged`).
+        let parentTipChanges = self.parentTipChanges
+        var parentFactPackage: AuthenticatedChildPackage?
         if case .unavailable(let requirement?) = outcome.decision,
-           let authenticatedPackage {
-            let parentPath = Array(configuration.chainPath.dropLast())
-            switch requirement {
-            case .parentGenesis(
-                let requiredPath,
-                let directory,
-                let childGenesisCID,
-                let parentStateCID
-            ) where requiredPath == parentPath
-                    && directory == configuration.address.directory:
-                await requestParentChainFact(
-                    .genesis(
-                        childGenesisCID: childGenesisCID,
-                        parentStateCID: parentStateCID
-                    ),
-                    for: candidate.blockCID,
-                    package: authenticatedPackage,
-                    generation: generation,
-                    process: process
-                )
-            case .parentStateContinuity(
-                let requiredPath,
-                let fromStateCID,
-                let toStateCID
-            ) where requiredPath == parentPath:
-                await requestParentChainFact(
-                    .continuity(
-                        fromStateCID: fromStateCID,
-                        toStateCID: toStateCID
-                    ),
-                    for: candidate.blockCID,
-                    package: authenticatedPackage,
-                    generation: generation,
-                    process: process
-                )
-            default:
-                break
+           let authenticatedPackage, let parentLevel {
+            parentFactPackage = await parentLevel.evidence(
+                for: requirement,
+                child: configuration.address,
+                package: authenticatedPackage
+            )
+            guard isCurrentRuntime(generation: generation, process: process) else {
+                return
             }
         }
         // A cold-synced block arrives without the portable package the live path
@@ -612,6 +601,17 @@ extension NodeNetworkRuntime {
             resolution: resolution,
             deficientProviders: failedOverlayProviders
         )
+        if let parentFactPackage {
+            reReadyCandidates([CandidateSeed(
+                blockCID: candidate.blockCID,
+                package: parentFactPackage
+            )])
+        } else if case .wait(.parentFact) = resolution,
+                  self.parentTipChanges != parentTipChanges {
+            // The tip moved while the fact was read: the wake already fired.
+            blockFetcher.retryParentFactWaits()
+            serviceBlockFetcher()
+        }
         await orphanUndecidedParentEvidence(
             candidate, package: authenticatedPackage,
             resolution: resolution, decision: outcome.decision,
@@ -686,10 +686,10 @@ extension NodeNetworkRuntime {
     /// How the fetcher resolves an admission outcome. A missing same-chain
     /// ancestor (`parkOn`) parks the candidate on it, whatever the decision.
     /// Otherwise an accepted decision connects; `unavailable` waits: for a new
-    /// provider when the body itself was not served (`contentShortfall`), on a
-    /// timer for a missing parent fact (genesis or state continuity), and for
-    /// new evidence otherwise; `temporarilyInvalid` waits on a timer; every
-    /// other decision is terminal.
+    /// provider when the body itself was not served (`contentShortfall`), for
+    /// the parent's tip to move on a missing parent fact (genesis or state
+    /// continuity), and for new evidence otherwise; `temporarilyInvalid`
+    /// waits on a timer; every other decision is terminal.
     nonisolated static func candidateResolution(
         _ decision: NodeImportDecision,
         parkOn: String?,
@@ -700,9 +700,11 @@ extension NodeNetworkRuntime {
         if decision == .unavailable(nil), contentShortfall {
             return .wait(.content)
         }
-        if case .unavailable(.parentGenesis?) = decision { return .wait(.later) }
+        if case .unavailable(.parentGenesis?) = decision {
+            return .wait(.parentFact)
+        }
         if case .unavailable(.parentStateContinuity?) = decision {
-            return .wait(.later)
+            return .wait(.parentFact)
         }
         if decision.shouldRetryWhenEvidenceChanges { return .wait(.evidence) }
         if decision.shouldRetryLater { return .wait(.later) }

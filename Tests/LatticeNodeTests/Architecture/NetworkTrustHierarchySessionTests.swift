@@ -94,13 +94,13 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
                 host: "overlay.example",
                 port: 4101
             )],
-            parentEndpoint: ParentEndpoint(
-                publicKey: peerKey(parent).hex,
-                host: "127.0.0.1",
-                port: 4102
-            ),
             minPeerKeyBits: 17
-        )
+        
+    ).withParentEndpoint(ParentEndpoint(
+            publicKey: peerKey(parent).hex,
+            host: "127.0.0.1",
+            port: 4102
+        ))
         let planes = try NodeNetworkPlaneConfigurations(configuration)
 
         XCTAssertEqual(planes.overlay.mode, .overlay)
@@ -142,13 +142,12 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         let configuration = try NodeConfiguration(
             chainPath: ["Nexus", "Payments"],
             storagePath: URL(fileURLWithPath: "/tmp/lattice-network-bootstrap-parent"),
-            privateKeyHex: String(repeating: "2b", count: 32),
-            parentEndpoint: ParentEndpoint(
-                publicKey: peerKey(parent).hex,
-                host: "127.0.0.1",
-                port: 4102
-            )
-        )
+            privateKeyHex: String(repeating: "2b", count: 32)
+        ).withParentEndpoint(ParentEndpoint(
+            publicKey: peerKey(parent).hex,
+            host: "127.0.0.1",
+            port: 4102
+        ))
         let planes = try NodeNetworkPlaneConfigurations(
             overlay: IvyConfig(
                 signingKey: configuration.signingKey,
@@ -240,13 +239,12 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         let configuration = try NodeConfiguration(
             chainPath: ["Nexus", "Payments"],
             storagePath: URL(fileURLWithPath: "/tmp/lattice-hierarchy-hello-test"),
-            privateKeyHex: String(repeating: "2d", count: 32),
-            parentEndpoint: ParentEndpoint(
-                publicKey: peerKey(parent).hex,
-                host: "127.0.0.1",
-                port: 4002
-            )
-        )
+            privateKeyHex: String(repeating: "2d", count: 32)
+        ).withParentEndpoint(ParentEndpoint(
+            publicKey: peerKey(parent).hex,
+            host: "127.0.0.1",
+            port: 4002
+        ))
         let parentHello = ChainHello(
             nexusGenesisCID: configuration.nexusGenesisCID,
             chainPath: ["Nexus"]
@@ -443,13 +441,12 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             privateKeyHex: String(repeating: "72", count: 32),
             listenPort: overlayPort,
             factListenPort: hierarchyPort,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            parentEndpoint: ParentEndpoint(
-                publicKey: parentPeer.hex,
-                host: "127.0.0.1",
-                port: parentPort
-            )
-        )
+            rpcPort: NetworkTransportTestPorts.allocate()
+        ).withParentEndpoint(ParentEndpoint(
+            publicKey: parentPeer.hex,
+            host: "127.0.0.1",
+            port: parentPort
+        ))
         let runtime = try NodeNetworkRuntime(configuration: configuration)
         let process = try await ChainProcess.open(
             configuration: configuration
@@ -1220,13 +1217,12 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             privateKeyHex: String(repeating: "98", count: 32),
             listenPort: overlayPort,
             factListenPort: NetworkTransportTestPorts.allocate(),
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            parentEndpoint: ParentEndpoint(
-                publicKey: parentPeer.hex,
-                host: "127.0.0.1",
-                port: NetworkTransportTestPorts.allocate()
-            )
-        )
+            rpcPort: NetworkTransportTestPorts.allocate()
+        ).withParentEndpoint(ParentEndpoint(
+            publicKey: parentPeer.hex,
+            host: "127.0.0.1",
+            port: NetworkTransportTestPorts.allocate()
+        ))
         let source = InMemoryContentStore()
         try await LatticeState.emptyHeader.storeRecursively(storer: source)
         // Self-contained child genesis: the child rebuilds it from the seed and
@@ -1466,9 +1462,8 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
             privateKeyHex: String(repeating: "9c", count: 32),
             listenPort: overlayPort,
             factListenPort: hierarchyPort,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            parentEndpoint: ParentEndpoint(publicKey: parentPeerKey.hex, host: "127.0.0.1", port: parentPort)
-        )
+            rpcPort: NetworkTransportTestPorts.allocate()
+        ).withParentEndpoint(ParentEndpoint(publicKey: parentPeerKey.hex, host: "127.0.0.1", port: parentPort))
         let source = InMemoryContentStore()
         try await LatticeState.emptyHeader.storeRecursively(storer: source)
         let seed = ChildGenesisSeed(spec: NexusGenesis.spec, premineTo: nil, timestamp: 1)

@@ -211,28 +211,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let request: ChildEvidenceIndexRequestMessage
     }
 
-    struct PendingParentChainFact: Sendable {
-        let peer: AuthenticatedPeer
-        let request: ParentChainFactMessage
-        let blockCID: String
-        let package: AuthenticatedChildPackage
-        /// Set by the validate walk's evidence request: the fact's arrival (or
-        /// its timeout) is handed back as the merged package (or nil) instead
-        /// of re-seeding a live candidate.
-        var continuation: CheckedContinuation<AuthenticatedChildPackage?, Never>? = nil
-
-        /// The live candidate the request holds, to hand back to the fetcher.
-        var candidateSeed: CandidateSeed {
-            CandidateSeed(blockCID: blockCID, package: package)
-        }
-    }
-
-    struct PendingGenesisVerification: Sendable {
-        let peer: AuthenticatedPeer
-        let request: ParentChainFactMessage
-        let continuation: CheckedContinuation<Bool, Never>
-    }
-
     struct PendingGenesisResolve: Sendable {
         let peer: AuthenticatedPeer
         let continuation: CheckedContinuation<String?, Never>
@@ -568,6 +546,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
     let configuration: NodeConfiguration
     /// Owner: init; immutable.
     let overlay: Ivy
+    /// The co-hosted parent level's facts; nil on Nexus.
+    /// Owner: init; immutable.
+    nonisolated let parentLevel: (any ParentLevel)?
     private let hello: ChainHello
 
     /// Owner: Lifecycle.enqueueStart / Lifecycle.stop.
@@ -658,14 +639,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         ///     Hierarchy.evidenceIndexRequestTimedOut / Lifecycle.clearRuntimeState /
         ///     Hierarchy.purgeHierarchyRequests.
         var pendingEvidenceIndexes: [UInt64: PendingChildEvidenceIndex] = [:]
-        /// Owner: Hierarchy.handleHierarchy / Hierarchy.discardPendingParentChainFacts /
-        ///     Hierarchy.requestParentChainFact / Hierarchy.parentChainFactRequestTimedOut.
-        var pendingParentChainFacts:
-            [UInt64: PendingParentChainFact] = [:]
-        /// Owner: Hierarchy.confirmParentRecordedChildGenesis /
-        ///     Hierarchy.resolveGenesisVerification / Lifecycle.clearRuntimeState.
-        var pendingGenesisVerifications:
-            [UInt64: PendingGenesisVerification] = [:]
         /// Owner: Hierarchy.resolveParentAnchoredGenesis / Hierarchy.resolveGenesisAnchor /
         ///     Lifecycle.clearRuntimeState.
         var pendingGenesisResolves:
@@ -788,6 +761,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// Owner: Candidates.startCandidateWorker / Candidates.finishCandidateWorker /
     ///     Lifecycle.clearRuntimeState.
     var candidateWorker = TaskSlot()
+    /// Counts the parent level's tip changes, so an admission that read a
+    /// parent fact as missing can tell whether the tip moved before its
+    /// candidate parked.
+    /// Owner: Candidates.parentChanged / Candidates.importCandidate.
+    var parentTipChanges: UInt64 = 0
     /// Owner: Hierarchy.handleHierarchy / Lifecycle.clearRuntimeState / Overlay.handleOverlay.
     var parentStateQueryGuard = ParentStateQueryGuard(
         capacity: NodeNetworkRuntime.maximumConcurrentParentStateQueries
@@ -959,16 +937,21 @@ public actor NodeNetworkRuntime: IvyDelegate {
         return (runtimeGeneration, process)
     }
 
-    public init(configuration: NodeConfiguration) throws {
+    public init(
+        configuration: NodeConfiguration,
+        parentLevel: (any ParentLevel)? = nil
+    ) throws {
         try self.init(
             configuration: configuration,
-            planeConfigurations: NodeNetworkPlaneConfigurations(configuration)
+            planeConfigurations: NodeNetworkPlaneConfigurations(configuration),
+            parentLevel: parentLevel
         )
     }
 
     init(
         configuration: NodeConfiguration,
-        planeConfigurations: NodeNetworkPlaneConfigurations
+        planeConfigurations: NodeNetworkPlaneConfigurations,
+        parentLevel: (any ParentLevel)? = nil
     ) throws {
         guard planeConfigurations.overlay.peerKey.hex == configuration.processPublicKey else {
             throw IvyModeError.invalidConfiguration(
@@ -997,6 +980,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let hierarchy = Ivy(config: planeConfigurations.hierarchy)
         self.configuration = configuration
         self.planeConfigurations = planeConfigurations
+        self.parentLevel = parentLevel
         self.overlay = overlay
         self.hierarchy = hierarchy
         remoteContentSource = IvyRootContentSource(
@@ -1179,10 +1163,10 @@ public actor NodeNetworkRuntime: IvyDelegate {
         if ivy === hierarchy {
             // A hierarchy role belongs to one authenticated connection.
             // The connect replaces whatever session the key held.
-            reReadyCandidates(clearHierarchyAuthorization(
+            clearHierarchyAuthorization(
                 for: peer.key,
                 removed: hierarchyState.hierarchyRecords.remove(peer.key)
-            ))
+            )
             scheduleHierarchyHelloDeadline(for: peer, generation: generation)
         }
         guard isCurrentRuntime(generation: generation, process: process) else {
@@ -1244,9 +1228,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
                   let removed = hierarchyState.hierarchyRecords.remove(
                     key, ifBoundTo: ended
                   ) else { return }
-            reReadyCandidates(clearHierarchyAuthorization(
+            clearHierarchyAuthorization(
                 for: key, removed: removed
-            ))
+            )
         }
     }
 
@@ -1510,8 +1494,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         keys.formUnion(overlayState.readURLDiscovery.pendingReadEndpoints.values.map(\.peer.key))
         if let sync = overlayState.rangeSync.state { keys.insert(sync.peer.key) }
         keys.formUnion(hierarchyState.pendingEvidenceIndexes.values.map(\.peer.key))
-        keys.formUnion(hierarchyState.pendingParentChainFacts.values.map(\.peer.key))
-        keys.formUnion(hierarchyState.pendingGenesisVerifications.values.map(\.peer.key))
         keys.formUnion(hierarchyState.pendingGenesisResolves.values.map(\.peer.key))
         keys.formUnion(parentStateQueryGuard.peers.keys)
         keys.formUnion(sessionLeases.portableEvidenceWork.values.map(\.peer.key))

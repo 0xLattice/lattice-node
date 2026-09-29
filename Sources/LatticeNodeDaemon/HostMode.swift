@@ -130,7 +130,6 @@ extension LatticeNodeCommand {
             ("--rpc-port", rpcPort != defaults.rpcPort),
             ("--peer", !peer.isEmpty),
             ("--no-default-peers", noDefaultPeers),
-            ("--parent", parent != nil),
             ("--public-read-port", publicReadPort != nil),
             ("--public-read-rate", publicReadRate != defaults.publicReadRate),
             ("--public-read-expensive-rate",
@@ -150,7 +149,7 @@ extension LatticeNodeCommand {
     }
 
     /// One level's node configuration from its `lattice.json` entry. The
-    /// parent endpoint is the host's to wire.
+    /// host wires a child to its parent.
     func hostedLevel(
         path: String, chain: TopologyChain, layout: HostLayout
     ) throws -> (address: ChainAddress, configure: ChainHost.Configure) {
@@ -173,7 +172,7 @@ extension LatticeNodeCommand {
         let minimumPeerKeyBits = minimumPeerKeyBits
         let overlayMaxConnectionsPerNetgroup = overlayMaxConnectionsPerNetgroup
         let peerSearchInterval = peerSearchInterval
-        return (address, { parentEndpoint in
+        return (address, {
             try NodeConfiguration(
                 chainPath: address.components,
                 storagePath: storage,
@@ -182,7 +181,6 @@ extension LatticeNodeCommand {
                 factListenPort: chain.fact,
                 rpcPort: chain.rpc,
                 bootstrapPeers: bootstrapPeers,
-                parentEndpoint: parentEndpoint,
                 minPeerKeyBits: minimumPeerKeyBits,
                 overlayMaxConnectionsPerNetgroup: overlayMaxConnectionsPerNetgroup,
                 externalAddress: chain.externalAddress,

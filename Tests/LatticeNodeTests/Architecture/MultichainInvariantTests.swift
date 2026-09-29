@@ -30,8 +30,7 @@ final class MultichainInvariantTests: XCTestCase {
         )
         let childConfiguration = try configuration(
             path: ["Nexus", "Payments"], storage: childStorage,
-            privateKeyHex: String(repeating: "62", count: 32),
-            parentPublicKey: parentConfiguration.processPublicKey
+            privateKeyHex: String(repeating: "62", count: 32)
         )
         let parent = try await ChainProcess.open(configuration: parentConfiguration)
         let parentGenesis = try await parent.canonicalTipBlock()
@@ -298,13 +297,11 @@ final class MultichainInvariantTests: XCTestCase {
         )
         let aConfiguration = try configuration(
             path: ["Nexus", "A"], storage: temporaryDirectory(),
-            privateKeyHex: String(repeating: "72", count: 32),
-            parentPublicKey: nexusConfiguration.processPublicKey
+            privateKeyHex: String(repeating: "72", count: 32)
         )
         let bConfiguration = try configuration(
             path: ["Nexus", "A", "B"], storage: temporaryDirectory(),
-            privateKeyHex: String(repeating: "73", count: 32),
-            parentPublicKey: aConfiguration.processPublicKey
+            privateKeyHex: String(repeating: "73", count: 32)
         )
         let nexus = try await ChainProcess.open(configuration: nexusConfiguration)
         let a = try await ChainProcess.open(configuration: aConfiguration)
@@ -460,8 +457,7 @@ final class MultichainInvariantTests: XCTestCase {
         let childConfiguration = try configuration(
             path: ["Nexus", "Payments"],
             storage: childStorage,
-            privateKeyHex: String(repeating: "52", count: 32),
-            parentPublicKey: parentConfiguration.processPublicKey
+            privateKeyHex: String(repeating: "52", count: 32)
         )
 
         let parent = try await ChainProcess.open(configuration: parentConfiguration)
@@ -599,14 +595,12 @@ final class MultichainInvariantTests: XCTestCase {
         let paymentsConfiguration = try configuration(
             path: ["Nexus", "Payments"],
             storage: paymentsStorage,
-            privateKeyHex: String(repeating: "42", count: 32),
-            parentPublicKey: parentConfiguration.processPublicKey
+            privateKeyHex: String(repeating: "42", count: 32)
         )
         let receiptsConfiguration = try configuration(
             path: ["Nexus", "Payments", "Receipts"],
             storage: receiptsStorage,
-            privateKeyHex: String(repeating: "43", count: 32),
-            parentPublicKey: paymentsConfiguration.processPublicKey
+            privateKeyHex: String(repeating: "43", count: 32)
         )
 
         var parent: ChainProcess? = try await ChainProcess.open(
@@ -821,16 +815,12 @@ final class MultichainInvariantTests: XCTestCase {
     private func configuration(
         path: [String],
         storage: URL,
-        privateKeyHex: String,
-        parentPublicKey: String? = nil
+        privateKeyHex: String
     ) throws -> NodeConfiguration {
         try NodeConfiguration(
             chainPath: path,
             storagePath: storage,
-            privateKeyHex: privateKeyHex,
-            parentEndpoint: parentPublicKey.map {
-                ParentEndpoint(publicKey: $0, host: "127.0.0.1", port: 4002)
-            }
+            privateKeyHex: privateKeyHex
         )
     }
 

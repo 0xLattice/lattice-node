@@ -367,24 +367,22 @@ of a new chain, or restart the child after writing it. Without a seed read at
 startup, the child can activate only by fetching the recorded genesis from a
 child-overlay peer, and a brand-new chain has none.
 
+A child runs in the same process as its whole ancestry: list every level in
+`lattice.json` and start the tree host.
+
 ```bash
-lattice-node \
-  --chain-path Nexus/Payments \
-  --parent <nexus-key>@10.0.0.10:4002 \
-  --data-directory /var/lib/lattice/chains/Nexus/Payments \
-  --identity-key /var/lib/lattice/identity/payments.key \
-  --listen-port 4101 \
-  --fact-listen-port 4102 \
-  --rpc-port 8180
+lattice-node --config /var/lib/lattice/lattice.json
 ```
 
-The parent endpoint is a live verdict boundary, not merely a bootstrap hint.
-Back up the configured parent key and child process identity as operational
-secrets. Losing the live parent does not revoke already imported history or
-fork choice, but new child imports that change parent state wait until the
-authenticated immediate parent can acknowledge the exact continuity or genesis
-query. Same-chain peers may restore the required Volumes; they cannot relay the
-parent's unsigned session-bound answer.
+Each level keeps its own ports, storage (`chains/<path>`) and identity
+(`identity/<path>.key`) under the configuration's directory, or `--data-root`.
+A chain added to the file is hosted from the next start. The child's data
+directory for the seed above is its `chains/<path>` directory.
+
+A child reads the parent facts its imports need (the recorded genesis and
+parent-state continuity) from its parent level's own validated state in the
+same process; there is no remote parent. Back up each level's identity key as
+an operational secret.
 
 For application testing, deploy a normal child with test-oriented parameters.
 Nexus retains its one pinned genesis.

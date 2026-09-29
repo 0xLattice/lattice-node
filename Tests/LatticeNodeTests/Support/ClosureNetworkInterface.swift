@@ -34,10 +34,6 @@ final class ClosureNetworkInterface: NetworkInterface {
         _ admit: @Sendable (_ remoteSource: any ContentSource) async throws
             -> NodeImportOutcome
     ) async throws -> NodeImportOutcome
-    typealias ValidateEvidenceSource = @Sendable (
-        _ blockCID: String,
-        _ requirement: CrossChainEvidenceRequirement
-    ) async -> AuthenticatedChildPackage?
 
     private let childCandidateProvider: ChildCandidateProvider
     private let chainStateChangePublisher: ChainStateChangePublisher
@@ -49,7 +45,6 @@ final class ClosureNetworkInterface: NetworkInterface {
     private let acceptedBlockPublisher: AcceptedBlockPublisher
     private let acceptedTransactionPublisher: AcceptedTransactionPublisher
     private let executionBodySource: ExecutionBodyImport?
-    private let validateEvidenceSource: ValidateEvidenceSource?
 
     init(
         childCandidateProvider: @escaping ChildCandidateProvider,
@@ -61,8 +56,7 @@ final class ClosureNetworkInterface: NetworkInterface {
         parentRunReportRequester: @escaping ParentRunReportRequester = { _ in },
         acceptedBlockPublisher: @escaping AcceptedBlockPublisher,
         acceptedTransactionPublisher: @escaping AcceptedTransactionPublisher = { _ in },
-        executionBodySource: ExecutionBodyImport? = nil,
-        validateEvidenceSource: ValidateEvidenceSource? = nil
+        executionBodySource: ExecutionBodyImport? = nil
     ) {
         self.childCandidateProvider = childCandidateProvider
         self.chainStateChangePublisher = chainStateChangePublisher
@@ -74,7 +68,6 @@ final class ClosureNetworkInterface: NetworkInterface {
         self.acceptedBlockPublisher = acceptedBlockPublisher
         self.acceptedTransactionPublisher = acceptedTransactionPublisher
         self.executionBodySource = executionBodySource
-        self.validateEvidenceSource = validateEvidenceSource
     }
 
     func directChildCandidates(
@@ -128,13 +121,5 @@ final class ClosureNetworkInterface: NetworkInterface {
         return try await executionBodySource(blockCID) { remoteSource in
             try await admit(remoteSource)
         }
-    }
-
-    func resolveExecutionEvidence(
-        for blockCID: String,
-        requirement: CrossChainEvidenceRequirement
-    ) async -> AuthenticatedChildPackage? {
-        guard let validateEvidenceSource else { return nil }
-        return await validateEvidenceSource(blockCID, requirement)
     }
 }

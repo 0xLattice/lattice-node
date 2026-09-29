@@ -132,8 +132,8 @@ final class LatticeCtlTopologyTests: XCTestCase {
     }
 
     /// `lattice-node --config` builds each level from its tree entry: ports,
-    /// peers and identity from the file and data root, the parent endpoint
-    /// from the host.
+    /// peers and identity from the file and data root. The host wires the
+    /// parent (`ChainHostTests`).
     func testDaemonConfiguresEachLevelFromTheTree() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ctl-host-\(UUID().uuidString)")
@@ -146,7 +146,7 @@ final class LatticeCtlTopologyTests: XCTestCase {
         nexus.peers = []
         let nexusConfiguration = try command.hostedLevel(
             path: "Nexus", chain: nexus, layout: layout
-        ).configure(nil)
+        ).configure()
         XCTAssertTrue(
             nexusConfiguration.bootstrapPeers.isEmpty,
             "an explicit empty list means no peers"
@@ -155,16 +155,11 @@ final class LatticeCtlTopologyTests: XCTestCase {
         let level = try command.hostedLevel(
             path: "Nexus/Payments", chain: chain(4101), layout: layout
         )
-        let parent = ParentEndpoint(
-            publicKey: nexusConfiguration.processPublicKey,
-            host: "127.0.0.1", port: 4002
-        )
-        let configuration = try level.configure(parent)
+        let configuration = try level.configure()
         XCTAssertEqual(level.address.key, "Nexus/Payments")
         XCTAssertEqual(configuration.listenPort, 4101)
         XCTAssertEqual(configuration.factListenPort, 4102)
         XCTAssertEqual(configuration.rpcPort, 4103)
-        XCTAssertEqual(configuration.parentEndpoint, parent)
         XCTAssertEqual(
             configuration.storagePath.path,
             layout.chainDirectory(for: "Nexus/Payments").path
@@ -173,13 +168,6 @@ final class LatticeCtlTopologyTests: XCTestCase {
             atPath: layout.identityKey(for: "Nexus/Payments").path
         ))
 
-        let single = try LatticeNodeCommand.parse([
-            "--config", "lattice.json", "--parent", "\(parent.publicKey)@127.0.0.1:4002",
-        ])
-        do {
-            try await single.runHost(configPath: "lattice.json")
-            XCTFail("--parent must be refused with --config")
-        } catch {}
         let ports = try LatticeNodeCommand.parse([
             "--config", "lattice.json", "--listen-port", "5001",
         ])
@@ -188,6 +176,21 @@ final class LatticeCtlTopologyTests: XCTestCase {
             XCTFail("--listen-port must be refused with --config")
         } catch {
             XCTAssertTrue("\(error)".contains("--listen-port"))
+        }
+    }
+
+    /// A child runs only co-hosted with its ancestry: there is no remote
+    /// parent, and without --config only Nexus runs.
+    func testTheDaemonRunsAChildOnlyInAHostedTree() async throws {
+        XCTAssertThrowsError(try LatticeNodeCommand.parse([
+            "--parent", "\(String(repeating: "ab", count: 32))@127.0.0.1:4002",
+        ]))
+        var child = try LatticeNodeCommand.parse(["--chain-path", "Nexus/Payments"])
+        do {
+            try await child.run()
+            XCTFail("a child chain must be refused without --config")
+        } catch {
+            XCTAssertTrue("\(error)".contains("--config"))
         }
     }
 

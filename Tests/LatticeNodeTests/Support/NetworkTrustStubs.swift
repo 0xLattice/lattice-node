@@ -137,7 +137,6 @@ actor HierarchyRetryRecorder {
     private var evidenceIndexRequests = 0
     private var helloSessions: [Data] = []
     private var indexSessions: [Data] = []
-    private var parentFactRequests = 0
     private var runReportRequests: [ParentRunReportRequestMessage] = []
 
     init(withholdFirstHello: Bool = false) {
@@ -160,8 +159,6 @@ actor HierarchyRetryRecorder {
         case NodeNetworkTopic.childEvidenceIndexRequest:
             evidenceIndexRequests += 1
             indexSessions.append(sessionID)
-        case NodeNetworkTopic.parentChainFactRequest:
-            parentFactRequests += 1
         default:
             break
         }
@@ -171,8 +168,6 @@ actor HierarchyRetryRecorder {
     func sessionTrace() -> (hellos: [Data], indexes: [Data]) {
         (helloSessions, indexSessions)
     }
-
-    func parentFactRequestCount() -> Int { parentFactRequests }
 }
 
 final class HierarchyRetryPeer: IvyDelegate, Sendable {

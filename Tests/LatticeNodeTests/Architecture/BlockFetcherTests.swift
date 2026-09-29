@@ -56,14 +56,14 @@ final class BlockFetcherTests: XCTestCase {
         XCTAssertEqual(fetcher.next()?.blockCID, blockCID)
     }
 
-    func testLaterWaitIsReadiedByRetryNotByObserveAlone() throws {
-        // Regression for the parent-fact SUCCESS gap: observe() (what
-        // enqueueCandidate does) only re-readies a `.wait(.evidence)` attempt,
-        // never a `.wait(.later)` one. A parent fact arriving successfully must
-        // therefore call retryExternalDependency to re-ready the blocked candidate,
-        // as acceptParentChainFact now does — otherwise it wedges until the poll.
-        let blockCID = "later-wait"
-        let rootCID = "later-root"
+    func testParentFactWaitIsReadiedByRetryNotByObserveAlone() throws {
+        // observe() (what enqueueCandidate does) only re-readies a
+        // `.wait(.evidence)` attempt, never a `.wait(.parentFact)` one. A
+        // parent fact the parent level holds must therefore call
+        // retryExternalDependency to re-ready the blocked candidate, as the
+        // admission path does — otherwise it waits for the parent's next tip.
+        let blockCID = "parent-fact-wait"
+        let rootCID = "parent-fact-root"
         var fetcher = BlockFetcher()
         XCTAssertTrue(fetcher.observe(.init(
             blockCID: blockCID,
@@ -71,19 +71,54 @@ final class BlockFetcherTests: XCTestCase {
             recoveryRootCID: rootCID
         )).accepted)
         let ticket = try XCTUnwrap(fetcher.next())
-        XCTAssertTrue(fetcher.complete(ticket.ticket, resolution: .wait(.later)))
+        XCTAssertTrue(fetcher.complete(ticket.ticket, resolution: .wait(.parentFact)))
 
-        // observe() with the (now available) package does NOT re-ready a .later wait.
+        // observe() with the (now available) package does NOT re-ready it.
         _ = fetcher.observe(.init(
             blockCID: blockCID,
             package: try childPackage(rootCID: rootCID),
             recoveryRootCID: rootCID
         ))
-        XCTAssertNil(fetcher.next(), "observe alone must not re-ready a .later wait")
+        XCTAssertNil(fetcher.next(), "observe alone must not re-ready a .parentFact wait")
 
-        // retryExternalDependency (the call the fix adds) re-readies it.
         fetcher.retryExternalDependency(blockCID: blockCID, rootCID: rootCID)
         XCTAssertEqual(fetcher.next()?.blockCID, blockCID)
+    }
+
+    /// A parent-fact park has no timer: only the parent's tip change
+    /// (`retryParentFactWaits`) re-readies it, and it wakes every such park
+    /// while leaving other waits alone.
+    func testParentFactWaitsWakeOnTheParentTipNotTheClock() throws {
+        var fetcher = BlockFetcher()
+        for cid in ["fact-a", "fact-b", "later"] {
+            XCTAssertTrue(fetcher.observe(.init(blockCID: cid, package: nil)).accepted)
+        }
+        var parked: [String] = []
+        while let candidate = fetcher.next() {
+            parked.append(candidate.blockCID)
+            XCTAssertTrue(fetcher.complete(
+                candidate.ticket,
+                resolution: .wait(candidate.blockCID == "later" ? .later : .parentFact)
+            ))
+        }
+        XCTAssertEqual(Set(parked), ["fact-a", "fact-b", "later"])
+
+        // Past every pacing interval, short of the expiry window.
+        fetcher.retry(now: .now.advanced(by: .seconds(60 * 60)))
+        var byClock: [String] = []
+        while let candidate = fetcher.next() {
+            byClock.append(candidate.blockCID)
+            XCTAssertTrue(fetcher.complete(candidate.ticket, resolution: .wait(.later)))
+        }
+        XCTAssertEqual(byClock, ["later"], "the clock retries only the .later wait")
+
+        fetcher.retryParentFactWaits()
+        var byTip: [String] = []
+        while let candidate = fetcher.next() {
+            byTip.append(candidate.blockCID)
+            XCTAssertTrue(fetcher.complete(candidate.ticket, resolution: .terminal))
+        }
+        XCTAssertEqual(Set(byTip), ["fact-a", "fact-b"])
     }
 
     private func provider(

@@ -82,37 +82,6 @@ final class NodeConfigurationTests: XCTestCase {
         )
     }
 
-    func testChildRequiresDialableAuthenticatedParent() throws {
-        let parentKey = try Curve25519.Signing.PrivateKey(
-            rawRepresentation: Data(repeating: 2, count: 32)
-        )
-        let parentPublicKey = try PeerKey(
-            rawRepresentation: parentKey.publicKey.rawRepresentation
-        ).hex
-
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus", "Payments"],
-            storagePath: URL(fileURLWithPath: "/tmp/lattice-node-test"),
-            privateKeyHex: String(repeating: "01", count: 32),
-            parentEndpoint: ParentEndpoint(
-                publicKey: parentPublicKey.uppercased(),
-                host: " 127.0.0.1 ",
-                port: 4001
-            )
-        )
-        XCTAssertEqual(configuration.parentEndpoint?.publicKey, parentPublicKey)
-        XCTAssertEqual(configuration.parentEndpoint?.host, "127.0.0.1")
-
-        XCTAssertThrowsError(try NodeConfiguration(
-            chainPath: ["Nexus", "Payments"],
-            storagePath: URL(fileURLWithPath: "/tmp/lattice-node-test"),
-            privateKeyHex: String(repeating: "01", count: 32),
-            parentEndpoint: ParentEndpoint(publicKey: "bad", host: "", port: 0)
-        )) { error in
-            XCTAssertEqual(error as? NodeConfigurationError, .invalidParentEndpoint)
-        }
-    }
-
     func testPublicReadURLIsNormalizedAndMustBeBrowsable() throws {
         let configuration = try NodeConfiguration(
             chainPath: ["Nexus"],
