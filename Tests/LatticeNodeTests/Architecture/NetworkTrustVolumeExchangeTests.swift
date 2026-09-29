@@ -568,6 +568,14 @@ final class NetworkTrustVolumeExchangeTests: NetworkTrustTestCase {
 
     /// Establishes: NODE-STORAGE-001.g
     func testAVolumeOfSeveralFramesArrivesWholeThroughRealIvy() async throws {
+        // Ivy 13.0.0 closes a healthy connection when its consumer falls two
+        // frames behind (adalinxx/Ivy#12), which sanitizer builds reliably
+        // do. Only the sanitizer jobs set this; every other run keeps the
+        // test. Remove with the Ivy fix and its pin bump.
+        try XCTSkipIf(
+            ProcessInfo.processInfo.environment["LATTICE_SKIP_IVY_12"] != nil,
+            "adalinxx/Ivy#12: a slow consumer drops a multi-frame transfer"
+        )
         let frameSize: UInt32 = 80 * 1_024
         let members = try (0..<5).map { index in
             try entry(header(String(repeating: "\(index)", count: 60_000)))
