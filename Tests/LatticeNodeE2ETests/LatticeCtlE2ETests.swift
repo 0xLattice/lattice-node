@@ -226,6 +226,17 @@ final class LatticeCtlE2ETests: XCTestCase {
     /// Brings up one CLI-managed host mining Nexus with rewards to `miner`
     /// (none when nil: they burn), and each chain in `recipients` to its
     /// key, then deploys a premined child.
+    ///
+    /// Pass a Nexus `miner` only when the test spends Nexus rewards. A
+    /// credited recipient changes Nexus's post-state on every block, and at
+    /// this host's near-maximum Nexus target nearly every hash is a full
+    /// Nexus block, so each one stales every hosted child's prebuilt
+    /// candidate (it binds the tip's post-state) before the coordinator's
+    /// next template can carry it. A child is then carried only when its
+    /// rebuild wins that race, and a grandchild topology, or a child with a
+    /// transaction pooled, can lose it on every block. At Nexus's real
+    /// target a child rides child-only carriers, which leave Nexus's
+    /// post-state alone.
     private func bringUpMiningHost(
         miner: TestKey?,
         recipients: [String: TestKey] = [:]
@@ -616,13 +627,9 @@ final class LatticeCtlE2ETests: XCTestCase {
         let buyer = try await makeKey(scratch, "buyerG")
         let sink = try await makeKey(scratch, "sinkG")
 
-        // No Nexus recipient: nothing here spends Nexus rewards, and a
-        // credited recipient changes Nexus's post-state on every block. At
-        // this host's near-maximum Nexus target nearly every hash is a full
-        // Nexus block, so each one would stale Market's prebuilt candidate
-        // (it binds the tip's post-state) before the coordinator's next
-        // template can carry it; with the receipt pooled, Market lost that
-        // race on every block and never advanced.
+        // No Nexus recipient (see `bringUpMiningHost`): with one, Market
+        // lost the candidate race on every block while the receipt was
+        // pooled and never advanced.
         let host = try await bringUpMiningHost(miner: nil)
         // Middle chain premined to the BUYER (their receipt funding);
         // grandchild premined to the SELLER (the locked goods).
@@ -741,10 +748,10 @@ final class LatticeCtlE2ETests: XCTestCase {
             at: scratch, withIntermediateDirectories: true
         )
         defer { try? FileManager.default.removeItem(at: scratch) }
-        let miner = try await makeKey(scratch, "minerRun")
         let holder = try await makeKey(scratch, "holderRun")
 
-        let host = try await bringUpMiningHost(miner: miner)
+        // No Nexus recipient: see `bringUpMiningHost`.
+        let host = try await bringUpMiningHost(miner: nil)
         let marketRPC = try await deployChild(
             host, directory: "Market",
             premineTo: holder.address,
@@ -933,9 +940,9 @@ final class LatticeCtlE2ETests: XCTestCase {
             .appendingPathComponent("lattice-node-e2e-ctlkeys-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: scratch) }
-        let miner = try await makeKey(scratch, "minerCrash")
         let holder = try await makeKey(scratch, "holderCrash")
-        let host = try await bringUpMiningHost(miner: miner)
+        // No Nexus recipient: see `bringUpMiningHost`.
+        let host = try await bringUpMiningHost(miner: nil)
         let marketRPC = try await deployChild(
             host, directory: "Market", premineTo: holder.address,
             fund: try await makeKey(scratch, "fundMarketCrash")
