@@ -7,10 +7,11 @@ import cashew
 /// state in this process.
 ///
 /// Every method is a GATE-FREE read: it must not take the parent's
-/// `ChainProcess` operation gate or its `ChainService` lease. The parent
-/// awaits its children while it holds its own lease, so a child read that
-/// waited on either could close a cycle. `LocalParentLevel` calls only the
-/// gate-free reads a SafetyNet gate allows.
+/// `ChainProcess` operation gate or its `ChainService` lease. A child reads
+/// its parent while it holds its own lease (its candidate rebuild), so a
+/// read that waited on either could close a cycle with a parent that holds
+/// its lease. `LocalParentLevel` calls only the gate-free reads a SafetyNet
+/// gate allows.
 public protocol ParentLevel: AnyObject, Sendable {
     /// Whether the parent executed a block producing this state, from its
     /// genesis: the executed-from-genesis frontier, never a state it only
@@ -29,33 +30,86 @@ public protocol ParentLevel: AnyObject, Sendable {
     /// into `directory` (§9.10). Nil while the parent does not serve runs for
     /// `directory` or `carrier` commits nothing there.
     func runReport(carrier: String, directory: String) async -> ParentRunReport?
+    /// The parent's validated tip and its CID: what a child's candidate
+    /// binds (its provisional carrier's `prevState` is the tip's post-state).
+    /// Nil before the parent's genesis activates.
+    func validatedTip() async -> (cid: String, block: Block)?
     /// The parent's local content, for a candidate build against its
     /// provisional carrier: broker-local reads only, never the network.
     var contentSource: any ContentSource { get }
 }
 
-/// A parent level's view of a co-hosted child level. Notifications never
-/// block; only `candidate` is awaited, and only from the parent's template
-/// path while it holds its own lease, under the template's deadline
-/// (`ChildCandidateBudget`). The child's build takes only the child's own
-/// lease and makes only gate-free upward reads (`ParentLevel`), so the lease
-/// order is parent before child, never the reverse.
+/// A parent level's view of a co-hosted child level. Nothing here waits on
+/// the child: notifications enqueue, and `readyCandidate` reads the snapshot
+/// the child last published (`ChainService.buildReadyCandidate`), built
+/// under the child's own lease against the parent's validated tip. The
+/// parent's template path never awaits a child (§2.4).
 public protocol ChildLevel: AnyObject, Sendable {
     var directory: String { get }
     /// Enqueues `change` for the child and returns.
     func parentChanged(_ change: ParentChange)
-    /// The child's candidate for `context`, or nil when it has none this
-    /// round: it is walking, busy past the deadline, or holds its own
-    /// carried block awaiting admission.
-    func candidate(for context: ChildCandidateRequestContext) async -> DirectChildCandidate?
-    /// The CID of the candidate the child last built, when it binds
-    /// `parentStateCID`: a template-digest input.
-    func candidateCID(parentStateCID: String) async -> String?
+    /// The child's pre-built candidate, or nil when it has none: it is
+    /// walking, holds its own carried block awaiting admission, or has not
+    /// built yet. The caller checks its binding.
+    var readyCandidate: ReadyCandidate? { get }
+}
+
+/// A hosted child's pre-built merged-mining candidate and the parent state it
+/// binds: its provisional carrier's `prevState`, the parent's validated
+/// tip's post-state when it was built.
+public struct ReadyCandidate: Sendable {
+    public let candidate: DirectChildCandidate
+    public let cid: String
+    public let parentStateCID: String
+
+    public init?(_ candidate: DirectChildCandidate) {
+        guard let cid = try? BlockHeader(node: candidate.block).rawCID else {
+            return nil
+        }
+        self.candidate = candidate
+        self.cid = cid
+        parentStateCID = candidate.block.parentState.rawCID
+    }
+}
+
+/// The miner's plan for a level's subtree (rewards and minimum work), from
+/// the last template request: what a hosted child builds its candidate
+/// against. A parent sends each child its subtree's part when it changes.
+public struct DescendantPlan: Sendable {
+    public let rewards: [MiningReward]
+    public let minimumWork: [MiningMinimumWork]
+
+    public init(rewards: [MiningReward] = [], minimumWork: [MiningMinimumWork] = []) {
+        self.rewards = rewards
+        self.minimumWork = minimumWork
+    }
+
+    /// The part of this plan for chains at or below `subtree`.
+    func narrowed(to subtree: [String]) -> DescendantPlan {
+        func inSubtree(_ chainPath: [String]) -> Bool {
+            chainPath.count >= subtree.count
+                && Array(chainPath.prefix(subtree.count)) == subtree
+        }
+        return DescendantPlan(
+            rewards: rewards.filter { inSubtree($0.chainPath) },
+            minimumWork: minimumWork.filter { inSubtree($0.chainPath) }
+        )
+    }
+
+    func same(as other: DescendantPlan) -> Bool {
+        guard rewards.count == other.rewards.count,
+              minimumWork == other.minimumWork else { return false }
+        return zip(rewards, other.rewards).allSatisfy { a, b in
+            a.chainPath == b.chainPath
+                && a.transaction.body.rawCID == b.transaction.body.rawCID
+                && a.transaction.signatures == b.transaction.signatures
+        }
+    }
 }
 
 /// What the parent level tells a hosted child (`ChainService.ParentMailbox`):
-/// runs in the order sent, tip changes coalesced. Delivery never blocks the
-/// parent.
+/// runs in the order sent, tip and plan changes coalesced. Delivery never
+/// blocks the parent.
 public enum ParentChange: Sendable {
     /// The parent's validated tip or executed frontier moved: a parent fact
     /// a child block waited on may hold now.
@@ -64,6 +118,9 @@ public enum ParentChange: Sendable {
     /// directory changed (§9.10): the child credits each at the child block
     /// the committer carried.
     case runs([ParentRunReport])
+    /// The miner's plan for the child's subtree changed: the child rebuilds
+    /// its candidate against it.
+    case plan(DescendantPlan)
 }
 
 /// A parent fact a child admission can read from its co-hosted parent
@@ -186,6 +243,10 @@ final class LocalParentLevel: @unchecked Sendable, ParentLevel, ContentSource {
         await process?.runReport(carrier: carrier, directory: directory)
     }
 
+    func validatedTip() async -> (cid: String, block: Block)? {
+        await process?.ungatedValidatedTip()
+    }
+
     var contentSource: any ContentSource { self }
 
     func fetch(_ cids: Set<String>) async -> [String: Data] {
@@ -193,54 +254,28 @@ final class LocalParentLevel: @unchecked Sendable, ParentLevel, ContentSource {
     }
 }
 
-/// `ChildLevel` over the co-hosted child's service, process and runtime.
-/// Weak: the host owns the child level, and a stopped child is not carried.
+/// `ChildLevel` over the co-hosted child's service. Weak: the host owns the
+/// child level, and a stopped child is not carried.
 final class LocalChildLevel: @unchecked Sendable, ChildLevel {
     let directory: String
     private let mailbox: ChainService.ParentMailbox
     private weak var service: ChainService?
-    private weak var process: ChainProcess?
-    private weak var network: NodeNetworkRuntime?
 
     init(
         directory: String,
         mailbox: ChainService.ParentMailbox,
-        service: ChainService,
-        process: ChainProcess,
-        network: NodeNetworkRuntime
+        service: ChainService
     ) {
         self.directory = directory
         self.mailbox = mailbox
         self.service = service
-        self.process = process
-        self.network = network
     }
 
     func parentChanged(_ change: ParentChange) {
         mailbox.send(change)
     }
 
-    func candidate(
-        for context: ChildCandidateRequestContext
-    ) async -> DirectChildCandidate? {
-        guard let service, let process, let network else { return nil }
-        // A candidate this chain built that the parent's evidence names as
-        // carried and still holds in the inbox (undecided), now ready for or
-        // in its admission: the carried block is about to be this chain's
-        // weighed tip, and a candidate built now, on the tip before it, would
-        // only be its sibling. The inbox is written only from the configured
-        // parent's evidence, so no overlay peer can populate this set.
-        let pendingHandoff = (try? await process.store.pendingHandoffChildCIDs()) ?? []
-        guard await network.offerGate(pendingHandoff: pendingHandoff) else {
-            SyncTrace.log("child candidate withheld: own carried candidate awaiting admission")
-            return nil
-        }
-        return await ChildCandidateBudget.withinDeadline {
-            try? await service.hostedMiningCandidate(for: context)
-        }
-    }
-
-    func candidateCID(parentStateCID: String) async -> String? {
-        await service?.candidateCID(parentStateCID: parentStateCID)
+    var readyCandidate: ReadyCandidate? {
+        service?.readyCandidate()
     }
 }

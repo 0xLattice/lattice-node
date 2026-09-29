@@ -1,7 +1,6 @@
 import Foundation
 import Ivy
 import Lattice
-import Synchronization
 import Tally
 import UInt256
 import VolumeBroker
@@ -30,55 +29,6 @@ public struct NetworkCandidateImport: Sendable {
         self.preparingChildDirectories = preparingChildDirectories
         self.contentSource = contentSource
         self.weighed = weighed
-    }
-}
-
-/// The deadline a template's child candidate asks run under: set once by the
-/// template path, inherited down the hosted tree.
-enum ChildCandidateBudget {
-    @TaskLocal static var deadline: ContinuousClock.Instant?
-
-    /// `build`'s result, or nil when the task's deadline passes first. The
-    /// build is not cancelled: it runs on under its own level's lease, and
-    /// the memo it leaves serves the next ask. No deadline waits for it.
-    static func withinDeadline<T: Sendable>(
-        _ build: @escaping @Sendable () async -> T?
-    ) async -> T? {
-        guard let deadline else { return await build() }
-        let remaining = deadline - ContinuousClock.now
-        guard remaining > .zero else { return nil }
-        let first = FirstResult<T>()
-        return await withCheckedContinuation { continuation in
-            first.arm(continuation)
-            let timer = Timers.deadline(after: remaining, generation: 0) { _ in
-                first.resolve(nil)
-            }
-            // `Task {}`: the build inherits the deadline, so a grandchild's
-            // ask is bounded by the same template.
-            Task {
-                let result = await build()
-                timer.cancel()
-                first.resolve(result)
-            }
-        }
-    }
-
-    /// Resumes its continuation with the first value resolved; later ones
-    /// are dropped.
-    private final class FirstResult<T: Sendable>: Sendable {
-        private let continuation = Mutex<CheckedContinuation<T?, Never>?>(nil)
-
-        func arm(_ continuation: CheckedContinuation<T?, Never>) {
-            self.continuation.withLock { $0 = continuation }
-        }
-
-        func resolve(_ value: T?) {
-            let continuation = self.continuation.withLock { slot in
-                defer { slot = nil }
-                return slot
-            }
-            continuation?.resume(returning: value)
-        }
     }
 }
 
@@ -769,6 +719,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// Owner: Candidates.startCandidateWorker / Candidates.finishCandidateWorker /
     ///     Lifecycle.clearRuntimeState.
     var candidateWorker = TaskSlot()
+    /// Set when the candidate gate withheld the ready candidate behind an own
+    /// carried candidate's admission; the admission drain then re-arms it.
+    /// Owner: Candidates.drainCandidateImports / Candidates.offerGate /
+    ///     Lifecycle.clearRuntimeState.
+    var candidateOfferDeferredByAdmission = false
     /// Counts the parent level's tip changes, so an admission that read a
     /// parent fact as missing can tell whether the tip moved before its
     /// candidate parked.

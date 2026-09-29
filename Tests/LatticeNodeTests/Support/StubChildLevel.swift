@@ -2,44 +2,32 @@ import Foundation
 import Lattice
 @testable import LatticeNode
 
-/// A hosted child level answered by closures: the test double for
-/// `LocalChildLevel`.
+/// A hosted child level whose snapshot the test publishes: the test double
+/// for `LocalChildLevel`.
 final class StubChildLevel: ChildLevel, Sendable {
-    typealias Build = @Sendable (
-        ChildCandidateRequestContext
-    ) async throws -> DirectChildCandidate?
-
     let directory: String
-    private let build: Build
-    private let cid: @Sendable (_ parentStateCID: String) async -> String?
+    private let snapshot = Published<ReadyCandidate>()
     private let notify: @Sendable (ParentChange) -> Void
 
     init(
         directory: String,
-        build: @escaping Build = { _ in nil },
-        candidateCID: @escaping @Sendable (_ parentStateCID: String) async -> String? = { _ in nil },
+        candidate: DirectChildCandidate? = nil,
         notify: @escaping @Sendable (ParentChange) -> Void = { _ in }
     ) {
         self.directory = directory
-        self.cid = candidateCID
         self.notify = notify
-        self.build = build
+        publish(candidate)
     }
 
     func parentChanged(_ change: ParentChange) {
         notify(change)
     }
 
-    func candidate(
-        for context: ChildCandidateRequestContext
-    ) async -> DirectChildCandidate? {
-        await ChildCandidateBudget.withinDeadline { [build] in
-            try? await build(context)
-        }
-    }
+    var readyCandidate: ReadyCandidate? { snapshot.value }
 
-    func candidateCID(parentStateCID: String) async -> String? {
-        await cid(parentStateCID)
+    /// Publishes `candidate` as this child's snapshot (nil withdraws it).
+    func publish(_ candidate: DirectChildCandidate?) {
+        snapshot.swap(candidate.flatMap(ReadyCandidate.init))
     }
 }
 
@@ -52,18 +40,47 @@ extension ChainService {
         attachChildLevel(StubChildLevel(directory: directory, notify: notify))
     }
 
-    /// One stub child level per directory, each answering with `provider`'s
-    /// candidate in its directory.
+    /// One stub child level per directory, each publishing `provider`'s
+    /// candidate in its directory, built — as a hosted child's rebuild
+    /// builds — against a provisional carrier on `process`'s validated tip
+    /// (`process` is this level's own). Returns that carrier.
+    @discardableResult
     func attachStubChildren(
         _ directories: [String],
+        on process: ChainProcess,
         provider: @escaping @Sendable (
             ChildCandidateRequestContext
         ) async throws -> [DirectChildCandidate]
-    ) {
+    ) async throws -> Block {
+        let tip = try await process.validatedTipBlock()
+        guard let carrier = ChainService.provisionalCarrier(
+            on: tip,
+            tipCID: try BlockHeader(node: tip).rawCID,
+            timestamp: tip.timestamp + 1
+        ) else { throw ChainServiceError.invalidParentCarrier }
+        let built = try await provider(
+            ChildCandidateRequestContext(parentCarrier: carrier, rewards: [])
+        )
         for directory in directories {
-            attachChildLevel(StubChildLevel(directory: directory) { context in
-                try await provider(context).first { $0.directory == directory }
-            })
+            attachChildLevel(StubChildLevel(
+                directory: directory,
+                candidate: built.first { $0.directory == directory }
+            ))
         }
+        return carrier
+    }
+
+    /// The co-hosted parent mailbox without the candidate hooks: this level
+    /// never builds a snapshot.
+    func openParentMailbox(
+        tipChanged: @escaping @Sendable () async -> Void,
+        serveParentRuns: @escaping @Sendable () async -> Void
+    ) -> ParentMailbox {
+        openParentMailbox(
+            tipChanged: tipChanged,
+            serveParentRuns: serveParentRuns,
+            candidateGate: { _ in false },
+            candidateChanged: {}
+        )
     }
 }

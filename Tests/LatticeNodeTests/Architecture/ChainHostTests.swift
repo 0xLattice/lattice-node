@@ -250,10 +250,10 @@ final class ChainHostTests: XCTestCase {
         await host.stopAll()
     }
 
-    /// Nexus, a child and a grandchild in one host: Nexus's template asks its
-    /// hosted child for a candidate, whose build asks its own hosted
-    /// grandchild, so one mined Nexus block carries both — and each level
-    /// admits its carried block.
+    /// Nexus, a child and a grandchild in one host: the grandchild's snapshot
+    /// composes into the child's, which Nexus's template carries, so one
+    /// mined Nexus block carries both — each level admits its carried block,
+    /// and its snapshot follows its moved tip into a later Nexus block.
     func testOneNexusBlockCarriesTheHostedChildAndGrandchild() async throws {
         let root = temporaryDirectory(create: true)
         let (_, childGenesis) = try await seedChild(root: root, timestamp: 1_000)
@@ -309,6 +309,28 @@ final class ChainHostTests: XCTestCase {
         }
         try await eventually("the grandchild admits its carried block", within: .seconds(120)) {
             (await refunds.status().height ?? 0) >= 1
+        }
+
+        // Each admission moves a level's tip and its snapshot follows, so a
+        // later Nexus block carries each level's next block, not the one
+        // already carried.
+        var carriedNext = false
+        try await eventually("a Nexus block carries both levels' next blocks", within: .seconds(120)) {
+            let template = try await parent.miningTemplate(
+                MiningTemplateRequest(rewards: [])
+            )
+            let childBlock = template.block.children.node?[self.child.directory]?.node
+            let grandchildBlock = childBlock?.children.node?[self.grandchild.directory]?.node
+            let mined = try await parent.submitWork(SubmitWorkRequest(
+                workID: template.workID, nonce: solvedNonce(for: template)
+            ))
+            carriedNext = carriedNext || (mined.accepted
+                && (childBlock?.height ?? 0) >= 2
+                && (grandchildBlock?.height ?? 0) >= 2)
+            return carriedNext
+        }
+        try await eventually("the grandchild admits its next block", within: .seconds(120)) {
+            (await refunds.status().height ?? 0) >= 2
         }
         await host.stopAll()
     }
@@ -523,6 +545,8 @@ private actor GatedAnchorParentLevel: ParentLevel {
     }
 
     func runReport(carrier: String, directory: String) async -> ParentRunReport? { nil }
+
+    func validatedTip() async -> (cid: String, block: Block)? { nil }
 
     nonisolated var contentSource: any ContentSource { InMemoryContentSource([:]) }
 }

@@ -252,6 +252,7 @@ extension NodeNetworkRuntime {
         sessionLeases.servingAncestorRange.removeAll()
         clearRangeSync()
         candidateWorker.cancel()
+        candidateOfferDeferredByAdmission = false
         blockFetcher.reset(
             retryWindow: planeConfigurations.overlay.requestTimeout
                 * Self.maximumCandidateWaitTicks

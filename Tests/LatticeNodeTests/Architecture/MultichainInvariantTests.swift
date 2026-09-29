@@ -1258,6 +1258,10 @@ final class MultichainInvariantTests: XCTestCase {
             await base.anchoredGenesisCID(directory: directory)
         }
 
+        func validatedTip() async -> (cid: String, block: Block)? {
+            await base.validatedTip()
+        }
+
         func runReport(carrier: String, directory: String) async -> ParentRunReport? {
             carriersRead.append(carrier)
             if await !served() { unservedReads += 1 }

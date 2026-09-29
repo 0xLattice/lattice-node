@@ -58,6 +58,10 @@ actor StubParentLevel: ParentLevel {
         await base?.runReport(carrier: carrier, directory: directory)
     }
 
+    func validatedTip() async -> (cid: String, block: Block)? {
+        await base?.validatedTip()
+    }
+
     /// The parent now answers from what it holds.
     func release() { withheld = false }
 

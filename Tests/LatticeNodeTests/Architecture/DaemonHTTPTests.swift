@@ -912,24 +912,20 @@ final class DaemonHTTPTests: XCTestCase {
                 acceptedBlockPublisher: { _ in },
             )
         )
-        // Asked from inside `buildMiningTemplate()` while `miningTemplate()`
-        // still holds the operation gate — parking here lets the test hold
-        // that gate open for a controlled duration (within the template's
-        // child-candidate deadline).
-        await service.attachChildLevel(StubChildLevel(directory: "Payments") { _ in
-            await providerEntered.open()
-            await releaseProvider.wait()
-            return nil
-        })
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
 
+        // Holds the operation gate, as a gated operation in flight does, for
+        // a controlled duration.
         let blockedTemplate = Task {
-            _ = try? await service.miningTemplate(MiningTemplateRequest())
+            await service.withOperationForTesting {
+                await providerEntered.open()
+                await releaseProvider.wait()
+            }
         }
         await providerEntered.wait()
 
         // A concurrent call to the GATED status() must queue behind the
-        // in-flight mining-template build.
+        // in-flight operation.
         let statusCompleted = CompletionFlag()
         let blockedStatus = Task { () -> ChainServiceStatusResponse in
             let result = await service.status()

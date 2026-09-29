@@ -11,27 +11,23 @@ public struct DirectChildProofPublication: Sendable {
     public let proof: ChildBlockProof
 }
 
-/// What a parent level asks each hosted child level to build its candidate
-/// against: the provisional carrier, and the miner's plan for the child's
-/// subtree. The template's deadline (`ChildCandidateBudget`) bounds the ask; a
-/// child that misses it is not carried this round.
+/// What a hosted child level builds its candidate against: the provisional
+/// carrier on its parent's validated tip, and the miner's plan for the
+/// child's subtree.
 public struct ChildCandidateRequestContext: Sendable {
     public let parentCarrier: Block
     public let rewards: [MiningReward]
     /// The requesting miner's minimum work for descendant chains.
     public let minimumWork: [MiningMinimumWork]
-    public let excludedDirectories: Set<String>
 
     public init(
         parentCarrier: Block,
         rewards: [MiningReward],
-        minimumWork: [MiningMinimumWork] = [],
-        excludedDirectories: Set<String> = []
+        minimumWork: [MiningMinimumWork] = []
     ) {
         self.parentCarrier = parentCarrier
         self.rewards = rewards
         self.minimumWork = minimumWork
-        self.excludedDirectories = excludedDirectories
     }
 }
 
@@ -92,6 +88,9 @@ public protocol ChainInterface: AnyObject, Sendable {
     /// This chain's genesis activated outside candidate admission (adopted
     /// from the parent's record): its tip moved from nothing.
     func genesisActivatedOutOfBand() async
+    /// An admission the candidate gate waited on (an own carried block)
+    /// decided or parked: the ready candidate it withheld is rebuilt.
+    func candidateGateReopened() async
 }
 
 /// The service's view of the runtime. Holds the runtime weakly, so the
@@ -183,5 +182,9 @@ final class WeakChain: @unchecked Sendable, ChainInterface {
 
     func genesisActivatedOutOfBand() async {
         await service?.genesisActivatedOutOfBand()
+    }
+
+    func candidateGateReopened() async {
+        await service?.candidateGateReopened()
     }
 }

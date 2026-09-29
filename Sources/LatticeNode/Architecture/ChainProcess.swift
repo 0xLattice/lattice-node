@@ -1515,6 +1515,17 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// that BUILD ON the tip (mining templates, mempool reconciliation) never
     /// act on a merely weighed tip. Identical to `canonicalTipBlock()` under
     /// all-eager admission.
+    /// `validatedTipBlock` without the operation gate, for a co-hosted
+    /// child's candidate rebuild (`ParentLevel.validatedTip`, §2.4): the
+    /// same ungated walk `readSnapshot` makes, resolved from local content.
+    func ungatedValidatedTip() async -> (cid: String, block: Block)? {
+        guard let validated = await deepestValidatedCanonicalTip(),
+              let block = try? await BlockHeader(
+                  rawCID: validated.cid, node: nil, encryptionInfo: nil
+              ).resolve(fetcher: localFetcher).node else { return nil }
+        return (validated.cid, block)
+    }
+
     public func validatedTipBlock() async throws -> Block {
         await acquireOperation()
         defer { releaseOperation() }
