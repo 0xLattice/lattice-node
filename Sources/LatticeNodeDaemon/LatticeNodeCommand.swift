@@ -250,7 +250,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         // gracefully stopped its listener; the node then shuts down behind
         // it, on success and on error alike: tasks that touch the store are
         // joined, the network stops, and the service joins its own work.
-        // The stores close when `run()` returns and drops the node.
+        // The seed task is joined after the network stops, which resumes
+        // its parent-record wait. The stores close when `run()` returns and
+        // drops the node.
         let result: Result<Void, any Error>
         do {
             if let publicReadApp {
@@ -273,10 +275,11 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             result = .failure(error)
         }
         genesisSeedTask?.cancel()
-        await genesisSeedTask?.value
         volumeMaintenance.cancel()
         await volumeMaintenance.value
-        await node.shutdown()
+        await node.shutdown {
+            await genesisSeedTask?.value
+        }
         try result.get()
     }
 

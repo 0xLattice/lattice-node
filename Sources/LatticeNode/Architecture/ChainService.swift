@@ -132,6 +132,10 @@ public actor ChainService {
     private var nextCarrierProofDelivery: UInt64 = 0
     // Set once by `shutdown()`: no background work is started afterwards.
     private var stopped = false
+    // Network ingress calls in flight (`enterIngress`). `shutdown()` waits
+    // for them, because a finishing import enqueues a canonical commit.
+    private var ingressInFlight = 0
+    private var ingressDrainWaiters: [CheckedContinuation<Void, Never>] = []
 
     // This actor calls other actors and is therefore reentrant. Keep its pool,
     // template cache, and pending intents in one externally observable order.
@@ -180,6 +184,9 @@ public actor ChainService {
     /// Canonical commits still drain, because each is already durable in the
     /// process and only its reconciliation is outstanding; they arrive only
     /// through ingress, which the caller stops first (`Node.shutdown()`).
+    /// Network ingress (every `ChainInterface` entry) is refused from entry
+    /// on, and calls already inside are waited for: the network runtime's
+    /// stop cancels its tasks without joining them.
     /// Idempotent: a later call waits for the same join and returns.
     public func shutdown() async {
         stopped = true
@@ -195,11 +202,38 @@ public actor ChainService {
                 // behind it so the deferred worker starts and finishes first.
                 await acquireOperation()
                 releaseOperation()
+            } else if ingressInFlight > 0 {
+                await withCheckedContinuation { ingressDrainWaiters.append($0) }
             } else {
                 return
             }
         }
     }
+
+    /// Admits one network ingress call; refused once `shutdown()` has begun.
+    /// Pair with `defer { exitIngress() }`.
+    private func enterIngress() throws {
+        guard !stopped else { throw CancellationError() }
+        ingressInFlight += 1
+    }
+
+    private func exitIngress() {
+        ingressInFlight -= 1
+        guard ingressInFlight == 0 else { return }
+        let waiters = ingressDrainWaiters
+        ingressDrainWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    #if DEBUG
+    /// Test seam: no worker is running or reserved and no ingress is inside.
+    func isQuiescent() -> Bool {
+        canonicalCommitWorker == nil && !canonicalCommitWorkerReserved
+            && executionWalkWorker == nil && executionWalkRetryTask == nil
+            && transactionPublicationWorker == nil
+            && carrierProofDeliveries.isEmpty && ingressInFlight == 0
+    }
+    #endif
 
     public func status() async -> ChainServiceStatusResponse {
         await acquireOperation()
@@ -698,6 +732,8 @@ public actor ChainService {
         contentSource: any ContentSource,
         weighed: Bool = false
     ) async throws -> NodeImportOutcome {
+        try enterIngress()
+        defer { exitIngress() }
         // Preparing proofs for a directory is the other way a node declares it
         // hosts that child (§9.10): serve its runs from here on. Idempotent.
         for directory in preparingChildDirectories {
@@ -768,6 +804,8 @@ public actor ChainService {
     public func submitNetworkTransaction(
         _ transaction: Transaction
     ) async throws -> Bool {
+        try enterIngress()
+        defer { exitIngress() }
         await acquireOperation()
         defer { releaseOperation() }
         let inserted = try await admitTransactionLocked(
@@ -779,6 +817,8 @@ public actor ChainService {
     }
 
     public func transactionInventoryRoots() async -> [String] {
+        guard (try? enterIngress()) != nil else { return [] }
+        defer { exitIngress() }
         await acquireOperation()
         defer { releaseOperation() }
         guard (try? await prepareMempoolLocked()) != nil else { return [] }
@@ -1058,6 +1098,8 @@ public actor ChainService {
         for context: ChildCandidateRequestContext,
         parentContentSource: any ContentSource
     ) async throws -> DirectChildCandidate {
+        try enterIngress()
+        defer { exitIngress() }
         // A candidate builds on the validated tip. While the validate walk is
         // stepping, that tip is about to move and the build is the very work
         // that starves the walk, so none is built. The walk reports a state
@@ -1744,6 +1786,8 @@ public actor ChainService {
     /// wires in and when this process prepares proofs for a directory;
     /// idempotent, re-called after every restart.
     public func serveRuns(for directory: String) async {
+        guard (try? enterIngress()) != nil else { return }
+        defer { exitIngress() }
         await process.serveRuns(for: directory)
     }
 
@@ -1755,7 +1799,9 @@ public actor ChainService {
     /// The committers this chain asks its parent to re-serve after each
     /// evidence catch-up round.
     public func recentCarriers() async throws -> [String] {
-        try await process.recentCarriers()
+        try enterIngress()
+        defer { exitIngress() }
+        return try await process.recentCarriers()
     }
 
     /// Credit a parent's run report at the child block it names. The commit,
@@ -1763,6 +1809,8 @@ public actor ChainService {
     public func applyParentRunReport(
         _ report: ParentRunReport
     ) async throws -> ChainProcess.ParentReportApplication {
+        try enterIngress()
+        defer { exitIngress() }
         // A canonical change is reconciled exactly once, on the queued
         // worker under the service gate — the same path every admission's
         // commit takes.
