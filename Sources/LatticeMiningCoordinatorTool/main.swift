@@ -35,8 +35,11 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
     @Option(name: .long, help: "Path to the LatticeMiner worker executable. When set, nonce search runs in worker subprocesses instead of in-process.")
     var workerExecutable: String?
 
-    @Option(name: .long, help: "JSON file containing the externally signed {\"rewards\":[...]} template request.")
-    var rewardsFile: String?
+    @Option(
+        name: .long,
+        help: "Where one chain's block reward and fees go: <chain path>=<address> (e.g. Nexus=bafy...). Repeat once per chain. A chain with no recipient mines to no one: its reward and fees burn."
+    )
+    var recipient: [String] = []
 
     @Option(
         name: .long,
@@ -63,7 +66,7 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
         let client = HTTPMiningCoordinatorNodeClient(
             apiBaseURL: apiBaseURL,
             templateRequestBody: try Self.loadTemplateRequest(
-                path: rewardsFile,
+                recipients: recipient,
                 deployment: deployment,
                 minimumWork: minWork
             )
@@ -179,19 +182,13 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
     }
 
     private static func loadTemplateRequest(
-        path: String?,
+        recipients: [String],
         deployment: Bool,
         minimumWork: [String]
     ) throws -> Data {
-        let data: Data
-        if let path {
-            data = try Data(contentsOf: URL(fileURLWithPath: path))
-        } else {
-            data = Data(#"{"rewards":[]}"#.utf8)
-        }
         do {
             return try MiningTemplateRequestBody.make(
-                rewardsRequest: data,
+                recipients: recipients,
                 deployment: deployment,
                 minimumWork: minimumWork
             )

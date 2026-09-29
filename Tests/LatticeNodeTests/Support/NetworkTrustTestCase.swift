@@ -262,7 +262,6 @@ class NetworkTrustTestCase: XCTestCase {
             receiptActions: [],
             withdrawalActions: [],
             signers: [],
-            fee: 0,
             nonce: 0,
             chainPath: path
         )
@@ -393,7 +392,6 @@ class NetworkTrustTestCase: XCTestCase {
             receiptActions: [],
             withdrawalActions: [],
             signers: [CryptoUtils.createAddress(from: key.publicKey)],
-            fee: 0,
             nonce: 0,
             chainPath: chainPath
         )

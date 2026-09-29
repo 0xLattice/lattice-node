@@ -380,7 +380,7 @@ final class ChainHostTests: XCTestCase {
         var carriedBoth = false
         try await eventually("a Nexus block carries both levels", within: .seconds(120)) {
             let template = try await parent.miningTemplate(
-                MiningTemplateRequest(rewards: [])
+                MiningTemplateRequest()
             )
             let carried = template.block.children.node?[self.child.directory]?
                 .node?.children.node?[self.grandchild.directory] != nil
@@ -400,7 +400,7 @@ final class ChainHostTests: XCTestCase {
         var carriedNext = false
         try await eventually("a Nexus block carries both levels' next blocks", within: .seconds(120)) {
             let template = try await parent.miningTemplate(
-                MiningTemplateRequest(rewards: [])
+                MiningTemplateRequest()
             )
             let childBlock = template.block.children.node?[self.child.directory]?.node
             let grandchildBlock = childBlock?.children.node?[self.grandchild.directory]?.node
@@ -588,7 +588,7 @@ final class ChainHostTests: XCTestCase {
 
     private func mine(_ service: ChainService) async throws -> SubmitWorkResponse {
         let template = try await service.miningTemplate(
-            MiningTemplateRequest(rewards: [])
+            MiningTemplateRequest()
         )
         return try await service.submitWork(SubmitWorkRequest(
             workID: template.workID, nonce: solvedNonce(for: template)

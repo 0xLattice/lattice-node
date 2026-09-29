@@ -137,13 +137,13 @@ final class DaemonHTTPTests: XCTestCase {
             MiningTemplateRequest.self,
             from: Data("{}".utf8)
         )
-        XCTAssertTrue(legacy.rewards.isEmpty)
+        XCTAssertTrue(legacy.recipients.isEmpty)
 
         let decoded = try JSONDecoder().decode(
             MiningTemplateRequest.self,
             from: JSONEncoder().encode(MiningTemplateRequest())
         )
-        XCTAssertTrue(decoded.rewards.isEmpty)
+        XCTAssertTrue(decoded.recipients.isEmpty)
     }
 
     func testMiningTemplateAndWorkRoutesRoundTrip() async throws {
@@ -242,7 +242,6 @@ final class DaemonHTTPTests: XCTestCase {
                 receiptActions: [],
                 withdrawalActions: [],
                 signers: [],
-                fee: 0,
                 nonce: 99,
                 chainPath: ["Nexus"]
             ))
@@ -412,7 +411,6 @@ final class DaemonHTTPTests: XCTestCase {
             receiptActions: [],
             withdrawalActions: [],
             signers: [CryptoUtils.createAddress(from: key.publicKey)],
-            fee: 0,
             nonce: 0,
             chainPath: ["Nexus"]
         )
@@ -444,15 +442,20 @@ final class DaemonHTTPTests: XCTestCase {
             // hides which rule it broke: a second transaction at the same
             // (signer, nonce) bidding no more of a real fee is replace-by-fee
             // refusing, and must say so.
+            // A different body at the same (signer, nonce) that nets the
+            // miner nothing more: its debit is returned to the signer.
+            let signer = CryptoUtils.createAddress(from: key.publicKey)
             let rival = TransactionBody(
-                accountActions: [],
+                accountActions: [
+                    AccountAction(owner: signer, delta: -1),
+                    AccountAction(owner: signer, delta: 1),
+                ],
                 actions: [],
                 depositActions: [],
                 genesisActions: [],
                 receiptActions: [],
                 withdrawalActions: [],
                 signers: [CryptoUtils.createAddress(from: key.publicKey)],
-                fee: 1,
                 nonce: 0,
                 chainPath: ["Nexus"]
             )
@@ -577,7 +580,6 @@ final class DaemonHTTPTests: XCTestCase {
                 receiptActions: [],
                 withdrawalActions: [],
                 signers: [],
-                fee: 0,
                 nonce: 98,
                 chainPath: ["Nexus"]
             ))
@@ -661,7 +663,6 @@ final class DaemonHTTPTests: XCTestCase {
                 receiptActions: [],
                 withdrawalActions: [],
                 signers: [],
-                fee: 0,
                 nonce: 97,
                 chainPath: ["Nexus"]
             ))
@@ -998,7 +999,6 @@ final class DaemonHTTPTests: XCTestCase {
             receiptActions: [],
             withdrawalActions: [],
             signers: [CryptoUtils.createAddress(from: key.publicKey)],
-            fee: 0,
             nonce: 0,
             chainPath: ["Nexus"]
         )

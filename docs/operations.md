@@ -84,7 +84,7 @@ Important fields:
   no tip-dependent intermediate phase.
 - `chainPath`: the complete path owned by this process.
 - `nexusGenesisCID`: must be
-  `bafyreifvxwhqbwvnrtr2plvtmlvpceqxnexyayjs7klgy6dbkj7yppdsz4`.
+  `bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24`.
 - `tipCID` and `height`: null only while a child awaits genesis.
 - `revision`: the local consensus mutation watermark.
 - `mempoolCount` and `mempoolBytes`: bounded service pressure indicators.
@@ -186,14 +186,16 @@ lattice-mining-coordinator \
 Custom workers (GPU or remote hardware) implement the contract in
 [mining-workers.md](mining-workers.md) and slot in via `--worker-executable`.
 
-**Run one miner payout plan per node.** A node serves one miner plan at a
-time: the rewards and minimum work a template request names for the chains
+**Run one recipient plan per node.** A node serves one miner plan at a
+time: the recipients and minimum work a template request names for the chains
 below Nexus. A request with a different plan replaces the last one, and each
 hosted child rebuilds its candidate for it; until it has, templates carry no
 candidate built for the other plan, so no child block pays the wrong miner.
-Miners with different payout plans sharing one node therefore thrash: each
+Miners with different recipient plans sharing one node therefore thrash: each
 request undoes the other's, and their templates mostly carry no child
-blocks. Coordinators that share one plan (one rewards file) may share a node.
+blocks. Coordinators that share one plan (the same `--recipient` and
+`--min-work` entries) may share a node. A recipient is only an address: no
+reward transaction is signed anywhere.
 
 ### Minimum work per block
 
@@ -337,35 +339,22 @@ reference [deploy/mine-supervisor.py](../deploy/mine-supervisor.py)).
 
 ## Mining rewards
 
-Without a rewards file the coordinator requests empty rewards and mined blocks
-pay nobody. Rewards are ordinary signed transactions validated by consensus:
-credit-only account actions, fee 0, total claimed at most the spec reward at
-the mined height, and the signer's nonces strictly sequential — so one signed
-reward transaction is valid in exactly one block, in nonce order. Unsigned
-credits exist only in genesis.
-
-`lattice-rewards` keeps the reward key off the mining host:
+Each block commits a `rewardRecipient` address, covered by its proof of work,
+and consensus credits it exactly the block reward plus the block's fees. A block
+without one burns both. The coordinator takes one `--recipient <chain
+path>=<address>` per chain (`lattice.json`: `mine.recipients`; the reference
+supervisor: `RECIPIENTS`); a chain left out pays no one. The recipient is only
+an address, so no key and no signed payout ever reaches the mining host, and
+there is no batch, cursor or nonce sequence to keep:
 
 ```bash
-lattice-rewards generate-key --out reward-key.json
-lattice-rewards emit-batch \
-  --key reward-key.json \
-  --count 10000 \
-  --out reward-batch.jsonl
+lattice key generate --out reward-key.json   # on a trusted machine
+lattice-mining-coordinator --node http://127.0.0.1:8080 \
+  --recipient Nexus=<address from reward-key.json>
 ```
 
-Ship only `reward-batch.jsonl` to the miner. Each line is one complete
-`--rewards-file` payload; feed line `i`, and advance to `i + 1` only after the
-block paying it is accepted. A spent nonce is refused at template build
-(HTTP 400 `invalidRewardTransaction`) — a supervisor's signal that the cursor
-is behind, never a reason to skip ahead on other failures: a skipped nonce
-permanently invalidates every later line. The reference
-[deploy/mine-supervisor.py](../deploy/mine-supervisor.py) implements this
-loop. Re-emit the batch before it is exhausted, and before a halving boundary
-makes its amount exceed the allowed reward. Cursor advancement reflects the
-current tip: a deep reorg that reverts a paid reward strands the tail of the
-batch on a nonce gap — recover by re-emitting from the key's next expected
-nonce.
+A request that still carries the retired `rewards` field is refused, and so is
+a `lattice.json` whose `mine` section still names `rewards`.
 
 ## Child chains
 

@@ -284,8 +284,6 @@ private actor RangeRecorder {
 }
 
 final class MiningTemplateRequestBodyTests: XCTestCase {
-    private let rewards = Data(#"{"rewards":[]}"#.utf8)
-
     private func object(_ data: Data) throws -> [String: Any] {
         try XCTUnwrap(
             JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -297,7 +295,7 @@ final class MiningTemplateRequestBodyTests: XCTestCase {
     /// is what the chain reads from arrival rate, not what a miner declares.
     func testMinimumWorkReachesTheRequestAsASearchPlanOnly() throws {
         let body = try object(MiningTemplateRequestBody.make(
-            rewardsRequest: rewards,
+            recipients: [],
             deployment: false,
             minimumWork: ["Nexus=2^8"]
         ))
@@ -306,6 +304,28 @@ final class MiningTemplateRequestBodyTests: XCTestCase {
             body["commitMinimumWorkTarget"],
             "a miner's filter must never travel as a commitment"
         )
+    }
+
+    /// `--recipient` entries reach the request as `recipients`, one per
+    /// chain; the signed-reward `rewards` field is gone.
+    func testRecipientsReachTheRequestOncePerChain() throws {
+        let body = try object(MiningTemplateRequestBody.make(
+            recipients: ["Nexus=addr-a", "Nexus/Payments=addr-b"],
+            deployment: false,
+            minimumWork: []
+        ))
+        let recipients = try XCTUnwrap(body["recipients"] as? [[String: Any]])
+        XCTAssertEqual(recipients.count, 2)
+        XCTAssertEqual(recipients[1]["chainPath"] as? [String], ["Nexus", "Payments"])
+        XCTAssertEqual(recipients[1]["address"] as? String, "addr-b")
+        XCTAssertNil(body["rewards"])
+        for malformed in [["Nexus=a", "Nexus=b"], ["Nexus="], ["Other=a"], ["Nexus"]] {
+            XCTAssertThrowsError(try MiningTemplateRequestBody.make(
+                recipients: malformed,
+                deployment: false,
+                minimumWork: []
+            ), "\(malformed)")
+        }
     }
 }
 
@@ -1192,7 +1212,7 @@ final class MiningCoordinatorTests: XCTestCase {
             let payload = requestBodyData(request).flatMap {
                 try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
             }
-            XCTAssertEqual((payload?["rewards"] as? [Any])?.count, 0)
+            XCTAssertEqual((payload?["recipients"] as? [Any])?.count, 0)
             return (
                 503,
                 Data(#"{"error":"No parent-state-continuous child candidate"}"#.utf8)

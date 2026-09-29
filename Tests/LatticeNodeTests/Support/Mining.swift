@@ -91,6 +91,7 @@ extension Block {
             children: children,
             height: height,
             timestamp: timestamp,
+            rewardRecipient: rewardRecipient,
             nonce: nonce
         )
     }

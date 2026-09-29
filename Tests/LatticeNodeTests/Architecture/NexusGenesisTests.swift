@@ -74,6 +74,7 @@ final class NexusGenesisArchitectureTests: XCTestCase {
             children: block.children,
             height: block.height,
             timestamp: block.timestamp + 1,
+            rewardRecipient: block.rewardRecipient,
             nonce: block.nonce
         )
         let result = GenesisResult(

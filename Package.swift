@@ -19,10 +19,6 @@ let package = Package(
             targets: ["LatticeProofVerifier"]
         ),
         .executable(
-            name: "lattice-rewards",
-            targets: ["LatticeRewardsTool"]
-        ),
-        .executable(
             name: "lattice",
             targets: ["LatticeCtl"]
         ),
@@ -30,7 +26,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/adalinxx/Lattice.git",
-            exact: "38.0.0"
+            exact: "39.0.0"
         ),
         .package(
             url: "https://github.com/adalinxx/cashew.git",
@@ -129,19 +125,12 @@ let package = Package(
                 "LatticeCtlCore",
                 "LatticeProcessWait",
                 "LatticeMinerCore",
+                "LatticeMiningCoordinator",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy"),
                 .product(name: "VolumeBroker", package: "VolumeBroker"),
                 .product(name: "cashew", package: "cashew"),
                 .product(name: "Crypto", package: "swift-crypto"),
-                .product(name: "ArgumentParser", package: "swift-argument-parser"),
-            ]),
-        .executableTarget(
-            name: "LatticeRewardsTool",
-            dependencies: [
-                "LatticeNode",
-                .product(name: "Lattice", package: "lattice"),
-                .product(name: "cashew", package: "cashew"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]),
         .executableTarget(

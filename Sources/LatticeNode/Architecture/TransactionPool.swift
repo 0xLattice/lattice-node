@@ -50,7 +50,7 @@ public actor TransactionPool {
         let transaction: Transaction
         let size: Int
         let conflictKey: ConflictKey
-        let minerFee: WorkSum
+        let minerSurplus: WorkSum
         var disposition: TransactionPoolDisposition
         let addedAt: Date
     }
@@ -72,7 +72,7 @@ public actor TransactionPool {
         private var items: [Entry] = []
 
         private func precedes(_ lhs: Entry, _ rhs: Entry) -> Bool {
-            if lhs.minerFee != rhs.minerFee { return lhs.minerFee > rhs.minerFee }
+            if lhs.minerSurplus != rhs.minerSurplus { return lhs.minerSurplus > rhs.minerSurplus }
             return lhs.cid < rhs.cid
         }
 
@@ -175,6 +175,12 @@ public actor TransactionPool {
         guard body.signers.count <= maxSignatures else {
             throw TransactionPoolError.tooLarge
         }
+        // A transaction that creates value (credits and deposits over debits
+        // and withdrawals) breaks the fee rule in any block, so it is never
+        // pooled: a template carrying it would be invalid.
+        guard let minerSurplus = body.minerSurplus() else {
+            throw TransactionPoolError.invalidState
+        }
 
         guard let bodyData = body.toData() else {
             throw TransactionPoolError.unresolved
@@ -210,15 +216,15 @@ public actor TransactionPool {
             transaction: resolved,
             size: storedSize,
             conflictKey: conflictKey,
-            minerFee: Self.minerFee(of: body),
+            minerSurplus: minerSurplus,
             disposition: disposition,
             addedAt: addedAt
         )
 
         // Replace-by-fee on an exact (signers, nonce) match: a signer may replace
         // their OWN pending transaction at that nonce only by strictly paying more
-        // to the miner (`minerFee` — the real debit-over-credit excess, not the
-        // free-form `body.fee` consensus ignores). Because that excess is funds the
+        // to the miner (`minerSurplus` — the debit-over-credit excess the block's
+        // recipient is credited). Because that excess is funds the
         // signer actually gives up, the bid cannot be raised for free; last-writer-
         // wins would let a signer cancel or downgrade for free and churn relay/
         // eviction. Only the signer can sign for that nonce, so this is self-
@@ -241,7 +247,7 @@ public actor TransactionPool {
             // funding-checked, so this permits monotonic self-churn on that one
             // slot — but bounded (`maxNonReadyPerSigner`), never mineable, and no
             // worse than the recency rule this replaced.
-            guard entry.minerFee > existing.minerFee else {
+            guard entry.minerSurplus > existing.minerSurplus else {
                 throw TransactionPoolError.feeTooLow
             }
             replacedCID = overlap
@@ -390,35 +396,8 @@ public actor TransactionPool {
         return ordered
     }
 
-    /// The real miner-claimable value of a transaction: the excess that block
-    /// validation lets the coinbase mint — funds it destroys (account debits plus
-    /// withdrawals) minus funds it creates (account credits plus deposits). This
-    /// mirrors `validateBalanceChanges` per transaction, excluding the block
-    /// reward. Unlike `body.fee` — a declared field consensus never reads — this
-    /// cannot be inflated without actually giving up funds, so it is a
-    /// forge-resistant key for eviction and template ranking. A net-negative
-    /// (reward-subsidized) transaction ranks as zero.
-    private static func minerFee(of body: TransactionBody) -> WorkSum {
-        var claimable = WorkSum.zero
-        var owed = WorkSum.zero
-        for action in body.accountActions where action.verify() {
-            if action.isDebit {
-                claimable = claimable + UInt256(action.absoluteAmount)
-            } else if action.isCredit {
-                owed = owed + UInt256(action.absoluteAmount)
-            }
-        }
-        for withdrawal in body.withdrawalActions {
-            claimable = claimable + UInt256(withdrawal.amountWithdrawn)
-        }
-        for deposit in body.depositActions {
-            owed = owed + UInt256(deposit.amountDeposited)
-        }
-        return claimable.subtracting(owed) ?? .zero
-    }
-
     /// Eviction priority when the pool is full: keep ready over non-ready, then
-    /// keep the HIGHER `minerFee` (the block's revenue, so the pool retains what a
+    /// keep the HIGHER `minerSurplus` (the block's revenue, so the pool retains what a
     /// miner would prefer and sheds free/low-value spam first); among equal fee
     /// keep the OLDEST (first-come-first-served, closest to being mined), evicting
     /// newest arrivals first; CID breaks exact ties. A positive result keeps `lhs`
@@ -428,12 +407,12 @@ public actor TransactionPool {
         let rhsReady = rhs.disposition == .ready
         if lhsReady != rhsReady { return lhsReady ? 1 : -1 }
         // Only a validated (.ready) excess is trustworthy: a future/unavailable
-        // entry's declared debits are not yet funding-checked, so its `minerFee`
+        // entry's declared debits are not yet funding-checked, so its `minerSurplus`
         // could be forged. Rank on fee only when both are ready; otherwise fall
         // back to first-come-first-served so forged non-ready fees cannot
         // preferentially evict honest non-ready entries.
-        if lhsReady, lhs.minerFee != rhs.minerFee {
-            return lhs.minerFee > rhs.minerFee ? 1 : -1
+        if lhsReady, lhs.minerSurplus != rhs.minerSurplus {
+            return lhs.minerSurplus > rhs.minerSurplus ? 1 : -1
         }
         if lhs.addedAt != rhs.addedAt {
             return lhs.addedAt < rhs.addedAt ? 1 : -1
@@ -519,7 +498,8 @@ public actor TransactionPool {
         for removed in mutation.allRemoved {
             guard let body = removed.transaction.body.node,
                   let envelope = removed.transaction.toData(),
-                  let bodyData = body.toData() else {
+                  let bodyData = body.toData(),
+                  let minerSurplus = body.minerSurplus() else {
                 preconditionFailure("pooled transaction lost resolved content")
             }
             insert(Entry(
@@ -530,7 +510,7 @@ public actor TransactionPool {
                     signers: Array(Set(body.signers)).sorted(),
                     nonce: body.nonce
                 ),
-                minerFee: Self.minerFee(of: body),
+                minerSurplus: minerSurplus,
                 disposition: removed.disposition,
                 addedAt: removed.addedAt
             ))

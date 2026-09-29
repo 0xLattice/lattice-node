@@ -125,6 +125,7 @@ final class PublicReadRateLimitTests: XCTestCase {
         for path in [
             "/v1/blocks",
             "/api/chain/endpoints",
+            "/api/block/bafy",
             "/api/block/bafy/transactions",
             "/api/block/bafy/children",
         ] {
@@ -137,7 +138,6 @@ final class PublicReadRateLimitTests: XCTestCase {
             "/v1/transactions/bafy",
             "/v1/accounts/bafy",
             "/api/block/latest",
-            "/api/block/bafy",
             "/api/peers",
             "/api/mempool",
             "/unknown",

@@ -581,26 +581,24 @@ public actor MiningCoordinator {
     }
 }
 
-/// The `POST /v1/mining/templates` body a coordinator sends: the externally
-/// signed rewards request with the operator's mining options merged in.
+/// The `POST /v1/mining/templates` body a coordinator sends: the operator's
+/// recipients and mining options.
 public enum MiningTemplateRequestBody {
     public struct Refusal: Error, CustomStringConvertible {
         public let description: String
     }
 
     public static func make(
-        rewardsRequest data: Data,
+        recipients: [String],
         deployment: Bool,
         minimumWork: [String]
     ) throws -> Data {
-        guard data.count <= 1 << 20,
-              var object = try JSONSerialization.jsonObject(with: data)
-                as? [String: Any],
-              object["rewards"] is [Any] else {
+        guard let recipientField = MinerLoopLogic.recipientField(recipients) else {
             throw Refusal(
-                description: "--rewards-file must be a JSON {\"rewards\":[...]} request no larger than 1 MiB"
+                description: "--recipient takes <chain path>=<address>, at most once per chain"
             )
         }
+        var object: [String: Any] = ["recipients": recipientField]
         if deployment { object["mode"] = "deployment" }
         if !minimumWork.isEmpty {
             guard let field = MinerLoopLogic.minimumWorkField(minimumWork) else {
@@ -621,7 +619,7 @@ public final class HTTPMiningCoordinatorNodeClient: MiningCoordinatorNodeClient 
 
     public init(
         apiBaseURL: URL,
-        templateRequestBody: Data = Data(#"{"rewards":[]}"#.utf8),
+        templateRequestBody: Data = Data(#"{"recipients":[]}"#.utf8),
         session: URLSession = .shared
     ) {
         self.apiBaseURL = apiBaseURL

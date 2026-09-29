@@ -1581,6 +1581,47 @@ final class ChainProcessTests: XCTestCase {
         }
     }
 
+    /// A data directory from before the coinbase-recipient flag day holds the
+    /// retired Nexus genesis: reopening it fails closed instead of running a
+    /// chain whose rules this node no longer applies.
+    func testReopenRejectsAPreFlagDayNexusGenesis() async throws {
+        let retiredGenesis =
+            "bafyreifvxwhqbwvnrtr2plvtmlvpceqxnexyayjs7klgy6dbkj7yppdsz4"
+        XCTAssertNotEqual(retiredGenesis, NexusGenesis.expectedBlockHash)
+        let directory = temporaryDirectory()
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let config = try configuration(path: ["Nexus"], storage: directory)
+        let store = try testNodeStore(
+            databasePath: directory.appendingPathComponent("state.db"),
+            nexusGenesisCID: retiredGenesis,
+            chainPath: config.chainPath,
+            issuingAuthorityKey: config.processPublicKey
+        )
+        try await store.stage(
+            BlockImportBatch(facts: [.block(ChainBlockFact(
+                blockHash: retiredGenesis,
+                parentBlockHash: nil,
+                blockHeight: 0,
+                postStateCID: "post-state",
+                prevStateCID: "previous-state",
+                specCID: "spec",
+                target: "target",
+                nextTarget: "next-target",
+                timestamp: 0,
+                stateDiff: .empty
+            ))]),
+            volumeRoots: []
+        )
+
+        do {
+            _ = try await ChainProcess.open(configuration: config)
+            XCTFail("reopen unexpectedly accepted the retired Nexus genesis")
+        } catch {}
+    }
+
     func testReopenRejectsASecondNexusGenesisRoot() async throws {
         let directory = temporaryDirectory()
         try FileManager.default.createDirectory(
@@ -2905,9 +2946,11 @@ final class ChainProcessTests: XCTestCase {
         var chain: [Block] = []
         for _ in 0..<depth {
             let template = try await producerService.miningTemplate(
-                MiningTemplateRequest(rewards: [MiningReward(
+                MiningTemplateRequest(recipients: [MiningRecipient(
                     chainPath: ["Nexus"],
-                    transaction: try signedRewardTransaction()
+                    address: CryptoUtils.createAddress(
+                        from: CryptoUtils.generateKeyPair().publicKey
+                    )
                 )])
             )
             let block = template.block.replacingNonce(solvedNonce(for: template))

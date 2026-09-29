@@ -1,8 +1,6 @@
 // Mining role: coordinator + worker beside a chain's node, one --once batch
-// per block, one pre-signed reward per block in nonce order. The cursor
-// advances only on an accepted block or the paired-probe spent-nonce
-// signature (line i refused at template build while line i+1 builds); both
-// refused stalls loudly. Same discipline as deploy/mine-supervisor.py.
+// per round. Each block pays the configured recipient for its chain (the
+// block's `rewardRecipient`); a chain with none burns its reward and fees.
 
 import Foundation
 #if canImport(FoundationNetworking)
@@ -11,6 +9,7 @@ import FoundationNetworking
 import ArgumentParser
 import LatticeCtlCore
 import LatticeMinerCore
+import LatticeMiningCoordinator
 import LatticeProcessWait
 
 struct Mine: AsyncParsableCommand {
@@ -69,7 +68,7 @@ struct Mine: AsyncParsableCommand {
             let layout = rootOption.layout
             // Under the spawn lock, so a concurrent `mine start` cannot
             // lose its pidfile to this stop. Graceful: the loop finishes
-            // its batch and persists the cursor within the grace.
+            // its batch within the grace.
             let stopped = try await withSpawnLock(layout) {
                 try await stopProcess(
                     layout, "mine", grace: .seconds(60),
@@ -87,7 +86,7 @@ struct Mine: AsyncParsableCommand {
     struct MineStatus: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "status",
-            abstract: "Cursor position and batch runway."
+            abstract: "Whether mining runs, and who it pays."
         )
 
         @OptionGroup var rootOption: RootOption
@@ -97,13 +96,13 @@ struct Mine: AsyncParsableCommand {
             let settings = try minerSettings(layout)
             let running = runningPid(layout, "mine").map { "running (pid \($0))" }
                 ?? "stopped"
-            let cursor = readCursor(layout)
             print("mining: \(running)")
             print("chain:  \(settings.mine.chain)")
-            if let total = settings.batch?.count {
-                print("rewards: \(cursor) of \(total) consumed, \(total - min(cursor, total)) remaining")
+            let recipients = settings.mine.recipientEntries
+            if recipients.isEmpty {
+                print("recipients: none configured (rewards and fees burn)")
             } else {
-                print("rewards: none configured (blocks pay nobody)")
+                for entry in recipients { print("recipient: \(entry)") }
             }
         }
     }
@@ -119,24 +118,16 @@ struct Mine: AsyncParsableCommand {
         func run() async throws {
             let layout = rootOption.layout
             let settings = try minerSettings(layout)
-            var cursor = readCursor(layout)
-            var refusedStreak = 0
-            // Finish the in-flight batch and persist the cursor on SIGTERM:
-            // killing mid-iteration can orphan a coordinator whose accepted
-            // block would leave the cursor behind the chain.
+            // Finish the in-flight batch on SIGTERM: killing mid-iteration can
+            // orphan a coordinator.
             //
             // The flag is only read at the top of the loop and inside
             // `holdFor`, so it does NOT cut short an in-flight HTTP call. A
             // SIGTERM landing mid-probe waits out the rest of
-            // mine.templateTimeoutSeconds before this notices, and the
-            // refusal-heal branch is worse: up to three `templateProbe` calls
-            // plus a `health` call back to back. On a node answering normally
-            // none of that is visible, but on one slow enough to need these
-            // timeouts a stop can outlast `mine stop`'s own 60s grace, and on
-            // the refusal path `TimeoutStopSec` too, ending in SIGKILL.
-            // Nothing is lost when it does -- the cursor only advances after
-            // an accepted block and is written atomically -- but the stop is
-            // then not the graceful one this comment otherwise describes.
+            // mine.templateTimeoutSeconds before this notices. On a node
+            // answering normally that is not visible, but on one slow enough
+            // to need the timeout a stop can outlast `mine stop`'s own 60s
+            // grace, ending in SIGKILL.
             let stopRequested = InterruptFlag()
             signal(SIGTERM, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: SIGTERM)
@@ -150,7 +141,12 @@ struct Mine: AsyncParsableCommand {
             var longestCompletedRound = Duration.zero
             var templateExpiry: Duration?
             var unusableTemplateSince: ContinuousClock.Instant?
-            log("mining loop start at reward cursor \(cursor)"
+            let templateRequestBody = try MiningTemplateRequestBody.make(
+                recipients: settings.mine.recipientEntries,
+                deployment: false,
+                minimumWork: settings.mine.minimumWorkEntries
+            )
+            log("mining loop start"
                 + (settings.mine.minBlockIntervalSeconds.map {
                     ", pacing parent blocks at least \($0)s apart"
                 } ?? ""))
@@ -158,9 +154,6 @@ struct Mine: AsyncParsableCommand {
                 let outcome: CoordinatorOutcome
                 let started = ContinuousClock.now
                 do {
-                    let rewardsFile = try prepareRewardsFile(
-                        settings, cursor: cursor, layout: layout
-                    )
                     if templateExpiry == nil {
                         // Marked BEFORE the attempt: an attempt can itself take
                         // the full timeout, so stamping it afterwards would
@@ -168,16 +161,13 @@ struct Mine: AsyncParsableCommand {
                         // did not answer for that long.
                         unusableTemplateSince = unusableTemplateSince
                             ?? ContinuousClock.now
-                        // NEVER the cursor's reward line. The node answers
-                        // 400 once that line is no longer mineable -- the
-                        // same "already spent on-chain" condition the
-                        // refusal branch below heals -- and a nil expiry
-                        // would then wedge this loop forever WITHOUT ever
-                        // reaching that branch. Template lifetime is
-                        // node-wide, so an empty rewards body observes it
-                        // without entangling it with reward validity.
+                        // Template lifetime is node-wide, but the node
+                        // adopts each request's plan for its descendants, so
+                        // the probe sends the coordinator's own body: any
+                        // other would churn their candidates.
                         templateExpiry = await observedTemplateExpiry(
-                            settings.rpc, rewardsFile: nil,
+                            settings.rpc,
+                            body: templateRequestBody,
                             timeoutSeconds: templateTimeout
                         )
                     }
@@ -204,7 +194,7 @@ struct Mine: AsyncParsableCommand {
                         // exists to carry.
                         let downFor = (unusableTemplateSince ?? ContinuousClock.now)
                             .duration(to: ContinuousClock.now)
-                        log("reward \(cursor) NOT MINING: no usable template answer from the node (no reply within \(templateTimeout)s, a non-200, or a reply with no expiry), so no round deadline can be derived. Stopped for \(downFor.components.seconds)s so far; check `POST /v1/mining/templates` on this node.")
+                        log("NOT MINING: no usable template answer from the node (no reply within \(templateTimeout)s, a non-200, or a reply with no expiry), so no round deadline can be derived. Stopped for \(downFor.components.seconds)s so far; check `POST /v1/mining/templates` on this node.")
                         try? await Task.sleep(for: .seconds(5))
                         continue
                     }
@@ -215,13 +205,11 @@ struct Mine: AsyncParsableCommand {
                         multiplier: multiplier
                     )
                     outcome = try await runCoordinatorOnce(
-                        settings, rewardsFile: rewardsFile, layout: layout,
-                        deadline: deadline
+                        settings, layout: layout, deadline: deadline
                     )
                 } catch {
-                    // A spawn/IO failure proves nothing about the reward and
-                    // must never advance the cursor or kill the loop: retry.
-                    log("reward \(cursor) retrying after spawn error: \(error)")
+                    // A spawn/IO failure must never kill the loop: retry.
+                    log("retrying after spawn error: \(error)")
                     try? await Task.sleep(for: .seconds(5))
                     continue
                 }
@@ -240,10 +228,7 @@ struct Mine: AsyncParsableCommand {
                 }
                 switch outcome {
                 case .accepted(let tip):
-                    log("reward \(cursor) accepted tip=\(tip.prefix(24))")
-                    cursor += 1
-                    writeCursor(layout, cursor)
-                    refusedStreak = 0
+                    log("accepted tip=\(tip.prefix(24))")
                     let hold = settings.mine.pacingHold(
                         afterRoundOf: started.duration(to: ContinuousClock.now)
                     )
@@ -252,63 +237,37 @@ struct Mine: AsyncParsableCommand {
                         await holdFor(hold, stopRequested: stopRequested)
                     }
                 case .harmless:
-                    refusedStreak = 0
+                    break
                 case .carrier:
-                    // A child chain advanced; no reward consumed and no parent
-                    // block was produced, so this starts no pacing hold. Note
+                    // A child chain advanced; no parent block was produced,
+                    // so this starts no pacing hold. Note
                     // that is about the TRIGGER, not the effect: a hold
                     // withholds the next round, and a round is what co-mines
                     // the children, so pacing throttles the whole subtree.
-                    refusedStreak = 0
+                    break
                 case .roundDeadlineExceeded(let deadline, let degraded):
                     // Loud by construction: a silent kill-and-continue is
                     // the original failure mode wearing a fix's clothes.
-                    log("ROUND DEADLINE EXCEEDED after \(deadline): the coordinator process group was killed and the round abandoned. Reward cursor stays at \(cursor). Raise mine.roundDeadlineMultiplier in lattice.json if rounds here legitimately run this long.")
+                    log("ROUND DEADLINE EXCEEDED after \(deadline): the coordinator process group was killed and the round abandoned. Raise mine.roundDeadlineMultiplier in lattice.json if rounds here legitimately run this long.")
                     if degraded {
                         // State the fact; do not decide for the operator what
                         // it means. A teardown that could only signal the pid
                         // is not the clean one the line above implies.
                         log("ROUND TEARDOWN DEGRADED: only the coordinator pid could be signalled, not its process group, so processes it spawned may still be running and holding resources. Check for stray lattice-miner processes.")
                     }
-                    refusedStreak = 0
                 case .workerTrouble(let detail):
-                    log("reward \(cursor) retrying after \(detail)")
+                    log("retrying after \(detail)")
                     try await Task.sleep(for: .seconds(5))
                 case .refusal:
-                    refusedStreak += 1
-                    guard refusedStreak >= 3,
-                          let batch = settings.batch,
-                          cursor < batch.count else {
-                        try await Task.sleep(for: .seconds(5))
-                        continue
-                    }
-                    let rpc = settings.rpc
-                    if await templateProbe(rpc, batch[cursor], timeoutSeconds: templateTimeout) == .refused,
-                       cursor + 1 < batch.count,
-                       await templateProbe(rpc, batch[cursor + 1], timeoutSeconds: templateTimeout) == .accepted {
-                        log("reward \(cursor) already spent on-chain; advancing")
-                        cursor += 1
-                        writeCursor(layout, cursor)
-                        refusedStreak = 0
-                    } else if await health(rpc: rpc) != nil,
-                              await templateProbe(rpc, batch[cursor], timeoutSeconds: templateTimeout) == .refused {
-                        log("REWARD BATCH STALLED at \(cursor): this line and the next are both refused; re-emit the batch")
-                        // Stop-aware: this is the longest wait in the loop, and
-                        // it sits on the path whose probes already delay a stop
-                        // the most. A bare sleep here made `mine stop` wait out
-                        // a full minute of a wait that exists only to avoid
-                        // spinning.
-                        await holdFor(.seconds(60), stopRequested: stopRequested)
-                    } else {
-                        try await Task.sleep(for: .seconds(5))
-                    }
+                    log("the node refused this round's work; retrying")
+                    try await Task.sleep(for: .seconds(5))
                 }
             }
         }
 
         /// Wait out a hold in slices, giving up the moment a stop is
         /// requested: `mine stop` must not have to sit through a long wait.
-        /// Used for the block cadence and for the stalled-batch backoff.
+        /// Used for the block cadence.
         private func holdFor(
             _ hold: Duration, stopRequested: InterruptFlag
         ) async {
@@ -335,7 +294,6 @@ struct MinerSettings {
     let mine: TopologyMine
     let rpc: UInt16
     let workerExecutable: URL
-    let batch: [String]?
 }
 
 func minerSettings(_ layout: HostLayout) throws -> MinerSettings {
@@ -354,45 +312,15 @@ func minerSettings(_ layout: HostLayout) throws -> MinerSettings {
     guard FileManager.default.isExecutableFile(atPath: worker.path) else {
         throw CtlError("worker is not executable: \(worker.path)")
     }
-    var batch: [String]?
-    if let rewards = mine.rewards {
-        let url = URL(
-            fileURLWithPath: rewards,
-            relativeTo: layout.root
-        )
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
-            throw CtlError("rewards batch not readable: \(url.path)")
-        }
-        batch = text.split(separator: "\n").map(String.init)
-            .filter { !$0.isEmpty }
+    if MinerLoopLogic.recipientField(mine.recipientEntries) == nil {
+        throw CtlError("mine.recipients maps chain paths to addresses")
     }
     if MinerLoopLogic.minimumWorkField(mine.minimumWorkEntries) == nil {
         throw CtlError("mine.minWork maps chain paths to work per block, as 2^N or a positive decimal integer")
     }
     return MinerSettings(
-        mine: mine, rpc: chain.rpc, workerExecutable: worker, batch: batch
+        mine: mine, rpc: chain.rpc, workerExecutable: worker
     )
-}
-
-func readCursor(_ layout: HostLayout) -> Int {
-    (try? String(
-        contentsOf: layout.pidFile(for: "mine-cursor"), encoding: .utf8
-    )).flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? 0
-}
-
-func writeCursor(_ layout: HostLayout, _ cursor: Int) {
-    try? Data(String(cursor).utf8).write(
-        to: layout.pidFile(for: "mine-cursor"), options: .atomic
-    )
-}
-
-func prepareRewardsFile(
-    _ settings: MinerSettings, cursor: Int, layout: HostLayout
-) throws -> URL? {
-    guard let batch = settings.batch, cursor < batch.count else { return nil }
-    let url = layout.pidFile(for: "mine-rewards")
-    try Data(batch[cursor].utf8).write(to: url, options: .atomic)
-    return url
 }
 
 enum CoordinatorOutcome {
@@ -426,8 +354,7 @@ final class InterruptFlag: @unchecked Sendable {
 }
 
 func runCoordinatorOnce(
-    _ settings: MinerSettings, rewardsFile: URL?, layout: HostLayout,
-    deadline: Duration
+    _ settings: MinerSettings, layout: HostLayout, deadline: Duration
 ) async throws -> CoordinatorOutcome {
     let executable = try nodeBinary().deletingLastPathComponent()
         .appendingPathComponent("lattice-mining-coordinator")
@@ -438,9 +365,7 @@ func runCoordinatorOnce(
         "--batch-size", String(settings.mine.batchSize ?? 2_000_000_000),
         "--once",
     ]
-    if let rewardsFile {
-        arguments += ["--rewards-file", rewardsFile.path]
-    }
+    arguments += settings.mine.coordinatorRecipientArguments
     arguments += settings.mine.coordinatorMinimumWorkArguments
     // Delegate to the shared spawn path (fresh /dev/null per spawn +
     // terminationHandler reaping) that ProcessSpawnTests pins.
@@ -478,13 +403,11 @@ func runCoordinatorOnce(
             return .harmless
         case "submitted" where object["disposition"] as? String == "carrier":
             // The solution cleared only a child chain's target: the child
-            // advances, no parent block was mined, and the reward line is
-            // untouched. Routine on a merged-mining chain whose child target
+            // advances and no parent block was mined. Routine on a merged-mining chain whose child target
             // is easier than the parent's — never a refusal signal.
             return .carrier
         case "submitted":
-            // Accepted was handled above: a rejected submission behaves like
-            // a refusal so the paired probe can heal an accept-then-crash.
+            // Accepted was handled above: a rejected submission is a refusal.
             return .refusal
         case "workerFailed", "nodeFailed":
             return .workerTrouble(kind)
@@ -504,7 +427,7 @@ func runCoordinatorOnce(
 /// is derived from this plus measured batch time, so no template lifetime is
 /// hardcoded on this side of the RPC.
 func observedTemplateExpiry(
-    _ rpc: UInt16, rewardsFile: URL?, timeoutSeconds: UInt64
+    _ rpc: UInt16, body: Data, timeoutSeconds: UInt64
 ) async -> Duration? {
     guard let url = URL(
         string: "http://127.0.0.1:\(rpc)/v1/mining/templates"
@@ -512,8 +435,7 @@ func observedTemplateExpiry(
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.httpBody = rewardsFile.flatMap { try? Data(contentsOf: $0) }
-        ?? Data(#"{"rewards":[]}"#.utf8)
+    request.httpBody = body
     request.timeoutInterval = TimeInterval(timeoutSeconds)
     guard let (data, response) = try? await URLSession.shared.data(
         for: request
@@ -526,24 +448,4 @@ func observedTemplateExpiry(
         return nil
     }
     return .milliseconds(milliseconds)
-}
-
-enum ProbeResult { case accepted, refused, unavailable }
-
-func templateProbe(
-    _ rpc: UInt16, _ rewardLine: String, timeoutSeconds: UInt64
-) async -> ProbeResult {
-    guard let url = URL(
-        string: "http://127.0.0.1:\(rpc)/v1/mining/templates"
-    ) else { return .unavailable }
-    var request = URLRequest(url: url)
-    request.httpMethod = "POST"
-    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.httpBody = Data(rewardLine.utf8)
-    request.timeoutInterval = TimeInterval(timeoutSeconds)
-    guard let (_, response) = try? await URLSession.shared.data(
-        for: request
-    ), let http = response as? HTTPURLResponse else { return .unavailable }
-    if http.statusCode == 200 { return .accepted }
-    return http.statusCode == 400 ? .refused : .unavailable
 }

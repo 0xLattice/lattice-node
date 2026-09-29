@@ -29,7 +29,6 @@ receiver can reconstruct and verify the transaction body CID:
     "receiptActions": [],
     "withdrawalActions": [],
     "signers": [],
-    "fee": 0,
     "nonce": 0,
     "chainPath": ["Nexus"]
   }
@@ -48,7 +47,7 @@ Both routes return the same chain-process status:
 {
   "phase": "active",
   "chainPath": ["Nexus"],
-  "nexusGenesisCID": "bafyreifvxwhqbwvnrtr2plvtmlvpceqxnexyayjs7klgy6dbkj7yppdsz4",
+  "nexusGenesisCID": "bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24",
   "tipCID": "<cid>",
   "height": 42,
   "revision": 57,
@@ -116,23 +115,31 @@ assembled.
 
 ```json
 {
-  "rewards": [
-    {
-      "chainPath": ["Nexus"],
-      "transaction": {
-        "signatures": {"<public-key-hex>": "<signature-hex>"},
-        "body": {"chainPath": ["Nexus"], "...": "other TransactionBody fields"}
-      }
-    }
+  "recipients": [
+    {"chainPath": ["Nexus"], "address": "<address>"},
+    {"chainPath": ["Nexus", "Payments"], "address": "<address>"}
   ],
   "minimumWork": [{"chainPath": ["Nexus"], "work": "0x100000000"}]
 }
 ```
 
-`rewards` and `minimumWork` are the only request fields and may be empty or
-absent; other fields are ignored. Each reward is an externally signed
-transaction for one absolute chain path; process identity is never converted
-into wallet identity. There is no template mode: transactions carrying a
+`recipients` and `minimumWork` are the only request fields and may be empty or
+absent; other fields are ignored, except `rewards`: a request that still
+carries the retired signed-reward field is refused (`400`), so an old miner
+fails instead of silently mining to no one.
+
+Each recipient names where one chain's block reward and fees go: at most one
+per chain, each `chainPath` absolute and naming this chain or a descendant,
+each `address` a canonical address. The block commits it as
+`rewardRecipient`, which the proof-of-work preimage covers, and consensus
+credits it exactly the block reward plus the block's fees (the debits and
+withdrawals its transactions destroy, minus the credits and deposits they
+create). A chain with no recipient mines to no one: its reward and fees burn.
+Anything else is refused as `invalidRecipientPlan`. The recipient is a header
+field, not a transaction, so it signs nothing and takes no transaction slot;
+process identity is never converted into wallet identity. A hosted child's
+snapshot is carried only when it pays the recipient the plan names for that
+chain. There is no template mode: transactions carrying a
 `GenesisAction` are selected from the pool like any other transaction.
 
 `minimumWork` is the requesting miner's own minimum work per block, for this
@@ -252,5 +259,5 @@ CID.
 - A temporarily unavailable transaction policy returns `503 Service
   Unavailable`.
 - Request bodies are bounded to 2 MiB, Hummingbird's default upload limit.
-  Within that, a transaction submission and a template request's rewards are
-  each bounded to 1 MiB once re-encoded.
+  Within that, a transaction submission and a template request's recipients
+  are each bounded to 1 MiB once re-encoded.

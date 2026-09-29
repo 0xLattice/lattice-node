@@ -141,7 +141,7 @@ key.
 A parent never waits on a child to serve a template. Each hosted child level
 keeps one pre-built candidate against its parent level's validated tip's
 post-state — the only thing a candidate takes from a carrier — and the
-miner's reward plan and minimum work for its subtree, and rebuilds it, one
+miner's recipients and minimum work for its subtree, and rebuilds it, one
 build at a time, whenever an input changed: the parent's tip, its own
 tip, the plan, a grandchild's candidate (a mempool change alone waits for
 the next rebuild). The build
@@ -244,7 +244,7 @@ Nexus has no parent, so an empty Nexus store starts from a configured local
 trust anchor. `ChainProcess.open` constructs the deterministic genesis,
 recomputes its CID, and requires it to equal:
 
-`bafyreifvxwhqbwvnrtr2plvtmlvpceqxnexyayjs7klgy6dbkj7yppdsz4`
+`bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24`
 
 Only then does it bootstrap the root locally. Signature and signer fields in
 genesis transactions are non-authoritative and need no special empty shape. The

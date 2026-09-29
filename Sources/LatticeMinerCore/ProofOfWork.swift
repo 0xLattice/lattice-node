@@ -34,6 +34,7 @@ public enum ProofOfWork {
             children: block.children,
             height: block.height,
             timestamp: block.timestamp,
+            rewardRecipient: block.rewardRecipient,
             nonce: nonce
         )
     }

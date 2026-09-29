@@ -18,6 +18,7 @@ final class MiningTemplateBookTests: XCTestCase {
             transactions: [],
             children: [],
             timestamp: 1,
+            rewardRecipient: nil,
             fetcher: fixture.store
         )
         XCTAssertEqual(template.searchTarget, fixture.genesis.nextTarget)
@@ -32,6 +33,7 @@ final class MiningTemplateBookTests: XCTestCase {
                 transactions: [],
                 children: [child, child],
                 timestamp: 1,
+                rewardRecipient: nil,
                 fetcher: fixture.store
             )
         ) { error in
@@ -71,6 +73,7 @@ final class MiningTemplateBookTests: XCTestCase {
                 block: leafBlock
             )],
             timestamp: 2,
+            rewardRecipient: nil,
             fetcher: hard.store
         )
         XCTAssertEqual(middle.block.target, UInt256(4))
@@ -88,6 +91,7 @@ final class MiningTemplateBookTests: XCTestCase {
                 searchWitness: middle.searchWitness
             )],
             timestamp: 2,
+            rewardRecipient: nil,
             fetcher: hard.store
         )
 
@@ -135,6 +139,7 @@ final class MiningTemplateBookTests: XCTestCase {
                 transactions: [],
                 children: children,
                 timestamp: 2,
+                rewardRecipient: nil,
                 fetcher: hard.store
             )
         }
@@ -165,6 +170,7 @@ final class MiningTemplateBookTests: XCTestCase {
             transactions: [],
             children: [DirectChildCandidate(directory: "Leaf", block: leaf)],
             timestamp: 2,
+            rewardRecipient: nil,
             fetcher: hard.store
         )
         let nested = try await rootTemplate([
@@ -224,6 +230,7 @@ final class MiningTemplateBookTests: XCTestCase {
                 DirectChildCandidate(directory: "Easy", block: easy),
             ],
             timestamp: 2,
+            rewardRecipient: nil,
             minimumWork: plan,
             fetcher: hard.store
         )
@@ -240,6 +247,7 @@ final class MiningTemplateBookTests: XCTestCase {
                 searchWitness: middle.searchWitness
             )],
             timestamp: 2,
+            rewardRecipient: nil,
             minimumWork: plan,
             fetcher: hard.store
         )
@@ -286,6 +294,7 @@ final class MiningTemplateBookTests: XCTestCase {
             transactions: [],
             children: [DirectChildCandidate(directory: "Bound", block: tiedBound)],
             timestamp: 2,
+            rewardRecipient: nil,
             minimumWork: plan,
             fetcher: hard.store
         )
@@ -310,6 +319,7 @@ final class MiningTemplateBookTests: XCTestCase {
                 DirectChildCandidate(directory: "Bound", block: siblingBound),
             ],
             timestamp: 2,
+            rewardRecipient: nil,
             minimumWork: plan,
             fetcher: hard.store
         )
@@ -345,6 +355,7 @@ final class MiningTemplateBookTests: XCTestCase {
                     DirectChildCandidate(directory: "Zed", block: easyRootLeaf),
                 ],
                 timestamp: 2,
+                rewardRecipient: nil,
                 minimumWork: plan,
                 fetcher: hard.store
             )
@@ -414,6 +425,7 @@ final class MiningTemplateBookTests: XCTestCase {
                 transactions: [],
                 children: children,
                 timestamp: 2,
+                rewardRecipient: nil,
                 fetcher: hard.store
             )
             XCTAssertNotEqual(
@@ -429,6 +441,7 @@ final class MiningTemplateBookTests: XCTestCase {
                     searchWitness: middle.searchWitness
                 )],
                 timestamp: 2,
+                rewardRecipient: nil,
                 minimumWork: plan,
                 fetcher: hard.store
             )
@@ -452,6 +465,7 @@ final class MiningTemplateBookTests: XCTestCase {
                 transactions: [],
                 children: [],
                 timestamp: 1_000,
+                rewardRecipient: nil,
                 minimumWork: plan,
                 fetcher: fixture.store
             )
@@ -535,6 +549,7 @@ final class MiningTemplateBookTests: XCTestCase {
                 transactions: [],
                 children: [],
                 timestamp: Int64(height) * 1_000,
+                rewardRecipient: nil,
                 minimumWork: [["Nexus"]: work],
                 fetcher: fixture.store
             )
@@ -573,6 +588,7 @@ final class MiningTemplateBookTests: XCTestCase {
                 transactions: [],
                 children: [],
                 timestamp: 1_000,
+                rewardRecipient: nil,
                 minimumWork: [["Nexus"]: easy],
                 fetcher: fixture.store
             )
@@ -589,6 +605,7 @@ final class MiningTemplateBookTests: XCTestCase {
             transactions: [],
             children: [],
             timestamp: 1_001,
+            rewardRecipient: nil,
             minimumWork: [["Nexus"]: harder],
             fetcher: fixture.store
         )
@@ -623,6 +640,7 @@ final class MiningTemplateBookTests: XCTestCase {
                 transactions: [],
                 children: [],
                 timestamp: 1_000 + Int64(work.description.count),
+                rewardRecipient: nil,
                 minimumWork: [["Nexus"]: work],
                 fetcher: fixture.store
             )
@@ -646,6 +664,7 @@ final class MiningTemplateBookTests: XCTestCase {
             transactions: [],
             children: [],
             timestamp: 1_000,
+            rewardRecipient: nil,
             fetcher: fixture.store
         )
         let scheduled = try await BlockBuilder.buildBlock(
@@ -674,7 +693,6 @@ final class MiningTemplateBookTests: XCTestCase {
                 AccountAction(owner: unfunded, delta: -2),
                 AccountAction(owner: recipient, delta: 1),
             ],
-            fee: 1,
             nonce: 1
         )
         let valid = try (1...2).map { nonce in
@@ -684,7 +702,6 @@ final class MiningTemplateBookTests: XCTestCase {
                     AccountAction(owner: fixture.owner, delta: -2),
                     AccountAction(owner: recipient, delta: 1),
                 ],
-                fee: 1,
                 nonce: UInt64(nonce)
             )
         }
@@ -696,6 +713,7 @@ final class MiningTemplateBookTests: XCTestCase {
             transactions: [valid[0], stale, valid[1]],
             children: [],
             timestamp: 1,
+            rewardRecipient: nil,
             fetcher: fixture.store
         )
         let transactions = try XCTUnwrap(template.block.transactions.node)
@@ -718,7 +736,6 @@ final class MiningTemplateBookTests: XCTestCase {
                 AccountAction(owner: fixture.owner, delta: -2),
                 AccountAction(owner: recipient, delta: 1),
             ],
-            fee: 1,
             nonce: 1
         )
         let stale = try signedTransaction(
@@ -727,7 +744,6 @@ final class MiningTemplateBookTests: XCTestCase {
                 AccountAction(owner: fixture.owner, delta: -2_000),
                 AccountAction(owner: recipient, delta: 1_999),
             ],
-            fee: 1,
             nonce: 2
         )
 
@@ -738,6 +754,7 @@ final class MiningTemplateBookTests: XCTestCase {
             transactions: [valid, stale],
             children: [],
             timestamp: 1,
+            rewardRecipient: nil,
             fetcher: fixture.store
         )
         let transactions = try XCTUnwrap(template.block.transactions.node)
@@ -761,7 +778,6 @@ final class MiningTemplateBookTests: XCTestCase {
                 AccountAction(owner: fixture.owner, delta: -2_000),
                 AccountAction(owner: recipient, delta: 1_900),
             ],
-            fee: 100,
             nonce: 2
         )
         let valid = try signedTransaction(
@@ -770,7 +786,6 @@ final class MiningTemplateBookTests: XCTestCase {
                 AccountAction(owner: fixture.owner, delta: -2),
                 AccountAction(owner: recipient, delta: 1),
             ],
-            fee: 1,
             nonce: 1
         )
         let pool = TransactionPool()
@@ -796,6 +811,7 @@ final class MiningTemplateBookTests: XCTestCase {
             children: [],
             timestamp: 1,
             transactionLimit: 2,
+            rewardRecipient: nil,
             fetcher: fixture.store
         )
         let included = try XCTUnwrap(template.block.transactions.node)
@@ -812,7 +828,6 @@ final class MiningTemplateBookTests: XCTestCase {
         let transaction = try signedTransaction(
             key: fixture.key,
             accountActions: [AccountAction(owner: fixture.owner, delta: -1)],
-            fee: 1,
             nonce: 1
         )
 
@@ -824,6 +839,7 @@ final class MiningTemplateBookTests: XCTestCase {
                 transactions: [transaction],
                 children: [],
                 timestamp: 1,
+                rewardRecipient: nil,
                 fetcher: FailingFetcher()
             )
         ) { error in
@@ -841,6 +857,7 @@ final class MiningTemplateBookTests: XCTestCase {
             transactions: [],
             children: [],
             timestamp: 1,
+            rewardRecipient: nil,
             fetcher: fixture.store
         )
 
@@ -861,6 +878,7 @@ final class MiningTemplateBookTests: XCTestCase {
             transactions: [],
             children: [],
             timestamp: 1,
+            rewardRecipient: nil,
             fetcher: fixture.store
         )
         let preview = try await book.preview(
@@ -868,6 +886,7 @@ final class MiningTemplateBookTests: XCTestCase {
             transactions: [],
             children: [],
             timestamp: 2,
+            rewardRecipient: nil,
             fetcher: fixture.store
         )
         XCTAssertNotEqual(preview.workID, issued.workID)
@@ -896,6 +915,7 @@ final class MiningTemplateBookTests: XCTestCase {
                 transactions: [],
                 children: [],
                 timestamp: timestamp,
+                rewardRecipient: nil,
                 fetcher: fixture.store
             )
         }
@@ -925,6 +945,7 @@ final class MiningTemplateBookTests: XCTestCase {
             transactions: [],
             children: [],
             timestamp: 1,
+            rewardRecipient: nil,
             fetcher: fixture.store
         )
         let conflicting = MiningTemplate(
@@ -1020,7 +1041,6 @@ final class MiningTemplateBookTests: XCTestCase {
                 owner: owner,
                 delta: Int64(spec.premineAmount())
             )],
-            fee: 0,
             nonce: 0
         )
         let result = try await BlockBuilder.buildGenesisWithTransition(
@@ -1156,13 +1176,11 @@ final class TransactionPoolArchitectureTests: XCTestCase {
         let later = try signedTransaction(
             key: key,
             accountActions: [AccountAction(owner: owner, delta: -1)],
-            fee: 1_000,
             nonce: 1
         )
         let earlier = try signedTransaction(
             key: key,
             accountActions: [AccountAction(owner: owner, delta: -1)],
-            fee: 1,
             nonce: 0
         )
         _ = try await pool.submit(
@@ -1191,7 +1209,6 @@ final class TransactionPoolArchitectureTests: XCTestCase {
                 AccountAction(owner: owner, delta: -2),
                 AccountAction(owner: recipient, delta: 1),
             ],
-            fee: 1,
             nonce: 0
         )
         let future = try signedTransaction(
@@ -1200,7 +1217,6 @@ final class TransactionPoolArchitectureTests: XCTestCase {
                 AccountAction(owner: owner, delta: -2),
                 AccountAction(owner: recipient, delta: 1),
             ],
-            fee: 1,
             nonce: 1
         )
 
@@ -1248,19 +1264,16 @@ final class TransactionPoolArchitectureTests: XCTestCase {
         let first = try signedTransaction(
             key: firstKey,
             accountActions: [],
-            fee: 1,
             nonce: 0
         )
         let second = try signedTransaction(
             key: secondKey,
             accountActions: [],
-            fee: 10,
             nonce: 0
         )
         let joint = try signedTransaction(
             keys: [firstKey, secondKey],
             accountActions: [],
-            fee: 100,
             nonce: 1
         )
         for (transaction, disposition) in [
@@ -1305,7 +1318,6 @@ final class TransactionPoolArchitectureTests: XCTestCase {
                 AccountAction(owner: owner, delta: -2),
                 AccountAction(owner: recipient, delta: 1),
             ],
-            fee: 1,
             nonce: 0
         )
         let high = try signedTransaction(
@@ -1314,7 +1326,6 @@ final class TransactionPoolArchitectureTests: XCTestCase {
                 AccountAction(owner: owner, delta: -3),
                 AccountAction(owner: recipient, delta: 1),
             ],
-            fee: 2,
             nonce: 0
         )
 
@@ -1364,7 +1375,6 @@ final class TransactionPoolArchitectureTests: XCTestCase {
                 ),
                 AccountAction(owner: recipient, delta: 1),
             ],
-            fee: 1,
             nonce: 0
         )
         let overlap = try signedTransaction(
@@ -1380,7 +1390,6 @@ final class TransactionPoolArchitectureTests: XCTestCase {
                 ),
                 AccountAction(owner: recipient, delta: 1),
             ],
-            fee: 2,
             nonce: 0
         )
 
@@ -1420,7 +1429,6 @@ final class TransactionPoolArchitectureTests: XCTestCase {
                 ),
                 AccountAction(owner: recipient, delta: 1),
             ],
-            fee: 1,
             nonce: 0
         )
         // A newer ready transaction at the SAME miner fee (both debit 2, credit 1
@@ -1436,7 +1444,6 @@ final class TransactionPoolArchitectureTests: XCTestCase {
                 ),
                 AccountAction(owner: recipient, delta: 1),
             ],
-            fee: 1,
             nonce: 0
         )
 
@@ -1464,7 +1471,6 @@ final class TransactionPoolArchitectureTests: XCTestCase {
         let ready = try signedTransaction(
             key: CryptoUtils.generateKeyPair(),
             accountActions: [],
-            fee: 0,
             nonce: 0
         )
         // A non-ready transaction paying a large REAL miner fee (debit excess
@@ -1479,7 +1485,6 @@ final class TransactionPoolArchitectureTests: XCTestCase {
                     delta: -1_000_000
                 ),
             ],
-            fee: 0,
             nonce: 1
         )
 
@@ -1520,13 +1525,11 @@ final class TransactionPoolArchitectureTests: XCTestCase {
         let first = try signedTransaction(
             key: key,
             accountActions: [],
-            fee: 1,
             nonce: 1
         )
         let second = try signedTransaction(
             key: key,
             accountActions: [],
-            fee: 2,
             nonce: 2
         )
 
@@ -1568,7 +1571,6 @@ final class TransactionPoolArchitectureTests: XCTestCase {
                     AccountAction(owner: owner, delta: -debit),
                     AccountAction(owner: recipient, delta: credit),
                 ],
-                fee: 0,
                 nonce: 0
             )
         }
@@ -1623,7 +1625,6 @@ final class TransactionPoolArchitectureTests: XCTestCase {
             let transaction = try signedTransaction(
                 key: key,
                 accountActions: [AccountAction(owner: owner, delta: -minerFee)],
-                fee: 0,
                 nonce: 0
             )
             _ = try await pool.submit(
@@ -1652,7 +1653,6 @@ final class TransactionPoolArchitectureTests: XCTestCase {
         let underbid = try signedTransaction(
             key: key,
             accountActions: [AccountAction(owner: owner, delta: -1)],
-            fee: 0,
             nonce: 0
         )
         await XCTAssertThrowsErrorAsync(
@@ -1675,7 +1675,6 @@ final class TransactionPoolArchitectureTests: XCTestCase {
             let transaction = try signedTransaction(
                 key: key,
                 accountActions: [AccountAction(owner: owner, delta: -minerFee)],
-                fee: 0,
                 nonce: 0
             )
             _ = try await pool.submit(
@@ -1708,7 +1707,6 @@ final class TransactionPoolArchitectureTests: XCTestCase {
             return try signedTransaction(
                 key: key,
                 accountActions: [AccountAction(owner: owner, delta: -debit)],
-                fee: 0,
                 nonce: 5
             )
         }
@@ -1752,7 +1750,6 @@ final class TransactionPoolArchitectureTests: XCTestCase {
                     AccountAction(owner: owner, delta: -debit),
                     AccountAction(owner: recipient, delta: credit),
                 ],
-                fee: 0,
                 nonce: 5
             )
         }
@@ -1802,7 +1799,6 @@ private func transactionBody(
         receiptActions: [],
         withdrawalActions: [],
         signers: [CryptoUtils.createAddress(from: key.publicKey)],
-        fee: fee,
         nonce: nonce,
         chainPath: chainPath
     )
@@ -1836,6 +1832,7 @@ private extension Block {
             children: children,
             height: height,
             timestamp: timestamp,
+            rewardRecipient: nil,
             nonce: nonce
         )
     }
