@@ -22,7 +22,7 @@ set -eu
 TAG="${1:?usage: upgrade-binaries.sh <image-tag, e.g. sha-888bab7>}"
 IMAGE="ghcr.io/adalinxx/lattice-node:${TAG}"
 BIN_DIR="${BIN_DIR:-/usr/local/bin}"
-BINARIES="lattice-node lattice lattice-mining-coordinator lattice-miner lattice-rewards"
+BINARIES="lattice-node lattice lattice-mining-coordinator lattice-miner"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT

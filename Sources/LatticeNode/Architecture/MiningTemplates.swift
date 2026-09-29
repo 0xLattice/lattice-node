@@ -181,6 +181,7 @@ public actor MiningTemplateBook {
         parentCarrier: Block? = nil,
         timestamp: Int64,
         transactionLimit: Int = .max,
+        rewardRecipient: String?,
         minimumWork: [[String]: UInt256] = [:],
         difficultyAnchor: DifficultyAnchor? = nil,
         fetcher: any Fetcher
@@ -192,6 +193,7 @@ public actor MiningTemplateBook {
             parentCarrier: parentCarrier,
             timestamp: timestamp,
             transactionLimit: transactionLimit,
+            rewardRecipient: rewardRecipient,
             minimumWork: minimumWork,
             difficultyAnchor: difficultyAnchor,
             fetcher: fetcher
@@ -237,6 +239,7 @@ public actor MiningTemplateBook {
         parentCarrier: Block? = nil,
         timestamp: Int64,
         transactionLimit: Int = .max,
+        rewardRecipient: String?,
         minimumWork: [[String]: UInt256] = [:],
         difficultyAnchor: DifficultyAnchor? = nil,
         fetcher: any Fetcher
@@ -248,6 +251,7 @@ public actor MiningTemplateBook {
             parentCarrier: parentCarrier,
             timestamp: timestamp,
             transactionLimit: transactionLimit,
+            rewardRecipient: rewardRecipient,
             minimumWork: minimumWork,
             difficultyAnchor: difficultyAnchor,
             fetcher: fetcher
@@ -261,6 +265,7 @@ public actor MiningTemplateBook {
         parentCarrier: Block?,
         timestamp: Int64,
         transactionLimit: Int,
+        rewardRecipient: String?,
         minimumWork: [[String]: UInt256],
         difficultyAnchor: DifficultyAnchor?,
         fetcher: any Fetcher
@@ -308,6 +313,7 @@ public actor MiningTemplateBook {
             timestamp: timestamp,
             target: target,
             chainPath: chainPath,
+            rewardRecipient: rewardRecipient,
             difficultyAnchor: difficultyAnchor,
             fetcher: fetcher
         )
@@ -329,6 +335,7 @@ public actor MiningTemplateBook {
                     timestamp: timestamp,
                     target: target,
                     chainPath: chainPath,
+                    rewardRecipient: rewardRecipient,
                     difficultyAnchor: difficultyAnchor,
                     fetcher: fetcher
                 )
@@ -336,7 +343,8 @@ public actor MiningTemplateBook {
             } catch let error
                 where error is StateErrors
                     || error is ProofErrors
-                    || error is MiningCandidateValidationError {
+                    || error is MiningCandidateValidationError
+                    || Self.breaksCoinbaseRule(error) {
                 guard chunk.count > 1 else { continue }
                 let midpoint = chunk.index(
                     chunk.startIndex,
@@ -505,6 +513,7 @@ public actor MiningTemplateBook {
         timestamp: Int64,
         target: UInt256?,
         chainPath: [String],
+        rewardRecipient: String?,
         difficultyAnchor: DifficultyAnchor?,
         fetcher: any Fetcher
     ) async throws -> Block {
@@ -517,6 +526,7 @@ public actor MiningTemplateBook {
             target: target,
             nonce: 0,
             difficultyAnchor: difficultyAnchor,
+            rewardRecipient: rewardRecipient,
             fetcher: fetcher
         )
         if transactions.contains(where: {
@@ -529,6 +539,14 @@ public actor MiningTemplateBook {
             guard valid else { throw MiningCandidateValidationError.invalid }
         }
         return candidate
+    }
+
+    /// A chunk whose transactions together break the fee rule is left out
+    /// like any other chunk the state transform refuses, so one bad pool
+    /// entry never suppresses the template.
+    private nonisolated static func breaksCoinbaseRule(_ error: any Error) -> Bool {
+        if case BlockBuilderError.invalidCoinbase = error { return true }
+        return false
     }
 
     public func candidate(workID: String, nonce: UInt64) throws -> Block {
@@ -576,6 +594,7 @@ private extension Block {
             children: children,
             height: height,
             timestamp: timestamp,
+            rewardRecipient: rewardRecipient,
             nonce: nonce
         )
     }

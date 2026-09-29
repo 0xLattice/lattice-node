@@ -1,8 +1,8 @@
 // lattice: operator front door for a host's chain-process tree.
 //
 // Verbs are orthogonal along the architecture's own separations: the tree
-// (init/up/down/status/wipe), identity/custody (identity; reward signing
-// stays in lattice-rewards), roles (mine), and value (tx). Every verb
+// (init/up/down/status/wipe), identity/custody (identity, key), roles
+// (mine), and value (tx). Every verb
 // reconciles the declarative topology in lattice.json; none holds resident
 // state.
 
@@ -21,7 +21,7 @@ struct LatticeCtl: AsyncParsableCommand {
         abstract: "Bring up and operate a multi-chain Lattice host.",
         subcommands: [
             Init.self, Up.self, Down.self, Status.self,
-            Identity.self, Wipe.self, Mine.self, Child.self, Tx.self,
+            Identity.self, Key.self, Wipe.self, Mine.self, Child.self, Tx.self,
             EmitSystemd.self,
         ]
     )

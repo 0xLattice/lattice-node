@@ -13,8 +13,9 @@ public enum ChainHelloError: Error, Equatable, Sendable {
 /// pinned parent link. Synchronization state is advertised separately because
 /// competing roots on one child path remain ordinary fork-choice candidates.
 public struct ChainHello: Codable, Equatable, Sendable {
-    /// Version 4 removes node-local policy from peer compatibility.
-    public static let protocolVersion: UInt16 = 4
+    /// Version 5: blocks commit a `rewardRecipient` credited the reward plus
+    /// fees, and transactions carry no `fee` (Lattice 39 flag day).
+    public static let protocolVersion: UInt16 = 5
     /// Deliberately tight pre-decode guard: `decode` runs on an UNAUTHENTICATED
     /// peer's bytes, so unlike post-session messages (bounded by the transport
     /// frame) this caps unauthenticated JSON parse work. A hello is only a version

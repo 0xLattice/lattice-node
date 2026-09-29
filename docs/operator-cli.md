@@ -20,16 +20,14 @@ lattice init --peer <pubkey>@lattice-mainnet-iad.fly.dev:4001
 lattice up          # start the tree; children are wired automatically
 lattice status      # phase / height / tip / mempool per chain, local RPC only
 
-# Rewards are pre-signed on a TRUSTED machine; the key never ships to miners.
-lattice-rewards generate-key --out reward-key.json
-lattice-rewards emit-batch --key reward-key.json --count 10000 \
-  --out reward-batch.jsonl
-# copy reward-batch.jsonl (only!) to the mining host, then add to lattice.json:
+# A key on a TRUSTED machine; only its address goes to the miner.
+lattice key generate --out reward-key.json
+# then add to lattice.json:
 #   "mine": {"chain": "Nexus", "worker": "cpu", "workers": 4,
-#            "rewards": "reward-batch.jsonl"}
+#            "recipients": {"Nexus": "<address>"}}
 
 lattice mine start
-lattice mine status  # cursor position and batch runway
+lattice mine status  # running or not, and who each chain pays
 ```
 
 ## `lattice.json`
@@ -46,7 +44,7 @@ lattice mine status  # cursor position and batch runway
     "worker": "cpu",
     "workers": 4,
     "batchSize": 2000000000,
-    "rewards": "reward-batch.jsonl",
+    "recipients": {"Nexus": "<address>", "Nexus/Market": "<address>"},
     "minWork": {"Nexus": "2^32"},
     "roundDeadlineMultiplier": 10
   }
@@ -76,7 +74,10 @@ lattice mine status  # cursor position and batch runway
 - `worker` is `"cpu"` (the bundled `lattice-miner`) or a path to any
   executable honoring the [worker contract](mining-workers.md) — a GPU worker
   slots in here.
-- `rewards` is optional; without it, mined blocks pay nobody.
+- `recipients` is optional: chain path → the address that chain's blocks pay
+  their reward and fees to, passed to the coordinator as `--recipient`. A chain
+  left out mines to no one (its reward and fees burn). The retired `rewards`
+  key is refused by name.
 - `minWork` is optional: chain path → minimum work per block (`2^N` or a
   decimal integer), passed to the coordinator as `--min-work`. It filters
   which hashes the miner searches for and submits — the miner's choice, never
@@ -128,7 +129,7 @@ lattice mine status  # cursor position and batch runway
   completed (capped at one more expiry, so a slow round cannot ratchet the
   bound upward), times this. A round that overruns is killed — process group and
   all — logged as `ROUND DEADLINE EXCEEDED`, and the loop continues without
-  advancing the reward cursor. Raise it where rounds legitimately run long;
+  paying anyone. Raise it where rounds legitimately run long;
   lower it to notice a wedged round sooner. Values below `1` are refused
   by name.
 
@@ -141,7 +142,8 @@ lattice mine status  # cursor position and batch runway
 | `up [--foreground]` | Start the one `lattice-node` hosting the tree under a spawn lock. The node reads `lattice.json` once, at start: if it already runs but `lattice.json` now lists a different set of chains, `up` restarts it (`down` + `up`) so it hosts them; there is no runtime attach. `--foreground` stays as PID 1 and restarts it if it exits (containers). |
 | `down` | Stop the tree (the node stops its chains children first). SIGTERM, then SIGKILL after a grace. Also stops chain processes an older one-process-per-chain `lattice` left running. |
 | `status` | One table for the tree, from local loopback RPC only. |
-| `mine start/stop/status` | Supervised rewarded mining (below). `stop` is graceful: the in-flight batch finishes and the cursor is persisted. |
+| `mine start/stop/status` | Supervised mining (below). `stop` is graceful: the in-flight batch finishes. |
+| `key generate --out <file>` | Create a wallet key file (address, private and public key, mode 0600). `tx` and `child deploy` sign with it; its address is what `mine.recipients` names. |
 | `child deploy` | Create a new child of a running local parent (below). |
 | `child adopt <path>` | Join an *existing* child: adds it to the tree and, if the node runs, restarts it to host the child; genesis is re-derived through the authenticated parent link, never copied from a node. |
 | `tx send/deposit/receipt/withdraw` | Sign a transaction with a key file and submit it to one chain in the tree (below). |
@@ -152,22 +154,15 @@ All verbs take `--root` (default: current directory).
 
 ## Mining and rewards
 
-`mine start` runs one coordinator batch per block beside the configured
-chain's node, feeding one pre-signed reward per block, in nonce order:
+`mine start` runs one coordinator batch per round beside the configured
+chain's node. Each block pays the recipient `mine.recipients` names for its
+chain the block reward plus its fees; the recipient is a header field the proof
+of work covers, so nothing is signed on the mining host and there is no batch
+or cursor to keep:
 
-- The cursor advances only on an **accepted block**, or on the one signature
-  proving the current nonce is already spent (the node refuses a template for
-  line *i* while accepting line *i + 1* — e.g. after a crash between block
-  acceptance and the cursor write).
-- Worker or node failures retry in place, forever. A skipped nonce would
-  permanently invalidate the rest of the batch, so nothing else advances it.
-- If line *i* and line *i + 1* are **both** refused, the batch is stalled
-  (nonce gap or a halving made the amount too large): the log says so and the
-  loop holds. Re-emit the batch from the key's next expected nonce.
-- Re-emit before the batch runs out (`mine status` shows the runway) and
-  before a halving boundary.
+- Worker or node failures retry in place, forever.
 - Run one miner payout plan per node. A node serves one plan at a time (the
-  rewards and minimum work a template names for child chains), so miners with
+  recipients and minimum work a template names for child chains), so miners with
   different plans on one node thrash and their templates mostly carry no
   child blocks. See [operations.md](operations.md#external-mining-services).
 
@@ -244,7 +239,7 @@ Notes:
 
 ## Transactions
 
-`tx` signs with a `lattice-rewards` key file (the key stays on this host) and
+`tx` signs with a `lattice key generate` key file (the key stays on this host) and
 submits to the named chain's loopback RPC, which validates against current
 state before pooling. `--nonce` defaults to the chain's next expected nonce
 for the key; pass it explicitly to queue several transactions before the

@@ -58,7 +58,7 @@ The worker does not define a second proof-of-work encoding.
 | Responsibility | Owner |
 | --- | --- |
 | Template and candidate construction | `LatticeNode` |
-| Externally signed reward transactions | Miner/wallet input; validated and partitioned by `LatticeNode` |
+| Reward recipients (addresses, one per chain) | Miner input; validated and partitioned by `LatticeNode` |
 | Effective target calculation | `LatticeNode` |
 | Merged-mining child proof generation and verification | `LatticeNode` |
 | Block sealing from accepted solution | `LatticeNode` |

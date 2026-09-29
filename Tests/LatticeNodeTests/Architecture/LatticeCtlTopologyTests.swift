@@ -205,7 +205,7 @@ final class LatticeCtlTopologyTests: XCTestCase {
             chains: ["Nexus": chain(4001)],
             mine: TopologyMine(
                 chain: "Nexus", worker: "cpu", workers: 2,
-                batchSize: 1_000, rewards: "rewards.jsonl",
+                batchSize: 1_000, recipients: ["Nexus": "addr-nexus"],
                 minWork: ["Nexus": "2^32"]
             )
         )
@@ -214,6 +214,17 @@ final class LatticeCtlTopologyTests: XCTestCase {
         XCTAssertEqual(loaded.chains["Nexus"]?.listen, 4001)
         XCTAssertEqual(loaded.mine?.batchSize, 1_000)
         XCTAssertEqual(loaded.mine?.minWork, ["Nexus": "2^32"])
+        XCTAssertEqual(loaded.mine?.recipients, ["Nexus": "addr-nexus"])
+        XCTAssertEqual(
+            loaded.mine?.coordinatorRecipientArguments,
+            ["--recipient", "Nexus=addr-nexus"]
+        )
+        // The pre-signed reward batch is gone: an old tree fails loudly
+        // instead of silently mining to no one.
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            TopologyMine.self,
+            from: Data(#"{"chain":"Nexus","rewards":"rewards.jsonl"}"#.utf8)
+        ))
         // Blocks always commit the schedule; the filter is a search plan.
         let legacy = try JSONDecoder().decode(
             TopologyMine.self,

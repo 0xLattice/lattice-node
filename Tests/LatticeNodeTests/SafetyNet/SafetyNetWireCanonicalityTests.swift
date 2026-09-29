@@ -19,7 +19,7 @@ import cashew
 /// `ChildValidationPackageEnvelope`, `ChildEvidenceVolume`, and the RPC
 /// types with a custom Codable (`ContentBoundTransaction`,
 /// `ContentBoundWasmPolicyModule`, `SubmitTransactionRequest`,
-/// `MiningTemplateRequest`, `MiningReward`).
+/// `MiningTemplateRequest`).
 ///
 /// Deterministic: one fixed `SplitMix64` seed per codec (the shared generator
 /// in `Support/SeededGenerator.swift`), so a failure names the codec and the
@@ -479,7 +479,6 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
             actions: [], depositActions: [], genesisActions: [],
             receiptActions: [], withdrawalActions: [],
             signers: [randomCID(&generator)],
-            fee: 0,
             nonce: UInt64.random(in: 0...UInt64.max, using: &generator),
             chainPath: chainPath
         )
@@ -590,35 +589,15 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
         }
     }
 
-    func testMiningRewardIsCanonical() throws {
-        var generator = SplitMix64(state: 0x20)
-        for iteration in 0..<Self.messagesPerCodec {
-            let path = randomChainPath(&generator, minimumCount: 1)
-            let reward = MiningReward(
-                chainPath: path,
-                transaction: try rewardTransaction(chainPath: path, generator: &generator)
-            )
-            let encoded = try _canonicalJSONEncode(reward)
-            let decoded = try JSONDecoder().decode(MiningReward.self, from: encoded)
-            let provenance = "MiningReward #\(iteration)"
-            XCTAssertEqual(decoded.chainPath, reward.chainPath, provenance)
-            XCTAssertEqual(decoded.transaction.body.rawCID, reward.transaction.body.rawCID, provenance)
-            XCTAssertEqual(decoded.transaction.signatures, reward.transaction.signatures, provenance)
-            XCTAssertEqual(
-                try _canonicalJSONEncode(decoded), encoded,
-                "\(provenance): encode(decode(bytes)) != bytes"
-            )
-        }
-    }
-
     func testMiningTemplateRequestIsCanonical() throws {
         var generator = SplitMix64(state: 0x21)
         for iteration in 0..<Self.messagesPerCodec {
-            let rewards = try (0..<randomInt(&generator, 0...3)).map { _ -> MiningReward in
-                let path = randomChainPath(&generator, minimumCount: 1)
-                return MiningReward(
-                    chainPath: path,
-                    transaction: try rewardTransaction(chainPath: path, generator: &generator)
+            let recipients = (0..<randomInt(&generator, 0...3)).map { _ -> MiningRecipient in
+                MiningRecipient(
+                    chainPath: randomChainPath(&generator, minimumCount: 1),
+                    address: CryptoUtils.createAddress(
+                        from: String(UInt64.random(in: 0...UInt64.max, using: &generator))
+                    )
                 )
             }
             // `minimumWork` is omitted from the wire when empty; both shapes
@@ -627,17 +606,12 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
                 chainPath: randomChainPath(&generator, minimumCount: 1),
                 work: UInt256(UInt64.random(in: 1...UInt64.max, using: &generator))
             )]
-            let request = MiningTemplateRequest(rewards: rewards, minimumWork: minimumWork)
+            let request = MiningTemplateRequest(recipients: recipients, minimumWork: minimumWork)
             let encoded = try _canonicalJSONEncode(request)
             let decoded = try JSONDecoder().decode(MiningTemplateRequest.self, from: encoded)
             let provenance = "MiningTemplateRequest #\(iteration)"
             XCTAssertEqual(decoded.minimumWork, request.minimumWork, provenance)
-            XCTAssertEqual(decoded.rewards.map(\.chainPath), request.rewards.map(\.chainPath), provenance)
-            XCTAssertEqual(
-                decoded.rewards.map(\.transaction.body.rawCID),
-                request.rewards.map(\.transaction.body.rawCID),
-                provenance
-            )
+            XCTAssertEqual(decoded.recipients, request.recipients, provenance)
             XCTAssertEqual(
                 try _canonicalJSONEncode(decoded), encoded,
                 "\(provenance): encode(decode(bytes)) != bytes"

@@ -46,7 +46,7 @@ struct Child: AsyncParsableCommand {
         @Option(name: .long, help: "ChainSpec JSON file for the child.")
         var spec: String
 
-        @Option(name: .long, help: "Funded key file (lattice-rewards format) signing the anchor transaction.")
+        @Option(name: .long, help: "Funded key file (from `lattice key generate`) signing the anchor transaction.")
         var fund: String
 
         @Option(name: .long, help: "The funding key's next expected nonce.")
@@ -149,7 +149,6 @@ struct Child: AsyncParsableCommand {
                     receiptActions: [],
                     withdrawalActions: [],
                     signers: [address],
-                    fee: fee,
                     nonce: nonce,
                     chainPath: [parent].flatMap {
                         $0 == "Nexus" ? ["Nexus"]
@@ -304,7 +303,7 @@ struct Child: AsyncParsableCommand {
                     // transient RPC failure must not abort a deploy that
                     // used to retry; this loop's own budget bounds it.
                     guard let expiry = await observedTemplateExpiry(
-                        rootChain.rpc, rewardsFile: nil,
+                        rootChain.rpc,
                         timeoutSeconds: topology.mine?
                             .resolvedTemplateTimeoutSeconds
                             ?? TopologyMine.defaultTemplateTimeoutSeconds

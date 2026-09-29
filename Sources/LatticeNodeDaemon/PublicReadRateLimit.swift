@@ -138,6 +138,11 @@ enum PublicReadRouteClass: Sendable, Equatable {
         case 3 where components[0] == "api"
             && components[1] == "chain" && components[2] == "endpoints":
             self = .expensive
+        case 3 where components[0] == "api" && components[1] == "block"
+            && components[2] != "latest":
+            // Block detail reads every transaction body to report the reward
+            // and fees the block paid its recipient.
+            self = .expensive
         case 4 where components[0] == "api" && components[1] == "block"
             && (components[3] == "transactions" || components[3] == "children"):
             self = .expensive

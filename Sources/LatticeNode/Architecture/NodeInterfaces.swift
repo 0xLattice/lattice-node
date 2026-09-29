@@ -16,17 +16,17 @@ public struct DirectChildProofPublication: Sendable {
 /// child's subtree.
 public struct ChildCandidateRequestContext: Sendable {
     public let parentCarrier: Block
-    public let rewards: [MiningReward]
+    public let recipients: [MiningRecipient]
     /// The requesting miner's minimum work for descendant chains.
     public let minimumWork: [MiningMinimumWork]
 
     public init(
         parentCarrier: Block,
-        rewards: [MiningReward],
+        recipients: [MiningRecipient],
         minimumWork: [MiningMinimumWork] = []
     ) {
         self.parentCarrier = parentCarrier
-        self.rewards = rewards
+        self.recipients = recipients
         self.minimumWork = minimumWork
     }
 }

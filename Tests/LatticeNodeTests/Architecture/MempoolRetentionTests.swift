@@ -119,16 +119,15 @@ final class MempoolRetentionTests: XCTestCase {
         // Each weighed block carries a transaction, so its body is not part of
         // the boundary a weighed admission stores and the walk cannot execute
         // it locally (an empty block's boundary is the whole block).
-        let reward = [AccountAction(
-            owner: CryptoUtils.createAddress(
-                from: CryptoUtils.generateKeyPair().publicKey
-            ),
-            delta: 1
-        )]
-        let weighed = [
-            try await producer.mine(rewards: reward),
-            try await producer.mine(rewards: reward),
-        ]
+        func carrying() async throws -> Block {
+            _ = try await producer.service.submitTransaction(
+                SubmitTransactionRequest(transaction: try signedTransaction(
+                    key: CryptoUtils.generateKeyPair()
+                ))
+            )
+            return try await producer.mine()
+        }
+        let weighed = [try await carrying(), try await carrying()]
         for block in weighed {
             let outcome = try await consumer.service.importNetworkCandidate(
                 BlockHeader(node: block),
@@ -493,20 +492,14 @@ struct MempoolNode {
     }
 
     /// Mines the pool into a block through the template and submit-work
-    /// entry points, crediting `rewards` from a fresh reward signer.
+    /// entry points, paying the block reward to `recipient` (nil burns it).
     @discardableResult
-    func mine(rewards: [AccountAction] = []) async throws -> Block {
-        var request = MiningTemplateRequest()
-        if !rewards.isEmpty {
-            request = MiningTemplateRequest(rewards: [MiningReward(
-                chainPath: ["Nexus"],
-                transaction: try signedTransaction(
-                    key: CryptoUtils.generateKeyPair(),
-                    accountActions: rewards
-                )
-            )])
-        }
-        let template = try await service.miningTemplate(request)
+    func mine(recipient: String? = nil) async throws -> Block {
+        let template = try await service.miningTemplate(MiningTemplateRequest(
+            recipients: recipient.map {
+                [MiningRecipient(chainPath: ["Nexus"], address: $0)]
+            } ?? []
+        ))
         let nonce = solvedNonce(for: template)
         let response = try await service.submitWork(SubmitWorkRequest(
             workID: template.workID,
@@ -520,13 +513,27 @@ struct MempoolNode {
 
     /// Funds `count` fresh keys with `PoolModel.fundedBalance` each.
     func fundKeys(count: Int) async throws -> [PoolModel.KeyPair] {
+        // One block pays a funder, and one transfer from it funds every key.
+        let funder = CryptoUtils.generateKeyPair()
+        let funderAddress = CryptoUtils.createAddress(from: funder.publicKey)
+        try await mine(recipient: funderAddress)
         let keys = (0..<count).map { _ in CryptoUtils.generateKeyPair() }
-        try await mine(rewards: keys.map {
-            AccountAction(
-                owner: CryptoUtils.createAddress(from: $0.publicKey),
-                delta: PoolModel.fundedBalance
-            )
-        })
+        let transfer = try signedTransaction(
+            key: funder,
+            accountActions: [AccountAction(
+                owner: funderAddress,
+                delta: -PoolModel.fundedBalance * Int64(count)
+            )] + keys.map {
+                AccountAction(
+                    owner: CryptoUtils.createAddress(from: $0.publicKey),
+                    delta: PoolModel.fundedBalance
+                )
+            }
+        )
+        _ = try await service.submitTransaction(
+            SubmitTransactionRequest(transaction: transfer)
+        )
+        try await mine()
         return keys
     }
 

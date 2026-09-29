@@ -92,11 +92,9 @@ final class LatticeCtlE2ETests: XCTestCase {
     }
 
     @discardableResult
-    private func runRewards(_ arguments: [String]) async throws -> String {
+    private func runKeyTool(_ arguments: [String]) async throws -> String {
         let process = Process()
-        process.executableURL = try binary(
-            "E2E_REWARDS_BIN", "lattice-rewards"
-        )
+        process.executableURL = try binary("E2E_CTL_BIN", "lattice")
         process.arguments = arguments
         let stdout = Pipe()
         process.standardOutput = stdout
@@ -105,7 +103,7 @@ final class LatticeCtlE2ETests: XCTestCase {
         let data = stdout.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         guard process.terminationStatus == 0 else {
-            throw CtlE2EError("lattice-rewards failed: \(String(decoding: data, as: UTF8.self))")
+            throw CtlE2EError("lattice key failed: \(String(decoding: data, as: UTF8.self))")
         }
         return String(decoding: data, as: UTF8.self)
     }
@@ -168,7 +166,7 @@ final class LatticeCtlE2ETests: XCTestCase {
         throw CtlE2EError("timed out waiting for \(label)")
     }
 
-    /// A `lattice-rewards` key file: the CLI signs with the file, the test
+    /// A `lattice key generate` key file: the CLI signs with the file, the test
     /// only ever needs the address.
     private struct TestKey {
         let address: String
@@ -177,7 +175,7 @@ final class LatticeCtlE2ETests: XCTestCase {
 
     private func makeKey(_ directory: URL, _ name: String) async throws -> TestKey {
         let path = directory.appendingPathComponent("\(name).json")
-        _ = try await runRewards(["generate-key", "--out", path.path])
+        _ = try await runKeyTool(["key", "generate", "--out", path.path])
         struct KeyFile: Decodable { let address: String }
         let decoded = try JSONDecoder().decode(
             KeyFile.self, from: Data(contentsOf: path)
@@ -225,10 +223,12 @@ final class LatticeCtlE2ETests: XCTestCase {
         }
     }
 
-    /// Brings up one CLI-managed host mining Nexus with rewards to `miner`,
-    /// then deploys a premined child.
+    /// Brings up one CLI-managed host mining Nexus with rewards to `miner`
+    /// (and each chain in `recipients` to its key), then deploys a premined
+    /// child.
     private func bringUpMiningHost(
-        miner: TestKey
+        miner: TestKey,
+        recipients: [String: TestKey] = [:]
     ) async throws -> CtlHost {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-node-e2e-ctl-\(UUID().uuidString)")
@@ -236,13 +236,6 @@ final class LatticeCtlE2ETests: XCTestCase {
             at: root, withIntermediateDirectories: true
         )
         _ = try await runCtl(["init"], root: root)
-        try copyKey(miner, into: root, name: "miner")
-        _ = try await runRewards([
-            "emit-batch", "--key",
-            root.appendingPathComponent("miner.json").path,
-            "--count", "60", "--out",
-            root.appendingPathComponent("rewards.jsonl").path,
-        ])
         let ports = randomPorts(3)
         let topologyURL = root.appendingPathComponent("lattice.json")
         var topology = try JSONSerialization.jsonObject(
@@ -260,7 +253,9 @@ final class LatticeCtlE2ETests: XCTestCase {
         topology["chains"] = chains
         topology["mine"] = [
             "chain": "Nexus", "worker": "cpu", "workers": 1,
-            "batchSize": 100_000, "rewards": "rewards.jsonl",
+            "batchSize": 100_000,
+            "recipients": recipients.mapValues(\.address)
+                .merging(["Nexus": miner.address]) { current, _ in current },
         ] as [String: Any]
         try JSONSerialization.data(withJSONObject: topology)
             .write(to: topologyURL)
@@ -452,39 +447,29 @@ final class LatticeCtlE2ETests: XCTestCase {
         let seller = try await makeKey(scratch, "seller")
         let fund = try await makeKey(scratch, "fund")
         let buyer = try await makeKey(scratch, "minerSwap")
+        let childMiner = try await makeKey(scratch, "childMinerSwap")
 
-        var host = try await bringUpMiningHost(miner: buyer)
+        var host = try await bringUpMiningHost(
+            miner: buyer, recipients: ["Nexus/Market": childMiner]
+        )
         host.childRPC = try await deployChild(
             host, directory: "Market",
             premineTo: seller.address, fund: fund
         )
         _ = try await runCtl(["mine", "start"], root: host.root)
 
-        // Fund the buyer parent-side through mining rewards, then switch to
-        // rewardless mining so the buyer's nonce sequence is ours to spend.
-        try await waitFor("buyer funded by rewards", seconds: 120) {
-            let status = try? await self.runCtl(
-                ["mine", "status"], root: host.root
-            )
-            guard let line = status?.split(separator: "\n").first(
-                where: { $0.hasPrefix("rewards:") }
-            ), let consumed = line.split(separator: " ").dropFirst().first
-                .flatMap({ Int($0) }) else { return false }
-            return consumed >= 3
-        }
-        _ = try await runCtl(["mine", "stop"], root: host.root)
-        let topologyURL = host.root.appendingPathComponent("lattice.json")
-        var topology = try JSONSerialization.jsonObject(
-            with: Data(contentsOf: topologyURL)
-        ) as! [String: Any]
-        var mine = topology["mine"] as! [String: Any]
-        mine.removeValue(forKey: "rewards")
-        topology["mine"] = mine
-        try JSONSerialization.data(withJSONObject: topology)
-            .write(to: topologyURL)
-        _ = try await runCtl(["mine", "start"], root: host.root)
-
+        // Both chains pay their configured recipients: the buyer is funded
+        // parent-side by the Nexus blocks it mines, and the child's blocks pay
+        // their own recipient. A recipient signs nothing, so mining never
+        // touches the buyer's nonce sequence.
         let childRPC = host.childRPC!
+        try await waitFor("buyer funded by Nexus rewards", seconds: 120) {
+            await self.balance(host.nexusRPC, buyer.address) >= 60
+        }
+        try await waitFor("child recipient funded by child rewards", seconds: 180) {
+            await self.balance(childRPC, childMiner.address) > 0
+        }
+
         func childHeight() async -> Int {
             await health(childRPC)?["height"] as? Int ?? -1
         }
@@ -506,7 +491,7 @@ final class LatticeCtlE2ETests: XCTestCase {
         }
 
         // 2. Buyer pays the demanded 60 on the parent with a receipt. The
-        // buyer's nonce follows its mined rewards; `tx` reads it from state.
+        // buyer's nonce is its own; `tx` reads it from state.
         try await submitUntilAccepted("parent accepts the receipt", host, [
             "receipt", "--chain", "Nexus", "--key", buyer.file.path,
             "--swap-nonce", "7", "--demand", "60",
@@ -874,7 +859,7 @@ final class LatticeCtlE2ETests: XCTestCase {
     /// and never a child-only carrier. Returns the accepted block's CID.
     private func mineFullBlock(_ rpc: UInt16) async throws -> String {
         let template: MiningTemplateResponse = try await postJSON(
-            rpc, "/v1/mining/templates", MiningTemplateRequest(rewards: []), timeout: 40
+            rpc, "/v1/mining/templates", MiningTemplateRequest(), timeout: 40
         )
         let midstate = ProofOfWork.midstate(for: template.block)
         var nonce: UInt64 = 0
