@@ -226,7 +226,6 @@ extension NodeNetworkRuntime {
         sessionLeases.activeTransactionVolumes.removeAll()
         hierarchyState.childProofRecoveryTask.cancel()
         genesisAnnounceTask.cancel()
-        hierarchyState.genesisActivationTask.cancel()
         hierarchyState.genesisActivationRequested = false
         hierarchyState.parentEvidenceOrphans.removeAll()
         hierarchyState.orphansAwaitingRoom.removeAll()
@@ -240,6 +239,14 @@ extension NodeNetworkRuntime {
         let peerSearch = overlayState.peerSearchTask.take()
         peerSearch?.cancel()
         await peerSearch?.value
+        // Joined for the same reason: a genesis activation attempt holds
+        // the ChainProcess and could persist the genesis after stop.
+        let genesisActivation = hierarchyState.genesisActivationTask.take()
+        let genesisRetry = hierarchyState.genesisRetryTask.take()
+        genesisActivation?.cancel()
+        genesisRetry?.cancel()
+        await genesisActivation?.value
+        await genesisRetry?.value
         hierarchyState.childProofRecoveryNeedsRefresh = false
         sessionLeases.servingAcceptedLeaves.removeAll()
         sessionLeases.servingAncestorRange.removeAll()

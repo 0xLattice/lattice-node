@@ -69,13 +69,16 @@ built offline and deterministically from a seed (the child `ChainSpec`, an
 optional premine recipient, and a timestamp), and the parent only records its
 CID. Submit a separately signed parent transaction carrying the matching
 `GenesisAction`; ordinary mining includes it like any other transaction. The
-child pursues the genesis by two concurrent paths. It rebuilds it from a seed
-found as `child-genesis.json` in its data directory at startup (the file is read
-only then). It also asks its parent for the recorded CID and fetches the
-content-addressed genesis block from child-overlay peers, which a brand-new
-chain does not yet have. Either way, it becomes active only after its
-authenticated immediate parent confirms that it recorded exactly that CID. There is no opaque serialized
-bootstrap channel. `lattice child deploy` runs the whole flow; see the
+child activates on events, not a polling loop: on its start, on each parent
+tip change, on a child-overlay peer's hello, and on a slow retry after a
+failed fetch. Each time it reads the CID its co-hosted parent level anchored
+for its directory. With `child-genesis.json` in its data directory (re-read on
+every trigger) it rebuilds the genesis from that seed and requires the anchored
+CID; without a seed, or when the seed is unreadable or builds another CID, it
+fetches the genesis block by the anchored CID from child-overlay peers, which
+a brand-new chain does not yet have. Either way, it becomes active only after a
+local read of its co-hosted parent confirms that the parent still anchors and
+recorded exactly that CID. There is no opaque serialized bootstrap channel. `lattice child deploy` runs the whole flow; see the
 [operator CLI](docs/operator-cli.md).
 
 ## Mining

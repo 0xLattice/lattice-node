@@ -290,6 +290,19 @@ final class ChainHostTests: XCTestCase {
     /// genesis from a child-overlay provider (here the deployer's host) once
     /// its own Nexus has synced the anchor.
     func testAnAdoptedChildFetchesItsAnchoredGenesis() async throws {
+        try await adoptFromDeployer(staleSeed: false)
+    }
+
+    /// A seed that is unusable here (it builds another CID than the anchored
+    /// one) does not strand the child: it falls back to fetching the
+    /// anchored genesis from a provider.
+    func testAStaleSeedFallsBackToFetchingTheAnchoredGenesis() async throws {
+        try await adoptFromDeployer(staleSeed: true)
+    }
+
+    /// A deployer host activates the child from its seed; an adopter host,
+    /// peered with it on both levels, activates the same genesis by fetch.
+    private func adoptFromDeployer(staleSeed: Bool) async throws {
         let deployerRoot = temporaryDirectory(create: true)
         let (_, genesisCID) = try await seedChild(
             root: deployerRoot, timestamp: 1_000
@@ -321,6 +334,9 @@ final class ChainHostTests: XCTestCase {
             )
         }
         let adopterRoot = temporaryDirectory(create: true)
+        if staleSeed {
+            _ = try await seedChild(root: adopterRoot, timestamp: 2_000)
+        }
         let nexusPeer = try await endpoint(deployer, nexus, deployerNexusPort)
         let childPeer = try await endpoint(deployer, child, deployerChildPort)
         let adopter = try ChainHost(chains: [
@@ -348,6 +364,47 @@ final class ChainHostTests: XCTestCase {
         await deployer.stopAll()
     }
 
+    /// Stopping a level joins its genesis activation attempt: an attempt in
+    /// flight at stop neither outlives the level (the storage opens again at
+    /// once in this process) nor persists the genesis after it stopped.
+    func testStoppingALevelJoinsItsGenesisActivation() async throws {
+        let root = temporaryDirectory(create: true)
+        let (_, genesisCID) = try await seedChild(root: root, timestamp: 1_000)
+        let parentKey = String(repeating: "01", count: 32)
+        let configuration = try configure(child, root: root, keyByte: 2)()
+            .withParentEndpoint(ParentEndpoint(
+                publicKey: try NodeConfiguration(
+                    chainPath: nexus.components,
+                    storagePath: root.appendingPathComponent("unused"),
+                    privateKeyHex: parentKey,
+                    listenPort: 1, factListenPort: 2, rpcPort: 3
+                ).processPublicKey,
+                host: "127.0.0.1",
+                port: NetworkTransportTestPorts.allocate()
+            ))
+        let parent = GatedAnchorParentLevel(genesisCID: genesisCID)
+        // Scoped, so nothing but the level's own tasks holds its process
+        // once it has stopped.
+        do {
+            let node = try await LatticeNode.Node.build(
+                configuration: configuration, parentLevel: parent
+            )
+            try await eventually("an activation attempt is in flight") {
+                await parent.asked
+            }
+            let stopped = Task { await node.shutdown() }
+            // The attempt is still parked on the parent's read while stop
+            // waits for it.
+            try await Task.sleep(for: .milliseconds(200))
+            await parent.gate.open()
+            await stopped.value
+        }
+
+        let reopened = try await ChainProcess.open(configuration: configuration)
+        let phase = await reopened.status().phase
+        XCTAssertEqual(phase, .awaitingGenesis)
+    }
+
     private func service(
         _ host: ChainHost, _ address: ChainAddress
     ) async throws -> ChainService {
@@ -367,5 +424,37 @@ final class ChainHostTests: XCTestCase {
         return try await service.submitWork(SubmitWorkRequest(
             workID: template.workID, nonce: solvedNonce(for: template)
         ))
+    }
+}
+
+/// A parent level whose anchor read parks until `gate` opens, then answers
+/// `genesisCID`, which it also reports recorded.
+private actor GatedAnchorParentLevel: ParentLevel {
+    let genesisCID: String
+    let gate = Latch()
+    private(set) var asked = false
+
+    init(genesisCID: String) {
+        self.genesisCID = genesisCID
+    }
+
+    func hasProducedState(_ stateCID: String) async -> Bool { false }
+
+    func recordedGenesisLink(
+        directory: String, childGenesisCID: String
+    ) async -> ParentGenesisLink? {
+        guard childGenesisCID == genesisCID else { return nil }
+        return ParentGenesisLink(
+            parentPath: ["Nexus"],
+            directory: directory,
+            childGenesisCID: childGenesisCID,
+            parentStateCID: LatticeState.emptyHeader.rawCID
+        )
+    }
+
+    func anchoredGenesisCID(directory: String) async -> String? {
+        asked = true
+        await gate.wait()
+        return genesisCID
     }
 }

@@ -219,22 +219,21 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// parent recorded THIS CID (a read of the co-hosted parent level's
     /// record). Fail-closed: a genesis the parent never recorded yields
     /// `false` and the chain stays `awaitingGenesis`, so no honest node
-    /// self-admits an unrecorded fork. Returns whether the genesis became
-    /// active. Idempotent: returns false (no-op) once the chain is past
-    /// `awaitingGenesis`.
+    /// self-admits an unrecorded fork. Idempotent: `.notAwaiting` once the
+    /// chain is past `awaitingGenesis`.
     public func activateChildGenesis(
         anchoredCID: String,
         from source: ChildGenesisSource,
         confirmParentRecordedGenesis: (_ childGenesisCID: String) async -> Bool
-    ) async throws -> Bool {
+    ) async throws -> ChildGenesisActivation {
         try await acquireMutationOperation()
         defer { releaseOperation() }
         guard case .awaitingGenesis = runtimePhase,
               !configuration.address.isNexus else {
-            return false
+            return .notAwaiting
         }
         let context = try configuration.runtimeContext
-        guard let directory = context.path.last else { return false }
+        guard let directory = context.path.last else { return .notAwaiting }
         let fetcher: CoalescingFetcher
         let node: Block
         switch source {
@@ -253,7 +252,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             guard let fetched = try? await BlockHeader(
                 rawCID: anchoredCID, node: nil, encryptionInfo: nil
             ).resolve(fetcher: fetcher).node else {
-                return false
+                return .notAnchoredGenesis
             }
             node = fetched
         }
@@ -265,7 +264,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 "child-genesis mismatch directory=\(directory)"
                     + " anchored=\(anchoredCID) built=\(header.rawCID)"
             )
-            return false
+            return .notAnchoredGenesis
         }
         return try await bootstrapSelfContainedGenesis(
             header: header,
@@ -273,7 +272,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             directory: directory,
             fetcher: fetcher,
             confirmParentRecordedGenesis: confirmParentRecordedGenesis
-        )
+        ) ? .activated : .unconfirmed
     }
 
     /// Whether this chain still waits for its genesis. Ungated: the phase

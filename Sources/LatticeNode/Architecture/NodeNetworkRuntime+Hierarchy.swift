@@ -2134,19 +2134,27 @@ extension NodeNetworkRuntime {
     }
 
     /// Verify-not-trust gate for a self-contained child genesis: whether the
-    /// co-hosted parent level recorded exactly this genesis CID for this
-    /// chain's directory, bound to the empty parent state. A local read.
+    /// co-hosted parent level still anchors exactly this genesis CID for
+    /// this chain's directory (a parent reorg during the fetch may have
+    /// moved it) and recorded it bound to the empty parent state. Local
+    /// reads.
     nonisolated func parentRecordedChildGenesis(
         _ childGenesisCID: String
     ) async -> Bool {
-        await parentLevel?.recordedGenesisLink(
-            directory: configuration.address.directory,
+        let directory = configuration.address.directory
+        guard let parentLevel,
+              await parentLevel.anchoredGenesisCID(directory: directory)
+                == childGenesisCID
+        else { return false }
+        return await parentLevel.recordedGenesisLink(
+            directory: directory,
             childGenesisCID: childGenesisCID
         ) != nil
     }
 
     /// One trigger of `activateGenesisIfRecorded`: this level's start, a
-    /// parent tip change, or (adopted only) a child overlay connect. One
+    /// parent tip change, (adopted only) a child overlay hello, or the slow
+    /// retry after a failed fetch or confirm. One
     /// attempt runs at a time; a trigger that lands during an attempt runs
     /// one more after it, so no trigger is lost.
     func triggerGenesisActivation() {
@@ -2194,11 +2202,13 @@ extension NodeNetworkRuntime {
 
     /// A hosted child with no genesis activates the one its parent anchored:
     /// read the CID the parent committed for this directory, rebuild the
-    /// genesis from the deployer's seed when this node holds one or else
-    /// fetch it through the child overlay, and admit it once the parent's
-    /// record confirms it. Nothing here waits or retries: no anchor yet, a
-    /// seed that rebuilds to another CID, or a fetch with no provider yet
-    /// leaves the chain awaiting the next trigger.
+    /// genesis from the deployer's seed when this node holds one, and fetch
+    /// it through the child overlay when it holds none or the seed is
+    /// unreadable or rebuilds to another CID (the fetch is bound to the
+    /// anchored CID). Admit it once the parent confirms it. Nothing here
+    /// waits: no anchor yet leaves the chain awaiting the next trigger, and
+    /// an anchored genesis that could not be fetched or confirmed also arms
+    /// the one slow retry, for a parent too quiet to trigger again.
     private func activateGenesisIfRecorded(
         generation: UInt64,
         process: ChainProcess
@@ -2207,26 +2217,32 @@ extension NodeNetworkRuntime {
         guard let parentLevel, await process.awaitsGenesis,
               let genesisCID = await parentLevel.anchoredGenesisCID(
                   directory: directory
-              )
+              ),
+              !Task.isCancelled,
+              isCurrentRuntime(generation: generation, process: process)
         else { return }
         let confirm: @Sendable (String) async -> Bool = { [weak self] cid in
             await self?.parentRecordedChildGenesis(cid) ?? false
         }
-        let activated: Bool
+        var outcome = ChildGenesisActivation.notAnchoredGenesis
         if FileManager.default.fileExists(atPath: genesisSeedURL.path) {
-            guard let seed = try? JSONDecoder().decode(
+            if let seed = try? JSONDecoder().decode(
                 ChildGenesisSeed.self, from: Data(contentsOf: genesisSeedURL)
-            ) else {
-                SyncTrace.log("child-genesis seed unreadable directory=\(directory)")
-                return
+            ) {
+                outcome = (try? await process.activateChildGenesis(
+                    anchoredCID: genesisCID,
+                    from: .seed(seed),
+                    confirmParentRecordedGenesis: confirm
+                )) ?? .unconfirmed
+            } else {
+                SyncTrace.log(
+                    "child-genesis seed unreadable directory=\(directory);"
+                        + " fetching the anchored genesis"
+                )
             }
-            activated = (try? await process.activateChildGenesis(
-                anchoredCID: genesisCID,
-                from: .seed(seed),
-                confirmParentRecordedGenesis: confirm
-            )) ?? false
-        } else {
-            activated = (try? await remoteContentSource.withRoot(
+        }
+        if outcome == .notAnchoredGenesis, !Task.isCancelled {
+            outcome = (try? await remoteContentSource.withRoot(
                 genesisCID
             ) { session in
                 try await process.activateChildGenesis(
@@ -2234,15 +2250,22 @@ extension NodeNetworkRuntime {
                     from: .fetch(session),
                     confirmParentRecordedGenesis: confirm
                 )
-            }) ?? false
+            }) ?? .notAnchoredGenesis
         }
         SyncTrace.log(
-            "child-genesis \(activated ? "activated" : "not activated")"
-                + " directory=\(directory) cid=\(genesisCID)"
+            "child-genesis \(outcome) directory=\(directory) cid=\(genesisCID)"
         )
-        guard activated,
-              isCurrentRuntime(generation: generation, process: process)
+        guard isCurrentRuntime(generation: generation, process: process)
         else { return }
+        switch outcome {
+        case .activated:
+            hierarchyState.genesisRetryTask.cancel()
+        case .notAnchoredGenesis, .unconfirmed:
+            armGenesisRetry(generation: generation)
+            return
+        case .notAwaiting:
+            return
+        }
         // The genesis bootstrapped to active OUT OF BAND (not via candidate
         // admission), so it never fired its one-shot connect signal. Wake the
         // successors that parked behind it while awaitingGenesis, or the chain
@@ -2250,6 +2273,27 @@ extension NodeNetworkRuntime {
         await predecessorConnectedOutOfBand(genesisCID)
         await chain?.genesisActivatedOutOfBand()
         await requestEvidenceIndex(generation: generation, process: process)
+    }
+
+    /// The one slow retry of a genesis that was anchored but could not be
+    /// fetched or confirmed (say an adopting node asked before any provider
+    /// held it): a quiet parent may not move its tip again. At most one
+    /// timer is armed; stop cancels and joins it.
+    private func armGenesisRetry(generation: UInt64) {
+        let delay = Self.genesisRetryNanoseconds
+        hierarchyState.genesisRetryTask.start { token in
+            Task { [weak self] in
+                guard await Timers.sleep(nanoseconds: delay) else { return }
+                await self?.genesisRetryFired(token: token, generation: generation)
+            }
+        }
+    }
+
+    private func genesisRetryFired(token: LifetimeToken, generation: UInt64) {
+        guard hierarchyState.genesisRetryTask.clear(token),
+              isCurrentGeneration(generation)
+        else { return }
+        triggerGenesisActivation()
     }
 
     /// Drops the hierarchy requests a gone parent session can never answer.

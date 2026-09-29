@@ -518,6 +518,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
     static let futureCandidateRetryInterval: Duration = .seconds(1)
     /// Owner: constant; read by +Hierarchy.
     static let maximumPendingRequests = 1_024
+    /// How long an anchored genesis that could not be fetched or confirmed
+    /// waits before it is tried again without a trigger.
+    static let genesisRetryNanoseconds: UInt64 = 30_000_000_000
     /// Owner: constant; read by +Hierarchy.
     static let maximumDirectChildren = 64
     private static let maximumConcurrentParentStateQueries = 64
@@ -630,6 +633,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// Owner: Hierarchy.triggerGenesisActivation /
         ///     Hierarchy.runGenesisActivation / Lifecycle.clearRuntimeState.
         var genesisActivationRequested = false
+        /// The one slow retry armed after an anchored genesis could not be
+        /// fetched or confirmed.
+        /// Owner: Hierarchy.armGenesisRetry / Hierarchy.genesisRetryFired /
+        ///     Hierarchy.activateGenesisIfRecorded / Lifecycle.clearRuntimeState.
+        var genesisRetryTask = TaskSlot()
         /// Owner: Hierarchy.scheduleChildProofRecovery / Hierarchy.recoverChildProofs /
         ///     Lifecycle.clearRuntimeState.
         var childProofRecoveryNeedsRefresh = false

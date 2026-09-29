@@ -101,6 +101,6 @@ extension ChainProcess {
             anchoredCID: BlockHeader(node: genesis).rawCID,
             from: .seed(seed),
             confirmParentRecordedGenesis: confirm
-        )
+        ) == .activated
     }
 }

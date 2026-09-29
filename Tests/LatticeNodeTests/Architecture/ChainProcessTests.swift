@@ -1450,7 +1450,7 @@ final class ChainProcessTests: XCTestCase {
                 return true
             }
         )
-        XCTAssertFalse(mismatched)
+        XCTAssertEqual(mismatched, .notAnchoredGenesis)
         var phase = await process.status().phase
         XCTAssertEqual(phase, .awaitingGenesis)
 
@@ -1459,7 +1459,7 @@ final class ChainProcessTests: XCTestCase {
             from: .seed(fixture.seed),
             confirmParentRecordedGenesis: { _ in true }
         )
-        XCTAssertTrue(activated)
+        XCTAssertEqual(activated, .activated)
         phase = await process.status().phase
         XCTAssertEqual(phase, .active)
         let tip = await process.status().tipCID
@@ -1479,7 +1479,7 @@ final class ChainProcessTests: XCTestCase {
             from: .fetch(InMemoryContentStore()),
             confirmParentRecordedGenesis: { _ in true }
         )
-        XCTAssertFalse(missed)
+        XCTAssertEqual(missed, .notAnchoredGenesis)
         var phase = await process.status().phase
         XCTAssertEqual(phase, .awaitingGenesis)
 
@@ -1488,7 +1488,7 @@ final class ChainProcessTests: XCTestCase {
             from: .fetch(fixture.source),
             confirmParentRecordedGenesis: { _ in true }
         )
-        XCTAssertTrue(activated)
+        XCTAssertEqual(activated, .activated)
         phase = await process.status().phase
         XCTAssertEqual(phase, .active)
     }

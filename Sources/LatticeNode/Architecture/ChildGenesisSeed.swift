@@ -28,6 +28,19 @@ public enum ChildGenesisSource: Sendable {
     case fetch(any ContentSource)
 }
 
+/// What one `ChainProcess.activateChildGenesis` attempt did.
+public enum ChildGenesisActivation: Sendable, Equatable {
+    case activated
+    /// The chain is past `awaitingGenesis` (or is Nexus): nothing to do.
+    case notAwaiting
+    /// The seed rebuilds to another CID than the anchored one, or the source
+    /// did not serve the anchored genesis.
+    case notAnchoredGenesis
+    /// The parent's record did not confirm the genesis, or it did not
+    /// bootstrap.
+    case unconfirmed
+}
+
 public enum ChildGenesisBuilder {
     /// Deterministically builds the self-contained child genesis (empty
     /// parentState, like a root genesis) that the parent only RECORDS by CID and

@@ -231,12 +231,14 @@ children a recorded child can be absent from it.
 
 A child level (`Nexus/Payments`, hosted with its parent from `lattice.json`)
 stays `awaitingGenesis` until it can import
-that genesis, which it pursues by two concurrent paths. If its data directory
-contains the seed as `child-genesis.json` at startup (the file is read only
-then), it rebuilds the genesis from the seed. Independently, it asks its parent
-for the CID recorded under its directory and fetches the genesis block by that
-CID from child-overlay peers. Either way it imports the genesis only after its
-co-hosted parent level shows that it recorded exactly that CID.
+that genesis. On its start, each parent tip change, each child-overlay peer
+hello, and a slow retry after a failed fetch, it reads the CID its co-hosted
+parent level anchored under its directory. If its data directory contains the
+seed as `child-genesis.json` (re-read each time) and the seed builds that CID,
+it rebuilds the genesis from the seed; otherwise it fetches the genesis block by
+that CID from child-overlay peers. Either way it imports the genesis only after
+its co-hosted parent level shows that it still anchors and recorded exactly that
+CID.
 `lattice child deploy` performs these steps; see [Operator CLI](operator-cli.md).
 
 ## Errors and limits
