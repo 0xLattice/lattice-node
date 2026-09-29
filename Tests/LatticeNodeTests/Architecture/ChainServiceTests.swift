@@ -206,6 +206,74 @@ final class ChainServiceTests: XCTestCase {
         _ = try await template.value
     }
 
+    /// The network runtime's stop cancels its ingress tasks without joining
+    /// them, so an import already inside the service when shutdown starts is
+    /// waited for: its commit is enqueued and reconciled before shutdown
+    /// returns, nothing starts afterwards, and new ingress is refused.
+    func testShutdownWaitsForAnImportInFlightAndRefusesNewIngress()
+        async throws
+    {
+        let producer = try await nexusProcess()
+        let genesis = try await producer.canonicalTipBlock()
+        let candidate = try await BlockBuilder.buildBlock(
+            previous: genesis,
+            timestamp: 1,
+            nonce: 0,
+            fetcher: producer
+        )
+        let header = try BlockHeader(node: candidate)
+        let remote = BlockingContentSource(blockedCID: header.rawCID)
+        await remote.setEntries([
+            header.rawCID: try XCTUnwrap(candidate.toData()),
+        ])
+        let process = try await nexusProcess()
+        let service = makeService(process: process)
+        let unresolved = BlockHeader(
+            rawCID: header.rawCID,
+            node: nil,
+            encryptionInfo: nil
+        )
+        let admission = Task {
+            try await service.importNetworkCandidate(
+                unresolved,
+                authenticatedChildPackage: nil,
+                preparingChildDirectories: [],
+                contentSource: remote
+            )
+        }
+        await remote.waitForBlockedFetch()
+
+        let returned = ShutdownReturned()
+        let shutdown = Task {
+            await service.shutdown()
+            await returned.mark()
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        let early = await returned.value
+        XCTAssertFalse(early, "shutdown returned with an import inside")
+
+        await remote.releaseBlockedFetch()
+        await shutdown.value
+        let outcome = try await admission.value
+        XCTAssertTrue(outcome.decision.isAccepted, "\(outcome.decision)")
+        let quiescent = await service.isQuiescent()
+        XCTAssertTrue(quiescent, "background work outlived shutdown")
+        let height = await process.canonicalTipHeight()
+        XCTAssertEqual(height, 1)
+
+        do {
+            _ = try await service.importNetworkCandidate(
+                unresolved,
+                authenticatedChildPackage: nil,
+                preparingChildDirectories: [],
+                contentSource: remote
+            )
+            XCTFail("ingress admitted after shutdown")
+        } catch is CancellationError {}
+        let roots = await service.transactionInventoryRoots()
+        XCTAssertEqual(roots, [])
+    }
+
     func testDuplicateWorkIsReportedWithoutClaimingNewAcceptance() async throws {
         let process = try await nexusProcess()
         let service = makeService(process: process)
@@ -4223,4 +4291,9 @@ private actor DigestInputs {
     private var value: [String] = []
     func set(_ lines: [String]) { value = lines }
     func lines() -> [String] { value }
+}
+
+private actor ShutdownReturned {
+    private(set) var value = false
+    func mark() { value = true }
 }

@@ -56,6 +56,8 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
             "the service never restarts; shutdown cancels it before joining the workers",
         "ChainService.transactionPublicationWorker":
             "the service never restarts; shutdown joins the worker",
+        "ChainService.carrierProofDeliveries":
+            "entries keyed by a service-unique ID, each removed by its own task; shutdown joins them",
     ]
 
     /// Members that establish a session and so may create its record.
