@@ -19,4 +19,13 @@ public struct Node: Sendable {
         try await network.start(process: process, chain: WeakChain(service))
         return Node(network: network, process: process, service: service)
     }
+
+    /// Stop in dependency order: the network runtime first, so no ingress
+    /// reaches the service, then the service stops and joins its background
+    /// work. Afterwards nothing but the caller holds the process; its stores
+    /// and storage lock close when the caller drops it. Idempotent.
+    public func shutdown() async {
+        await network.stop()
+        await service.shutdown()
+    }
 }
