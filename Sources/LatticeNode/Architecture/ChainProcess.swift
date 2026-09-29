@@ -1557,8 +1557,13 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         guard case .active(let level) = runtimePhase else {
             throw ChainProcessError.chainNotBootstrapped
         }
+        // Against the validated tip — the block admission and templates
+        // build on, and the tip `status()` reports — never the weighed
+        // canonical tip, whose post-state this node has not executed
+        // (Lattice classifies an unexecuted tip as unavailable).
         return await level.preflightTransaction(
             transaction,
+            at: await deepestValidatedCanonicalTip(level: level)?.cid,
             parentState: parentState,
             fetcher: fetcher ?? localFetcher
         )
