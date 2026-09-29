@@ -21,6 +21,26 @@ public struct ChildGenesisSeed: Codable, Sendable {
     }
 }
 
+/// Where a child node gets its self-contained genesis bytes: rebuilt from
+/// the deployer's seed, or fetched by CID from a child-overlay provider.
+public enum ChildGenesisSource: Sendable {
+    case seed(ChildGenesisSeed)
+    case fetch(any ContentSource)
+}
+
+/// What one `ChainProcess.activateChildGenesis` attempt did.
+public enum ChildGenesisActivation: Sendable, Equatable {
+    case activated
+    /// The chain is past `awaitingGenesis` (or is Nexus): nothing to do.
+    case notAwaiting
+    /// The seed does not build, or builds another CID than the anchored
+    /// one, or the source did not serve the anchored genesis.
+    case notAnchoredGenesis
+    /// The parent's record did not confirm the genesis, or it did not
+    /// bootstrap.
+    case unconfirmed
+}
+
 public enum ChildGenesisBuilder {
     /// Deterministically builds the self-contained child genesis (empty
     /// parentState, like a root genesis) that the parent only RECORDS by CID and

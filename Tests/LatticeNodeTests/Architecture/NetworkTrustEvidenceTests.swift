@@ -232,9 +232,8 @@ private struct PendingSideCarrierFixture {
 
 /// A raw immediate child on its parent's hierarchy plane. It answers the
 /// parent's hello with its own, then asks for its evidence index (answered
-/// for any wired child) and for the genesis CID the parent anchored for its
-/// directory. Records every payload the parent sends.
-private final class AnchorRequestingChildPeer: IvyDelegate, Sendable {
+/// for any wired child). Records every payload the parent sends.
+private final class WiredChildPeer: IvyDelegate, Sendable {
     private let recorder: PayloadRecorder
     private let hello: Data
     private let childPath: [String]
@@ -258,9 +257,6 @@ private final class AnchorRequestingChildPeer: IvyDelegate, Sendable {
                 sourceID: nil,
                 cursor: 0,
                 through: nil
-              ).encoded(),
-              let anchor = try? ChildGenesisAnchorRequestMessage(
-                requestID: 2
               ).encoded()
         else { return }
         _ = await ivy.sendMessage(
@@ -272,11 +268,6 @@ private final class AnchorRequestingChildPeer: IvyDelegate, Sendable {
             to: peer,
             topic: NodeNetworkTopic.childEvidenceIndexRequest,
             payload: index
-        )
-        _ = await ivy.sendMessage(
-            to: peer,
-            topic: NodeNetworkTopic.childGenesisAnchorRequest,
-            payload: anchor
         )
     }
 }
@@ -1543,9 +1534,9 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
     /// A parent with more anchored children than one listing page. Anchors
     /// live in the genesisState trie in key order, so `c200` sorts past the
     /// first 200 entries while `c000` sits inside them. For both wired
-    /// children, every runtime path that resolves a child's anchor must find
-    /// it: the answer to the child's own anchor request, the read URL served
-    /// for the child's genesis, and the provider record announced for it.
+    /// children, every path that resolves a child's anchor must find it: the
+    /// co-hosted child's parent-level read, the read URL served for the
+    /// child's genesis, and the provider record announced for it.
     /// Each path's observation is recorded while the network runs and asserted
     /// only once it is torn down.
     func testWiredChildAnchorsResolveBeyondTheFirstListingPage()
@@ -1640,7 +1631,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             var recorders: [String: PayloadRecorder] = [:]
             for (index, directory) in children.enumerated() {
                 let recorder = PayloadRecorder()
-                let delegate = AnchorRequestingChildPeer(
+                let delegate = WiredChildPeer(
                     recorder: recorder,
                     hello: try ChainHello(
                         nexusGenesisCID: configuration.nexusGenesisCID,
@@ -1668,10 +1659,10 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                 try await child.start()
             }
 
-            // (1) The child's own anchor request, answered on the hierarchy
-            // plane. The evidence-index answer (served to any wired child)
-            // proves the role was granted, so a silent anchor answer is the
-            // lookup's miss, not a missing session.
+            // (1) The co-hosted child's read of its parent level. The
+            // evidence-index answer (served to any wired child) proves the
+            // role was granted, which the read URL below depends on.
+            let parentLevel = LocalParentLevel(target.process)
             for directory in children {
                 let recorder = try XCTUnwrap(recorders[directory])
                 wired[directory] = try await firstPayload(
@@ -1679,14 +1670,8 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                     in: recorder,
                     accept: { _ in true }
                 ) ?? false
-                anchorAnswers[directory] = try await firstPayload(
-                    NodeNetworkTopic.childGenesisAnchorResponse,
-                    in: recorder,
-                    accept: {
-                        try? ChildGenesisAnchorResponseMessage.decoded($0)
-                            .genesisCID
-                    }
-                )
+                anchorAnswers[directory] = await parentLevel
+                    .anchoredGenesisCID(directory: directory)
             }
 
             // (2) The read URL a wired child declared, served for its genesis.
@@ -1773,7 +1758,7 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
             XCTAssertEqual(
                 anchorAnswers[directory],
                 genesisCIDs[directory],
-                "anchor request from \(directory)"
+                "parent-level anchor read for \(directory)"
             )
             XCTAssertEqual(
                 readURLs[directory],

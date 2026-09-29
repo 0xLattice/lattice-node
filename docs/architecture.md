@@ -174,23 +174,25 @@ and leave it only after an import decides the block.
    The accepted block records `directory -> genesisCID` in the parent's
    committed genesis state.
 4. The child level, co-hosted with its ancestry (`lattice.json`, `--config`),
-   opens its durable store in `awaitingGenesis` and runs two genesis paths
-   concurrently. If its data directory holds the seed as `child-genesis.json`
-   at startup (the file is read only then), it rebuilds the genesis locally.
-   Independently, it asks the parent for the CID recorded under its directory
-   and fetches the genesis block by that CID from child-overlay peers,
-   requiring the content to hash back to it. A brand-new chain has no such
-   peer, so its first node needs the seed in place before it starts.
-5. The child asks its authenticated immediate parent to acknowledge the exact
-   `(directory, genesisCID, empty parent state)` fact. Only a positive answer
-   lets it bootstrap the genesis and become `active`; otherwise it stays
-   `awaitingGenesis` and retries.
+   opens its durable store in `awaitingGenesis`. It tries to activate on each
+   trigger: its start, every parent tip change, a child-overlay peer's hello,
+   and one slow retry armed after an anchored genesis could not be fetched or
+   confirmed. There is no polling loop.
+5. Each attempt reads the CID its co-hosted parent level anchored under its
+   directory. If the data directory holds the seed as `child-genesis.json`
+   (re-read on every attempt), the child rebuilds the genesis and requires the
+   anchored CID. Without a seed, or when the seed is unreadable or builds
+   another CID, it fetches the genesis block by the anchored CID from
+   child-overlay peers, requiring the content to hash back to it. A brand-new
+   chain has no such peer, so its first node needs the seed.
+6. The child confirms, by a local read of its co-hosted parent level, that the
+   parent still anchors that CID and recorded the exact
+   `(directory, genesisCID, empty parent state)` fact. Only then does it
+   bootstrap the genesis and become `active`; otherwise it stays
+   `awaitingGenesis` until the next trigger.
 
 There is no opaque genesis byte channel, and no parent block carries a child
-genesis. The authenticated immediate-parent process alone acknowledges the
-recorded genesis and later forward parent-state movements from its recovered
-validated graph. These positive acknowledgements are unsigned, session-bound,
-and non-portable.
+genesis.
 
 The process that directly parents an edge retains only its sparse commitment
 proof. Ordinary child validation Volumes remain child-chain data. Import stages a

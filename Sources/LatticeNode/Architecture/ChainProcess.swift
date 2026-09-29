@@ -205,99 +205,102 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         )
     }
 
-    /// Self-admit a deployer-seeded, self-contained child genesis. The deployer
-    /// holds the genesis bytes (the parent only RECORDED the CID via a
-    /// GenesisAction); the child node rebuilds the identical genesis from the
-    /// seed and bootstraps it locally, exactly as the Nexus root bootstraps
-    /// `NexusGenesis`. Before activating, `confirmParentRecordedGenesis` must
-    /// confirm the parent actually recorded THIS rebuilt CID (the parent holds
-    /// the committed `genesisState`, not this child node, so the confirmation is
-    /// a read of the co-hosted parent level's record). Fail-closed: a
-    /// genesis the parent never recorded — or a CID that differs from the record —
-    /// yields `false` and the chain stays `awaitingGenesis` for the caller to
-    /// retry, so no honest node self-admits an unrecorded fork. Returns whether the
-    /// genesis became active. Idempotent: returns false (no-op) once the chain is
-    /// past `awaitingGenesis`.
-    public func activateSeededChildGenesis(
-        seed: ChildGenesisSeed,
+    /// Self-admit this child's self-contained genesis, `anchoredCID`: the
+    /// CID the parent committed for this chain's directory. The parent only
+    /// RECORDS the CID; the genesis bytes come from `source`:
+    /// - `.seed`: the deployer seeded this node, which rebuilds the identical
+    ///   genesis. A seed that does not build, or builds another CID than
+    ///   `anchoredCID` (a corrected re-deploy, a stale seed), is logged and
+    ///   answers `.notAnchoredGenesis`.
+    /// - `.fetch`: this node adopted the child and fetches the genesis by
+    ///   `anchoredCID` (content-addressed and self-verifying) through a
+    ///   child-overlay provider. A miss yields `false` for the next trigger.
+    ///
+    /// Before activating, `confirmParentRecordedGenesis` must confirm the
+    /// parent recorded THIS CID (a read of the co-hosted parent level's
+    /// record). Fail-closed: a genesis the parent never recorded yields
+    /// `false` and the chain stays `awaitingGenesis`, so no honest node
+    /// self-admits an unrecorded fork. Idempotent: `.notAwaiting` once the
+    /// chain is past `awaitingGenesis`.
+    public func activateChildGenesis(
+        anchoredCID: String,
+        from source: ChildGenesisSource,
         confirmParentRecordedGenesis: (_ childGenesisCID: String) async -> Bool
-    ) async throws -> Bool {
+    ) async throws -> ChildGenesisActivation {
         try await acquireMutationOperation()
         defer { releaseOperation() }
         guard case .awaitingGenesis = runtimePhase,
               !configuration.address.isNexus else {
-            return false
+            return .notAwaiting
         }
         let context = try configuration.runtimeContext
-        guard let directory = context.path.last else { return false }
-        let genesis = try await ChildGenesisBuilder.build(
-            seed: seed,
-            chainPath: context.path,
-            fetcher: localFetcher
-        )
-        let header = try BlockHeader(node: genesis)
-        return try await bootstrapSelfContainedGenesis(
-            header: header,
-            context: context,
-            directory: directory,
-            fetcher: localFetcher,
-            confirmParentRecordedGenesis: confirmParentRecordedGenesis
-        )
-    }
-
-    /// Self-admit an ADOPTED self-contained child genesis: this node did not
-    /// deploy the child and holds no seed, so it FETCHES the genesis block by the
-    /// parent-recorded `genesisCID` (content-addressed and self-verifying)
-    /// through `remoteSource` — a child-overlay provider serves the bytes — and
-    /// bootstraps it under the same fail-closed parent-record gate as the seeded
-    /// path. This is the no-seed follower counterpart the candidate machinery
-    /// cannot carry (a self-contained genesis has no `ChildBlockProof` to
-    /// package). Returns whether the genesis became active; a fetch miss, a CID
-    /// that fails to hash back, or a genesis the parent never recorded yields
-    /// `false` for the caller to retry. Idempotent past `awaitingGenesis`.
-    public func activateAdoptedChildGenesis(
-        genesisCID: String,
-        remoteSource: any ContentSource,
-        confirmParentRecordedGenesis: (_ childGenesisCID: String) async -> Bool
-    ) async throws -> Bool {
-        try await acquireMutationOperation()
-        defer { releaseOperation() }
-        guard case .awaitingGenesis = runtimePhase,
-              !configuration.address.isNexus else {
-            return false
-        }
-        let context = try configuration.runtimeContext
-        guard let directory = context.path.last else { return false }
-        let fetcher = try Self.attemptFetcher(
-            package: nil,
-            fallback: CompositeContentSource([broker, remoteSource])
-        )
-        guard let node = try? await BlockHeader(
-            rawCID: genesisCID, node: nil, encryptionInfo: nil
-        ).resolve(fetcher: fetcher).node else {
-            return false
+        guard let directory = context.path.last else { return .notAwaiting }
+        let fetcher: CoalescingFetcher
+        let node: Block
+        switch source {
+        case .seed(let seed):
+            fetcher = localFetcher
+            // A seed that does not build is no more the anchored genesis
+            // than one that builds another CID.
+            do {
+                node = try await ChildGenesisBuilder.build(
+                    seed: seed,
+                    chainPath: context.path,
+                    fetcher: localFetcher
+                )
+            } catch {
+                SyncTrace.log(
+                    "child-genesis seed does not build directory=\(directory)"
+                        + " error=\(error)"
+                )
+                return .notAnchoredGenesis
+            }
+        case .fetch(let remoteSource):
+            fetcher = try Self.attemptFetcher(
+                package: nil,
+                fallback: CompositeContentSource([broker, remoteSource])
+            )
+            guard let fetched = try? await BlockHeader(
+                rawCID: anchoredCID, node: nil, encryptionInfo: nil
+            ).resolve(fetcher: fetcher).node else {
+                return .notAnchoredGenesis
+            }
+            node = fetched
         }
         let header = try BlockHeader(node: node)
-        // Content addressing is self-verifying: a fetched volume that does not
-        // hash back to the requested CID is not this genesis.
-        guard header.rawCID == genesisCID else { return false }
+        // A seed rebuilt to another genesis, or fetched content that does not
+        // hash back to the requested CID, is not the anchored genesis.
+        guard header.rawCID == anchoredCID else {
+            SyncTrace.log(
+                "child-genesis mismatch directory=\(directory)"
+                    + " anchored=\(anchoredCID) built=\(header.rawCID)"
+            )
+            return .notAnchoredGenesis
+        }
         return try await bootstrapSelfContainedGenesis(
             header: header,
             context: context,
             directory: directory,
             fetcher: fetcher,
             confirmParentRecordedGenesis: confirmParentRecordedGenesis
-        )
+        ) ? .activated : .unconfirmed
+    }
+
+    /// Whether this chain still waits for its genesis. Ungated: the phase
+    /// only ever moves forward, so a stale `true` costs one gated no-op.
+    var awaitsGenesis: Bool {
+        if case .awaitingGenesis = runtimePhase { return true }
+        return false
     }
 
     /// Bootstrap a resolved self-contained child genesis (seed-built or
     /// adopted-by-fetch). Fail-closed gate: only admits a genesis the parent
-    /// actually recorded for this directory — this node holds no local copy of
-    /// the parent's committed genesisState, so it asks the parent (over the
-    /// authenticated fact plane) whether it recorded exactly this CID, bound to
-    /// the empty parent state a self-contained genesis commits to. A negative or
-    /// absent answer leaves the chain awaiting for the retry path. The caller
-    /// holds the mutation operation and has confirmed `.awaitingGenesis`.
+    /// actually recorded for this directory — this node holds no copy of the
+    /// parent's committed genesisState, so it asks the co-hosted parent level
+    /// whether it recorded exactly this CID, bound to the empty parent state a
+    /// self-contained genesis commits to. A negative answer leaves the chain
+    /// awaiting the next trigger. The caller holds the mutation operation and
+    /// has confirmed `.awaitingGenesis`.
     private func bootstrapSelfContainedGenesis(
         header: BlockHeader,
         context: ChainRuntimeContext,

@@ -362,11 +362,12 @@ nonce.
 
 A child process may start before or after its parent records the child genesis
 and can safely remain in `awaitingGenesis` until the parent block carrying the
-`GenesisAction` is accepted. The node reads a `child-genesis.json` seed from its
-data directory only at startup: place the seed before starting the first node
-of a new chain, or restart the child after writing it. Without a seed read at
-startup, the child can activate only by fetching the recorded genesis from a
-child-overlay peer, and a brand-new chain has none.
+`GenesisAction` is accepted. The child re-reads a `child-genesis.json` seed
+from its data directory on every activation trigger (its start, each parent tip
+change, each child-overlay peer hello, and a slow retry), so a seed written
+while it waits is picked up without a restart. Without a usable seed, the child
+can activate only by fetching the anchored genesis from a child-overlay peer,
+and a brand-new chain has none.
 
 A child runs in the same process as its whole ancestry: list every level in
 `lattice.json` and start the tree host.
@@ -527,27 +528,6 @@ process, so a tree upgrades as one: restart the `lattice-node --config` process
 on the new image. The parent attests only states it **executed**, never one it
 only weighed.
 
-The topic bump makes that impossible rather than merely discouraged: a `v1`
-parent does not recognise the topic, drops it unread, and the child parks and
-retries. So the mixed-version window is **safe but stalled**, in both
-directions:
-
-- **New child, old parent:** the child's continuity questions go unanswered. It
-  parks on `.wait(.later)` and retries; import of blocks needing a new
-  anchor waits. No wrong answer is ever accepted.
-- **Old child, new parent:** an old child asks the `v1` topic, which the new
-  parent no longer serves, and also asks with a `from` the new rule rejects.
-  Same outcome — silent retry, no durable damage.
-- **A new child cannot DEPLOY or ADOPT against an old parent.** Genesis
-  confirmation rides the same topic, and a child will not activate an adopted
-  genesis without it, so it sits in `awaitingGenesis` polling. This is the case
-  an operator is most likely to hit mid-roll: defer child deploys until the
-  parent has rolled.
-
-Neither direction corrupts state or requires a wipe; both simply make no
-progress until the other side rolls. **Roll parents first**, then children, to
-keep that window short.
-
 ### What the migration grandfathers
 
 The boot migration converts the old tier column into durable execution facts
@@ -589,15 +569,15 @@ matched backup pair or wipe the entire process directory and resync.
   `GenesisAction` was mined. The parent's `GET /api/chain/children` listing
   helps, but it returns at most 100 children with no offset, so absence from it
   is not proof on a parent with more children.
-- The child pursues two genesis paths concurrently: a `child-genesis.json` seed
-  read from its data directory at startup, and a fetch of the recorded genesis
-  block by CID from child-overlay peers.
-- If the seed was written after the child started, restart the child; the seed
-  is read only at startup.
+- The child tries to activate on its start, each parent tip change, each
+  child-overlay peer hello, and a slow retry after a failed fetch. Each attempt
+  rebuilds the `child-genesis.json` seed from its data directory (re-read every
+  time) and, without a usable seed, fetches the anchored genesis block by CID
+  from child-overlay peers.
 - If the seed is not the exact one the recorded CID was built from, it yields a
-  different CID that the parent will not confirm. The child can then activate
-  only through the fetch path, so confirm a child-overlay peer serves the
-  genesis block (a brand-new chain has none), or replace the seed and restart.
+  different CID, which the child logs and does not activate; it falls back to
+  the fetch path, so confirm a child-overlay peer serves the genesis block (a
+  brand-new chain has none), or replace the seed.
 - The parent record is read from the co-hosted parent level; an overlay peer
   cannot substitute for it.
 

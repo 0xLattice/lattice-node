@@ -114,7 +114,7 @@ final class MultichainInvariantTests: XCTestCase {
         // (the file's idiom: the lock lives with the process).
         var childProcess: ChainProcess? = try await ChainProcess.open(configuration: childConfiguration)
         func child() throws -> ChainProcess { try XCTUnwrap(childProcess) }
-        let bootstrapped = try await child().activateSeededChildGenesis(
+        let bootstrapped = try await child().activateChildGenesis(
             seed: seed, confirmParentRecordedGenesis: { _ in true }
         )
         XCTAssertTrue(bootstrapped)
@@ -312,7 +312,7 @@ final class MultichainInvariantTests: XCTestCase {
         let aGenesis = try await ChildGenesisBuilder.build(seed: aSeed, chainPath: ["Nexus", "A"], fetcher: nexus)
         let nexusGenesis = try await nexus.canonicalTipBlock()
         let n0 = try await record(anchorOf: aGenesis, directory: "A", on: nexus, previous: nexusGenesis, chainPath: ["Nexus"], timestamp: 1)
-        let aUp = try await a.activateSeededChildGenesis(seed: aSeed, confirmParentRecordedGenesis: { _ in true })
+        let aUp = try await a.activateChildGenesis(seed: aSeed, confirmParentRecordedGenesis: { _ in true })
         XCTAssertTrue(aUp)
 
         // A1, carried by N1, records B's anchor; B comes up.
@@ -326,7 +326,7 @@ final class MultichainInvariantTests: XCTestCase {
             childOf: aGenesis, transactions: [bAnchor], directory: "A",
             parent: nexus, parentTip: n0, child: a, timestamp: 2
         )
-        let bUp = try await b.activateSeededChildGenesis(seed: bSeed, confirmParentRecordedGenesis: { _ in true })
+        let bUp = try await b.activateChildGenesis(seed: bSeed, confirmParentRecordedGenesis: { _ in true })
         XCTAssertTrue(bUp)
 
         // B1 against A's tip A1; A2 (on A1) commits B1; N2 (on N1) commits A2.
@@ -523,7 +523,7 @@ final class MultichainInvariantTests: XCTestCase {
         let evidence = try XCTUnwrap(issued)
 
         let child = try await ChainProcess.open(configuration: childConfiguration)
-        let bootstrapped = try await child.activateSeededChildGenesis(
+        let bootstrapped = try await child.activateChildGenesis(
             seed: seed, confirmParentRecordedGenesis: { _ in true }
         )
         XCTAssertTrue(bootstrapped)
@@ -792,7 +792,7 @@ final class MultichainInvariantTests: XCTestCase {
             configuration: paymentsConfiguration
         )
         let paymentsBootstrapped = try await payments!
-            .activateSeededChildGenesis(
+            .activateChildGenesis(
                 seed: seed,
                 confirmParentRecordedGenesis: { _ in true }
             )

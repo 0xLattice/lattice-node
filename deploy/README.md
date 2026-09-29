@@ -129,10 +129,12 @@ lattice-node \
 ```
 
 The child waits until a separately signed parent `GenesisAction` transaction
-has recorded its self-contained genesis CID, then bootstraps that genesis once its
-parent confirms the record. It pursues two paths concurrently: rebuilding the
-genesis from a `child-genesis.json` seed read from its data directory at
-startup, and fetching it by CID from child-overlay peers. It never boots from
+has recorded its self-contained genesis CID. On its start, each parent tip
+change, each child-overlay peer hello, and a slow retry after a failed fetch,
+it reads that CID from its co-hosted parent level, rebuilds the genesis from a
+`child-genesis.json` seed in its data directory (re-read each time) when the
+seed builds that CID, and otherwise fetches it by CID from child-overlay peers.
+It activates once its co-hosted parent confirms the record. It never boots from
 an opaque serialized genesis field.
 
 ## Destructive migration

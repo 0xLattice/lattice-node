@@ -1,4 +1,5 @@
 import Lattice
+import VolumeBroker
 import XCTest
 import cashew
 @testable import LatticeNode
@@ -82,4 +83,24 @@ func signedGenesisAnchorTransaction(
             blockCID: childGenesisCID
         )]
     )
+}
+
+extension ChainProcess {
+    /// `activateChildGenesis` from `seed`, anchored at the CID the seed
+    /// builds to: for tests whose parent record is `confirm`.
+    func activateChildGenesis(
+        seed: ChildGenesisSeed,
+        confirmParentRecordedGenesis confirm: (String) async -> Bool
+    ) async throws -> Bool {
+        let genesis = try await ChildGenesisBuilder.build(
+            seed: seed,
+            chainPath: configuration.chainPath,
+            fetcher: CoalescingFetcher(CompositeContentSource([MemoryBroker()]))
+        )
+        return try await activateChildGenesis(
+            anchoredCID: BlockHeader(node: genesis).rawCID,
+            from: .seed(seed),
+            confirmParentRecordedGenesis: confirm
+        ) == .activated
+    }
 }

@@ -21,6 +21,9 @@ public protocol ParentLevel: AnyObject, Sendable {
     func recordedGenesisLink(
         directory: String, childGenesisCID: String
     ) async -> ParentGenesisLink?
+    /// The genesis CID the parent committed for `directory` in its
+    /// validated tip's state. Nil while no anchor is committed there.
+    func anchoredGenesisCID(directory: String) async -> String?
 }
 
 /// What the parent level tells a hosted child. Delivery never blocks the
@@ -139,5 +142,11 @@ final class LocalParentLevel: @unchecked Sendable, ParentLevel {
             childGenesisCID: childGenesisCID,
             parentStateCID: LatticeState.emptyHeader.rawCID
         )
+    }
+
+    func anchoredGenesisCID(directory: String) async -> String? {
+        await process?.anchoredChildGenesisCIDs(
+            directories: [directory]
+        )[directory]
     }
 }

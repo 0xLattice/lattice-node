@@ -211,11 +211,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         let request: ChildEvidenceIndexRequestMessage
     }
 
-    struct PendingGenesisResolve: Sendable {
-        let peer: AuthenticatedPeer
-        let continuation: CheckedContinuation<String?, Never>
-    }
-
     struct EvidenceVolumeLease: Hashable {
         let plane: CandidateSourcePlane
         let sessionID: Data
@@ -523,6 +518,9 @@ public actor NodeNetworkRuntime: IvyDelegate {
     static let futureCandidateRetryInterval: Duration = .seconds(1)
     /// Owner: constant; read by +Hierarchy.
     static let maximumPendingRequests = 1_024
+    /// How long an anchored genesis that could not be fetched or confirmed
+    /// waits before it is tried again without a trigger.
+    static let genesisRetryNanoseconds: UInt64 = 30_000_000_000
     /// Owner: constant; read by +Hierarchy.
     static let maximumDirectChildren = 64
     private static let maximumConcurrentParentStateQueries = 64
@@ -627,11 +625,19 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// Owner: Hierarchy.scheduleChildProofRecovery / Hierarchy.recoverChildProofs /
         ///     Lifecycle.clearRuntimeState.
         var childProofRecoveryTask = TaskSlot()
-        /// Drives a child this node ADOPTED (no local genesis seed) out of
-        /// `awaitingGenesis` by resolving its recorded genesis CID off the
-        /// authenticated parent and fetching+admitting the self-contained genesis.
-        /// Owner: Hierarchy.scheduleAdoptedGenesisBootstrap / Lifecycle.clearRuntimeState.
-        var adoptedGenesisTask = TaskSlot()
+        /// The one genesis activation attempt in flight, and whether a
+        /// trigger asked for another since it started.
+        /// Owner: Hierarchy.triggerGenesisActivation /
+        ///     Hierarchy.runGenesisActivation / Lifecycle.clearRuntimeState.
+        var genesisActivationTask = TaskSlot()
+        /// Owner: Hierarchy.triggerGenesisActivation /
+        ///     Hierarchy.runGenesisActivation / Lifecycle.clearRuntimeState.
+        var genesisActivationRequested = false
+        /// The one slow retry armed after an anchored genesis could not be
+        /// fetched or confirmed.
+        /// Owner: Hierarchy.armGenesisRetry / Hierarchy.genesisRetryFired /
+        ///     Hierarchy.activateGenesisIfRecorded / Lifecycle.clearRuntimeState.
+        var genesisRetryTask = TaskSlot()
         /// Owner: Hierarchy.scheduleChildProofRecovery / Hierarchy.recoverChildProofs /
         ///     Lifecycle.clearRuntimeState.
         var childProofRecoveryNeedsRefresh = false
@@ -639,10 +645,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         ///     Hierarchy.evidenceIndexRequestTimedOut / Lifecycle.clearRuntimeState /
         ///     Hierarchy.purgeHierarchyRequests.
         var pendingEvidenceIndexes: [UInt64: PendingChildEvidenceIndex] = [:]
-        /// Owner: Hierarchy.resolveParentAnchoredGenesis / Hierarchy.resolveGenesisAnchor /
-        ///     Lifecycle.clearRuntimeState.
-        var pendingGenesisResolves:
-            [UInt64: PendingGenesisResolve] = [:]
         /// Owner: Hierarchy.refreshParentTipContext / Lifecycle.clearRuntimeState.
         var parentTipContext: ParentTipContext?
         /// Owner: Hierarchy.refreshParentTipContext.
@@ -766,7 +768,7 @@ public actor NodeNetworkRuntime: IvyDelegate {
     /// candidate parked.
     /// Owner: Candidates.parentChanged / Candidates.importCandidate.
     var parentTipChanges: UInt64 = 0
-    /// Owner: Hierarchy.handleHierarchy / Lifecycle.clearRuntimeState / Overlay.handleOverlay.
+    /// Owner: Lifecycle.clearRuntimeState / Overlay.handleOverlay.
     var parentStateQueryGuard = ParentStateQueryGuard(
         capacity: NodeNetworkRuntime.maximumConcurrentParentStateQueries
     )
@@ -1494,7 +1496,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         keys.formUnion(overlayState.readURLDiscovery.pendingReadEndpoints.values.map(\.peer.key))
         if let sync = overlayState.rangeSync.state { keys.insert(sync.peer.key) }
         keys.formUnion(hierarchyState.pendingEvidenceIndexes.values.map(\.peer.key))
-        keys.formUnion(hierarchyState.pendingGenesisResolves.values.map(\.peer.key))
         keys.formUnion(parentStateQueryGuard.peers.keys)
         keys.formUnion(sessionLeases.portableEvidenceWork.values.map(\.peer.key))
         if let receivedParentTip = hierarchyState.receivedParentTip { keys.insert(receivedParentTip.peer.key) }

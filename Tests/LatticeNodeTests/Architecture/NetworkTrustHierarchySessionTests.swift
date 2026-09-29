@@ -1242,7 +1242,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         var process: ChainProcess? = try await ChainProcess.open(
             configuration: configuration
         )
-        let activated = try await process!.activateSeededChildGenesis(
+        let activated = try await process!.activateChildGenesis(
             seed: seed,
             confirmParentRecordedGenesis: { _ in true }
         )
@@ -1472,7 +1472,7 @@ final class NetworkTrustHierarchySessionTests: NetworkTrustTestCase {
         )
         try await BlockHeader(node: childGenesis).storeBlock(fetcher: source, storer: source)
         var process: ChainProcess? = try await ChainProcess.open(configuration: configuration)
-        let bootstrapped = try await process!.activateSeededChildGenesis(
+        let bootstrapped = try await process!.activateChildGenesis(
             seed: seed, confirmParentRecordedGenesis: { _ in true }
         )
         XCTAssertTrue(bootstrapped)

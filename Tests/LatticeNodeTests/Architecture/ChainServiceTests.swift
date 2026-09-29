@@ -2372,7 +2372,7 @@ final class ChainServiceTests: XCTestCase {
             storagePath: childDirectory,
             privateKeyHex: String(repeating: "02", count: 32)
         ))
-        let activated = try await childProcess.activateSeededChildGenesis(
+        let activated = try await childProcess.activateChildGenesis(
             seed: seed,
             confirmParentRecordedGenesis: { _ in true }
         )
@@ -4077,7 +4077,7 @@ final class ChainServiceTests: XCTestCase {
         for module in policyModules {
             try await module.storeRecursively(storer: process)
         }
-        let activated = try await process.activateSeededChildGenesis(
+        let activated = try await process.activateChildGenesis(
             seed: child.seed,
             confirmParentRecordedGenesis: { _ in true }
         )
@@ -4113,7 +4113,7 @@ final class ChainServiceTests: XCTestCase {
         // A self-contained child genesis (empty parentState) recorded on the
         // parent by a plain GenesisAction — never carried on the carrier's
         // children. The child rebuilds this identical genesis from `seed` and
-        // self-admits it (activateSeededChildGenesis).
+        // self-admits it (activateChildGenesis).
         let seed = ChildGenesisSeed(
             spec: spec, premineTo: nil, timestamp: childTimestamp
         )

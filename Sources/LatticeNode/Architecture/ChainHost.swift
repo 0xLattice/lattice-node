@@ -39,7 +39,6 @@ public actor ChainHost {
     private struct Running {
         let node: Node
         var services = TaskSlot()
-        var seededGenesis = TaskSlot()
     }
 
     private var levels: [ChainAddress: Level] = [:]
@@ -122,14 +121,9 @@ public actor ChainHost {
         guard var running = levels[address]?.running else { return }
         levels[address]?.running = nil
         let services = running.services.take()
-        let seeded = running.seededGenesis.take()
         services?.cancel()
-        seeded?.cancel()
         await services?.value
-        // The seed task is joined after the network stops.
-        await running.node.shutdown {
-            await seeded?.value
-        }
+        await running.node.shutdown()
     }
 
     private func start(_ address: ChainAddress) async throws {
@@ -156,11 +150,6 @@ public actor ChainHost {
         var running = Running(node: node)
         if let services {
             running.services.start { _ in services.serve(node) }
-        }
-        if let seeded = node.activateSeededChildGenesis(
-            storage: level.configuration.storagePath
-        ) {
-            running.seededGenesis.start { _ in seeded }
         }
         levels[address]?.running = running
     }
@@ -195,53 +184,4 @@ public actor ChainHost {
 /// it.
 public protocol ChainHostServices: Sendable {
     func serve(_ node: Node) -> Task<Void, Never>
-}
-
-extension Node {
-    /// A deployed child holds its own self-contained genesis bytes: the
-    /// parent only RECORDED the CID. If the deployer seeded
-    /// `child-genesis.json` into `storage`, rebuild the identical genesis and
-    /// self-admit it — but only after confirming, from the co-hosted parent
-    /// level, that the parent actually recorded THIS CID. That is the same
-    /// record honest followers demand before admitting the genesis, so a
-    /// genesis the parent never recorded cannot self-activate here either.
-    /// Retries until active so a child started slightly ahead of its
-    /// parent's anchor still comes up once the record lands. Nil when there
-    /// is no seed to activate.
-    public func activateSeededChildGenesis(storage: URL) -> Task<Void, Never>? {
-        guard process.configuration.chainPath.count > 1,
-              let seedData = try? Data(
-                  contentsOf: storage.appendingPathComponent("child-genesis.json")
-              ),
-              let seed = try? JSONDecoder().decode(
-                  ChildGenesisSeed.self, from: seedData
-              ) else {
-            return nil
-        }
-        let process = process
-        let confirm: @Sendable (String) async -> Bool = {
-            [weak network] childGenesisCID in
-            await network?.parentRecordedChildGenesis(childGenesisCID) ?? false
-        }
-        // Out of band: the hosted children hear the tip move.
-        let activated: @Sendable () async -> Void = { [weak service] in
-            await service?.genesisActivatedOutOfBand()
-        }
-        return Task { [weak process] in
-            while !Task.isCancelled {
-                guard let process else { return }
-                if await process.status().phase == .active { return }
-                if (try? await process.activateSeededChildGenesis(
-                    seed: seed,
-                    confirmParentRecordedGenesis: confirm
-                )) == true {
-                    await activated()
-                    return
-                }
-                guard await Timers.sleep(nanoseconds: 1_000_000_000) else {
-                    return
-                }
-            }
-        }
-    }
 }

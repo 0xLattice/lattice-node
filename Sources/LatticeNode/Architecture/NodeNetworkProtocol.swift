@@ -47,10 +47,6 @@ enum NodeNetworkTopic {
     /// Child → parent: the child's current candidate for the parent's tip.
     /// Pushed on every change of its inputs; the parent caches the latest.
     static let childCandidateAvailable = "lattice.hierarchy.child-candidate.available.v1"
-    static let childGenesisAnchorRequest =
-        "lattice.hierarchy.child-genesis-anchor.request.v1"
-    static let childGenesisAnchorResponse =
-        "lattice.hierarchy.child-genesis-anchor.response.v1"
     // §9.10: a parent PUSHES the run it credits to one of its committing
     // blocks to the children of that directory, on every change to that run
     // — every admitted block or strengthening with verifiable work — and a
@@ -77,7 +73,6 @@ enum NodeNetworkTopic {
         case hierarchyHello, childEvidenceAvailable,
              childEvidenceIndexRequest, childEvidenceIndexResponse,
              parentEvidenceRequest, parentTipAvailable, childCandidateAvailable,
-             childGenesisAnchorRequest, childGenesisAnchorResponse,
              parentRunReport, parentRunReportRequest: .hierarchy
         default: nil
         }
@@ -191,33 +186,6 @@ struct ParentRunReportRequestMessage: NodeJSONMessage, Equatable, Sendable {
               carrierCIDs.count <= maximumParentRunReportRequestCarriers,
               Set(carrierCIDs).count == carrierCIDs.count,
               carrierCIDs.allSatisfy(_isCanonicalWireCID) else {
-            throw NodeNetworkWireError.malformed
-        }
-    }
-}
-
-/// An adopting child still `awaitingGenesis` asks its authenticated immediate
-/// parent for the genesis CID the parent recorded for the child's OWN directory
-/// (the parent knows the directory from the authenticated `.child` role, so the
-/// request carries none). The child learns the CID verify-not-trust off the
-/// parent's committed record — it never guesses it — and re-confirms the CID
-/// before admitting the fetched, self-verifying genesis.
-struct ChildGenesisAnchorRequestMessage: NodeJSONMessage, Equatable, Sendable {
-    let requestID: UInt64
-
-    func validate() throws {
-        guard requestID != 0 else {
-            throw NodeNetworkWireError.malformed
-        }
-    }
-}
-
-struct ChildGenesisAnchorResponseMessage: NodeJSONMessage, Equatable, Sendable {
-    let requestID: UInt64
-    let genesisCID: String
-
-    func validate() throws {
-        guard requestID != 0, _isCanonicalWireCID(genesisCID) else {
             throw NodeNetworkWireError.malformed
         }
     }

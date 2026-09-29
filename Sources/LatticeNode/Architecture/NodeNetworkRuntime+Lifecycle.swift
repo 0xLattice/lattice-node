@@ -120,10 +120,7 @@ extension NodeNetworkRuntime {
                 generation: runtimeGeneration,
                 process: process
             )
-            scheduleAdoptedGenesisBootstrap(
-                generation: runtimeGeneration,
-                process: process
-            )
+            triggerGenesisActivation()
             schedulePeerSearch(
                 generation: runtimeGeneration,
                 process: process
@@ -229,7 +226,7 @@ extension NodeNetworkRuntime {
         sessionLeases.activeTransactionVolumes.removeAll()
         hierarchyState.childProofRecoveryTask.cancel()
         genesisAnnounceTask.cancel()
-        hierarchyState.adoptedGenesisTask.cancel()
+        hierarchyState.genesisActivationRequested = false
         hierarchyState.parentEvidenceOrphans.removeAll()
         hierarchyState.orphansAwaitingRoom.removeAll()
         hierarchyState.refetchedOrphans.removeAll()
@@ -242,6 +239,14 @@ extension NodeNetworkRuntime {
         let peerSearch = overlayState.peerSearchTask.take()
         peerSearch?.cancel()
         await peerSearch?.value
+        // Joined for the same reason: a genesis activation attempt holds
+        // the ChainProcess and could persist the genesis after stop.
+        let genesisActivation = hierarchyState.genesisActivationTask.take()
+        let genesisRetry = hierarchyState.genesisRetryTask.take()
+        genesisActivation?.cancel()
+        genesisRetry?.cancel()
+        await genesisActivation?.value
+        await genesisRetry?.value
         hierarchyState.childProofRecoveryNeedsRefresh = false
         sessionLeases.servingAcceptedLeaves.removeAll()
         sessionLeases.servingAncestorRange.removeAll()
@@ -252,10 +257,6 @@ extension NodeNetworkRuntime {
                 * Self.maximumCandidateWaitTicks
         )
         hierarchyState.pendingEvidenceIndexes.removeAll()
-        for pending in hierarchyState.pendingGenesisResolves.values {
-            pending.continuation.resume(returning: nil)
-        }
-        hierarchyState.pendingGenesisResolves.removeAll()
         parentStateQueryGuard.removeAll()
         overlayState.rangeSync.reentryTask.cancel()
         sessionLeases.activeEvidenceVolumes.removeAll()
