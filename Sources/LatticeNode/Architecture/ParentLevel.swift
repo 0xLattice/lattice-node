@@ -30,8 +30,9 @@ public protocol ParentLevel: AnyObject, Sendable {
     func runReport(carrier: String, directory: String) async -> ParentRunReport?
 }
 
-/// What the parent level tells a hosted child, in the order it happened
-/// (`ChainService.ParentMailbox`). Delivery never blocks the parent.
+/// What the parent level tells a hosted child (`ChainService.ParentMailbox`):
+/// runs in the order sent, tip changes coalesced. Delivery never blocks the
+/// parent.
 public enum ParentChange: Sendable {
     /// The parent's validated tip or executed frontier moved: a parent fact
     /// a child block waited on may hold now.

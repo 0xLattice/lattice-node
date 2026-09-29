@@ -1862,8 +1862,6 @@ extension NodeNetworkRuntime {
             return
         }
         if case .parent = role {
-            // The run re-ask follows the evidence round this starts, once
-            // the blocks it brings are held here (`scheduleParentEvidencePage`).
             await requestEvidenceIndex(
                 generation: generation,
                 process: process

@@ -92,6 +92,11 @@ public actor ChainService {
     /// until the host opens it.
     private var parentMailbox: AsyncStream<ParentMailboxItem>.Continuation?
     private var parentMailboxDrain: Task<Void, Never>?
+    /// The parent's tip changes, coalesced to one pending signal and drained
+    /// by their own task: never queued behind a gate-bound run credit or the
+    /// parent's serve walk.
+    private var parentTipSignal: AsyncStream<Void>.Continuation?
+    private var parentTipDrain: Task<Void, Never>?
     private let maximumChildCandidates: Int
     private var liveMempoolRoots = Set<String>()
     private var mempoolUnavailable = false
@@ -208,9 +213,15 @@ public actor ChainService {
         // apply is refused from here on, and a restart re-reads the runs).
         parentMailbox?.finish()
         parentMailbox = nil
+        parentTipSignal?.finish()
+        parentTipSignal = nil
         if let drain = parentMailboxDrain {
             await drain.value
             parentMailboxDrain = nil
+        }
+        if let drain = parentTipDrain {
+            await drain.value
+            parentTipDrain = nil
         }
         while true {
             if let worker = canonicalCommitWorker ?? executionWalkWorker
@@ -251,7 +262,7 @@ public actor ChainService {
         canonicalCommitWorker == nil && !canonicalCommitWorkerReserved
             && executionWalkWorker == nil && executionWalkRetryTask == nil
             && transactionPublicationWorker == nil
-            && parentMailboxDrain == nil
+            && parentMailboxDrain == nil && parentTipDrain == nil
             && carrierProofDeliveries.isEmpty && ingressInFlight == 0
     }
     #endif
@@ -1883,9 +1894,12 @@ public actor ChainService {
 
     /// Credits, from the co-hosted parent level, the run of each of
     /// `carriers` — parent blocks that carried a block this chain accepted.
+    /// Called only from the mailbox drain, after the parent serves this
+    /// directory (`.serveParentRuns` runs first): a read made while the
+    /// parent's serve walk runs would find nothing and lose the credit.
     /// Each read is gate-free (`ParentLevel.runReport`); each credit takes
-    /// only this level's own process gate. A run the parent does not serve
-    /// yet, or one already credited as strongly, changes nothing.
+    /// only this level's own process gate. A run already credited as
+    /// strongly changes nothing.
     private func creditParentRuns(carriers: [String]) async {
         guard let parentLevel,
               let directory = process.configuration.chainPath.last
@@ -1963,18 +1977,19 @@ public actor ChainService {
             outcome: outcome
         )
         // §9.10: push the runs this admission changed (see `pushChangedRuns`),
-        // and — this chain being the child — read from the parent level the
-        // run of the block that carried what was just admitted: a push the
-        // parent made before this block was held here was refused. Credited
-        // inline: the reads are gate-free, and the credit takes only this
-        // level's own process gate, which admission no longer holds.
+        // and — this chain being the child — have the mailbox read from the
+        // parent level the run of the block that carried what was just
+        // admitted: a push the parent made before this block was held here
+        // was refused. Queued, not read here: the drain reads it once the
+        // parent serves this directory, and this lease is not held across
+        // the parent reads.
         if outcome.decision.isAccepted {
             await pushChangedRuns(of: header.rawCID)
             if outcome.parentCarrierLink != nil,
                let carriers = try? await process.incomingCarriers(
                    of: header.rawCID
                ), !carriers.isEmpty {
-                await creditParentRuns(carriers: carriers)
+                parentMailbox?.yield(.rereadCarriers(carriers))
             }
         }
         if outcome.decision.isAccepted {
@@ -2155,36 +2170,48 @@ public actor ChainService {
         childLevels[directory] = notify
     }
 
-    /// One entry of a child level's parent mailbox.
+    /// One entry of a child level's parent mailbox, drained in order.
     enum ParentMailboxItem: Sendable {
-        case change(ParentChange)
-        /// This level's genesis activated: have the parent serve its runs,
-        /// then re-read them.
+        /// Runs the parent sent, credited in the order sent.
+        case runs([ParentRunReport])
+        /// Have the parent serve this directory's runs, then re-read the
+        /// runs of this level's recent carriers: at start and when this
+        /// level's genesis activates.
         case serveParentRuns
+        /// Read the runs of carriers of a block this level just accepted.
+        case rereadCarriers([String])
     }
 
     /// A hosted child's inbox from its parent level. `send` enqueues and
-    /// returns: the parent never waits on the child.
+    /// returns: the parent never waits on the child. Runs are queued in
+    /// order; tip changes are coalesced into one pending signal.
     struct ParentMailbox: Sendable {
         fileprivate let continuation: AsyncStream<ParentMailboxItem>.Continuation
+        fileprivate let tipSignal: AsyncStream<Void>.Continuation
 
         func send(_ change: ParentChange) {
-            continuation.yield(.change(change))
+            switch change {
+            case .tipChanged: tipSignal.yield()
+            case .runs(let reports): continuation.yield(.runs(reports))
+            }
         }
     }
 
     /// Opens this child level's parent mailbox; the host calls it once, when
-    /// the level starts. One task drains it, in order: a tip change runs
-    /// `tipChanged`, and each run report is credited under this level's own
-    /// process gate (`applyParentRunReport`, whose credit re-pushes to this
-    /// level's own children). First, and again when this level's genesis
-    /// activates, it runs `serveParentRuns` (the parent serves this
-    /// directory's runs) and then re-reads the runs this level already
-    /// holds blocks for (`ChainProcess.recentCarriers`): the credit a push
-    /// delivered before a restart, or one the parent served only after a
-    /// push was refused. The drain holds no lease of this level, so
-    /// `serveParentRuns` may take the parent's gate (§2.4). `shutdown`
-    /// finishes the mailbox and joins the drain.
+    /// the level starts. One task drains the runs in order: each run report
+    /// is credited under this level's own process gate
+    /// (`applyParentRunReport`, whose credit re-pushes to this level's own
+    /// children). First, and again when this level's genesis activates, it
+    /// runs `serveParentRuns` (the parent serves this directory's runs) and
+    /// then re-reads the runs this level already holds blocks for
+    /// (`ChainProcess.recentCarriers`): the credit a push delivered before a
+    /// restart, or one the parent served only after a push was refused. The
+    /// carriers of each block this level accepts are read in the same order,
+    /// so never before the parent serves the directory. The drain holds no
+    /// lease of this level, so `serveParentRuns` may take the parent's gate
+    /// (§2.4). Tip changes run `tipChanged` on a second task, coalesced, so
+    /// a parked candidate's wake never waits behind a credit or the serve.
+    /// `shutdown` finishes both and joins them.
     func openParentMailbox(
         tipChanged: @escaping @Sendable () async -> Void,
         serveParentRuns: @escaping @Sendable () async -> Void
@@ -2193,17 +2220,20 @@ public actor ChainService {
         let (stream, continuation) = AsyncStream.makeStream(
             of: ParentMailboxItem.self
         )
+        let (tips, tipSignal) = AsyncStream.makeStream(
+            of: Void.self, bufferingPolicy: .bufferingNewest(1)
+        )
         if stopped {
             continuation.finish()
+            tipSignal.finish()
         } else {
             parentMailbox = continuation
+            parentTipSignal = tipSignal
             parentMailboxDrain = Task { [weak self] in
                 for await item in stream {
                     guard let self else { return }
                     switch item {
-                    case .change(.tipChanged):
-                        await tipChanged()
-                    case .change(.runs(let reports)):
+                    case .runs(let reports):
                         for report in reports {
                             _ = try? await self.applyParentRunReport(report)
                         }
@@ -2212,12 +2242,17 @@ public actor ChainService {
                         if let carriers = try? await self.process.recentCarriers() {
                             await self.creditParentRuns(carriers: carriers)
                         }
+                    case .rereadCarriers(let carriers):
+                        await self.creditParentRuns(carriers: carriers)
                     }
                 }
             }
+            parentTipDrain = Task {
+                for await _ in tips { await tipChanged() }
+            }
             continuation.yield(.serveParentRuns)
         }
-        return ParentMailbox(continuation: continuation)
+        return ParentMailbox(continuation: continuation, tipSignal: tipSignal)
     }
 
     private nonisolated static func poolDisposition(

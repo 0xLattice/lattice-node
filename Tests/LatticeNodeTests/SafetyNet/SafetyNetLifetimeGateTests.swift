@@ -56,6 +56,8 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
             "the service never restarts; shutdown joins the worker",
         "ChainService.parentMailboxDrain":
             "the service never restarts; shutdown finishes the mailbox and joins the drain",
+        "ChainService.parentTipDrain":
+            "the service never restarts; shutdown finishes the tip signal and joins the drain",
         "ChainService.carrierProofDeliveries":
             "entries keyed by a service-unique ID, each removed by its own task; shutdown joins them",
     ]

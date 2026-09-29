@@ -124,20 +124,18 @@ final class MultichainInvariantTests: XCTestCase {
         let childContent = InMemoryContentStore()
         try await BlockHeader(node: childBlock).storeBlock(fetcher: parent, storer: childContent)
         let childBlockHeader = BlockHeader(rawCID: childBlockCID, node: nil, encryptionInfo: nil)
-        // Through the service: admitting a block a parent block carried
-        // reads that committer's run from the parent level and credits it
-        // inline, so the credit never waits for a push. The service is
-        // dropped right after, with the process, so the storage lock is
-        // released for the reopen.
-        let asked = RecordingParentLevel(LocalParentLevel(parent))
+        // Through the service, which records the carrier edge. (Its read of
+        // the carrier's run goes through a hosted child's mailbox, pinned by
+        // `testCarrierRunsAreReadOnlyOnceTheParentServesTheDirectory`.) The
+        // service is dropped right after, with the process, so the storage
+        // lock is released for the reopen.
         var childService: ChainService? = ChainService(
             process: try child(),
             network: ClosureNetworkInterface(
                 childCandidateProvider: { _ in [] },
                 childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in }
-            ),
-            parentLevel: asked
+            )
         )
         let admitted = try await XCTUnwrap(childService).importNetworkCandidate(
             childBlockHeader,
@@ -154,8 +152,6 @@ final class MultichainInvariantTests: XCTestCase {
         )
         childService = nil
         XCTAssertTrue(admitted.decision.isAccepted)
-        let askedFor = await asked.carriersRead
-        XCTAssertEqual(askedFor, [carrierHeader.rawCID], "one read, naming the admitted block's carrier")
         let remembered = try await child().recentCarriers()
         XCTAssertEqual(remembered, [carrierHeader.rawCID], "the child remembers whom to re-read")
         // A directory this chain never anchored a child genesis for is not
@@ -210,8 +206,7 @@ final class MultichainInvariantTests: XCTestCase {
         }
         var counters = try await child().parentReportCounters()
         XCTAssertEqual(counters.applied, 1)
-        // The read at admission, the carrier-only report and the repeat.
-        XCTAssertEqual(counters.refusals["notStronger"], 3)
+        XCTAssertEqual(counters.refusals["notStronger"], 2)
 
         // A report naming the wrong child block is refused and counted.
         let misnamed = ParentRunReport(
@@ -514,6 +509,61 @@ final class MultichainInvariantTests: XCTestCase {
         XCTAssertEqual(counters.refusals["notStronger"], 1, "no push was refused as stale")
         await childService.shutdown()
         await nexusService.shutdown()
+    }
+
+    /// A block a parent block carried is credited that carrier's run once
+    /// the parent serves the directory, never read before: the admission
+    /// queues the read behind the start's serve in the child's mailbox. A
+    /// read while the parent's serve walk ran would find nothing and the
+    /// credit would be lost. Three blocks are admitted while the serve is
+    /// held; each carrier's run holds a plain parent block above it, and all
+    /// three are credited once the serve completes.
+    func testCarrierRunsAreReadOnlyOnceTheParentServesTheDirectory() async throws {
+        let (nexus, child, first) = try await payingChild(keyByte: 0x87)
+        let serveGate = Latch()
+        let recording = RecordingParentLevel(LocalParentLevel(nexus)) {
+            await nexus.servedRunDirectoryList().contains("Payments")
+        }
+        let childService = ChainService(
+            process: child,
+            network: ClosureNetworkInterface(
+                childCandidateProvider: { _ in [] },
+                childProofPublisher: { _ in },
+                acceptedBlockPublisher: { _ in }
+            ),
+            parentLevel: recording
+        )
+        _ = await childService.openParentMailbox(
+            tipChanged: {},
+            serveParentRuns: {
+                await serveGate.wait()
+                await nexus.serveRuns(for: "Payments")
+            }
+        )
+        var carriers = [try BlockHeader(node: first.carrier).rawCID]
+        var above = try await mine(on: nexus, previous: first.carrier, timestamp: 3)
+        var previous = first.block
+        for timestamp in stride(from: Int64(4), through: 8, by: 2) {
+            let carried = try await carry(
+                childOf: previous, transactions: [], directory: "Payments",
+                parent: nexus, parentTip: above, child: child,
+                timestamp: timestamp, through: childService
+            )
+            carriers.append(try BlockHeader(node: carried.carrier).rawCID)
+            above = try await mine(on: nexus, previous: carried.carrier, timestamp: timestamp + 1)
+            previous = carried.block
+        }
+        let servedEarly = await nexus.servedRunDirectoryList()
+        XCTAssertEqual(servedEarly, [], "the serve is still held")
+        await serveGate.open()
+        try await eventually("every carried block credited after the serve") {
+            await child.parentReportCounters().applied == 4
+        }
+        let unserved = await recording.unservedReads
+        XCTAssertEqual(unserved, 0, "no run was read before the parent served the directory")
+        let read = Set(await recording.carriersRead)
+        XCTAssertEqual(read, Set(carriers))
+        await childService.shutdown()
     }
 
     /// A restarted child level keeps the credit a push would have brought:
@@ -982,14 +1032,15 @@ final class MultichainInvariantTests: XCTestCase {
     /// carrier proof and the continuity link the parent attests.
     private func carry(
         childOf previous: Block, transactions: [Transaction], directory: String,
-        parent: ChainProcess, parentTip: Block, child: ChainProcess, timestamp: Int64
+        parent: ChainProcess, parentTip: Block, child: ChainProcess, timestamp: Int64,
+        through childService: ChainService? = nil
     ) async throws -> Carried {
         let provisional = try await BlockBuilder.buildBlock(
             previous: parentTip, timestamp: timestamp, nonce: 0, fetcher: parent
         )
         let childBlock = try await BlockBuilder.buildBlock(
             previous: previous, transactions: transactions, parentChainBlock: provisional,
-            timestamp: timestamp, fetcher: parent
+            timestamp: timestamp, fetcher: UnionFetcher([parent, child])
         )
         let unminedCarrier = try await BlockBuilder.buildBlock(
             previous: parentTip, children: [directory: childBlock],
@@ -1009,19 +1060,28 @@ final class MultichainInvariantTests: XCTestCase {
         )
         let evidence = try XCTUnwrap(issued)
         let content = InMemoryContentStore()
-        try await BlockHeader(node: childBlock).storeBlock(fetcher: parent, storer: content)
-        let admitted = try await child.importBlock(
-            BlockHeader(rawCID: childBlockCID, node: nil, encryptionInfo: nil),
-            authenticatedChildPackage: AuthenticatedChildPackage(package: ChildValidationPackage(
-                proof: evidence.proof,
-                parentStateContinuityLink: ParentStateContinuityLink(
-                    parentPath: Array(child.configuration.chainPath.dropLast()),
-                    fromStateCID: LatticeState.emptyHeader.rawCID,
-                    toStateCID: childBlock.parentState.rawCID
-                )
-            )),
-            remoteSource: content
-        )
+        try await BlockHeader(node: childBlock).storeBlock(fetcher: UnionFetcher([parent, child]), storer: content)
+        let package = AuthenticatedChildPackage(package: ChildValidationPackage(
+            proof: evidence.proof,
+            parentStateContinuityLink: ParentStateContinuityLink(
+                parentPath: Array(child.configuration.chainPath.dropLast()),
+                fromStateCID: LatticeState.emptyHeader.rawCID,
+                toStateCID: childBlock.parentState.rawCID
+            )
+        ))
+        let childHeader = BlockHeader(rawCID: childBlockCID, node: nil, encryptionInfo: nil)
+        let admitted = if let childService {
+            try await childService.importNetworkCandidate(
+                childHeader,
+                authenticatedChildPackage: package,
+                preparingChildDirectories: [],
+                contentSource: content
+            )
+        } else {
+            try await child.importBlock(
+                childHeader, authenticatedChildPackage: package, remoteSource: content
+            )
+        }
         XCTAssertTrue(admitted.decision.isAccepted, "child block into \(directory)")
         return Carried(block: childBlock, carrier: carrier)
     }
@@ -1105,10 +1165,17 @@ final class MultichainInvariantTests: XCTestCase {
     /// A parent level that records the carriers a child read runs for.
     private actor RecordingParentLevel: ParentLevel {
         private let base: any ParentLevel
+        private let served: @Sendable () async -> Bool
         private(set) var carriersRead: [String] = []
+        /// Reads made while the parent did not yet serve the directory.
+        private(set) var unservedReads = 0
 
-        init(_ base: any ParentLevel) {
+        init(
+            _ base: any ParentLevel,
+            served: @escaping @Sendable () async -> Bool = { true }
+        ) {
             self.base = base
+            self.served = served
         }
 
         func hasProducedState(_ stateCID: String) async -> Bool {
@@ -1129,6 +1196,7 @@ final class MultichainInvariantTests: XCTestCase {
 
         func runReport(carrier: String, directory: String) async -> ParentRunReport? {
             carriersRead.append(carrier)
+            if await !served() { unservedReads += 1 }
             return await base.runReport(carrier: carrier, directory: directory)
         }
     }
