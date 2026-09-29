@@ -1583,10 +1583,6 @@ public actor ChainService {
         fitting.template
     }
 
-    /// How long `submitWork` awaits each hosted child's admission of a mined
-    /// grind (its hosted descendants' included) before answering without it.
-    static let minedHandoffBound: Duration = .seconds(10)
-
     public func submitWork(
         _ request: SubmitWorkRequest
     ) async throws -> SubmitWorkResponse {
@@ -1608,11 +1604,6 @@ public actor ChainService {
         )
         let candidate = submission.block
         let header = try BlockHeader(node: candidate)
-        let preparedChildProofs = try await process.prepareChildProofs(
-            for: candidate,
-            children: submission.children,
-            capacity: Self.templateCapacity
-        )
         let outcome = try await process.importBlock(
             header,
             canonicalCommitPublisher: { [self] commit in
@@ -1640,11 +1631,10 @@ public actor ChainService {
             await receipt.wait()
         }
         // Lease released: the downward await never holds this level's gate.
+        // Nexus is its own root: each hop is the whole proof.
         let admittedChildren = outcome.parentCarrierLink == nil
             ? []
-            : await handOffMined(preparedChildProofs.map {
-                (directory: $0.directory, childCID: $0.childCID, proof: $0.proof)
-            })
+            : await handOffMined(carrier: candidate, upstream: nil)
 
         let status = await process.status()
         let accepted: Bool
@@ -1664,76 +1654,67 @@ public actor ChainService {
         )
     }
 
-    /// Hands a grind this host mined to the hosted child levels it carries,
-    /// in memory: each child admits its block under `proofs`' proof through
-    /// its normal candidate path (and hands its own hosted children theirs
-    /// before answering). Awaited up to `minedHandoffBound` per child; a
-    /// child still busy past it is omitted and admits the block when its
-    /// admission finishes, or through the normal path. Returns the children
-    /// that admitted. Called only with this level's lease released.
+    /// Hands a grind this host mined to the hosted child levels `carrier`
+    /// commits, in memory (D2), one after another: each gets its carried
+    /// block and `upstream` (the proof that reached `carrier`; nil at Nexus,
+    /// its own root) composed with the hop from `carrier`, and folds the same
+    /// way into its own hosted children before answering. Returns the
+    /// children that admitted. Called only with this level's lease released.
+    ///
+    /// Drop contract: a handoff that fails loses that grind's hosted
+    /// descendants, as a solo miner that crashes before broadcasting loses
+    /// its block. Nothing retries it.
     private func handOffMined(
-        _ proofs: [(directory: String, childCID: String, proof: ChildBlockProof)]
+        carrier: Block,
+        upstream: ChildBlockProof?
     ) async -> [DirectChildProofSummary] {
-        let bound = Timers.nanoseconds(Self.minedHandoffBound)
+        guard let committed = carrier.children.node?.entries,
+              let rootHeader = try? BlockHeader(node: carrier) else { return [] }
         var admitted: [DirectChildProofSummary] = []
-        for hop in proofs {
-            guard let level = childLevels[hop.directory] else { continue }
-            let decided = await Timers.bounded(nanoseconds: bound) {
-                await level.admitMined(childCID: hop.childCID, proof: hop.proof)
-            }
-            if decided == true {
+        for (directory, header) in committed.sorted(by: { $0.key < $1.key }) {
+            guard let level = childLevels[directory], let block = header.node,
+                  let hop = try? await ChildBlockProof.generate(
+                    rootHeader: rootHeader,
+                    childDirectory: directory,
+                    fetcher: process
+                  ) else { continue }
+            if await level.admitMined(
+                block: block, proof: upstream?.composing(hop: hop) ?? hop
+            ) {
                 admitted.append(DirectChildProofSummary(
-                    directory: hop.directory,
-                    childCID: hop.childCID
+                    directory: directory, childCID: header.rawCID
                 ))
             }
         }
         return admitted
     }
 
-    /// The co-hosted parent mined a grind carrying this level's block
-    /// `childCID` (`ChildLevel.admitMined`): admit it as a network candidate
-    /// with the parent's content, announce its proof on this chain's overlay
-    /// like any carrier-linked admission, then hand the grind on to this
-    /// level's own hosted children. True iff this level admitted the block.
-    func admitMinedCarriage(childCID: String, proof: ChildBlockProof) async -> Bool {
-        guard let parentLevel else { return false }
+    /// The co-hosted parent mined a grind carrying this level's `block`
+    /// under `proof` (`ChildLevel.admitMined`): admit it weighed as a network
+    /// candidate (the weighed tier reads no parent fact), announce its proof
+    /// on this chain's overlay, then fold the grind into this level's hosted
+    /// children whatever this level decided: a relay-only block still
+    /// carries them. True iff this level admitted the block.
+    func admitMinedCarriage(block: Block, proof: ChildBlockProof) async -> Bool {
+        guard let parentLevel, let header = try? BlockHeader(node: block) else {
+            return false
+        }
         let package = AuthenticatedChildPackage(
             package: ChildValidationPackage(proof: proof)
         )
-        let outcome: NodeImportOutcome
-        do {
-            // Weighed, like the same proof arriving from the network.
-            outcome = try await importNetworkCandidate(
-                BlockHeader(rawCID: childCID, node: nil, encryptionInfo: nil),
-                authenticatedChildPackage: package,
-                preparingChildDirectories: childLevels.keys.sorted(),
-                contentSource: parentLevel.contentSource,
-                weighed: true
-            )
-        } catch {
-            syncTrace("mined handoff \(childCID.prefix(12)) failed: \(error)")
-            return false
-        }
-        syncTrace("mined handoff \(childCID.prefix(12)) decision=\(outcome.decision)")
-        if let link = outcome.parentCarrierLink {
+        let outcome = try? await importNetworkCandidate(
+            header,
+            authenticatedChildPackage: package,
+            preparingChildDirectories: [],
+            contentSource: parentLevel.contentSource,
+            weighed: true
+        )
+        syncTrace("mined handoff \(header.rawCID.prefix(12)) decision=\(outcome.map { "\($0.decision)" } ?? "failed")")
+        if outcome?.parentCarrierLink != nil {
             await network.announceCarriedEvidence(package)
-            // The hop to a hosted grandchild composes from the parent's
-            // content when the import could not resolve it locally.
-            _ = try? await process.retryPendingChildProofs(
-                carrierCID: childCID,
-                remoteSource: parentLevel.contentSource
-            )
-            let hosted = (try? await process.durableDirectChildProofs(
-                carrierCID: childCID,
-                rootCID: link.rootCID,
-                directories: Set(childLevels.keys)
-            )) ?? []
-            _ = await handOffMined(hosted.map {
-                (directory: $0.directory, childCID: $0.childCID, proof: $0.proof)
-            })
         }
-        return outcome.decision.isAccepted
+        _ = await handOffMined(carrier: block, upstream: proof)
+        return outcome?.decision.isAccepted ?? false
     }
 
     /// Reconciles service-owned state and publishes hierarchy effects after a

@@ -55,25 +55,6 @@ enum Timers {
         }
     }
 
-    /// `operation`'s result, or nil when `nanoseconds` pass first. The bound
-    /// only stops the wait: `operation` is never cancelled and runs to its
-    /// end either way.
-    static func bounded<T: Sendable>(
-        nanoseconds: UInt64,
-        _ operation: @escaping @Sendable () async -> T
-    ) async -> T? {
-        let (results, continuation) = AsyncStream.makeStream(of: T?.self)
-        Task { continuation.yield(await operation()) }
-        let timer = Task {
-            if await Timers.sleep(nanoseconds: nanoseconds) {
-                continuation.yield(nil)
-            }
-        }
-        defer { timer.cancel() }
-        for await first in results { return first }
-        return nil
-    }
-
     enum Retry<T: Sendable>: Sendable {
         case value(T)
         case cancelled

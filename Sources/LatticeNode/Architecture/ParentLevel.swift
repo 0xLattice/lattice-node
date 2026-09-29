@@ -54,10 +54,11 @@ public protocol ChildLevel: AnyObject, Sendable {
     /// walking, holds its own carried block awaiting admission, or has not
     /// built yet. The caller checks its binding.
     var readyCandidate: ReadyCandidate? { get }
-    /// This host mined a grind carrying the child's block `childCID` under
-    /// `proof`: the child admits it through its normal candidate path (and
-    /// hands its own hosted children theirs) and reports whether it admitted.
-    func admitMined(childCID: String, proof: ChildBlockProof) async -> Bool
+    /// This host mined a grind carrying the child's `block` (the node from
+    /// the mined block, in memory) under `proof`: the child admits it through
+    /// its normal candidate path (and hands its own hosted children theirs)
+    /// and reports whether it admitted.
+    func admitMined(block: Block, proof: ChildBlockProof) async -> Bool
 }
 
 /// A hosted child's pre-built merged-mining candidate, the parent state it
@@ -283,7 +284,7 @@ final class LocalChildLevel: @unchecked Sendable, ChildLevel {
         service?.readyCandidate()
     }
 
-    func admitMined(childCID: String, proof: ChildBlockProof) async -> Bool {
-        await service?.admitMinedCarriage(childCID: childCID, proof: proof) ?? false
+    func admitMined(block: Block, proof: ChildBlockProof) async -> Bool {
+        await service?.admitMinedCarriage(block: block, proof: proof) ?? false
     }
 }
