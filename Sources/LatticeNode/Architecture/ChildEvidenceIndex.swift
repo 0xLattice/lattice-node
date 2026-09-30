@@ -33,6 +33,9 @@ enum ChildEvidenceIndex {
         let root: String
         let added: [String]
         let released: [String]
+        /// The store's pin-dirty marker was already set when this update
+        /// was prepared: releasing this update must leave it set, for boot.
+        var markerWasSet = false
     }
 
     enum IndexError: Error, Equatable {

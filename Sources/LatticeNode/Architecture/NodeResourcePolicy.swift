@@ -4,7 +4,6 @@ public struct NodeResourcePolicy: Sendable, Equatable {
     public static let `default` = NodeResourcePolicy()
 
     public let maximumChainSpecBytes: Int
-    public let maximumParentWitnessBytes: Int
     public let maximumPendingParentEvidence: Int
     /// How many parent-evidence orphans this node keeps in memory: evidence
     /// whose import could not decide on a fact the parent will send (a
@@ -50,13 +49,6 @@ public struct NodeResourcePolicy: Sendable, Equatable {
 
     public init(
         maximumChainSpecBytes: Int = 1 * 1_024 * 1_024,
-        // The operator's acceptance budget for a fetched child-evidence proof
-        // envelope (which carries the securing-work proof and any parent-state
-        // witness). Defaults just under the transport's volume-archive ceiling
-        // so a deep multi-hop proof is not wedged at one frame; operators lower
-        // it to restrict how much evidence they will accept.
-        maximumParentWitnessBytes: Int =
-            Int(IvyConfig.defaultProtocolMaxFrameSize) * 15,
         maximumPendingParentEvidence: Int = 64,
         maximumOrphanedParentEvidence: Int = 1_024,
         maximumWasmPolicies: Int = 64,
@@ -71,7 +63,6 @@ public struct NodeResourcePolicy: Sendable, Equatable {
     ) {
         precondition(
             maximumChainSpecBytes > 0
-                && maximumParentWitnessBytes > 0
                 && maximumPendingParentEvidence > 0
                 && maximumOrphanedParentEvidence > 0
                 && maximumWasmPolicies > 0
@@ -85,7 +76,6 @@ public struct NodeResourcePolicy: Sendable, Equatable {
                 && offChainValidatedRetentionDepth >= 0
         )
         self.maximumChainSpecBytes = maximumChainSpecBytes
-        self.maximumParentWitnessBytes = maximumParentWitnessBytes
         self.maximumPendingParentEvidence = maximumPendingParentEvidence
         self.maximumOrphanedParentEvidence = maximumOrphanedParentEvidence
         self.maximumWasmPolicies = maximumWasmPolicies

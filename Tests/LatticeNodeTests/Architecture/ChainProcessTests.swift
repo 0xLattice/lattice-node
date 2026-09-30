@@ -259,6 +259,86 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertEqual(recovered, committed)
     }
 
+    /// The pin-dirty marker is sticky: an update whose unpin fails leaves
+    /// it set, a later update that succeeds does not clear it (it found it
+    /// set), and only boot's reconcile heals the pins and clears it.
+    func testAChildEvidencePinMarkerStaysSetUntilBootHeals() async throws {
+        let directory = temporaryDirectory()
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let config = try configuration(path: ["Nexus"], storage: directory)
+        let scope = [config.nexusGenesisCID, config.address.key]
+            .joined(separator: ":")
+        let owner = scope + ":child-evidence"
+        let disk = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        let broker = FaultInjectingBroker(broker: disk)
+        func entry(_ index: Int) throws -> ChildEvidenceIndex.Entry {
+            ChildEvidenceIndex.Entry(
+                childCID: try VolumeImpl<PublicKey>(
+                    node: PublicKey(key: "child-\(index)")
+                ).rawCID,
+                rootCID: try VolumeImpl<PublicKey>(
+                    node: PublicKey(key: "root-\(index)")
+                ).rawCID,
+                attachmentCID: try VolumeImpl<PublicKey>(
+                    node: PublicKey(key: "attachment-\(index)")
+                ).rawCID
+            )
+        }
+        var store: NodeStore? = try testNodeStore(
+            databasePath: directory.appendingPathComponent("state.db"),
+            nexusGenesisCID: config.nexusGenesisCID,
+            chainPath: config.chainPath,
+            issuingAuthorityKey: config.processPublicKey,
+            blockRetentionScope: scope,
+            broker: broker
+        )
+        func commit(_ entries: [ChildEvidenceIndex.Entry]) async throws
+            -> ChildEvidenceIndex.Update {
+            let prepared = try await store!.prepareChildEvidenceIndex(entries: entries)
+            let update = try XCTUnwrap(prepared)
+            try await store!.persistChildEvidenceRoot(update)
+            await store!.finishChildEvidenceIndex(update)
+            return update
+        }
+        _ = try await commit((0..<4).map(entry))
+        var dirty = try await store!.childEvidencePinsDirty()
+        XCTAssertFalse(dirty)
+
+        await broker.failNext(.unpinBatch(owner: owner))
+        _ = try await commit([try entry(4)])
+        dirty = try await store!.childEvidencePinsDirty()
+        XCTAssertTrue(dirty, "a failed unpin cleared the marker")
+
+        let last = try await commit([try entry(5)])
+        dirty = try await store!.childEvidencePinsDirty()
+        XCTAssertTrue(dirty, "a later update cleared a marker it found set")
+        let stray = Set(await disk.pinnedRoots(owners: [owner]))
+        let reachable = Set(
+            await ChildEvidenceIndex.volumes(root: last.root, fetcher: disk).reachable
+        )
+        XCTAssertNotEqual(stray, reachable)
+        store = nil
+
+        var process: ChainProcess? = try await ChainProcess.open(configuration: config)
+        XCTAssertNotNil(process)
+        process = nil
+        let healed = Set(await disk.pinnedRoots(owners: [owner]))
+        XCTAssertEqual(healed, reachable)
+        let cleared = try await testNodeStore(
+            databasePath: directory.appendingPathComponent("state.db"),
+            nexusGenesisCID: config.nexusGenesisCID,
+            chainPath: config.chainPath,
+            issuingAuthorityKey: config.processPublicKey,
+            broker: disk
+        ).childEvidencePinsDirty()
+        XCTAssertFalse(cleared)
+    }
+
     /// Establishes: NODE-STORAGE-002.p
     func testOpenDropsContextualPinsLeftAfterStateEvictionCommitted()
         async throws {

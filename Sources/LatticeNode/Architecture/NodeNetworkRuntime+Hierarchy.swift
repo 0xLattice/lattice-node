@@ -1005,9 +1005,7 @@ extension NodeNetworkRuntime {
                 : .unavailable
         }
         guard let envelope = try? ChildValidationPackageEnvelope.decode(
-            attachment.envelopeBytes,
-            maximumEncodedSize:
-                configuration.resourcePolicy.maximumParentWitnessBytes
+            attachment.envelopeBytes
         ) else {
             return .failed
         }

@@ -10,6 +10,7 @@ func testNodeStore(
     spawningParentKey: String = "",
     issuingAuthorityKey: String = String(repeating: "a", count: 64),
     contextualCandidateOwner: String = "test:contextual-candidates",
+    blockRetentionScope: String = "test:blocks",
     broker suppliedBroker: (any RetainedRootMergeBroker)? = nil,
     parentEvidenceInboxCapacity: Int = 64,
     handoffCandidateCapacity: Int = 1_024
@@ -28,7 +29,7 @@ func testNodeStore(
         nexusGenesisCID: nexusGenesisCID,
         chainPath: chainPath,
         recoveryVolumeBroker: broker,
-        blockRetentionScope: "test:blocks",
+        blockRetentionScope: blockRetentionScope,
         issuedRecoveryRetentionScope: "test:issued-hierarchy",
         preparedRecoveryRetentionScope: "test:prepared-hierarchy",
         parentEvidenceInboxCapacity: parentEvidenceInboxCapacity,

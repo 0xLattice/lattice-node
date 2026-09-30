@@ -200,11 +200,6 @@ final class ChildEvidenceIndexTests: XCTestCase {
         XCTAssertGreaterThan(
             ChildValidationPackageEnvelope.maximumEncodedSize, frame
         )
-        // ...and so must the operator acceptance budget, or the receiver's
-        // decode (the min of the two) still wedges at one frame.
-        XCTAssertGreaterThan(
-            NodeResourcePolicy.default.maximumParentWitnessBytes, frame
-        )
         // The wrapped evidence Volume must stay under the transport's archive
         // ceiling (16 frames) so the archive never rejects it.
         XCTAssertLessThanOrEqual(

@@ -439,21 +439,28 @@ extension NodeStore {
     func prepareChildEvidenceIndex(
         _ evidence: [PreparedImportCarrierEvidence]
     ) async throws -> ChildEvidenceIndex.Update? {
-        let entries = evidence.filter(\.weighs).map {
+        try await prepareChildEvidenceIndex(entries: evidence.filter(\.weighs).map {
             ChildEvidenceIndex.Entry(
                 childCID: $0.edge.childCID,
                 rootCID: $0.rootCID,
                 attachmentCID: $0.proofAttachment.rawCID
             )
-        }
-        guard !entries.isEmpty, let update = try await ChildEvidenceIndex.inserting(
+        })
+    }
+
+    func prepareChildEvidenceIndex(
+        entries: [ChildEvidenceIndex.Entry]
+    ) async throws -> ChildEvidenceIndex.Update? {
+        guard !entries.isEmpty, var update = try await ChildEvidenceIndex.inserting(
             entries,
             into: try childEvidenceRoot(),
             fetcher: recoveryVolumeBroker,
             storer: recoveryVolumeBroker
         ) else { return nil }
-        // Set until the replaced pins are released: a crash in between
-        // leaves the pins to boot's reconcile.
+        // Set until the replaced pins are released: a crash in between, or
+        // a pin or unpin that throws, leaves the pins to boot's reconcile.
+        // Only the update that found it clear may clear it.
+        update.markerWasSet = try childEvidencePinsDirty()
         try setChildEvidencePinsDirty(true)
         if !update.added.isEmpty {
             try await recoveryVolumeBroker.pinBatch(
@@ -484,25 +491,26 @@ extension NodeStore {
     /// fails to drop is healed at boot (`BootRecovery`).
     func finishChildEvidenceIndex(_ update: ChildEvidenceIndex.Update?) async {
         guard let update else { return }
-        await releaseChildEvidencePins(update.released)
+        await releaseChildEvidencePins(update.released, markerWasSet: update.markerWasSet)
     }
 
     /// The commit failed: the new Volumes lose the pin `prepare` gave them.
     func abandonChildEvidenceIndex(_ update: ChildEvidenceIndex.Update?) async {
         guard let update else { return }
-        await releaseChildEvidencePins(update.added)
+        await releaseChildEvidencePins(update.added, markerWasSet: update.markerWasSet)
     }
 
-    /// Unpins `roots`, then clears the dirty marker; on a failure the
-    /// marker stays set and boot reconciles the pins.
-    private func releaseChildEvidencePins(_ roots: [String]) async {
+    /// Unpins `roots`, then clears the dirty marker if this update set it.
+    /// On a failure, or a marker an earlier update left set, it stays set
+    /// and boot reconciles the pins.
+    private func releaseChildEvidencePins(_ roots: [String], markerWasSet: Bool) async {
         do {
             if !roots.isEmpty {
                 try await recoveryVolumeBroker.unpinBatch(items: roots.map {
                     (root: $0, owner: childEvidenceOwner, count: 1)
                 })
             }
-            try setChildEvidencePinsDirty(false)
+            if !markerWasSet { try setChildEvidencePinsDirty(false) }
         } catch {}
     }
 
