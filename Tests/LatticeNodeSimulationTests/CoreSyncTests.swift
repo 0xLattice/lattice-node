@@ -204,10 +204,11 @@ final class CoreSyncTests: XCTestCase {
         _ peer: PeerID,
         _ request: HeadersRequest,
         _ entries: [HeaderEntry],
+        hasMore: Bool = false,
         at now: Int64 = CoreSyncTests.now
     ) -> [Effect] {
         core.step(.received(peer, .headers(HeadersResponse(
-            requestID: request.requestID, entries: entries, hasMore: false
+            requestID: request.requestID, entries: entries, hasMore: hasMore
         ))), now: now)
     }
 
@@ -447,16 +448,71 @@ final class CoreSyncTests: XCTestCase {
         XCTAssertEqual(core.tree.canonicalTip, blocks.last?.cid)
     }
 
-    /// A page that promises more but adds nothing is a strike, and the next
-    /// request starts from our best chain, not from that page.
-    func testAFullPageThatAddsNothingIsAStrikeAndDoesNotContinue() throws {
-        var core = core()
+    /// The page after the first locator entry on `chain`: what an honest
+    /// peer whose best chain is `chain` serves.
+    private func servedPage(of chain: [SimBlock], after locator: [String], limit: Int) -> (entries: [HeaderEntry], hasMore: Bool) {
+        let fork = locator.lazy.compactMap { hash in chain.firstIndex { $0.cid == hash } }.first ?? 0
+        let rest = chain.dropFirst(fork + 1)
+        return (entries(rest.prefix(limit)), rest.count > limit)
+    }
+
+    /// An honest peer whose best chain runs through headers we hold but do
+    /// not select walks us to its new blocks, with no strike.
+    func testAWalkThroughHeldButUnselectedHeadersReachesThePeersNewBlocks() async throws {
+        var core = core(pageSize: 4)
+        var request = try ready(&core)
+        for start in stride(from: 0, to: 20, by: 4) {
+            request = try XCTUnwrap(requests(answer(&core, request, entries(chain[start..<start + 4]), hasMore: true)).first)
+        }
+        // A lighter side branch from height 5: its first 8 blocks held (from
+        // a relay), its last 4 new. Ours stays the heavier chain.
+        let side = try await world.branch(from: chain[4], count: 12)
+        for block in side.prefix(8) {
+            _ = core.step(.received(peer, .headers(HeadersResponse(
+                requestID: 0, entries: entries([block][...]), hasMore: false
+            ))), now: Self.now + 100_000)
+        }
+        XCTAssertTrue(side.prefix(8).allSatisfy { core.tree.contains(blockHash: $0.cid) })
+        XCTAssertEqual(core.tree.canonicalTip, chain[19].cid)
+
+        let walker = PeerID(key: "walker", session: 1)
+        let best = [world.genesis] + Array(chain[0..<5]) + side
+        var ask = try ready(&core, walker, at: Self.now + 100_000)
+        for _ in 0..<6 {
+            let page = servedPage(of: best, after: ask.locator, limit: 4)
+            let effects = answer(&core, walker, ask, page.entries, hasMore: page.hasMore, at: Self.now + 100_000)
+            XCTAssertTrue(disconnects(effects).isEmpty)
+            guard let next = requests(effects).first else { break }
+            ask = next
+        }
+        XCTAssertTrue(core.tree.contains(blockHash: side[11].cid), "the walk reached the peer's new blocks")
+        XCTAssertEqual(core.sync.peers[walker]?.unconnecting, 0, "no strike")
+    }
+
+    /// A peer that repeats the same full page is never blamed and is asked
+    /// again only at each timeout: one page per timeout.
+    func testAPeerRepeatingAFullPageCostsOnePagePerTimeout() throws {
+        var core = core(pageSize: 4)
         var request = try ready(&core)
         request = try XCTUnwrap(requests(answer(&core, request, entries(chain[0..<4]), hasMore: true)).first)
-        let effects = answer(&core, request, entries(chain[0..<4]), hasMore: true)
-        XCTAssertEqual(core.sync.peers[peer]?.unconnecting, 1)
-        let next = try XCTUnwrap(requests(effects).first)
-        XCTAssertEqual(next.locator.first, core.tree.canonicalTip, "no continuation from the page")
+        _ = answer(&core, request, entries(chain[4..<8]))
+        let repeater = PeerID(key: "repeater", session: 1)
+        let page = entries(chain[0..<4])
+        var now = Self.now
+        var ask = try ready(&core, repeater)
+        // The exchange's first all-held page may be a walk: it continues once.
+        ask = try XCTUnwrap(requests(answer(&core, repeater, ask, page, hasMore: true)).first)
+        for _ in 0..<5 {
+            let effects = answer(&core, repeater, ask, page, hasMore: true, at: now)
+            XCTAssertTrue(disconnects(effects).isEmpty, "never blamed")
+            XCTAssertTrue(requests(effects).isEmpty, "the exchange ends")
+            XCTAssertEqual(core.sync.peers[repeater]?.unconnecting, 0)
+            let retry = try XCTUnwrap(core.sync.peers[repeater]?.retryAt)
+            XCTAssertEqual(retry, now + core.config.headersTimeout)
+            XCTAssertTrue(requests(core.step(.tick, now: retry - 1)).isEmpty, "nothing before the timeout")
+            now = retry
+            ask = try XCTUnwrap(requests(core.step(.tick, now: now)).first, "asked again at the timeout")
+        }
     }
 
     /// 9a with M1: one peer streaming tip extensions that declare the

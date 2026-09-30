@@ -224,14 +224,27 @@ public struct Core: Sendable {
     /// already in flight. `continuingFrom` is the last header of a full page:
     /// it leads the locator so a heavier chain still lighter than ours at this
     /// point keeps downloading.
+    ///
+    /// An exchange is one request and the continuations that follow it;
+    /// `continuationHeight` is the height of `last`, the exchange's new
+    /// continuation point. A fresh request starts a new exchange with no
+    /// point, except the retry that follows an exchange ended for making no
+    /// progress (`resuming`): it keeps that exchange's point, so a peer that
+    /// repeats a page costs one page per timeout.
     private mutating func requestHeaders(
         from peer: PeerID,
         continuingFrom last: String?,
+        continuationHeight: UInt64? = nil,
+        resuming: Bool = false,
         _ turn: inout Turn
     ) {
         guard let state = sync.peers[peer], state.inFlight == nil,
               !sync.awaitingChildIndex.values.contains(where: { $0.peer == peer })
         else { return }
+        sync.peers[peer]?.continuationHeight = last == nil
+            ? (resuming ? state.stalledHeight : nil)
+            : continuationHeight
+        sync.peers[peer]?.stalledHeight = nil
         var locator = tree.headerLocator()
         if let last, !locator.contains(last) {
             locator = Array(([last] + locator).prefix(HeadersRequest.maximumLocatorEntries - 1))
@@ -404,16 +417,29 @@ public struct Core: Sendable {
             }
         }
         guard solicited, let last = previous else { return }
-        if response.hasMore, inserted == 0 {
-            // A page that promises more but adds nothing is no progress:
-            // count it like a page that does not connect, and do not
-            // continue from it.
-            unconnected(peer, solicited: true, &turn)
+        if response.hasMore, inserted == 0, let lastHeight = response.entries.last?.block.height {
+            // Every header is already held. An honest peer walking its best
+            // chain through blocks we hold but do not select moves forward:
+            // continue while the walk climbs past this exchange's previous
+            // continuation point. Anything else ends the exchange until a
+            // timeout. Never blame: holding a peer's chain is not its fault.
+            let previous = sync.peers[peer]?.continuationHeight
+            if previous.map({ lastHeight > $0 }) ?? true {
+                requestHeaders(from: peer, continuingFrom: last, continuationHeight: lastHeight, &turn)
+            } else {
+                sync.peers[peer]?.stalledHeight = previous
+                retry(peer, at: turn.now + config.headersTimeout)
+            }
             return
         }
         sync.peers[peer]?.unconnecting = 0
         if response.hasMore {
-            requestHeaders(from: peer, continuingFrom: last, &turn)
+            requestHeaders(
+                from: peer,
+                continuingFrom: last,
+                continuationHeight: response.entries.last?.block.height,
+                &turn
+            )
         } else if inserted > 0, let announced = sync.peers[peer]?.announcedTip,
                   !tree.contains(blockHash: announced) {
             // Progress, but not yet the block it announced: ask again. A page
@@ -564,7 +590,12 @@ public struct Core: Sendable {
         }
         switch insert(waiting.block, blockCID: waiting.blockCID, children: index, from: peer, &turn) {
         case .inserted, .held:
-            requestHeaders(from: peer, continuingFrom: waiting.blockCID, &turn)
+            requestHeaders(
+                from: peer,
+                continuingFrom: waiting.blockCID,
+                continuationHeight: waiting.block.height,
+                &turn
+            )
         case .notYetValid(let timestamp):
             retry(peer, at: timestamp)
         case .deferred, .unconnected:
@@ -595,7 +626,9 @@ public struct Core: Sendable {
             .union(expiredRequests.keys)
             .union(dueRetries.keys)
         for peer in retry.sorted() {
-            requestHeaders(from: peer, continuingFrom: nil, &turn)
+            requestHeaders(
+                from: peer, continuingFrom: nil, resuming: dueRetries.keys.contains(peer), &turn
+            )
         }
     }
 }

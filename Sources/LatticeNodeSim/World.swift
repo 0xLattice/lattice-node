@@ -167,7 +167,7 @@ public struct World: Sendable {
         )
     }
 
-    private static func extend(
+    static func extend(
         _ parent: SimBlock,
         timestamp: Int64,
         nonce: UInt64,
@@ -259,6 +259,24 @@ public struct World: Sendable {
             ))
         }
         return carriers
+    }
+
+    /// `count` blocks extending `parent`, one `interval` apart after it: a
+    /// side branch built beside the world's own blocks.
+    public func branch(from parent: SimBlock, count: Int, interval: Int64 = World.blockInterval) async throws -> [SimBlock] {
+        let cas = SimCAS()
+        var tip = parent
+        var branch: [SimBlock] = []
+        for index in 0..<count {
+            tip = try await World.extend(
+                tip,
+                timestamp: tip.block.timestamp + interval,
+                nonce: (UInt64(index) << 36) | 0xB7A,
+                in: cas
+            )
+            branch.append(tip)
+        }
+        return branch
     }
 
     /// Blocks released by `now`, in release order.

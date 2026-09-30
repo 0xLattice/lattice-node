@@ -10,6 +10,11 @@ public struct PeerSync: Sendable, Equatable {
     public internal(set) var unconnecting: Int = 0
     /// When to ask this peer again without a request in flight.
     public internal(set) var retryAt: Int64?
+    /// The height the current exchange last continued from.
+    public internal(set) var continuationHeight: UInt64?
+    /// The continuation point of an exchange ended for making no progress,
+    /// kept for the retry that resumes it.
+    public internal(set) var stalledHeight: UInt64?
     /// A page served to this peer that the shell has not finished sending.
     public internal(set) var serving = false
 
