@@ -1,6 +1,7 @@
 import Foundation
 @testable import Lattice
 import VolumeBroker
+import LatticeNodeSim
 import XCTest
 import cashew
 @testable import LatticeNode

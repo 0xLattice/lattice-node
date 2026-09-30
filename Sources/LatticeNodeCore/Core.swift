@@ -1,0 +1,416 @@
+import Lattice
+import cashew
+
+/// What the shell hands the core. Time is not an event: every `step` takes
+/// the shell's `now` (milliseconds since the epoch).
+public enum Event: Sendable {
+    case peerReady(PeerID)
+    case peerGone(PeerID)
+    case received(PeerID, SyncMessage)
+    /// The answer to `Effect.fetchByCID` for a child index: nil when the peer
+    /// did not have it.
+    case childIndexFetched(PeerID, cid: String, ChildIndex?)
+    case tick
+}
+
+public enum DisconnectReason: Sendable, Equatable {
+    /// The peer sent something provably wrong: bytes that do not match
+    /// their CID, a header that fails proof-of-work or linkage, a page that
+    /// does not chain, or too many pages that do not connect.
+    case malformed
+}
+
+/// The durable form of one step: header content first, then the facts that
+/// reference it. The shell writes it before executing any later effect of
+/// the same step.
+public struct PersistBatch: Sendable {
+    public let headers: [StoredHeader]
+    public let facts: [BlockImportBatch]
+
+    public init(headers: [StoredHeader], facts: [BlockImportBatch]) {
+        self.headers = headers
+        self.facts = facts
+    }
+}
+
+/// What readers see: the best header tip and the tip a node acts on — the
+/// deepest executed block on the best chain.
+public struct Snapshot: Sendable, Equatable {
+    public let bestHeaderTip: String
+    public let bestHeaderHeight: UInt64
+    public let actOnTip: String
+    public let actOnHeight: UInt64
+}
+
+public enum Effect: Sendable {
+    case send(PeerID, SyncMessage)
+    /// Answer `getHeaders` with these blocks of the best header chain, in
+    /// order. The shell reads their content and byte-budgets the page,
+    /// omitting a child index that does not fit and setting `hasMore` when
+    /// it truncates.
+    case serveHeaders(PeerID, requestID: UInt64, blockCIDs: [String], hasMore: Bool)
+    case fetchByCID(PeerID, cid: String)
+    case disconnect(PeerID, DisconnectReason)
+    case persist(PersistBatch)
+    case publish(Snapshot)
+    case wakeAt(Int64)
+}
+
+public struct CoreConfig: Sendable {
+    public var maxHeadersPerPage: Int
+    public var headersTimeout: Int64
+    public var maxUnconnectingHeaders: Int
+    public var maxAwaitingChildIndex: Int
+
+    public init(
+        maxHeadersPerPage: Int = 2_000,
+        headersTimeout: Int64 = 30_000,
+        maxUnconnectingHeaders: Int = 10,
+        maxAwaitingChildIndex: Int = 64
+    ) {
+        self.maxHeadersPerPage = maxHeadersPerPage
+        self.headersTimeout = headersTimeout
+        self.maxUnconnectingHeaders = maxUnconnectingHeaders
+        self.maxAwaitingChildIndex = maxAwaitingChildIndex
+    }
+}
+
+/// The node's state machine for one root level: the chain tree and header
+/// sync as values behind one synchronous `step`. No IO, no awaits: every
+/// mutation of a step is atomic, and the effects say what the shell must do.
+public struct Core: Sendable {
+    public private(set) var tree: ChainTree
+    public private(set) var sync = Sync()
+    public private(set) var published: Snapshot?
+    public let spec: ChainSpec
+    public let config: CoreConfig
+
+    /// A core over a bootstrapped or restored root tree. `spec` is the
+    /// chain's own (every header must commit the same one).
+    public init(tree: ChainTree, spec: ChainSpec, config: CoreConfig = CoreConfig()) {
+        precondition(tree.context?.isRoot == true, "the core runs one root level")
+        self.tree = tree
+        self.spec = spec
+        self.config = config
+    }
+
+    /// Rebuild a core from its durable facts.
+    public static func restore(
+        replaying facts: [BlockImportBatch],
+        context: ChainRuntimeContext,
+        spec: ChainSpec,
+        config: CoreConfig = CoreConfig()
+    ) throws -> Core {
+        Core(
+            tree: try ChainTree.restore(replaying: facts, context: context),
+            spec: spec,
+            config: config
+        )
+    }
+
+    public var snapshot: Snapshot {
+        let actOn = tree.actOnTip()
+        return Snapshot(
+            bestHeaderTip: tree.canonicalTip,
+            bestHeaderHeight: tree.headerSnapshot(of: tree.canonicalTip)?.tipHeight ?? 0,
+            actOnTip: actOn.hash,
+            actOnHeight: actOn.height
+        )
+    }
+
+    public mutating func step(_ event: Event, now: Int64) -> [Effect] {
+        var turn = Turn(now: now)
+        switch event {
+        case .peerReady(let peer):
+            guard sync.peers[peer] == nil else { break }
+            sync.peers[peer] = PeerSync()
+            requestHeaders(from: peer, continuingFrom: nil, &turn)
+        case .peerGone(let peer):
+            sync.drop(peer)
+        case .received(let peer, let message):
+            guard sync.peers[peer] != nil else { break }
+            receive(message, from: peer, &turn)
+        case .childIndexFetched(let peer, let cid, let index):
+            childIndexFetched(index, cid: cid, from: peer, &turn)
+        case .tick:
+            expireDeadlines(&turn)
+        }
+        return finish(turn)
+    }
+
+    // MARK: - Step bookkeeping
+
+    /// What one step produced, in order.
+    struct Turn {
+        let now: Int64
+        var headers: [StoredHeader] = []
+        var facts: [BlockImportBatch] = []
+        var effects: [Effect] = []
+    }
+
+    /// Persist first, then publish, then everything else: nothing a step
+    /// makes visible precedes the write that makes it durable.
+    private mutating func finish(_ turn: Turn) -> [Effect] {
+        var effects: [Effect] = []
+        if !turn.facts.isEmpty {
+            effects.append(.persist(PersistBatch(headers: turn.headers, facts: turn.facts)))
+        }
+        let current = snapshot
+        if current != published {
+            published = current
+            effects.append(.publish(current))
+        }
+        effects += turn.effects
+        if let deadline = sync.nextDeadline {
+            effects.append(.wakeAt(deadline))
+        }
+        return effects
+    }
+
+    private mutating func disconnect(_ peer: PeerID, _ reason: DisconnectReason, _ turn: inout Turn) {
+        sync.drop(peer)
+        turn.effects.append(.disconnect(peer, reason))
+    }
+
+    // MARK: - Messages
+
+    private mutating func receive(_ message: SyncMessage, from peer: PeerID, _ turn: inout Turn) {
+        switch message {
+        case .announce(let blockCID, _):
+            sync.peers[peer]?.announcedTip = blockCID
+            if !tree.contains(blockHash: blockCID) {
+                requestHeaders(from: peer, continuingFrom: nil, &turn)
+            }
+        case .getHeaders(let request):
+            serve(request, to: peer, &turn)
+        case .headers(let response):
+            guard let inFlight = sync.peers[peer]?.inFlight,
+                  inFlight.requestID == response.requestID else { return }
+            sync.peers[peer]?.inFlight = nil
+            receive(response, from: peer, &turn)
+        }
+    }
+
+    /// Ask `peer` for headers after our best header chain, unless a request is
+    /// already in flight. `continuingFrom` is the last header of a full page:
+    /// it leads the locator so a heavier chain still lighter than ours at this
+    /// point keeps downloading.
+    private mutating func requestHeaders(
+        from peer: PeerID,
+        continuingFrom last: String?,
+        _ turn: inout Turn
+    ) {
+        guard let state = sync.peers[peer], state.inFlight == nil,
+              !sync.awaitingChildIndex.values.contains(where: { $0.peer == peer })
+        else { return }
+        var locator = tree.headerLocator()
+        if let last, !locator.contains(last) {
+            locator = Array(([last] + locator).prefix(HeadersRequest.maximumLocatorEntries - 1))
+            if let genesis = tree.canonicalBlockHash(atHeight: 0), locator.last != genesis {
+                locator.append(genesis)
+            }
+        }
+        let requestID = sync.nextRequestID
+        sync.nextRequestID += 1
+        sync.peers[peer]?.inFlight = InFlightHeaders(
+            requestID: requestID,
+            deadline: turn.now + config.headersTimeout
+        )
+        turn.effects.append(.send(peer, .getHeaders(HeadersRequest(
+            requestID: requestID, locator: locator
+        ))))
+    }
+
+    /// Serve the best header chain after the first locator entry on it.
+    private mutating func serve(_ request: HeadersRequest, to peer: PeerID, _ turn: inout Turn) {
+        guard request.locator.count <= HeadersRequest.maximumLocatorEntries else {
+            disconnect(peer, .malformed, &turn)
+            return
+        }
+        let tipHeight = tree.headerSnapshot(of: tree.canonicalTip)?.tipHeight ?? 0
+        let tree = self.tree
+        let forkHeight = request.locator.lazy
+            .filter { tree.isCanonical(hash: $0) }
+            .compactMap { tree.headerSnapshot(of: $0)?.tipHeight }
+            .first ?? 0
+        var blockCIDs: [String] = []
+        var height = forkHeight + 1
+        while height <= tipHeight, blockCIDs.count < config.maxHeadersPerPage,
+              let hash = tree.canonicalBlockHash(atHeight: height) {
+            blockCIDs.append(hash)
+            height += 1
+        }
+        turn.effects.append(.serveHeaders(
+            peer,
+            requestID: request.requestID,
+            blockCIDs: blockCIDs,
+            hasMore: height <= tipHeight
+        ))
+    }
+
+    // MARK: - Header insertion
+
+    private enum Insertion {
+        case inserted
+        case held
+        /// The first header's parent is unknown.
+        case unconnected
+        /// Not blame: the header is from our future, or the failure is ours.
+        case deferred
+        case malformed
+    }
+
+    /// Weigh one root header: its own proof-of-work, target, linkage and
+    /// timestamp, checked by the tree.
+    private mutating func insert(
+        _ block: Block,
+        blockCID: String,
+        children: ChildIndex,
+        _ turn: inout Turn
+    ) -> Insertion {
+        if tree.contains(blockHash: blockCID) { return .held }
+        let admission = tree.insertRootHeader(
+            block,
+            spec: spec,
+            childIndex: children,
+            validationContext: ValidationContext(nowMilliseconds: turn.now)
+        )
+        switch admission {
+        case .applied(let update):
+            turn.headers.append(StoredHeader(blockCID: blockCID, block: block, children: children))
+            turn.facts.append(update.facts)
+            return .inserted
+        case .duplicate:
+            return .held
+        case .rejected(let failure):
+            switch failure {
+            case .unavailableEvidence:
+                return .unconnected
+            case .notYetValid, .localVerificationFailure, .revisionExhausted:
+                return .deferred
+            case .providerMalformedEvidence, .protocolInvalid, .notAcceptedAtCurrentChain,
+                 .crossChainEvidenceRequired:
+                return .malformed
+            }
+        }
+    }
+
+    private mutating func receive(_ response: HeadersResponse, from peer: PeerID, _ turn: inout Turn) {
+        var previous: String?
+        var inserted = 0
+        for (position, entry) in response.entries.enumerated() {
+            guard let blockCID = try? BlockHeader(node: entry.block).rawCID,
+                  previous == nil || entry.block.parent?.rawCID == previous else {
+                disconnect(peer, .malformed, &turn)
+                return
+            }
+            previous = blockCID
+            if tree.contains(blockHash: blockCID) { continue }
+            guard let children = entry.children else {
+                awaitChildIndex(of: entry.block, blockCID: blockCID, from: peer, &turn)
+                return
+            }
+            switch insert(entry.block, blockCID: blockCID, children: children, &turn) {
+            case .inserted:
+                inserted += 1
+            case .held:
+                continue
+            case .deferred:
+                return
+            case .malformed:
+                disconnect(peer, .malformed, &turn)
+                return
+            case .unconnected:
+                // Only the first header can miss its parent: every later one
+                // names the header before it, which is now held.
+                guard position == 0 else { return }
+                unconnected(peer, &turn)
+                return
+            }
+        }
+        guard let last = previous else { return }
+        sync.peers[peer]?.unconnecting = 0
+        if response.hasMore {
+            requestHeaders(from: peer, continuingFrom: last, &turn)
+        } else if inserted > 0, let announced = sync.peers[peer]?.announcedTip,
+                  !tree.contains(blockHash: announced) {
+            // Progress, but not yet the block it announced: ask again. A page
+            // that added nothing ends the exchange, so a peer announcing a
+            // block off its own best chain cannot loop us.
+            requestHeaders(from: peer, continuingFrom: nil, &turn)
+        }
+    }
+
+    /// A page whose first header does not connect counts against the peer;
+    /// below the limit, ask again from our best header chain.
+    private mutating func unconnected(_ peer: PeerID, _ turn: inout Turn) {
+        let count = (sync.peers[peer]?.unconnecting ?? 0) + 1
+        guard count < config.maxUnconnectingHeaders else {
+            disconnect(peer, .malformed, &turn)
+            return
+        }
+        sync.peers[peer]?.unconnecting = count
+        requestHeaders(from: peer, continuingFrom: nil, &turn)
+    }
+
+    private mutating func awaitChildIndex(
+        of block: Block,
+        blockCID: String,
+        from peer: PeerID,
+        _ turn: inout Turn
+    ) {
+        let cid = block.children.rawCID
+        guard sync.awaitingChildIndex[cid] == nil,
+              sync.awaitingChildIndex.count < config.maxAwaitingChildIndex else { return }
+        sync.awaitingChildIndex[cid] = AwaitingChildIndex(
+            blockCID: blockCID,
+            block: block,
+            peer: peer,
+            deadline: turn.now + config.headersTimeout
+        )
+        turn.effects.append(.fetchByCID(peer, cid: cid))
+    }
+
+    private mutating func childIndexFetched(
+        _ index: ChildIndex?,
+        cid: String,
+        from peer: PeerID,
+        _ turn: inout Turn
+    ) {
+        guard let waiting = sync.awaitingChildIndex[cid], waiting.peer == peer else { return }
+        sync.awaitingChildIndex[cid] = nil
+        // Not having the bytes is availability, never blame.
+        guard let index else { return }
+        guard (try? HeaderImpl<ChildIndex>(node: index).rawCID) == cid else {
+            disconnect(peer, .malformed, &turn)
+            return
+        }
+        switch insert(waiting.block, blockCID: waiting.blockCID, children: index, &turn) {
+        case .inserted, .held:
+            requestHeaders(from: peer, continuingFrom: waiting.blockCID, &turn)
+        case .deferred, .unconnected:
+            return
+        case .malformed:
+            disconnect(peer, .malformed, &turn)
+        }
+    }
+
+    // MARK: - Deadlines
+
+    /// A request past its deadline is dropped and asked again: silence is
+    /// availability, never blame.
+    private mutating func expireDeadlines(_ turn: inout Turn) {
+        let expiredFetches = sync.awaitingChildIndex.filter { $0.value.deadline <= turn.now }
+        for (cid, _) in expiredFetches {
+            sync.awaitingChildIndex[cid] = nil
+        }
+        let expiredRequests = sync.peers.filter { ($0.value.inFlight?.deadline ?? .max) <= turn.now }
+        for peer in expiredRequests.keys {
+            sync.peers[peer]?.inFlight = nil
+        }
+        let retry = Set(expiredFetches.values.map(\.peer)).union(expiredRequests.keys)
+        for peer in retry.sorted() {
+            requestHeaders(from: peer, continuingFrom: nil, &turn)
+        }
+    }
+}

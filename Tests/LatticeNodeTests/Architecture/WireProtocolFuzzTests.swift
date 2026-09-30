@@ -1,6 +1,7 @@
 import Foundation
 import Lattice
 import UInt256
+import LatticeNodeSim
 import XCTest
 @testable import LatticeNode
 

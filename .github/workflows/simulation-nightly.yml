@@ -1,0 +1,30 @@
+name: Simulation (nightly)
+
+# The per-PR suite runs 10 simulator seeds. This runs many more, from a
+# different first seed every night; a failure prints the
+# LATTICE_TEST_SEED=… that replays it exactly.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  simulate-linux:
+    runs-on: ubuntu-latest
+    container: swift:6.1-jammy
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies for Linux
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev
+
+      - name: Build test targets
+        run: swift build --build-tests
+
+      - name: Simulate many seeds
+        env:
+          SIM_SEEDS: "500"
+          LATTICE_TEST_SEED: ${{ github.run_id }}
+        run: swift test --skip-build --filter SimulationTests.testSeeds

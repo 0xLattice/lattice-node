@@ -26,7 +26,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/adalinxx/Lattice.git",
-            exact: "39.0.0"
+            exact: "39.1.0"
         ),
         .package(
             url: "https://github.com/adalinxx/cashew.git",
@@ -59,6 +59,19 @@ let package = Package(
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "cashew", package: "cashew"),
                 .product(name: "VolumeBroker", package: "VolumeBroker"),
+            ]),
+        .target(
+            name: "LatticeNodeCore",
+            dependencies: [
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "cashew", package: "cashew"),
+            ]),
+        .target(
+            name: "LatticeNodeSim",
+            dependencies: [
+                "LatticeNodeCore",
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "cashew", package: "cashew"),
             ]),
         .target(
             name: "LatticeNode",
@@ -149,6 +162,7 @@ let package = Package(
                 "LatticeProcessWait",
                 "LatticeNodeDaemon",
                 "LatticeMinerCore",
+                "LatticeNodeSim",
                 "CSQLite",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "LatticeBlockTree", package: "lattice"),
@@ -163,6 +177,14 @@ let package = Package(
             ],
             path: "Tests/LatticeNodeTests",
             exclude: ["SafetyNet/Goldens"]),
+        .testTarget(
+            name: "LatticeNodeSimulationTests",
+            dependencies: [
+                "LatticeNodeCore",
+                "LatticeNodeSim",
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "cashew", package: "cashew"),
+            ]),
         .testTarget(
             name: "LatticeNodeE2ETests",
             dependencies: [

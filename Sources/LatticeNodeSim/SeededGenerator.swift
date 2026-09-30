@@ -3,10 +3,14 @@ import Foundation
 /// SplitMix64: reproducible, portable, and not `SystemRandomNumberGenerator`.
 /// A seeded test's failure is worthless if the input that caused it cannot be
 /// recreated, so every seeded test draws from this one generator.
-struct SplitMix64: RandomNumberGenerator {
-    var state: UInt64
+public struct SplitMix64: RandomNumberGenerator, Sendable {
+    public var state: UInt64
 
-    mutating func next() -> UInt64 {
+    public init(state: UInt64) {
+        self.state = state
+    }
+
+    public mutating func next() -> UInt64 {
         state &+= 0x9E37_79B9_7F4A_7C15
         var z = state
         z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
@@ -19,19 +23,23 @@ struct SplitMix64: RandomNumberGenerator {
 /// with `0x`) when it is set, otherwise the test's own fixed default. An
 /// ordinary run is deterministic; a run with another seed explores other
 /// inputs and prints the seed that replays it.
-struct TestSeed: CustomStringConvertible {
-    static let variable = "LATTICE_TEST_SEED"
+public struct TestSeed: CustomStringConvertible, Sendable {
+    public static let variable = "LATTICE_TEST_SEED"
 
-    struct Malformed: Error, CustomStringConvertible {
-        let value: String
-        var description: String {
+    public struct Malformed: Error, CustomStringConvertible {
+        public let value: String
+        public var description: String {
             "\(TestSeed.variable)=\(value) is neither decimal nor 0x-prefixed hex"
         }
     }
 
-    let value: UInt64
+    public let value: UInt64
 
-    static func resolve(
+    public init(value: UInt64) {
+        self.value = value
+    }
+
+    public static func resolve(
         default fixed: UInt64,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> TestSeed {
@@ -45,7 +53,7 @@ struct TestSeed: CustomStringConvertible {
     }
 
     /// The assignment that replays this run: `LATTICE_TEST_SEED=0x…`.
-    var description: String {
+    public var description: String {
         "\(Self.variable)=0x\(String(value, radix: 16))"
     }
 }
@@ -54,16 +62,16 @@ struct TestSeed: CustomStringConvertible {
 /// integer) when it is set, otherwise the test's own default. A malformed
 /// value fails the test naming the variable instead of silently running the
 /// default, so a soak that asked for more work never passes on less.
-enum TestBudget {
-    struct Malformed: Error, CustomStringConvertible {
-        let variable: String
-        let value: String
-        var description: String {
+public enum TestBudget {
+    public struct Malformed: Error, CustomStringConvertible {
+        public let variable: String
+        public let value: String
+        public var description: String {
             "\(variable)=\(value) is not a positive decimal integer"
         }
     }
 
-    static func resolve(
+    public static func resolve(
         _ variable: String,
         default fixed: Int,
         environment: [String: String] = ProcessInfo.processInfo.environment

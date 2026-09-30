@@ -1,0 +1,242 @@
+import Lattice
+import LatticeNodeCore
+import UInt256
+
+/// A node's durable store: header content and the fact log, appended in the
+/// order the core's `persist` effects name them.
+public struct SimStore: Sendable {
+    public private(set) var headers: [String: StoredHeader] = [:]
+    public private(set) var childIndexes: [String: ChildIndex] = [:]
+    /// Each stored header's own proof-of-work, verified once from its bytes.
+    public private(set) var ownWork: [String: VerifiedWorkContribution] = [:]
+    public private(set) var facts: [BlockImportBatch] = []
+    public private(set) var blockFacts: Set<String> = []
+    public private(set) var validations: Set<String> = []
+    public private(set) var exclusions: Set<String> = []
+
+    public init(genesis: SimBlock, facts seed: BlockImportBatch) {
+        append(PersistBatch(
+            headers: [StoredHeader(blockCID: genesis.cid, block: genesis.block, children: genesis.children)],
+            facts: [seed]
+        ))
+    }
+
+    public mutating func append(_ batch: PersistBatch) {
+        for header in batch.headers {
+            headers[header.blockCID] = header
+            ownWork[header.blockCID] = ChainTree.rootWork(of: header.block)
+            childIndexes[header.block.children.rawCID] = header.children
+        }
+        facts += batch.facts
+        for fact in batch.facts.flatMap(\.facts) {
+            switch fact {
+            case .block(let block): blockFacts.insert(block.blockHash)
+            case .validation(let validation): validations.insert(validation.blockHash)
+            case .exclusion(let exclusion): exclusions.insert(exclusion.blockHash)
+            case .work: break
+            }
+        }
+    }
+}
+
+/// Everything a tree says about its blocks, read through its public API: the
+/// form two trees are compared in.
+public struct TreeDigest: Equatable, Sendable {
+    public struct Entry: Equatable, Sendable {
+        public let parent: String?
+        public let height: UInt64
+        public let grinds: [String: UInt256]
+        public let prevState: String
+        public let postState: String
+        public let subtreeWork: UInt256?
+    }
+
+    public let genesis: String
+    public let canonicalTip: String
+    public let canonicalPath: [String]
+    public let blocks: [String: Entry]
+    public let executed: Set<String>
+    public let excluded: Set<String>
+
+    public init(_ tree: ChainTree) {
+        var tree = tree
+        let genesis = tree.canonicalBlockHash(atHeight: 0) ?? tree.canonicalTip
+        var blocks: [String: Entry] = [:]
+        var executed = Set<String>()
+        var excluded = Set<String>()
+        var pending = [genesis]
+        while let hash = pending.popLast() {
+            guard let meta = tree.getConsensusBlock(hash: hash) else { continue }
+            blocks[hash] = Entry(
+                parent: meta.parentBlockHash,
+                height: meta.blockHeight,
+                grinds: meta.workContributions.mapValues(\.work),
+                prevState: tree.headerSnapshot(of: hash)?.prevStateCID ?? "",
+                postState: tree.headerSnapshot(of: hash)?.postStateCID ?? "",
+                subtreeWork: tree.subtreeWeight(forHash: hash)?.uint256Value
+            )
+            if tree.hasExecutedAncestry(blockHash: hash) { executed.insert(hash) }
+            if tree.isExcludedRoot(hash) { excluded.insert(hash) }
+            pending += meta.childHashes
+        }
+        let tipHeight = blocks[tree.canonicalTip]?.height ?? 0
+        self.genesis = genesis
+        self.canonicalTip = tree.canonicalTip
+        self.canonicalPath = (0...tipHeight).compactMap { tree.canonicalBlockHash(atHeight: $0) }
+        self.blocks = blocks
+        self.executed = executed
+        self.excluded = excluded
+    }
+
+    /// The deepest executed block on the best chain, walked from genesis.
+    public var actOnTip: String {
+        canonicalPath.prefix { executed.contains($0) }.last ?? genesis
+    }
+}
+
+/// The checks the simulator runs after every step of every honest node.
+public enum Invariants {
+    static func fail(_ node: String, _ detail: String) -> SimulationError {
+        .invariant("\(node): \(detail)")
+    }
+
+    /// DST 1, DST 2 and the "Lattice architecture preserved" checklist over
+    /// one node's tree, against its previous digest and its durable store.
+    public static func check(
+        node: String,
+        core: Core,
+        digest: TreeDigest,
+        previous: TreeDigest?,
+        store: SimStore,
+        treeChanged: Bool = true
+    ) throws {
+        if treeChanged {
+            try checkTree(node: node, core: core, digest: digest, previous: previous, store: store)
+        }
+
+        // The act-on tip is the deepest executed block on the best chain.
+        if core.snapshot.actOnTip != digest.actOnTip {
+            throw fail(node, "act-on tip \(core.snapshot.actOnTip) is not \(digest.actOnTip)")
+        }
+        if let published = core.published, published != core.snapshot {
+            throw fail(node, "published snapshot is stale after the step")
+        }
+
+        // DST 6: bounded sync state.
+        if core.sync.awaitingChildIndex.count > core.config.maxAwaitingChildIndex {
+            throw fail(node, "child-index waits exceed their bound")
+        }
+    }
+
+    /// The checks over the tree itself: run whenever it changed.
+    static func checkTree(
+        node: String,
+        core: Core,
+        digest: TreeDigest,
+        previous: TreeDigest?,
+        store: SimStore
+    ) throws {
+        // DST 1 / validity selects / hierarchical GHOST: the head is an
+        // independent reference's, whose weights count every block (excluded
+        // ones too) and each grind once, and whose descent skips excluded roots.
+        var reference = GhostReference(genesis: digest.genesis)
+        reference.excluded = digest.excluded
+        for (hash, entry) in digest.blocks.sorted(by: { $0.key < $1.key }) {
+            reference.add(hash, parent: entry.parent, grinds: entry.grinds)
+        }
+        let descent = reference.descent()
+        guard descent.head == digest.canonicalTip, descent.path == digest.canonicalPath else {
+            throw fail(node, "head \(digest.canonicalTip) is not the GHOST reference's \(descent.head)")
+        }
+        let work = reference.subtreeWork()
+        for (hash, entry) in digest.blocks where entry.subtreeWork != work[hash] {
+            throw fail(node, "subtree work of \(hash) is \(String(describing: entry.subtreeWork)), reference \(String(describing: work[hash]))")
+        }
+        if let excludedOnPath = digest.canonicalPath.first(where: digest.excluded.contains) {
+            throw fail(node, "the best chain enters excluded root \(excludedOnPath)")
+        }
+
+        // DST 2 / weighed graph: each grind has one location, and every held
+        // block weighs exactly its verified proof-of-work.
+        var located: [String: String] = [:]
+        for (hash, entry) in digest.blocks {
+            for grind in entry.grinds.keys {
+                if let other = located.updateValue(hash, forKey: grind) {
+                    throw fail(node, "grind \(grind) is credited at \(other) and \(hash)")
+                }
+            }
+            guard store.headers[hash] != nil else {
+                throw fail(node, "weighed block \(hash) has no durable content")
+            }
+            guard let own = store.ownWork[hash], entry.grinds == [own.id: own.work] else {
+                throw fail(node, "block \(hash) weighs \(entry.grinds), not its own proof-of-work")
+            }
+        }
+
+        // Work is never revoked: the weighed graph only grows.
+        if let previous {
+            for (hash, before) in previous.blocks {
+                guard let now = digest.blocks[hash] else {
+                    throw fail(node, "weighed block \(hash) left the graph")
+                }
+                for (grind, work) in before.grinds where (now.grinds[grind] ?? .zero) < work {
+                    throw fail(node, "grind \(grind) at \(hash) lost work")
+                }
+            }
+            if !previous.executed.isSubset(of: digest.executed) {
+                throw fail(node, "the executed set shrank")
+            }
+        }
+
+        // The executed set is a subset of the weighed graph, closed under
+        // ancestry, and outside every excluded subtree.
+        for hash in digest.executed {
+            guard let entry = digest.blocks[hash] else {
+                throw fail(node, "executed block \(hash) is not weighed")
+            }
+            if let parent = entry.parent, !digest.executed.contains(parent) {
+                throw fail(node, "executed block \(hash) has an unexecuted parent")
+            }
+            if digest.excluded.contains(hash) {
+                throw fail(node, "executed block \(hash) is excluded")
+            }
+        }
+
+        // Parent-chain continuity reads the executed set on any branch: as a
+        // parent level, this tree attests exactly the states its executed
+        // blocks produced (a block whose post-state is its pre-state
+        // produces nothing).
+        let facts = ParentLevelFacts(tree: core.tree)
+        let produced = Set(digest.executed.compactMap { hash in
+            digest.blocks[hash].flatMap { $0.prevState == $0.postState ? nil : $0.postState }
+        })
+        for (hash, entry) in digest.blocks {
+            let link = ParentStateContinuityLink(
+                parentPath: core.tree.context?.path ?? [],
+                fromStateCID: LatticeState.emptyHeader.rawCID,
+                toStateCID: entry.postState
+            )
+            if facts.hasContinuity(link) != produced.contains(entry.postState) {
+                throw fail(node, "continuity for the post-state of \(hash) disagrees with the executed set")
+            }
+        }
+
+        // Weighed-only blocks issue no facts: a validation fact exists only
+        // for an executed block, an exclusion only for an excluded root.
+        for hash in store.validations where !digest.executed.contains(hash) {
+            throw fail(node, "unexecuted block \(hash) has a durable validation")
+        }
+        for hash in store.exclusions where !digest.excluded.contains(hash) {
+            throw fail(node, "durable exclusion of \(hash) is not in the tree")
+        }
+
+        // The root-exclusion rule: a root is excluded only while another
+        // executed root stands.
+        for hash in digest.excluded where digest.blocks[hash]?.parent == nil {
+            if !digest.executed.contains(where: { $0 != hash && digest.blocks[$0]?.parent == nil }) {
+                throw fail(node, "root \(hash) is excluded with no other executed root")
+            }
+        }
+
+    }
+}
