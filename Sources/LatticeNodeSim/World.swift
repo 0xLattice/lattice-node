@@ -105,8 +105,8 @@ public struct World: Sendable {
         var honest: [String] = []
         for index in 1...max(honestBlocks, 1) {
             var parent = reference.head
-            if Double.random(in: 0..<1, using: &rng) < forkProbability {
-                for _ in 0..<Int.random(in: 1...3, using: &rng) {
+            if rng.chance(forkProbability) {
+                for _ in 0..<rng.draw(1...3) {
                     parent = blocks[parent]?.parent ?? parent
                 }
             }
@@ -168,7 +168,7 @@ public struct World: Sendable {
         return try await record(block, releaseAt: timestamp, anchor: anchor, in: cas)
     }
 
-    private static func record(
+    static func record(
         _ block: Block,
         releaseAt: Int64,
         anchor: DifficultyAnchor?,
@@ -215,6 +215,30 @@ public struct World: Sendable {
             if ChainTree.rootWork(of: candidate) == nil { return candidate }
             nonce &+= 1
         }
+    }
+
+    /// `count` distinct blocks on genesis, each committing its own non-empty
+    /// child index (so a receiver cannot rebuild it and must fetch it).
+    public func carriers(count: Int) async throws -> [SimBlock] {
+        let cas = SimCAS()
+        var carriers: [SimBlock] = []
+        for index in 0..<count {
+            let built = try await BlockBuilder.buildBlock(
+                previous: genesis.block,
+                children: ["Carried\(index)": genesis.block],
+                timestamp: World.genesisTime + World.blockInterval,
+                nonce: UInt64(index) << 40,
+                fetcher: cas
+            )
+            let block = World.mined(built.replacing(parent: built.parent?.removingNode(), nonce: built.nonce))
+            carriers.append(try await World.record(
+                block,
+                releaseAt: block.timestamp,
+                anchor: DifficultyAnchor(blockHeight: 1, timestamp: block.timestamp, target: block.target),
+                in: cas
+            ))
+        }
+        return carriers
     }
 
     /// Blocks released by `now`, in release order.

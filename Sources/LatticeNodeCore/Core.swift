@@ -10,6 +10,8 @@ public enum Event: Sendable {
     /// The answer to `Effect.fetchByCID` for a child index: nil when the peer
     /// did not have it.
     case childIndexFetched(PeerID, cid: String, ChildIndex?)
+    /// The shell finished sending the page a `serveHeaders` effect named.
+    case headersServed(PeerID)
     case tick
 }
 
@@ -132,6 +134,8 @@ public struct Core: Sendable {
             receive(message, from: peer, &turn)
         case .childIndexFetched(let peer, let cid, let index):
             childIndexFetched(index, cid: cid, from: peer, &turn)
+        case .headersServed(let peer):
+            sync.peers[peer]?.serving = false
         case .tick:
             expireDeadlines(&turn)
         }
@@ -212,6 +216,7 @@ public struct Core: Sendable {
         }
         let requestID = sync.nextRequestID
         sync.nextRequestID += 1
+        sync.peers[peer]?.retryAt = nil
         sync.peers[peer]?.inFlight = InFlightHeaders(
             requestID: requestID,
             deadline: turn.now + config.headersTimeout
@@ -221,12 +226,16 @@ public struct Core: Sendable {
         ))))
     }
 
-    /// Serve the best header chain after the first locator entry on it.
+    /// Serve the best header chain after the first locator entry on it. One
+    /// page per peer is outstanding at a time; a request beyond it is
+    /// dropped, never blamed (the peer re-asks at its own deadline).
     private mutating func serve(_ request: HeadersRequest, to peer: PeerID, _ turn: inout Turn) {
         guard request.locator.count <= HeadersRequest.maximumLocatorEntries else {
             disconnect(peer, .malformed, &turn)
             return
         }
+        guard sync.peers[peer]?.serving == false else { return }
+        sync.peers[peer]?.serving = true
         let tipHeight = tree.headerSnapshot(of: tree.canonicalTip)?.tipHeight ?? 0
         let tree = self.tree
         let forkHeight = request.locator.lazy
@@ -255,7 +264,9 @@ public struct Core: Sendable {
         case held
         /// The first header's parent is unknown.
         case unconnected
-        /// Not blame: the header is from our future, or the failure is ours.
+        /// Not blame: the header is from our future; ask again at its time.
+        case notYetValid(Int64)
+        /// Not blame: the failure is ours.
         case deferred
         case malformed
     }
@@ -286,7 +297,9 @@ public struct Core: Sendable {
             switch failure {
             case .unavailableEvidence:
                 return .unconnected
-            case .notYetValid, .localVerificationFailure, .revisionExhausted:
+            case .notYetValid:
+                return .notYetValid(block.timestamp)
+            case .localVerificationFailure, .revisionExhausted:
                 return .deferred
             case .providerMalformedEvidence, .protocolInvalid, .notAcceptedAtCurrentChain,
                  .crossChainEvidenceRequired:
@@ -306,7 +319,18 @@ public struct Core: Sendable {
             }
             previous = blockCID
             if tree.contains(blockHash: blockCID) { continue }
-            guard let children = entry.children else {
+            guard let children = entry.children ?? heldChildIndex(for: entry.block) else {
+                // Only a header that would be inserted may cost a fetch: its
+                // parent is held and its own proof-of-work holds.
+                guard let parent = entry.block.parent?.rawCID,
+                      tree.contains(blockHash: parent) else {
+                    if position == 0 { unconnected(peer, &turn) }
+                    return
+                }
+                guard ChainTree.rootWork(of: entry.block) != nil else {
+                    disconnect(peer, .malformed, &turn)
+                    return
+                }
                 awaitChildIndex(of: entry.block, blockCID: blockCID, from: peer, &turn)
                 return
             }
@@ -315,6 +339,9 @@ public struct Core: Sendable {
                 inserted += 1
             case .held:
                 continue
+            case .notYetValid(let timestamp):
+                retry(peer, at: timestamp)
+                return
             case .deferred:
                 return
             case .malformed:
@@ -353,6 +380,25 @@ public struct Core: Sendable {
         requestHeaders(from: peer, continuingFrom: nil, &turn)
     }
 
+    /// A child index this tree already commits to: the empty one, or the
+    /// one its parent recorded. Its CID must be the block's own.
+    private func heldChildIndex(for block: Block) -> ChildIndex? {
+        var candidates = [ChildIndex()]
+        if let parent = block.parent?.rawCID,
+           let commitments = tree.recordedChildCommitments(of: parent), !commitments.isEmpty {
+            candidates.append(ChildIndex(entries: commitments.mapValues { BlockHeader(rawCID: $0) }))
+        }
+        let cid = block.children.rawCID
+        return candidates.first { (try? HeaderImpl<ChildIndex>(node: $0).rawCID) == cid }
+    }
+
+    /// Ask `peer` again at `time` (another wait's deadline, or a header's
+    /// timestamp): never a drop, never blame.
+    private mutating func retry(_ peer: PeerID, at time: Int64) {
+        guard let existing = sync.peers[peer] else { return }
+        sync.peers[peer]?.retryAt = min(existing.retryAt ?? .max, time)
+    }
+
     private mutating func awaitChildIndex(
         of block: Block,
         blockCID: String,
@@ -361,7 +407,13 @@ public struct Core: Sendable {
     ) {
         let cid = block.children.rawCID
         guard sync.awaitingChildIndex[cid] == nil,
-              sync.awaitingChildIndex.count < config.maxAwaitingChildIndex else { return }
+              sync.awaitingChildIndex.count < config.maxAwaitingChildIndex else {
+            // Someone else's wait holds the slot: ask this peer again once the
+            // earliest wait resolves or expires.
+            let next = sync.awaitingChildIndex.values.map(\.deadline).min()
+            retry(peer, at: next ?? turn.now + config.headersTimeout)
+            return
+        }
         sync.awaitingChildIndex[cid] = AwaitingChildIndex(
             blockCID: blockCID,
             block: block,
@@ -388,6 +440,8 @@ public struct Core: Sendable {
         switch insert(waiting.block, blockCID: waiting.blockCID, children: index, &turn) {
         case .inserted, .held:
             requestHeaders(from: peer, continuingFrom: waiting.blockCID, &turn)
+        case .notYetValid(let timestamp):
+            retry(peer, at: timestamp)
         case .deferred, .unconnected:
             return
         case .malformed:
@@ -408,7 +462,13 @@ public struct Core: Sendable {
         for peer in expiredRequests.keys {
             sync.peers[peer]?.inFlight = nil
         }
-        let retry = Set(expiredFetches.values.map(\.peer)).union(expiredRequests.keys)
+        let dueRetries = sync.peers.filter { ($0.value.retryAt ?? .max) <= turn.now }
+        for peer in dueRetries.keys {
+            sync.peers[peer]?.retryAt = nil
+        }
+        let retry = Set(expiredFetches.values.map(\.peer))
+            .union(expiredRequests.keys)
+            .union(dueRetries.keys)
         for peer in retry.sorted() {
             requestHeaders(from: peer, continuingFrom: nil, &turn)
         }

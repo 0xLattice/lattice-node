@@ -33,19 +33,31 @@ public struct SimConfig: Sendable {
     public static func random(seed: UInt64) -> SimConfig {
         var rng = SplitMix64(state: seed ^ 0xC0FF_EE00)
         var config = SimConfig(seed: seed)
-        config.cores = Int.random(in: 2...5, using: &rng)
-        config.honestSources = Int.random(in: 1...2, using: &rng)
-        config.spammer = Bool.random(using: &rng)
-        config.liar = Bool.random(using: &rng)
-        config.honestBlocks = Int.random(in: 20...50, using: &rng)
-        config.forkProbability = Double.random(in: 0...0.3, using: &rng)
-        config.spamBlocks = Int.random(in: 1...5, using: &rng)
-        config.drop = Double.random(in: 0...0.2, using: &rng)
-        config.duplicate = Double.random(in: 0...0.1, using: &rng)
-        config.maxDelay = Int64.random(in: 20...500, using: &rng)
-        config.pageSize = Int.random(in: 3...16, using: &rng)
+        config.cores = rng.draw(2...5)
+        config.honestSources = rng.draw(1...2)
+        config.spammer = rng.chance(0.5)
+        config.liar = rng.chance(0.5)
+        config.honestBlocks = rng.draw(20...50)
+        config.forkProbability = 0.3 * rng.unit()
+        config.spamBlocks = rng.draw(1...5)
+        config.drop = 0.2 * rng.unit()
+        config.duplicate = 0.1 * rng.unit()
+        config.maxDelay = rng.draw(Int64(20)...500)
+        config.pageSize = rng.draw(3...16)
         return config
     }
+}
+
+/// Bugs a test plants to show an invariant catches them.
+public struct SimFaults: Sendable {
+    /// Execute a step's `publish` before its `persist`.
+    public var publishBeforePersist = false
+    /// Lose one fact batch on its way into the store.
+    public var dropFact = false
+    /// Break the reference's equal-work ties toward the larger CID.
+    public var flipReferenceTieBreak = false
+
+    public init() {}
 }
 
 /// What a run observed.
@@ -110,6 +122,9 @@ public struct Simulator {
     var nextSession: UInt64 = 1
     var queue = EventQueue()
     public private(set) var report = SimReport()
+    /// Planted bugs, for proving the invariants can fail.
+    public var faults = SimFaults()
+    var droppedFact = false
 
     struct Pair: Hashable {
         let low: String
@@ -255,10 +270,10 @@ public struct Simulator {
 
     /// A message leg: dropped, delayed or duplicated by the seed.
     mutating func send(_ delivery: Delivery, from: String, to: String) {
-        guard Double.random(in: 0..<1, using: &rng) >= config.drop else { return }
-        let copies = Double.random(in: 0..<1, using: &rng) < config.duplicate ? 2 : 1
+        guard !rng.chance(config.drop) else { return }
+        let copies = rng.chance(config.duplicate) ? 2 : 1
         for _ in 0..<copies {
-            schedule(at: now + Int64.random(in: config.minDelay...config.maxDelay, using: &rng), to: to, delivery)
+            schedule(at: now + rng.draw(config.minDelay...config.maxDelay), to: to, delivery)
         }
     }
 
@@ -279,11 +294,19 @@ public struct Simulator {
     mutating func step(_ name: String, _ event: Event) throws {
         guard var node = cores[name] else { return }
         let revision = node.core.tree.currentRevision()
-        let effects = node.core.step(event, now: now)
+        var effects = node.core.step(event, now: now)
+        if faults.publishBeforePersist {
+            effects = effects.filter { if case .publish = $0 { true } else { false } }
+                + effects.filter { if case .publish = $0 { false } else { true } }
+        }
         var persisted = false
         for effect in effects {
             switch effect {
-            case .persist(let batch):
+            case .persist(var batch):
+                if faults.dropFact, !droppedFact, let dropped = batch.facts.last {
+                    droppedFact = true
+                    batch = PersistBatch(headers: batch.headers, facts: batch.facts.filter { $0 != dropped })
+                }
                 node.store.append(batch)
                 persisted = true
             case .publish(let snapshot):
@@ -304,12 +327,14 @@ public struct Simulator {
                     guard let stored = node.store.headers[cid] else {
                         throw Invariants.fail(name, "served \(cid) before it was durable")
                     }
-                    let omit = Double.random(in: 0..<1, using: &rng) < config.omitChildren
+                    let omit = rng.chance(config.omitChildren)
                     entries.append(HeaderEntry(block: stored.block, children: omit ? nil : stored.children))
                 }
                 try route(.headers(HeadersResponse(
                     requestID: requestID, entries: entries, hasMore: hasMore
                 )), from: name, to: peer)
+                // The shell reports the page sent; it is local, never lost.
+                schedule(at: now, to: name, .core(.headersServed(peer)))
             case .fetchByCID(let peer, let cid):
                 guard session(name, peer.key) == peer.session else { continue }
                 if let other = cores[peer.key] {
@@ -343,6 +368,8 @@ public struct Simulator {
             digest: digest,
             previous: treeChanged ? node.digest : nil,
             store: node.store,
+            world: world,
+            flipTieBreak: faults.flipReferenceTieBreak,
             treeChanged: treeChanged || persisted
         )
         if persisted {

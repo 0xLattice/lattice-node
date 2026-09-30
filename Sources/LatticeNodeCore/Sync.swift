@@ -8,6 +8,10 @@ public struct PeerSync: Sendable, Equatable {
     public internal(set) var announcedTip: String?
     /// Consecutive header pages whose first header did not connect.
     public internal(set) var unconnecting: Int = 0
+    /// When to ask this peer again without a request in flight.
+    public internal(set) var retryAt: Int64?
+    /// A page served to this peer that the shell has not finished sending.
+    public internal(set) var serving = false
 
     public init() {}
 }
@@ -44,6 +48,7 @@ public struct Sync: Sendable {
     /// The earliest deadline the core must wake for.
     var nextDeadline: Int64? {
         let requests = peers.values.compactMap { $0.inFlight?.deadline }
+            + peers.values.compactMap(\.retryAt)
         let fetches = awaitingChildIndex.values.map(\.deadline)
         return (requests + fetches).min()
     }

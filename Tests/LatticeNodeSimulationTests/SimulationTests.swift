@@ -57,6 +57,50 @@ final class SimulationTests: XCTestCase {
         XCTAssertEqual(first.coreTips, second.coreTips)
     }
 
+    // MARK: - Planted bugs: each invariant can fail
+
+    private func assertCaught(
+        _ plant: (inout SimFaults) -> Void,
+        _ expected: String,
+        seeds: ClosedRange<UInt64> = 0x9A0...0x9A0,
+        forkProbability: Double = 0.2,
+        line: UInt = #line
+    ) async throws {
+        for seed in seeds {
+            var config = SimConfig(seed: seed)
+            config.cores = 2
+            config.honestSources = 1
+            config.honestBlocks = 20
+            config.forkProbability = forkProbability
+            var simulator = try await Simulator.make(config)
+            plant(&simulator.faults)
+            do {
+                _ = try simulator.run()
+            } catch let SimulationError.invariant(detail) {
+                XCTAssertTrue(detail.contains(expected), detail, line: line)
+                return
+            }
+        }
+        XCTFail("the planted bug went unnoticed", line: line)
+    }
+
+    func testPublishingBeforePersistingIsCaught() async throws {
+        try await assertCaught({ $0.publishBeforePersist = true }, "is not durable")
+    }
+
+    func testAFactDroppedFromTheStoreIsCaught() async throws {
+        // Caught by whichever check reads the lost fact first: the published
+        // tip's durability or the weighed block's durable fact.
+        try await assertCaught({ $0.dropFact = true }, "durable")
+    }
+
+    func testAFlippedTieBreakIsCaught() async throws {
+        try await assertCaught(
+            { $0.flipReferenceTieBreak = true }, "GHOST reference",
+            seeds: 0x7_1E00...0x7_1E0F, forkProbability: 0.6
+        )
+    }
+
     func testTheLiarIsDisconnectedAndHonestSyncCompletes() async throws {
         var config = SimConfig(seed: 0x11A2)
         config.cores = 2

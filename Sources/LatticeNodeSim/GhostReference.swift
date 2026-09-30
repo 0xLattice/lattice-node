@@ -1,4 +1,3 @@
-import Lattice
 import UInt256
 
 /// A small, independent GHOST: descend from genesis to the child whose
@@ -10,6 +9,8 @@ public struct GhostReference: Sendable {
     private(set) var children: [String: [String]] = [:]
     private(set) var grinds: [String: [String: UInt256]] = [:]
     public var excluded: Set<String> = []
+    /// A planted bug for the simulator's own tests: prefer the LARGER CID.
+    public var flipTieBreak = false
 
     public init(genesis: String) {
         self.genesis = genesis
@@ -57,7 +58,7 @@ public struct GhostReference: Sendable {
                 let challenger = work[child] ?? .zero
                 let holder = work[incumbent] ?? .zero
                 if challenger > holder
-                    || (challenger == holder && forkChoicePrefersBlock(child, over: incumbent)) {
+                    || (challenger == holder && prefers(child, over: incumbent)) {
                     selected = child
                 }
             }
@@ -68,4 +69,31 @@ public struct GhostReference: Sendable {
     }
 
     public var head: String { descent().head }
+
+    /// Equal work breaks to the lexicographically smaller CID bytes.
+    func prefers(_ candidate: String, over incumbent: String) -> Bool {
+        guard candidate != incumbent else { return false }
+        let smaller = Self.cidBytes(candidate).lexicographicallyPrecedes(Self.cidBytes(incumbent))
+        return smaller != flipTieBreak
+    }
+
+    /// The bytes of a base32 (`b…`) multibase CID string; any other string
+    /// compares by its UTF-8 bytes.
+    static func cidBytes(_ cid: String) -> [UInt8] {
+        let alphabet = Array("abcdefghijklmnopqrstuvwxyz234567".utf8)
+        guard cid.first == "b" else { return Array(cid.utf8) }
+        var bytes: [UInt8] = []
+        var buffer: UInt32 = 0
+        var bits = 0
+        for character in cid.utf8.dropFirst() {
+            guard let value = alphabet.firstIndex(of: character) else { return Array(cid.utf8) }
+            buffer = (buffer << 5) | UInt32(value)
+            bits += 5
+            if bits >= 8 {
+                bits -= 8
+                bytes.append(UInt8((buffer >> UInt32(bits)) & 0xFF))
+            }
+        }
+        return bytes
+    }
 }

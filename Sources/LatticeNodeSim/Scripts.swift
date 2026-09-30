@@ -211,7 +211,7 @@ public struct Liar: SimScript {
         guard case .getHeaders(let request) = message else { return [] }
         let chain = bestChain(of: world.released(world.honest, at: now), genesis: world.genesis)
         var entries = page(of: chain, after: request.locator, limit: pageSize).blocks.map(entry)
-        var lie = Lie.allCases.randomElement(using: &rng)!
+        var lie = Lie.allCases[rng.draw(0...Lie.allCases.count - 1)]
         if entries.isEmpty || (lie == .brokenChain && entries.count < 3) {
             lie = .failedProofOfWork
         }

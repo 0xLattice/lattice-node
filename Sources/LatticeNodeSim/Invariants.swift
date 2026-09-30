@@ -108,10 +108,15 @@ public enum Invariants {
         digest: TreeDigest,
         previous: TreeDigest?,
         store: SimStore,
+        world: World,
+        flipTieBreak: Bool = false,
         treeChanged: Bool = true
     ) throws {
         if treeChanged {
-            try checkTree(node: node, core: core, digest: digest, previous: previous, store: store)
+            try checkTree(
+                node: node, core: core, digest: digest, previous: previous,
+                store: store, world: world, flipTieBreak: flipTieBreak
+            )
         }
 
         // The act-on tip is the deepest executed block on the best chain.
@@ -134,15 +139,35 @@ public enum Invariants {
         core: Core,
         digest: TreeDigest,
         previous: TreeDigest?,
-        store: SimStore
+        store: SimStore,
+        world: World,
+        flipTieBreak: Bool
     ) throws {
+        // The weighed graph is exactly the headers this node made durable, and
+        // each of them has a durable block fact.
+        guard Set(digest.blocks.keys) == Set(store.headers.keys) else {
+            throw fail(node, "the weighed graph is not the set of durable headers")
+        }
+        if let missing = digest.blocks.keys.first(where: { !store.blockFacts.contains($0) }) {
+            throw fail(node, "weighed block \(missing) has no durable block fact")
+        }
+        // DST 4: every generated block is valid, so nothing is excluded.
+        if let excluded = digest.excluded.first {
+            throw fail(node, "valid block \(excluded) was excluded")
+        }
+
         // DST 1 / validity selects / hierarchical GHOST: the head is an
-        // independent reference's, whose weights count every block (excluded
-        // ones too) and each grind once, and whose descent skips excluded roots.
-        var reference = GhostReference(genesis: digest.genesis)
-        reference.excluded = digest.excluded
-        for (hash, entry) in digest.blocks.sorted(by: { $0.key < $1.key }) {
-            reference.add(hash, parent: entry.parent, grinds: entry.grinds)
+        // independent reference's, built from the generator's ground truth
+        // (each held block's true parent and the work its target implies),
+        // never from what the tree reports.
+        var reference = GhostReference(genesis: world.genesis.cid)
+        reference.flipTieBreak = flipTieBreak
+        reference.add(world.genesis.cid, parent: nil, work: workForTarget(world.genesis.block.target))
+        for hash in store.headers.keys.sorted() where hash != world.genesis.cid {
+            guard let truth = world.blocks[hash] else {
+                throw fail(node, "weighed block \(hash) was never generated")
+            }
+            reference.add(hash, parent: truth.parent, work: workForTarget(truth.block.target))
         }
         let descent = reference.descent()
         guard descent.head == digest.canonicalTip, descent.path == digest.canonicalPath else {

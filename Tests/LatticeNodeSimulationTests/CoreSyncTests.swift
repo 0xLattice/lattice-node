@@ -177,7 +177,8 @@ final class CoreSyncTests: XCTestCase {
             request = try XCTUnwrap(requests(effects).first)
         }
         func serve(_ locator: [String]) -> [Effect] {
-            core.step(.received(peer, .getHeaders(HeadersRequest(requestID: 42, locator: locator))), now: Self.now)
+            defer { _ = core.step(.headersServed(peer), now: Self.now) }
+            return core.step(.received(peer, .getHeaders(HeadersRequest(requestID: 42, locator: locator))), now: Self.now)
         }
         guard case .serveHeaders(_, 42, let cids, let hasMore) = serve([chain[2].cid, world.genesis.cid]).first else {
             return XCTFail("no page")
@@ -193,37 +194,161 @@ final class CoreSyncTests: XCTestCase {
         XCTAssertEqual(disconnects(serve(tooLong)), [.malformed])
     }
 
-    func testAnOmittedChildIndexIsFetchedByCIDAndVerified() throws {
+    private func ready(_ core: inout Core, _ peer: PeerID, at now: Int64 = CoreSyncTests.now) throws -> HeadersRequest {
+        try XCTUnwrap(requests(core.step(.peerReady(peer), now: now)).first)
+    }
+
+    private func answer(
+        _ core: inout Core,
+        _ peer: PeerID,
+        _ request: HeadersRequest,
+        _ entries: [HeaderEntry],
+        at now: Int64 = CoreSyncTests.now
+    ) -> [Effect] {
+        core.step(.received(peer, .headers(HeadersResponse(
+            requestID: request.requestID, entries: entries, hasMore: false
+        ))), now: now)
+    }
+
+    private func fetches(_ effects: [Effect]) -> [String] {
+        effects.compactMap {
+            if case .fetchByCID(_, let cid) = $0 { return cid }
+            return nil
+        }
+    }
+
+    func testAChildIndexTheTreeAlreadyCommitsIsReusedWithoutAFetch() throws {
+        var core = core()
+        let request = try ready(&core)
+        let effects = answer(&core, request, [HeaderEntry(block: chain[0].block, children: nil)])
+        XCTAssertTrue(fetches(effects).isEmpty)
+        XCTAssertTrue(core.tree.contains(blockHash: chain[0].cid))
+    }
+
+    func testAnOmittedChildIndexIsFetchedByCIDAndVerified() async throws {
+        let carriers = try await world.carriers(count: 1)
+        let carrier = try XCTUnwrap(carriers.first)
         for honest in [false, true] {
             var core = core()
             let request = try ready(&core)
-            let page = [HeaderEntry(block: chain[0].block, children: nil)]
-            let effects = answer(&core, request, page)
-            let cid = chain[0].block.children.rawCID
-            XCTAssertTrue(effects.contains {
-                if case .fetchByCID(peer, cid) = $0 { return true }
-                return false
-            })
-            let bytes = honest ? chain[0].children : ChildIndex(entries: ["Liar": try BlockHeader(node: world.genesis.block)])
+            let effects = answer(&core, request, [HeaderEntry(block: carrier.block, children: nil)])
+            let cid = carrier.block.children.rawCID
+            XCTAssertEqual(fetches(effects), [cid])
+            let bytes = honest ? carrier.children : ChildIndex(entries: ["Liar": try BlockHeader(node: world.genesis.block)])
             let fetched = core.step(.childIndexFetched(peer, cid: cid, bytes), now: Self.now)
             if honest {
-                XCTAssertTrue(core.tree.contains(blockHash: chain[0].cid))
+                XCTAssertTrue(core.tree.contains(blockHash: carrier.cid))
                 guard case .persist = fetched.first else { return XCTFail("\(fetched)") }
-                XCTAssertEqual(requests(fetched).first?.locator.first, chain[0].cid)
+                XCTAssertEqual(requests(fetched).first?.locator.first, carrier.cid)
             } else {
                 XCTAssertEqual(disconnects(fetched), [.malformed])
-                XCTAssertFalse(core.tree.contains(blockHash: chain[0].cid))
+                XCTAssertFalse(core.tree.contains(blockHash: carrier.cid))
             }
         }
     }
 
-    func testAMissingChildIndexIsAvailabilityNotBlame() throws {
+    func testAMissingChildIndexIsAvailabilityNotBlame() async throws {
+        let carriers = try await world.carriers(count: 1)
+        let carrier = try XCTUnwrap(carriers.first)
         var core = core()
         let request = try ready(&core)
-        _ = answer(&core, request, [HeaderEntry(block: chain[0].block, children: nil)])
-        let effects = core.step(.childIndexFetched(peer, cid: chain[0].block.children.rawCID, nil), now: Self.now)
+        _ = answer(&core, request, [HeaderEntry(block: carrier.block, children: nil)])
+        let effects = core.step(.childIndexFetched(peer, cid: carrier.block.children.rawCID, nil), now: Self.now)
         XCTAssertTrue(disconnects(effects).isEmpty)
         XCTAssertNotNil(core.sync.peers[peer])
+    }
+
+    func testNonConnectingHeadersWithoutChildrenStillCountAgainstThePeer() throws {
+        var core = core()
+        var request = try ready(&core)
+        let orphan = try XCTUnwrap(world.blocks[world.orphan])
+        let page = [HeaderEntry(block: orphan.block, children: nil)]
+        for _ in 1..<core.config.maxUnconnectingHeaders {
+            let effects = answer(&core, request, page)
+            XCTAssertTrue(fetches(effects).isEmpty, "no fetch for a header that does not connect")
+            request = try XCTUnwrap(requests(effects).first)
+        }
+        XCTAssertEqual(disconnects(answer(&core, request, page)), [.malformed])
+        XCTAssertTrue(core.sync.awaitingChildIndex.isEmpty)
+    }
+
+    func testAHeaderFailingProofOfWorkCostsNoFetch() async throws {
+        let carriers = try await world.carriers(count: 1)
+        let carrier = try XCTUnwrap(carriers.first)
+        var nonce = carrier.block.nonce &+ 1
+        while ChainTree.rootWork(of: replacing(carrier.block, nonce: nonce)) != nil { nonce &+= 1 }
+        var core = core()
+        let request = try ready(&core)
+        let effects = answer(&core, request, [HeaderEntry(block: replacing(carrier.block, nonce: nonce), children: nil)])
+        XCTAssertTrue(fetches(effects).isEmpty)
+        XCTAssertEqual(disconnects(effects), [.malformed])
+    }
+
+    /// 64 sybils fill every child-index wait with fetches they never answer;
+    /// an honest peer's page is re-asked once those waits expire, not dropped.
+    func testSixtyFourSybilsCannotStallHonestSync() async throws {
+        let carriers = try await world.carriers(count: 65)
+        var core = core()
+        XCTAssertEqual(core.config.maxAwaitingChildIndex, 64)
+        for index in 0..<64 {
+            let sybil = PeerID(key: "sybil\(index)", session: 1)
+            let request = try ready(&core, sybil)
+            let effects = answer(&core, sybil, request, [HeaderEntry(block: carriers[index].block, children: nil)])
+            XCTAssertEqual(fetches(effects).count, 1)
+        }
+        XCTAssertEqual(core.sync.awaitingChildIndex.count, 64)
+
+        let honest = carriers[64]
+        let request = try ready(&core, peer)
+        var effects = answer(&core, peer, request, [HeaderEntry(block: honest.block, children: nil)])
+        XCTAssertTrue(fetches(effects).isEmpty, "every wait is taken")
+        let retry = try XCTUnwrap(core.sync.peers[peer]?.retryAt)
+        XCTAssertEqual(retry, Self.now + core.config.headersTimeout)
+
+        effects = core.step(.tick, now: retry)
+        XCTAssertTrue(effects.contains {
+            if case .send(peer, .getHeaders) = $0 { return true }
+            return false
+        }, "the honest peer is asked again")
+        XCTAssertTrue(core.sync.awaitingChildIndex.isEmpty, "the sybils' waits expired")
+        let honestRequest = try XCTUnwrap(core.sync.peers[peer]?.inFlight?.requestID)
+        effects = core.step(.received(peer, .headers(HeadersResponse(
+            requestID: honestRequest, entries: [HeaderEntry(block: honest.block, children: nil)], hasMore: false
+        ))), now: retry)
+        XCTAssertEqual(fetches(effects), [honest.block.children.rawCID])
+        _ = core.step(.childIndexFetched(peer, cid: honest.block.children.rawCID, honest.children), now: retry)
+        XCTAssertTrue(core.tree.contains(blockHash: honest.cid))
+    }
+
+    func testAHeaderFromTheFutureIsAskedAgainAtItsTimestamp() throws {
+        var core = core()
+        let early = chain[0].block.timestamp - 500
+        let request = try ready(&core, peer, at: early)
+        let effects = answer(&core, peer, request, entries(chain[0..<1]), at: early)
+        XCTAssertFalse(core.tree.contains(blockHash: chain[0].cid))
+        XCTAssertTrue(disconnects(effects).isEmpty)
+        guard case .wakeAt(let wake) = effects.last else { return XCTFail("\(effects)") }
+        XCTAssertEqual(wake, chain[0].block.timestamp)
+        let again = try XCTUnwrap(requests(core.step(.tick, now: wake)).first)
+        _ = answer(&core, peer, again, entries(chain[0..<1]), at: wake)
+        XCTAssertTrue(core.tree.contains(blockHash: chain[0].cid))
+    }
+
+    func testOnlyOneServedPagePerPeerIsOutstanding() throws {
+        var core = core()
+        _ = try ready(&core)
+        func ask(_ id: UInt64) -> [Effect] {
+            core.step(.received(peer, .getHeaders(HeadersRequest(requestID: id, locator: [world.genesis.cid]))), now: Self.now)
+        }
+        func served(_ effects: [Effect]) -> Bool {
+            effects.contains { if case .serveHeaders = $0 { true } else { false } }
+        }
+        XCTAssertTrue(served(ask(1)))
+        let extra = ask(2)
+        XCTAssertFalse(served(extra), "a second request while one is outstanding is dropped")
+        XCTAssertTrue(disconnects(extra).isEmpty, "and never blamed")
+        _ = core.step(.headersServed(peer), now: Self.now)
+        XCTAssertTrue(served(ask(3)))
     }
 
     private func replacing(_ block: Block, nonce: UInt64) -> Block {

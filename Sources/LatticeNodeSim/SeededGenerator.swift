@@ -17,6 +17,31 @@ public struct SplitMix64: RandomNumberGenerator, Sendable {
         z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
         return z ^ (z >> 31)
     }
+
+    // Draws by explicit arithmetic on `next()`, never the standard library's
+    // `random(in:using:)`, whose algorithm may change between Swift versions:
+    // a seed must replay the same run on every toolchain.
+
+    /// A value in `range` (modulo draw; the bias is irrelevant here).
+    public mutating func draw(_ range: ClosedRange<Int64>) -> Int64 {
+        let span = UInt64(bitPattern: range.upperBound &- range.lowerBound) &+ 1
+        let offset = span == 0 ? next() : next() % span
+        return range.lowerBound &+ Int64(bitPattern: offset)
+    }
+
+    public mutating func draw(_ range: ClosedRange<Int>) -> Int {
+        Int(draw(Int64(range.lowerBound)...Int64(range.upperBound)))
+    }
+
+    /// A uniform value in [0, 1) from the top 53 bits.
+    public mutating func unit() -> Double {
+        Double(next() >> 11) * 0x1p-53
+    }
+
+    /// True with probability `probability`.
+    public mutating func chance(_ probability: Double) -> Bool {
+        unit() < probability
+    }
 }
 
 /// The seed a seeded test starts from: `LATTICE_TEST_SEED` (decimal, or hex
