@@ -141,10 +141,14 @@ public enum LevelInvariants {
         if path.count > 1, let facts = host.parentFacts(for: path) {
             let parentPath = Array(path.dropLast())
             for hash in digest.executed where digest.blocks[hash]?.height != 0 {
+                // A block committing no parent state (`emptyHeader`) needs no
+                // fact, as in Lattice's `validateParentFacts`.
+                let parentState = truth[hash]!.block.parentState.rawCID
+                guard parentState != LatticeState.emptyHeader.rawCID else { continue }
                 let link = ParentStateContinuityLink(
                     parentPath: parentPath,
                     fromStateCID: LatticeState.emptyHeader.rawCID,
-                    toStateCID: truth[hash]!.block.parentState.rawCID
+                    toStateCID: parentState
                 )
                 guard facts.hasContinuity(link) else {
                     throw fail("executed \(hash) has no executed parent block producing its parent state")
@@ -247,7 +251,8 @@ public enum LevelInvariants {
     public static func checkQuietPoint(
         _ cores: [String: (host: HostCore, digests: [ChainPath: TreeDigest])],
         world: LevelWorld,
-        now: Int64
+        now: Int64,
+        withheldShown: Bool
     ) throws {
         let names = cores.keys.sorted()
         guard let first = names.first else { return }
@@ -255,7 +260,7 @@ public enum LevelInvariants {
             guard let reference = cores[first]?.digests[path] else {
                 throw Invariants.fail(first, "never ran level \(path)")
             }
-            let public_ = world.released(path, at: now, withheld: true).filter {
+            let public_ = world.released(path, at: now, withheld: withheldShown).filter {
                 path.count == 1 || !world.publicProofs(path, $0.cid, at: now).isEmpty
             }
             for name in names {
@@ -263,10 +268,30 @@ public enum LevelInvariants {
                     throw Invariants.fail(name, "never ran level \(path) after the quiet point")
                 }
                 if let missing = public_.first(where: { digest.blocks[$0.cid] == nil }) {
-                    throw Invariants.fail(name, "misses \(missing.cid) at \(path) after the quiet point")
+                    let pending = host.levels[path]?.sync.pending.entries[missing.cid]
+                    let detail = "height \(missing.height), parent held \(missing.parent.map { digest.blocks[$0] != nil } ?? true), "
+                        + "pending \(pending != nil) with \(pending?.evidence.count ?? 0) grinds and children \(pending?.children != nil), "
+                        + "withheld \(world.isWithheld(path, missing.cid)), level hosts \(host.levels[path] != nil)"
+                    throw Invariants.fail(name, "misses \(missing.cid) at \(path) after the quiet point: \(detail)")
                 }
                 guard digest.blocks == reference.blocks, digest.excluded == reference.excluded else {
-                    throw Invariants.fail(name, "weighs a different graph at \(path) than \(first) after the quiet point")
+                    let differing = Set(digest.blocks.keys).union(reference.blocks.keys)
+                        .filter { digest.blocks[$0] != reference.blocks[$0] }.sorted()
+                    let root = differing.filter {
+                        digest.blocks[$0]?.grinds != reference.blocks[$0]?.grinds || digest.blocks[$0] == nil || reference.blocks[$0] == nil
+                    }
+                    let detail = "\(differing.count) differ, \(root.count) in grinds or presence; " + (root.isEmpty ? differing : root).prefix(3).map { cid in
+                        let mine = digest.blocks[cid], theirs = reference.blocks[cid]
+                        let ids = Set(mine?.grinds.keys.map { $0 } ?? []).union(theirs?.grinds.keys.map { $0 } ?? [])
+                        let odd = ids.filter { mine?.grinds[$0] != theirs?.grinds[$0] }
+                        let kinds = odd.map {
+                            (world.proofs[path]?[cid]?[$0] != nil ? "proof " : "run ")
+                                + "\(String(describing: mine?.grinds[$0])) vs \(String(describing: theirs?.grinds[$0]))"
+                        }.sorted()
+                        return "\(cid) h\(mine?.height ?? 0): odd grinds \(kinds), grinds \(mine?.grinds.keys.sorted() ?? []) vs \(theirs?.grinds.keys.sorted() ?? []), "
+                            + "subtree \(String(describing: mine?.subtreeWork)) vs \(String(describing: theirs?.subtreeWork))"
+                    }.joined(separator: "; ")
+                    throw Invariants.fail(name, "weighs a different graph at \(path) than \(first) after the quiet point: \(detail)")
                 }
                 guard digest.executed == reference.executed, digest.canonicalTip == reference.canonicalTip else {
                     throw Invariants.fail(name, "executes or selects differently at \(path) than \(first)")

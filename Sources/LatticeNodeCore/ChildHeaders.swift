@@ -17,17 +17,18 @@ public struct ProofKey: Hashable, Comparable, Sendable {
 }
 
 /// One proof check the shell runs off the step: `verifySecuringWork` of
-/// `proof` for `block` on the level's chain. Pure over its inputs, so its
-/// answer is never stale.
+/// `proof` for the block on the level's chain. Pure over its inputs, so its
+/// answer is never stale. `block` is nil for a weighed block: the shell
+/// reads it from its store, as it does to serve it.
 public struct ProofJob: Sendable {
     public let childCID: String
-    public let block: Block
+    public let block: Block?
     public let proof: ChildBlockProof
     public let chainPath: [String]
 
     public var key: ProofKey { ProofKey(childCID: childCID, rootCID: proof.rootCID) }
 
-    public func run() async -> Result<VerifiedChildEvidence, ChildProofVerificationFailure> {
+    public func run(_ block: Block) async -> Result<VerifiedChildEvidence, ChildProofVerificationFailure> {
         await proof.verifySecuringWork(child: block, chainPath: chainPath)
     }
 }
@@ -45,7 +46,7 @@ extension Core {
 
     /// Verify the proofs a header came with: one job per root that is neither
     /// credited nor in flight, within the per-header and in-flight bounds.
-    mutating func offerProofs(_ proofs: [ChildBlockProof], for block: Block, cid: String, _ turn: inout Turn) {
+    mutating func offerProofs(_ proofs: [ChildBlockProof], for block: Block?, cid: String, _ turn: inout Turn) {
         var roots = Set<String>()
         for proof in proofs.prefix(config.maxProofsPerHeader) where roots.insert(proof.rootCID).inserted {
             let job = ProofJob(childCID: cid, block: block, proof: proof, chainPath: chainPath)
@@ -62,10 +63,13 @@ extension Core {
         tree.getConsensusBlock(hash: cid)?.workContributions[grind] != nil
     }
 
-    /// The evidence index's proofs for a header still waiting.
+    /// The evidence index's proofs for a waiting or weighed header.
     mutating func proofsFound(_ proofs: [ChildBlockProof], for cid: String, _ turn: inout Turn) {
-        guard let header = sync.pending.entries[cid] else { return }
-        offerProofs(proofs, for: header.block, cid: cid, &turn)
+        if let header = sync.pending.entries[cid] {
+            offerProofs(proofs, for: header.block, cid: cid, &turn)
+        } else if tree.contains(blockHash: cid) {
+            offerProofs(proofs, for: nil, cid: cid, &turn)
+        }
     }
 
     /// A proof that weighs credits its grind: on a weighed block at once (its
@@ -84,7 +88,9 @@ extension Core {
             guard case .applied(let update) = tree.addWork(work, to: job.childCID) else { return }
             turn.facts += update.batches
             turn.indexed.append((job.childCID, job.proof))
-            turn.relays.append((HeaderEntry(block: job.block, children: nil, proofs: [job.proof]), from: nil))
+            if let block = job.block {
+                turn.relays.append((HeaderEntry(block: block, children: nil, proofs: [job.proof]), from: nil))
+            }
         } else if let header = sync.pending.entries[job.childCID], header.evidence[evidence.grindID] == nil {
             let size = (try? job.proof.serialize().count) ?? 0
             sync.pending.entries[job.childCID]?.evidence[evidence.grindID] = evidence
@@ -96,22 +102,29 @@ extension Core {
         }
     }
 
-    mutating func evidenceChanged() {
-        for cid in sync.pending.entries.keys {
-            sync.pending.entries[cid]?.lookedUp = false
+    mutating func evidenceChanged(_ cids: [String], _ turn: inout Turn) {
+        var held: [String] = []
+        for cid in Set(cids).sorted() {
+            if sync.pending.entries[cid] != nil {
+                sync.pending.entries[cid]?.lookedUp = false
+            } else if tree.contains(blockHash: cid) {
+                held.append(cid)
+            }
         }
+        if !held.isEmpty { turn.effects.append(.lookupProofs(held)) }
     }
 
-    /// Ask the evidence index, once per index change, for every waiting
-    /// header with no proof in hand or in flight: one batch per step.
+    /// Ask the evidence index, in one batch per step, for the other grinds of
+    /// every header this step weighed, and — once per index change — for
+    /// every waiting header with no proof in hand or in flight.
     mutating func requestProofs(_ turn: inout Turn) {
         let inFlight = Set(sync.verifying.map(\.childCID))
-        let wanted = sync.pending.entries.values
+        let waiting = sync.pending.entries.values
             .filter { $0.evidence.isEmpty && !$0.lookedUp && !inFlight.contains($0.blockCID) }
             .map(\.blockCID)
-            .sorted()
+        for cid in waiting { sync.pending.entries[cid]?.lookedUp = true }
+        let wanted = Set(waiting + turn.headers.map(\.blockCID)).sorted()
         guard !wanted.isEmpty else { return }
-        for cid in wanted { sync.pending.entries[cid]?.lookedUp = true }
         turn.effects.append(.lookupProofs(wanted))
     }
 
@@ -185,6 +198,7 @@ extension Core {
             from: nil
         ))
         advance(&turn)
+        if !isRoot { requestProofs(&turn) }
         return finish(turn)
     }
 

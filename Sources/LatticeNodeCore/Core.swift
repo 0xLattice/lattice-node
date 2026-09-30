@@ -19,9 +19,10 @@ public enum Event: Sendable {
     case proofsFound(childCID: String, [ChildBlockProof])
     /// A child level: a `verifyProof` job finished.
     case proofVerified(ProofJob, Result<VerifiedChildEvidence, ChildProofVerificationFailure>)
-    /// A child level: the evidence index changed, so what still waits for a
-    /// proof is looked up again.
-    case evidenceChanged
+    /// A child level: the evidence index's proofs changed for these blocks,
+    /// so they are looked up again: a waiting header's, and a weighed one's
+    /// (another host's grind at a block this node holds).
+    case evidenceChanged(childCIDs: [String])
 }
 
 public enum DisconnectReason: Sendable, Equatable {
@@ -202,8 +203,8 @@ public struct Core: Sendable {
             proofsFound(proofs, for: cid, &turn)
         case .proofVerified(let job, let result):
             proofVerified(job, result, &turn)
-        case .evidenceChanged:
-            evidenceChanged()
+        case .evidenceChanged(let cids):
+            evidenceChanged(cids, &turn)
         }
         advance(&turn)
         if !isRoot { requestProofs(&turn) }

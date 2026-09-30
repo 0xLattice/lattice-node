@@ -241,7 +241,8 @@ public struct LevelSimulator {
             report.digests[name] = node.digests
         }
         try LevelInvariants.checkQuietPoint(
-            cores.mapValues { ($0.core, $0.digests) }, world: world, now: now
+            cores.mapValues { ($0.core, $0.digests) }, world: world, now: now,
+            withheldShown: config.withholder
         )
         return report
     }
@@ -322,7 +323,13 @@ public struct LevelSimulator {
         case .execute(let path, let cid):
             try await execute(cid, at: path, on: node)
         case .mine(let position):
-            try await step(node, .mined(world.grinds[position].mined))
+            // The miner hands its grind to its node and publishes its proofs
+            // to the evidence index, whatever levels that node runs yet.
+            let grind = world.grinds[position]
+            try await step(node, .mined(grind.mined))
+            for carried in grind.mined.carried {
+                publish(carried.proof, for: WorldCID.of(carried.evidence), at: carried.path)
+            }
         case .publishProofs(let position):
             for carried in world.grinds[position].mined.carried {
                 publish(carried.proof, for: WorldCID.of(carried.evidence), at: carried.path)
@@ -367,7 +374,7 @@ public struct LevelSimulator {
     mutating func publish(_ proof: ChildBlockProof, for cid: String, at path: ChainPath) {
         guard index[path, default: [:]][cid, default: [:]].updateValue(proof, forKey: proof.rootCID) == nil else { return }
         for name in cores.keys.sorted() {
-            schedule(at: delay(), to: name, .host(.level(path, .evidenceChanged)))
+            schedule(at: delay(), to: name, .host(.level(path, .evidenceChanged(childCIDs: [cid]))))
         }
     }
 
@@ -532,7 +539,10 @@ public struct LevelSimulator {
             }
         case .verifyProof(let job):
             report.verifications += 1
-            let result = await job.run()
+            guard let block = job.block ?? node.store.levels[path]?.headers[job.childCID]?.block else {
+                throw Invariants.fail(name, "asked to verify a proof of \(job.childCID), which it does not hold")
+            }
+            let result = await job.run(block)
             schedule(at: delay(), to: name, .host(.level(path, .proofVerified(job, result))))
         case .indexProof(let cid, let proof):
             node.store.index(proof, for: cid, at: path)

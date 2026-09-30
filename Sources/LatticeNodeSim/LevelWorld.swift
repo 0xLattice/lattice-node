@@ -229,7 +229,11 @@ public struct LevelWorld: Sendable {
         }
 
         func store(_ block: Block, releaseAt: Int64, anchor: DifficultyAnchor?) async throws -> SimBlock {
-            try await BlockHeader(node: block).storeRecursively(storer: cas as any VolumeStorer)
+            // The block's transactions (World.record stores its own Volume,
+            // spec and post-state).
+            if block.transactions.node != nil {
+                try await block.transactions.storeRecursively(storer: cas)
+            }
             return try await World.record(block, releaseAt: releaseAt, anchor: anchor, in: cas)
         }
 
