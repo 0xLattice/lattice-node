@@ -120,7 +120,7 @@ enum ChildEvidenceIndex {
     /// `localRoot` lacks: for every `wanted` key, and for every key the
     /// local index holds. Subtrees whose CIDs match are skipped, and keys
     /// only the peer holds are never descended into; where the two radix
-    /// shapes disagree, the local keys below are looked up one by one.
+    /// shapes compress differently, the walk aligns their labels.
     static func missingEntries(
         peerRoot: String,
         localRoot: String?,
@@ -128,7 +128,6 @@ enum ChildEvidenceIndex {
         peer: any Fetcher,
         local: any Fetcher
     ) async throws -> [Entry] {
-        var lookups = Set(wanted)
         var differing: [(key: String, peer: ProofSetVolume, local: ProofSetVolume)] = []
         if let localRoot, localRoot != peerRoot {
             let peerTrie = try await node(Root(
@@ -142,11 +141,14 @@ enum ChildEvidenceIndex {
             }) {
                 guard let peerBranch = peerTrie.children[character],
                       peerBranch.rawCID != localBranch.rawCID else { continue }
+                let peerNode = try await node(peerBranch, fetcher: peer)
+                let localNode = try await node(localBranch, fetcher: local)
                 try await compare(
-                    peerBranch, localBranch,
+                    peerNode, peerNode.prefix[...],
+                    localNode, localNode.prefix[...],
                     path: "",
                     peer: peer, local: local,
-                    differing: &differing, lookups: &lookups
+                    differing: &differing
                 )
             }
         }
@@ -165,7 +167,7 @@ enum ChildEvidenceIndex {
                 ))
             }
         }
-        let keys = lookups.sorted()
+        let keys = Array(Set(wanted)).sorted()
         let peerEntries = try await entries(for: keys, root: peerRoot, fetcher: peer)
         var localEntries: [String: [String: String]] = [:]
         if let localRoot {
@@ -186,18 +188,30 @@ enum ChildEvidenceIndex {
         }
     }
 
-    /// The package a fetched proof Volume carries for `entry`, or nil when
-    /// its bytes do not: the Volume is `entry.attachmentCID` bound to
-    /// `entry.childCID`, its envelope decodes within `maximumEncodedSize`,
-    /// and its proof is the grind `entry.rootCID` for that child. A proof
-    /// `weighs` reports as contributing no work is refused too: an honest
-    /// index holds none. Depends on the bytes (and the held child) alone.
-    nonisolated static func verified(
+    /// What a fetched proof Volume is worth for `entry`.
+    enum Verdict {
+        /// The Volume carries this package for `entry`.
+        case valid(ChildValidationPackage)
+        /// Refused by this node's own policy (the witness-size limit):
+        /// never the peer's fault.
+        case skipped
+        /// The bytes do not carry a proof `entry` names, or the held child
+        /// shows the proof contributes no work: an honest index holds none.
+        case invalid
+    }
+
+    /// Judges a fetched proof Volume for `entry`: the Volume is
+    /// `entry.attachmentCID` bound to `entry.childCID`, its envelope decodes
+    /// within the protocol cap, and its proof is the grind `entry.rootCID`
+    /// for that child. `weighs` is nil when the child is not held, so only
+    /// a held block's proof is judged on its work. Depends on the bytes
+    /// (and the held child) alone, except the local size limit.
+    nonisolated static func verdict(
         _ serialized: SerializedVolume?,
         entry: Entry,
         maximumEncodedSize: Int,
         weighs: @Sendable (ChildBlockProof, String) async -> Bool?
-    ) async -> ChildValidationPackage? {
+    ) async -> Verdict {
         guard let serialized,
               serialized.root == entry.attachmentCID,
               let volume = try? ChildEvidenceVolume(
@@ -205,17 +219,21 @@ enum ChildEvidenceIndex {
                 childCID: entry.childCID
               ),
               let envelope = try? ChildValidationPackageEnvelope.decode(
-                volume.envelopeBytes,
-                maximumEncodedSize: maximumEncodedSize
+                volume.envelopeBytes
               ),
               let package = try? envelope.makeValidationPackage(),
               package.proof.rootCID == entry.rootCID,
               let edge = await DirectChildEdge.derive(from: package.proof),
-              edge.childCID == entry.childCID,
-              await weighs(package.proof, entry.childCID) != false else {
-            return nil
+              edge.childCID == entry.childCID else {
+            return .invalid
         }
-        return package
+        guard volume.envelopeBytes.count <= maximumEncodedSize else {
+            return .skipped
+        }
+        guard await weighs(package.proof, entry.childCID) != false else {
+            return .invalid
+        }
+        return .valid(package)
     }
 
     /// What one sync pass against a peer's root produced: the proofs that
@@ -248,8 +266,10 @@ enum ChildEvidenceIndex {
     }
 
     /// Fetches and verifies every entry `missingEntries` finds, stopping at
-    /// the first failure. Blame is the caller's: it depends on whether the
-    /// fetch was complete.
+    /// the first failure; a proof this node's own policy refuses is skipped.
+    /// A `wanted` block is not held yet: one proof for it is enough this
+    /// pass, and the rest arrive by the walk once it is admitted and indexed.
+    /// Blame is the caller's: it depends on whether the fetch was complete.
     static func collect(
         peerRoot: String,
         localRoot: String?,
@@ -275,9 +295,14 @@ enum ChildEvidenceIndex {
             collected.localFailure = await localFailures.occurred
             return collected
         }
+        let wantedKeys = Set(wanted)
+        var found = Set<String>()
         for entry in missing {
+            if wantedKeys.contains(entry.childCID), found.contains(entry.childCID) {
+                continue
+            }
             let data = try? await peer.fetch(rawCid: entry.attachmentCID)
-            guard let package = await verified(
+            switch await verdict(
                 data.map {
                     SerializedVolume(
                         root: entry.attachmentCID,
@@ -287,13 +312,36 @@ enum ChildEvidenceIndex {
                 entry: entry,
                 maximumEncodedSize: maximumEncodedSize,
                 weighs: weighs
-            ) else {
+            ) {
+            case .valid(let package):
+                collected.verified.append((entry, package))
+                found.insert(entry.childCID)
+            case .skipped:
+                continue
+            case .invalid:
                 collected.failed = true
                 return collected
             }
-            collected.verified.append((entry, package))
         }
         return collected
+    }
+
+    /// Every Volume of the index at `root` (the root, each outer node, each
+    /// ProofSet): what this node pins for its current root.
+    static func volumes(root: String, fetcher: any Fetcher) async throws -> [String] {
+        var volumes = [root]
+        let trie = try await node(
+            Root(rawCID: root, node: nil, encryptionInfo: nil),
+            fetcher: fetcher
+        )
+        var pending = Array(trie.children.values)
+        while let branch = pending.popLast() {
+            volumes.append(branch.rawCID)
+            let resolved = try await node(branch, fetcher: fetcher)
+            if let value = resolved.value { volumes.append(value.rawCID) }
+            pending.append(contentsOf: resolved.children.values)
+        }
+        return volumes
     }
 
     // MARK: - Trie helpers
@@ -335,22 +383,46 @@ enum ChildEvidenceIndex {
         return try await node(volume, fetcher: fetcher).resolveList(fetcher: fetcher)
     }
 
+    /// Compares two radix nodes whose remaining labels are `peerLabel` and
+    /// `localLabel`, both below `path`. Where one label ends first, its
+    /// node's child at the other's next character is compared against the
+    /// rest of the longer label, so reads follow only the keys both hold.
     private static func compare(
-        _ peerBranch: Branch,
-        _ localBranch: Branch,
+        _ peerNode: Branch.NodeType,
+        _ peerLabel: Substring,
+        _ localNode: Branch.NodeType,
+        _ localLabel: Substring,
         path: String,
         peer: any Fetcher,
         local: any Fetcher,
-        differing: inout [(key: String, peer: ProofSetVolume, local: ProofSetVolume)],
-        lookups: inout Set<String>
+        differing: inout [(key: String, peer: ProofSetVolume, local: ProofSetVolume)]
     ) async throws {
-        let peerNode = try await node(peerBranch, fetcher: peer)
-        let localNode = try await node(localBranch, fetcher: local)
-        guard peerNode.prefix == localNode.prefix else {
-            try await collectKeys(localNode, path: path, fetcher: local, into: &lookups)
+        let common = zip(peerLabel, localLabel).prefix { $0 == $1 }.count
+        // Labels that diverge before either ends: the key sets are disjoint.
+        guard common == min(peerLabel.count, localLabel.count) else { return }
+        if peerLabel.count > common {
+            let rest = peerLabel.dropFirst(common)
+            guard let child = localNode.children[rest.first!] else { return }
+            let childNode = try await node(child, fetcher: local)
+            try await compare(
+                peerNode, rest, childNode, childNode.prefix[...],
+                path: path + localLabel,
+                peer: peer, local: local, differing: &differing
+            )
             return
         }
-        let key = path + localNode.prefix
+        if localLabel.count > common {
+            let rest = localLabel.dropFirst(common)
+            guard let child = peerNode.children[rest.first!] else { return }
+            let childNode = try await node(child, fetcher: peer)
+            try await compare(
+                childNode, childNode.prefix[...], localNode, rest,
+                path: path + peerLabel,
+                peer: peer, local: local, differing: &differing
+            )
+            return
+        }
+        let key = path + localLabel
         if let localValue = localNode.value, let peerValue = peerNode.value,
            localValue.rawCID != peerValue.rawCID {
             differing.append((key, peerValue, localValue))
@@ -360,29 +432,13 @@ enum ChildEvidenceIndex {
         }) {
             guard let peerChild = peerNode.children[character],
                   peerChild.rawCID != localChild.rawCID else { continue }
+            let peerChildNode = try await node(peerChild, fetcher: peer)
+            let localChildNode = try await node(localChild, fetcher: local)
             try await compare(
-                peerChild, localChild,
+                peerChildNode, peerChildNode.prefix[...],
+                localChildNode, localChildNode.prefix[...],
                 path: key,
-                peer: peer, local: local,
-                differing: &differing, lookups: &lookups
-            )
-        }
-    }
-
-    private static func collectKeys(
-        _ node: Branch.NodeType,
-        path: String,
-        fetcher: any Fetcher,
-        into keys: inout Set<String>
-    ) async throws {
-        let key = path + node.prefix
-        if node.value != nil { keys.insert(key) }
-        for (_, child) in node.children {
-            try await collectKeys(
-                try await self.node(child, fetcher: fetcher),
-                path: key,
-                fetcher: fetcher,
-                into: &keys
+                peer: peer, local: local, differing: &differing
             )
         }
     }

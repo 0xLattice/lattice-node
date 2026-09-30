@@ -131,6 +131,9 @@ struct BlockFetcher {
         /// The parent fact a `.wait(.parentFact)` park waits on; nil when no
         /// parent level can answer it, so no tip change wakes it.
         var parentFact: ParentFact?
+        /// A `.wait(.evidence)` park whose block needs a child proof this
+        /// node lacks: what the child-evidence lookup searches peers for.
+        var awaitsChildProof = false
     }
 
     private struct BlockRecord {
@@ -467,6 +470,7 @@ struct BlockFetcher {
         resolution: Resolution,
         deficientProviders: Set<CandidateProvider> = [],
         parentFact: ParentFact? = nil,
+        awaitsChildProof: Bool = false,
         now: ContinuousClock.Instant = .now
     ) -> Bool {
         guard active == ticket,
@@ -477,6 +481,7 @@ struct BlockFetcher {
             return false
         }
         attempt.parentFact = parentFact
+        attempt.awaitsChildProof = awaitsChildProof
 
         for provider in deficientProviders
             where record.providers[provider.publicKey] == provider {
@@ -713,6 +718,17 @@ struct BlockFetcher {
             }
         }
         return facts
+    }
+
+    /// The blocks parked on `.wait(.evidence)` for a child proof, in key
+    /// order. A block leaves once the fetcher retries, decides or drops it.
+    func childProofWaits() -> [String] {
+        records.compactMap { blockCID, record in
+            record.attempts.values.contains {
+                guard case .waiting(.evidence, _) = $0.state else { return false }
+                return $0.awaitsChildProof
+            } ? blockCID : nil
+        }.sorted()
     }
 
     /// The parent level now holds `held`: exactly the attempts parked on

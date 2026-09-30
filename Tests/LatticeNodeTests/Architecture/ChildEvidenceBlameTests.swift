@@ -1,6 +1,7 @@
 import Foundation
 import Lattice
 import UInt256
+import VolumeBroker
 import XCTest
 import cashew
 @testable import LatticeNode
@@ -44,12 +45,13 @@ final class ChildEvidenceBlameTests: XCTestCase {
             serialized: SerializedVolume? = nil,
             weighs: Bool? = nil
         ) async -> Bool {
-            await ChildEvidenceIndex.verified(
+            if case .valid = await ChildEvidenceIndex.verdict(
                 serialized ?? fixture.volume.serialized,
                 entry: entry,
                 maximumEncodedSize: NodeResourcePolicy.default.maximumParentWitnessBytes,
                 weighs: { _, _ in weighs }
-            ) != nil
+            ) { return true }
+            return false
         }
         let accepted = await check(valid)
         XCTAssertTrue(accepted)
@@ -77,13 +79,116 @@ final class ChildEvidenceBlameTests: XCTestCase {
             attachmentCID: protocolCID("another-volume")
         ))
         XCTAssertFalse(otherVolume)
-        let unavailable = await ChildEvidenceIndex.verified(
+        let unavailable = await ChildEvidenceIndex.verdict(
             nil,
             entry: valid,
             maximumEncodedSize: NodeResourcePolicy.default.maximumParentWitnessBytes,
             weighs: { _, _ in nil }
         )
-        XCTAssertNil(unavailable)
+        guard case .invalid = unavailable else {
+            return XCTFail("unavailable bytes verified: \(unavailable)")
+        }
+    }
+
+    /// A proof only this node's own witness-size limit refuses is skipped,
+    /// never judged invalid (and so never blamed); within the limit, a proof
+    /// contributing no work to a held block is invalid.
+    func testALocalPolicyRefusalIsSkippedNotInvalid() async throws {
+        let fixture = try await proofFixture()
+        let entry = ChildEvidenceIndex.Entry(
+            childCID: fixture.childCID,
+            rootCID: fixture.proof.rootCID,
+            attachmentCID: fixture.volume.rawCID
+        )
+        let verdict = await ChildEvidenceIndex.verdict(
+            fixture.volume.serialized,
+            entry: entry,
+            maximumEncodedSize: 1,
+            weighs: { _, _ in true }
+        )
+        guard case .skipped = verdict else {
+            return XCTFail("a local size refusal was \(verdict)")
+        }
+        let carrier = await ChildEvidenceIndex.verdict(
+            fixture.volume.serialized,
+            entry: entry,
+            maximumEncodedSize: NodeResourcePolicy.default.maximumParentWitnessBytes,
+            weighs: { _, _ in false }
+        )
+        guard case .invalid = carrier else {
+            return XCTFail("a proof contributing no work was \(carrier)")
+        }
+    }
+
+    /// A peer whose index holds many proofs for a block this node does not
+    /// hold yet: one pass admits one of them, and the rest wait for the walk
+    /// once the block is held and indexed.
+    func testAnUnheldBlockAdmitsAtMostOneProofPerPass() async throws {
+        let (childCID, proofs) = try await grinds(6)
+        let broker = MemoryBroker()
+        var entries: [ChildEvidenceIndex.Entry] = []
+        for proof in proofs {
+            let volume = try ChildEvidenceVolume(
+                envelopeBytes: try ChildValidationPackageEnvelope(
+                    ChildValidationPackage(proof: proof)
+                ).encode(),
+                childCID: childCID
+            )
+            try await volume.store(storer: broker)
+            entries.append(ChildEvidenceIndex.Entry(
+                childCID: childCID,
+                rootCID: proof.rootCID,
+                attachmentCID: volume.rawCID
+            ))
+        }
+        let update = try await ChildEvidenceIndex.inserting(
+            entries, into: nil, fetcher: broker, storer: broker
+        )
+        let root = try XCTUnwrap(update).root
+        let collected = await ChildEvidenceIndex.collect(
+            peerRoot: root,
+            localRoot: nil,
+            wanted: [childCID],
+            peer: broker,
+            local: broker,
+            maximumEncodedSize: NodeResourcePolicy.default.maximumParentWitnessBytes,
+            weighs: { _, _ in nil }
+        )
+        XCTAssertFalse(collected.failed)
+        XCTAssertEqual(collected.verified.count, 1)
+    }
+
+    /// `count` distinct grinds proving one child block.
+    private func grinds(_ count: Int) async throws -> (String, [ChildBlockProof]) {
+        let content = InMemoryContentStore()
+        try await LatticeState.emptyHeader.storeRecursively(
+            storer: content as any Storer
+        )
+        let leaf = try await BlockBuilder.buildChildGenesis(
+            spec: NexusGenesis.spec,
+            parentState: LatticeState.emptyHeader,
+            timestamp: 1,
+            target: UInt256.max,
+            fetcher: content
+        )
+        var proofs: [ChildBlockProof] = []
+        for timestamp in 0..<count {
+            let root = try await BlockBuilder.buildGenesis(
+                spec: NexusGenesis.spec,
+                children: ["Leaf": leaf],
+                timestamp: Int64(2 + timestamp),
+                target: UInt256.max,
+                fetcher: content
+            )
+            let rootHeader = try BlockHeader(node: root)
+            try await rootHeader.storeRecursively(storer: content as any Storer)
+            proofs.append(try await ChildBlockProof.generate(
+                rootHeader: rootHeader,
+                childDirectory: "Leaf",
+                fetcher: content
+            ))
+        }
+        return (try BlockHeader(node: leaf).rawCID, proofs)
     }
 
     private func proofFixture() async throws -> (

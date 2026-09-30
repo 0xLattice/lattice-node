@@ -223,7 +223,7 @@ The node uses two Ivy sessions:
 Parent facts, run reports and merged-mining candidates never cross a network
 plane: they pass in-process between co-hosted levels.
 
-Both planes currently require node protocol version 6; mixed-version peers
+Both planes currently require node protocol version 5; mixed-version peers
 refuse the session. Co-hosted levels run one binary, so a hierarchy session
 never mixes versions.
 
@@ -245,12 +245,14 @@ pushes its root (`lattice.overlay.child-evidence.root.v1`, one CID) when a
 session becomes ready and whenever the root changes; the receiver keeps each
 peer's latest root. One serial worker then reads peers' roots as ordinary
 Volumes through one budgeted session per peer: it looks up the blocks parked
-on a missing proof, and walks the peer's trie against its own, skipping equal
+on a missing proof (one proof each per pass; the rest arrive by the walk once
+the block is admitted and indexed), and walks the peer's trie against its own, skipping equal
 subtrees and descending only into blocks it holds, to fetch the proofs it
 lacks. Each proof fetched is admitted as a weighed package seed. A proof that
 does not bind its key and grind, or that contributes no work to a held block,
 is blamed on the sole supplier of a complete fetch, whose session is recycled
-and root dropped; content that is unavailable or incomplete is never blamed.
+and root dropped; content that is unavailable or incomplete, or that only this
+node's own witness-size limit refuses, is never blamed.
 
 Peer content exchange is Volume-native. An announcer names one complete Volume
 by its root CID and must serve that Volume from the exact authenticated session

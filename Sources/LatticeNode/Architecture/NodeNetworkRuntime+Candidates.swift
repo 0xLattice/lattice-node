@@ -198,7 +198,8 @@ extension NodeNetworkRuntime {
         _ candidate: Candidate,
         resolution: BlockFetcher.Resolution,
         deficientProviders: Set<CandidateProvider> = [],
-        parentFact: ParentFact? = nil
+        parentFact: ParentFact? = nil,
+        awaitsChildProof: Bool = false
     ) {
         syncTrace(
             "complete \(candidate.blockCID) \(resolution) "
@@ -208,7 +209,8 @@ extension NodeNetworkRuntime {
             candidate.ticket,
             resolution: resolution,
             deficientProviders: deficientProviders,
-            parentFact: parentFact
+            parentFact: parentFact,
+            awaitsChildProof: awaitsChildProof
         )
         serviceBlockFetcher()
     }
@@ -583,16 +585,14 @@ extension NodeNetworkRuntime {
         }
         // A cold-synced block arrives without the package the live path
         // carries. When it needs a child proof this node cannot recover locally
-        // (its own parent never mined the carriers), look it up in the overlay
-        // peers' child-evidence indexes; each proof found is enqueued as a
-        // package seed, so the retry admits it exactly like the live path.
+        // (its own parent never mined the carriers), it parks awaiting one and
+        // is looked up in the overlay peers' child-evidence indexes; each
+        // proof found is enqueued as a package seed, so the retry admits it
+        // exactly like the live path.
+        var awaitsChildProof = false
         if authenticatedPackage == nil,
            case .unavailable(.childProof(_, let childCID)?) = outcome.decision {
-            wantChildEvidence(
-                childCID,
-                generation: generation,
-                process: process
-            )
+            awaitsChildProof = true
             // The parent's durable index may hold it where no overlay peer
             // admitted it (a lone child, its orphan evicted or lost).
             await requestParentEvidence(
@@ -631,8 +631,12 @@ extension NodeNetworkRuntime {
             candidate,
             resolution: resolution,
             deficientProviders: failedOverlayProviders,
-            parentFact: parentFact
+            parentFact: parentFact,
+            awaitsChildProof: awaitsChildProof
         )
+        if awaitsChildProof {
+            wantChildEvidence(generation: generation, process: process)
+        }
         if let parentFactPackage {
             reReadyCandidates([CandidateSeed(
                 blockCID: candidate.blockCID,

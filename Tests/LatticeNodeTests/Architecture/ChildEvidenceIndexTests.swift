@@ -410,9 +410,9 @@ final class ChildEvidenceIndexWalkTests: XCTestCase {
             }
             root = update.root
             let pinned = Set(await broker.pinnedRoots(owners: [owner]))
-            let reachable = try await indexVolumes(
-                try XCTUnwrap(root), fetcher: broker
-            )
+            let reachable = Set(try await Index.volumes(
+                root: try XCTUnwrap(root), fetcher: broker
+            ))
             XCTAssertEqual(pinned, reachable, "after insert \(index)")
         }
     }
@@ -533,9 +533,9 @@ final class ChildEvidenceIndexWalkTests: XCTestCase {
         ))
     }
 
-    /// Where the two radix shapes disagree, the local keys below are looked
-    /// up by key instead of compared node by node.
-    func testRadixPrefixMismatchFallsBackToTargetedLookups() async throws {
+    /// Where the two radix shapes compress differently, the walk aligns
+    /// their labels and still finds the differing key.
+    func testRadixPrefixMismatchIsAligned() async throws {
         func raw(_ key: String, _ root: String) -> Entry {
             Entry(
                 childCID: key,
@@ -556,6 +556,36 @@ final class ChildEvidenceIndexWalkTests: XCTestCase {
             peer: await peer.source(), local: await local.source()
         )
         XCTAssertEqual(missing, [raw("k-aa", "1")])
+    }
+
+    /// A sparse peer against a dense local index: the peer's one compressed
+    /// label spans the whole local subtree, and aligning labels reads only
+    /// the local nodes on the differing key's path.
+    func testASparsePeerReadsOnlyTheDifferingLocalPath() async throws {
+        let local = VolumeRecorder()
+        let localRoot = try await build(
+            [(0..<256).map { entry("\($0)", "0") }], into: local
+        )
+        let localVolumes = try await Index.volumes(
+            root: try XCTUnwrap(localRoot), fetcher: await local.source()
+        )
+        let peer = VolumeRecorder()
+        let peerRoot = try awaitedUnwrap(try await build(
+            [[entry("7", "0"), entry("7", "1")]], into: peer
+        ))
+        let log = FetchLog()
+        let missing = try await Index.missingEntries(
+            peerRoot: peerRoot, localRoot: localRoot, wanted: [],
+            peer: await peer.source(),
+            local: CoalescingFetcher(CountingSource(
+                base: await local.source(), log: log
+            ))
+        )
+        XCTAssertEqual(missing, [entry("7", "1")])
+        let reads = Set(await log.cids)
+        XCTAssertGreaterThan(localVolumes.count, 300)
+        // The root, the outer nodes on one key's path, and its ProofSet.
+        XCTAssertLessThanOrEqual(reads.count, 12, "\(reads.count) local reads")
     }
 
     /// Nodes that pull each other's missing entries reach one root: a node
@@ -605,25 +635,46 @@ final class ChildEvidenceIndexWalkTests: XCTestCase {
         ).resolve(paths: [[key]: .targeted], fetcher: fetcher).node
         return try XCTUnwrap(try trie?.get(key: key)).rawCID
     }
-
-    /// Every Volume of the index at `root`: the root, each outer node, each
-    /// ProofSet.
-    private func indexVolumes(
-        _ root: String,
-        fetcher: any Fetcher
-    ) async throws -> Set<String> {
-        var volumes: Set<String> = [root]
-        let trie = try awaitedUnwrap(try await Index.Root(
-            rawCID: root, node: nil, encryptionInfo: nil
-        ).resolve(fetcher: fetcher).node)
-        var pending = Array(trie.children.values)
-        while let branch = pending.popLast() {
-            volumes.insert(branch.rawCID)
-            let node = try awaitedUnwrap(try await branch.resolve(fetcher: fetcher).node)
-            if let value = node.value { volumes.insert(value.rawCID) }
-            pending.append(contentsOf: node.children.values)
-        }
-        return volumes
-    }
 }
 
+/// Which peer root and which parked blocks the one serial worker serves.
+final class ChildEvidenceSyncSchedulingTests: XCTestCase {
+    private func key(_ byte: Int) throws -> PeerKey {
+        try PeerKey(String(repeating: String(format: "%02x", byte), count: 32))
+    }
+
+    /// A low-key peer that is dirty again after every pass (a partial pass,
+    /// a stream of new roots) cannot starve the other dirty peers.
+    func testARedirtyingLowKeyPeerCannotStarveTheOthers() throws {
+        let low = try key(0x01)
+        let others = try (2...5).map { try key($0) }
+        var dirty = Set([low] + others)
+        var last: PeerKey?
+        var served: [PeerKey] = []
+        for _ in 0..<(2 * (others.count + 1)) {
+            guard let next = NodeNetworkRuntime.nextChildEvidencePeer(
+                dirty: dirty, after: last
+            ) else { break }
+            served.append(next)
+            last = next
+            if next != low { dirty.remove(next) }
+        }
+        XCTAssertTrue(Set(others).isSubset(of: Set(served.prefix(others.count + 1))))
+        XCTAssertLessThanOrEqual(served.prefix(others.count + 1).filter { $0 == low }.count, 1)
+    }
+
+    /// Parked blocks are looked up in rotation, not as a sorted prefix: a
+    /// pass starts past the last block the previous pass searched.
+    func testParkedBlocksAreLookedUpInRotation() {
+        let keys = ["a", "b", "c", "d", "e"]
+        func pass(_ cursor: String?) -> [String] {
+            NodeNetworkRuntime.rotatedChildProofWaits(keys, after: cursor, limit: 2)
+        }
+        XCTAssertEqual(pass(nil), ["a", "b"])
+        XCTAssertEqual(pass("b"), ["c", "d"])
+        XCTAssertEqual(pass("d"), ["e", "a"])
+        // The cursor block was decided meanwhile: start past where it was.
+        XCTAssertEqual(pass("bb"), ["c", "d"])
+        XCTAssertEqual(pass("z"), ["a", "b"])
+    }
+}

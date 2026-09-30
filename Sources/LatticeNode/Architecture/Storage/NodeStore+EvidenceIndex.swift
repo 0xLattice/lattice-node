@@ -468,10 +468,11 @@ extension NodeStore {
 
     /// After the commit: the replaced Volumes lose their pin and are
     /// reclaimed by ordinary eviction. A peer still walking the old root
-    /// finds them unavailable and re-reads the current root.
-    func finishChildEvidenceIndex(_ update: ChildEvidenceIndex.Update?) async throws {
+    /// finds them unavailable and re-reads the current root. A pin this
+    /// fails to drop is healed at boot (`BootRecovery`).
+    func finishChildEvidenceIndex(_ update: ChildEvidenceIndex.Update?) async {
         guard let update, !update.released.isEmpty else { return }
-        try await recoveryVolumeBroker.unpinBatch(items: update.released.map {
+        try? await recoveryVolumeBroker.unpinBatch(items: update.released.map {
             (root: $0, owner: childEvidenceOwner, count: 1)
         })
     }
@@ -621,7 +622,7 @@ extension NodeStore {
             await abandonChildEvidenceIndex(indexUpdate)
             throw error
         }
-        try await finishChildEvidenceIndex(indexUpdate)
+        await finishChildEvidenceIndex(indexUpdate)
         if prepared.carrierEvidence != nil {
             await reconcileParentEvidenceInboxPruningProtection()
         }

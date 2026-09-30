@@ -134,7 +134,6 @@ extension NodeNetworkRuntime {
         }
         guard let append = parentEvidence.beginAppend(
             for: session,
-            competingOperationCount: 0,
             capacity: Self.maximumEvidenceCandidates
         ) else { return .backpressured }
         let task = Task { [weak self] in

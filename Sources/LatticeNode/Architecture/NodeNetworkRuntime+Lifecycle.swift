@@ -264,7 +264,8 @@ extension NodeNetworkRuntime {
         wakeEvidenceSlotWaiters()
         overlayState.childEvidenceSync.cancel()
         overlayState.childEvidenceAnnounce.cancel()
-        overlayState.wantedChildEvidence.removeAll()
+        overlayState.childProofLookupCursor = nil
+        overlayState.lastChildEvidencePeer = nil
         overlayState.childEvidenceAnnounceDirty = false
         overlayState.announcedChildEvidenceRoot = nil
         parentEvidence.reset()

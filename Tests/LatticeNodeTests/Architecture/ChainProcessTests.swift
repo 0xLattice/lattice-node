@@ -153,6 +153,89 @@ final class ChainProcessTests: XCTestCase {
         _ = process
     }
 
+    /// A crash between pinning an index update and committing its root, or
+    /// between the commit and releasing the replaced Volumes, leaves stray
+    /// pins: boot pins exactly the committed root's Volumes.
+    func testOpenPinsExactlyTheCommittedChildEvidenceIndex() async throws {
+        let directory = temporaryDirectory()
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let config = try configuration(path: ["Nexus"], storage: directory)
+        let owner = [config.nexusGenesisCID, config.address.key]
+            .joined(separator: ":") + ":child-evidence"
+        let broker = try DiskBroker(
+            path: directory.appendingPathComponent("volumes.db").path
+        )
+        func cid(_ seed: String) throws -> String {
+            try VolumeImpl<PublicKey>(node: PublicKey(key: seed)).rawCID
+        }
+        func entry(_ index: Int) throws -> ChildEvidenceIndex.Entry {
+            ChildEvidenceIndex.Entry(
+                childCID: try cid("child-\(index)"),
+                rootCID: try cid("root-\(index)"),
+                attachmentCID: try cid("attachment-\(index)")
+            )
+        }
+        func openStore() throws -> NodeStore {
+            try testNodeStore(
+                databasePath: directory.appendingPathComponent("state.db"),
+                nexusGenesisCID: config.nexusGenesisCID,
+                chainPath: config.chainPath,
+                issuingAuthorityKey: config.processPublicKey,
+                broker: broker
+            )
+        }
+        func prepare(_ entries: [ChildEvidenceIndex.Entry], into root: String?)
+            async throws -> ChildEvidenceIndex.Update {
+            let update = try await ChildEvidenceIndex.inserting(
+                entries, into: root, fetcher: broker, storer: broker
+            )
+            let prepared = try XCTUnwrap(update)
+            try await broker.pinBatch(roots: prepared.added, owner: owner)
+            return prepared
+        }
+        func pinned() async -> Set<String> {
+            Set(await broker.pinnedRoots(owners: [owner]))
+        }
+        func reachable(_ root: String) async throws -> Set<String> {
+            Set(try await ChildEvidenceIndex.volumes(root: root, fetcher: broker))
+        }
+        func reopen() async throws {
+            var process: ChainProcess? = try await ChainProcess.open(
+                configuration: config
+            )
+            XCTAssertNotNil(process)
+            process = nil
+        }
+
+        var store: NodeStore? = try openStore()
+        let first = try await prepare((0..<8).map(entry), into: nil)
+        try await store!.persistChildEvidenceRoot(first)
+        // Crash after pinning the next update, before its root commits.
+        _ = try await prepare([try entry(8)], into: first.root)
+        store = nil
+        var stray = await pinned()
+        var committed = try await reachable(first.root)
+        XCTAssertNotEqual(stray, committed)
+        try await reopen()
+        var recovered = await pinned()
+        XCTAssertEqual(recovered, committed)
+
+        // Crash after the commit, before the replaced Volumes are unpinned.
+        store = try openStore()
+        let second = try await prepare([try entry(9)], into: first.root)
+        try await store!.persistChildEvidenceRoot(second)
+        store = nil
+        stray = await pinned()
+        committed = try await reachable(second.root)
+        XCTAssertNotEqual(stray, committed)
+        try await reopen()
+        recovered = await pinned()
+        XCTAssertEqual(recovered, committed)
+    }
+
     /// Establishes: NODE-STORAGE-002.p
     func testOpenDropsContextualPinsLeftAfterStateEvictionCommitted()
         async throws {

@@ -250,7 +250,8 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// kept: it supersedes every earlier one), and whether it is still
         /// to be walked against ours or searched for wanted blocks.
         /// Owner: Overlay.receiveChildEvidenceRoot / Overlay.wantChildEvidence /
-        ///     Overlay.runChildEvidenceSync / Overlay.syncChildEvidence.
+        ///     Overlay.markChildEvidenceWalks / Overlay.runChildEvidenceSync /
+        ///     Overlay.syncChildEvidence.
         var evidenceRoot: PeerEvidenceRoot?
         var evidenceWalkDirty = false
         var evidenceLookupDirty = false
@@ -595,15 +596,16 @@ public actor NodeNetworkRuntime: IvyDelegate {
         /// peers it already holds.
         /// Owner: Lifecycle.clearRuntimeState / NodeNetworkRuntime.schedulePeerSearch.
         var peerSearchTask = TaskSlot()
-        /// Child blocks parked on a proof this node lacks, to be looked up
-        /// in peers' indexes.
-        /// Owner: Lifecycle.clearRuntimeState / Overlay.wantChildEvidence /
-        ///     Overlay.syncChildEvidence.
-        var wantedChildEvidence = Set<String>()
-        /// The one serial worker that looks up and walks peers' roots.
+        /// The last parked block a lookup pass searched for: the next pass
+        /// starts past it.
+        /// Owner: Lifecycle.clearRuntimeState / Overlay.syncChildEvidence.
+        var childProofLookupCursor: String?
+        /// The one serial worker that looks up and walks peers' roots, and
+        /// the peer it served last (the round-robin's position).
         /// Owner: Lifecycle.clearRuntimeState / Overlay.startChildEvidenceSync /
         ///     Overlay.runChildEvidenceSync.
         var childEvidenceSync = TaskSlot()
+        var lastChildEvidencePeer: PeerKey?
         /// Pushes this node's root when it changes; the dirty flag coalesces
         /// every change made while a push runs into one more push.
         /// Owner: Lifecycle.clearRuntimeState / Overlay.scheduleChildEvidenceRootAnnounce /

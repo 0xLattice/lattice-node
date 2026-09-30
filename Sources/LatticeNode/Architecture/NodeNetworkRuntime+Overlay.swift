@@ -1092,27 +1092,28 @@ extension NodeNetworkRuntime {
 // MARK: - Child-evidence index sync
 
 extension NodeNetworkRuntime {
-    /// Child blocks awaiting a proof lookup are bounded; a block refused
-    /// here is wanted again at its next parked retry.
-    static let maximumWantedChildEvidence = 256
-
     /// Tells one peer this node's current child-evidence root (on hello).
+    /// The root is read again after each send: a push of a newer root that
+    /// ran while this one was read would otherwise be overtaken by it.
     func sendChildEvidenceRoot(
         to peer: AuthenticatedPeer,
         generation: UInt64,
         process: ChainProcess
     ) async {
-        guard !configuration.address.isNexus,
+        var sent: String?
+        while !configuration.address.isNexus,
               let root = try? await process.childEvidenceRoot(),
+              root != sent,
               let payload = try? ChildEvidenceRootMessage(rootCID: root).encoded(),
               isCurrentRuntime(generation: generation, process: process),
-              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID
-        else { return }
-        _ = await overlay.sendMessage(
-            to: peer,
-            topic: NodeNetworkTopic.childEvidenceRoot,
-            payload: payload
-        )
+              overlayState.overlayRecords[peer.key]?.readyPeer?.sessionID == peer.sessionID {
+            _ = await overlay.sendMessage(
+                to: peer,
+                topic: NodeNetworkTopic.childEvidenceRoot,
+                payload: payload
+            )
+            sent = root
+        }
     }
 
     /// The root may have changed: push it to every ready peer if it did.
@@ -1160,6 +1161,9 @@ extension NodeNetworkRuntime {
                   let payload = try? ChildEvidenceRootMessage(rootCID: root).encoded()
             else { continue }
             overlayState.announcedChildEvidenceRoot = root
+            // Our root moved: every peer root may now hold proofs for the
+            // blocks it added, so each is walked again.
+            markChildEvidenceWalks(generation: generation, process: process)
             for peer in readyOverlayPeers {
                 guard overlayState.childEvidenceAnnounce.holds(token) else { return }
                 _ = await overlay.sendMessage(
@@ -1169,6 +1173,22 @@ extension NodeNetworkRuntime {
                 )
             }
         }
+    }
+
+    private func markChildEvidenceWalks(
+        generation: UInt64,
+        process: ChainProcess
+    ) {
+        let keys = overlayState.overlayRecords.records
+            .filter { $0.value.readyPeer != nil && $0.value.evidenceRoot != nil }
+            .keys
+        guard !keys.isEmpty else { return }
+        for key in keys {
+            overlayState.overlayRecords.updateExisting(key) {
+                $0.evidenceWalkDirty = true
+            }
+        }
+        startChildEvidenceSync(generation: generation, process: process)
     }
 
     /// Keeps a peer's latest root; a new one is walked against ours, and
@@ -1184,7 +1204,7 @@ extension NodeNetworkRuntime {
             return
         }
         let root = PeerEvidenceRoot(sessionID: peer.sessionID, rootCID: rootCID)
-        let lookup = !overlayState.wantedChildEvidence.isEmpty
+        let lookup = !blockFetcher.childProofWaits().isEmpty
         let changed = overlayState.overlayRecords.update(session: peer) { record in
             guard record.evidenceRoot != root else { return false }
             record.evidenceRoot = root
@@ -1196,25 +1216,16 @@ extension NodeNetworkRuntime {
         startChildEvidenceSync(generation: generation, process: process)
     }
 
-    /// A block needs a proof this node lacks: look it up in the latest roots
-    /// of up to `maximumExactContentSources` ready peers now, and in every
-    /// root that changes until it is found.
+    /// A block parked awaiting a proof this node lacks: look the parked
+    /// blocks up in the latest roots of up to `maximumExactContentSources`
+    /// ready peers now, and in every root that changes while they wait.
     func wantChildEvidence(
-        _ childCID: String,
         generation: UInt64,
         process: ChainProcess
     ) {
         guard !configuration.address.isNexus,
               isCurrentRuntime(generation: generation, process: process) else {
             return
-        }
-        if !overlayState.wantedChildEvidence.contains(childCID) {
-            guard overlayState.wantedChildEvidence.count
-                    < Self.maximumWantedChildEvidence else {
-                syncTrace("child-evidence want-overflow \(childCID)")
-                return
-            }
-            overlayState.wantedChildEvidence.insert(childCID)
         }
         let peers = overlayState.overlayRecords.records
             .filter { $0.value.readyPeer != nil && $0.value.evidenceRoot != nil }
@@ -1276,6 +1287,7 @@ extension NodeNetworkRuntime {
                   let record = root,
                   let peer = overlayState.overlayRecords[key]?.readyPeer,
                   peer.sessionID == record.sessionID else { continue }
+            overlayState.lastChildEvidencePeer = key
             await syncChildEvidence(
                 from: peer,
                 rootCID: record.rootCID,
@@ -1287,13 +1299,39 @@ extension NodeNetworkRuntime {
         }
     }
 
-    /// The next peer, in key order, with a root still to be walked or
-    /// searched.
+    /// The next peer with a root still to be walked or searched.
     private func nextChildEvidencePeer() -> PeerKey? {
-        overlayState.overlayRecords.records
-            .filter { $0.value.evidenceWalkDirty || $0.value.evidenceLookupDirty }
-            .keys
-            .min(by: { $0.hex < $1.hex })
+        Self.nextChildEvidencePeer(
+            dirty: overlayState.overlayRecords.records
+                .filter { $0.value.evidenceWalkDirty || $0.value.evidenceLookupDirty }
+                .keys,
+            after: overlayState.lastChildEvidencePeer
+        )
+    }
+
+    /// Round-robin in key order, starting past the peer served last: a peer
+    /// that is dirty again at once (a partial pass, a new root) waits for
+    /// every other dirty peer.
+    nonisolated static func nextChildEvidencePeer(
+        dirty: some Collection<PeerKey>,
+        after last: PeerKey?
+    ) -> PeerKey? {
+        let ordered = dirty.sorted { $0.hex < $1.hex }
+        guard let last else { return ordered.first }
+        return ordered.first { $0.hex > last.hex } ?? ordered.first
+    }
+
+    /// Up to `limit` of `keys` (sorted), starting past `cursor` and wrapping,
+    /// so successive passes cover every key.
+    nonisolated static func rotatedChildProofWaits(
+        _ keys: [String],
+        after cursor: String?,
+        limit: Int
+    ) -> [String] {
+        let start = cursor.map { cursor in
+            keys.firstIndex { $0 > cursor } ?? keys.startIndex
+        } ?? keys.startIndex
+        return Array((keys[start...] + keys[..<start]).prefix(limit))
     }
 
     /// Fetches, from one peer's root, the proofs this node lacks for the
@@ -1311,14 +1349,13 @@ extension NodeNetworkRuntime {
     ) async {
         var wanted: [String] = []
         if lookup {
-            for childCID in overlayState.wantedChildEvidence.sorted()
-                .prefix(Self.maximumEvidenceCandidates) {
-                if await process.hasAcceptedBlock(childCID) {
-                    overlayState.wantedChildEvidence.remove(childCID)
-                } else {
-                    wanted.append(childCID)
-                }
-            }
+            wanted = Self.rotatedChildProofWaits(
+                blockFetcher.childProofWaits(),
+                after: overlayState.childProofLookupCursor,
+                limit: Self.maximumEvidenceCandidates
+            )
+            overlayState.childProofLookupCursor = wanted.last
+                ?? overlayState.childProofLookupCursor
         }
         let localRoot = walk ? (try? await process.childEvidenceRoot()) ?? nil : nil
         guard !wanted.isEmpty || (localRoot != nil && localRoot != rootCID),
@@ -1370,14 +1407,12 @@ extension NodeNetworkRuntime {
         }
         for (entry, package) in collected.verified {
             // A rejected enqueue is local congestion, not the peer's fault:
-            // the block stays wanted and is looked up again.
-            if enqueueCandidate(CandidateSeed(
+            // a parked block stays parked and is looked up again.
+            _ = enqueueCandidate(CandidateSeed(
                 blockCID: entry.childCID,
                 package: AuthenticatedChildPackage(package: package),
                 weighed: true
-            ), generation: generation) {
-                overlayState.wantedChildEvidence.remove(entry.childCID)
-            }
+            ), generation: generation)
         }
         if blamed != nil {
             overlayState.overlayRecords.update(session: peer) {

@@ -36,6 +36,27 @@ final class BlockFetcherTests: XCTestCase {
         XCTAssertFalse(fetcher.isAwaitingAdmission(blockCID), "parked on a predecessor")
     }
 
+    /// The child-evidence lookup searches exactly the blocks parked on
+    /// `.wait(.evidence)` for a child proof, and a block leaves that set
+    /// once the fetcher retries it.
+    func testChildProofWaitsAreTheBlocksParkedOnAChildProof() throws {
+        var fetcher = BlockFetcher()
+        for blockCID in ["needs-proof", "other-evidence"] {
+            XCTAssertTrue(fetcher.observe(.init(
+                blockCID: blockCID, package: nil
+            )).accepted)
+            let ticket = try XCTUnwrap(fetcher.next())
+            XCTAssertTrue(fetcher.complete(
+                ticket.ticket,
+                resolution: .wait(.evidence),
+                awaitsChildProof: ticket.blockCID == "needs-proof"
+            ))
+        }
+        XCTAssertEqual(fetcher.childProofWaits(), ["needs-proof"])
+        fetcher.retryExternalDependency(blockCID: "needs-proof", rootCID: nil)
+        XCTAssertEqual(fetcher.childProofWaits(), [])
+    }
+
     func testParentFactTimeoutRetriesExactUnchangedEvidence() throws {
         let blockCID = "parent-fact-timeout"
         let rootCID = "parent-fact-root"

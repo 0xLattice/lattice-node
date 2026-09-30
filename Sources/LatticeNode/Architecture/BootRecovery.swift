@@ -211,6 +211,19 @@ enum BootRecovery {
             roots: contextualCandidateRoots,
             owner: contextualCandidateOwner
         )
+        // Pins stand in for the reachability GC planned in P4, which
+        // replaces them.
+        let childEvidenceOwner = await store.childEvidenceOwner
+        try await broker.unpinAll(owner: childEvidenceOwner)
+        if let childEvidenceRoot = try await store.childEvidenceRoot() {
+            try await broker.pinBatch(
+                roots: try await ChildEvidenceIndex.volumes(
+                    root: childEvidenceRoot,
+                    fetcher: broker
+                ),
+                owner: childEvidenceOwner
+            )
+        }
         try await broker.advanceRetainedRoots(
             scope: preparedHierarchyRetentionScope,
             roots: preparedRecoveryRoots

@@ -216,7 +216,7 @@ extension NodeStore {
             await abandonChildEvidenceIndex(indexUpdate)
             throw error
         }
-        try await finishChildEvidenceIndex(indexUpdate)
+        await finishChildEvidenceIndex(indexUpdate)
         if preparedHierarchyArtifacts?.carrierEvidence != nil
             || preparedIncomingCarrierEvidence != nil
         {

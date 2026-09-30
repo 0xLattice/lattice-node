@@ -7,7 +7,6 @@ final class ParentEvidenceFlowTests: XCTestCase {
         var flow = ParentEvidenceFlow()
         let append = try XCTUnwrap(flow.beginAppend(
             for: session,
-            competingOperationCount: 0,
             capacity: 1
         ))
         let task = Task { ParentEvidenceFlow.Result.backpressured }
@@ -44,13 +43,11 @@ final class ParentEvidenceFlowTests: XCTestCase {
         var flow = ParentEvidenceFlow()
         XCTAssertNil(flow.beginAppend(
             for: session,
-            competingOperationCount: 8,
-            capacity: 8
+            capacity: 0
         ))
         // Retry after the lane drains: the refusal was not a failure.
         let retried = try XCTUnwrap(flow.beginAppend(
             for: session,
-            competingOperationCount: 0,
             capacity: 8
         ))
         XCTAssertFalse(flow.finish(
@@ -63,8 +60,7 @@ final class ParentEvidenceFlowTests: XCTestCase {
         // backpressure.
         XCTAssertNil(flow.beginAppend(
             for: session,
-            competingOperationCount: 8,
-            capacity: 8
+            capacity: 0
         ))
         XCTAssertFalse(flow.allowsReservation(for: session, after: .handled))
         flow.capacityBecameAvailable(for: session)
@@ -76,7 +72,6 @@ final class ParentEvidenceFlowTests: XCTestCase {
         var flow = ParentEvidenceFlow()
         let append = try XCTUnwrap(flow.beginAppend(
             for: session,
-            competingOperationCount: 0,
             capacity: 1
         ))
         XCTAssertFalse(flow.finish(
@@ -95,7 +90,6 @@ final class ParentEvidenceFlowTests: XCTestCase {
         // event.
         let retry = try XCTUnwrap(flow.beginAppend(
             for: session,
-            competingOperationCount: 0,
             capacity: 1
         ))
         XCTAssertFalse(flow.finish(
@@ -115,7 +109,6 @@ final class ParentEvidenceFlowTests: XCTestCase {
         var flow = ParentEvidenceFlow()
         let append = try XCTUnwrap(flow.beginAppend(
             for: failedSession,
-            competingOperationCount: 0,
             capacity: 1
         ))
         XCTAssertTrue(flow.finish(
