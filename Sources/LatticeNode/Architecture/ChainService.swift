@@ -288,8 +288,9 @@ public actor ChainService {
         }
     }
 
-    /// Refuses template and work requests from now on and waits for those
-    /// already inside, a mined handoff to hosted children included. A host
+    /// Refuses template and work requests, and mined handoffs from a parent,
+    /// from now on and waits for those already inside, a mined handoff to
+    /// hosted children included. A host
     /// stopping calls it on every level before it stops any level, so no
     /// grind is mined into, or handed down to, a level being stopped.
     /// Idempotent.
@@ -1711,8 +1712,12 @@ public actor ChainService {
     /// candidate (the weighed tier reads no parent fact), announce its proof
     /// on this chain's overlay, then fold the grind into this level's hosted
     /// children whatever this level decided: a relay-only block still
-    /// carries them. True iff this level admitted the block.
+    /// carries them. True iff this level admitted the block. Counted as
+    /// mining ingress: once this level's mining ingress is closed a handoff
+    /// is refused, and closing waits for one in flight.
     func admitMinedCarriage(block: Block, proof: ChildBlockProof) async -> Bool {
+        guard (try? enterMining()) != nil else { return false }
+        defer { exitMining() }
         guard let parentLevel, let header = try? BlockHeader(node: block) else {
             return false
         }

@@ -2819,6 +2819,90 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertTrue(returned)
     }
 
+    /// What `ChainHost.stop(_:)` does to a stopping child level: closing its
+    /// mining ingress waits for a mined handoff already inside it (here
+    /// parked in its own fold into a hosted grandchild) and refuses a new
+    /// one from the parent.
+    func testClosingMiningIngressDrainsAndRefusesAMinedHandoffIntoThisLevel()
+        async throws {
+        let fixture = try await activeChildService(spec: NexusGenesis.spec)
+        let payments = makeService(
+            process: fixture.process,
+            parentLevel: LocalParentLevel(fixture.parent)
+        )
+        let parked = Latch()
+        let release = Latch()
+        addTeardownBlock { await release.open() }
+        await payments.attachChildLevel(StubChildLevel(
+            directory: "Grandchild",
+            admit: { _, _ in
+                await parked.open()
+                await release.wait()
+                return true
+            }
+        ))
+        let tip = try await fixture.process.canonicalTipBlock()
+        let grandchild = try await BlockBuilder.buildChildGenesis(
+            spec: NexusGenesis.spec,
+            parentState: LatticeState.emptyHeader,
+            timestamp: 1,
+            target: UInt256.max,
+            fetcher: fixture.process
+        )
+        let block = try await BlockBuilder.buildBlock(
+            previous: tip,
+            children: ["Grandchild": grandchild],
+            parentChainBlock: fixture.parentCarrier,
+            timestamp: fixture.parentCarrier.timestamp + 1,
+            nonce: 0,
+            fetcher: fixture.process
+        )
+        let proof = try await ChildBlockProof.generate(
+            rootHeader: BlockHeader(node: fixture.parentCarrier),
+            childDirectory: "Payments",
+            fetcher: fixture.parent
+        )
+        let handing = Task {
+            await payments.admitMinedCarriage(block: block, proof: proof)
+        }
+        await parked.wait()
+
+        let closed = ShutdownReturned()
+        let closing = Task {
+            await payments.closeMiningIngress()
+            await closed.mark()
+        }
+        try await eventually("mining ingress is closed") {
+            do {
+                _ = try await payments.miningTemplate(MiningTemplateRequest())
+                return false
+            } catch ChainServiceError.shuttingDown {
+                return true
+            } catch {
+                return false
+            }
+        }
+        let answered = ShutdownReturned()
+        let second = Task {
+            let admitted = await payments.admitMinedCarriage(block: block, proof: proof)
+            await answered.mark()
+            return admitted
+        }
+        try await eventually("a new handoff is refused at once", within: .seconds(10)) {
+            await answered.value
+        }
+        let refused = await second.value
+        XCTAssertFalse(refused, "a handoff reached a level whose mining is closed")
+        let returnedEarly = await closed.value
+        XCTAssertFalse(returnedEarly, "closed before the handoff in flight finished")
+
+        await release.open()
+        _ = await handing.value
+        await closing.value
+        let returned = await closed.value
+        XCTAssertTrue(returned)
+    }
+
     /// A children-only parent block leaves the post-state and the child's
     /// tip, so the child rebuilds the block the parent carried as is — even
     /// once the carrier is older than a template's lifetime — and the
