@@ -13,7 +13,7 @@ final class CoreSyncTests: XCTestCase {
 
     override func setUp() async throws {
         var rng = SplitMix64(state: 0x5_1C)
-        world = try await World.generate(rng: &rng, honestBlocks: 30, forkProbability: 0, spamBlocks: 1)
+        world = try await World.generate(rng: &rng, honestBlocks: 30, forkProbability: 0, spamBlocks: 6)
         chain = world.honest.compactMap { world.blocks[$0] }
     }
 
@@ -256,7 +256,8 @@ final class CoreSyncTests: XCTestCase {
         _ = answer(&core, request, [HeaderEntry(block: carrier.block, children: nil)])
         let effects = core.step(.childIndexFetched(peer, cid: carrier.block.children.rawCID, nil), now: Self.now)
         XCTAssertTrue(disconnects(effects).isEmpty)
-        XCTAssertNotNil(core.sync.peers[peer])
+        XCTAssertEqual(core.sync.peers[peer]?.retryAt, Self.now + core.config.headersTimeout, "not left idle")
+        XCTAssertNotNil(requests(core.step(.tick, now: Self.now + core.config.headersTimeout)).first)
     }
 
     func testNonConnectingHeadersWithoutChildrenStillCountAgainstThePeer() throws {
@@ -412,6 +413,7 @@ final class CoreSyncTests: XCTestCase {
         let spammer = PeerID(key: "spammer", session: 1)
         let spamRequest = try ready(&core, spammer)
         let spam = world.spam.compactMap { world.blocks[$0] }
+        XCTAssertGreaterThan(spam.count, 2, "saturated headers follow the on-schedule two")
         let effects = core.step(.received(spammer, .headers(HeadersResponse(
             requestID: spamRequest.requestID,
             entries: spam.map { HeaderEntry(block: $0.block, children: $0.children) },
@@ -421,7 +423,9 @@ final class CoreSyncTests: XCTestCase {
         XCTAssertTrue(core.tree.contains(blockHash: spam[1].cid))
         XCTAssertFalse(spam.dropFirst(2).contains { core.tree.contains(blockHash: $0.cid) })
         XCTAssertTrue(disconnects(effects).isEmpty, "the floor never blames")
-        XCTAssertEqual(requests(effects).first?.locator.first, spam.last?.cid, "the peer's sync continues")
+        XCTAssertTrue(requests(effects).isEmpty, "the exchange ends: nothing continues from a dropped header")
+        XCTAssertEqual(core.sync.peers[spammer]?.retryAt, Self.now + core.config.headersTimeout,
+                       "the peer is asked again, from our best chain, after a timeout")
         XCTAssertFalse(relayed(effects).contains { !Set(spam.prefix(2).map(\.cid)).contains($0.1) })
     }
 
@@ -441,6 +445,58 @@ final class CoreSyncTests: XCTestCase {
         let request = try ready(&core)
         _ = answer(&core, request, blocks.map { HeaderEntry(block: $0.block, children: $0.children) })
         XCTAssertEqual(core.tree.canonicalTip, blocks.last?.cid)
+    }
+
+    /// A page that promises more but adds nothing is a strike, and the next
+    /// request starts from our best chain, not from that page.
+    func testAFullPageThatAddsNothingIsAStrikeAndDoesNotContinue() throws {
+        var core = core()
+        var request = try ready(&core)
+        request = try XCTUnwrap(requests(answer(&core, request, entries(chain[0..<4]), hasMore: true)).first)
+        let effects = answer(&core, request, entries(chain[0..<4]), hasMore: true)
+        XCTAssertEqual(core.sync.peers[peer]?.unconnecting, 1)
+        let next = try XCTUnwrap(requests(effects).first)
+        XCTAssertEqual(next.locator.first, core.tree.canonicalTip, "no continuation from the page")
+    }
+
+    /// 9a with M1: one peer streaming tip extensions that declare the
+    /// maximum target and omit their child index takes no wait (the target is
+    /// not the consensus one: malformed), and streaming valid ones takes one
+    /// wait at most. Honest sync completes beside it.
+    func testOnePeerHoldsAtMostOneChildIndexWait() async throws {
+        let carriers = try await world.carriers(count: 6)
+        var core = core()
+        let attacker = PeerID(key: "attacker", session: 1)
+        _ = try ready(&core, attacker)
+        func push(_ block: Block) -> [Effect] {
+            core.step(.received(attacker, .headers(HeadersResponse(
+                requestID: 0, entries: [HeaderEntry(block: block, children: nil)], hasMore: false
+            ))), now: Self.now)
+        }
+        for carrier in carriers.prefix(5) {
+            _ = push(carrier.block)
+        }
+        XCTAssertEqual(core.sync.awaitingChildIndex.count, 1, "one wait per peer")
+        XCTAssertNotNil(core.sync.peers[attacker]?.retryAt)
+
+        let easy = Block(
+            version: carriers[5].block.version, parent: carriers[5].block.parent,
+            transactions: carriers[5].block.transactions, target: .max,
+            nextTarget: carriers[5].block.nextTarget, spec: carriers[5].block.spec,
+            parentState: carriers[5].block.parentState, prevState: carriers[5].block.prevState,
+            postState: carriers[5].block.postState, children: carriers[5].block.children,
+            height: carriers[5].block.height, timestamp: carriers[5].block.timestamp,
+            rewardRecipient: nil, nonce: 7
+        )
+        XCTAssertNotNil(ChainTree.rootWork(of: easy), "the maximum target passes its own proof-of-work")
+        let effects = push(easy)
+        XCTAssertEqual(disconnects(effects), [.malformed], "a declared target that is not the consensus target")
+        XCTAssertTrue(core.sync.awaitingChildIndex.isEmpty)
+
+        let honest = PeerID(key: "honest", session: 1)
+        let request = try ready(&core, honest)
+        _ = answer(&core, honest, request, entries(chain[0..<10]))
+        XCTAssertEqual(core.tree.canonicalTip, chain[9].cid)
     }
 
     private func replacing(_ block: Block, nonce: UInt64) -> Block {
