@@ -141,10 +141,11 @@ accepted blocks, proof-derived work, and the attributed work-only batches it
 credited from parent run reports. A block its parent carried is a network
 block: imported weighed on the verified proof — in fork choice with its work
 at once, executed when the chain would step into it — never held back for a
-continuity fact or a rule not yet met. Its carriage is relayed at once,
-with the acceptance, as for a carrier this chain refused: deeper chains are owed the proof of carriage whatever this
-chain makes of the block, and the proofs this chain composes for its own
-children follow from that relay. Only the parent facts it answers —
+continuity fact or a rule not yet met. Its carrier evidence is recorded
+with the acceptance, and the proofs this chain composes for its own
+children follow from it. A carrier this chain refused, or one Lattice
+returns relay-only, records nothing: this chain has no reader for it.
+Only the parent facts it answers —
 the genesis links a child's first block anchors to — wait for its
 validation, since a child must not anchor to state this chain has not
 executed. When this host mined the grind, the parent level hands the

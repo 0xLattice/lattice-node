@@ -50,9 +50,9 @@ public protocol ChildLevel: AnyObject, Sendable {
     var directory: String { get }
     /// Enqueues `change` for the child and returns.
     func parentChanged(_ change: ParentChange)
-    /// The child's pre-built candidate, or nil when it has none: it is
-    /// walking, holds its own carried block awaiting admission, or has not
-    /// built yet. The caller checks its binding.
+    /// The child's pre-built candidate, or nil when it has none: its
+    /// execution walk is stepping or behind, or it has not built yet. The
+    /// caller checks its binding.
     var readyCandidate: ReadyCandidate? { get }
     /// This host mined a grind carrying the child's `block` (the node from
     /// the mined block, in memory) under `proof`: the child admits it through

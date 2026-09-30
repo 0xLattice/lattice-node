@@ -188,17 +188,12 @@ final class NodeStoreTests: XCTestCase {
             )
         )
 
-        let storedCarrier = try await store.issuedParentCarrierLink(
-            carrierCID: "carrier",
-            rootCID: "carrier"
-        )
         let storedGenesis = try await store.issuedParentGenesisLink(
             directory: "Payments",
             childGenesisCID: "child-genesis",
             parentStateCID: "parent-state"
         )
         let staged = try await store.stagedImports()
-        XCTAssertEqual(storedCarrier, carrier)
         XCTAssertEqual(storedGenesis, genesis)
         XCTAssertEqual(staged.count, 1)
     }
@@ -236,8 +231,11 @@ final class NodeStoreTests: XCTestCase {
         }
     }
 
-    func testEvidenceOnlyAdmissionStagesItsVerifiedCarrierLink() async throws {
-        let store = try makeStore()
+    /// A carrier link is not a parent fact: an admission that issues no
+    /// genesis link writes no fact and no fact source.
+    func testACarrierLinkWithoutGenesisLinksIssuesNoParentFact() async throws {
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
+        let store = try makeStore(path: path)
         let carrier = try decode(ParentCarrierLink.self, json: """
             {"parentPath":["Nexus"],"carrierCID":"carrier","rootCID":"carrier"}
             """)
@@ -259,11 +257,15 @@ final class NodeStoreTests: XCTestCase {
             )
         )
 
-        let stored = try await store.issuedParentCarrierLink(
-            carrierCID: "carrier",
-            rootCID: "carrier"
-        )
-        XCTAssertEqual(stored, carrier)
+        let database = try NodeSQLite(path: path.path)
+        for table in ["issued_parent_facts", "issued_parent_fact_sources"] {
+            let count = try database.query(
+                "SELECT COUNT(*) AS n FROM \(table)"
+            ).first?["n"]?.intValue
+            XCTAssertEqual(count, 0, table)
+        }
+        let staged = try await store.stagedImports()
+        XCTAssertEqual(staged.count, 1)
     }
 
     func testInvalidHierarchyArtifactRollsBackItsAdmissionBatch() async throws {
@@ -290,12 +292,7 @@ final class NodeStoreTests: XCTestCase {
             }
         }
         let staged = try await store.stagedImports()
-        let carrier = try await store.issuedParentCarrierLink(
-            carrierCID: "outside",
-            rootCID: "root"
-        )
         XCTAssertTrue(staged.isEmpty)
-        XCTAssertNil(carrier)
     }
 
     func testNexusHierarchyArtifactCannotClaimAnotherRoot() async throws {
@@ -719,16 +716,11 @@ final class NodeStoreTests: XCTestCase {
         store = nil
         store = try makeStore(path: path)
 
-        let storedCarrier = try await store!.issuedParentCarrierLink(
-            carrierCID: "carrier",
-            rootCID: "carrier"
-        )
         let storedGenesis = try await store!.issuedParentGenesisLink(
             directory: "Child",
             childGenesisCID: "genesis",
             parentStateCID: "parent-state"
         )
-        XCTAssertEqual(storedCarrier, carrier)
         XCTAssertEqual(storedGenesis, genesis)
     }
 
@@ -842,11 +834,6 @@ final class NodeStoreTests: XCTestCase {
                 parentGenesisLinks: []
             )
         )
-        let storedCarrier = try await store.issuedParentCarrierLink(
-            carrierCID: carrierCID,
-            rootCID: carrierCID
-        )
-        XCTAssertEqual(storedCarrier, carrier)
         let storedGenesis = try await store.issuedParentGenesisLink(
             directory: "Child",
             childGenesisCID: "child",
@@ -857,7 +844,7 @@ final class NodeStoreTests: XCTestCase {
     }
 
 
-    func testIssuedCarrierEvidencePersistsProofAndLinkTogether() async throws {
+    func testIssuedCarrierEvidencePersistsItsProof() async throws {
         let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let store = try makeStore(path: path, chainPath: ["Nexus", "Child"])
         let fixture = try await childProofFixture()
@@ -876,11 +863,6 @@ final class NodeStoreTests: XCTestCase {
             )
         )
 
-        let storedLink = try await store.issuedParentCarrierLink(
-            carrierCID: fixture.childCID,
-            rootCID: fixture.first.rootCID
-        )
-        XCTAssertEqual(storedLink, link)
         let proofValue = try await store.incomingCarrierEvidence(
             childCID: fixture.childCID,
             directory: "Child",
@@ -888,9 +870,6 @@ final class NodeStoreTests: XCTestCase {
         )?.proof
         let proof = try XCTUnwrap(proofValue)
         XCTAssertEqual(try proof.serialize(), try fixture.first.serialize())
-        let incomingCoverage = try await store
-            .incomingParentCarrierBlocksByChildBlock()
-        XCTAssertEqual(Set(incomingCoverage.keys), [fixture.childCID])
     }
 
     /// The re-ask list and the local location binding (Lattice §9.10) are
@@ -1306,11 +1285,6 @@ final class NodeStoreTests: XCTestCase {
                 )
             }
             try await assertNoEvidenceRow(child, fixture: fixture, after: step)
-            let issuedLink = try await child.store.issuedParentCarrierLink(
-                carrierCID: fixture.childCID,
-                rootCID: fixture.first.rootCID
-            )
-            XCTAssertNil(issuedLink, "a carrier link outran its evidence at \(step)")
         }
 
         let merge = BrokerStep.merge(scope: "test:issued-hierarchy")
@@ -1320,11 +1294,6 @@ final class NodeStoreTests: XCTestCase {
         }
         try await child.broker.waitUntilParked(merge)
         try await assertNoEvidenceRow(child, fixture: fixture, after: merge)
-        let linkWhileParked = try await child.store.issuedParentCarrierLink(
-            carrierCID: fixture.childCID,
-            rootCID: fixture.first.rootCID
-        )
-        XCTAssertNil(linkWhileParked, "a carrier link outran its retention")
         await child.broker.release(merge)
         try await issuing.value
 

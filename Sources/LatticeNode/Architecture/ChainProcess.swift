@@ -531,6 +531,8 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 sameChainPredecessor: nil,
                 canonicalCommitReceipt: receipt
             )
+        // A genesis this chain did not accept records nothing: its carrier
+        // evidence has no reader here.
         case .carrier(let resultLink):
             decision = .carrier
             link = resultLink
@@ -538,16 +540,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             decision = NodeImportDecision(failure)
             link = resultLink
         }
-        let evidence = try await Self.canonicalCarrierEvidence(
-            blockHeader,
-            authenticatedPackage: authenticatedChildPackage,
-            chainPath: configuration.chainPath,
-            fetcher: attemptFetcher
-        )
-        try await persistHierarchyArtifacts(
-            link,
-            carrierEvidence: evidence
-        )
         releaseOperation()
         operationHeld = false
         return NodeImportOutcome(
@@ -821,32 +813,15 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
 
         let decision = NodeImportDecision(result)
         let admissionStaged = result.commit != nil
-        // A disconnected accepted block is not yet a parent-fact issuer, but
-        // its content-verified carrier remains valid relay data for deeper
-        // chains. Persist that relay with no genesis facts; a later duplicate
-        // retry promotes the exact genesis facts after the predecessor connects.
-        // Only for a DECIDED block: a deferral persists nothing.
-        //
-        // A WEIGHED acceptance of a parent-carried block stages its incoming
-        // evidence, but Lattice issues no parent-process fact for a block it
-        // has not executed, so `stage` wrote no carrier link for it. The
-        // RELAY of its carriage is another matter: content-verified before
-        // any execution, owed to deeper chains whatever this chain makes of
-        // the block (a carrier it refused gets it too). It goes here, with no
-        // genesis facts (validation issues those), under the same lease as
-        // the stage; the link is Lattice's to mint, so it cannot yet land in
-        // the stage's own write.
-        let relayUnissued: Bool
-        if admissionStaged, result.sameChainPredecessor == nil,
-           carrierEvidence != nil, let link = result.parentCarrierLink {
-            relayUnissued = try await store.issuedParentCarrierLink(
-                carrierCID: blockHeader.rawCID, rootCID: link.rootCID
-            ) == nil
-        } else {
-            relayUnissued = false
-        }
-        if (!admissionStaged || result.sameChainPredecessor != nil || relayUnissued),
-           Self.isDecided(result),
+        // Only an ACCEPTED block records its carrier evidence: a carrier this
+        // chain refused, or one Lattice returned relay-only (`.carrier`), has
+        // no reader here, so it writes no edge, proof, fact or pin. A staged
+        // acceptance already wrote its evidence in `stage`. A disconnected
+        // accepted block is not yet a parent-fact issuer: its evidence goes
+        // here with no genesis facts, and a later duplicate retry promotes the
+        // exact genesis facts after the predecessor connects.
+        if !admissionStaged || result.sameChainPredecessor != nil,
+           decision.isAccepted,
            let link = result.parentCarrierLink {
             try await store.persistIssuedHierarchyArtifacts(
                 ImportHierarchyArtifacts(
@@ -1972,21 +1947,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         ).resolve(fetcher: localFetcher).node else { return nil }
         return await Self.proofWeighs(
             proof, child: child, chainPath: configuration.chainPath
-        )
-    }
-
-    private func persistHierarchyArtifacts(
-        _ link: ParentCarrierLink,
-        carrierEvidence: ImportCarrierEvidence?,
-        parentGenesisLinks: [ParentGenesisLink] = []
-    ) async throws {
-        try Task.checkCancellation()
-        try await store.persistIssuedHierarchyArtifacts(
-            ImportHierarchyArtifacts(
-                carrierLink: link,
-                carrierEvidence: carrierEvidence,
-                parentGenesisLinks: parentGenesisLinks
-            )
         )
     }
 

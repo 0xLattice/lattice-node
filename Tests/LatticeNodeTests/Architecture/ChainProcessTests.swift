@@ -677,14 +677,10 @@ final class ChainProcessTests: XCTestCase {
 
         let outcome = try await process!.importBlock(carrierHeader)
         XCTAssertTrue(outcome.decision.isAccepted)
-        let carrierLink = try XCTUnwrap(outcome.parentCarrierLink)
+        XCTAssertNotNil(outcome.parentCarrierLink)
         process = nil
 
         process = try await ChainProcess.open(configuration: config)
-        let persistedCarrier = try await process!.store.issuedParentCarrierLink(
-            carrierCID: carrierHeader.rawCID,
-            rootCID: carrierLink.rootCID
-        )
         let persistedGenesis = try await process!.store.issuedParentGenesisLink(
             directory: "Payments",
             childGenesisCID: childCID,
@@ -692,7 +688,6 @@ final class ChainProcessTests: XCTestCase {
             // state, not the recording carrier's prevState.
             parentStateCID: LatticeState.emptyHeader.rawCID
         )
-        XCTAssertEqual(persistedCarrier, carrierLink)
         XCTAssertEqual(persistedGenesis?.parentPath, ["Nexus"])
         XCTAssertEqual(persistedGenesis?.directory, "Payments")
         XCTAssertEqual(persistedGenesis?.childGenesisCID, childCID)
@@ -777,15 +772,7 @@ final class ChainProcessTests: XCTestCase {
             validatedGenesisLink, eagerGenesisLink,
             "validate-on-candidacy must persist the same genesis link as eager"
         )
-        let carrierLink = try XCTUnwrap(validated.parentCarrierLink)
-        let persistedCarrier = try await consumer.store.issuedParentCarrierLink(
-            carrierCID: carrierHeader.rawCID,
-            rootCID: carrierLink.rootCID
-        )
-        XCTAssertEqual(
-            persistedCarrier, carrierLink,
-            "the validated carrier link must be durably persisted for relay"
-        )
+        XCTAssertNotNil(validated.parentCarrierLink)
     }
 
     func testDisconnectedCarrierRelaysBeforeGenesisFactPromotion() async throws {
@@ -851,7 +838,7 @@ final class ChainProcessTests: XCTestCase {
                 predecessorCID: missingParentHeader.rawCID
             )
         )
-        let relay = try XCTUnwrap(first.parentCarrierLink)
+        XCTAssertNotNil(first.parentCarrierLink)
         let earlyGenesis = try await process!.store.issuedParentGenesisLink(
             directory: "Payments",
             childGenesisCID: childCID,
@@ -861,14 +848,6 @@ final class ChainProcessTests: XCTestCase {
         process = nil
 
         process = try await ChainProcess.open(configuration: config)
-        let recoveredRelay = try await process!.store.issuedParentCarrierLink(
-            carrierCID: orphanHeader.rawCID,
-            rootCID: relay.rootCID
-        )
-        XCTAssertEqual(
-            recoveredRelay,
-            relay
-        )
         let recoveredGenesis = try await process!.store.issuedParentGenesisLink(
             directory: "Payments",
             childGenesisCID: childCID,
@@ -1109,6 +1088,82 @@ final class ChainProcessTests: XCTestCase {
         )
         XCTAssertTrue(retry.decision.isAccepted)
         XCTAssertNil(retry.sameChainPredecessor)
+    }
+
+    /// A carried block whose grind missed this chain's target is a carrier:
+    /// Lattice decides it relay-only, and this chain has no reader for its
+    /// evidence, so the import writes no edge, proof row, parent fact or
+    /// fact source, and pins no Volume, live or after a restart.
+    func testANonAcceptedCarrierRecordsNothing() async throws {
+        let fixture = try await childBootstrapFixture()
+        let parentSource = fixture.source
+        var process: ChainProcess? = try await ChainProcess.open(
+            configuration: fixture.configuration
+        )
+        let bootstrapped = try await process!.activateChildGenesis(
+            seed: fixture.seed, confirmParentRecordedGenesis: { _ in true }
+        )
+        XCTAssertTrue(bootstrapped)
+        let genesis = try XCTUnwrap(fixture.childHeader.node)
+        let carried = try await BlockBuilder.buildBlock(
+            previous: genesis, timestamp: 2, target: UInt256(1) << 8, nonce: 1,
+            fetcher: parentSource
+        )
+        let carriedHeader = try BlockHeader(node: carried)
+        try await carriedHeader.storeBlock(fetcher: parentSource, storer: parentSource)
+        let parentCarrier = try await BlockBuilder.buildGenesis(
+            spec: NexusGenesis.spec, children: ["Payments": carried],
+            timestamp: 3, target: UInt256.max, fetcher: parentSource
+        )
+        let proof = try await ChildBlockProof.generate(
+            rootHeader: try BlockHeader(node: parentCarrier),
+            childDirectory: "Payments",
+            fetcher: parentSource
+        )
+        let package = AuthenticatedChildPackage(
+            package: ChildValidationPackage(proof: proof)
+        )
+        let refused = try await process!.importBlock(
+            carriedHeader, authenticatedChildPackage: package,
+            remoteSource: parentSource, mode: .header
+        )
+        guard case .carrier = refused.decision else {
+            return XCTFail("a grind that misses this chain's target is a carrier, got \(refused.decision)")
+        }
+        XCTAssertEqual(refused.parentCarrierLink?.carrierCID, carriedHeader.rawCID)
+
+        let storage = fixture.configuration.storagePath
+        let issuedScope = [
+            fixture.configuration.nexusGenesisCID,
+            fixture.configuration.address.key,
+        ].joined(separator: ":") + ":issued-hierarchy"
+        func assertNothingRecorded(_ when: String) async throws {
+            let database = try NodeSQLite(
+                path: storage.appendingPathComponent("state.db").path
+            )
+            for table in [
+                "issued_child_edges", "issued_child_proofs",
+                "issued_parent_facts", "issued_parent_fact_sources",
+            ] {
+                let count = try database.query(
+                    "SELECT COUNT(*) AS n FROM \(table)"
+                ).first?["n"]?.intValue
+                XCTAssertEqual(count, 0, "\(when): \(table)")
+            }
+            let relay = try await process!.recoveredAuthenticatedChildPackage(
+                for: carriedHeader.rawCID, rootCID: proof.rootCID
+            )
+            XCTAssertNil(relay, "\(when): carrier evidence recorded")
+            let broker = try DiskBroker(
+                path: storage.appendingPathComponent("volumes.db").path
+            )
+            let pinned = try await broker.retainedRoots(scope: issuedScope)
+            XCTAssertEqual(pinned, [], "\(when): a Volume is pinned")
+        }
+        try await assertNothingRecorded("live")
+        process = nil
+        process = try await ChainProcess.open(configuration: fixture.configuration)
+        try await assertNothingRecorded("after restart")
     }
 
     func testSelfContainedGenesisSurvivesRestartAsValidatedAncestry() async throws {

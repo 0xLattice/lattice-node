@@ -71,7 +71,6 @@ struct ChildEvidencePinsDirtyRow: NodeStoreRecord {
 
 struct PreparedImportHierarchyArtifacts {
     let carrierLink: ParentCarrierLink
-    let carrierLinkPayload: Data
     let carrierEvidence: PreparedImportCarrierEvidence?
     let parentGenesisLinks: [(link: ParentGenesisLink, payload: Data)]
 }
@@ -102,7 +101,7 @@ struct IssuedParentFactSourceRow: NodeStoreRecord {
     var payload: Data { get throws { try row.blob("payload") } }
 }
 
-/// `issued_parent_facts`: one locally issued carrier or genesis fact. The
+/// `issued_parent_facts`: one locally issued genesis fact. The
 /// keys are opaque text (a genesis key is a length-prefixed composite).
 struct IssuedParentFactRow: NodeStoreRecord {
     static let table = "issued_parent_facts"
@@ -192,45 +191,6 @@ extension NodeStore {
         "\(parentStateCID.utf8.count):\(parentStateCID)\(childGenesisCID)"
     }
 
-    /// Durable child-to-parent carrier links used only by this child when it
-    /// projects its configured parent's generic securing-work graph.
-    func incomingParentCarrierBlocksByChildBlock()
-        throws -> [String: Set<String>]
-    {
-        let rows = try database.rows(
-            ProofEdgeJoinRow.self,
-            "SELECT DISTINCT e.child_cid, e.parent_carrier_cid \(Self.proofEdgeJoinSQL) WHERE p.scope = ?1 ORDER BY e.child_cid, e.parent_carrier_cid",
-            params: [.text(IssuedChildProofScope.incomingCarrier.rawValue)]
-        )
-        var result: [String: Set<String>] = [:]
-        for row in rows {
-            result[try row.childCID, default: []].insert(try row.parentCarrierCID)
-        }
-        return result
-    }
-
-    /// Resolve only bindings touched by a live parent-work delta. Full graph
-    /// materialization remains a restart/reconnect operation.
-    func incomingParentCarrierBlocksByChildBlock(
-        matching parentBlockCIDs: Set<String>
-    ) throws -> [String: Set<String>] {
-        var result: [String: Set<String>] = [:]
-        for parentBlockCID in parentBlockCIDs.sorted() {
-            let rows = try database.rows(
-                ProofEdgeJoinRow.self,
-                "SELECT DISTINCT e.child_cid \(Self.proofEdgeJoinSQL) WHERE p.scope = ?1 AND e.parent_carrier_cid = ?2 ORDER BY e.child_cid",
-                params: [
-                    .text(IssuedChildProofScope.incomingCarrier.rawValue),
-                    .text(parentBlockCID),
-                ]
-            )
-            for row in rows {
-                result[try row.childCID, default: []].insert(parentBlockCID)
-            }
-        }
-        return result
-    }
-
     func incomingParentCarrierBlockCIDs(
         forChildBlockCID childBlockCID: String
     ) throws -> Set<String> {
@@ -299,7 +259,6 @@ extension NodeStore {
 
         return PreparedImportHierarchyArtifacts(
             carrierLink: link,
-            carrierLinkPayload: try Self.encode(link),
             carrierEvidence: carrierEvidence,
             parentGenesisLinks: parentGenesisLinks
         )
@@ -482,7 +441,6 @@ extension NodeStore {
         }
         try persistParentFacts(
             link: artifacts.carrierLink,
-            payload: artifacts.carrierLinkPayload,
             parentGenesisLinks: artifacts.parentGenesisLinks
         )
     }
@@ -503,11 +461,13 @@ extension NodeStore {
         )
     }
 
+    /// Only genesis facts are issued: a carrier link has no reader, so a
+    /// carrier with no genesis links leaves no fact and no source.
     private func persistParentFacts(
         link: ParentCarrierLink,
-        payload: Data,
         parentGenesisLinks: [(link: ParentGenesisLink, payload: Data)]
     ) throws {
+        guard !parentGenesisLinks.isEmpty else { return }
         let source = PersistedParentFactSource(
             carrierLink: link,
             parentGenesisLinks: parentGenesisLinks.map(\.link)
@@ -515,12 +475,6 @@ extension NodeStore {
         try database.execute(
             "INSERT OR IGNORE INTO issued_parent_fact_sources (payload) VALUES (?1)",
             params: [.blob(try Self.encode(source))]
-        )
-        try persistIssuedParentFact(
-            kind: "carrier",
-            keyA: link.carrierCID,
-            keyB: link.rootCID,
-            payload: payload
         )
         for genesis in parentGenesisLinks {
             try persistIssuedParentFact(
@@ -570,24 +524,6 @@ extension NodeStore {
             throw error
         }
         await finishChildEvidenceIndex(indexUpdate)
-    }
-
-    func issuedParentCarrierLink(
-        carrierCID: String,
-        rootCID: String
-    ) async throws -> ParentCarrierLink? {
-        guard let payload = try issuedParentFact(
-            kind: "carrier",
-            keyA: carrierCID,
-            keyB: rootCID
-        ) else { return nil }
-        let link = try Self.decode(ParentCarrierLink.self, from: payload)
-        guard link.parentPath == chainPath,
-              link.carrierCID == carrierCID,
-              link.rootCID == rootCID else {
-            throw NodeStoreError.corrupt("malformed locally issued carrier link")
-        }
-        return link
     }
 
     func issuedParentGenesisLink(
@@ -695,10 +631,8 @@ extension NodeStore {
     /// The committing parent blocks of the blocks this chain ACCEPTED with a
     /// carrier proof, distinct, newest first (Lattice §9.10). Durable, so it
     /// is the answer to "whose runs does this chain re-read from its parent
-    /// level" after a restart. Joined on `accepted_blocks` deliberately: the relay
-    /// evidence table also records carriers of blocks this chain refused —
-    /// every merged-mining round whose root missed this chain's target — and
-    /// those are not committers of anything here.
+    /// level" after a restart. Joined on `accepted_blocks`: only an accepted
+    /// block's carrier evidence is recorded, and the join keeps that explicit.
     func incomingCarriers(limit: Int) throws -> [String] {
         let rows = try database.rows(
             ProofEdgeJoinRow.self,
@@ -720,55 +654,11 @@ extension NodeStore {
         )?.childCID
     }
 
-    func issuedChildEvidence(
-        scope: IssuedChildProofScope,
-        edgeCID: String,
-        rootCID: String
-    ) async throws -> IssuedChildEvidence? {
-        guard let row = try database.row(
-            ProofEdgeJoinRow.self,
-            "SELECT e.child_cid, e.directory \(Self.proofEdgeJoinSQL) WHERE p.scope = ?1 AND p.edge_cid = ?2 AND p.root_cid = ?3 LIMIT 1",
-            params: [.text(scope.rawValue), .text(edgeCID), .text(rootCID)]
-        ) else {
-            return nil
-        }
-        let evidence = try await issuedChildEvidence(
-            scope: scope,
-            childCID: try row.childCID,
-            directory: try row.directory,
-            rootCID: rootCID,
-            exactEdgeCID: edgeCID
-        )
-        guard evidence?.edgeCID == edgeCID else {
-            throw NodeStoreError.corrupt("malformed child root attachment")
-        }
-        return evidence
-    }
-
-    func issuedChildEvidence(
-        scope: IssuedChildProofScope,
-        edgeCID: String
-    ) async throws -> IssuedChildEvidence? {
-        guard let rootCID = try database.row(
-            IssuedChildProofRow.self,
-            "SELECT root_cid FROM issued_child_proofs WHERE scope = ?1 AND edge_cid = ?2 ORDER BY root_cid LIMIT 1",
-            params: [.text(scope.rawValue), .text(edgeCID)]
-        )?.rootCID else {
-            return nil
-        }
-        return try await issuedChildEvidence(
-            scope: scope,
-            edgeCID: edgeCID,
-            rootCID: rootCID
-        )
-    }
-
     private func issuedChildEvidence(
         scope: IssuedChildProofScope,
         childCID: String,
         directory: String,
-        rootCID: String? = nil,
-        exactEdgeCID: String? = nil
+        rootCID: String? = nil
     ) async throws -> IssuedChildEvidence? {
         guard !directory.isEmpty else {
             throw NodeStoreError.invalidConfiguration(
@@ -776,16 +666,7 @@ extension NodeStore {
             )
         }
         let rows: [ProofEdgeJoinRow]
-        if let rootCID, let exactEdgeCID {
-            rows = try database.rows(
-                ProofEdgeJoinRow.self,
-                "SELECT p.edge_cid, p.root_cid, p.attachment_cid, e.parent_carrier_cid, e.directory, e.child_cid \(Self.proofEdgeJoinSQL) WHERE p.scope = ?1 AND p.edge_cid = ?2 AND e.child_cid = ?3 AND e.directory = ?4 AND p.root_cid = ?5 LIMIT 1",
-                params: [
-                    .text(scope.rawValue), .text(exactEdgeCID),
-                    .text(childCID), .text(directory), .text(rootCID),
-                ]
-            )
-        } else if let rootCID {
+        if let rootCID {
             rows = try database.rows(
                 ProofEdgeJoinRow.self,
                 "SELECT p.edge_cid, p.root_cid, p.attachment_cid, e.parent_carrier_cid, e.directory, e.child_cid \(Self.proofEdgeJoinSQL) WHERE p.scope = ?1 AND e.child_cid = ?2 AND e.directory = ?3 AND p.root_cid = ?4 LIMIT 1",
@@ -1001,21 +882,12 @@ extension NodeStore {
                           && !$0.childGenesisCID.isEmpty
                           && !$0.parentStateCID.isEmpty
                   }),
-                  source.parentGenesisLinks.isEmpty
-                    || connectedAcceptedBlocks.contains(
+                  !source.parentGenesisLinks.isEmpty,
+                  connectedAcceptedBlocks.contains(
                         source.carrierLink.carrierCID
                     ) else {
                 throw NodeStoreError.corrupt("invalid genesis-fact source")
             }
-            try Self.addExpectedParentFact(
-                key: IssuedParentFactKey(
-                    kind: "carrier",
-                    keyA: source.carrierLink.carrierCID,
-                    keyB: source.carrierLink.rootCID
-                ),
-                payload: try Self.encode(source.carrierLink),
-                to: &expectedParentFacts
-            )
             for link in source.parentGenesisLinks {
                 try Self.addExpectedParentFact(
                     key: IssuedParentFactKey(
