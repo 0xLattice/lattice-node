@@ -251,8 +251,9 @@ subtrees and descending only into blocks it holds, to fetch the proofs it
 lacks. Each proof fetched is admitted as a weighed package seed. A proof that
 does not bind its key and grind, or that contributes no work to a held block,
 is blamed on the sole supplier of a complete fetch, whose session is recycled
-and root dropped; content that is unavailable or incomplete, or that only this
-node's own witness-size limit refuses, is never blamed.
+and root dropped; content that is unavailable or incomplete is never blamed.
+No local witness-size limit applies to a proof from a peer's index: one within
+the protocol cap that weighs is admitted.
 
 Peer content exchange is Volume-native. An announcer names one complete Volume
 by its root CID and must serve that Volume from the exact authenticated session

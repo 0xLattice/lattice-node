@@ -192,9 +192,6 @@ enum ChildEvidenceIndex {
     enum Verdict {
         /// The Volume carries this package for `entry`.
         case valid(ChildValidationPackage)
-        /// Refused by this node's own policy (the witness-size limit):
-        /// never the peer's fault.
-        case skipped
         /// The bytes do not carry a proof `entry` names, or the held child
         /// shows the proof contributes no work: an honest index holds none.
         case invalid
@@ -205,11 +202,11 @@ enum ChildEvidenceIndex {
     /// within the protocol cap, and its proof is the grind `entry.rootCID`
     /// for that child. `weighs` is nil when the child is not held, so only
     /// a held block's proof is judged on its work. Depends on the bytes
-    /// (and the held child) alone, except the local size limit.
+    /// (and the held child) alone: no local policy applies, since the proof
+    /// already carried work into an honest index.
     nonisolated static func verdict(
         _ serialized: SerializedVolume?,
         entry: Entry,
-        maximumEncodedSize: Int,
         weighs: @Sendable (ChildBlockProof, String) async -> Bool?
     ) async -> Verdict {
         guard let serialized,
@@ -226,9 +223,6 @@ enum ChildEvidenceIndex {
               let edge = await DirectChildEdge.derive(from: package.proof),
               edge.childCID == entry.childCID else {
             return .invalid
-        }
-        guard volume.envelopeBytes.count <= maximumEncodedSize else {
-            return .skipped
         }
         guard await weighs(package.proof, entry.childCID) != false else {
             return .invalid
@@ -266,7 +260,7 @@ enum ChildEvidenceIndex {
     }
 
     /// Fetches and verifies every entry `missingEntries` finds, stopping at
-    /// the first failure; a proof this node's own policy refuses is skipped.
+    /// the first failure.
     /// A `wanted` block is not held yet: one proof for it is enough this
     /// pass, and the rest arrive by the walk once it is admitted and indexed.
     /// Blame is the caller's: it depends on whether the fetch was complete.
@@ -276,7 +270,6 @@ enum ChildEvidenceIndex {
         wanted: [String],
         peer: any Fetcher,
         local: any Fetcher,
-        maximumEncodedSize: Int,
         weighs: @Sendable (ChildBlockProof, String) async -> Bool?
     ) async -> Collected {
         var collected = Collected()
@@ -310,14 +303,11 @@ enum ChildEvidenceIndex {
                     )
                 },
                 entry: entry,
-                maximumEncodedSize: maximumEncodedSize,
                 weighs: weighs
             ) {
             case .valid(let package):
                 collected.verified.append((entry, package))
                 found.insert(entry.childCID)
-            case .skipped:
-                continue
             case .invalid:
                 collected.failed = true
                 return collected
@@ -327,21 +317,30 @@ enum ChildEvidenceIndex {
     }
 
     /// Every Volume of the index at `root` (the root, each outer node, each
-    /// ProofSet): what this node pins for its current root.
-    static func volumes(root: String, fetcher: any Fetcher) async throws -> [String] {
-        var volumes = [root]
-        let trie = try await node(
+    /// ProofSet): what this node pins for its current root. A node that does
+    /// not resolve is reported `missing`, and the walk goes on without the
+    /// subtree below it.
+    static func volumes(
+        root: String,
+        fetcher: any Fetcher
+    ) async -> (reachable: [String], missing: [String]) {
+        guard let trie = try? await node(
             Root(rawCID: root, node: nil, encryptionInfo: nil),
             fetcher: fetcher
-        )
+        ) else { return ([], [root]) }
+        var reachable = [root]
+        var missing: [String] = []
         var pending = Array(trie.children.values)
         while let branch = pending.popLast() {
-            volumes.append(branch.rawCID)
-            let resolved = try await node(branch, fetcher: fetcher)
-            if let value = resolved.value { volumes.append(value.rawCID) }
+            guard let resolved = try? await node(branch, fetcher: fetcher) else {
+                missing.append(branch.rawCID)
+                continue
+            }
+            reachable.append(branch.rawCID)
+            if let value = resolved.value { reachable.append(value.rawCID) }
             pending.append(contentsOf: resolved.children.values)
         }
-        return volumes
+        return (reachable, missing)
     }
 
     // MARK: - Trie helpers

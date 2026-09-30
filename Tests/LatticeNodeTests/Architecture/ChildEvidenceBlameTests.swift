@@ -48,7 +48,6 @@ final class ChildEvidenceBlameTests: XCTestCase {
             if case .valid = await ChildEvidenceIndex.verdict(
                 serialized ?? fixture.volume.serialized,
                 entry: entry,
-                maximumEncodedSize: NodeResourcePolicy.default.maximumParentWitnessBytes,
                 weighs: { _, _ in weighs }
             ) { return true }
             return false
@@ -82,7 +81,6 @@ final class ChildEvidenceBlameTests: XCTestCase {
         let unavailable = await ChildEvidenceIndex.verdict(
             nil,
             entry: valid,
-            maximumEncodedSize: NodeResourcePolicy.default.maximumParentWitnessBytes,
             weighs: { _, _ in nil }
         )
         guard case .invalid = unavailable else {
@@ -90,34 +88,45 @@ final class ChildEvidenceBlameTests: XCTestCase {
         }
     }
 
-    /// A proof only this node's own witness-size limit refuses is skipped,
-    /// never judged invalid (and so never blamed); within the limit, a proof
-    /// contributing no work to a held block is invalid.
-    func testALocalPolicyRefusalIsSkippedNotInvalid() async throws {
+    /// No local witness-size policy applies to a proof from a peer's index:
+    /// one larger than a tight local limit that weighs is valid, so it is
+    /// never skipped and re-fetched on every pass.
+    func testAnOversizeWeighingProofIsAdmitted() async throws {
         let fixture = try await proofFixture()
-        let entry = ChildEvidenceIndex.Entry(
-            childCID: fixture.childCID,
-            rootCID: fixture.proof.rootCID,
-            attachmentCID: fixture.volume.rawCID
-        )
+        XCTAssertGreaterThan(fixture.volume.envelopeBytes.count, 64)
         let verdict = await ChildEvidenceIndex.verdict(
             fixture.volume.serialized,
-            entry: entry,
-            maximumEncodedSize: 1,
+            entry: ChildEvidenceIndex.Entry(
+                childCID: fixture.childCID,
+                rootCID: fixture.proof.rootCID,
+                attachmentCID: fixture.volume.rawCID
+            ),
             weighs: { _, _ in true }
         )
-        guard case .skipped = verdict else {
-            return XCTFail("a local size refusal was \(verdict)")
+        guard case .valid = verdict else {
+            return XCTFail("a weighing proof was \(verdict)")
         }
-        let carrier = await ChildEvidenceIndex.verdict(
+    }
+
+    /// Size never excuses a proof that contributes no work to a held block:
+    /// it is invalid, and blamed on the sole supplier of a complete fetch.
+    func testAPaddedNonWeighingProofForAHeldBlockIsBlamed() async throws {
+        let fixture = try await proofFixture()
+        let verdict = await ChildEvidenceIndex.verdict(
             fixture.volume.serialized,
-            entry: entry,
-            maximumEncodedSize: NodeResourcePolicy.default.maximumParentWitnessBytes,
+            entry: ChildEvidenceIndex.Entry(
+                childCID: fixture.childCID,
+                rootCID: fixture.proof.rootCID,
+                attachmentCID: fixture.volume.rawCID
+            ),
             weighs: { _, _ in false }
         )
-        guard case .invalid = carrier else {
-            return XCTFail("a proof contributing no work was \(carrier)")
+        guard case .invalid = verdict else {
+            return XCTFail("a non-weighing proof was \(verdict)")
         }
+        XCTAssertEqual(NodeNetworkRuntime.childEvidenceBlame(
+            failed: true, complete: true, soleSupplier: "supplier"
+        ), "supplier")
     }
 
     /// A peer whose index holds many proofs for a block this node does not
@@ -151,7 +160,6 @@ final class ChildEvidenceBlameTests: XCTestCase {
             wanted: [childCID],
             peer: broker,
             local: broker,
-            maximumEncodedSize: NodeResourcePolicy.default.maximumParentWitnessBytes,
             weighs: { _, _ in nil }
         )
         XCTAssertFalse(collected.failed)

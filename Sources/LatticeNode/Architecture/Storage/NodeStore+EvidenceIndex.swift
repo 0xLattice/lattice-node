@@ -79,6 +79,15 @@ struct ChildEvidenceRootRow: NodeStoreRecord {
     var rootCID: String { get throws { try row.text("root_cid") } }
 }
 
+/// `child_evidence_pins_dirty`: present while an index update's pins may
+/// be out of step with the committed root.
+struct ChildEvidencePinsDirtyRow: NodeStoreRecord {
+    static let table = "child_evidence_pins_dirty"
+    private let row: Row
+
+    init(_ row: Row) { self.row = row }
+}
+
 struct PreparedImportHierarchyArtifacts {
     let carrierLink: ParentCarrierLink
     let carrierLinkPayload: Data
@@ -443,6 +452,9 @@ extension NodeStore {
             fetcher: recoveryVolumeBroker,
             storer: recoveryVolumeBroker
         ) else { return nil }
+        // Set until the replaced pins are released: a crash in between
+        // leaves the pins to boot's reconcile.
+        try setChildEvidencePinsDirty(true)
         if !update.added.isEmpty {
             try await recoveryVolumeBroker.pinBatch(
                 roots: update.added,
@@ -471,18 +483,42 @@ extension NodeStore {
     /// finds them unavailable and re-reads the current root. A pin this
     /// fails to drop is healed at boot (`BootRecovery`).
     func finishChildEvidenceIndex(_ update: ChildEvidenceIndex.Update?) async {
-        guard let update, !update.released.isEmpty else { return }
-        try? await recoveryVolumeBroker.unpinBatch(items: update.released.map {
-            (root: $0, owner: childEvidenceOwner, count: 1)
-        })
+        guard let update else { return }
+        await releaseChildEvidencePins(update.released)
     }
 
     /// The commit failed: the new Volumes lose the pin `prepare` gave them.
     func abandonChildEvidenceIndex(_ update: ChildEvidenceIndex.Update?) async {
-        guard let update, !update.added.isEmpty else { return }
-        try? await recoveryVolumeBroker.unpinBatch(items: update.added.map {
-            (root: $0, owner: childEvidenceOwner, count: 1)
-        })
+        guard let update else { return }
+        await releaseChildEvidencePins(update.added)
+    }
+
+    /// Unpins `roots`, then clears the dirty marker; on a failure the
+    /// marker stays set and boot reconciles the pins.
+    private func releaseChildEvidencePins(_ roots: [String]) async {
+        do {
+            if !roots.isEmpty {
+                try await recoveryVolumeBroker.unpinBatch(items: roots.map {
+                    (root: $0, owner: childEvidenceOwner, count: 1)
+                })
+            }
+            try setChildEvidencePinsDirty(false)
+        } catch {}
+    }
+
+    /// Whether an index update may have left the child-evidence pins out of
+    /// step with the committed root (a crash between pin and release).
+    func childEvidencePinsDirty() throws -> Bool {
+        !(try database.rows(
+            ChildEvidencePinsDirtyRow.self,
+            "SELECT singleton FROM child_evidence_pins_dirty"
+        )).isEmpty
+    }
+
+    func setChildEvidencePinsDirty(_ dirty: Bool) throws {
+        try database.execute(dirty
+            ? "INSERT OR IGNORE INTO child_evidence_pins_dirty (singleton) VALUES (1)"
+            : "DELETE FROM child_evidence_pins_dirty")
     }
 
     private func prepareParentGenesisLinks(

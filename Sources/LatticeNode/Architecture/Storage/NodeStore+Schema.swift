@@ -89,6 +89,7 @@ extension NodeStore {
         "issued_child_edges",
         "issued_child_proofs",
         "child_evidence_root",
+        "child_evidence_pins_dirty",
         "parent_evidence_scan",
         "parent_evidence_inbox",
         "local_mempool_transactions",
@@ -218,6 +219,11 @@ extension NodeStore {
             CREATE TABLE IF NOT EXISTS child_evidence_root (
                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                 root_cid TEXT NOT NULL
+            ) WITHOUT ROWID
+            """)
+        try database.execute("""
+            CREATE TABLE IF NOT EXISTS child_evidence_pins_dirty (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1)
             ) WITHOUT ROWID
             """)
         try database.execute("""

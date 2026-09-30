@@ -1369,7 +1369,6 @@ extension NodeNetworkRuntime {
         )
         let local = process.childEvidenceFetcher
         let wantedKeys = wanted
-        let maximumEncodedSize = configuration.resourcePolicy.maximumParentWitnessBytes
         let result = await source.withRootTracing(rootCID) { session in
             await ChildEvidenceIndex.collect(
                 peerRoot: rootCID,
@@ -1377,7 +1376,6 @@ extension NodeNetworkRuntime {
                 wanted: wantedKeys,
                 peer: CoalescingFetcher(session),
                 local: local,
-                maximumEncodedSize: maximumEncodedSize,
                 weighs: { proof, childCID in
                     await process.childEvidenceWeighs(proof, childCID: childCID)
                 }

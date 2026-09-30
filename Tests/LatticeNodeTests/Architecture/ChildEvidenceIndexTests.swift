@@ -410,9 +410,9 @@ final class ChildEvidenceIndexWalkTests: XCTestCase {
             }
             root = update.root
             let pinned = Set(await broker.pinnedRoots(owners: [owner]))
-            let reachable = Set(try await Index.volumes(
+            let reachable = Set(await Index.volumes(
                 root: try XCTUnwrap(root), fetcher: broker
-            ))
+            ).reachable)
             XCTAssertEqual(pinned, reachable, "after insert \(index)")
         }
     }
@@ -517,7 +517,6 @@ final class ChildEvidenceIndexWalkTests: XCTestCase {
                 wanted: [],
                 peer: CoalescingFetcher(session),
                 local: localSource,
-                maximumEncodedSize: 1 << 20,
                 weighs: { _, _ in nil }
             )
         }
@@ -566,9 +565,9 @@ final class ChildEvidenceIndexWalkTests: XCTestCase {
         let localRoot = try await build(
             [(0..<256).map { entry("\($0)", "0") }], into: local
         )
-        let localVolumes = try await Index.volumes(
+        let localVolumes = await Index.volumes(
             root: try XCTUnwrap(localRoot), fetcher: await local.source()
-        )
+        ).reachable
         let peer = VolumeRecorder()
         let peerRoot = try awaitedUnwrap(try await build(
             [[entry("7", "0"), entry("7", "1")]], into: peer

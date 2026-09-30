@@ -155,7 +155,8 @@ final class ChainProcessTests: XCTestCase {
 
     /// A crash between pinning an index update and committing its root, or
     /// between the commit and releasing the replaced Volumes, leaves stray
-    /// pins: boot pins exactly the committed root's Volumes.
+    /// pins and the dirty marker set: boot pins exactly the committed root's
+    /// Volumes. A clean boot (marker clear) does not walk the index.
     func testOpenPinsExactlyTheCommittedChildEvidenceIndex() async throws {
         let directory = temporaryDirectory()
         try FileManager.default.createDirectory(
@@ -187,8 +188,12 @@ final class ChainProcessTests: XCTestCase {
                 broker: broker
             )
         }
-        func prepare(_ entries: [ChildEvidenceIndex.Entry], into root: String?)
-            async throws -> ChildEvidenceIndex.Update {
+        func prepare(
+            _ entries: [ChildEvidenceIndex.Entry],
+            into root: String?,
+            store: NodeStore
+        ) async throws -> ChildEvidenceIndex.Update {
+            try await store.setChildEvidencePinsDirty(true)
             let update = try await ChildEvidenceIndex.inserting(
                 entries, into: root, fetcher: broker, storer: broker
             )
@@ -200,7 +205,7 @@ final class ChainProcessTests: XCTestCase {
             Set(await broker.pinnedRoots(owners: [owner]))
         }
         func reachable(_ root: String) async throws -> Set<String> {
-            Set(try await ChildEvidenceIndex.volumes(root: root, fetcher: broker))
+            Set(await ChildEvidenceIndex.volumes(root: root, fetcher: broker).reachable)
         }
         func reopen() async throws {
             var process: ChainProcess? = try await ChainProcess.open(
@@ -208,13 +213,31 @@ final class ChainProcessTests: XCTestCase {
             )
             XCTAssertNotNil(process)
             process = nil
+            let dirty = try await openStore().childEvidencePinsDirty()
+            XCTAssertFalse(dirty)
         }
 
         var store: NodeStore? = try openStore()
-        let first = try await prepare((0..<8).map(entry), into: nil)
+        let first = try await prepare((0..<8).map(entry), into: nil, store: store!)
         try await store!.persistChildEvidenceRoot(first)
+        try await store!.setChildEvidencePinsDirty(false)
+        store = nil
+        // A clean boot does not reconcile: a pin outside the index survives
+        // it, which a walk and re-pin would have dropped.
+        let outside = try VolumeImpl<PublicKey>(node: PublicKey(key: "outside"))
+        try await outside.store(storer: broker)
+        try await broker.pinBatch(roots: [outside.rawCID], owner: owner)
+        try await reopen()
+        var survived = await pinned()
+        XCTAssertTrue(survived.contains(outside.rawCID))
+        try await broker.unpin(root: outside.rawCID, owner: owner, count: 1)
+        survived = await pinned()
+        let firstReachable = try await reachable(first.root)
+        XCTAssertEqual(survived, firstReachable)
+
         // Crash after pinning the next update, before its root commits.
-        _ = try await prepare([try entry(8)], into: first.root)
+        store = try openStore()
+        _ = try await prepare([try entry(8)], into: first.root, store: store!)
         store = nil
         var stray = await pinned()
         var committed = try await reachable(first.root)
@@ -225,7 +248,7 @@ final class ChainProcessTests: XCTestCase {
 
         // Crash after the commit, before the replaced Volumes are unpinned.
         store = try openStore()
-        let second = try await prepare([try entry(9)], into: first.root)
+        let second = try await prepare([try entry(9)], into: first.root, store: store!)
         try await store!.persistChildEvidenceRoot(second)
         store = nil
         stray = await pinned()
