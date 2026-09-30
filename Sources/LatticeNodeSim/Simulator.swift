@@ -8,6 +8,8 @@ public struct SimConfig: Sendable {
     public var honestSources = 2
     public var spammer = true
     public var liar = true
+    /// A script that shows the world's uncle to core0 alone.
+    public var uncle = false
     public var honestBlocks = 40
     public var forkProbability = 0.2
     public var spamBlocks = 4
@@ -82,6 +84,26 @@ public struct Simulator {
         var store: SimStore
         var digest: TreeDigest
         var persists = 0
+    }
+
+    /// After the quiet point every honest core weighs the same graph, holds
+    /// every released honest block, and selects the same head.
+    func checkQuietPoint() throws {
+        let nodes = cores.sorted { $0.key < $1.key }
+        guard let (first, reference) = nodes.first else { return }
+        let honest = Set(world.released(world.honest, at: now).map(\.cid))
+        for (name, node) in nodes {
+            let graph = Set(node.digest.blocks.keys)
+            if let missing = honest.subtracting(graph).first {
+                throw Invariants.fail(name, "misses released honest block \(missing) after the quiet point")
+            }
+            if graph != Set(reference.digest.blocks.keys) {
+                throw Invariants.fail(name, "weighs a different graph than \(first) after the quiet point")
+            }
+            if node.digest.canonicalTip != reference.digest.canonicalTip {
+                throw Invariants.fail(name, "head differs from \(first)'s after the quiet point")
+            }
+        }
     }
 
     /// DST 7: the store alone rebuilds an equal tree.
@@ -172,6 +194,14 @@ public struct Simulator {
         }
         if config.spammer { scripts["spammer"] = HeaderSpammer(name: "spammer") }
         if config.liar { scripts["liar"] = Liar(name: "liar", pageSize: config.pageSize) }
+        if config.uncle {
+            scripts["uncle"] = UncleShower(
+                name: "uncle",
+                showingTo: "core0",
+                interval: config.reannounceInterval,
+                until: (world.blocks[world.uncle]?.releaseAt ?? now) + 30_000
+            )
+        }
 
         let coreNames = cores.keys.sorted()
         for (position, name) in coreNames.enumerated() {
@@ -199,6 +229,7 @@ public struct Simulator {
             report.trace = (report.trace ^ next.sequence ^ UInt64(bitPattern: next.time)) &* 0x100_0000_01B3
             try deliver(next)
         }
+        try checkQuietPoint()
         for (name, node) in cores.sorted(by: { $0.key < $1.key }) {
             try checkReplay(name, node, node.digest)
             report.coreTips[name] = node.core.tree.canonicalTip
@@ -316,9 +347,20 @@ public struct Simulator {
                     throw Invariants.fail(name, "published tip \(tip) is not durable")
                 }
             case .send(let peer, let message):
+                // DST 5: announces come only from the durable executed tip.
+                // Relaying a weighed header is not acting on it, but it too
+                // is sent only once durable.
                 if case .announce(let cid, _) = message, cid != node.core.snapshot.actOnTip
                     || !node.store.blockFacts.contains(cid) {
                     throw Invariants.fail(name, "announced \(cid), not its durable act-on tip")
+                }
+                if case .headers(let relayed) = message {
+                    for entry in relayed.entries {
+                        let cid = (try? BlockHeader(node: entry.block).rawCID) ?? ""
+                        guard node.store.headers[cid] != nil else {
+                            throw Invariants.fail(name, "relayed \(cid) before it was durable")
+                        }
+                    }
                 }
                 try route(message, from: name, to: peer)
             case .serveHeaders(let peer, let requestID, let blockCIDs, let hasMore):

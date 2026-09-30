@@ -46,7 +46,10 @@ public struct SimBlock: Sendable {
 public struct World: Sendable {
     public static let genesisTime: Int64 = 1_700_000_000_000
     public static let blockInterval: Int64 = 1_000
-    public static let spamInterval: Int64 = 20_000
+    /// When the spam fork's second block is dated: far enough behind its
+    /// schedule (4.9 half-lives) that ASERT makes every later spam target more
+    /// than 16 times easier than the honest tip's.
+    public static let spamLateBlockTime: Int64 = genesisTime + 50_000
 
     public let spec: ChainSpec
     public let context: ChainRuntimeContext
@@ -59,6 +62,8 @@ public struct World: Sendable {
     public let spam: [String]
     /// A block whose parent is never served: a header that does not connect.
     public let orphan: String
+    /// An honest side block only the uncle script shows, to one node.
+    public let uncle: String
 
     public static let spec = ChainSpec(
         maxNumberOfTransactionsPerBlock: 100,
@@ -70,18 +75,22 @@ public struct World: Sendable {
         halfLife: 10
     )
 
-    /// One hash in eight meets the genesis target, so a tampered header
-    /// almost always fails proof-of-work.
-    public static let genesisTarget = UInt256.max >> 3
+    /// One hash in 32 meets the genesis target: a tampered header almost
+    /// always fails proof-of-work, and a saturated (maximum) target is 32
+    /// times easier than the honest tip's, so the spam floor has room to act.
+    public static let genesisTarget = UInt256.max >> 5
 
     /// Generate a world: `honestBlocks` honest blocks, each on the current
-    /// GHOST head or, with `forkProbability`, on one of its three nearest
-    /// ancestors; and `spamBlocks` slow blocks forking from genesis.
+    /// GHOST head or, with `forkProbability`, on any of the last eight blocks
+    /// generated (side branches included); an uncle; and a `spamBlocks`-long
+    /// ASERT-saturation fork from genesis (block 2 dated far behind schedule,
+    /// the rest right after it, at saturated targets).
     public static func generate(
         rng: inout SplitMix64,
         honestBlocks: Int,
         forkProbability: Double,
-        spamBlocks: Int
+        spamBlocks: Int,
+        honestInterval: Int64 = blockInterval
     ) async throws -> World {
         let cas = SimCAS()
         try await LatticeState.emptyHeader.storeRecursively(storer: cas as any VolumeStorer)
@@ -106,11 +115,10 @@ public struct World: Sendable {
         for index in 1...max(honestBlocks, 1) {
             var parent = reference.head
             if rng.chance(forkProbability) {
-                for _ in 0..<rng.draw(1...3) {
-                    parent = blocks[parent]?.parent ?? parent
-                }
+                let recent = [genesis.cid] + honest.suffix(8)
+                parent = recent[rng.draw(0...recent.count - 1)]
             }
-            let time = genesisTime + Int64(index) * blockInterval
+            let time = genesisTime + Int64(index) * honestInterval
             let next = try await extend(
                 blocks[parent]!, timestamp: time, nonce: UInt64(index) << 32, in: cas
             )
@@ -121,8 +129,10 @@ public struct World: Sendable {
 
         var spam: [String] = []
         var spamTip = genesis
-        for index in 0..<spamBlocks {
-            let time = genesisTime + Int64(index + 1) * spamInterval
+        for index in 0..<max(spamBlocks, 2) {
+            let time = index == 0
+                ? genesisTime + blockInterval
+                : spamLateBlockTime + Int64(index - 1)
             spamTip = try await extend(
                 spamTip, timestamp: time, nonce: (UInt64(index) << 32) | 0xFFFF, in: cas
             )
@@ -134,6 +144,11 @@ public struct World: Sendable {
             withheld, timestamp: genesisTime + 2, nonce: 0xBEEF << 32, in: cas
         )
         blocks[orphan.cid] = orphan
+        let uncleParent = blocks[honest[min(2, honest.count - 1)]]?.parent ?? genesis.cid
+        let uncle = try await extend(
+            blocks[uncleParent]!, timestamp: genesisTime + 2_500, nonce: 0x0CE1 << 32, in: cas
+        )
+        blocks[uncle.cid] = uncle
 
         return World(
             spec: spec,
@@ -143,7 +158,8 @@ public struct World: Sendable {
             blocks: blocks,
             honest: honest,
             spam: spam,
-            orphan: orphan.cid
+            orphan: orphan.cid,
+            uncle: uncle.cid
         )
     }
 

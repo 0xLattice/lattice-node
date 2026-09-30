@@ -1,4 +1,5 @@
 import Lattice
+import UInt256
 import cashew
 
 /// What the shell hands the core. Time is not an event: every `step` takes
@@ -63,17 +64,26 @@ public struct CoreConfig: Sendable {
     public var headersTimeout: Int64
     public var maxUnconnectingHeaders: Int
     public var maxAwaitingChildIndex: Int
+    /// The spam floor N: drop (never blame) a header whose target is easier
+    /// than 1/N of the best header tip's. 16 is four ASERT half-lives: an
+    /// honest block's target moves by 2^(drift / half-life), so an honest
+    /// side branch near the tip sits within a small factor of the tip's
+    /// target, while a fork dated far behind schedule to saturate its target
+    /// is cut off after a few headers. 0 or 1 disables it.
+    public var targetFloorDivisor: UInt64
 
     public init(
         maxHeadersPerPage: Int = 2_000,
         headersTimeout: Int64 = 30_000,
         maxUnconnectingHeaders: Int = 10,
-        maxAwaitingChildIndex: Int = 64
+        maxAwaitingChildIndex: Int = 64,
+        targetFloorDivisor: UInt64 = 16
     ) {
         self.maxHeadersPerPage = maxHeadersPerPage
         self.headersTimeout = headersTimeout
         self.maxUnconnectingHeaders = maxUnconnectingHeaders
         self.maxAwaitingChildIndex = maxAwaitingChildIndex
+        self.targetFloorDivisor = targetFloorDivisor
     }
 }
 
@@ -150,6 +160,8 @@ public struct Core: Sendable {
         var headers: [StoredHeader] = []
         var facts: [BlockImportBatch] = []
         var effects: [Effect] = []
+        /// Headers this step weighed, and the peer each came from.
+        var relays: [(entry: HeaderEntry, from: PeerID)] = []
     }
 
     /// Persist first, then publish, then everything else: nothing a step
@@ -163,6 +175,17 @@ public struct Core: Sendable {
         if current != published {
             published = current
             effects.append(.publish(current))
+        }
+        // Relay every newly weighed header to every other peer (BIP130
+        // sendheaders): relaying a header is not acting on its weight. Only
+        // tip announces and templates act, and they come from the executed tip.
+        let peers = sync.peers.keys.sorted()
+        for relay in turn.relays {
+            for peer in peers where peer != relay.from {
+                effects.append(.send(peer, .headers(HeadersResponse(
+                    requestID: 0, entries: [relay.entry], hasMore: false
+                ))))
+            }
         }
         effects += turn.effects
         if let deadline = sync.nextDeadline {
@@ -188,10 +211,12 @@ public struct Core: Sendable {
         case .getHeaders(let request):
             serve(request, to: peer, &turn)
         case .headers(let response):
-            guard let inFlight = sync.peers[peer]?.inFlight,
-                  inFlight.requestID == response.requestID else { return }
-            sync.peers[peer]?.inFlight = nil
-            receive(response, from: peer, &turn)
+            if let inFlight = sync.peers[peer]?.inFlight, inFlight.requestID == response.requestID {
+                sync.peers[peer]?.inFlight = nil
+                receive(response, from: peer, solicited: true, &turn)
+            } else if response.entries.count == 1 {
+                receive(response, from: peer, solicited: false, &turn)
+            }
         }
     }
 
@@ -277,6 +302,7 @@ public struct Core: Sendable {
         _ block: Block,
         blockCID: String,
         children: ChildIndex,
+        from peer: PeerID,
         _ turn: inout Turn
     ) -> Insertion {
         if tree.contains(blockHash: blockCID) { return .held }
@@ -290,6 +316,7 @@ public struct Core: Sendable {
         case .applied(let update):
             turn.headers.append(StoredHeader(blockCID: blockCID, block: block, children: children))
             turn.facts.append(update.facts)
+            turn.relays.append((HeaderEntry(block: block, children: children), from: peer))
             return .inserted
         case .duplicate:
             return .held
@@ -308,7 +335,14 @@ public struct Core: Sendable {
         }
     }
 
-    private mutating func receive(_ response: HeadersResponse, from peer: PeerID, _ turn: inout Turn) {
+    /// Read a headers page: the answer to our request (`solicited`), or one
+    /// unsolicited header a peer relayed. Both take the same insert path.
+    private mutating func receive(
+        _ response: HeadersResponse,
+        from peer: PeerID,
+        solicited: Bool,
+        _ turn: inout Turn
+    ) {
         var previous: String?
         var inserted = 0
         for (position, entry) in response.entries.enumerated() {
@@ -319,12 +353,21 @@ public struct Core: Sendable {
             }
             previous = blockCID
             if tree.contains(blockHash: blockCID) { continue }
+            if belowTargetFloor(entry.block) {
+                // Dropped, never blamed: not stored, not relayed. The rest of
+                // the page descends from it; the peer's sync goes on.
+                if solicited, response.hasMore,
+                   let last = response.entries.last.flatMap({ try? BlockHeader(node: $0.block).rawCID }) {
+                    requestHeaders(from: peer, continuingFrom: last, &turn)
+                }
+                return
+            }
             guard let children = entry.children ?? heldChildIndex(for: entry.block) else {
                 // Only a header that would be inserted may cost a fetch: its
                 // parent is held and its own proof-of-work holds.
                 guard let parent = entry.block.parent?.rawCID,
                       tree.contains(blockHash: parent) else {
-                    if position == 0 { unconnected(peer, &turn) }
+                    if position == 0 { unconnected(peer, solicited: solicited, &turn) }
                     return
                 }
                 guard ChainTree.rootWork(of: entry.block) != nil else {
@@ -334,7 +377,7 @@ public struct Core: Sendable {
                 awaitChildIndex(of: entry.block, blockCID: blockCID, from: peer, &turn)
                 return
             }
-            switch insert(entry.block, blockCID: blockCID, children: children, &turn) {
+            switch insert(entry.block, blockCID: blockCID, children: children, from: peer, &turn) {
             case .inserted:
                 inserted += 1
             case .held:
@@ -351,11 +394,11 @@ public struct Core: Sendable {
                 // Only the first header can miss its parent: every later one
                 // names the header before it, which is now held.
                 guard position == 0 else { return }
-                unconnected(peer, &turn)
+                unconnected(peer, solicited: solicited, &turn)
                 return
             }
         }
-        guard let last = previous else { return }
+        guard solicited, let last = previous else { return }
         sync.peers[peer]?.unconnecting = 0
         if response.hasMore {
             requestHeaders(from: peer, continuingFrom: last, &turn)
@@ -368,9 +411,26 @@ public struct Core: Sendable {
         }
     }
 
-    /// A page whose first header does not connect counts against the peer;
-    /// below the limit, ask again from our best header chain.
-    private mutating func unconnected(_ peer: PeerID, _ turn: inout Turn) {
+    /// The spam floor: a header whose target is easier than 1/N of our best
+    /// header tip's target is dropped. It gates what this node stores and
+    /// relays, never what is valid, and blames no one.
+    private func belowTargetFloor(_ block: Block) -> Bool {
+        guard config.targetFloorDivisor > 1,
+              let tipTarget = tree.headerSnapshot(of: tree.canonicalTip)?.target else { return false }
+        let (floor, overflow) = tipTarget.multipliedReportingOverflow(by: UInt256(config.targetFloorDivisor))
+        return !overflow && block.target > floor
+    }
+
+    /// A page we asked for whose first header does not connect counts against
+    /// the peer; below the limit, ask again from our best header chain. A
+    /// relayed header that does not connect (its proof-of-work holds, or it
+    /// would be malformed) is a chain we lack: ask, never count it, since an
+    /// honest peer relays a burst of headers to a peer that is behind.
+    private mutating func unconnected(_ peer: PeerID, solicited: Bool, _ turn: inout Turn) {
+        guard solicited else {
+            requestHeaders(from: peer, continuingFrom: nil, &turn)
+            return
+        }
         let count = (sync.peers[peer]?.unconnecting ?? 0) + 1
         guard count < config.maxUnconnectingHeaders else {
             disconnect(peer, .malformed, &turn)
@@ -437,7 +497,7 @@ public struct Core: Sendable {
             disconnect(peer, .malformed, &turn)
             return
         }
-        switch insert(waiting.block, blockCID: waiting.blockCID, children: index, &turn) {
+        switch insert(waiting.block, blockCID: waiting.blockCID, children: index, from: peer, &turn) {
         case .inserted, .held:
             requestHeaders(from: peer, continuingFrom: waiting.blockCID, &turn)
         case .notYetValid(let timestamp):

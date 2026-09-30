@@ -44,7 +44,7 @@ let package = Package(
             url: "https://github.com/adalinxx/VolumeBroker.git",
             exact: "7.0.1"
         ),
-        // Lattice's own UInt256, declared for the simulator's direct import.
+        // Lattice's own UInt256, declared for the core's and simulator's direct imports.
         .package(url: "https://github.com/adalinxx/UInt256.git", from: "1.1.0"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
@@ -67,6 +67,7 @@ let package = Package(
             dependencies: [
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "cashew", package: "cashew"),
+                .product(name: "UInt256", package: "UInt256"),
             ]),
         .target(
             name: "LatticeNodeSim",
@@ -187,6 +188,7 @@ let package = Package(
                 "LatticeNodeSim",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "cashew", package: "cashew"),
+                .product(name: "UInt256", package: "UInt256"),
             ]),
         .testTarget(
             name: "LatticeNodeE2ETests",

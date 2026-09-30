@@ -1,6 +1,7 @@
 import Lattice
 import LatticeNodeCore
 import LatticeNodeSim
+import UInt256
 import XCTest
 
 /// `Core.step` header sync, one event at a time.
@@ -349,6 +350,85 @@ final class CoreSyncTests: XCTestCase {
         XCTAssertTrue(disconnects(extra).isEmpty, "and never blamed")
         _ = core.step(.headersServed(peer), now: Self.now)
         XCTAssertTrue(served(ask(3)))
+    }
+
+    private func relayed(_ effects: [Effect]) -> [(PeerID, String)] {
+        effects.compactMap {
+            guard case .send(let to, .headers(let page)) = $0, page.requestID == 0,
+                  let first = page.entries.first,
+                  let cid = try? BlockHeader(node: first.block).rawCID else { return nil }
+            return (to, cid)
+        }
+    }
+
+    /// BIP130-style relay: an unsolicited single header whose parent is held
+    /// is weighed through the same path and relayed to every other peer.
+    func testARelayedHeaderIsWeighedAndRelayedToEveryOtherPeer() throws {
+        var core = core()
+        let other = PeerID(key: "other", session: 1)
+        _ = try ready(&core)
+        _ = try ready(&core, other)
+        func push(_ entries: [HeaderEntry], from sender: PeerID) -> [Effect] {
+            core.step(.received(sender, .headers(HeadersResponse(requestID: 0, entries: entries, hasMore: false))), now: Self.now)
+        }
+        let effects = push(entries(chain[0..<1]), from: peer)
+        guard case .persist = effects.first else { return XCTFail("\(effects)") }
+        let sent = relayed(effects)
+        XCTAssertEqual(sent.map(\.0), [other], "relayed to every peer but its source")
+        XCTAssertEqual(sent.map(\.1), [chain[0].cid])
+        XCTAssertTrue(relayed(push(entries(chain[0..<1]), from: other)).isEmpty, "a held header is not relayed again")
+
+        XCTAssertFalse(push(entries(chain[1..<3]), from: peer).contains {
+            if case .persist = $0 { return true }
+            return false
+        }, "only a single header is read unsolicited")
+        XCTAssertFalse(core.tree.contains(blockHash: chain[1].cid))
+
+        // A relayed header we cannot connect is a chain we lack: never a strike.
+        let gap = push(entries(chain[5..<6]), from: peer)
+        XCTAssertTrue(disconnects(gap).isEmpty)
+        XCTAssertEqual(core.sync.peers[peer]?.unconnecting, 0)
+    }
+
+    /// The ASERT-saturation fork: its on-schedule headers weigh, every header
+    /// whose target is easier than 1/16 of the tip's is dropped — not stored,
+    /// not relayed, not blamed — and the peer's sync goes on.
+    func testSpamUnderTheTargetFloorIsDroppedWithoutBlame() throws {
+        var core = core(pageSize: 100)
+        let request = try ready(&core)
+        _ = answer(&core, request, entries(chain[0..<10]))
+        let spammer = PeerID(key: "spammer", session: 1)
+        let spamRequest = try ready(&core, spammer)
+        let spam = world.spam.compactMap { world.blocks[$0] }
+        let effects = core.step(.received(spammer, .headers(HeadersResponse(
+            requestID: spamRequest.requestID,
+            entries: spam.map { HeaderEntry(block: $0.block, children: $0.children) },
+            hasMore: true
+        ))), now: Self.now)
+        XCTAssertTrue(core.tree.contains(blockHash: spam[0].cid))
+        XCTAssertTrue(core.tree.contains(blockHash: spam[1].cid))
+        XCTAssertFalse(spam.dropFirst(2).contains { core.tree.contains(blockHash: $0.cid) })
+        XCTAssertTrue(disconnects(effects).isEmpty, "the floor never blames")
+        XCTAssertEqual(requests(effects).first?.locator.first, spam.last?.cid, "the peer's sync continues")
+        XCTAssertFalse(relayed(effects).contains { !Set(spam.prefix(2).map(\.cid)).contains($0.1) })
+    }
+
+    /// Catch-up from genesis on a chain whose difficulty rose 16x and more:
+    /// each header is compared with the node's best tip as it advances, so
+    /// the early, easier headers are never under the floor.
+    func testCatchUpFromGenesisWorksAcrossAHardeningChain() async throws {
+        var rng = SplitMix64(state: 0xFA57)
+        let fast = try await World.generate(
+            rng: &rng, honestBlocks: 50, forkProbability: 0, spamBlocks: 2, honestInterval: 1
+        )
+        let blocks = fast.honest.compactMap { fast.blocks[$0] }
+        let first = try XCTUnwrap(blocks.first?.block.target)
+        let last = try XCTUnwrap(blocks.last?.block.target)
+        XCTAssertLessThanOrEqual(last.multipliedReportingOverflow(by: 16).partialValue, first, "the chain hardened at least 16x")
+        var core = Core(tree: fast.bootstrap.tree, spec: fast.spec, config: CoreConfig(maxHeadersPerPage: 100))
+        let request = try ready(&core)
+        _ = answer(&core, request, blocks.map { HeaderEntry(block: $0.block, children: $0.children) })
+        XCTAssertEqual(core.tree.canonicalTip, blocks.last?.cid)
     }
 
     private func replacing(_ block: Block, nonce: UInt64) -> Block {

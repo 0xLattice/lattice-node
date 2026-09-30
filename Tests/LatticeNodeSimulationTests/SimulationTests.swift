@@ -11,7 +11,6 @@ final class SimulationTests: XCTestCase {
     func testSeeds() async throws {
         let count = try TestBudget.resolve("SIM_SEEDS", default: 10)
         let first = try TestSeed.resolve(default: 0x51_0000)
-        var headDisagreements = 0
         for offset in 0..<UInt64(count) {
             let seed = first.value &+ offset
             let replay = TestSeed(value: seed)
@@ -23,15 +22,8 @@ final class SimulationTests: XCTestCase {
                 return XCTFail("\(error) — replay with \(replay)")
             }
             assertSynced(report, replay)
-            // Headers-first serves best chains, so a block that was never on
-            // a server's best chain does not travel; GHOST heads can differ
-            // from a source's where such side blocks carry weight.
-            if Set(report.coreTips.values).count > 1
-                || Set(report.coreTips.values) != Set(report.sourceChains.values.compactMap(\.last)) {
-                headDisagreements += 1
-            }
         }
-        print("simulated \(count) seeds from \(first); seeds whose heads differ from a source's: \(headDisagreements)")
+        print("simulated \(count) seeds from \(first)")
     }
 
     /// Every core holds every block of every honest source's final best chain.
@@ -101,6 +93,24 @@ final class SimulationTests: XCTestCase {
         )
     }
 
+    /// An honest side block shown to core0 alone reaches every core through
+    /// core0's relay, and every core weighs it.
+    func testAnUncleShownToOneNodeReachesEveryNode() async throws {
+        var config = SimConfig(seed: 0xC1E)
+        config.cores = 4
+        config.honestSources = 1
+        config.spammer = false
+        config.liar = false
+        config.uncle = true
+        config.drop = 0
+        config.duplicate = 0
+        var simulator = try await Simulator.make(config)
+        let report = try simulator.run()
+        for (core, held) in report.coreHeld {
+            XCTAssertTrue(held.contains(simulator.world.uncle), "\(core) never weighed the uncle")
+        }
+    }
+
     func testTheLiarIsDisconnectedAndHonestSyncCompletes() async throws {
         var config = SimConfig(seed: 0x11A2)
         config.cores = 2
@@ -121,15 +131,18 @@ final class SimulationTests: XCTestCase {
         config.honestSources = 1
         config.spammer = true
         config.liar = false
-        config.spamBlocks = 3
+        config.spamBlocks = 40
         config.drop = 0
         config.duplicate = 0
         var simulator = try await Simulator.make(config)
         let report = try simulator.run()
         XCTAssertTrue(report.disconnects.contains { $0.peer == "spammer" && $0.reason == .malformed })
-        let spam = simulator.world.spam.filter { simulator.world.blocks[$0]!.releaseAt <= simulator.end }
+        let spam = simulator.world.spam
         for (core, held) in report.coreHeld {
-            XCTAssertTrue(Set(spam).isSubset(of: held), "\(core) weighs the spam fork")
+            // The two on-schedule spam headers weigh; every saturated one
+            // after them is under the floor: the graph stays bounded.
+            XCTAssertTrue(Set(spam.prefix(2)).isSubset(of: held), "\(core) weighs the spam fork's head")
+            XCTAssertTrue(Set(spam.dropFirst(2)).isDisjoint(with: held), "\(core) stored saturated spam")
             XCTAssertFalse(held.contains(simulator.world.orphan), "\(core) holds an unconnected header")
             XCTAssertEqual(report.coreTips[core], report.sourceChains["source0"]?.last)
         }
