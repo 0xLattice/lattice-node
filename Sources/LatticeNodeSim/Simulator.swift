@@ -10,6 +10,8 @@ public struct SimConfig: Sendable {
     public var liar = true
     /// A script that shows the world's uncle to core0 alone.
     public var uncle = false
+    /// The honest chain stops after this block for this long, then resumes.
+    public var stall: (afterBlock: Int, milliseconds: Int64)?
     public var honestBlocks = 40
     public var forkProbability = 0.2
     public var spamBlocks = 4
@@ -162,7 +164,8 @@ public struct Simulator {
             rng: &rng,
             honestBlocks: config.honestBlocks,
             forkProbability: config.forkProbability,
-            spamBlocks: config.spamBlocks
+            spamBlocks: config.spamBlocks,
+            stall: config.stall
         )
         return Simulator(config: config, world: world, rng: rng)
     }

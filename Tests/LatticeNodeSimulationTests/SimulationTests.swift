@@ -1,6 +1,7 @@
 import Lattice
 import LatticeNodeCore
 import LatticeNodeSim
+import UInt256
 import XCTest
 
 /// The deterministic simulator: honest cores header-sync from honest sources
@@ -108,6 +109,33 @@ final class SimulationTests: XCTestCase {
         let report = try simulator.run()
         for (core, held) in report.coreHeld {
             XCTAssertTrue(held.contains(simulator.world.uncle), "\(core) never weighed the uncle")
+        }
+    }
+
+    /// The honest chain stalls for five half-lives, so its next block is 32
+    /// times easier than every node's tip: that header extends the tip and so
+    /// bypasses the spam floor, and every core advances past the stall.
+    func testEveryCoreAdvancesPastAStallLongerThanFourHalfLives() async throws {
+        var config = SimConfig(seed: 0x57A11)
+        config.cores = 3
+        config.honestSources = 1
+        config.spammer = false
+        config.liar = false
+        config.honestBlocks = 20
+        config.forkProbability = 0
+        config.stall = (afterBlock: 10, milliseconds: 50_000)
+        var simulator = try await Simulator.make(config)
+        let world = simulator.world
+        let honest = world.honest.compactMap { world.blocks[$0] }
+        // Block 11 is dated after the stall, so block 12's target (block
+        // 11's next target) is the one ASERT eases.
+        let tip = honest[10].block.target
+        let resumed = honest[11].block.target
+        XCTAssertGreaterThan(resumed, tip.multipliedReportingOverflow(by: 16).partialValue,
+                             "the block after the stall is more than 16 times easier than its parent")
+        let report = try simulator.run()
+        for (core, tip) in report.coreTips {
+            XCTAssertEqual(tip, honest.last?.cid, "\(core) did not advance past the stall")
         }
     }
 

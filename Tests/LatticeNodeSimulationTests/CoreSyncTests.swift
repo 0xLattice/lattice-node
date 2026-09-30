@@ -384,9 +384,21 @@ final class CoreSyncTests: XCTestCase {
         }, "only a single header is read unsolicited")
         XCTAssertFalse(core.tree.contains(blockHash: chain[1].cid))
 
-        // A relayed header we cannot connect is a chain we lack: never a strike.
-        let gap = push(entries(chain[5..<6]), from: peer)
-        XCTAssertTrue(disconnects(gap).isEmpty)
+        // A relayed header we cannot connect is a chain we lack: never a
+        // strike, and the getHeaders it asks with is bounded by the one
+        // request in flight per peer.
+        let inFlight = try XCTUnwrap(core.sync.peers[peer]?.inFlight)
+        _ = core.step(.received(peer, .headers(HeadersResponse(
+            requestID: inFlight.requestID, entries: [], hasMore: false
+        ))), now: Self.now)
+        XCTAssertNil(core.sync.peers[peer]?.inFlight)
+        var asked = 0
+        for _ in 0..<5 {
+            let gap = push(entries(chain[5..<6]), from: peer)
+            XCTAssertTrue(disconnects(gap).isEmpty)
+            asked += requests(gap).count
+        }
+        XCTAssertEqual(asked, 1, "one getHeaders in flight, however many relays")
         XCTAssertEqual(core.sync.peers[peer]?.unconnecting, 0)
     }
 

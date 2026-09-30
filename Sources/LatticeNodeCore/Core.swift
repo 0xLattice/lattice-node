@@ -413,9 +413,13 @@ public struct Core: Sendable {
 
     /// The spam floor: a header whose target is easier than 1/N of our best
     /// header tip's target is dropped. It gates what this node stores and
-    /// relays, never what is valid, and blames no one.
+    /// relays, never what is valid, and blames no one. A header extending the
+    /// best header tip always passes: after a stall longer than four
+    /// half-lives the next honest block is that much easier than the tip, and
+    /// flooring it would halt the chain.
     private func belowTargetFloor(_ block: Block) -> Bool {
         guard config.targetFloorDivisor > 1,
+              block.parent?.rawCID != tree.canonicalTip,
               let tipTarget = tree.headerSnapshot(of: tree.canonicalTip)?.target else { return false }
         let (floor, overflow) = tipTarget.multipliedReportingOverflow(by: UInt256(config.targetFloorDivisor))
         return !overflow && block.target > floor

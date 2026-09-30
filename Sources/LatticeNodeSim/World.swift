@@ -90,7 +90,8 @@ public struct World: Sendable {
         honestBlocks: Int,
         forkProbability: Double,
         spamBlocks: Int,
-        honestInterval: Int64 = blockInterval
+        honestInterval: Int64 = blockInterval,
+        stall: (afterBlock: Int, milliseconds: Int64)? = nil
     ) async throws -> World {
         let cas = SimCAS()
         try await LatticeState.emptyHeader.storeRecursively(storer: cas as any VolumeStorer)
@@ -118,7 +119,10 @@ public struct World: Sendable {
                 let recent = [genesis.cid] + honest.suffix(8)
                 parent = recent[rng.draw(0...recent.count - 1)]
             }
-            let time = genesisTime + Int64(index) * honestInterval
+            var time = genesisTime + Int64(index) * honestInterval
+            if let stall, index > stall.afterBlock {
+                time += stall.milliseconds
+            }
             let next = try await extend(
                 blocks[parent]!, timestamp: time, nonce: UInt64(index) << 32, in: cas
             )
