@@ -677,7 +677,6 @@ final class ChainProcessTests: XCTestCase {
 
         let outcome = try await process!.importBlock(carrierHeader)
         XCTAssertTrue(outcome.decision.isAccepted)
-        XCTAssertNotNil(outcome.parentCarrierLink)
         process = nil
 
         process = try await ChainProcess.open(configuration: config)
@@ -772,10 +771,9 @@ final class ChainProcessTests: XCTestCase {
             validatedGenesisLink, eagerGenesisLink,
             "validate-on-candidacy must persist the same genesis link as eager"
         )
-        XCTAssertNotNil(validated.parentCarrierLink)
     }
 
-    func testDisconnectedCarrierRelaysBeforeGenesisFactPromotion() async throws {
+    func testDisconnectedCarrierDefersGenesisFactPromotion() async throws {
         let directory = temporaryDirectory()
         let config = try configuration(path: ["Nexus"], storage: directory)
         var process: ChainProcess? = try await ChainProcess.open(
@@ -838,7 +836,6 @@ final class ChainProcessTests: XCTestCase {
                 predecessorCID: missingParentHeader.rawCID
             )
         )
-        XCTAssertNotNil(first.parentCarrierLink)
         let earlyGenesis = try await process!.store.issuedParentGenesisLink(
             directory: "Payments",
             childGenesisCID: childCID,
@@ -966,6 +963,7 @@ final class ChainProcessTests: XCTestCase {
             (.localVerificationFailure, true),
             (.revisionExhausted, true),
             (.notAcceptedAtCurrentChain, true),
+            (.proofOfWorkInvalid, true),
         ]
         for verdict in verdicts {
             let result = BlockImportResult.rejected(verdict.failure)
@@ -974,8 +972,6 @@ final class ChainProcessTests: XCTestCase {
             let retried = decision.shouldRetryWhenEvidenceChanges || decision.shouldRetryLater
             XCTAssertEqual(retried, !verdict.decided, "the fetcher retries exactly the undecided: \(verdict.failure)")
         }
-        let link = ParentCarrierLink(parentPath: ["Nexus"], carrierCID: "c", rootCID: "r")
-        XCTAssertTrue(ChainProcess.isDecided(.carrier(link, sameChainPredecessor: nil)))
     }
 
     /// Evidence for a carried block, as the parent's index serves it.
@@ -1066,8 +1062,6 @@ final class ChainProcessTests: XCTestCase {
                 predecessorCID: fixture.childHeader.rawCID
             )
         )
-        XCTAssertEqual(early.parentCarrierLink?.carrierCID, successorHeader.rawCID)
-        XCTAssertEqual(early.parentCarrierLink?.rootCID, proof.rootCID)
         // A deferral decides nothing, so nothing is persisted for it, never
         // as relay rows that would read as "handled".
         let retainedRelay = try await process.recoveredAuthenticatedChildPackage(
@@ -1090,10 +1084,11 @@ final class ChainProcessTests: XCTestCase {
         XCTAssertNil(retry.sameChainPredecessor)
     }
 
-    /// A carried block whose grind missed this chain's target is a carrier:
-    /// Lattice decides it relay-only, and this chain has no reader for its
-    /// evidence, so the import writes no edge, proof row, parent fact or
-    /// fact source, and pins no Volume, live or after a restart.
+    /// A carried block whose grind missed this chain's target proves no
+    /// work here: Lattice refuses it as `.proofOfWorkInvalid`, and this chain
+    /// has no reader for its evidence, so the import writes no edge, proof
+    /// row, parent fact or fact source, and pins no Volume, live or after a
+    /// restart.
     func testANonAcceptedCarrierRecordsNothing() async throws {
         let fixture = try await childBootstrapFixture()
         let parentSource = fixture.source
@@ -1127,10 +1122,20 @@ final class ChainProcessTests: XCTestCase {
             carriedHeader, authenticatedChildPackage: package,
             remoteSource: parentSource, mode: .header
         )
-        guard case .carrier = refused.decision else {
-            return XCTFail("a grind that misses this chain's target is a carrier, got \(refused.decision)")
-        }
-        XCTAssertEqual(refused.parentCarrierLink?.carrierCID, carriedHeader.rawCID)
+        XCTAssertEqual(
+            refused.decision, .proofOfWorkInvalid,
+            "a grind that misses this chain's target proves no work here"
+        )
+        // The failure is the proof's, not the block's: an honest supplier of
+        // the block bytes is never blamed for a proof it did not serve.
+        XCTAssertFalse(refused.blockSupplierAtFault)
+        XCTAssertNil(NodeNetworkRuntime.candidateBlame(
+            refused.decision,
+            blockSupplierAtFault: refused.blockSupplierAtFault,
+            complete: true,
+            soleSupplier: "honest-block-supplier",
+            supplierHasReadySession: true
+        ))
 
         let storage = fixture.configuration.storagePath
         let issuedScope = [

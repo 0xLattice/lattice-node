@@ -162,10 +162,13 @@ public struct SubmitWorkRequest: Codable, Sendable, Equatable {
 public enum WorkDisposition: String, Codable, Sendable {
     case canonicalized
     case acceptedSide
-    case carrier
+    /// The grind cleared only child targets, not Nexus's own: the children
+    /// it carries advanced and no Nexus block was mined. The work stays open.
+    case childOnly
     case duplicate
     case unavailable
     case temporarilyInvalid
+    case proofOfWorkInvalid
     case invalid
     case localFailure
 }
@@ -174,7 +177,6 @@ public struct SubmitWorkResponse: Codable, Sendable {
     public let accepted: Bool
     public let disposition: WorkDisposition
     public let tipCID: String?
-    public let parentCarrierLink: ParentCarrierLink?
     public let parentGenesisLinks: [ParentGenesisLink]
     public let durableChildProofs: [DirectChildProofSummary]
 }

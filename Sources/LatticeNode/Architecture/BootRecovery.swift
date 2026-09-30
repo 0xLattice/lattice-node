@@ -359,20 +359,21 @@ enum BootRecovery {
                 let importStorage = NodeImportStorage(
                     storage: broker
                 )
+                let genesisHeader = try BlockHeader(node: genesis.block)
                 let bootstrapped = try await ChainLevel.bootstrap(
                     context: context,
-                    genesisHeader: try BlockHeader(node: genesis.block),
+                    genesisHeader: genesisHeader,
                     fetcher: localFetcher,
                     validationContentStorer: importStorage,
                     materializedVolumeStorer: importStorage,
                     stage: { context in
-                        let hierarchyArtifacts = context.issuedCarrierLink.map {
-                            ImportHierarchyArtifacts(
-                                carrierLink: $0,
+                        let hierarchyArtifacts = context.issuesHierarchyFacts
+                            ? ImportHierarchyArtifacts(
+                                blockCID: genesisHeader.rawCID,
                                 carrierEvidence: nil,
                                 parentGenesisLinks: context.parentGenesisLinks
                             )
-                        }
+                            : nil
                         try await ChainProcess.persist(
                             context.batch,
                             importStorage: importStorage,
