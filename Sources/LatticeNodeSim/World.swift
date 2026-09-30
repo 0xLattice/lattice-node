@@ -41,14 +41,25 @@ public struct SimBlock: Sendable {
     let anchor: DifficultyAnchor?
 }
 
+/// The kinds of lie the liar tells. The first three prove no work the chain
+/// accepts (blame); the last two are weighed and excluded (never blame).
+public enum Lie: CaseIterable, Sendable {
+    case failedProofOfWork
+    case offScheduleTarget
+    case offScheduleTimestamp
+    case wrongSpec
+    case wrongPrevState
+}
+
 /// The generator's ground truth: the chain spec, the bootstrapped genesis,
-/// the honest block tree in release order, and a low-work spam fork.
+/// the honest block tree in release order, a low-work spam fork, garbage, and
+/// the liar's headers.
 public struct World: Sendable {
     public static let genesisTime: Int64 = 1_700_000_000_000
     public static let blockInterval: Int64 = 1_000
     /// When the spam fork's second block is dated: far enough behind its
-    /// schedule (4.9 half-lives) that ASERT makes every later spam target more
-    /// than 16 times easier than the honest tip's.
+    /// schedule (4.9 half-lives) that ASERT makes every later spam target
+    /// saturate toward the easiest the schedule allows.
     public static let spamLateBlockTime: Int64 = genesisTime + 50_000
 
     public let spec: ChainSpec
@@ -58,12 +69,23 @@ public struct World: Sendable {
     public let blocks: [String: SimBlock]
     /// Honest blocks in release order.
     public let honest: [String]
-    /// The spam fork from genesis, in order.
+    /// The spam fork from genesis, in order: valid proof-of-work at the
+    /// easiest target the schedule allows.
     public let spam: [String]
-    /// A block whose parent is never served: a header that does not connect.
+    /// Headers whose parents are never served, each at the maximum target
+    /// (any hash meets it): garbage that proves almost no work.
+    public let garbage: [String]
+    /// A block that is never served, and a header on it.
+    public let withheld: String
     public let orphan: String
     /// An honest side block only the uncle script shows, to one node.
     public let uncle: String
+    /// The liar's headers, each on an honest block.
+    public let lies: [Lie: String]
+    /// A header linked to the wrong-prevState lie: weighed, never selected.
+    public let excludedChild: String
+    /// Ground truth: the blocks a node must weigh and exclude.
+    public let excluded: Set<String>
 
     public static let spec = ChainSpec(
         maxNumberOfTransactionsPerBlock: 100,
@@ -76,13 +98,14 @@ public struct World: Sendable {
     )
 
     /// One hash in 32 meets the genesis target: a tampered header almost
-    /// always fails proof-of-work, and a saturated (maximum) target is 32
-    /// times easier than the honest tip's, so the spam floor has room to act.
+    /// always fails proof-of-work.
     public static let genesisTarget = UInt256.max >> 5
 
     /// Generate a world: `honestBlocks` honest blocks, each on the current
     /// GHOST head or, with `forkProbability`, on any of the last eight blocks
-    /// generated (side branches included); an uncle; and a `spamBlocks`-long
+    /// generated (side branches included), every third committing a child
+    /// index and every seventh one too big to travel inline; an uncle; the
+    /// liar's headers; `garbage` orphans; and a `spamBlocks`-long
     /// ASERT-saturation fork from genesis (block 2 dated far behind schedule,
     /// the rest right after it, at saturated targets).
     public static func generate(
@@ -90,6 +113,7 @@ public struct World: Sendable {
         honestBlocks: Int,
         forkProbability: Double,
         spamBlocks: Int,
+        garbage garbageCount: Int = 16,
         honestInterval: Int64 = blockInterval,
         stall: (afterBlock: Int, milliseconds: Int64)? = nil
     ) async throws -> World {
@@ -113,7 +137,7 @@ public struct World: Sendable {
         var blocks = [genesis.cid: genesis]
         var reference = GhostReference(genesis: genesis.cid)
         var honest: [String] = []
-        for index in 1...max(honestBlocks, 1) {
+        for index in 1...max(honestBlocks, 3) {
             var parent = reference.head
             if rng.chance(forkProbability) {
                 let recent = [genesis.cid] + honest.suffix(8)
@@ -123,8 +147,12 @@ public struct World: Sendable {
             if let stall, index > stall.afterBlock {
                 time += stall.milliseconds
             }
+            let childCount = index % 7 == 0 ? 48 : index % 3 == 0 ? 1 : 0
+            let children = Dictionary(uniqueKeysWithValues: (0..<childCount).map {
+                ("Child\(index)-\($0)", genesis.block)
+            })
             let next = try await extend(
-                blocks[parent]!, timestamp: time, nonce: UInt64(index) << 32, in: cas
+                blocks[parent]!, timestamp: time, nonce: UInt64(index) << 32, children: children, in: cas
             )
             blocks[next.cid] = next
             honest.append(next.cid)
@@ -147,12 +175,61 @@ public struct World: Sendable {
         let orphan = try await extend(
             withheld, timestamp: genesisTime + 2, nonce: 0xBEEF << 32, in: cas
         )
+        blocks[withheld.cid] = withheld
         blocks[orphan.cid] = orphan
-        let uncleParent = blocks[honest[min(2, honest.count - 1)]]?.parent ?? genesis.cid
+        var garbage: [String] = []
+        for index in 0..<garbageCount {
+            let unseen = try await extend(
+                genesis, timestamp: genesisTime + 3, nonce: (UInt64(index) << 32) | 0x6A6, in: cas
+            )
+            let junk = try await extend(
+                unseen, timestamp: genesisTime + 4, nonce: UInt64(index) << 32, target: .max, in: cas
+            )
+            blocks[junk.cid] = junk
+            garbage.append(junk.cid)
+        }
+        let uncleParent = blocks[honest[2]]?.parent ?? genesis.cid
         let uncle = try await extend(
             blocks[uncleParent]!, timestamp: genesisTime + 2_500, nonce: 0x0CE1 << 32, in: cas
         )
         blocks[uncle.cid] = uncle
+
+        // The liar's headers hang off honest block 2, dated just after it.
+        let base = blocks[honest[1]]!
+        let time = base.block.timestamp + 100
+        var lies: [Lie: SimBlock] = [:]
+        lies[.failedProofOfWork] = try await extend(base, timestamp: time, nonce: 0x1_1E << 32, in: cas)
+            .forged(in: cas)
+        lies[.offScheduleTarget] = try await extend(
+            base, timestamp: time, nonce: 0x2_1E << 32,
+            target: base.block.nextTarget << 2, in: cas
+        )
+        lies[.offScheduleTimestamp] = try await extend(
+            base, timestamp: base.block.timestamp, nonce: 0x3_1E << 32, in: cas
+        ).releasing(at: time, in: cas)
+        let otherSpec = ChainSpec(
+            maxNumberOfTransactionsPerBlock: 99,
+            maxStateGrowth: 100_000,
+            premine: 0,
+            targetBlockTime: UInt64(blockInterval),
+            initialReward: 100,
+            halvingInterval: 10_000,
+            halfLife: 10
+        )
+        let honestShaped = try await extend(base, timestamp: time, nonce: 0x4_1E << 32, in: cas)
+        lies[.wrongSpec] = try await record(
+            mined(honestShaped.block.replacing(spec: try VolumeImpl<ChainSpec>(node: otherSpec))),
+            releaseAt: time, anchor: honestShaped.anchor, in: cas
+        )
+        lies[.wrongPrevState] = try await record(
+            mined(honestShaped.block.replacing(prevState: LatticeStateHeader(rawCID: genesis.cid))),
+            releaseAt: time, anchor: honestShaped.anchor, in: cas
+        )
+        let excludedChild = try await extend(
+            lies[.wrongPrevState]!, timestamp: time + 100, nonce: 0x5_1E << 32, in: cas
+        )
+        for lie in lies.values { blocks[lie.cid] = lie }
+        blocks[excludedChild.cid] = excludedChild
 
         return World(
             spec: spec,
@@ -162,8 +239,13 @@ public struct World: Sendable {
             blocks: blocks,
             honest: honest,
             spam: spam,
+            garbage: garbage,
+            withheld: withheld.cid,
             orphan: orphan.cid,
-            uncle: uncle.cid
+            uncle: uncle.cid,
+            lies: lies.mapValues(\.cid),
+            excludedChild: excludedChild.cid,
+            excluded: [lies[.wrongSpec]!.cid, lies[.wrongPrevState]!.cid]
         )
     }
 
@@ -171,11 +253,15 @@ public struct World: Sendable {
         _ parent: SimBlock,
         timestamp: Int64,
         nonce: UInt64,
+        children: [String: Block] = [:],
+        target: UInt256? = nil,
         in cas: SimCAS
     ) async throws -> SimBlock {
         let built = try await BlockBuilder.buildBlock(
             previous: parent.block,
+            children: children,
             timestamp: timestamp,
+            target: target,
             nonce: nonce,
             difficultyAnchor: parent.anchor,
             fetcher: cas
@@ -238,23 +324,19 @@ public struct World: Sendable {
     }
 
     /// `count` distinct blocks on genesis, each committing its own non-empty
-    /// child index (so a receiver cannot rebuild it and must fetch it).
-    public func carriers(count: Int) async throws -> [SimBlock] {
+    /// child index of `entries` entries.
+    public func carriers(count: Int, entries: Int = 1) async throws -> [SimBlock] {
         let cas = SimCAS()
         var carriers: [SimBlock] = []
         for index in 0..<count {
-            let built = try await BlockBuilder.buildBlock(
-                previous: genesis.block,
-                children: ["Carried\(index)": genesis.block],
+            let children = Dictionary(uniqueKeysWithValues: (0..<entries).map {
+                ("Carried\(index)-\($0)", genesis.block)
+            })
+            carriers.append(try await World.extend(
+                genesis,
                 timestamp: World.genesisTime + World.blockInterval,
                 nonce: UInt64(index) << 40,
-                fetcher: cas
-            )
-            let block = World.mined(built.replacing(parent: built.parent?.removingNode(), nonce: built.nonce))
-            carriers.append(try await World.record(
-                block,
-                releaseAt: block.timestamp,
-                anchor: DifficultyAnchor(blockHeight: 1, timestamp: block.timestamp, target: block.target),
+                children: children,
                 in: cas
             ))
         }
@@ -297,27 +379,43 @@ public enum SimulationError: Error, CustomStringConvertible {
     }
 }
 
+extension SimBlock {
+    /// The same block with a nonce that misses its target.
+    func forged(in cas: SimCAS) async throws -> SimBlock {
+        try await World.record(World.forged(block), releaseAt: releaseAt, anchor: anchor, in: cas)
+    }
+
+    func releasing(at time: Int64, in cas: SimCAS) async throws -> SimBlock {
+        try await World.record(block, releaseAt: time, anchor: anchor, in: cas)
+    }
+}
+
 extension Block {
     func replacingNonce(_ nonce: UInt64) -> Block {
         replacing(parent: parent, nonce: nonce)
     }
 
-    func replacing(parent: BlockHeader?, nonce: UInt64) -> Block {
+    func replacing(
+        parent: BlockHeader? = nil,
+        nonce: UInt64? = nil,
+        spec newSpec: VolumeImpl<ChainSpec>? = nil,
+        prevState newPrevState: LatticeStateHeader? = nil
+    ) -> Block {
         Block(
             version: version,
-            parent: parent,
+            parent: parent ?? self.parent,
             transactions: transactions,
             target: target,
             nextTarget: nextTarget,
-            spec: spec,
+            spec: newSpec ?? spec,
             parentState: parentState,
-            prevState: prevState,
+            prevState: newPrevState ?? prevState,
             postState: postState,
             children: children,
             height: height,
             timestamp: timestamp,
             rewardRecipient: rewardRecipient,
-            nonce: nonce
+            nonce: nonce ?? self.nonce
         )
     }
 }

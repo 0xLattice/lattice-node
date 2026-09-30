@@ -127,9 +127,16 @@ public enum Invariants {
             throw fail(node, "published snapshot is stale after the step")
         }
 
-        // DST 6: bounded sync state.
+        // DST 6: bounded sync state. The pending queue stays within the
+        // operator's budget whatever peers send.
         if core.sync.awaitingChildIndex.count > core.config.maxAwaitingChildIndex {
             throw fail(node, "child-index waits exceed their bound")
+        }
+        if core.sync.pending.bytes > core.config.pendingBudget {
+            throw fail(node, "the pending queue holds \(core.sync.pending.bytes) bytes, over its budget")
+        }
+        if core.sync.pending.entries.keys.contains(where: digest.blocks.keys.contains) {
+            throw fail(node, "a weighed header is still pending")
         }
     }
 
@@ -151,9 +158,11 @@ public enum Invariants {
         if let missing = digest.blocks.keys.first(where: { !store.blockFacts.contains($0) }) {
             throw fail(node, "weighed block \(missing) has no durable block fact")
         }
-        // DST 4: every generated block is valid, so nothing is excluded.
-        if let excluded = digest.excluded.first {
-            throw fail(node, "valid block \(excluded) was excluded")
+        // DST 4 / work weighs, validity selects: exactly the held blocks that
+        // break a validity rule (wrong spec or prevState) are excluded.
+        let excluded = world.excluded.intersection(digest.blocks.keys)
+        guard digest.excluded == excluded else {
+            throw fail(node, "excludes \(digest.excluded.sorted()), ground truth \(excluded.sorted())")
         }
 
         // DST 1 / validity selects / hierarchical GHOST: the head is an
@@ -162,6 +171,7 @@ public enum Invariants {
         // never from what the tree reports.
         var reference = GhostReference(genesis: world.genesis.cid)
         reference.flipTieBreak = flipTieBreak
+        reference.excluded = excluded
         reference.add(world.genesis.cid, parent: nil, work: workForTarget(world.genesis.block.target))
         for hash in store.headers.keys.sorted() where hash != world.genesis.cid {
             guard let truth = world.blocks[hash] else {
