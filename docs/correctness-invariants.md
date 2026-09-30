@@ -18,14 +18,14 @@ places are their own claim until a test covers them too.
 
 ## NODE-SEMANTICS-001 — every import outcome has one node meaning
 
-- **NODE-SEMANTICS-001.a** — `canonicalized`, `acceptedSide`, `carrier`,
-  `duplicate`, `unavailable`, `temporarilyInvalid`, `invalid`, and
+- **NODE-SEMANTICS-001.a** — `canonicalized`, `acceptedSide`, `duplicate`,
+  `unavailable`, `temporarilyInvalid`, `proofOfWorkInvalid`, `invalid`, and
   `localFailure` remain distinct at the node boundary: `NodeImportDecision`
   maps every import result and error to exactly one of them.
 - **NODE-SEMANTICS-001.b** — A child chain's genesis bootstrap in
-  `ChainProcess.importBlock`, whose accepted and carrier arms set their
-  decision by hand (its rejected arm uses `NodeImportDecision`), gives each
-  the same meaning.
+  `ChainProcess.importBlock`, whose accepted arm sets its decision by hand
+  (its rejected arm uses `NodeImportDecision`, blameless via
+  `bootstrapDecision`), gives each the same meaning.
   Gap: #212
 
 ## NODE-SEMANTICS-002 — side validity is not canonicity
@@ -85,11 +85,14 @@ places are their own claim until a test covers them too.
 ## NODE-SEMANTICS-005 — only obtained invalid evidence is punishable
 
 - **NODE-SEMANTICS-005.a** — Candidate admission blames only a complete
-  `invalid` outcome, only its sole remote supplier, only while that
-  supplier's session is ready, and only on Nexus or when the outcome carries
-  a parent carrier link.
-- **NODE-SEMANTICS-005.b** — A child-chain candidate rejected as `invalid`
-  without a parent carrier link blames no one.
+  `proofOfWorkInvalid` outcome (a header that proves no work the chain
+  accepts), only its sole remote supplier, and only while that supplier's
+  session is ready. On a child chain the failure must be the block's own:
+  a package proof that carries no work to the block blames no one, since it
+  did not come from the block's supplier.
+- **NODE-SEMANTICS-005.b** — Every other refusal blames no one, and so does a
+  bootstrap: a genesis that misses its own target is the content's fault,
+  not its server's.
 - **NODE-SEMANTICS-005.c** — Authenticated parent evidence establishes parent
   facts; it never vouches for a child transition.
   Gap: #213

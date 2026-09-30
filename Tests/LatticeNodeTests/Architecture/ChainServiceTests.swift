@@ -1006,6 +1006,45 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertEqual(status.mempoolCount, 1)
     }
 
+    /// A header whose timestamp does not pass its parent's proves no work
+    /// (Lattice 40), so an honest merged-mined child candidate is always
+    /// stamped past its own previous block, even when the provisional parent
+    /// carrier it rides is older; otherwise it takes the carrier's time.
+    func testChildCandidateTimestampPassesItsPreviousBlock() async throws {
+        let spec = ChainSpec(
+            maxNumberOfTransactionsPerBlock: 100,
+            maxStateGrowth: 100_000,
+            premine: 0,
+            targetBlockTime: 1_000,
+            initialReward: 1,
+            halvingInterval: 100,
+            halfLife: 10
+        )
+        for childTimestamp: Int64 in [0, 1, 5_000] {
+            let fixture = try await activeChildService(
+                spec: spec, childTimestamp: childTimestamp
+            )
+            let previous = try await fixture.process.validatedTipBlock()
+            XCTAssertEqual(previous.timestamp, childTimestamp)
+            let candidate = try await fixture.service.miningCandidate(
+                for: ChildCandidateRequestContext(
+                    parentCarrier: fixture.parentCarrier,
+                    recipients: []
+                ),
+                parentContentSource: FetcherContentSource(fixture.parent)
+            )
+            XCTAssertGreaterThan(
+                candidate.block.timestamp, previous.timestamp,
+                "child genesis at \(childTimestamp)"
+            )
+            XCTAssertEqual(
+                candidate.block.timestamp,
+                max(previous.timestamp + 1, fixture.parentCarrier.timestamp),
+                "child genesis at \(childTimestamp)"
+            )
+        }
+    }
+
     func testTemplateUsesLogicalBlockVolumeSizeAtExactBoundary() async throws {
         let key = CryptoUtils.generateKeyPair()
         let body = TransactionBody(
@@ -1365,7 +1404,7 @@ final class ChainServiceTests: XCTestCase {
             workID: template.workID,
             nonce: nonce
         ))
-        XCTAssertEqual(submitted.disposition, .carrier)
+        XCTAssertEqual(submitted.disposition, .childOnly)
         XCTAssertEqual(submitted.durableChildProofs, [
             DirectChildProofSummary(directory: "Payments", childCID: childCID),
         ])
@@ -1444,7 +1483,7 @@ final class ChainServiceTests: XCTestCase {
     /// harder target, and a later parent-clearing nonce for the same workID
     /// has to produce the parent block. Consuming the template on the carrier
     /// throws that nonce away as `unknownWork`.
-    func testCarrierSubmissionKeepsWorkOpenForTheParentTarget() async throws {
+    func testChildOnlySubmissionKeepsWorkOpenForTheParentTarget() async throws {
         let process = try await nexusProcess()
         let genesis = try await process.canonicalTipBlock()
         let activeChild = try await anchoredChildGenesis(
@@ -1495,7 +1534,7 @@ final class ChainServiceTests: XCTestCase {
             workID: template.workID,
             nonce: carrierNonce
         ))
-        XCTAssertEqual(carried.disposition, .carrier)
+        XCTAssertEqual(carried.disposition, .childOnly)
         XCTAssertFalse(carried.accepted)
         let tipAfterCarrier = await process.status().tipCID
         XCTAssertEqual(tipAfterCarrier, template.block.parent?.rawCID)
@@ -1816,7 +1855,7 @@ final class ChainServiceTests: XCTestCase {
             workID: template.workID,
             nonce: carrierNonce
         ))
-        XCTAssertEqual(carried.disposition, .carrier)
+        XCTAssertEqual(carried.disposition, .childOnly)
 
         let parentNonce = firstNonce(
             of: template.block,
@@ -2981,7 +3020,7 @@ final class ChainServiceTests: XCTestCase {
         )
         let firstCarrierHeader = try BlockHeader(node: firstCarrier)
         let parentOutcome = try await parentProcess.importBlock(firstCarrierHeader)
-        XCTAssertNotNil(parentOutcome.parentCarrierLink)
+        XCTAssertTrue(parentOutcome.decision.isAccepted)
 
         let childDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-child-service-\(UUID().uuidString)")
@@ -4620,6 +4659,7 @@ final class ChainServiceTests: XCTestCase {
     /// of hashes.
     private func activeChildService(
         spec: ChainSpec,
+        childTimestamp: Int64 = 1,
         carrierInterval: Int64 = 1,
         carrierTarget: UInt256? = nil,
         policyModules: [WasmPolicyModuleHeader] = []
@@ -4632,7 +4672,7 @@ final class ChainServiceTests: XCTestCase {
         let child = try await anchoredChildGenesis(
             parent: parent,
             parentGenesis: parentGenesis,
-            childTimestamp: 1,
+            childTimestamp: childTimestamp,
             carrierNonce: 0,
             carrierInterval: carrierInterval,
             carrierTarget: carrierTarget,
@@ -4727,7 +4767,7 @@ final class ChainServiceTests: XCTestCase {
             )
         let carrierHeader = try BlockHeader(node: carrier)
         let parentAdmission = try await parent.importBlock(carrierHeader)
-        XCTAssertNotNil(parentAdmission.parentCarrierLink)
+        XCTAssertTrue(parentAdmission.decision.isAccepted)
         return AnchoredChildGenesis(
             block: block,
             header: header,

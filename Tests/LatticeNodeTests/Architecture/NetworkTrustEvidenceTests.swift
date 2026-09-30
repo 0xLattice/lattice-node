@@ -593,7 +593,6 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                             chainPath: targetConfiguration.chainPath,
                             childCID: admission.header.rawCID
                         )),
-                        parentCarrierLink: nil,
                         sameChainPredecessor: nil
                     )
                 }
@@ -607,7 +606,6 @@ final class NetworkTrustEvidenceTests: NetworkTrustTestCase {
                     decision: .acceptedSide(ChainCommit(
                         tipHash: admission.header.rawCID
                     )),
-                    parentCarrierLink: nil,
                     sameChainPredecessor: nil
                 )
             }

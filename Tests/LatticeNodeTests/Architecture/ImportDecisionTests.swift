@@ -18,15 +18,30 @@ final class ImportDecisionTests: XCTestCase {
         XCTAssertFalse(invalid.shouldRetryLater)
     }
 
-    func testTemporalAndTargetMissResultsStayNeutral() {
+    func testTemporalAndTargetMissResultsStayDistinct() {
         let temporal = NodeImportDecision(.rejected(.notYetValid))
         XCTAssertTrue(temporal.shouldRetryLater)
         XCTAssertFalse(temporal.shouldRetryWhenEvidenceChanges)
 
-        let targetMiss = NodeImportDecision(
-            .rejected(.notAcceptedAtCurrentChain)
-        )
-        XCTAssertEqual(targetMiss, .carrier)
+        // A target miss is a terminal proof-of-work failure, the one refusal
+        // that blames its sender; it is not a plain invalidity.
+        let targetMiss = NodeImportDecision(.rejected(.proofOfWorkInvalid))
+        XCTAssertEqual(targetMiss, .proofOfWorkInvalid)
+        XCTAssertFalse(targetMiss.shouldRetryLater)
+        XCTAssertFalse(targetMiss.shouldRetryWhenEvidenceChanges)
+    }
+
+    /// A bootstrap refusal blames no one: a genesis that misses its own
+    /// target is the content's fault, not its server's.
+    func testABootstrapProofOfWorkFailureIsBlameless() {
+        XCTAssertEqual(ChainProcess.bootstrapDecision(.proofOfWorkInvalid), .invalid)
+        for error in Self.errorSamples where error != .proofOfWorkInvalid {
+            XCTAssertEqual(
+                ChainProcess.bootstrapDecision(error),
+                NodeImportDecision(error),
+                "\(error)"
+            )
+        }
     }
 
     // MARK: - Exhaustive tables
@@ -65,7 +80,8 @@ final class ImportDecisionTests: XCTestCase {
         case .localVerificationFailure: .localFailure
         case .revisionExhausted: .localFailure
         case .notYetValid: .temporarilyInvalid
-        case .notAcceptedAtCurrentChain: .carrier
+        case .notAcceptedAtCurrentChain: .invalid
+        case .proofOfWorkInvalid: .proofOfWorkInvalid
         }
     }
 
@@ -81,6 +97,7 @@ final class ImportDecisionTests: XCTestCase {
         .revisionExhausted,
         .notYetValid,
         .notAcceptedAtCurrentChain,
+        .proofOfWorkInvalid,
     ]
 
     private static func caseName(_ error: BlockImportError) -> String {
@@ -93,6 +110,7 @@ final class ImportDecisionTests: XCTestCase {
         case .revisionExhausted: "revisionExhausted"
         case .notYetValid: "notYetValid"
         case .notAcceptedAtCurrentChain: "notAcceptedAtCurrentChain"
+        case .proofOfWorkInvalid: "proofOfWorkInvalid"
         }
     }
 
@@ -101,8 +119,7 @@ final class ImportDecisionTests: XCTestCase {
             facts: .validation(blockHash: commit.tipHash),
             materializedPostState: nil,
             commit: commit,
-            sameChainPredecessor: nil,
-            parentCarrierLink: nil
+            sameChainPredecessor: nil
         ))
     }
 
@@ -112,14 +129,13 @@ final class ImportDecisionTests: XCTestCase {
         ("accepted, added", accepted(added), .canonicalized(added)),
         ("accepted, removed only", accepted(removedOnly), .canonicalized(removedOnly)),
         ("accepted, unchanged", accepted(unchanged), .acceptedSide(unchanged)),
-        ("carrier", .carrier(nil), .carrier),
-        ("carrier behind a predecessor",
-         .carrier(nil, sameChainPredecessor: predecessor), .carrier),
-        ("duplicate", .duplicate(nil), .duplicate),
+        ("duplicate", .duplicate(), .duplicate),
+        ("duplicate behind a predecessor",
+         .duplicate(sameChainPredecessor: predecessor), .duplicate),
         ("duplicate, promoted unchanged",
-         .duplicate(nil, promotedCommit: unchanged), .duplicate),
+         .duplicate(promotedCommit: unchanged), .duplicate),
         ("duplicate, promoted canonical",
-         .duplicate(nil, promotedCommit: added), .canonicalized(added)),
+         .duplicate(promotedCommit: added), .canonicalized(added)),
     ] + errorSamples.map { error in
         ("rejected \(error)", .rejected(error), expected(error))
     }
@@ -127,7 +143,6 @@ final class ImportDecisionTests: XCTestCase {
     private static func resultCaseName(_ result: BlockImportResult) -> String {
         switch result {
         case .accepted: "accepted"
-        case .carrier: "carrier"
         case .duplicate: "duplicate"
         case .rejected: "rejected"
         }
@@ -137,13 +152,13 @@ final class ImportDecisionTests: XCTestCase {
     private static let decisions: [NodeImportDecision] = [
         .canonicalized(added),
         .acceptedSide(unchanged),
-        .carrier,
         .duplicate,
         .unavailable(nil),
         .unavailable(childProof),
         .unavailable(parentGenesis),
         .unavailable(parentContinuity),
         .temporarilyInvalid,
+        .proofOfWorkInvalid,
         .invalid,
         .localFailure,
     ]
@@ -151,14 +166,14 @@ final class ImportDecisionTests: XCTestCase {
     /// Establishes: NODE-SEMANTICS-001.a
     func testEveryImportResultAndErrorMapsToItsExactDecision() {
         XCTAssertEqual(
-            Set(Self.errorSamples.map(Self.caseName)).count, 8,
+            Set(Self.errorSamples.map(Self.caseName)).count, 9,
             "every BlockImportError case needs a sample"
         )
         for error in Self.errorSamples {
             XCTAssertEqual(NodeImportDecision(error), Self.expected(error), "\(error)")
         }
         XCTAssertEqual(
-            Set(Self.resultTable.map { Self.resultCaseName($0.1) }).count, 4,
+            Set(Self.resultTable.map { Self.resultCaseName($0.1) }).count, 3,
             "every BlockImportResult case needs a row"
         )
         for (name, result, decision) in Self.resultTable {
@@ -168,8 +183,9 @@ final class ImportDecisionTests: XCTestCase {
         // decisions of its own case.
         let names = Set(Self.resultTable.map { Self.decisionCaseName($0.2) })
         XCTAssertEqual(names, [
-            "canonicalized", "acceptedSide", "carrier", "duplicate",
-            "unavailable", "temporarilyInvalid", "invalid", "localFailure",
+            "canonicalized", "acceptedSide", "duplicate", "unavailable",
+            "temporarilyInvalid", "proofOfWorkInvalid", "invalid",
+            "localFailure",
         ])
     }
 
@@ -177,10 +193,10 @@ final class ImportDecisionTests: XCTestCase {
         switch decision {
         case .canonicalized: "canonicalized"
         case .acceptedSide: "acceptedSide"
-        case .carrier: "carrier"
         case .duplicate: "duplicate"
         case .unavailable: "unavailable"
         case .temporarilyInvalid: "temporarilyInvalid"
+        case .proofOfWorkInvalid: "proofOfWorkInvalid"
         case .invalid: "invalid"
         case .localFailure: "localFailure"
         }
@@ -202,10 +218,10 @@ final class ImportDecisionTests: XCTestCase {
         let expected: [String: String] = [
             "canonicalized": "accepted,publish",
             "acceptedSide": "accepted",
-            "carrier": "",
             "duplicate": "accepted",
             "unavailable": "evidence",
             "temporarilyInvalid": "later",
+            "proofOfWorkInvalid": "",
             "invalid": "",
             "localFailure": "",
         ]

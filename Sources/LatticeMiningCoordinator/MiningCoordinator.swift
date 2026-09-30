@@ -389,7 +389,7 @@ public actor MiningCoordinator {
 
             // The easiest target no submitted hit has cleared yet.
             var openTarget = work.targets.first
-            var lastCarrier: MiningCoordinatorCycleResult?
+            var lastChildOnly: MiningCoordinatorCycleResult?
 
             while searching > 0 || probing, let event = await group.next() {
                 switch event {
@@ -405,7 +405,7 @@ public actor MiningCoordinator {
                     return .stale(workId: work.workId)
                 case .expired:
                     group.cancelAll()
-                    if let lastCarrier { return lastCarrier }
+                    if let lastChildOnly { return lastChildOnly }
                     metricsState.staleAbortCount += 1
                     return .stale(workId: work.workId)
                 case .workerFailed(let workerId, let error):
@@ -430,18 +430,18 @@ public actor MiningCoordinator {
                             return .stale(workId: work.workId)
                         }
                         let outcome = await submitWithRetry(work: work, result: result)
-                        // Only a carrier leaves the work open, and only a known
+                        // Only a childOnly share leaves the work open, and only a known
                         // hash names the targets it left uncleared.
                         guard case .submitted(_, _, let submission) = outcome,
                               !submission.accepted,
-                              submission.disposition == "carrier",
+                              submission.disposition == "childOnly",
                               let hash,
                               let next = work.targets.first(where: { $0 < hash }) else {
                             group.cancelAll()
                             return outcome
                         }
                         openTarget = next
-                        lastCarrier = outcome
+                        lastChildOnly = outcome
                     }
                     // Resume this worker's range after the hit, searching
                     // toward the easiest target still open.
@@ -460,7 +460,7 @@ public actor MiningCoordinator {
             }
 
             group.cancelAll()
-            return lastCarrier ?? .noSolution(workId: work.workId)
+            return lastChildOnly ?? .noSolution(workId: work.workId)
         }
     }
 

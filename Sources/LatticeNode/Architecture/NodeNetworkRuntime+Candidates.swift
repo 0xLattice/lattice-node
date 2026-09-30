@@ -187,8 +187,8 @@ extension NodeNetworkRuntime {
     }
 
     /// `NetworkInterface.announceCarriedEvidence`: the service admitted a
-    /// carrier-linked block under a package outside the candidate worker,
-    /// which may have changed the child-evidence index root.
+    /// block under a package outside the candidate worker, which may have
+    /// changed the child-evidence index root.
     func announceCarriedEvidence(_ package: AuthenticatedChildPackage) async {
         guard isRunning, let process else { return }
         scheduleChildEvidenceRootAnnounce(
@@ -404,13 +404,12 @@ extension NodeNetworkRuntime {
         let soleSupplier = attempt.attribution.soleRemoteSupplierPublicKey
         if let blamed = Self.candidateBlame(
             outcome.decision,
+            blockSupplierAtFault: outcome.blockSupplierAtFault,
             complete: attempt.attribution.allResponsesComplete,
             soleSupplier: soleSupplier,
             supplierHasReadySession: soleSupplier
                 .flatMap { try? PeerKey($0) }
-                .map { hasReadySession($0) } ?? false,
-            isNexus: configuration.address.isNexus,
-            hasCarrierLink: outcome.parentCarrierLink != nil
+                .map { hasReadySession($0) } ?? false
         ) {
             await overlay.reportDeficientContent(
                 rootCID: candidate.blockCID,
@@ -500,25 +499,28 @@ extension NodeNetworkRuntime {
         }
     }
 
-    /// The peer an admission outcome blames, or nil. Only a complete
-    /// `invalid` candidate is attributable, and only to its sole remote
-    /// supplier while that supplier's session is ready. On a child chain the
-    /// candidate must also carry a parent carrier link: parent evidence
-    /// authenticates only parent facts and never vouches for the child
-    /// transition. "Blame" is a per-root routing suppression, never a ban.
+    /// The peer an admission outcome blames, or nil. Only a header that
+    /// proves no work the chain accepts (`proofOfWorkInvalid`) blames its
+    /// sender; every other refusal blames no one. On a child chain the
+    /// failure must also be the block's own (`blockSupplierAtFault`): a
+    /// proof that carries no work came from the child-evidence index, not
+    /// from the block's supplier, and the node does not know which peer
+    /// served it, so that failure blames no one. Even then only a complete
+    /// candidate is attributable, and only to its sole remote supplier while
+    /// that supplier's session is ready. "Blame" is a per-root routing
+    /// suppression, never a ban.
     nonisolated static func candidateBlame(
         _ decision: NodeImportDecision,
+        blockSupplierAtFault: Bool,
         complete: Bool,
         soleSupplier: String?,
-        supplierHasReadySession: Bool,
-        isNexus: Bool,
-        hasCarrierLink: Bool
+        supplierHasReadySession: Bool
     ) -> String? {
-        guard decision == .invalid,
+        guard decision == .proofOfWorkInvalid,
+              blockSupplierAtFault,
               complete,
               let soleSupplier,
-              supplierHasReadySession,
-              isNexus || hasCarrierLink else {
+              supplierHasReadySession else {
             return nil
         }
         return soleSupplier

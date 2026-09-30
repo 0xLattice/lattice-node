@@ -218,7 +218,7 @@ struct Mine: AsyncParsableCommand {
                 // failing -- worker/node trouble, or the deadline itself --
                 // would inflate the very bound meant to catch it.
                 switch outcome {
-                case .accepted, .harmless, .carrier, .refusal:
+                case .accepted, .harmless, .childOnly, .refusal:
                     longestCompletedRound = max(
                         longestCompletedRound,
                         started.duration(to: ContinuousClock.now)
@@ -238,7 +238,7 @@ struct Mine: AsyncParsableCommand {
                     }
                 case .harmless:
                     break
-                case .carrier:
+                case .childOnly:
                     // A child chain advanced; no parent block was produced,
                     // so this starts no pacing hold. Note
                     // that is about the TRIGGER, not the effect: a hold
@@ -326,7 +326,7 @@ func minerSettings(_ layout: HostLayout) throws -> MinerSettings {
 enum CoordinatorOutcome {
     case accepted(tip: String)
     case harmless
-    case carrier
+    case childOnly
     case refusal
     case workerTrouble(String)
     /// The round outlived its derived bound; its process group was killed.
@@ -401,11 +401,11 @@ func runCoordinatorOnce(
             return .accepted(tip: object["tipCID"] as? String ?? "")
         case "noSolution", "stale":
             return .harmless
-        case "submitted" where object["disposition"] as? String == "carrier":
+        case "submitted" where object["disposition"] as? String == "childOnly":
             // The solution cleared only a child chain's target: the child
             // advances and no parent block was mined. Routine on a merged-mining chain whose child target
             // is easier than the parent's — never a refusal signal.
-            return .carrier
+            return .childOnly
         case "submitted":
             // Accepted was handled above: a rejected submission is a refusal.
             return .refusal

@@ -1203,7 +1203,6 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             delivered.fulfill()
             return NodeImportOutcome(
                 decision: .duplicate,
-                parentCarrierLink: nil,
                 sameChainPredecessor: nil
             )
         })
@@ -1277,10 +1276,10 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             let decision = switch outcome.decision {
             case .canonicalized: "canonicalized"
             case .acceptedSide: "acceptedSide"
-            case .carrier: "carrier"
             case .duplicate: "duplicate"
             case .unavailable: "unavailable"
             case .temporarilyInvalid: "temporarilyInvalid"
+            case .proofOfWorkInvalid: "proofOfWorkInvalid"
             case .invalid: "invalid"
             case .localFailure: "localFailure"
             }
@@ -1511,7 +1510,6 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
                 decision: .acceptedSide(ChainCommit(
                     tipHash: admission.header.rawCID
                 )),
-                parentCarrierLink: nil,
                 sameChainPredecessor: nil
             )
         })
@@ -1593,7 +1591,6 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
                 decision: .acceptedSide(ChainCommit(
                     tipHash: admission.header.rawCID
                 )),
-                parentCarrierLink: nil,
                 sameChainPredecessor: nil
             )
         })
@@ -2004,10 +2001,10 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
     }
 
     /// Waiting on a missing parent applies only to a block that clears its
-    /// own target. A target miss is a carrier: decided and relayed from its
-    /// own bytes, whatever its parent (§9.5), so it is never held behind a
-    /// parent this node may never accept.
-    func testTargetMissWithUnknownParentIsACarrierNotAPark() async throws {
+    /// own target. A target miss proves no work: it is decided from its own
+    /// bytes, whatever its parent, so it is never held behind a parent this
+    /// node may never accept.
+    func testTargetMissWithUnknownParentIsRefusedNotParked() async throws {
         let producer = try await canonicalNetworkProcess()
         let joiner = try await canonicalNetworkProcess()
         let clock = TestBlockClock()
@@ -2032,17 +2029,18 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         }
         let missHeader = try BlockHeader(node: miss)
         try await missHeader.storeBlock(fetcher: producer, storer: producer)
-        let carrier = try await joiner.importBlock(
+        let refused = try await joiner.importBlock(
             missHeader, remoteSource: producer, mode: .header
         )
-        guard case .carrier = carrier.decision else {
-            return XCTFail("a target miss is a carrier, got \(carrier.decision)")
-        }
         XCTAssertEqual(
-            carrier.parentCarrierLink?.carrierCID, missHeader.rawCID,
-            "the carrier is relayed"
+            refused.decision, .proofOfWorkInvalid,
+            "a target miss proves no work"
         )
-        XCTAssertNil(carrier.sameChainPredecessor, "not parked on its parent")
+        XCTAssertTrue(
+            refused.blockSupplierAtFault,
+            "a Nexus header's work is its own: its supplier is at fault"
+        )
+        XCTAssertNil(refused.sameChainPredecessor, "not parked on its parent")
 
         // The same parent under a block that clears its target: it waits
         // for that parent.

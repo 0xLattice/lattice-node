@@ -180,7 +180,7 @@ private actor SearchLedger {
 
 /// Decides each submission the way the node does: by hashing it. A hash that
 /// clears the parent target produces the parent block; one that clears only the
-/// child target is a carrier, which leaves the work open.
+/// child target is `childOnly`, which leaves the work open.
 private actor MergedMiningNode: MiningCoordinatorNodeClient {
     private let merged: MergedWork
     private(set) var submissions: [UInt64] = []
@@ -200,7 +200,7 @@ private actor MergedMiningNode: MiningCoordinatorNodeClient {
             return MiningSolutionSubmission(accepted: true, disposition: "canonicalized", tipCID: "parent")
         }
         if hash <= merged.childTarget {
-            return MiningSolutionSubmission(accepted: false, disposition: "carrier")
+            return MiningSolutionSubmission(accepted: false, disposition: "childOnly")
         }
         return MiningSolutionSubmission(accepted: false, disposition: "invalid")
     }

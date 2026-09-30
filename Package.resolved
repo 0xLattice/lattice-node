@@ -69,8 +69,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adalinxx/Lattice.git",
       "state" : {
-        "revision" : "53ea3faa5f8f8b240347e793fc8e343e1ea5f733",
-        "version" : "39.0.0"
+        "revision" : "da79ce3d9573fae9a44a6adf37b49300b345a9c2",
+        "version" : "40.0.0"
       }
     },
     {
