@@ -14,6 +14,9 @@ public struct SimStore: Sendable {
     public private(set) var validations: Set<String> = []
     public private(set) var exclusions: Set<String> = []
 
+    /// An empty store, for a level that starts from a bootstrap batch.
+    init() {}
+
     public init(genesis: SimBlock, facts seed: BlockImportBatch) {
         append(PersistBatch(
             headers: [StoredHeader(blockCID: genesis.cid, block: genesis.block, children: genesis.children)],

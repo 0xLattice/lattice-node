@@ -1,0 +1,287 @@
+import Lattice
+import LatticeNodeCore
+import UInt256
+
+/// The "Lattice architecture preserved" checklist at every level of a host,
+/// after every step:
+///
+/// - the weighed graph is the durable headers; invalid subtrees still weigh;
+///   work is never revoked;
+/// - each grind has one location and weighs what its proof verifies (root:
+///   its own work; child: its root's `verifySecuringWork` contribution, one
+///   per root) or the parent's attributed run, never more;
+/// - hierarchical GHOST: the head is an independent reference's over those
+///   grinds; validity selects (no excluded block on the best chain);
+/// - the executed set is a subset of the weighed graph on any branch, closed
+///   under ancestry, never shrinking, outside every excluded subtree;
+/// - continuity: every executed child block's parent state was produced by
+///   an executed parent block (any branch);
+/// - genesis links: a parent's facts authorize a child genesis exactly when
+///   the block carrying its `GenesisAction` is executed, and a child level
+///   exists only then;
+/// - weighed-only blocks issue no facts: validations only for executed
+///   blocks, genesis links only from executed ones;
+/// - the root-exclusion rule;
+/// - durability precedes visibility, and sync state stays bounded.
+public enum LevelInvariants {
+    public static func check(
+        node: String,
+        host: HostCore,
+        digests: [ChainPath: TreeDigest],
+        previous: [ChainPath: TreeDigest],
+        store: HostStore,
+        world: LevelWorld
+    ) throws {
+        for path in host.ordered {
+            guard let core = host.levels[path], let digest = digests[path],
+                  let level = store.levels[path] else {
+                throw Invariants.fail(node, "level \(path) has no digest or store")
+            }
+            let name = "\(node)\(path.dropFirst().map { "/" + $0 }.joined())"
+            try checkLevel(name, path: path, host: host, core: core, digest: digest,
+                           previous: previous[path], store: level, digests: digests, world: world)
+        }
+        try checkGenesisLinks(node, host: host, digests: digests, store: store, world: world)
+    }
+
+    static func checkLevel(
+        _ node: String,
+        path: ChainPath,
+        host: HostCore,
+        core: Core,
+        digest: TreeDigest,
+        previous: TreeDigest?,
+        store: SimStore,
+        digests: [ChainPath: TreeDigest],
+        world: LevelWorld
+    ) throws {
+        let fail = { (detail: String) in Invariants.fail(node, detail) }
+        guard Set(digest.blocks.keys) == Set(store.headers.keys) else {
+            throw fail("the weighed graph is not the set of durable headers")
+        }
+        if let missing = digest.blocks.keys.first(where: { !store.blockFacts.contains($0) }) {
+            throw fail("weighed block \(missing) has no durable block fact")
+        }
+        let truth = world.blocks[path] ?? [:]
+        if let stranger = digest.blocks.keys.first(where: { truth[$0] == nil }) {
+            throw fail("weighed block \(stranger) was never mined")
+        }
+        // Availability never becomes invalidity: only a block whose
+        // execution is invalid is excluded.
+        if let wrong = digest.excluded.first(where: { !(world.invalid[path] ?? []).contains($0) }) {
+            throw fail("excludes \(wrong), which is valid")
+        }
+
+        // Grinds: one location each, and each explained.
+        let attributed = attributedRuns(at: path, host: host, digests: digests)
+        var located: [String: String] = [:]
+        for (hash, entry) in digest.blocks {
+            for (grind, work) in entry.grinds {
+                if let other = located.updateValue(hash, forKey: grind) {
+                    throw fail("grind \(grind) is credited at \(other) and \(hash)")
+                }
+                if path.count == 1 || entry.height == 0 {
+                    guard grind == hash, work == workForTarget(truth[hash]!.block.target) else {
+                        throw fail("block \(hash) weighs \(grind): \(work), not its own proof-of-work")
+                    }
+                } else if let proof = world.proofs[path]?[hash]?[grind] {
+                    guard work == proof.evidence.contribution?.work else {
+                        throw fail("grind \(grind) at \(hash) weighs \(work), its proof \(String(describing: proof.evidence.contribution?.work))")
+                    }
+                } else if let run = attributed[hash]?[grind] {
+                    guard work <= run else {
+                        throw fail("the attributed run \(grind) at \(hash) weighs \(work), over its parent's \(run)")
+                    }
+                } else {
+                    throw fail("grind \(grind) at \(hash) is neither a proof's nor an attributed run")
+                }
+            }
+        }
+
+        // Hierarchical GHOST over those grinds; validity selects.
+        var reference = GhostReference(genesis: digest.genesis)
+        reference.excluded = digest.excluded
+        for (hash, entry) in digest.blocks.sorted(by: { $0.key < $1.key }) {
+            reference.add(hash, parent: entry.parent, grinds: entry.grinds)
+        }
+        let descent = reference.descent()
+        guard descent.head == digest.canonicalTip, descent.path == digest.canonicalPath else {
+            throw fail("head \(digest.canonicalTip) is not the GHOST reference's \(descent.head)")
+        }
+        let work = reference.subtreeWork()
+        for (hash, entry) in digest.blocks where entry.subtreeWork != work[hash] {
+            throw fail("subtree work of \(hash) is \(String(describing: entry.subtreeWork)), reference \(String(describing: work[hash]))")
+        }
+        if let excludedOnPath = digest.canonicalPath.first(where: digest.excluded.contains) {
+            throw fail("the best chain enters excluded root \(excludedOnPath)")
+        }
+
+        // Work is never revoked; the executed set never shrinks.
+        if let previous {
+            for (hash, before) in previous.blocks {
+                guard let now = digest.blocks[hash] else { throw fail("weighed block \(hash) left the graph") }
+                for (grind, work) in before.grinds where (now.grinds[grind] ?? .zero) < work {
+                    throw fail("grind \(grind) at \(hash) lost work")
+                }
+            }
+            if !previous.executed.isSubset(of: digest.executed) { throw fail("the executed set shrank") }
+        }
+
+        // The executed set: in the weighed graph, closed under ancestry,
+        // outside every excluded subtree.
+        for hash in digest.executed {
+            guard let entry = digest.blocks[hash] else { throw fail("executed block \(hash) is not weighed") }
+            if let parent = entry.parent, !digest.executed.contains(parent) {
+                throw fail("executed block \(hash) has an unexecuted parent")
+            }
+            if digest.excluded.contains(hash) { throw fail("executed block \(hash) is excluded") }
+        }
+
+        // Continuity against any executed parent state.
+        if path.count > 1, let facts = host.parentFacts(for: path) {
+            let parentPath = Array(path.dropLast())
+            for hash in digest.executed where digest.blocks[hash]?.height != 0 {
+                let link = ParentStateContinuityLink(
+                    parentPath: parentPath,
+                    fromStateCID: LatticeState.emptyHeader.rawCID,
+                    toStateCID: truth[hash]!.block.parentState.rawCID
+                )
+                guard facts.hasContinuity(link) else {
+                    throw fail("executed \(hash) has no executed parent block producing its parent state")
+                }
+            }
+        }
+
+        // Weighed-only blocks issue no facts.
+        for hash in store.validations where !digest.executed.contains(hash) {
+            throw fail("unexecuted block \(hash) has a durable validation")
+        }
+        for hash in store.exclusions where !digest.excluded.contains(hash) {
+            throw fail("durable exclusion of \(hash) is not in the tree")
+        }
+
+        // The root-exclusion rule.
+        for hash in digest.excluded where digest.blocks[hash]?.parent == nil {
+            if !digest.executed.contains(where: { $0 != hash && digest.blocks[$0]?.parent == nil }) {
+                throw fail("root \(hash) is excluded with no other executed root")
+            }
+        }
+
+        // The act-on tip, publication, and bounded sync state.
+        if core.snapshot.actOnTip != digest.actOnTip {
+            throw fail("act-on tip \(core.snapshot.actOnTip) is not \(digest.actOnTip)")
+        }
+        if let published = core.published, published != core.snapshot {
+            throw fail("published snapshot is stale after the step")
+        }
+        if core.sync.pending.bytes > core.config.pendingBudget {
+            throw fail("the pending queue holds \(core.sync.pending.bytes) bytes, over its budget")
+        }
+        if core.sync.verifying.count > core.config.maxProofChecks {
+            throw fail("\(core.sync.verifying.count) proof checks in flight, over the bound")
+        }
+        if core.sync.awaitingChildIndex.count > core.config.maxAwaitingChildIndex {
+            throw fail("child-index waits exceed their bound")
+        }
+        if core.sync.pending.entries.keys.contains(where: digest.blocks.keys.contains) {
+            throw fail("a weighed header is still pending")
+        }
+    }
+
+    /// Per child block: each attributed-run identity its parent's committers
+    /// would credit it under, and the parent's run beyond the committer's
+    /// own grinds (the most it may credit).
+    static func attributedRuns(at path: ChainPath, host: HostCore, digests: [ChainPath: TreeDigest]) -> [String: [String: UInt256]] {
+        guard path.count > 1, let parent = host.levels[Array(path.dropLast())],
+              let parentDigest = digests[Array(path.dropLast())] else { return [:] }
+        let directory = path[path.count - 1]
+        var runs: [String: [String: UInt256]] = [:]
+        for committer in parentDigest.blocks.keys {
+            guard let report = parent.tree.parentRunReport(at: committer, directory: directory),
+                  let id = AttributedRunIdentity(carrierBlockHash: committer, directory: directory).contributionID,
+                  let run = report.runWork.subtracting(report.ownWork)?.uint256Value else { continue }
+            runs[report.childBlock, default: [:]][id] = run
+        }
+        return runs
+    }
+
+    /// Genesis links come from executed parent blocks only, and a child level
+    /// exists only while one authorizes its genesis.
+    static func checkGenesisLinks(
+        _ node: String,
+        host: HostCore,
+        digests: [ChainPath: TreeDigest],
+        store: HostStore,
+        world: LevelWorld
+    ) throws {
+        for (child, link) in world.links.sorted(by: { $0.key.count < $1.key.count }) {
+            let parent = link.parentPath
+            guard let facts = host.parentFacts(for: child), let parentDigest = digests[parent] else {
+                if host.levels[child] != nil { throw Invariants.fail(node, "level \(child) runs without its parent") }
+                continue
+            }
+            let executed = parentDigest.executed.contains(world.issuers[child] ?? "")
+            guard facts.recordsGenesis(link) == executed else {
+                throw Invariants.fail(node, "the genesis link of \(child) is \(executed ? "missing" : "honoured") though its issuer is \(executed ? "" : "not ")executed")
+            }
+            if host.levels[child] != nil, !executed {
+                throw Invariants.fail(node, "level \(child) runs with no executed block authorizing its genesis")
+            }
+        }
+        for (parent, links) in host.issuers {
+            for (link, issuers) in links {
+                for issuer in issuers {
+                    guard world.issuers[parent + [link.directory]] == issuer,
+                          store.levels[parent]?.validations.contains(issuer) == true else {
+                        throw Invariants.fail(node, "\(issuer) issued a genesis link without executing it")
+                    }
+                }
+            }
+        }
+    }
+
+    /// After the quiet point: every honest core hosts every level, and at
+    /// each holds the identical weighed graph (blocks, grinds, subtree work,
+    /// exclusions), the same executed set and head, every block mined
+    /// publicly, and each attributed run in full.
+    public static func checkQuietPoint(
+        _ cores: [String: (host: HostCore, digests: [ChainPath: TreeDigest])],
+        world: LevelWorld,
+        now: Int64
+    ) throws {
+        let names = cores.keys.sorted()
+        guard let first = names.first else { return }
+        for path in world.paths {
+            guard let reference = cores[first]?.digests[path] else {
+                throw Invariants.fail(first, "never ran level \(path)")
+            }
+            let public_ = world.released(path, at: now, withheld: true).filter {
+                path.count == 1 || !world.publicProofs(path, $0.cid, at: now).isEmpty
+            }
+            for name in names {
+                guard let (host, digests) = cores[name], let digest = digests[path] else {
+                    throw Invariants.fail(name, "never ran level \(path) after the quiet point")
+                }
+                if let missing = public_.first(where: { digest.blocks[$0.cid] == nil }) {
+                    throw Invariants.fail(name, "misses \(missing.cid) at \(path) after the quiet point")
+                }
+                guard digest.blocks == reference.blocks, digest.excluded == reference.excluded else {
+                    throw Invariants.fail(name, "weighs a different graph at \(path) than \(first) after the quiet point")
+                }
+                guard digest.executed == reference.executed, digest.canonicalTip == reference.canonicalTip else {
+                    throw Invariants.fail(name, "executes or selects differently at \(path) than \(first)")
+                }
+                let invalid = (world.invalid[path] ?? []).filter { digest.blocks[$0] != nil }
+                guard invalid == digest.excluded else {
+                    throw Invariants.fail(name, "excludes \(digest.excluded.sorted()) at \(path), invalid \(invalid.sorted())")
+                }
+                let runs = attributedRuns(at: path, host: host, digests: digests)
+                for (hash, entry) in digest.blocks {
+                    for (id, run) in runs[hash] ?? [:] where run > .zero && entry.grinds[id] != run {
+                        throw Invariants.fail(name, "credits \(String(describing: entry.grinds[id])) of the attributed run \(run) at \(hash)")
+                    }
+                }
+            }
+        }
+    }
+}

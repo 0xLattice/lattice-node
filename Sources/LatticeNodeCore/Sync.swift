@@ -42,8 +42,10 @@ public struct PendingHeader: Sendable {
     public let blockCID: String
     public let block: Block
     public internal(set) var children: ChildIndex?
-    /// Its achieved proof-of-work hash: small means real work.
-    public let hash: UInt256
+    /// Its achieved proof-of-work hash: small means real work. A child
+    /// header's is its smallest verified root hash (the maximum until one
+    /// verifies).
+    public internal(set) var hash: UInt256
     public internal(set) var bytes: Int
     /// The peer asked for its parent and its child index.
     public internal(set) var source: PeerID
@@ -51,6 +53,12 @@ public struct PendingHeader: Sendable {
     public internal(set) var askedParent = false
     /// Not before this time: a header from this node's future.
     public internal(set) var notBefore: Int64?
+    /// A child header's verified grinds and their proofs, by root: it is
+    /// weighed once one is in hand.
+    public internal(set) var evidence: [String: VerifiedChildEvidence] = [:]
+    public internal(set) var proofs: [String: ChildBlockProof] = [:]
+    /// Whether its proofs were looked up since the evidence index changed.
+    public internal(set) var lookedUp = false
 
     var parent: String? { block.parent?.rawCID }
 }
@@ -122,6 +130,8 @@ public struct Sync: Sendable {
     /// Keyed by the child index CID.
     public internal(set) var awaitingChildIndex: [String: AwaitingChildIndex] = [:]
     public internal(set) var pending = PendingQueue()
+    /// Child proofs being verified, keyed by block and root.
+    public internal(set) var verifying: Set<ProofKey> = []
     var nextRequestID: UInt64 = 1
 
     public init() {}

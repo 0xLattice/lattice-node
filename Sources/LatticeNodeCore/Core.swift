@@ -14,6 +14,14 @@ public enum Event: Sendable {
     /// The shell finished sending the headers a `serveHeaders` effect named.
     case headersServed(PeerID, requestID: UInt64)
     case tick
+    /// A child level: the evidence index's proofs for a block
+    /// (`Effect.lookupProofs`).
+    case proofsFound(childCID: String, [ChildBlockProof])
+    /// A child level: a `verifyProof` job finished.
+    case proofVerified(ProofJob, Result<VerifiedChildEvidence, ChildProofVerificationFailure>)
+    /// A child level: the evidence index changed, so what still waits for a
+    /// proof is looked up again.
+    case evidenceChanged
 }
 
 public enum DisconnectReason: Sendable, Equatable {
@@ -58,6 +66,14 @@ public enum Effect: Sendable {
     case persist(PersistBatch)
     case publish(Snapshot)
     case wakeAt(Int64)
+    /// A child level: ask the evidence index for these blocks' proofs.
+    case lookupProofs([String])
+    /// A child level: run `ChildBlockProof.verifySecuringWork`, a pure job,
+    /// and answer `proofVerified`.
+    case verifyProof(ProofJob)
+    /// A child level: write a verified proof to the local evidence index, so
+    /// this node serves it. Emitted after the step's `persist`.
+    case indexProof(childCID: String, ChildBlockProof)
 }
 
 public struct CoreConfig: Sendable {
@@ -70,25 +86,32 @@ public struct CoreConfig: Sendable {
     public var maxInlineChildIndexBytes: Int
     /// The operator's byte budget for headers not yet weighed.
     public var pendingBudget: Int
+    /// Child proofs verified at once, and taken from one header.
+    public var maxProofChecks: Int
+    public var maxProofsPerHeader: Int
 
     public init(
         maxHeadersPerPage: Int = 2_000,
         headersTimeout: Int64 = 30_000,
         maxAwaitingChildIndex: Int = 64,
         maxInlineChildIndexBytes: Int = 16 * 1_024,
-        pendingBudget: Int = 16 * 1_024 * 1_024
+        pendingBudget: Int = 16 * 1_024 * 1_024,
+        maxProofChecks: Int = 256,
+        maxProofsPerHeader: Int = 8
     ) {
         self.maxHeadersPerPage = maxHeadersPerPage
         self.headersTimeout = headersTimeout
         self.maxAwaitingChildIndex = maxAwaitingChildIndex
         self.maxInlineChildIndexBytes = maxInlineChildIndexBytes
         self.pendingBudget = pendingBudget
+        self.maxProofChecks = maxProofChecks
+        self.maxProofsPerHeader = maxProofsPerHeader
     }
 
     /// A header as it travels: its child index inline when it fits.
-    public func entry(_ block: Block, children: ChildIndex) -> HeaderEntry {
+    public func entry(_ block: Block, children: ChildIndex, proofs: [ChildBlockProof] = []) -> HeaderEntry {
         let fits = (children.toData()?.count ?? .max) <= maxInlineChildIndexBytes
-        return HeaderEntry(block: block, children: fits ? children : nil)
+        return HeaderEntry(block: block, children: fits ? children : nil, proofs: proofs)
     }
 }
 
@@ -102,18 +125,18 @@ public struct CoreConfig: Sendable {
 /// the peer that sent the header; catch-up asks a peer for its weighed
 /// headers after ours. Only a proof-of-work failure blames a peer.
 public struct Core: Sendable {
-    public private(set) var tree: ChainTree
-    public private(set) var sync = Sync()
+    public internal(set) var tree: ChainTree
+    public internal(set) var sync = Sync()
     public private(set) var published: Snapshot?
     public let config: CoreConfig
     let genesis: String
     /// The weighed graph's leaves: what a catch-up request names as known.
-    private var leaves: Set<String>
+    var leaves: Set<String>
 
     /// A core over a bootstrapped or restored root tree.
     public init(tree: ChainTree, config: CoreConfig = CoreConfig()) {
         var tree = tree
-        precondition(tree.context?.isRoot == true, "the core runs one root level")
+        precondition(tree.context != nil, "the core runs one chain's level")
         let genesis = tree.canonicalBlockHash(atHeight: 0) ?? tree.canonicalTip
         var leaves = Set<String>()
         var stack = [genesis]
@@ -175,8 +198,15 @@ public struct Core: Sendable {
             }
         case .tick:
             expireDeadlines(&turn)
+        case .proofsFound(let cid, let proofs):
+            proofsFound(proofs, for: cid, &turn)
+        case .proofVerified(let job, let result):
+            proofVerified(job, result, &turn)
+        case .evidenceChanged:
+            evidenceChanged()
         }
         advance(&turn)
+        if !isRoot { requestProofs(&turn) }
         // A full page continues once its headers are weighed, so the next
         // request names them as known.
         for (peer, after) in turn.continuations {
@@ -193,19 +223,23 @@ public struct Core: Sendable {
         var headers: [StoredHeader] = []
         var facts: [BlockImportBatch] = []
         var effects: [Effect] = []
-        /// Headers this step weighed, and the peer each came from.
-        var relays: [(entry: HeaderEntry, from: PeerID)] = []
+        /// Headers this step weighed, and the peer each came from (nil for
+        /// this node's own grinds and the evidence index's proofs).
+        var relays: [(entry: HeaderEntry, from: PeerID?)] = []
+        /// Child proofs this step verified and credited, to index.
+        var indexed: [(childCID: String, proof: ChildBlockProof)] = []
         /// Catch-up pages to continue, after the given header.
         var continuations: [(PeerID, HeaderKey)] = []
     }
 
     /// Persist first, then publish, then relay, then everything else:
     /// nothing a step makes visible precedes the write that makes it durable.
-    private mutating func finish(_ turn: Turn) -> [Effect] {
+    mutating func finish(_ turn: Turn) -> [Effect] {
         var effects: [Effect] = []
         if !turn.facts.isEmpty {
             effects.append(.persist(PersistBatch(headers: turn.headers, facts: turn.facts)))
         }
+        effects += turn.indexed.map { .indexProof(childCID: $0.childCID, $0.proof) }
         let current = snapshot
         if current != published {
             published = current
@@ -229,7 +263,7 @@ public struct Core: Sendable {
         return effects
     }
 
-    private mutating func disconnect(_ peer: PeerID, _ reason: DisconnectReason, _ turn: inout Turn) {
+    mutating func disconnect(_ peer: PeerID, _ reason: DisconnectReason, _ turn: inout Turn) {
         sync.drop(peer)
         turn.effects.append(.disconnect(peer, reason))
     }
@@ -349,13 +383,19 @@ public struct Core: Sendable {
             disconnect(peer, .proofOfWorkInvalid, &turn)
             return nil
         }
-        if tree.contains(blockHash: cid) { return cid }
+        if tree.contains(blockHash: cid) {
+            if !isRoot { offerProofs(entry.proofs, for: entry.block, cid: cid, &turn) }
+            return cid
+        }
         // Structural, never blame: an inline child index that is not the one
         // the block commits, or a genesis (only bootstrap admits one).
         if let children = entry.children, Self.cid(of: children) != entry.block.children.rawCID {
             return cid
         }
         guard entry.block.parent != nil else { return cid }
+        if !isRoot, sync.pending.entries[cid] != nil {
+            offerProofs(entry.proofs, for: entry.block, cid: cid, &turn)
+        }
         if let held = sync.pending.entries[cid] {
             if let children = entry.children {
                 sync.pending.setChildren(children, of: cid, bytes: Self.size(of: children))
@@ -366,7 +406,9 @@ public struct Core: Sendable {
             }
             return cid
         }
-        guard ChainTree.rootWork(of: entry.block) != nil else {
+        // A root header proves its own work now; a child header's work is
+        // its proofs', verified off the step.
+        guard !isRoot || ChainTree.rootWork(of: entry.block) != nil else {
             disconnect(peer, .proofOfWorkInvalid, &turn)
             return nil
         }
@@ -374,13 +416,14 @@ public struct Core: Sendable {
             blockCID: cid,
             block: entry.block,
             children: entry.children,
-            hash: entry.block.proofOfWorkHash(),
+            hash: isRoot ? entry.block.proofOfWorkHash() : .max,
             bytes: Self.size(of: entry.block) + (entry.children.map(Self.size) ?? 0),
             source: peer
         )
         // A header that can be weighed now is, so a page that links never
         // waits in (or is evicted from) the pending queue.
         sync.pending.insert(header)
+        if !isRoot { offerProofs(entry.proofs, for: entry.block, cid: cid, &turn) }
         if isReady(header, turn.now) {
             _ = insert(header, &turn)
         } else {
@@ -393,7 +436,7 @@ public struct Core: Sendable {
     /// first (each weighed header readies its pending children), then ask
     /// for what the rest lack: a child index of the peer that sent the
     /// header, or its unknown parent.
-    private mutating func advance(_ turn: inout Turn) {
+    mutating func advance(_ turn: inout Turn) {
         guard !sync.pending.entries.isEmpty else { return }
         let priority = sync.pending.priorities()
         let before: (String, String) -> Bool = { a, b in
@@ -435,18 +478,19 @@ public struct Core: Sendable {
     private func isReady(_ header: PendingHeader, _ now: Int64) -> Bool {
         header.children != nil && (header.notBefore ?? .min) <= now
             && header.parent.map { tree.contains(blockHash: $0) } == true
+            && (isRoot || !header.evidence.isEmpty)
     }
 
-    /// Weigh one header. Only `.proofOfWorkInvalid` blames its source; a
-    /// header from this node's future waits for its time; anything else is
-    /// dropped. Returns whether the header is now weighed.
-    private mutating func insert(_ header: PendingHeader, _ turn: inout Turn) -> Bool {
+    /// Weigh one header. Only `.proofOfWorkInvalid` blames its source (for a
+    /// child header, only with a proof that weighs, so the failure is the
+    /// header's own); a header from this node's future waits for its time;
+    /// anything else is dropped. Returns whether the header is now weighed.
+    mutating func insert(_ header: PendingHeader, _ turn: inout Turn) -> Bool {
         guard let children = header.children else { return false }
-        let admission = tree.insertRootHeader(
-            header.block,
-            childIndex: children,
-            validationContext: ValidationContext(nowMilliseconds: turn.now)
-        )
+        let context = ValidationContext(nowMilliseconds: turn.now)
+        let admission = isRoot
+            ? tree.insertRootHeader(header.block, childIndex: children, validationContext: context)
+            : insertChildHeader(header, children: children, context)
         switch admission {
         case .applied(let update):
             sync.pending.remove(header.blockCID)
@@ -454,7 +498,8 @@ public struct Core: Sendable {
             turn.facts += update.batches
             if let parent = header.parent { leaves.remove(parent) }
             leaves.insert(header.blockCID)
-            turn.relays.append((config.entry(header.block, children: children), from: header.source))
+            let proofs = creditRemainingProofs(of: header, &turn)
+            turn.relays.append((config.entry(header.block, children: children, proofs: proofs), from: header.source))
             return true
         case .duplicate:
             sync.pending.remove(header.blockCID)

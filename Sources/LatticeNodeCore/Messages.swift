@@ -21,14 +21,17 @@ public struct PeerID: Hashable, Comparable, Sendable, CustomStringConvertible {
 
 /// One header on the wire: the block node and, when it fits, the root
 /// `ChildIndex` its `children` link commits. An omitted child index is
-/// fetched by CID. (A child chain's header adds its proof here.)
+/// fetched by CID. A child chain's header adds the proofs that weigh it: a
+/// `ChildBlockProof` per root that carries it.
 public struct HeaderEntry: Sendable {
     public let block: Block
     public let children: ChildIndex?
+    public let proofs: [ChildBlockProof]
 
-    public init(block: Block, children: ChildIndex?) {
+    public init(block: Block, children: ChildIndex?, proofs: [ChildBlockProof] = []) {
         self.block = block
         self.children = children
+        self.proofs = proofs
     }
 }
 

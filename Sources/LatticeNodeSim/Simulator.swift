@@ -412,6 +412,9 @@ public struct Simulator {
                 if time > now, !queue.hasTick(for: name, at: time) {
                     schedule(at: time, to: name, .core(.tick))
                 }
+            case .lookupProofs, .verifyProof, .indexProof:
+                // Child-level effects: a root level never emits them.
+                throw Invariants.fail(name, "a root level emitted a child-level effect")
             }
         }
         // Every consensus mutation advances the revision: an unchanged one is

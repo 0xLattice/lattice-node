@@ -76,6 +76,7 @@ let package = Package(
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "cashew", package: "cashew"),
                 .product(name: "UInt256", package: "UInt256"),
+                .product(name: "Crypto", package: "swift-crypto"),
             ]),
         .target(
             name: "LatticeNode",
