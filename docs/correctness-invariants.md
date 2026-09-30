@@ -18,14 +18,14 @@ places are their own claim until a test covers them too.
 
 ## NODE-SEMANTICS-001 — every import outcome has one node meaning
 
-- **NODE-SEMANTICS-001.a** — `canonicalized`, `acceptedSide`, `carrier`,
-  `duplicate`, `unavailable`, `temporarilyInvalid`, `invalid`, and
+- **NODE-SEMANTICS-001.a** — `canonicalized`, `acceptedSide`, `duplicate`,
+  `unavailable`, `temporarilyInvalid`, `proofOfWorkInvalid`, `invalid`, and
   `localFailure` remain distinct at the node boundary: `NodeImportDecision`
   maps every import result and error to exactly one of them.
 - **NODE-SEMANTICS-001.b** — A child chain's genesis bootstrap in
-  `ChainProcess.importBlock`, whose accepted and carrier arms set their
-  decision by hand (its rejected arm uses `NodeImportDecision`), gives each
-  the same meaning.
+  `ChainProcess.importBlock`, whose accepted arm sets its decision by hand
+  (its rejected arm uses `NodeImportDecision`, blameless via
+  `bootstrapDecision`), gives each the same meaning.
   Gap: #212
 
 ## NODE-SEMANTICS-002 — side validity is not canonicity

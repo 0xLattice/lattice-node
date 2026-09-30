@@ -211,10 +211,10 @@ Response fields are `accepted`, `disposition`, `tipCID`,
 `parentGenesisLinks`, and `durableChildProofs`. Child-proof
 delivery is asynchronous; this field acknowledges local durability, not remote
 receipt.
-Possible dispositions are `canonicalized`, `acceptedSide`, `carrier`,
+Possible dispositions are `canonicalized`, `acceptedSide`, `childOnly`,
 `duplicate`, `unavailable`, `temporarilyInvalid`, `proofOfWorkInvalid`,
 `invalid`, and `localFailure`.
-A `carrier` missed Nexus's own target and cleared only child targets: the
+A `childOnly` share missed Nexus's own target and cleared only child targets: the
 children it carries advanced, no Nexus block was imported, and it leaves the work open until it
 expires: a later nonce for the same `workID` that clears a harder target is
 still submittable. Any other disposition consumes the work.

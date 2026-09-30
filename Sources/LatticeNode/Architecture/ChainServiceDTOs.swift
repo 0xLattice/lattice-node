@@ -164,7 +164,7 @@ public enum WorkDisposition: String, Codable, Sendable {
     case acceptedSide
     /// The grind cleared only child targets, not Nexus's own: the children
     /// it carries advanced and no Nexus block was mined. The work stays open.
-    case carrier
+    case childOnly
     case duplicate
     case unavailable
     case temporarilyInvalid

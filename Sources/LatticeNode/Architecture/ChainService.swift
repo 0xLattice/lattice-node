@@ -1627,7 +1627,7 @@ public actor ChainService {
         ) else {
             return SubmitWorkResponse(
                 accepted: false,
-                disposition: .carrier,
+                disposition: .childOnly,
                 tipCID: await process.status().tipCID,
                 parentGenesisLinks: [],
                 durableChildProofs: admittedChildren

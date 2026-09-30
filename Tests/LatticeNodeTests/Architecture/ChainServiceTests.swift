@@ -1404,7 +1404,7 @@ final class ChainServiceTests: XCTestCase {
             workID: template.workID,
             nonce: nonce
         ))
-        XCTAssertEqual(submitted.disposition, .carrier)
+        XCTAssertEqual(submitted.disposition, .childOnly)
         XCTAssertEqual(submitted.durableChildProofs, [
             DirectChildProofSummary(directory: "Payments", childCID: childCID),
         ])
@@ -1483,7 +1483,7 @@ final class ChainServiceTests: XCTestCase {
     /// harder target, and a later parent-clearing nonce for the same workID
     /// has to produce the parent block. Consuming the template on the carrier
     /// throws that nonce away as `unknownWork`.
-    func testCarrierSubmissionKeepsWorkOpenForTheParentTarget() async throws {
+    func testChildOnlySubmissionKeepsWorkOpenForTheParentTarget() async throws {
         let process = try await nexusProcess()
         let genesis = try await process.canonicalTipBlock()
         let activeChild = try await anchoredChildGenesis(
@@ -1534,7 +1534,7 @@ final class ChainServiceTests: XCTestCase {
             workID: template.workID,
             nonce: carrierNonce
         ))
-        XCTAssertEqual(carried.disposition, .carrier)
+        XCTAssertEqual(carried.disposition, .childOnly)
         XCTAssertFalse(carried.accepted)
         let tipAfterCarrier = await process.status().tipCID
         XCTAssertEqual(tipAfterCarrier, template.block.parent?.rawCID)
@@ -1855,7 +1855,7 @@ final class ChainServiceTests: XCTestCase {
             workID: template.workID,
             nonce: carrierNonce
         ))
-        XCTAssertEqual(carried.disposition, .carrier)
+        XCTAssertEqual(carried.disposition, .childOnly)
 
         let parentNonce = firstNonce(
             of: template.block,

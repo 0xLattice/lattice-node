@@ -1492,7 +1492,7 @@ final class ParentChildE2ETests: XCTestCase {
             }
             // Grind for a hash in the band between the parent's own target
             // and the child's easy searchTarget: it meets only the child, so
-            // the disposition is a carrier BY CONSTRUCTION — the parent can
+            // the disposition is childOnly BY CONSTRUCTION — the parent can
             // never advance because no submitted hash ever meets its target
             // (the corrected target itself is still CPU-reachable; the band
             // is what freezes the parent, not unreachability).
@@ -1523,9 +1523,9 @@ final class ParentChildE2ETests: XCTestCase {
                 body: SubmitWorkRequest(workID: template.workID, nonce: nonce),
                 timeout: 30
             )
-            guard round.disposition.rawValue == "carrier" else {
+            guard round.disposition == .childOnly else {
                 XCTFail(
-                    "a child-band solution must be a carrier round, got "
+                    "a child-band solution must be a childOnly round, got "
                         + round.disposition.rawValue
                 )
                 return
@@ -1539,7 +1539,7 @@ final class ParentChildE2ETests: XCTestCase {
         }).height ?? 0
         XCTAssertEqual(
             parentAfterCarriers, parentHeight,
-            "carrier rounds must never advance the parent"
+            "childOnly rounds must never advance the parent"
         )
         _ = try await sourceChild.waitForStatus {
             ($0.height ?? 0) >= childDepth
