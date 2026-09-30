@@ -13,6 +13,8 @@ public struct SimStore: Sendable {
     public private(set) var blockFacts: Set<String> = []
     public private(set) var validations: Set<String> = []
     public private(set) var exclusions: Set<String> = []
+    /// Header content a torn write kept without its facts: held, not weighed.
+    public private(set) var torn: Set<String> = []
 
     public init(genesis: SimBlock, facts seed: BlockImportBatch) {
         append(PersistBatch(
@@ -23,6 +25,7 @@ public struct SimStore: Sendable {
 
     public mutating func append(_ batch: PersistBatch) {
         for header in batch.headers {
+            torn.remove(header.blockCID)
             headers[header.blockCID] = header
             ownWork[header.blockCID] = ChainTree.rootWork(of: header.block)
             childIndexes[header.block.children.rawCID] = header.children
@@ -35,6 +38,15 @@ public struct SimStore: Sendable {
             case .exclusion(let exclusion): exclusions.insert(exclusion.blockHash)
             case .work: break
             }
+        }
+    }
+
+    /// A crash in the middle of writing `batch`: its header content lands
+    /// in the volumes, its facts never reach the fact log.
+    public mutating func appendTorn(_ batch: PersistBatch) {
+        for header in batch.headers where headers[header.blockCID] == nil {
+            append(PersistBatch(headers: [header], facts: []))
+            torn.insert(header.blockCID)
         }
     }
 }
@@ -152,18 +164,22 @@ public enum Invariants {
     ) throws {
         // The weighed graph is exactly the headers this node made durable, and
         // each of them has a durable block fact.
-        guard Set(digest.blocks.keys) == Set(store.headers.keys) else {
+        guard Set(digest.blocks.keys) == Set(store.headers.keys).subtracting(store.torn) else {
             throw fail(node, "the weighed graph is not the set of durable headers")
         }
         if let missing = digest.blocks.keys.first(where: { !store.blockFacts.contains($0) }) {
             throw fail(node, "weighed block \(missing) has no durable block fact")
         }
-        // DST 4 / work weighs, validity selects: exactly the held blocks that
-        // break a validity rule (wrong spec or prevState) are excluded.
-        let excluded = world.excluded.intersection(digest.blocks.keys)
-        guard digest.excluded == excluded else {
-            throw fail(node, "excludes \(digest.excluded.sorted()), ground truth \(excluded.sorted())")
+        // DST 4 / work weighs, validity selects: every held block that
+        // breaks a header validity rule (wrong spec or prevState) is
+        // excluded, and beyond those only a block whose body the generator
+        // knows is invalid, once executed.
+        let headerExcluded = world.excluded.intersection(digest.blocks.keys)
+        let allowed = headerExcluded.union(world.invalidBodies)
+        guard headerExcluded.isSubset(of: digest.excluded), digest.excluded.isSubset(of: allowed) else {
+            throw fail(node, "excludes \(digest.excluded.sorted()), ground truth \(headerExcluded.sorted()) plus invalid bodies")
         }
+        let excluded = digest.excluded
 
         // DST 1 / validity selects / hierarchical GHOST: the head is an
         // independent reference's, built from the generator's ground truth
@@ -173,7 +189,7 @@ public enum Invariants {
         reference.flipTieBreak = flipTieBreak
         reference.excluded = excluded
         reference.add(world.genesis.cid, parent: nil, work: workForTarget(world.genesis.block.target))
-        for hash in store.headers.keys.sorted() where hash != world.genesis.cid {
+        for hash in digest.blocks.keys.sorted() where hash != world.genesis.cid {
             guard let truth = world.blocks[hash] else {
                 throw fail(node, "weighed block \(hash) was never generated")
             }

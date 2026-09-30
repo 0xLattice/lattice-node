@@ -34,6 +34,16 @@ public struct SimConfig: Sendable {
     public var settle: Int64 = 60_000
     /// Replay the store and compare trees every this many persists per node.
     public var replayInterval = 32
+    /// A script that relays a block whose body fails execution.
+    public var invalidBody = false
+    /// The operator's body window.
+    public var bodyWindow = 8
+    /// Body Volumes the content layer cannot serve before a time
+    /// (`Int64.max`: never): a liveness wait, never blame.
+    public var withheldBodies: [String: Int64] = [:]
+    /// Crash a core in the middle of its next persist at each time, tearing
+    /// that write as the mode says; it restarts from its store.
+    public var crashes: [(at: Int64, core: String, mode: CrashMode)] = []
 
     public init(seed: UInt64) {
         self.seed = seed
@@ -53,6 +63,16 @@ public struct SimConfig: Sendable {
         config.duplicate = 0.1 * rng.unit()
         config.maxDelay = rng.draw(Int64(20)...500)
         config.pageSize = rng.draw(3...16)
+        config.invalidBody = rng.chance(0.5)
+        config.bodyWindow = rng.draw(1...16)
+        // Up to two crashes while the honest chain is released, each tearing
+        // its write its own way.
+        for _ in 0..<rng.draw(0...2) {
+            let at = World.genesisTime + rng.draw(Int64(1)...Int64(config.honestBlocks)) * World.blockInterval
+            let core = "core\(rng.draw(0...config.cores - 1))"
+            let mode = CrashMode.allCases[rng.draw(0...CrashMode.allCases.count - 1)]
+            config.crashes.append((at: at, core: core, mode: mode))
+        }
         return config
     }
 }
@@ -82,6 +102,14 @@ public struct SimReport: Sendable {
     public var fetches = 0
     /// The most bytes any core's pending queue held after a step.
     public var pendingPeak = 0
+    /// Body Volumes fetched through the content layer, and connect jobs run.
+    public var bodyFetches = 0
+    public var connects = 0
+    /// Crashes that happened (a crash waits for its core's next persist).
+    public var crashes = 0
+    /// Each core's act-on tip and exclusions at the end.
+    public var actOnTips: [String: String] = [:]
+    public var coreExcluded: [String: Set<String>] = [:]
     /// A fingerprint of the run's event order: equal seeds, equal traces.
     public var trace: UInt64 = 0xCBF2_9CE4_8422_2325
 }
@@ -95,6 +123,10 @@ public struct Simulator {
         var store: SimStore
         var digest: TreeDigest
         var persists = 0
+        /// Body Volumes this node's content store holds.
+        var bodies: Set<String>
+        /// Bumped by a restart: work the dead process started never reports.
+        var incarnation = 0
     }
 
     /// After the quiet point every honest core holds the identical weighed
@@ -109,11 +141,19 @@ public struct Simulator {
             if let missing = honest.subtracting(graph).first {
                 throw Invariants.fail(name, "misses released honest block \(missing) after the quiet point")
             }
-            if node.digest.blocks != reference.digest.blocks || node.digest.excluded != reference.digest.excluded {
+            // Whether a node executed an invalid body depends on whether it
+            // was ever on that node's best chain; every other exclusion is
+            // the header tier's and the same everywhere.
+            let excluded = node.digest.excluded.subtracting(world.invalidBodies)
+            let referenceExcluded = reference.digest.excluded.subtracting(world.invalidBodies)
+            if node.digest.blocks != reference.digest.blocks || excluded != referenceExcluded {
                 throw Invariants.fail(name, "weighs a different graph than \(first) after the quiet point")
             }
             if node.digest.canonicalTip != reference.digest.canonicalTip {
                 throw Invariants.fail(name, "head differs from \(first)'s after the quiet point")
+            }
+            try Invariants.checkLiveness(node: name, digest: node.digest) { cid in
+                (config.withheldBodies[cid] ?? .min) <= now
             }
         }
     }
@@ -137,6 +177,12 @@ public struct Simulator {
         case scriptFetch(from: String, session: UInt64, cid: String)
         case scriptTick
         case connect(String, String)
+        /// The content layer delivers a body Volume to a core.
+        case bodyArrived(String, incarnation: Int)
+        /// A connect job to run, then report.
+        case runConnect(ConnectJob, incarnation: Int)
+        /// Arm a crash for the core's next persist.
+        case crash(CrashMode)
         /// The session ends: both ends learn it, and reconnect later.
         case linkDown(String, String, UInt64)
     }
@@ -162,6 +208,7 @@ public struct Simulator {
     /// Planted bugs, for proving the invariants can fail.
     public var faults = SimFaults()
     var droppedFact = false
+    var armedCrash: [String: CrashMode] = [:]
 
     struct Pair: Hashable {
         let low: String
@@ -192,7 +239,8 @@ public struct Simulator {
             maxHeadersPerPage: config.pageSize,
             headersTimeout: config.headersTimeout,
             maxInlineChildIndexBytes: config.inlineChildIndexBytes,
-            pendingBudget: config.pendingBudget
+            pendingBudget: config.pendingBudget,
+            bodyWindow: config.bodyWindow
         )
         self.coreConfig = coreConfig
         for index in 0..<config.cores {
@@ -200,7 +248,8 @@ public struct Simulator {
             cores["core\(index)"] = CoreNode(
                 core: core,
                 store: SimStore(genesis: world.genesis, facts: world.bootstrap.facts),
-                digest: TreeDigest(core.tree)
+                digest: TreeDigest(core.tree),
+                bodies: [world.genesis.cid]
             )
         }
         for index in 0..<config.honestSources {
@@ -209,6 +258,9 @@ public struct Simulator {
         }
         if config.spammer { scripts["spammer"] = HeaderSpammer(name: "spammer", config: coreConfig) }
         if config.liar { scripts["liar"] = Liar(name: "liar", config: coreConfig) }
+        if config.invalidBody {
+            scripts["invalid-body"] = InvalidBodyMiner(name: "invalid-body", config: coreConfig)
+        }
         if config.uncle {
             scripts["uncle"] = UncleShower(name: "uncle", showingTo: "core0", config: coreConfig)
         }
@@ -225,6 +277,9 @@ public struct Simulator {
         for script in scripts.keys.sorted() {
             schedule(at: now, to: script, .scriptTick)
         }
+        for crash in config.crashes {
+            schedule(at: crash.at, to: crash.core, .crash(crash.mode))
+        }
     }
 
     public var end: Int64 {
@@ -232,18 +287,20 @@ public struct Simulator {
     }
 
     /// Run to `end`, checking invariants after every step.
-    public mutating func run() throws -> SimReport {
+    public mutating func run() async throws -> SimReport {
         while let next = queue.pop(), next.time <= end {
             now = max(now, next.time)
             report.steps += 1
             report.trace = (report.trace ^ next.sequence ^ UInt64(bitPattern: next.time)) &* 0x100_0000_01B3
-            try deliver(next)
+            try await deliver(next)
         }
         try checkQuietPoint()
         for (name, node) in cores.sorted(by: { $0.key < $1.key }) {
             try checkReplay(name, node, node.digest)
             report.coreTips[name] = node.core.tree.canonicalTip
             report.coreHeld[name] = Set(node.digest.blocks.keys)
+            report.actOnTips[name] = node.digest.actOnTip
+            report.coreExcluded[name] = node.digest.excluded
         }
         for (name, script) in scripts where script.isHonest {
             report.sourceChains[name] = bestChain(
@@ -263,7 +320,7 @@ public struct Simulator {
         sessions[Pair(a, b)]
     }
 
-    mutating func deliver(_ scheduled: Scheduled) throws {
+    mutating func deliver(_ scheduled: Scheduled) async throws {
         let node = scheduled.node
         switch scheduled.delivery {
         case .connect(let a, let b):
@@ -292,6 +349,21 @@ public struct Simulator {
             let index = script.fetch(cid, now: now, world: world)
             send(.core(.childIndexFetched(PeerID(key: node, session: sessionID), cid: cid, index)),
                  from: node, to: from)
+        case .bodyArrived(let cid, let incarnation):
+            guard cores[node]?.incarnation == incarnation else { return }
+            cores[node]?.bodies.insert(cid)
+            try step(node, .bodyFetched(cid: cid))
+        case .runConnect(let job, let incarnation):
+            guard let held = cores[node], held.incarnation == incarnation else { return }
+            report.connects += 1
+            let verdict = await ChainTree.connect(
+                job,
+                fetcher: BodyGate(content: world.content, blocks: Set(world.blocks.keys), held: held.bodies),
+                validationContext: ValidationContext(nowMilliseconds: now)
+            )
+            try step(node, .connected(verdict))
+        case .crash(let mode):
+            armedCrash[node] = mode
         case .scriptTick:
             guard var script = scripts[node] else { return }
             let peers = sessions.compactMap { pair, id -> PeerID? in
@@ -355,6 +427,14 @@ public struct Simulator {
         for effect in effects {
             switch effect {
             case .persist(var batch):
+                if let mode = armedCrash.removeValue(forKey: name) {
+                    // The process dies inside this write: no later effect of
+                    // the step runs.
+                    cores[name] = node
+                    report.crashes += 1
+                    try crash(name, tearing: batch, mode)
+                    return
+                }
                 if faults.dropFact, !droppedFact, let dropped = batch.facts.last {
                     droppedFact = true
                     batch = PersistBatch(headers: batch.headers, facts: batch.facts.filter { $0 != dropped })
@@ -412,11 +492,30 @@ public struct Simulator {
                 if time > now, !queue.hasTick(for: name, at: time) {
                     schedule(at: time, to: name, .core(.tick))
                 }
+            case .fetchBody(let cid):
+                // The content layer finds a provider, verifies the CID and
+                // retries until the body is available: the core hears only
+                // of its arrival.
+                report.bodyFetches += 1
+                let available = max(now, config.withheldBodies[cid] ?? now)
+                guard available != .max, world.blocks[cid] != nil else { continue }
+                schedule(
+                    at: available + rng.draw(config.minDelay...config.maxDelay),
+                    to: name,
+                    .bodyArrived(cid, incarnation: node.incarnation)
+                )
+            case .connect(let job):
+                schedule(
+                    at: now + rng.draw(config.minDelay...config.maxDelay),
+                    to: name,
+                    .runConnect(job, incarnation: node.incarnation)
+                )
             }
         }
-        // Every consensus mutation advances the revision: an unchanged one is
-        // an unchanged tree, whose tree invariants already hold.
-        let treeChanged = node.core.tree.currentRevision() != revision
+        // Every weight mutation advances the revision, and an execution
+        // persists: otherwise the tree is unchanged, and its tree invariants
+        // already hold.
+        let treeChanged = node.core.tree.currentRevision() != revision || persisted
         let digest = treeChanged ? TreeDigest(node.core.tree) : node.digest
         try Invariants.check(
             node: name,
@@ -428,6 +527,7 @@ public struct Simulator {
             flipTieBreak: faults.flipReferenceTieBreak,
             treeChanged: treeChanged || persisted
         )
+        try Invariants.checkBodies(node: name, core: node.core, digest: digest)
         if persisted {
             node.persists += 1
             // Replay costs the whole log, so it runs every `replayInterval`

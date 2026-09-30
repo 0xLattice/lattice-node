@@ -13,6 +13,10 @@ public enum Event: Sendable {
     case childIndexFetched(PeerID, cid: String, ChildIndex?)
     /// The shell finished sending the headers a `serveHeaders` effect named.
     case headersServed(PeerID, requestID: UInt64)
+    /// The content layer holds the body Volume of this block locally.
+    case bodyFetched(cid: String)
+    /// A connect job's verdict.
+    case connected(ConnectVerdict)
     case tick
 }
 
@@ -54,6 +58,12 @@ public enum Effect: Sendable {
     /// their content (`CoreConfig.entry` decides what travels inline).
     case serveHeaders(PeerID, requestID: UInt64, blockCIDs: [String], hasMore: Bool)
     case fetchByCID(PeerID, cid: String)
+    /// Fetch a block's body Volume by CID through the content layer, and
+    /// report `bodyFetched` once it is held locally.
+    case fetchBody(cid: String)
+    /// Run `ChainTree.connect` on this job off the core and report its
+    /// verdict as `connected`.
+    case connect(ConnectJob)
     case disconnect(PeerID, DisconnectReason)
     case persist(PersistBatch)
     case publish(Snapshot)
@@ -70,19 +80,24 @@ public struct CoreConfig: Sendable {
     public var maxInlineChildIndexBytes: Int
     /// The operator's byte budget for headers not yet weighed.
     public var pendingBudget: Int
+    /// How many weighed-but-unexecuted blocks of the best chain, after the
+    /// act-on tip, have their bodies asked for at once.
+    public var bodyWindow: Int
 
     public init(
         maxHeadersPerPage: Int = 2_000,
         headersTimeout: Int64 = 30_000,
         maxAwaitingChildIndex: Int = 64,
         maxInlineChildIndexBytes: Int = 16 * 1_024,
-        pendingBudget: Int = 16 * 1_024 * 1_024
+        pendingBudget: Int = 16 * 1_024 * 1_024,
+        bodyWindow: Int = 64
     ) {
         self.maxHeadersPerPage = maxHeadersPerPage
         self.headersTimeout = headersTimeout
         self.maxAwaitingChildIndex = maxAwaitingChildIndex
         self.maxInlineChildIndexBytes = maxInlineChildIndexBytes
         self.pendingBudget = pendingBudget
+        self.bodyWindow = bodyWindow
     }
 
     /// A header as it travels: its child index inline when it fits.
@@ -101,9 +116,14 @@ public struct CoreConfig: Sendable {
 /// relayed to every other ready peer; an unknown parent is asked by CID of
 /// the peer that sent the header; catch-up asks a peer for its weighed
 /// headers after ours. Only a proof-of-work failure blames a peer.
+///
+/// Bodies (`Bodies.swift`) are fetched by CID through the content layer and
+/// connected in parent order along the best chain; a missing body is an
+/// availability wait, never blame.
 public struct Core: Sendable {
-    public private(set) var tree: ChainTree
+    public internal(set) var tree: ChainTree
     public private(set) var sync = Sync()
+    public internal(set) var bodies = Bodies()
     public private(set) var published: Snapshot?
     public let config: CoreConfig
     let genesis: String
@@ -173,6 +193,10 @@ public struct Core: Sendable {
                 sync.peers[peer]?.queued = nil
                 serve(queued, to: peer, &turn)
             }
+        case .bodyFetched(let cid):
+            bodyFetched(cid)
+        case .connected(let verdict):
+            connected(verdict, &turn)
         case .tick:
             expireDeadlines(&turn)
         }
@@ -182,6 +206,7 @@ public struct Core: Sendable {
         for (peer, after) in turn.continuations {
             requestCatchUp(from: peer, after: after, &turn)
         }
+        scheduleBodies(&turn)
         return finish(turn)
     }
 

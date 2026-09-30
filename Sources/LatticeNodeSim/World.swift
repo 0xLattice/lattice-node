@@ -7,7 +7,7 @@ import cashew
 
 /// An in-memory content store the world builds blocks into and bootstraps
 /// the genesis from.
-public final class SimCAS: Fetcher, Storer, VolumeStorer {
+public final class SimCAS: Fetcher, Storer, VolumeStorer, Sendable {
     private let entries = Mutex<[String: Data]>([:])
 
     public init() {}
@@ -86,6 +86,16 @@ public struct World: Sendable {
     public let excludedChild: String
     /// Ground truth: the blocks a node must weigh and exclude.
     public let excluded: Set<String>
+    /// A block with valid proof-of-work and header linkage whose body fails
+    /// execution (its declared post-state is not the one it produces), and
+    /// a block on it: weighed, then excluded by whoever executes it.
+    public let invalidBody: String
+    public let invalidBodyChild: String
+    /// Ground truth: the blocks whose execution proves them invalid.
+    public let invalidBodies: Set<String>
+    /// Every block's content (its body Volume, spec and post-state): what
+    /// the content layer serves by CID.
+    public let content: SimCAS
 
     public static let spec = ChainSpec(
         maxNumberOfTransactionsPerBlock: 100,
@@ -231,6 +241,28 @@ public struct World: Sendable {
         for lie in lies.values { blocks[lie.cid] = lie }
         blocks[excludedChild.cid] = excludedChild
 
+        // The invalid body hangs off honest block 2 like the lies, dated just
+        // after it, and a block on it makes its branch the heavier for a
+        // while: it declares a post-state (a CID that is no state) which
+        // executing it does not produce. The block on it links to that
+        // post-state.
+        let honestBody = try await extend(base, timestamp: time, nonce: 0x6_1E << 32, in: cas)
+        let declared = LatticeStateHeader(rawCID: genesis.cid)
+        let invalidBody = try await record(
+            mined(honestBody.block.replacing(postState: declared)),
+            releaseAt: time, anchor: honestBody.anchor, in: cas
+        )
+        let honestChild = try await extend(honestBody, timestamp: time + 100, nonce: 0x7_1E << 32, in: cas)
+        let invalidBodyChild = try await record(
+            mined(honestChild.block.replacing(
+                parent: try BlockHeader(node: invalidBody.block).removingNode(),
+                prevState: declared
+            )),
+            releaseAt: time + 100, anchor: honestChild.anchor, in: cas
+        )
+        blocks[invalidBody.cid] = invalidBody
+        blocks[invalidBodyChild.cid] = invalidBodyChild
+
         return World(
             spec: spec,
             context: context,
@@ -245,7 +277,11 @@ public struct World: Sendable {
             uncle: uncle.cid,
             lies: lies.mapValues(\.cid),
             excludedChild: excludedChild.cid,
-            excluded: [lies[.wrongSpec]!.cid, lies[.wrongPrevState]!.cid]
+            excluded: [lies[.wrongSpec]!.cid, lies[.wrongPrevState]!.cid],
+            invalidBody: invalidBody.cid,
+            invalidBodyChild: invalidBodyChild.cid,
+            invalidBodies: [invalidBody.cid],
+            content: cas
         )
     }
 
@@ -399,7 +435,8 @@ extension Block {
         parent: BlockHeader? = nil,
         nonce: UInt64? = nil,
         spec newSpec: VolumeImpl<ChainSpec>? = nil,
-        prevState newPrevState: LatticeStateHeader? = nil
+        prevState newPrevState: LatticeStateHeader? = nil,
+        postState newPostState: LatticeStateHeader? = nil
     ) -> Block {
         Block(
             version: version,
@@ -410,7 +447,7 @@ extension Block {
             spec: newSpec ?? spec,
             parentState: parentState,
             prevState: newPrevState ?? prevState,
-            postState: postState,
+            postState: newPostState ?? postState,
             children: children,
             height: height,
             timestamp: timestamp,
