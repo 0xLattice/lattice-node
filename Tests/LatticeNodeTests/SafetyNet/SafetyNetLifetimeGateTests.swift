@@ -15,8 +15,7 @@ import XCTest
 ///   each other stored task and why no stale task can clobber it.
 /// - In the network runtime (`NodeNetworkRuntime*.swift`) a per-peer record
 ///   is created only where a session is established, and removed by key
-///   only where a connect replaces the key's session or teardown empties
-///   the set. Every other write uses `update(session:_:)` or
+///   only where teardown empties the set. Every other write uses `update(session:_:)` or
 ///   `updateExisting(_:_:)`, and every other removal `remove(_:ifBoundTo:)`:
 ///   work that resumes after its session ended can neither bring the key
 ///   back nor remove a newer session's record.
@@ -41,11 +40,6 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
             "owned by the range-sync state; fires are matched by request ID",
         "State.progressTimeout":
             "owned by the range-sync state; fires are matched by progress epoch",
-        "Append.predecessor": "a value handed to the appending task, not a stored handle",
-        "Reservation.evidenceTail": "a value handed to the reserving task, not a stored handle",
-        "Tail.task": "held with its lifetime token; finish compares the token",
-        "EvidenceSlotWaiter.timeout":
-            "cancelled when its waiter wakes; a fire only wakes the waiter with its own id",
         "ChainService.canonicalCommitWorker":
             "the service never restarts; shutdown joins the worker",
         "ChainService.executionWalkWorker":
@@ -60,24 +54,16 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
             "the service never restarts; shutdown finishes the tip signal and joins the drain",
         "ChainService.parentPlanDrain":
             "the service never restarts; shutdown finishes the plan signal and joins the drain",
-        "ChainService.carrierProofDeliveries":
-            "entries keyed by a service-unique ID, each removed by its own task; shutdown joins them",
     ]
 
     /// Members that establish a session and so may create its record.
     private static let creatingAllowlist: Set<String> = [
         // Overlay connect: the session starts awaiting its hello.
         "didConnect",
-        // Hierarchy connect: the hello deadline is the record's first field.
-        "scheduleHierarchyHelloDeadline",
-        // Accepted hierarchy hello: role and session are bound here.
-        "handleHierarchyHello",
     ]
 
-    /// Members that may remove a record by key: a connect replacing the
-    /// key's session, and teardown.
+    /// Members that may remove a record by key: teardown.
     private static let keyedRemovalAllowlist: Set<String> = [
-        "didConnect",
         "clearRuntimeState",
     ]
 
@@ -237,10 +223,10 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
     }
 
     private static let creatingUpdate =
-        #"\b(?:overlayRecords|hierarchyRecords)\s*\.\s*update\s*\((?!\s*session\s*:)"#
+        #"\boverlayRecords\s*\.\s*update\s*\((?!\s*session\s*:)"#
     /// A removal by key: `remove(key)` without `ifBoundTo:`, or `removeAll`.
     private static let keyedRemoval =
-        #"\b(?:overlayRecords|hierarchyRecords)\s*\.\s*(?:remove\s*\((?![^()]*ifBoundTo\s*:)|removeAll\s*\()"#
+        #"\boverlayRecords\s*\.\s*(?:remove\s*\((?![^()]*ifBoundTo\s*:)|removeAll\s*\()"#
 
     // MARK: - Self-tests
 
@@ -293,19 +279,19 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
         let sample = """
         func connect() {
             overlayRecords.update(peer.key) { $0.session = nil }
-            hierarchyRecords.remove(peer.key)
+            overlayRecords.remove(peer.key)
         }
         func late() async {
-            hierarchyRecords.update(session: peer) { $0.offer = nil }
-            hierarchyRecords.updateExisting(key) { $0.offer = nil }
-            hierarchyRecords.update(key) { $0.offer = nil }
-            hierarchyRecords.remove(
+            overlayRecords.update(session: peer) { $0.offer = nil }
+            overlayRecords.updateExisting(key) { $0.offer = nil }
+            overlayRecords.update(key) { $0.offer = nil }
+            overlayRecords.remove(
                 key, ifBoundTo: ended
             )
-            hierarchyRecords.remove(
+            overlayRecords.remove(
                 key
             )
-            // hierarchyRecords.remove(key)
+            // overlayRecords.remove(key)
             overlayRecords.removeAll()
         }
         """

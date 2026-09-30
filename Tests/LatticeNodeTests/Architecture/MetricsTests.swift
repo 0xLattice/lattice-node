@@ -218,7 +218,6 @@ final class MetricsTests: XCTestCase {
         ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
         )

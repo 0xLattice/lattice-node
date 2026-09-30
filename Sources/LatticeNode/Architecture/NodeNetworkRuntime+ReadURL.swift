@@ -38,8 +38,8 @@ extension NodeNetworkRuntime {
     /// Resolve the browsable read URLs for the chain whose genesis is
     /// `genesisCID`. A read URL is only ever a self-DECLARATION — the P2P
     /// plane traffics in IP literals a browser cannot dial, so browsability is
-    /// its own declaration, carried from a child's hierarchy hello to its
-    /// parent and served here; no URL is ever derived from a provider's
+    /// its own declaration, which a co-hosted child's configuration hands its
+    /// parent level and the parent serves here; no URL is ever derived from a provider's
     /// announced host. This node's own declaration leads, read directly: it
     /// must not hinge on Ivy holding a provider record under our own key,
     /// which exists only once this node advertises a P2P address and an
@@ -168,5 +168,34 @@ extension NodeNetworkRuntime {
         ) else { return }
         pending.timeout.cancel()
         pending.continuation.resume(returning: [])
+    }
+
+    /// Seam: whether any hosted child declared a public read URL.
+    var anyChildDeclaredReadURL: Bool {
+        !configuration.hostedChildReadURLs.isEmpty
+    }
+
+    /// Seam: this node's own self-description for `genesisCID`: its configured
+    /// public read URL when that is its own chain's genesis, plus the URLs its
+    /// co-hosted children are configured with when the CID is one this node
+    /// anchored for that child directory. Deduped, bounded.
+    func declaredReadURLs(
+        genesisCID: String,
+        process: ChainProcess
+    ) async -> [String] {
+        var urls: [String] = []
+        if let own = configuration.publicReadURL,
+           await process.canonicalBlockCID(atHeight: 0) == genesisCID {
+            urls.append(own)
+        }
+        let children = configuration.hostedChildReadURLs
+        let anchored = await process.anchoredChildGenesisCIDs(
+            directories: Set(children.keys)
+        )
+        for (directory, url) in children.sorted(by: { $0.key < $1.key })
+        where anchored[directory] == genesisCID && !urls.contains(url) {
+            urls.append(url)
+        }
+        return Array(urls.prefix(ReadEndpointResponseMessage.maximumURLs))
     }
 }

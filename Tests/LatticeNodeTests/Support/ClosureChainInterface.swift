@@ -52,5 +52,4 @@ final class ClosureChainInterface: ChainInterface {
 
     func genesisActivatedOutOfBand() async {}
 
-    func candidateGateReopened() async {}
 }

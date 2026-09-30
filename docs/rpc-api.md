@@ -109,8 +109,8 @@ search those ranges.
 
 ### `POST /v1/mining/templates`
 
-Issue bounded, expiring work. This public route is Nexus-only; child candidates
-are requested through the authenticated hierarchy plane while the template is
+Issue bounded, expiring work. This public route is Nexus-only; the template
+reads each co-hosted child level's pre-built candidate in-process while it is
 assembled.
 
 ```json
@@ -148,19 +148,19 @@ chain and for chains merged-mined under it (`work` is a hex `UInt256`; each
 once). The named chain's candidate still commits its scheduled target; its
 search threshold becomes `min(scheduled target, floor(2^256 / work) - 1)` —
 harder than the schedule, never easier — and each descendant entry travels
-with the parent's pushed template context down the hierarchy plane. A child node
+with the parent's plan to its co-hosted child level in-process. A child level
 returns a witness naming the block that sets its search target. Where that
 witness names a filtered descendant, the Nexus re-derives the descendant's
 threshold from it; for every other filtered chain two or more levels down it
 caps `searchTarget` at that entry's `floor(2^256 / work) - 1` outright. That
-fails closed against a child node that ignores or predates the entry. It is
+fails closed against a child level that ignores the entry. It is
 stricter than needed when the chain is absent from the template, and whenever
 that filter does not bind (the chain's committed target is at or harder than
 the filter target): each child
 returns a single witness, so a non-binding filtered chain two or more levels
 down is normally left unnamed and still caps the search. Removing that
 over-strictness needs a child to return one witness per filtered path in its
-subtree, a change to the child candidate wire format that this API does not
+subtree, a change to the child candidate format that this API does not
 make. It is a template choice of the miner that asked,
 not consensus: import, validation, and fork choice are untouched, and a
 block from any other miner at the scheduled target is still accepted. Absent,

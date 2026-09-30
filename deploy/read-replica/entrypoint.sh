@@ -15,7 +15,6 @@ exec /usr/local/bin/lattice-node \
     --data-directory /data/chains/Nexus-v3 \
     --identity-key /data/identity/nexus.key \
     --listen-port 4001 \
-    --fact-listen-port 4002 \
     --rpc-port 8080 \
     --overlay-max-connections-per-netgroup 256 \
     --peer 139b8f3639e7c515417c63bd3a652a5c6fd4a1a2d0baed8e33ea63047995fe64@lattice-mainnet-iad.fly.dev:4001 \

@@ -13,7 +13,6 @@ enum NodeStoreError: Error, Equatable, LocalizedError {
     case conflictingIssuedParentFact
     case conflictingIssuedChildProof
     case invalidIssuedChildProof(String)
-    case parentEvidenceInboxFull
     case corrupt(String)
     /// A column of one row could not be read as the type its table declares
     /// for it (missing, NULL where required, wrong storage class, or outside
@@ -38,8 +37,6 @@ enum NodeStoreError: Error, Equatable, LocalizedError {
             "A locally issued child proof was replayed with different bytes."
         case .invalidIssuedChildProof(let childCID):
             "The proof cached for child \(childCID) does not prove that child from this chain path."
-        case .parentEvidenceInboxFull:
-            "The pending parent-evidence inbox is full."
         case .corrupt(let reason):
             "The node store is corrupt: \(reason)"
         case .malformedRow(let table, let column):
@@ -56,10 +53,6 @@ actor NodeStore {
     let recoveryVolumeBroker: any RetainedRootMergeBroker
     let blockRetentionScope: String
     let issuedRecoveryRetentionScope: String
-    let preparedRecoveryRetentionScope: String
-    let parentEvidenceInboxRetentionScope: String
-    let parentEvidenceInboxCapacity: Int
-    let handoffCandidateCapacity: Int
     let contextualCandidateOwner: String
     private var preparedMutationInFlight = false
     private var preparedMutationWaiters: [CheckedContinuation<Void, Never>] = []
@@ -71,11 +64,7 @@ actor NodeStore {
         recoveryVolumeBroker: any RetainedRootMergeBroker,
         blockRetentionScope: String,
         issuedRecoveryRetentionScope: String,
-        preparedRecoveryRetentionScope: String,
-        parentEvidenceInboxRetentionScope: String = "parent-evidence-inbox",
-        parentEvidenceInboxCapacity: Int = 64,
-        contextualCandidateOwner: String,
-        handoffCandidateCapacity: Int = 1_024
+        contextualCandidateOwner: String
     ) throws {
         guard !nexusGenesisCID.isEmpty else {
             throw NodeStoreError.invalidConfiguration("Nexus genesis CID is empty")
@@ -85,16 +74,9 @@ actor NodeStore {
         }
         guard !blockRetentionScope.isEmpty,
               !issuedRecoveryRetentionScope.isEmpty,
-              !preparedRecoveryRetentionScope.isEmpty,
-              !parentEvidenceInboxRetentionScope.isEmpty,
-              parentEvidenceInboxCapacity > 0,
-              handoffCandidateCapacity > 0,
-              issuedRecoveryRetentionScope != preparedRecoveryRetentionScope,
-              issuedRecoveryRetentionScope != parentEvidenceInboxRetentionScope,
-              preparedRecoveryRetentionScope != parentEvidenceInboxRetentionScope,
               !contextualCandidateOwner.isEmpty else {
             throw NodeStoreError.invalidConfiguration(
-                "hierarchy retention scopes must be nonempty and distinct"
+                "retention scopes must be nonempty"
             )
         }
         let database = try NodeSQLite(path: databasePath.path)
@@ -134,12 +116,7 @@ actor NodeStore {
         self.recoveryVolumeBroker = recoveryVolumeBroker
         self.blockRetentionScope = blockRetentionScope
         self.issuedRecoveryRetentionScope = issuedRecoveryRetentionScope
-        self.preparedRecoveryRetentionScope = preparedRecoveryRetentionScope
-        self.parentEvidenceInboxRetentionScope =
-            parentEvidenceInboxRetentionScope
-        self.parentEvidenceInboxCapacity = parentEvidenceInboxCapacity
         self.contextualCandidateOwner = contextualCandidateOwner
-        self.handoffCandidateCapacity = handoffCandidateCapacity
     }
 
     func acquirePreparedMutation() async {

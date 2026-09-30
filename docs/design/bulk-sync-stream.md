@@ -15,8 +15,8 @@ security comes from per-item verification plus objectively comparable
 cumulative work, under partial synchrony — in which a slow peer and a
 stalling peer are indistinguishable, so rotation is a local timing policy
 that never implies blame. The one non-peer trust edge is the receiver's own
-configured immediate parent, which alone answers genesis and parent-state
-continuity questions on the hierarchy plane.
+co-hosted immediate parent level, which alone answers genesis and
+parent-state continuity questions, in-process.
 
 ## The insight
 

@@ -193,11 +193,8 @@ property everything else depends on.
 Faults are drawn from the seed and applied to the simulated environment, never
 by editing node state:
 
-- **Partition and heal.** Partitions can be arbitrary and asymmetric. One can
-  separate a child process from its configured immediate parent while leaving
-  overlay peers reachable.
-- **Delay, reorder, drop and duplicate** on every channel, including the
-  hierarchy plane.
+- **Partition and heal.** Partitions can be arbitrary and asymmetric.
+- **Delay, reorder, drop and duplicate** on every channel.
 - **Crash and restart at arbitrary points.** This includes between any two
   durable writes, and at any suspension point of an import, eviction or
   evidence flow. A restarted node sees only what its simulated disk durably held.
@@ -363,15 +360,14 @@ node's observable behaviour against it; it does not restate it.
 13. **Authority stays where it belongs.**
     - Spec §9.5 allows a continuity fact to be relayed independently of its
       original transport. This node does not take that allowance.
-    - A continuity or genesis acknowledgement is accepted only as the answer to
-      the node's own request, on its authenticated session with the configured
-      immediate parent. The same fact from any other peer or session is refused.
+    - A continuity or genesis fact is read only from the co-hosted parent
+      level, in-process. The same fact from any peer is refused.
     - Evidence received from peers carries only a proof, so no received genesis
       or continuity claim reaches validation.
     - No content reaches state before its CID and evidence verify.
 
-    Sources: the [process trust model](process-trust-model.md) (session-bound,
-    non-portable acknowledgements; a hierarchy plane that disables relay); the
+    Sources: the [process trust model](process-trust-model.md) (in-process,
+    non-portable parent facts); the
     proof-only child evidence envelope; spec §9.5 for the relay allowance the
     node declines.
 14. **State stays bounded.** Every retained collection respects its bound at
@@ -473,7 +469,7 @@ hard to recover. This section states what is achievable and what is not.
   and crash behaviour belong to the operating system.
 - **Randomness is ambient.**
   - Ivy draws reconnect jitter and session secrets from the system generator.
-  - The runtime shuffles hierarchy peers.
+  - The runtime shuffles overlay peers for child-evidence lookups.
   - The stores mint `UUID`s.
 
 ### What is and is not achievable

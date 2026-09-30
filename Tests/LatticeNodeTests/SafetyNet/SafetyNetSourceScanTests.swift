@@ -297,3 +297,18 @@ final class SafetyNetSourceScanTests: XCTestCase {
         }
     }
 }
+
+/// The hierarchy plane is gone: a child reads its parent in-process and
+/// takes child-block proofs from the overlay. No source names a topic on it.
+final class SafetyNetNoHierarchyPlaneTests: XCTestCase {
+    func testNoSourceNamesAHierarchyTopic() throws {
+        var offenders: [String] = []
+        for file in try SourceTree.swiftFiles(under: "Sources") {
+            for (number, line) in file.text.components(separatedBy: "\n")
+                .enumerated() where line.contains("lattice.hierarchy.") {
+                offenders.append("\(file.path):\(number + 1)")
+            }
+        }
+        XCTAssertEqual(offenders, [], "a hierarchy topic reappeared")
+    }
+}

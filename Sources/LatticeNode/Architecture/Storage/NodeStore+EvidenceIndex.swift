@@ -43,25 +43,6 @@ struct ImportHierarchyArtifacts: Sendable {
     let parentGenesisLinks: [ParentGenesisLink]
 }
 
-struct IssuedChildEvidenceSummary: Codable, Equatable, Hashable, Sendable {
-    let ordinal: UInt64
-    let childCID: String
-    let rootCID: String
-    let attachmentCID: String
-}
-
-struct ParentEvidenceScanCursor: Equatable, Sendable {
-    let sourceID: String?
-    let ordinal: UInt64
-}
-
-struct ParentEvidenceInboxItem: Sendable {
-    let sourceID: String
-    let ordinal: UInt64
-    let attachment: ChildEvidenceVolume
-    let package: AuthenticatedChildPackage
-}
-
 struct PreparedImportCarrierEvidence {
     let edge: DirectChildEdge
     let rootCID: String
@@ -108,7 +89,6 @@ private struct IssuedParentFactKey: Hashable {
 
 enum IssuedChildProofScope: String, Sendable {
     case incomingCarrier = "incoming_carrier"
-    case outgoingDirectChild = "outgoing_direct_child"
 }
 
 /// `issued_parent_fact_sources`: the JSON source each issued parent fact
@@ -167,7 +147,6 @@ struct IssuedChildProofRow: NodeStoreRecord {
     }
     var rootCID: String { get throws { try row.cid("root_cid") } }
     var attachmentCID: String { get throws { try row.cid("attachment_cid") } }
-    var ordinal: UInt64? { get throws { try issuedChildProofOrdinal(row) } }
     /// The edge the boot audit LEFT JOINs onto the proof (projected as
     /// `edge_cid`): nil when the proof has no edge.
     var joinedEdgeCID: String? { get throws { try row.optionalText("edge_cid") } }
@@ -185,64 +164,9 @@ struct ProofEdgeJoinRow: NodeStoreRecord {
     var edgeCID: String { get throws { try row.cid("edge_cid") } }
     var rootCID: String { get throws { try row.cid("root_cid") } }
     var attachmentCID: String { get throws { try row.cid("attachment_cid") } }
-    var ordinal: UInt64? { get throws { try issuedChildProofOrdinal(row) } }
     var childCID: String { get throws { try row.cid("child_cid") } }
     var directory: String { get throws { try row.text("directory") } }
     var parentCarrierCID: String { get throws { try row.cid("parent_carrier_cid") } }
-}
-
-/// `issued_child_proofs.ordinal`: NULL for an incoming-carrier proof, a
-/// positive integer for an outgoing one (the table's CHECK).
-private func issuedChildProofOrdinal(_ row: Row) throws -> UInt64? {
-    guard let raw = try row.optionalInt("ordinal") else { return nil }
-    guard let ordinal = UInt64(exactly: raw), ordinal > 0 else {
-        throw NodeStoreError.malformedRow(table: row.table, column: "ordinal")
-    }
-    return ordinal
-}
-
-/// `parent_evidence_scan`: the singleton cursor over the parent's issued
-/// evidence; `source_id` is NULL until the first scan.
-struct ParentEvidenceScanRow: NodeStoreRecord {
-    static let table = "parent_evidence_scan"
-    private let row: Row
-
-    init(_ row: Row) { self.row = row }
-
-    var sourceID: String? {
-        get throws {
-            guard let sourceID = try row.optionalText("source_id") else { return nil }
-            guard UUID(uuidString: sourceID) != nil else {
-                throw NodeStoreError.malformedRow(table: Self.table, column: "source_id")
-            }
-            return sourceID
-        }
-    }
-    var ordinal: UInt64 { get throws { try row.uint64("ordinal") } }
-}
-
-/// `parent_evidence_inbox`: one relayed parent-evidence entry awaiting an
-/// admission decision. `child_cid` and `root_cid` are only ever compared
-/// against the attachment's proof, so they stay plain text.
-struct ParentEvidenceInboxRow: NodeStoreRecord {
-    static let table = "parent_evidence_inbox"
-    private let row: Row
-
-    init(_ row: Row) { self.row = row }
-
-    var sourceID: String { get throws { try row.uuid("source_id") } }
-    var ordinal: UInt64 {
-        get throws {
-            let ordinal = try row.uint64("ordinal")
-            guard ordinal > 0 else {
-                throw NodeStoreError.malformedRow(table: Self.table, column: "ordinal")
-            }
-            return ordinal
-        }
-    }
-    var childCID: String { get throws { try row.text("child_cid") } }
-    var rootCID: String { get throws { try row.text("root_cid") } }
-    var attachmentCID: String { get throws { try row.cid("attachment_cid") } }
 }
 
 extension NodeStore {
@@ -609,22 +533,13 @@ extension NodeStore {
     }
 
     func persistIssuedHierarchyArtifacts(
-        _ artifacts: ImportHierarchyArtifacts,
-        pendingChildProofRoutes: [PendingChildProofRoute] = [],
-        pendingChildProofCapacity: Int = 16
+        _ artifacts: ImportHierarchyArtifacts
     ) async throws {
         let link = artifacts.carrierLink
         if !artifacts.parentGenesisLinks.isEmpty,
            try !hasConnectedAcceptedBlock(link.carrierCID) {
             throw NodeStoreError.invalidConfiguration(
                 "genesis authority requires a connected parent block"
-            )
-        }
-        guard pendingChildProofRoutes.allSatisfy({
-            $0.carrierCID == link.carrierCID && !$0.directory.isEmpty
-        }) else {
-            throw NodeStoreError.invalidConfiguration(
-                "pending child-proof route belongs to another carrier"
             )
         }
         guard let prepared = try await prepareHierarchyArtifacts(
@@ -649,27 +564,12 @@ extension NodeStore {
                 if let indexUpdate {
                     try persistChildEvidenceRoot(indexUpdate)
                 }
-                if let attachmentCID = prepared.carrierEvidence?
-                    .proofAttachment.rawCID
-                {
-                    try deleteParentEvidenceInbox(attachmentCID: attachmentCID)
-                }
-                try persistPendingChildProofRouteRows(
-                    try pendingRoutesIncludingPreparedProofs(
-                        pendingChildProofRoutes,
-                        carrierCIDs: [link.carrierCID]
-                    ),
-                    capacity: pendingChildProofCapacity
-                )
             }
         } catch {
             await abandonChildEvidenceIndex(indexUpdate)
             throw error
         }
         await finishChildEvidenceIndex(indexUpdate)
-        if prepared.carrierEvidence != nil {
-            await reconcileParentEvidenceInboxPruningProtection()
-        }
     }
 
     func issuedParentCarrierLink(
@@ -711,92 +611,6 @@ extension NodeStore {
             throw NodeStoreError.corrupt("malformed locally issued genesis link")
         }
         return link
-    }
-
-    /// Persists content-authenticated proof material used to serve a direct
-    /// child. Different Nexus roots and directories for the same child are
-    /// distinct valid evidence, so the cache is set-valued by
-    /// `(childCID, directory, rootCID)`.
-    func persistIssuedChildProof(
-        _ proof: ChildBlockProof,
-        childCID: String,
-        isChildGenesis: Bool,
-        bootstrapRoots: [String],
-        parentCarrierCID: String? = nil,
-        rootEnvelope: ChildValidationPackageEnvelope
-    ) async throws {
-        guard let directory = proof.directoryPath.last,
-              isChildGenesis || bootstrapRoots.isEmpty,
-              bootstrapRoots.isEmpty || bootstrapRoots.contains(childCID) else {
-            throw NodeStoreError.invalidIssuedChildProof(childCID)
-        }
-        guard let edge = await DirectChildEdge.derive(from: proof),
-              edge.childCID == childCID,
-              edge.directory == directory,
-              proof.directoryPath
-                == Array(chainPath.dropFirst()) + [directory],
-              parentCarrierCID.map({ $0 == edge.parentCarrierCID }) ?? true else {
-            throw NodeStoreError.invalidIssuedChildProof(childCID)
-        }
-        _ = try await validatedProofPayload(
-            proof,
-            childCID: childCID
-        )
-        guard let edgeCID = edge.edgeCID else {
-            throw NodeStoreError.invalidIssuedChildProof(childCID)
-        }
-        guard rootEnvelope.proofBytes == (try? proof.serialize()) else {
-            throw NodeStoreError.invalidIssuedChildProof(childCID)
-        }
-        let proofAttachment = try ChildEvidenceVolume(
-            envelopeBytes: try rootEnvelope.encode(),
-            childCID: childCID
-        )
-        try await retainChildGenesisVolumes(
-            bootstrapRoots,
-            storer: recoveryVolumeBroker
-        )
-        try await proofAttachment.store(storer: recoveryVolumeBroker)
-        let recoveryRoots = bootstrapRoots
-            + [proofAttachment.rawCID]
-        try await mergeRecoveryPruningProtection(
-            scope: issuedRecoveryRetentionScope,
-            roots: recoveryRoots
-        )
-        try database.transaction {
-            try persistChildGenesisVolumeRoots(
-                childCID: childCID,
-                roots: bootstrapRoots
-            )
-            try persistIssuedChildEdgeRow(edge)
-            try persistIssuedChildProofRow(
-                scope: .outgoingDirectChild,
-                edgeCID: edgeCID,
-                rootCID: proof.rootCID,
-                attachmentCID: proofAttachment.rawCID
-            )
-        }
-    }
-
-    private func validatedProofPayload(
-        _ proof: ChildBlockProof,
-        childCID: String,
-        exactDirectoryPath: [String]? = nil
-    ) async throws -> Data {
-        guard !childCID.isEmpty,
-              exactDirectoryPath.map({ proof.directoryPath == $0 }) ?? true,
-              try await Self.proves(
-                proof,
-                childCID: childCID,
-                from: chainPath
-              ) else {
-            throw NodeStoreError.invalidIssuedChildProof(childCID)
-        }
-        let payload = try proof.serialize()
-        guard ChildBlockProof.deserialize(payload) != nil else {
-            throw NodeStoreError.invalidIssuedChildProof(childCID)
-        }
-        return payload
     }
 
     private func persistIssuedChildEdgeRow(_ edge: DirectChildEdge) throws {
@@ -845,53 +659,23 @@ extension NodeStore {
     ) throws {
         let existing = try database.row(
             IssuedChildProofRow.self,
-            "SELECT attachment_cid, ordinal FROM issued_child_proofs WHERE scope = ?1 AND edge_cid = ?2 AND root_cid = ?3",
+            "SELECT attachment_cid FROM issued_child_proofs WHERE scope = ?1 AND edge_cid = ?2 AND root_cid = ?3",
             params: [
                 .text(scope.rawValue), .text(edgeCID), .text(rootCID),
             ]
         )
         if let row = existing {
-            guard try row.attachmentCID == attachmentCID,
-                  try (row.ordinal != nil) == (scope == .outgoingDirectChild) else {
+            guard try row.attachmentCID == attachmentCID else {
                 throw NodeStoreError.conflictingIssuedChildProof
             }
             return
         }
-        let ordinal: NodeSQLiteValue
-        if scope == .outgoingDirectChild {
-            let maximum = try database.row(
-                from: IssuedChildProofRow.table,
-                "SELECT COALESCE(MAX(ordinal), 0) AS ordinal FROM issued_child_proofs"
-            )?.int("ordinal") ?? 0
-            guard maximum < Int64.max else {
-                throw NodeStoreError.corrupt(
-                    "child-evidence ordinal exhausted"
-                )
-            }
-            ordinal = .int(maximum + 1)
-        } else {
-            ordinal = .null
-        }
         try database.execute(
-            "INSERT INTO issued_child_proofs (scope, edge_cid, root_cid, attachment_cid, ordinal) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO issued_child_proofs (scope, edge_cid, root_cid, attachment_cid) VALUES (?1, ?2, ?3, ?4)",
             params: [
                 .text(scope.rawValue), .text(edgeCID), .text(rootCID),
                 .text(attachmentCID),
-                ordinal,
             ]
-        )
-    }
-
-    func issuedChildEvidence(
-        childCID: String,
-        directory: String,
-        rootCID: String? = nil
-    ) async throws -> IssuedChildEvidence? {
-        try await issuedChildEvidence(
-            scope: .outgoingDirectChild,
-            childCID: childCID,
-            directory: directory,
-            rootCID: rootCID
         )
     }
 
@@ -1061,21 +845,6 @@ extension NodeStore {
         )
     }
 
-    func issuedChildProofRoots(
-        childCID: String,
-        directory: String,
-        afterRootCID: String?,
-        limit: Int
-    ) async throws -> [String] {
-        try await issuedChildProofRoots(
-            scope: .outgoingDirectChild,
-            childCID: childCID,
-            directory: directory,
-            afterRootCID: afterRootCID,
-            limit: limit
-        )
-    }
-
     func incomingCarrierProofRoots(
         childCID: String,
         directory: String,
@@ -1125,505 +894,6 @@ extension NodeStore {
             )
         }
         return try rows.map { try $0.rootCID }
-    }
-
-    func issuedChildEvidenceSummaries(
-        directory: String,
-        afterOrdinal: UInt64,
-        throughOrdinal: UInt64,
-        limit: Int
-    ) async throws -> [IssuedChildEvidenceSummary] {
-        guard !directory.isEmpty, limit > 0,
-              let sqlLimit = Int64(exactly: limit),
-              let after = Int64(exactly: afterOrdinal),
-              let through = Int64(exactly: throughOrdinal),
-              after <= through else {
-            throw NodeStoreError.invalidConfiguration(
-                "child-evidence page must be bounded"
-            )
-        }
-        let rows = try database.rows(
-            ProofEdgeJoinRow.self,
-            "SELECT p.ordinal, e.child_cid, p.root_cid, p.attachment_cid \(Self.proofEdgeJoinSQL) WHERE p.scope = ?1 AND e.directory = ?2 AND p.ordinal > ?3 AND p.ordinal <= ?4 ORDER BY p.ordinal LIMIT ?5",
-            params: [
-                .text(IssuedChildProofScope.outgoingDirectChild.rawValue),
-                .text(directory), .int(after), .int(through), .int(sqlLimit),
-            ]
-        )
-        return try rows.map { row in
-            // An outgoing proof always carries an ordinal (the table's
-            // CHECK); one without is an index inconsistency, not a column.
-            guard let ordinal = try row.ordinal else {
-                throw NodeStoreError.corrupt(
-                    "malformed locally issued child-evidence index"
-                )
-            }
-            return IssuedChildEvidenceSummary(
-                ordinal: ordinal,
-                childCID: try row.childCID,
-                rootCID: try row.rootCID,
-                attachmentCID: try row.attachmentCID
-            )
-        }
-    }
-
-    func issuedChildEvidenceScanHead(directory: String) throws
-        -> (sourceID: String, throughOrdinal: UInt64)
-    {
-        guard !directory.isEmpty else {
-            throw NodeStoreError.invalidConfiguration(
-                "child-evidence directory must be nonempty"
-            )
-        }
-        let sourceID = try syncSourceID()
-        guard let through = try database.row(
-                from: ProofEdgeJoinRow.table,
-                "SELECT COALESCE(MAX(p.ordinal), 0) AS ordinal \(Self.proofEdgeJoinSQL) WHERE p.scope = ?1 AND e.directory = ?2",
-                params: [
-                    .text(IssuedChildProofScope.outgoingDirectChild.rawValue),
-                    .text(directory),
-                ]
-              )?.uint64("ordinal") else {
-            throw NodeStoreError.corrupt(
-                "malformed child-evidence scan head"
-            )
-        }
-        return (sourceID, through)
-    }
-
-    func issuedChildEvidenceSummary(
-        childCID: String,
-        directory: String,
-        rootCID: String
-    ) throws -> (sourceID: String, summary: IssuedChildEvidenceSummary)? {
-        guard let row = try database.row(
-            ProofEdgeJoinRow.self,
-            "SELECT p.ordinal, p.attachment_cid \(Self.proofEdgeJoinSQL) WHERE p.scope = ?1 AND e.child_cid = ?2 AND e.directory = ?3 AND p.root_cid = ?4 LIMIT 1",
-            params: [
-                .text(IssuedChildProofScope.outgoingDirectChild.rawValue),
-                .text(childCID), .text(directory), .text(rootCID),
-            ]
-        ), let ordinal = try row.ordinal else {
-            return nil
-        }
-        return (
-            try issuedChildEvidenceScanHead(directory: directory).sourceID,
-            IssuedChildEvidenceSummary(
-                ordinal: ordinal,
-                childCID: childCID,
-                rootCID: rootCID,
-                attachmentCID: try row.attachmentCID
-            )
-        )
-    }
-
-    /// The first evidence issued for `childCID` into `directory`, under
-    /// any root: what the parent answers a child's request for a block's
-    /// evidence with. Nil until the evidence is durably indexed.
-    func issuedChildEvidenceSummary(
-        childCID: String,
-        directory: String
-    ) throws -> (sourceID: String, summary: IssuedChildEvidenceSummary)? {
-        guard let row = try database.row(
-            ProofEdgeJoinRow.self,
-            "SELECT p.ordinal, p.root_cid, p.attachment_cid \(Self.proofEdgeJoinSQL) WHERE p.scope = ?1 AND e.child_cid = ?2 AND e.directory = ?3 AND p.ordinal IS NOT NULL ORDER BY p.ordinal LIMIT 1",
-            params: [
-                .text(IssuedChildProofScope.outgoingDirectChild.rawValue),
-                .text(childCID), .text(directory),
-            ]
-        ), let ordinal = try row.ordinal else {
-            return nil
-        }
-        return (
-            try issuedChildEvidenceScanHead(directory: directory).sourceID,
-            IssuedChildEvidenceSummary(
-                ordinal: ordinal,
-                childCID: childCID,
-                rootCID: try row.rootCID,
-                attachmentCID: try row.attachmentCID
-            )
-        )
-    }
-
-    func parentEvidenceScanCursor() throws -> ParentEvidenceScanCursor {
-        let rows = try database.rows(
-            ParentEvidenceScanRow.self,
-            "SELECT source_id, ordinal FROM parent_evidence_scan WHERE singleton = 1"
-        )
-        guard rows.count == 1 else {
-            throw NodeStoreError.corrupt(
-                "malformed parent-evidence scan cursor"
-            )
-        }
-        return ParentEvidenceScanCursor(
-            sourceID: try rows[0].sourceID,
-            ordinal: try rows[0].ordinal
-        )
-    }
-
-    /// Returns whether this carrier's evidence was admitted before (then no
-    /// inbox entry is kept and there is nothing to admit again).
-    @discardableResult
-    func storeParentEvidenceInbox(
-        sourceID: String,
-        ordinal: UInt64,
-        attachment: ChildEvidenceVolume,
-        package: AuthenticatedChildPackage,
-        advanceScan: Bool
-    ) async throws -> Bool {
-        guard UUID(uuidString: sourceID) != nil,
-              ordinal > 0,
-              let sqlOrdinal = Int64(exactly: ordinal),
-              package.package.proof.rootCID.isEmpty == false,
-              let directHop = await package.package.proof.directHop() else {
-            throw NodeStoreError.invalidConfiguration(
-                "parent-evidence inbox reference is malformed"
-            )
-        }
-        let envelope = try ChildValidationPackageEnvelope(
-            package.package
-        ).encode()
-        guard envelope == attachment.envelopeBytes else {
-            throw NodeStoreError.invalidIssuedChildProof(directHop.childCID)
-        }
-        _ = try await prepareCarrierEvidence(
-            ImportCarrierEvidence(
-                proof: package.package.proof,
-                childCID: directHop.childCID
-            ),
-            expectedChildCIDs: [directHop.childCID],
-            expectedRootCID: package.package.proof.rootCID
-        )
-        let existing = try database.row(
-            ParentEvidenceInboxRow.self,
-            "SELECT child_cid, root_cid, attachment_cid FROM parent_evidence_inbox WHERE source_id = ?1 AND ordinal = ?2",
-            params: [.text(sourceID), .int(sqlOrdinal)]
-        )
-        if let row = existing {
-            guard try row.childCID == directHop.childCID,
-                  try row.rootCID == package.package.proof.rootCID,
-                  try row.attachmentCID == attachment.rawCID else {
-                throw NodeStoreError.corrupt(
-                    "parent-evidence ordinal changed"
-                )
-            }
-        }
-        let alreadyAdmitted = try admittedCarrierEvidenceExists(
-            attachmentCID: attachment.rawCID,
-            childCID: directHop.childCID,
-            rootCID: package.package.proof.rootCID
-        )
-        if !alreadyAdmitted, existing == nil {
-            let count = try database.row(
-                from: ParentEvidenceInboxRow.table,
-                "SELECT COUNT(*) AS count FROM parent_evidence_inbox"
-            )?.int("count")
-            guard let count, count < Int64(parentEvidenceInboxCapacity) else {
-                throw NodeStoreError.parentEvidenceInboxFull
-            }
-        }
-        try await attachment.store(storer: recoveryVolumeBroker)
-        if !alreadyAdmitted {
-            try await mergeRecoveryPruningProtection(
-                scope: parentEvidenceInboxRetentionScope,
-                roots: [attachment.rawCID]
-            )
-        }
-        let admittedDuringStore: Bool
-        do {
-            admittedDuringStore = try database.transaction {
-                let transactionalExisting = try database.row(
-                    ParentEvidenceInboxRow.self,
-                    "SELECT child_cid, root_cid, attachment_cid FROM parent_evidence_inbox WHERE source_id = ?1 AND ordinal = ?2",
-                    params: [.text(sourceID), .int(sqlOrdinal)]
-                )
-                if let row = transactionalExisting {
-                    guard try row.childCID == directHop.childCID,
-                          try row.rootCID == package.package.proof.rootCID,
-                          try row.attachmentCID == attachment.rawCID else {
-                        throw NodeStoreError.corrupt(
-                            "parent-evidence ordinal changed"
-                        )
-                    }
-                }
-                let admitted = try admittedCarrierEvidenceExists(
-                    attachmentCID: attachment.rawCID,
-                    childCID: directHop.childCID,
-                    rootCID: package.package.proof.rootCID
-                )
-                if admitted {
-                    try deleteParentEvidenceInbox(attachmentCID: attachment.rawCID)
-                } else if transactionalExisting == nil {
-                    let count = try database.row(
-                        from: ParentEvidenceInboxRow.table,
-                        "SELECT COUNT(*) AS count FROM parent_evidence_inbox"
-                    )?.int("count")
-                    guard let count, count < Int64(parentEvidenceInboxCapacity) else {
-                        throw NodeStoreError.parentEvidenceInboxFull
-                    }
-                    try database.execute(
-                        "INSERT INTO parent_evidence_inbox (source_id, ordinal, child_cid, root_cid, attachment_cid) VALUES (?1, ?2, ?3, ?4, ?5)",
-                        params: [
-                            .text(sourceID), .int(sqlOrdinal),
-                            .text(directHop.childCID),
-                            .text(package.package.proof.rootCID),
-                            .text(attachment.rawCID),
-                        ]
-                    )
-                }
-                _ = try markContextualCandidateHandoff(
-                    candidateCID: directHop.childCID
-                )
-                if advanceScan {
-                    try persistParentEvidenceScan(
-                        sourceID: sourceID,
-                        ordinal: ordinal
-                    )
-                }
-                return admitted
-            }
-        } catch {
-            if !alreadyAdmitted {
-                await reconcileParentEvidenceInboxPruningProtection()
-            }
-            throw error
-        }
-        if admittedDuringStore {
-            await reconcileParentEvidenceInboxPruningProtection()
-        }
-        return admittedDuringStore
-    }
-
-    private func admittedCarrierEvidenceExists(
-        attachmentCID: String,
-        childCID: String,
-        rootCID: String
-    ) throws -> Bool {
-        try database.query(
-            "SELECT 1 \(Self.proofEdgeJoinSQL) WHERE p.scope = ?1 AND p.attachment_cid = ?2 AND e.child_cid = ?3 AND p.root_cid = ?4 LIMIT 1",
-            params: [
-                .text(IssuedChildProofScope.incomingCarrier.rawValue),
-                .text(attachmentCID),
-                .text(childCID),
-                .text(rootCID),
-            ]
-        ).isEmpty == false
-    }
-
-    private func persistParentEvidenceScan(
-        sourceID: String,
-        ordinal: UInt64
-    ) throws {
-        let current = try parentEvidenceScanCursor()
-        let nextOrdinal = current.sourceID == sourceID
-            ? max(current.ordinal, ordinal)
-            : ordinal
-        guard let sqlOrdinal = Int64(exactly: nextOrdinal) else {
-            throw NodeStoreError.invalidConfiguration(
-                "parent-evidence scan cursor is too large"
-            )
-        }
-        try database.execute(
-            "UPDATE parent_evidence_scan SET source_id = ?1, ordinal = ?2 WHERE singleton = 1",
-            params: [.text(sourceID), .int(sqlOrdinal)]
-        )
-    }
-
-    /// Owner: ImportJournal.stage / EvidenceIndex.persistIssuedHierarchyArtifacts / EvidenceIndex.storeParentEvidenceInbox — caller holds the transaction.
-    func deleteParentEvidenceInbox(attachmentCID: String) throws {
-        try database.execute(
-            "DELETE FROM parent_evidence_inbox WHERE attachment_cid = ?1",
-            params: [.text(attachmentCID)]
-        )
-    }
-
-    /// Drop the inbox entries for one (block, root) an admission decided
-    /// without persisting relay evidence; the persist and stage paths consume
-    /// theirs by attachment. Otherwise an entry leaves only as an orphan
-    /// (`orphanParentEvidence`).
-    func consumeParentEvidence(childCID: String, rootCID: String) async throws {
-        let present = try database.query(
-            "SELECT 1 FROM parent_evidence_inbox WHERE child_cid = ?1 AND root_cid = ?2 LIMIT 1",
-            params: [.text(childCID), .text(rootCID)]
-        )
-        guard !present.isEmpty else { return }
-        try database.execute(
-            "DELETE FROM parent_evidence_inbox WHERE child_cid = ?1 AND root_cid = ?2",
-            params: [.text(childCID), .text(rootCID)]
-        )
-        await reconcileParentEvidenceInboxPruningProtection()
-    }
-
-    /// The import of (block, root) could not decide on a fact the parent
-    /// will send: its inbox entries leave (the runtime keeps them, if at
-    /// all, in its in-memory orphan pool). Returns what left: each entry's
-    /// source and its place in the parent's index, to fetch it again by.
-    func orphanParentEvidence(
-        childCID: String,
-        rootCID: String
-    ) async throws -> [(sourceID: String, summary: IssuedChildEvidenceSummary)] {
-        let orphaned = try database.transaction {
-            () throws -> [(sourceID: String, summary: IssuedChildEvidenceSummary)] in
-            let rows = try database.rows(
-                ParentEvidenceInboxRow.self,
-                "SELECT source_id, ordinal, attachment_cid FROM parent_evidence_inbox WHERE child_cid = ?1 AND root_cid = ?2",
-                params: [.text(childCID), .text(rootCID)]
-            )
-            let orphaned = try rows.map { row in
-                (
-                    sourceID: try row.sourceID,
-                    summary: IssuedChildEvidenceSummary(
-                        ordinal: try row.ordinal,
-                        childCID: childCID,
-                        rootCID: rootCID,
-                        attachmentCID: try row.attachmentCID
-                    )
-                )
-            }
-            try database.execute(
-                "DELETE FROM parent_evidence_inbox WHERE child_cid = ?1 AND root_cid = ?2",
-                params: [.text(childCID), .text(rootCID)]
-            )
-            return orphaned
-        }
-        if !orphaned.isEmpty {
-            await reconcileParentEvidenceInboxPruningProtection()
-        }
-        return orphaned
-    }
-
-    func parentEvidenceInboxHasCapacity() throws -> Bool {
-        let count = try database.row(
-            from: ParentEvidenceInboxRow.table,
-            "SELECT COUNT(*) AS count FROM parent_evidence_inbox"
-        )?.int("count")
-        guard let count else {
-            throw NodeStoreError.corrupt(
-                "parent-evidence inbox count is malformed"
-            )
-        }
-        return count < Int64(parentEvidenceInboxCapacity)
-    }
-
-    func parentEvidenceInbox() async throws -> [ParentEvidenceInboxItem] {
-        let rows = try database.rows(
-            ParentEvidenceInboxRow.self,
-            "SELECT source_id, ordinal, child_cid, root_cid, attachment_cid FROM parent_evidence_inbox ORDER BY source_id, ordinal"
-        )
-        var items: [ParentEvidenceInboxItem] = []
-        items.reserveCapacity(rows.count)
-        for row in rows {
-            let sourceID = try row.sourceID
-            let ordinal = try row.ordinal
-            let childCID = try row.childCID
-            let rootCID = try row.rootCID
-            let attachmentCID = try row.attachmentCID
-            let attachment = try await recoveryVolume(
-                attachmentCID: attachmentCID,
-                childCID: childCID
-            )
-            guard let envelope = try? ChildValidationPackageEnvelope.decode(
-                attachment.envelopeBytes
-            ), let proof = ChildBlockProof.deserialize(envelope.proofBytes),
-               proof.rootCID == rootCID else {
-                throw NodeStoreError.corrupt(
-                    "malformed parent-evidence inbox attachment"
-                )
-            }
-            let package = AuthenticatedChildPackage(
-                package: ChildValidationPackage(proof: proof)
-            )
-            _ = try await prepareCarrierEvidence(
-                ImportCarrierEvidence(
-                    proof: proof,
-                    childCID: childCID
-                ),
-                expectedChildCIDs: [childCID],
-                expectedRootCID: rootCID
-            )
-            items.append(ParentEvidenceInboxItem(
-                sourceID: sourceID,
-                ordinal: ordinal,
-                attachment: attachment,
-                package: package
-            ))
-        }
-        return items
-    }
-
-    /// Permanent root-independent hops already published by this parent.
-    /// They outlive the bounded pre-publication recovery buffer and can be
-    /// recomposed whenever this carrier gains another authenticated root.
-    func publishedDirectChildProofs(
-        carrierCID: String
-    ) async throws -> [PreparedChildProof] {
-        let rows = try database.rows(
-            ProofEdgeJoinRow.self,
-            "SELECT DISTINCT p.edge_cid \(Self.proofEdgeJoinSQL) WHERE p.scope = ?1 AND e.parent_carrier_cid = ?2 ORDER BY p.edge_cid",
-            params: [
-                .text(IssuedChildProofScope.outgoingDirectChild.rawValue),
-                .text(carrierCID),
-            ]
-        )
-        var proofs: [PreparedChildProof] = []
-        proofs.reserveCapacity(rows.count)
-        for row in rows {
-            guard let evidence = try await issuedChildEvidence(
-                    scope: .outgoingDirectChild,
-                    edgeCID: try row.edgeCID
-                  ), let proof = evidence.edge.proof else {
-                throw NodeStoreError.corrupt("malformed retained direct-child edge")
-            }
-            let bootstrapRoots = try childGenesisVolumeRoots(
-                childCID: evidence.edge.childCID
-            )
-            proofs.append(try PreparedChildProof(
-                directory: evidence.edge.directory,
-                childCID: evidence.edge.childCID,
-                isChildGenesis: !bootstrapRoots.isEmpty,
-                bootstrapRoots: bootstrapRoots,
-                proof: proof
-            ))
-        }
-        return proofs
-    }
-
-    /// Durable direct edges can outlive their bounded preparation row. Return
-    /// only carriers whose retained edge has a newly learned upstream root
-    /// that has not been composed into an outgoing attachment yet.
-    func uncomposedDirectChildProofCarrierCIDs(
-        parentDirectory: String
-    ) async throws -> [String] {
-        guard !parentDirectory.isEmpty else { return [] }
-        return try database.rows(
-            from: IssuedChildEdgeRow.table,
-            """
-            SELECT DISTINCT outgoing_edge.parent_carrier_cid AS carrier_cid
-            FROM issued_child_edges AS outgoing_edge
-            INNER JOIN issued_child_proofs AS retained
-                ON retained.edge_cid = outgoing_edge.edge_cid
-                AND retained.scope = ?1
-            INNER JOIN issued_child_edges AS incoming_edge
-                ON incoming_edge.child_cid = outgoing_edge.parent_carrier_cid
-                AND incoming_edge.directory = ?2
-            INNER JOIN issued_child_proofs AS incoming
-                ON incoming.edge_cid = incoming_edge.edge_cid
-                AND incoming.scope = ?3
-            WHERE NOT EXISTS (
-                SELECT 1
-                FROM issued_child_proofs AS composed
-                WHERE composed.scope = ?1
-                    AND composed.edge_cid = outgoing_edge.edge_cid
-                    AND composed.root_cid = incoming.root_cid
-            )
-            ORDER BY carrier_cid
-            """,
-            params: [
-                .text(IssuedChildProofScope.outgoingDirectChild.rawValue),
-                .text(parentDirectory),
-                .text(IssuedChildProofScope.incomingCarrier.rawValue),
-            ]
-        ).map { try $0.text("carrier_cid") }
     }
 
     private func persistIssuedParentFact(
@@ -1806,27 +1076,6 @@ extension NodeStore {
                 )
             }
         }
-        let outgoingOrdinals = try database.rows(
-            IssuedChildProofRow.self,
-            "SELECT ordinal FROM issued_child_proofs WHERE scope = ?1 ORDER BY ordinal",
-            params: [.text(IssuedChildProofScope.outgoingDirectChild.rawValue)]
-        )
-        for (offset, row) in outgoingOrdinals.enumerated() {
-            guard try row.ordinal == UInt64(offset + 1) else {
-                throw NodeStoreError.corrupt(
-                    "child-evidence ordinals are not contiguous"
-                )
-            }
-        }
-        let invalidIncomingOrdinal = try database.query(
-            "SELECT 1 FROM issued_child_proofs WHERE scope != ?1 AND ordinal IS NOT NULL LIMIT 1",
-            params: [.text(IssuedChildProofScope.outgoingDirectChild.rawValue)]
-        )
-        guard invalidIncomingOrdinal.isEmpty else {
-            throw NodeStoreError.corrupt(
-                "incoming evidence has an outgoing ordinal"
-            )
-        }
         let edgeCount = try database.row(
             from: IssuedChildEdgeRow.table,
             "SELECT COUNT(*) AS count FROM issued_child_edges"
@@ -1838,10 +1087,5 @@ extension NodeStore {
         guard edgeCount == attachedEdgeCount else {
             throw NodeStoreError.corrupt("orphaned direct-child content")
         }
-    }
-
-    func auditParentEvidence() async throws {
-        _ = try parentEvidenceScanCursor()
-        _ = try await parentEvidenceInbox()
     }
 }

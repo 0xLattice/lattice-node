@@ -371,16 +371,13 @@ public struct IvyRootContentSource: Sendable {
 /// Serves complete local Volume boundaries from the recovered chain process.
 struct ChainProcessIvyContentSource: IvyContentSource {
     let process: ChainProcess
-    let authorizes: (@Sendable (AuthenticatedPeer) async -> Bool)?
     let transientRootVolume: (@Sendable (String) async -> SerializedVolume?)?
 
     init(
         process: ChainProcess,
-        authorizes: (@Sendable (AuthenticatedPeer) async -> Bool)? = nil,
         transientRootVolume: (@Sendable (String) async -> SerializedVolume?)? = nil
     ) {
         self.process = process
-        self.authorizes = authorizes
         self.transientRootVolume = transientRootVolume
     }
 
@@ -396,7 +393,7 @@ struct ChainProcessIvyContentSource: IvyContentSource {
         from peer: AuthenticatedPeer,
         rootCID: String
     ) async -> Bool {
-        await authorizes?(peer) ?? true
+        true
     }
 
     func content(

@@ -94,7 +94,7 @@ struct Init: AsyncParsableCommand {
         }
         let topology = try Topology(
             chains: ["Nexus": TopologyChain(
-                listen: 4001, fact: 4002, rpc: 8080,
+                listen: 4001, rpc: 8080,
                 peers: peer.isEmpty ? nil : peer
             )],
             mine: nil

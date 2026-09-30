@@ -34,15 +34,13 @@ final class NodeConfigurationTests: XCTestCase {
         )
 
         XCTAssertEqual(configuration.nexusGenesisCID, NexusGenesis.expectedBlockHash)
-        XCTAssertNil(configuration.parentEndpoint)
         XCTAssertEqual(configuration.minPeerKeyBits, 0)
 
         XCTAssertThrowsError(try NodeConfiguration(
             chainPath: ["Nexus"],
             storagePath: URL(fileURLWithPath: "/tmp/lattice-node-test"),
             privateKeyHex: String(repeating: "01", count: 32),
-            listenPort: 4001,
-            factListenPort: 4001
+            rpcPort: 4001
         )) { error in
             XCTAssertEqual(error as? NodeConfigurationError, .invalidPorts)
         }

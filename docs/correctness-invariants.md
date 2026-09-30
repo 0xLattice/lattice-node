@@ -72,8 +72,7 @@ places are their own claim until a test covers them too.
 
 - **NODE-SEMANTICS-004.a** — `localFailure` is a local observation, not a
   verdict: the attempt is retried and its parent evidence is kept.
-  Gap: #214 (today a local verification failure is terminal: its
-  parent-evidence inbox entry is consumed)
+  Gap: #214 (today a local verification failure is terminal)
 - **NODE-SEMANTICS-004.b** — Candidate admission's outcome blame
   (`candidateBlame`) never names the supplier of a `localFailure` outcome.
 - **NODE-SEMANTICS-004.c** — The child-evidence sync blames on the bytes
@@ -147,35 +146,25 @@ places are their own claim until a test covers them too.
 - **NODE-STORAGE-002.a** — Block import merges its Volume roots into retention
   before it stages the fact batch that references them.
 - **NODE-STORAGE-002.b** — Every other durable reference (issued evidence,
-  parent-evidence inbox, issued child proof) is written after its complete
-  Volume is stored and retained.
+  issued child proof) is written after its complete Volume is stored and
+  retained.
 - **NODE-STORAGE-002.c** — Import pruning protection only grows while the node
   is live.
 - **NODE-STORAGE-002.d** — Issued-hierarchy pruning protection only grows while
   the node is live.
-- **NODE-STORAGE-002.e** — Prepared proof storage and its SQLite capacity
-  eviction are serialized through one gate, which leaves exactly the kept
-  proofs retained.
-- **NODE-STORAGE-002.f** — The prepared retained set is advanced inside that
-  gate, never after it is released.
 - **NODE-STORAGE-002.g** — Contextual child offers live in a durable LRU in
   the store: touching an offer (`touchContextualCandidate`, or offering it
   again) makes it the newest, and the order survives reopening the store.
 - **NODE-STORAGE-002.h** — An offer's roots are pinned before its index row is
   written.
 - **NODE-STORAGE-002.i** — Offer eviction removes the oldest offer, whole.
-- **NODE-STORAGE-002.j** — Offer eviction never touches a candidate marked as
-  a handoff.
-- **NODE-STORAGE-002.k** — Admission releases a handoff
+- **NODE-STORAGE-002.k** — Admission releases an offer
   (`removeContextualCandidateIfAdmitted`) only once its admission batch owns
-  every one of the handoff's roots; a batch that owns only some of them
-  releases nothing. The handoff budget (002.l, 002.t) sheds handoffs without
-  any admission.
-- **NODE-STORAGE-002.l** — Storing a new offer sheds the oldest handoffs beyond
-  the handoff budget.
+  every one of the offer's roots; a batch that owns only some of them
+  releases nothing.
 - **NODE-STORAGE-002.m** — No parent reserves anything at a child, and no
   acknowledgement gates parent progress.
-  Gap: #216 (no enforcement point: an absence across the hierarchy runtime)
+  Gap: #216 (no enforcement point: an absence across the runtime)
 - **NODE-STORAGE-002.n** — Canonicity never changes admission retention: a
   side block, and a block a reorg moves off the main chain, keep the
   retention their admission took, live and across a restart. The validated
@@ -186,15 +175,9 @@ places are their own claim until a test covers them too.
 - **NODE-STORAGE-002.p** — A root shared by several offers stays pinned until
   the last of them is released.
 - **NODE-STORAGE-002.q** — An accepted block's roots stay owned after the
-  handoff that brought them is released.
-- **NODE-STORAGE-002.r** — Proof acquisition is independent of offers and
-  handoffs.
+  offer that brought them is released.
+- **NODE-STORAGE-002.r** — Proof acquisition is independent of offers.
   Gap: #216 (no enforcement point identified)
-- **NODE-STORAGE-002.s** — A candidate the parent's evidence names carried is
-  marked as a handoff.
-- **NODE-STORAGE-002.t** — Booting the node also sheds the oldest handoffs
-  beyond the budget, row and pins together, as storing a new offer does
-  (002.l).
 - **NODE-STORAGE-002.u** — The process touches an offer each time a template
   carries it to the process again (`storeContextualCandidate`).
 - **NODE-STORAGE-002.v** — `NodeImportStorage` records a Volume root only after
@@ -205,8 +188,7 @@ places are their own claim until a test covers them too.
   inputs reuses its cached candidate without reaching the process
   (`miningCandidate`), so that carry touches nothing. The cached candidate is
   the last one whose build completed; a build that stores its offer and then
-  fails (`prepareChildProofs` throws) leaves a newer offer than the one the
-  cache carries.
+  fails leaves a newer offer than the one the cache carries.
   Gap: #216
 
 ## NODE-MEMPOOL-001 — the mempool is tip-relative, not consensus

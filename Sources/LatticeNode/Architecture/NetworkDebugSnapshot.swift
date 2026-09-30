@@ -13,26 +13,17 @@ struct NetworkDebugSnapshot {
         let hasHelloDeadline: Bool
     }
 
-    struct HierarchyPeer: Equatable {
-        /// The hierarchy role the peer's hello earned, if any.
-        let role: NodeNetworkRuntime.HierarchyPeer?
-        let hasHelloDeadline: Bool
-    }
-
     let overlay: [PeerKey: OverlayPeer]
-    let hierarchy: [PeerKey: HierarchyPeer]
-    /// Every peer key still held by a per-peer record or a pending request,
-    /// across both planes.
+    /// Every peer key still held by a per-peer record or a pending request.
     let heldPeerKeys: Set<PeerKey>
     /// Every session ID held by state keyed on a session rather than a peer
     /// key (in-flight serves and content leases).
     let heldSessionIDs: Set<Data>
-    /// The session IDs of every live authenticated session on either plane
-    /// (pre- and post-hello).
+    /// The session IDs of every live authenticated session (pre- and
+    /// post-hello).
     let liveSessionIDs: Set<Data>
     /// The range sync's current request anchor (the block the next page is
     /// requested after, and its height).
     let rangeSyncAnchor: (afterCID: String, requestedHeight: UInt64)?
-    let refusedChildEvidenceHintCount: Int
 }
 #endif

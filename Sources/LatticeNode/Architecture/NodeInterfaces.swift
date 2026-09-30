@@ -3,14 +3,6 @@ import Lattice
 import VolumeBroker
 import cashew
 
-/// Internal publication passed directly to the hierarchy runtime. Deliberately
-/// not Codable so it cannot accidentally become an HTTP DTO.
-public struct DirectChildProofPublication: Sendable {
-    public let directory: String
-    public let childCID: String
-    public let proof: ChildBlockProof
-}
-
 /// What a hosted child level builds its candidate against: the provisional
 /// carrier on its parent's validated tip, and the miner's plan for the
 /// child's subtree.
@@ -33,10 +25,6 @@ public struct ChildCandidateRequestContext: Sendable {
 
 /// What `ChainService` needs from the network runtime.
 public protocol NetworkInterface: AnyObject, Sendable {
-    /// Something changed on this chain: the validated tip, the mempool, a
-    /// credit. The runtime re-sends the evidence hints its send budget refused.
-    func chainStateChanged() async
-    func publishChildProof(_ publication: DirectChildProofPublication) async throws
     /// A carrier-linked admission under `package` outside the runtime's
     /// candidate worker (a co-hosted parent's mined grind): announce the
     /// child-evidence index root it may have changed, as the worker does.
@@ -92,9 +80,6 @@ public protocol ChainInterface: AnyObject, Sendable {
     /// This chain's genesis activated outside candidate admission (adopted
     /// from the parent's record): its tip moved from nothing.
     func genesisActivatedOutOfBand() async
-    /// An admission the candidate gate waited on (an own carried block)
-    /// decided or parked: the ready candidate it withheld is rebuilt.
-    func candidateGateReopened() async
 }
 
 /// The service's view of the runtime. Holds the runtime weakly, so the
@@ -106,19 +91,6 @@ final class WeakNetwork: @unchecked Sendable, NetworkInterface {
 
     init(_ runtime: NodeNetworkRuntime) {
         self.runtime = runtime
-    }
-
-    func chainStateChanged() async {
-        await runtime?.chainStateChanged()
-    }
-
-    func publishChildProof(_ publication: DirectChildProofPublication) async throws {
-        guard let runtime else { throw CancellationError() }
-        _ = try await runtime.publishChildProof(
-            publication.proof,
-            childDirectory: publication.directory,
-            childCID: publication.childCID
-        )
     }
 
     func announceCarriedEvidence(_ package: AuthenticatedChildPackage) async {
@@ -172,7 +144,6 @@ final class WeakChain: @unchecked Sendable, ChainInterface {
         return try await service.importNetworkCandidate(
             admission.header,
             authenticatedChildPackage: admission.authenticatedChildPackage,
-            preparingChildDirectories: admission.preparingChildDirectories,
             contentSource: admission.contentSource,
             weighed: admission.weighed
         )
@@ -190,9 +161,5 @@ final class WeakChain: @unchecked Sendable, ChainInterface {
 
     func genesisActivatedOutOfBand() async {
         await service?.genesisActivatedOutOfBand()
-    }
-
-    func candidateGateReopened() async {
-        await service?.candidateGateReopened()
     }
 }

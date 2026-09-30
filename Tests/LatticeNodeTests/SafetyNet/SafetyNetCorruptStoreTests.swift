@@ -10,14 +10,9 @@ import XCTest
 /// admission log replay and the normalized-index audit (admission_batches,
 /// admission_facts, accepted_blocks, issued_parent_fact_sources,
 /// issued_parent_facts, issued_child_edges, issued_child_proofs,
-/// parent_evidence_scan, parent_evidence_inbox, prepared_child_proofs,
-/// child_genesis_volume_roots, contextual_candidates, contextual_candidate_roots,
-/// contextual_candidate_children), the local mempool (local_mempool_transactions),
-/// the consensus revision floor (consensus_revision) and the prepared-proof
-/// recovery (prepared_child_proofs). `pending_child_proof_routes` is not read
-/// by this fixture's boot (nothing is staged, no prepared proofs), and
-/// `child_genesis_volume_roots` only through joins that an orphan row never
-/// satisfies.
+/// contextual_candidates, contextual_candidate_roots), the local mempool
+/// (local_mempool_transactions) and the consensus revision floor
+/// (consensus_revision).
 ///
 /// Every case starts from one valid fixture (Nexus, two mined blocks), damages
 /// exactly one row through SQL, reopens, and records what boot did. The
@@ -33,21 +28,16 @@ import XCTest
 /// - A column that cannot be read as its table declares it (consensus_revision
 ///   text that is not an integer, an empty accepted_blocks parent, a
 ///   non-positive sequence or an execution tier outside `BlockStatus`, a
-///   non-canonical CID in issued_child_proofs, parent_evidence_inbox,
-///   local_mempool_transactions or prepared_child_proofs, a non-UUID
-///   parent_evidence_scan source): refused
+///   non-canonical CID in issued_child_proofs or
+///   local_mempool_transactions): refused
 ///   with `NodeStoreError.malformedRow(table:column:)` naming exactly the
 ///   damaged table and column.
 /// - Semantic damage the row layer cannot see (admission_batches and
 ///   issued_parent_fact_sources JSON that fails to decode, admission_facts and
 ///   issued_parent_facts that disagree with their sources, an orphaned
 ///   issued_child_edges row, contextual_candidates / contextual_candidate_roots
-///   / contextual_candidate_children rows that break the index's SQL
-///   consistency): refused with `NodeStoreError.corrupt` (a free-text reason).
-/// - child_genesis_volume_roots (orphan row), pending_child_proof_routes: not
-///   read by this fixture's boot (nothing is staged, no prepared proofs) —
-///   boot succeeds and the damaged row is still there afterwards. Pinned as
-///   "unread", not as a tolerance.
+///   rows that break the index's SQL consistency): refused with
+///   `NodeStoreError.corrupt` (a free-text reason).
 /// - accepted_blocks.leaf disagreeing with the parent links: repaired at boot
 ///   (documented behaviour, pinned as such).
 ///
@@ -83,17 +73,6 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         /// Executed one statement at a time (`sqlite3_prepare` compiles only
         /// the first statement of a string).
         let sql: [String]
-        /// For a boot that succeeds: a COUNT query that must still return 1
-        /// afterwards, proving the damaged row survived the boot untouched.
-        let stillPresent: String?
-
-        init(table: String, column: String, description: String, sql: [String], stillPresent: String? = nil) {
-            self.table = table
-            self.column = column
-            self.description = description
-            self.sql = sql
-            self.stillPresent = stillPresent
-        }
     }
 
     // MARK: - Cases
@@ -133,17 +112,12 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         Damage(
             table: "contextual_candidates", column: "candidate_cid",
             description: "inserted candidate without roots",
-            sql: ["INSERT INTO contextual_candidates (candidate_cid, offer_seq, issued, handoff, handoff_seq) VALUES ('not-a-cid', 1, 0, 0, NULL)"]
+            sql: ["INSERT INTO contextual_candidates (candidate_cid, offer_seq, issued) VALUES ('not-a-cid', 1, 0)"]
         ),
         Damage(
             table: "contextual_candidate_roots", column: "root_cid",
             description: "inserted root without a candidate",
             sql: ["INSERT INTO contextual_candidate_roots (candidate_cid, root_cid) VALUES ('orphan', 'not-a-cid')"]
-        ),
-        Damage(
-            table: "contextual_candidate_children", column: "child_peer_key",
-            description: "inserted child without a candidate",
-            sql: ["INSERT INTO contextual_candidate_children (candidate_cid, child_peer_key, child_cid) VALUES ('orphan', 'not-a-peer-key', 'child')"]
         ),
     ]
 
@@ -173,63 +147,21 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         Damage(
             table: "issued_child_proofs", column: "root_cid",
             description: "inserted proof with malformed CID text",
-            sql: ["INSERT INTO issued_child_proofs (scope, edge_cid, root_cid, attachment_cid, ordinal) VALUES ('outgoing_direct_child', 'edge', 'not-a-cid', 'not-a-cid', 1)"]
-        ),
-        Damage(
-            table: "parent_evidence_scan", column: "source_id",
-            description: "non-UUID source",
-            sql: ["UPDATE parent_evidence_scan SET source_id = 'not-a-uuid' WHERE singleton = 1"]
-        ),
-        Damage(
-            table: "parent_evidence_inbox", column: "attachment_cid",
-            description: "inserted entry with malformed CID text",
-            sql: ["INSERT INTO parent_evidence_inbox (source_id, ordinal, child_cid, root_cid, attachment_cid) VALUES ('00000000-0000-4000-8000-000000000001', 1, 'child', 'root', 'not-a-cid')"]
+            sql: ["INSERT INTO issued_child_proofs (scope, edge_cid, root_cid, attachment_cid) VALUES ('incoming_carrier', 'edge', 'not-a-cid', 'not-a-cid')"]
         ),
         Damage(
             table: "local_mempool_transactions", column: "transaction_cid",
             description: "inserted malformed CID text",
             sql: ["INSERT INTO local_mempool_transactions (transaction_cid, added_at) VALUES ('not-a-cid', 0)"]
         ),
-        Damage(
-            table: "prepared_child_proofs", column: "attachment_cid",
-            description: "inserted proof with malformed CID text",
-            sql: ["INSERT INTO prepared_child_proofs (carrier_cid, batch_seq, directory, child_cid, is_child_genesis, attachment_cid) VALUES ('carrier', 1, 'Payments', 'child', 0, 'not-a-cid')"]
-        ),
     ]
 
     /// Refused with `NodeStoreError.wipeRequired`.
     private static let refusedAsWipeRequired: [Damage] = [
         Damage(
-            table: "node_metadata", column: "sync_source_id",
-            description: "non-UUID sync source",
-            sql: ["UPDATE node_metadata SET sync_source_id = 'not-a-uuid' WHERE singleton = 1"]
-        ),
-        Damage(
             table: "node_metadata", column: "nexus_genesis_cid",
             description: "a different genesis",
             sql: ["UPDATE node_metadata SET nexus_genesis_cid = 'not-a-cid' WHERE singleton = 1"]
-        ),
-    ]
-
-    /// Not read by this fixture's boot (nothing is staged, no prepared
-    /// proofs): `pending_child_proof_routes` is read on the stage path
-    /// (`persistPreparedChildProofs` / `persistPendingChildProofRouteRows`)
-    /// and by `pendingChildProofRoutes()`, neither of which a Nexus boot with
-    /// an empty prepared set reaches, and `child_genesis_volume_roots` only
-    /// through `WHERE EXISTS` joins on issued edges / prepared proofs that an
-    /// orphan row never satisfies. Boot succeeds and the row is still there.
-    private static let unreadAtBoot: [Damage] = [
-        Damage(
-            table: "child_genesis_volume_roots", column: "root_cid",
-            description: "inserted malformed CID text for an unknown child",
-            sql: ["INSERT INTO child_genesis_volume_roots (child_cid, root_cid) VALUES ('child', 'not-a-cid')"],
-            stillPresent: "SELECT COUNT(*) AS n FROM child_genesis_volume_roots WHERE child_cid = 'child' AND root_cid = 'not-a-cid'"
-        ),
-        Damage(
-            table: "pending_child_proof_routes", column: "carrier_cid",
-            description: "inserted route with an empty carrier",
-            sql: ["INSERT INTO pending_child_proof_routes (carrier_cid, batch_seq, directory) VALUES ('', 1, 'Payments')"],
-            stillPresent: "SELECT COUNT(*) AS n FROM pending_child_proof_routes WHERE carrier_cid = ''"
         ),
     ]
 
@@ -246,10 +178,6 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
 
     func testBootRefusesDamagedMetadataWithWipeRequired() async throws {
         try await assertBoot(Self.refusedAsWipeRequired, observes: .wipeRequired)
-    }
-
-    func testBootDoesNotReadTheseTablesAndTheDamagedRowSurvives() async throws {
-        try await assertBoot(Self.unreadAtBoot, observes: .opened)
     }
 
     /// A leaf flag that disagrees with the parent links is a derived index
@@ -302,20 +230,14 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         observes expected: (Damage) -> Observed
     ) async throws {
         let fixture = try await buildFixture()
-        var results: [(Damage, Observed, survived: Bool?)] = []
+        var results: [(Damage, Observed)] = []
         for damage in damages {
             let root = try damagedCopy(of: fixture, applying: damage.sql)
-            let observed = await observeBoot(at: root)
-            var survived: Bool?
-            if let query = damage.stillPresent {
-                survived = try NodeSQLite(path: root.appendingPathComponent("state.db").path)
-                    .query(query).first?["n"]?.intValue == 1
-            }
-            results.append((damage, observed, survived))
+            results.append((damage, await observeBoot(at: root)))
         }
         // Every failure message names the (table, column) it belongs to;
         // `XCTContext.runActivity` is unavailable on swift-corelibs-xctest.
-        for (damage, observed, survived) in results {
+        for (damage, observed) in results {
             let expected = expected(damage)
             XCTAssertEqual(
                 observed, expected,
@@ -323,14 +245,6 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
                     + "boot observed \(observed), pinned \(expected)",
                 file: file, line: line
             )
-            if let survived {
-                XCTAssertTrue(
-                    survived,
-                    "\(damage.table).\(damage.column): the damaged row "
-                        + "did not survive the boot unchanged",
-                    file: file, line: line
-                )
-            }
         }
     }
 

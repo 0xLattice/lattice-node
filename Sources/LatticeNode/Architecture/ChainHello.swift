@@ -9,8 +9,8 @@ public enum ChainHelloError: Error, Equatable, Sendable {
     case wrongChainPath
 }
 
-/// Authenticated application handshake for both the same-chain overlay and a
-/// pinned parent link. Synchronization state is advertised separately because
+/// Authenticated application handshake for the same-chain overlay.
+/// Synchronization state is advertised separately because
 /// competing roots on one child path remain ordinary fork-choice candidates.
 public struct ChainHello: Codable, Equatable, Sendable {
     /// Version 5: blocks commit a `rewardRecipient` credited the reward plus

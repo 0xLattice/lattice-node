@@ -90,7 +90,6 @@ start_node() {
         --data-directory "$tmp/data" \
         --identity-key "$tmp/process.key" \
         --listen-port "$port" \
-        --fact-listen-port "$((port + 1))" \
         --rpc-port "$rpc_port" \
         >>"$node_log" 2>&1 &
     node_pid=$!

@@ -30,8 +30,6 @@ enum BootRecovery {
         let localFetcher: CoalescingFetcher
         let retentionScope: String
         let issuedHierarchyRetentionScope: String
-        let preparedHierarchyRetentionScope: String
-        let parentEvidenceInboxRetentionScope: String
         let durableMempoolOwner: String
         let liveMempoolOwner: String
         let contextualCandidateOwner: String
@@ -56,11 +54,6 @@ enum BootRecovery {
             configuration: configuration,
             staged: staged,
             migrated: migrated
-        )
-        // Stage 8: prepared child proofs recovered.
-        try await ChainProcess.recoverPreparedChildProofs(
-            store: stores.store,
-            configuration: configuration
         )
         let bootHoleCeiling = await holeCeiling(
             runtimePhase: runtimePhase,
@@ -114,9 +107,6 @@ enum BootRecovery {
             configuration.address.key,
         ].joined(separator: ":")
         let issuedHierarchyRetentionScope = retentionScope + ":issued-hierarchy"
-        let preparedHierarchyRetentionScope = retentionScope + ":prepared-hierarchy"
-        let parentEvidenceInboxRetentionScope =
-            retentionScope + ":parent-evidence-inbox"
         let durableMempoolOwner = retentionScope + ":durable-mempool"
         let liveMempoolOwner = retentionScope + ":live-mempool"
         let contextualCandidateOwner = retentionScope + ":contextual-candidates"
@@ -127,22 +117,13 @@ enum BootRecovery {
             recoveryVolumeBroker: broker,
             blockRetentionScope: retentionScope,
             issuedRecoveryRetentionScope: issuedHierarchyRetentionScope,
-            preparedRecoveryRetentionScope: preparedHierarchyRetentionScope,
-            parentEvidenceInboxRetentionScope:
-                parentEvidenceInboxRetentionScope,
-            parentEvidenceInboxCapacity:
-                configuration.resourcePolicy.maximumPendingParentEvidence,
-            contextualCandidateOwner: contextualCandidateOwner,
-            handoffCandidateCapacity:
-                configuration.resourcePolicy.maximumRetainedHandoffCandidates
+            contextualCandidateOwner: contextualCandidateOwner
         )
         return Stores(
             broker: broker,
             localFetcher: localFetcher,
             retentionScope: retentionScope,
             issuedHierarchyRetentionScope: issuedHierarchyRetentionScope,
-            preparedHierarchyRetentionScope: preparedHierarchyRetentionScope,
-            parentEvidenceInboxRetentionScope: parentEvidenceInboxRetentionScope,
             durableMempoolOwner: durableMempoolOwner,
             liveMempoolOwner: liveMempoolOwner,
             contextualCandidateOwner: contextualCandidateOwner,
@@ -175,26 +156,19 @@ enum BootRecovery {
         let store = stores.store
         let retentionScope = stores.retentionScope
         let issuedHierarchyRetentionScope = stores.issuedHierarchyRetentionScope
-        let preparedHierarchyRetentionScope = stores.preparedHierarchyRetentionScope
-        let parentEvidenceInboxRetentionScope = stores.parentEvidenceInboxRetentionScope
         let contextualCandidateOwner = stores.contextualCandidateOwner
         let staged = try await store.stagedImports()
         try await store.auditNormalizedIndexes()
         try await store.pruneAdmittedContextualCandidates()
-        try await store.enforceHandoffCandidateBudget()
         let retainedRoots = durableProtectedRoots(
             staged: staged,
             additionalRoots: constantRoots
         )
         let issuedRecoveryRoots = try await store.issuedRecoveryVolumeRoots()
-        let preparedRecoveryRoots = try await store.preparedRecoveryVolumeRoots()
-        let parentEvidenceInboxRoots = try await store
-            .parentEvidenceInboxRoots()
         let contextualCandidateRoots = try await store
             .contextualCandidateVolumeRoots()
         for root in Set(
-            retainedRoots + issuedRecoveryRoots + preparedRecoveryRoots
-                + parentEvidenceInboxRoots + contextualCandidateRoots
+            retainedRoots + issuedRecoveryRoots + contextualCandidateRoots
         ) {
             guard await broker.fetchVolumeLocal(root: root) != nil else {
                 throw ChainProcessError.missingMaterializedVolume(root)
@@ -239,14 +213,6 @@ enum BootRecovery {
                 )
             }
         }
-        try await broker.advanceRetainedRoots(
-            scope: preparedHierarchyRetentionScope,
-            roots: preparedRecoveryRoots
-        )
-        try await broker.advanceRetainedRoots(
-            scope: parentEvidenceInboxRetentionScope,
-            roots: parentEvidenceInboxRoots
-        )
         try await broker.advanceRetainedRoots(
             scope: retentionScope,
             roots: retainedRoots
@@ -414,7 +380,6 @@ enum BootRecovery {
                             broker: broker,
                             retentionScope: retentionScope,
                             persistence: ImportPersistence(
-                                pendingChildProofCapacity: ChainProcess.preparedChildProofCapacity,
                                 hierarchyArtifacts: hierarchyArtifacts
                             )
                         )
@@ -451,7 +416,7 @@ enum BootRecovery {
         return runtimePhase
     }
 
-    /// Stage 9: the hole ceiling seeded from the blocks this boot demoted.
+    /// Stage 8: the hole ceiling seeded from the blocks this boot demoted.
     private static func holeCeiling(
         runtimePhase: ChainProcess.RuntimePhase,
         bootDemoted: [String]

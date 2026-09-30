@@ -1,8 +1,7 @@
 // The declarative unit `lattice` operates on: one host's chain tree.
 //
 // One lattice-node process hosts every chain in the tree; a child
-// reads its parent facts in-process and takes its parent's evidence over
-// the loopback hierarchy plane.
+// reads its parent facts in-process.
 // This file makes that tree a value: each entry is one chain, parents are
 // derived from chain paths, and every verb reconciles against it rather than
 // accumulating flag invocations.
@@ -13,7 +12,6 @@ import LatticeNode
 
 public struct TopologyChain: Codable, Sendable {
     public var listen: UInt16
-    public var fact: UInt16
     public var rpc: UInt16
     /// Overlay bootstrap peers as `publicKey@host:port`. Only meaningful
     /// entries for this chain's own path; children of a local parent are
@@ -46,14 +44,13 @@ public struct TopologyChain: Codable, Sendable {
     public var publicReadMaxRate: Double?
 
     public init(
-        listen: UInt16, fact: UInt16, rpc: UInt16, peers: [String]? = nil,
+        listen: UInt16, rpc: UInt16, peers: [String]? = nil,
         publicRead: UInt16? = nil, externalAddress: String? = nil,
         publicReadUrl: String? = nil, publicReadRate: Double? = nil,
         publicReadExpensiveRate: Double? = nil,
         publicReadMaxRate: Double? = nil
     ) {
         self.listen = listen
-        self.fact = fact
         self.rpc = rpc
         self.peers = peers
         self.publicRead = publicRead
@@ -276,7 +273,7 @@ public struct Topology: Codable {
                     throw CtlError("\(path) has no local parent \(parent); every child needs its immediate parent in the tree")
                 }
             }
-            for port in [chain.listen, chain.fact, chain.rpc]
+            for port in [chain.listen, chain.rpc]
                 + (chain.publicRead.map { [$0] } ?? []) {
                 guard ports.insert(port).inserted else {
                     throw CtlError("port \(port) is used twice")

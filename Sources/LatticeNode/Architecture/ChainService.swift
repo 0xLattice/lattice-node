@@ -117,10 +117,8 @@ public actor ChainService {
     /// tip is the one it was stamped on (`parentTipCID`): a children-only
     /// parent block on top must still rebuild the carried block as is.
     private var readyCarrier: (key: String, parentTipCID: String, block: Block)?
-    /// Set with the parent mailbox: whether this level may build now (no own
-    /// carried block awaits admission), and how the parent level hears that
-    /// this level's snapshot changed.
-    private var candidateGate: (@Sendable (_ pendingHandoff: [String]) async -> Bool)?
+    /// Set with the parent mailbox: how the parent level hears that this
+    /// level's snapshot changed.
     private var candidateChanged: (@Sendable () async -> Void)?
     /// This child level's mailbox from its co-hosted parent level, and the one
     /// task that drains it in order (`openParentMailbox`). Nil on Nexus and
@@ -180,10 +178,6 @@ public actor ChainService {
     #endif
     private var transactionPublications = Set<String>()
     private var transactionPublicationWorker: Task<Void, Never>?
-    // Carrier child-proof deliveries in flight. Each writes the store, so
-    // `shutdown()` joins them; each removes itself when it finishes.
-    private var carrierProofDeliveries: [UInt64: Task<Void, Never>] = [:]
-    private var nextCarrierProofDelivery: UInt64 = 0
     // Set once by `shutdown()`: no background work is started afterwards.
     private var stopped = false
     // Network ingress calls in flight (`enterIngress`). `shutdown()` waits
@@ -273,8 +267,7 @@ public actor ChainService {
         readySnapshot.swap(nil)
         while true {
             if let worker = canonicalCommitWorker ?? executionWalkWorker
-                ?? transactionPublicationWorker
-                ?? carrierProofDeliveries.values.first {
+                ?? transactionPublicationWorker {
                 await worker.value
             } else if canonicalCommitWorkerReserved {
                 // Reserved behind a holder of the operation gate: queue
@@ -312,7 +305,7 @@ public actor ChainService {
             && transactionPublicationWorker == nil
             && parentMailboxDrain == nil && parentTipDrain == nil
             && parentPlanDrain == nil && candidateRebuild.isEmpty
-            && carrierProofDeliveries.isEmpty && ingressInFlight == 0
+            && ingressInFlight == 0
     }
     #endif
 
@@ -834,21 +827,14 @@ public actor ChainService {
     public func importNetworkCandidate(
         _ header: BlockHeader,
         authenticatedChildPackage: AuthenticatedChildPackage?,
-        preparingChildDirectories: [String],
         contentSource: any ContentSource,
         weighed: Bool = false
     ) async throws -> NodeImportOutcome {
         try enterIngress()
         defer { exitIngress() }
-        // Preparing proofs for a directory is the other way a node declares it
-        // hosts that child (§9.10): serve its runs from here on. Idempotent.
-        for directory in preparingChildDirectories {
-            await process.serveRuns(for: directory)
-        }
         let outcome = try await process.importBlock(
             header,
             authenticatedChildPackage: authenticatedChildPackage,
-            preparingChildDirectories: preparingChildDirectories,
             remoteSource: CountedContentSource(base: contentSource) {
                 [weak self] count in
                 await self?.countCandidateSessionReads(count)
@@ -859,15 +845,7 @@ public actor ChainService {
             }
         )
         guard let block = await locallyStoredBlock(header) else {
-            // A target-miss carrier is intentionally not local chain state,
-            // but its authenticated path can still carry an accepted direct
-            // child. Relay any proof the process durably composed for it.
-            if outcome.parentCarrierLink != nil {
-                await handleCarrierImport(
-                    header: header,
-                    outcome: outcome
-                )
-            }
+            // A target-miss carrier is intentionally not local chain state.
             return outcome
         }
         _ = await handleImport(
@@ -1356,11 +1334,6 @@ public actor ChainService {
             capacity: process.configuration.resourcePolicy
                 .maximumRetainedCandidateOffers
         )
-        _ = try await process.prepareChildProofs(
-            for: template.block,
-            children: template.childCandidates,
-            capacity: Self.templateCapacity
-        )
         return DirectChildCandidate(
             directory: process.configuration.address.directory,
             block: template.block,
@@ -1705,7 +1678,6 @@ public actor ChainService {
         let outcome = try? await importNetworkCandidate(
             header,
             authenticatedChildPackage: package,
-            preparingChildDirectories: [],
             contentSource: parentLevel.contentSource,
             weighed: true
         )
@@ -1717,8 +1689,8 @@ public actor ChainService {
         return outcome?.decision.isAccepted ?? false
     }
 
-    /// Reconciles service-owned state and publishes hierarchy effects after a
-    /// candidate was admitted through gossip, sync, or the hierarchy plane.
+    /// Reconciles service-owned state after a candidate was admitted through
+    /// gossip, sync, or a co-hosted parent's handoff.
     /// Consensus admission itself remains exclusively in `ChainProcess`.
     @discardableResult
     private func handleImport(
@@ -1730,18 +1702,6 @@ public actor ChainService {
         defer { releaseOperation() }
         return await applyImportEffects(
             block: block,
-            header: header,
-            outcome: outcome
-        )
-    }
-
-    private func handleCarrierImport(
-        header: BlockHeader,
-        outcome: NodeImportOutcome
-    ) async {
-        await acquireOperation()
-        defer { releaseOperation() }
-        _ = await publishCarrierChildProofs(
             header: header,
             outcome: outcome
         )
@@ -1951,10 +1911,6 @@ public actor ChainService {
                 // way re-read tip/target and continue — never mark an excluded block
                 // validated, and never self-loop.
                 lastAdmittedHeight = nextHeight
-                // Deliver any child-proof routes this block just re-issued on
-                // validation (no-op when it anchors no child), exactly as the
-                // eager admission path publishes them.
-                await publishCarrierChildProofs(header: header, outcome: outcome)
                 // The validated tip moved: templates and child candidates
                 // build on it.
                 publishChainStateChange()
@@ -2147,10 +2103,6 @@ public actor ChainService {
             break
         }
 
-        await publishCarrierChildProofs(
-            header: header,
-            outcome: outcome
-        )
         // §9.10: push the runs this admission changed (see `pushChangedRuns`),
         // and — this chain being the child — have the mailbox read from the
         // parent level the run of the block that carried what was just
@@ -2175,53 +2127,6 @@ public actor ChainService {
                 $0.directory < $1.directory
             }
         )
-    }
-
-    private func publishCarrierChildProofs(
-        header: BlockHeader,
-        outcome: NodeImportOutcome
-    ) async {
-        guard let link = outcome.parentCarrierLink else { return }
-        // Admission and the miner response depend only on the durable proof,
-        // never on child availability. Delivery is an asynchronous hint; the
-        // retained route remains pullable and retryable after failure/restart.
-        guard !stopped else { return }
-        let id = nextCarrierProofDelivery
-        nextCarrierProofDelivery += 1
-        carrierProofDeliveries[id] = Task { [weak self] in
-            guard let self else { return }
-            await self.deliverCarrierChildProofs(
-                carrierCID: header.rawCID,
-                rootCID: link.rootCID
-            )
-            await self.finishCarrierProofDelivery(id)
-        }
-    }
-
-    private func finishCarrierProofDelivery(_ id: UInt64) {
-        carrierProofDeliveries[id] = nil
-    }
-
-    private func deliverCarrierChildProofs(
-        carrierCID: String,
-        rootCID: String
-    ) async {
-        _ = try? await process.retryPendingChildProofs(carrierCID: carrierCID)
-        let durableProofs = (try? await process.durableDirectChildProofs(
-            carrierCID: carrierCID,
-            rootCID: rootCID
-        )) ?? []
-        for durable in durableProofs {
-            let publication = DirectChildProofPublication(
-                directory: durable.directory,
-                childCID: durable.childCID,
-                proof: durable.proof
-            )
-            do { try await network.publishChildProof(publication) } catch {
-                // Proofs and links are durable; hierarchy pull/reconnect can
-                // retry a failed eager publication.
-            }
-        }
     }
 
     private func locallyStoredBlock(_ header: BlockHeader) async -> Block? {
@@ -2322,9 +2227,6 @@ public actor ChainService {
             for level in childLevels.values { level.parentChanged(.tipChanged) }
             scheduleCandidateRebuild()
         }
-        Task { [network] in
-            await network.chainStateChanged()
-        }
     }
 
     /// This chain's genesis activated outside candidate admission (seeded or
@@ -2366,12 +2268,6 @@ public actor ChainService {
         }
     }
 
-    /// The admission the candidate gate withheld this level's snapshot for
-    /// decided or parked.
-    func candidateGateReopened() {
-        scheduleCandidateRebuild()
-    }
-
     /// A hosted child published a new snapshot. On a child level, this
     /// level's own candidate carries it, so it is rebuilt; on Nexus, the
     /// template digest reads it, so nothing else moves.
@@ -2382,7 +2278,7 @@ public actor ChainService {
     /// Rebuilds this child level's snapshot: one build at a time, and a
     /// change during a build runs one more, with the inputs that stand then.
     private func scheduleCandidateRebuild() {
-        guard parentLevel != nil, candidateGate != nil, !stopped else { return }
+        guard parentLevel != nil, candidateChanged != nil, !stopped else { return }
         candidateRebuildDirty = true
         candidateRebuild.start { token in
             Task { [weak self] in
@@ -2408,27 +2304,15 @@ public actor ChainService {
 
     /// This level's candidate against a provisional carrier on the parent's
     /// validated tip, read gate-free, under this level's own lease only. Nil
-    /// while the validate walk steps or is behind, while an own carried
-    /// block awaits admission (a candidate now would only be its sibling),
-    /// or before the parent or this level can build.
+    /// while the validate walk steps or is behind, or before the parent or
+    /// this level can build.
     private func buildReadyCandidate() async -> ReadyCandidate? {
-        guard let parentLevel, let candidateGate else { return nil }
+        guard let parentLevel else { return nil }
         // The plan this level and its hosted children build against.
         if let plan = parentPlan.value, !plan.same(as: descendantPlan) {
             sendDescendantPlan(plan)
         }
         guard await process.status().phase == .active else { return nil }
-        // A candidate this chain built that the parent's evidence names as
-        // carried and still holds in the inbox (undecided), now ready for or
-        // in its admission: the carried block is about to be this chain's
-        // weighed tip. The inbox is written only from the configured
-        // parent's evidence, so no overlay peer can populate this set; the
-        // admission's end reports the change that rebuilds.
-        let pendingHandoff = (try? await process.store.pendingHandoffChildCIDs()) ?? []
-        guard await candidateGate(pendingHandoff) else {
-            syncTrace("ready candidate withheld: own carried candidate awaiting admission")
-            return nil
-        }
         guard let tip = await parentLevel.validatedTip() else { return nil }
         let carrierKey = tip.block.postState.rawCID + "|"
             + (await process.deepestValidatedCanonicalTip()?.cid ?? "")
@@ -2510,14 +2394,12 @@ public actor ChainService {
     /// (§2.4). Tip changes run `tipChanged` on a second task, coalesced, so
     /// a parked candidate's wake never waits behind a credit or the serve,
     /// and then rebuild this level's snapshot; a plan change, kept newest
-    /// only, rebuilds it from a third. `candidateGate` says whether this level
-    /// may build a candidate now; `candidateChanged` tells the parent level
+    /// only, rebuilds it from a third. `candidateChanged` tells the parent level
     /// this level's snapshot changed. `shutdown` finishes all three and
     /// joins them.
     func openParentMailbox(
         tipChanged: @escaping @Sendable () async -> Void,
         serveParentRuns: @escaping @Sendable () async -> Void,
-        candidateGate: @escaping @Sendable (_ pendingHandoff: [String]) async -> Bool,
         candidateChanged: @escaping @Sendable () async -> Void
     ) -> ParentMailbox {
         precondition(parentMailbox == nil, "one parent mailbox per level")
@@ -2535,7 +2417,6 @@ public actor ChainService {
             tipSignal.finish()
             planSignal.finish()
         } else {
-            self.candidateGate = candidateGate
             self.candidateChanged = candidateChanged
             parentMailbox = continuation
             parentTipSignal = tipSignal

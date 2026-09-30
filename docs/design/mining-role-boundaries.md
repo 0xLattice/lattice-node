@@ -117,6 +117,6 @@ protocols:
 Mining code must stay on the matrix above. `Sources/LatticeMiner` is a nonce
 search worker target only. RPC transport, stale-work handling, range allocation,
 and solution submission live in the coordinator. Contextual child orchestration
-and proof generation stay inside the node's authenticated hierarchy plane. No
+and proof generation stay inside the node, between its co-hosted levels. No
 Ivy gossip, child topology, proof generation, or private-key submission may
 exist in the worker target.

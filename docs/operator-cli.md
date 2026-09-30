@@ -3,7 +3,7 @@
 `lattice` operates one host's chain tree from a single declarative file. One
 `lattice-node` process (`lattice-node --config lattice.json`) hosts every chain
 in the tree; a child reads its parent facts from its co-hosted parent level
-in-process and takes its parent's evidence over the loopback hierarchy plane. The CLI makes that tree a value — `lattice.json` — and every
+in-process. The CLI makes that tree a value — `lattice.json` — and every
 verb reconciles reality against it. No remote control plane: state lives in
 the file, one pidfile (`run/lattice-node.pid`), and each chain's own storage.
 
@@ -35,9 +35,9 @@ lattice mine status  # running or not, and who each chain pays
 ```json
 {
   "chains": {
-    "Nexus":            {"listen": 4001, "fact": 4002, "rpc": 8080,
+    "Nexus":            {"listen": 4001, "rpc": 8080,
                          "peers": ["<pubkey>@host:4001"]},
-    "Nexus/Market":     {"listen": 4101, "fact": 4102, "rpc": 8103}
+    "Nexus/Market":     {"listen": 4101, "rpc": 8103}
   },
   "mine": {
     "chain": "Nexus",
@@ -53,7 +53,7 @@ lattice mine status  # running or not, and who each chain pays
 
 - Every key in `chains` is an absolute Nexus-rooted path; a child requires its
   immediate parent in the same file (the node wires each child to its
-  co-hosted parent's identity and fact port — you never wire it by hand).
+  co-hosted parent level in-process — you never wire it by hand).
 - `peers` is that chain's overlay bootstrap peers. Omit it and a Nexus process
   uses the default bootstrap peers built into the binary; a list REPLACES them;
   an explicitly empty `"peers": []` means no bootstrap peers at all. Child

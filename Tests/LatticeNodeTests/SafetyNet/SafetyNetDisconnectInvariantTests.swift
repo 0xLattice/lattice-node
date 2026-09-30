@@ -8,9 +8,8 @@ import cashew
 @testable import LatticeNode
 
 /// Safety net: after a network session ends, no per-peer record and no
-/// pending request in `NodeNetworkRuntime` still holds that peer's key — on
-/// the overlay plane and on the hierarchy plane alike — and no session-keyed
-/// serve or lease outlives its session.
+/// pending request in `NodeNetworkRuntime` still holds that peer's key, and
+/// no session-keyed serve or lease outlives its session.
 ///
 /// The runtime keeps ~30 per-peer maps and pending-request tables (sessions,
 /// hello deadlines, announced tips, range sync, frontier pulls, inventory and
@@ -29,28 +28,19 @@ import cashew
 ///   runtime's fetch — and the `activeTransactionVolumes` lease on this
 ///   session — stays in flight (a session ID appears);
 /// - it announces a deep tip, which starts a range sync against it;
-/// - the hierarchy peer completes a child hello and is checked to hold the
-///   `.child(["Nexus", "Payments"])` role (a hello deadline alone is set
-///   before any hello, so the key appearing is not proof of the role);
-/// - only then must both disconnects clear everything.
+/// - only then must the disconnect clear everything.
 ///
 /// `overlayRuntime` / `connectAndHello` and the keys come from
 /// `NetworkTrustTestCase`, the base the NetworkTrust suites share.
 final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
 
-    func testDisconnectedPeersLeaveNoPerPeerRecordOnEitherPlane() async throws {
+    func testDisconnectedPeersLeaveNoPerPeerRecord() async throws {
         // Long enough that neither the withheld volume fetch nor the range
         // sync can time out on its own during the test: every release below
         // must be attributable to the disconnect, not to a timer.
         let target = try await overlayRuntime(
             keyByte: 0xd1,
-            requestTimeout: .seconds(60),
-            hostedChildren: ["Payments": peerKey(signingKey(0xd3))]
-        )
-        let hierarchyEndpoint = PeerEndpoint(
-            publicKey: target.process.configuration.processPublicKey,
-            host: "127.0.0.1",
-            port: target.process.configuration.factListenPort
+            requestTimeout: .seconds(60)
         )
         let overlayKey = signingKey(0xd2)
         let overlayPeer = Ivy(config: IvyConfig(
@@ -64,18 +54,7 @@ final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
         let withholding = SafetyNetWithholdingContentSource(blockedRoot: withheldRoot)
         let overlayStub = SafetyNetSilentPeer()
         await overlayPeer.installSafetyNetDelegate(overlayStub, contentSource: withholding)
-        let childKey = signingKey(0xd3)
-        let childPeer = Ivy(config: IvyConfig(
-            signingKey: childKey,
-            listenPort: 0,
-            stunServers: [],
-            healthConfig: PeerHealthConfig(enabled: false),
-            mode: .privateNetwork
-        ))
-        let childStub = SafetyNetSilentPeer()
-        await childPeer.installSafetyNetDelegate(childStub, contentSource: nil)
         let overlayPeerKey = peerKey(overlayKey)
-        let childPeerKey = peerKey(childKey)
 
         try await target.runtime.start(
             process: target.process,
@@ -133,38 +112,17 @@ final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
                 await target.runtime.debugSnapshot().rangeSyncAnchor != nil
             }
 
-            // Hierarchy: an immediate-child hello must earn the child role.
-            try await childPeer.start()
-            try await childPeer.connect(to: hierarchyEndpoint)
-            try await waitUntil("child peer connected on the hierarchy plane") {
-                (await childPeer.connectedPeers).contains(target.peerID)
-            }
-            try await send(
-                childPeer, to: target.peerID,
-                topic: NodeNetworkTopic.hierarchyHello,
-                payload: try ChainHello(
-                    nexusGenesisCID: target.process.configuration.nexusGenesisCID,
-                    chainPath: ["Nexus", "Payments"]
-                ).encode()
-            )
-            try await waitUntil("child peer granted the child role") {
-                await target.runtime.debugSnapshot().hierarchy[childPeerKey]?.role
-                    == .child(["Nexus", "Payments"])
-            }
-
             // Everything the disconnect must clear is in place right now.
             let anchorBeforeStop = await target.runtime.debugSnapshot().rangeSyncAnchor
             XCTAssertNotNil(anchorBeforeStop, "range sync must be live immediately before the disconnect")
             let heldKeysBefore = await target.runtime.debugSnapshot().heldPeerKeys
             XCTAssertTrue(heldKeysBefore.contains(overlayPeerKey), "overlay key held before disconnect")
-            XCTAssertTrue(heldKeysBefore.contains(childPeerKey), "child key held before disconnect")
 
-            // Both sessions end.
+            // The session ends.
             await overlayPeer.stop()
-            await childPeer.stop()
             try await waitUntil("per-peer records cleared after disconnect") {
-                await target.runtime.debugSnapshot().heldPeerKeys
-                    .isDisjoint(with: [overlayPeerKey, childPeerKey])
+                await !target.runtime.debugSnapshot().heldPeerKeys
+                    .contains(overlayPeerKey)
             }
             try await waitUntil("session-keyed state released after disconnect") {
                 await target.runtime.debugSnapshot().heldSessionIDs
@@ -172,7 +130,6 @@ final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
             }
         } catch {
             await overlayPeer.stop()
-            await childPeer.stop()
             await withholding.release()
             throw error
         }
@@ -181,10 +138,6 @@ final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
         XCTAssertFalse(
             held.contains(overlayPeerKey),
             "overlay peer \(overlayPeerKey.hex.prefix(8)) still held after disconnect"
-        )
-        XCTAssertFalse(
-            held.contains(childPeerKey),
-            "hierarchy child peer \(childPeerKey.hex.prefix(8)) still held after disconnect"
         )
         let heldSessions = await target.runtime.debugSnapshot().heldSessionIDs
         let liveSessions = await target.runtime.debugSnapshot().liveSessionIDs
@@ -199,87 +152,6 @@ final class SafetyNetDisconnectInvariantTests: NetworkTrustTestCase {
             "range sync must not survive its source peer's disconnect"
         )
         await withholding.release()
-    }
-
-    /// A child session S1 parks in its hello follow-up waiting for evidence
-    /// readiness; the child reconnects as S2, whose connect ends S1's wait.
-    /// S1's follow-up then resumes and gives up: it must end S1 only, not
-    /// remove S2's record and hello deadline, or S2's hello is dropped and
-    /// the link wedges until the transport drops.
-    ///
-    /// S2 is delivered through the runtime's own delegate entry points
-    /// (`didConnect`, then its hello), so the interleaving is exact: the
-    /// real transport would keep whichever session wins Ivy's tie-break.
-    func testAStaleHelloFollowUpCannotEndTheReconnectedSession() async throws {
-        let target = try await overlayRuntime(
-            keyByte: 0xd6,
-            requestTimeout: .seconds(60),
-            hostedChildren: ["Payments": peerKey(signingKey(0xd7))]
-        )
-        let childKey = signingKey(0xd7)
-        let childPeerKey = peerKey(childKey)
-        let childPath = ["Nexus", "Payments"]
-        let hello = try ChainHello(
-            nexusGenesisCID: target.process.configuration.nexusGenesisCID,
-            chainPath: childPath
-        ).encode()
-        // Ivy holds its delegate weakly: the script lives as long as the test.
-        let firstScript = SafetyNetScriptedChild(
-            hello: hello, childPath: childPath, pullsIndex: false
-        )
-        let first = Ivy(config: IvyConfig(
-            signingKey: childKey,
-            listenPort: 0,
-            stunServers: [],
-            healthConfig: PeerHealthConfig(enabled: false),
-            mode: .privateNetwork
-        ))
-        await first.installSafetyNetDelegate(firstScript, contentSource: nil)
-        let hierarchyEndpoint = PeerEndpoint(
-            publicKey: target.process.configuration.processPublicKey,
-            host: "127.0.0.1",
-            port: target.process.configuration.factListenPort
-        )
-        let runtime = target.runtime
-        try await runtime.start(process: target.process, chain: inertNetworkHandlers())
-        do {
-            try await first.start()
-            try await first.connect(to: hierarchyEndpoint)
-            try await waitUntil("S1's hello follow-up waits for readiness") {
-                await runtime.debugEvidenceWaiterCount(childPeerKey) == 1
-            }
-
-            // The reconnect: same key, a fresh session, a direct route.
-            let s2 = AuthenticatedPeer(
-                key: childPeerKey,
-                role: .endpoint,
-                route: .direct,
-                metadata: PeerMetadata(),
-                sessionID: Data(UUID().uuidString.utf8)
-            )
-            await runtime.ivy(runtime.hierarchy, didConnect: s2)
-            try await waitUntil("S2's connect ended S1's wait") {
-                await runtime.debugEvidenceWaiterCount(childPeerKey) == 0
-            }
-            let deadlineSession = await runtime.debugHierarchyHelloDeadlineSession(childPeerKey)
-            XCTAssertEqual(deadlineSession, s2.sessionID, "S2's hello deadline survives S1's follow-up")
-
-            await runtime.ivy(
-                runtime.hierarchy,
-                didReceiveMessage: PeerMessage(topic: NodeNetworkTopic.hierarchyHello, payload: hello),
-                from: s2
-            )
-            let bound = await runtime.debugHierarchySession(childPeerKey)
-            XCTAssertEqual(bound.role, .child(childPath), "S2's hello is accepted")
-            XCTAssertEqual(bound.sessionID, s2.sessionID, "the record is bound to S2")
-        } catch {
-            await first.stop()
-            await runtime.stop()
-            throw error
-        }
-        await first.stop()
-        await runtime.stop()
-        withExtendedLifetime(firstScript) {}
     }
 
     // MARK: - Helpers (the runtime, keys and hello come from NetworkTrustTestCase)
@@ -318,67 +190,6 @@ private enum SafetyNetNetworkError: Error {
 
 /// A delegate that records nothing: the test reads the runtime's side only.
 private final class SafetyNetSilentPeer: IvyDelegate, Sendable {}
-
-/// A direct child: answers the parent's hello with its own and pulls its
-/// (empty) evidence index, which makes it evidence-ready at the parent.
-private final class SafetyNetScriptedChild: IvyDelegate, Sendable {
-    private let hello: Data
-    private let childPath: [String]
-    /// False: the child never pulls its index, so it never becomes ready.
-    private let pullsIndex: Bool
-
-    init(hello: Data, childPath: [String], pullsIndex: Bool = true) {
-        self.hello = hello
-        self.childPath = childPath
-        self.pullsIndex = pullsIndex
-    }
-
-    func ivy(
-        _ ivy: Ivy,
-        didReceiveMessage message: PeerMessage,
-        from peer: AuthenticatedPeer
-    ) async {
-        guard message.topic == NodeNetworkTopic.hierarchyHello,
-              case .enqueued = await ivy.sendMessage(
-                to: peer,
-                topic: NodeNetworkTopic.hierarchyHello,
-                payload: hello
-              ),
-              pullsIndex,
-              let request = try? ChildEvidenceIndexRequestMessage(
-                requestID: 1,
-                childPath: childPath,
-                sourceID: nil,
-                cursor: 0,
-                through: nil
-              ).encoded() else { return }
-        _ = await ivy.sendMessage(
-            to: peer,
-            topic: NodeNetworkTopic.childEvidenceIndexRequest,
-            payload: request
-        )
-    }
-}
-
-extension NodeNetworkRuntime {
-    /// The session the key's hierarchy hello deadline waits on.
-    func debugHierarchyHelloDeadlineSession(_ key: PeerKey) -> Data? {
-        hierarchyState.hierarchyRecords[key]?.helloDeadline?.sessionID
-    }
-
-    /// The role and session bound to the key's hierarchy record.
-    func debugHierarchySession(_ key: PeerKey) -> (role: HierarchyPeer?, sessionID: Data?) {
-        (
-            hierarchyState.hierarchyRecords[key]?.role,
-            hierarchyState.hierarchyRecords[key]?.session?.sessionID
-        )
-    }
-
-    /// Evidence-readiness waiters parked on the key's record.
-    func debugEvidenceWaiterCount(_ key: PeerKey) -> Int {
-        hierarchyState.hierarchyRecords[key]?.evidence.waiters.count ?? 0
-    }
-}
 
 /// Answers every content and volume request empty except `blockedRoot`,
 /// which it holds open until released, so the requesting runtime keeps its

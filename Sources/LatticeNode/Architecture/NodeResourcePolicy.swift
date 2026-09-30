@@ -4,36 +4,15 @@ public struct NodeResourcePolicy: Sendable, Equatable {
     public static let `default` = NodeResourcePolicy()
 
     public let maximumChainSpecBytes: Int
-    public let maximumPendingParentEvidence: Int
-    /// How many parent-evidence orphans this node keeps in memory: evidence
-    /// whose import could not decide on a fact the parent will send (a
-    /// missing predecessor, a clock ahead, content no one served). An
-    /// orphan holds no inbox room; the pool keeps its place in the parent's
-    /// index, to fetch it again once it can decide. A plain local bound: at
-    /// it a random orphan gives way, and an evicted one returns only through
-    /// ordinary acquisition.
-    public let maximumOrphanedParentEvidence: Int
     public let maximumWasmPolicies: Int
     public let maximumAcquisitionVolumes: Int
     public let maximumAcquisitionMembers: Int
     public let maximumAcquisitionStorageBytes: Int
-    /// Storage budget for handed-off contextual candidates awaiting
-    /// admission. A handoff is a local cache of durable ownership, not a
-    /// consensus commitment: an evicted candidate whose branch returns is
-    /// re-acquired through ordinary verified acquisition. Oldest first.
-    public let maximumRetainedHandoffCandidates: Int
     /// Candidates this chain built for its parent and still keeps — body,
     /// transactions, post-state — so a parent block that carries one can be
     /// admitted from what is held here. A local budget, never a parent's
     /// reservation; the oldest offer goes first.
     public let maximumRetainedCandidateOffers: Int
-    /// How many recent accepted carriers the late-child evidence backfill walks
-    /// when a child connects, self-issuing that child's securing proofs rather
-    /// than relying on a peer to serve them. Not a limit on validity or
-    /// capability: carriers older than this window are still served by the
-    /// verified any-peer proof fallback, so this only tunes how eagerly a node
-    /// self-issues. Operators raise it to self-issue deeper history.
-    public let childEvidenceBackfillCarrierWindow: Int
     /// Storage budget for walk-validated state OFF the canonical chain (fork
     /// loss = cache eviction): how many losing-fork blocks keep their
     /// materialized body + post-state, nearest the validated head first. The
@@ -49,42 +28,30 @@ public struct NodeResourcePolicy: Sendable, Equatable {
 
     public init(
         maximumChainSpecBytes: Int = 1 * 1_024 * 1_024,
-        maximumPendingParentEvidence: Int = 64,
-        maximumOrphanedParentEvidence: Int = 1_024,
         maximumWasmPolicies: Int = 64,
         maximumAcquisitionVolumes: Int = 20_548,
         maximumAcquisitionMembers: Int = Int(UInt16.max),
         maximumAcquisitionStorageBytes: Int = 64 * 1_024 * 1_024,
-        maximumRetainedHandoffCandidates: Int = 1_024,
         maximumRetainedCandidateOffers: Int = 64,
-        childEvidenceBackfillCarrierWindow: Int = 256,
         maximumRetainedOffChainValidatedBlocks: Int = 1_024,
         offChainValidatedRetentionDepth: Int = 256
     ) {
         precondition(
             maximumChainSpecBytes > 0
-                && maximumPendingParentEvidence > 0
-                && maximumOrphanedParentEvidence > 0
                 && maximumWasmPolicies > 0
                 && maximumAcquisitionVolumes > 0
                 && maximumAcquisitionMembers > 0
                 && maximumAcquisitionStorageBytes > 0
-                && maximumRetainedHandoffCandidates > 0
                 && maximumRetainedCandidateOffers > 0
-                && childEvidenceBackfillCarrierWindow > 0
                 && maximumRetainedOffChainValidatedBlocks >= 0
                 && offChainValidatedRetentionDepth >= 0
         )
         self.maximumChainSpecBytes = maximumChainSpecBytes
-        self.maximumPendingParentEvidence = maximumPendingParentEvidence
-        self.maximumOrphanedParentEvidence = maximumOrphanedParentEvidence
         self.maximumWasmPolicies = maximumWasmPolicies
         self.maximumAcquisitionVolumes = maximumAcquisitionVolumes
         self.maximumAcquisitionMembers = maximumAcquisitionMembers
         self.maximumAcquisitionStorageBytes = maximumAcquisitionStorageBytes
-        self.maximumRetainedHandoffCandidates = maximumRetainedHandoffCandidates
         self.maximumRetainedCandidateOffers = maximumRetainedCandidateOffers
-        self.childEvidenceBackfillCarrierWindow = childEvidenceBackfillCarrierWindow
         self.maximumRetainedOffChainValidatedBlocks =
             maximumRetainedOffChainValidatedBlocks
         self.offChainValidatedRetentionDepth = offChainValidatedRetentionDepth

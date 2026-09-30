@@ -32,7 +32,6 @@ final class ContinuityDurabilityTests: XCTestCase {
         let service = ChainService(
             process: producer,
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
                 acceptedTransactionPublisher: { _ in }
             )

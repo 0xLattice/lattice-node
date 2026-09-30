@@ -52,9 +52,6 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Same-chain overlay listen port")
     var listenPort: UInt16 = 4001
 
-    @Option(help: "Private parent/child fact-plane listen port")
-    var factListenPort: UInt16 = 4002
-
     @Option(help: "Loopback HTTP API port")
     var rpcPort: UInt16 = 8080
 
@@ -144,7 +141,6 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             storagePath: storage,
             privateKeyHex: privateKeyHex,
             listenPort: listenPort,
-            factListenPort: factListenPort,
             rpcPort: rpcPort,
             bootstrapPeers: overlayPeers,
             minPeerKeyBits: minimumPeerKeyBits,

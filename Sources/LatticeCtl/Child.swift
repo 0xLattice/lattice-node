@@ -380,7 +380,7 @@ struct Child: AsyncParsableCommand {
                 }
                 let ports = nextFreePorts(current)
                 current.chains[childPath] = TopologyChain(
-                    listen: ports.0, fact: ports.1, rpc: ports.2, peers: nil
+                    listen: ports.0, rpc: ports.1, peers: nil
                 )
                 try current.validated().save(root: layout.root)
                 // The child's own directory now carries the seed.
@@ -391,7 +391,7 @@ struct Child: AsyncParsableCommand {
                 print("\(childPath): added; `lattice up` starts it")
                 return
             }
-            try await waitActive(childPath, rpc: ports.2)
+            try await waitActive(childPath, rpc: ports.1)
             print("\(childPath): active")
         }
     }
@@ -417,7 +417,7 @@ struct Child: AsyncParsableCommand {
                 }
                 let ports = nextFreePorts(topology)
                 topology.chains[path] = TopologyChain(
-                    listen: ports.0, fact: ports.1, rpc: ports.2, peers: nil
+                    listen: ports.0, rpc: ports.1, peers: nil
                 )
                 _ = try topology.validated()
                 try topology.save(root: layout.root)
@@ -446,16 +446,14 @@ struct PendingChildDeploy: Codable {
 /// root's tree (or a lingering process) may hold a port the topology has
 /// never heard of, and a child that cannot bind dies at launch while health
 /// probes silently hit the squatter.
-func nextFreePorts(_ topology: Topology) -> (UInt16, UInt16, UInt16) {
-    let used = topology.chains.values.flatMap { [$0.listen, $0.fact, $0.rpc] }
+func nextFreePorts(_ topology: Topology) -> (UInt16, UInt16) {
+    let used = topology.chains.values.flatMap { [$0.listen, $0.rpc] }
     var base: UInt16 = 4101
-    while used.contains(base) || used.contains(base + 1)
-        || used.contains(base + 2)
-        || !portIsBindable(base) || !portIsBindable(base + 1)
-        || !portIsBindable(base + 2) {
+    while used.contains(base) || used.contains(base + 2)
+        || !portIsBindable(base) || !portIsBindable(base + 2) {
         base += 100
     }
-    return (base, base + 1, base + 2)
+    return (base, base + 2)
 }
 
 func portIsBindable(_ port: UInt16) -> Bool {

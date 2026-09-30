@@ -179,8 +179,7 @@ public struct SubmitWorkResponse: Codable, Sendable {
     public let durableChildProofs: [DirectChildProofSummary]
 }
 
-/// Bounded miner-facing acknowledgement. Proof bytes stay on the authenticated
-/// hierarchy plane.
+/// Bounded miner-facing acknowledgement. Proof bytes stay in the node.
 public struct DirectChildProofSummary: Codable, Sendable, Equatable {
     public let directory: String
     public let childCID: String

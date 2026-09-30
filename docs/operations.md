@@ -26,15 +26,12 @@ lattice-node \
   --data-directory /var/lib/lattice/chains/Nexus \
   --identity-key /var/lib/lattice/identity/nexus.key \
   --listen-port 4001 \
-  --fact-listen-port 4002 \
   --rpc-port 8080 \
   --minimum-peer-key-bits 0 \
   --peer <public-key>@<host>:4001
 ```
 
-RPC must remain on loopback. The same-chain overlay port may be public. Never
-expose the hierarchy port: co-hosted levels dial it on loopback and no remote
-peer needs it, but its listener binds all interfaces, so firewall it.
+RPC must remain on loopback. The same-chain overlay port may be public.
 
 ## Bootstrap peers
 
@@ -163,7 +160,7 @@ example `Nexus` or `Nexus/testnet`); label values are escaped per the format.
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
 | `lattice_chain_tip_height` | gauge | `chain`, `tier` | Canonical tip height. `tier="validated"` is the deepest validated tip the node acts on; `tier="weighed"` is the canonical weighed-inclusive tip that same read started from, so validated never exceeds weighed within a scrape. Absent while a child awaits genesis. |
-| `lattice_overlay_peers` | gauge | `chain` | Authenticated same-chain overlay peers. The parent/child fact-plane link is not counted: a child whose only link is its parent reads `0`. |
+| `lattice_overlay_peers` | gauge | `chain` | Authenticated same-chain overlay peers. |
 | `lattice_mempool_transactions` | gauge | `chain` | Transactions in the mempool. |
 | `process_start_time_seconds` | gauge | `chain` | Process start time, seconds since the Unix epoch. |
 
@@ -600,5 +597,4 @@ matched backup pair or wipe the entire process directory and resync.
 - Host each child in the same process as its ancestry (`lattice.json`): its
   parent facts are read from the co-hosted parent level, never from a remote
   process.
-- Firewall the hierarchy plane to intended parent/child hosts where possible.
 - Use distinct storage and identity paths per chain process.

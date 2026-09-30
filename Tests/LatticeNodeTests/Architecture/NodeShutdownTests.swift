@@ -14,7 +14,6 @@ final class NodeShutdownTests: XCTestCase {
             storagePath: temporaryDirectory(prefix: "lattice-node-shutdown"),
             privateKeyHex: String(repeating: "01", count: 32),
             listenPort: NetworkTransportTestPorts.allocate(),
-            factListenPort: NetworkTransportTestPorts.allocate(),
             rpcPort: NetworkTransportTestPorts.allocate()
         )
         var node: Node? = try await Node.build(configuration: configuration)

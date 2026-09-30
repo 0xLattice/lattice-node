@@ -160,19 +160,6 @@ extension NodeStore {
         )?.parentCID
     }
 
-    /// The most recently admitted accepted-block CIDs, newest first, capped at
-    /// `limit`. Bounds the late-child evidence backfill to a recent window;
-    /// carriers older than the window rely on the verified any-peer proof
-    /// fallback rather than parent self-issuance.
-    func recentAcceptedBlockCIDs(limit: Int) throws -> [String] {
-        guard limit > 0 else { return [] }
-        return try database.rows(
-            AcceptedBlockRow.self,
-            "SELECT block_cid FROM accepted_blocks ORDER BY admission_seq DESC LIMIT ?1",
-            params: [.int(Int64(limit))]
-        ).map { try $0.canonicalBlockCID }
-    }
-
     func hasConnectedAcceptedBlock(_ blockCID: String) throws -> Bool {
         guard CIDIdentity.isCanonical(blockCID) else {
             throw NodeStoreError.corrupt("invalid connected block lookup")

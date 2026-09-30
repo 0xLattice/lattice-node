@@ -72,15 +72,10 @@ extension NodeNetworkRuntime {
     }
 
     /// Seam: a predecessor activated outside admission (an adopted genesis)
-    /// wakes the successors parked behind it, and is an acceptance like any
-    /// other for the parent evidence waiting on it.
+    /// wakes the successors parked behind it.
     func predecessorConnectedOutOfBand(_ blockCID: String) async {
         blockFetcher.predecessorConnectedOutOfBand(blockCID)
         serviceBlockFetcher()
-        guard let process else { return }
-        await parentEvidenceRetryTrigger(
-            accepted: blockCID, generation: runtimeGeneration, process: process
-        )
     }
 
     /// Seam: an overlay session ended or was replaced; its provider no
@@ -98,28 +93,6 @@ extension NodeNetworkRuntime {
     /// Seam: whether any attempt for the block is held.
     func fetcherTracks(_ blockCID: String) -> Bool {
         blockFetcher.tracks(blockCID)
-    }
-
-    /// Seam: whether an attempt for the block was seeded with the configured
-    /// parent's evidence (in whatever state).
-    func fetcherHasParentAttempt(_ blockCID: String) -> Bool {
-        blockFetcher.hasParentAttempt(blockCID)
-    }
-
-    /// Seam: the ready candidate's gate against admission. Closed while any
-    /// of `pendingHandoff` (own candidates the parent names as carried) is
-    /// ready for or in its admission: the carried block is about to be this
-    /// chain's weighed tip, and a candidate built now would only be its
-    /// sibling. The flag is set and the admission drain re-arms the build.
-    /// Open otherwise, which also clears a deferral the drain never got to
-    /// read (its attempt left the fetcher without an admission).
-    func offerGate(pendingHandoff: [String]) -> Bool {
-        if pendingHandoff.contains(where: { blockFetcher.isAwaitingAdmission($0) }) {
-            candidateOfferDeferredByAdmission = true
-            return false
-        }
-        candidateOfferDeferredByAdmission = false
-        return true
     }
 
     func candidateProvider(
@@ -175,14 +148,6 @@ extension NodeNetworkRuntime {
                 process: process
             ) else { return }
             serviceBlockFetcher()
-            // A build deferred behind an admission is owed a look whatever
-            // that admission decided: an acceptance reports a state change,
-            // a park reports nothing. Only then; an admission a peer drove
-            // (a duplicate, an invalid block) is not a reason to build.
-            if candidateOfferDeferredByAdmission {
-                candidateOfferDeferredByAdmission = false
-                await chain?.candidateGateReopened()
-            }
             await advanceRangeSync(generation: generation, process: process)
         }
     }
@@ -258,7 +223,6 @@ extension NodeNetworkRuntime {
             authenticatedPackage = nil
         }
         var failedOverlayProviders = Set<CandidateProvider>()
-        let childDirectories = authenticatedChildDirectories()
         var attempt: (
             value: NodeImportOutcome,
             attribution: IvyRootContentSource.Attribution
@@ -268,11 +232,6 @@ extension NodeNetworkRuntime {
                         node: nil,
                         encryptionInfo: nil
         )
-        var exactSources: [(
-            peer: AuthenticatedPeer?,
-            source: IvyRootContentSource,
-            plane: CandidateSourcePlane?
-        )]
         // Order the direct advertisers by a per-process-seeded hash of
         // (publicKey, blockCID) — NOT raw publicKey — so an attacker cannot grind
         // Sybil keys to sort ahead of the genuine supplier for a given block, and
@@ -280,10 +239,9 @@ extension NodeNetworkRuntime {
         // timeouts before the recovery source (below) is reached. The recovery
         // source's full pin cascade still reaches the genuine supplier if every
         // capped slot is a Sybil, so the worst case is bounded, not unbounded.
-        let overlaySources: [(
+        var exactSources: [(
             peer: AuthenticatedPeer?,
-            source: IvyRootContentSource,
-            plane: CandidateSourcePlane?
+            source: IvyRootContentSource
         )] = Self.boundedOrderedExactPeers(
             readyPeers(for: candidate.providers),
             blockCID: candidate.blockCID
@@ -293,42 +251,19 @@ extension NodeNetworkRuntime {
                 source: candidateContentSource(
                     preferred: overlay,
                     peer: $0
-                ),
-                plane: .overlay
+                )
             )
         }
-        exactSources = []
-        if authenticatedPackage != nil,
-           let parent = configuredParentPeer() {
-            exactSources.append((
-                parent,
-                candidateContentSource(
-                    preferred: hierarchy,
-                    peer: parent
-                ),
-                .hierarchy
-            ))
-        }
-        exactSources.append(contentsOf: overlaySources)
         // A verified CID remains discoverable even when its first advertiser
         // fails. Ivy resolves public pins to an exact authenticated supplier.
-        exactSources.append((nil, remoteContentSource, .overlay))
+        exactSources.append((nil, remoteContentSource))
         for exact in exactSources {
             let initialResponse: AttributedVolumeResponse?
-            if let peer = exact.peer, let plane = exact.plane {
-                let response: AttributedVolumeResponse
-                switch plane {
-                case .overlay:
-                    response = await overlay.fetchVolume(
-                        rootCID: candidate.blockCID,
-                        from: peer
-                    )
-                case .hierarchy:
-                    response = await hierarchy.fetchVolume(
-                        rootCID: candidate.blockCID,
-                        from: peer
-                    )
-                }
+            if let peer = exact.peer {
+                let response = await overlay.fetchVolume(
+                    rootCID: candidate.blockCID,
+                    from: peer
+                )
                 if response.failure == .localCapacityUnavailable {
                     continue
                 }
@@ -343,29 +278,12 @@ extension NodeNetworkRuntime {
                     entries: response.entries
                 )
                 guard response.servedBy == peer.id,
-                      response.rootCID == candidate.blockCID else {
-                    if plane == .overlay {
-                        failedOverlayProviders.insert(
-                            candidateProvider(peer)
-                        )
-                    }
-                    await reportDeficientVolume(
-                        candidate.blockCID,
-                        servedBy: peer.id,
-                        on: plane
-                    )
-                    continue
-                }
-                guard (try? volume.validate()) != nil else {
-                    if plane == .overlay {
-                        failedOverlayProviders.insert(
-                            candidateProvider(peer)
-                        )
-                    }
-                    await reportDeficientVolume(
-                        candidate.blockCID,
-                        servedBy: peer.id,
-                        on: plane
+                      response.rootCID == candidate.blockCID,
+                      (try? volume.validate()) != nil else {
+                    failedOverlayProviders.insert(candidateProvider(peer))
+                    await overlay.reportDeficientContent(
+                        rootCID: candidate.blockCID,
+                        servedBy: peer.id
                     )
                     continue
                 }
@@ -373,15 +291,8 @@ extension NodeNetworkRuntime {
                     generation: generation,
                     process: process
                 ) else { return }
-                switch plane {
-                case .overlay:
-                    guard isReadySession(peer) else {
-                        continue
-                    }
-                case .hierarchy:
-                    guard configuredParentPeer()?.sessionID == peer.sessionID else {
-                        continue
-                    }
+                guard isReadySession(peer) else {
+                    continue
                 }
                 initialResponse = response
             } else {
@@ -405,20 +316,12 @@ extension NodeNetworkRuntime {
                     let admitted = try await chain.importNetworkCandidate(NetworkCandidateImport(
                         header: header,
                         authenticatedChildPackage: authenticatedPackage,
-                        preparingChildDirectories: childDirectories,
                         contentSource: session,
                         weighed: candidate.weighed
                     ))
                     return admitted
                 }
                 await reportDeficientVolumes(resolved.attribution)
-                // Admission durably records any unresolved direct-child
-                // routes. The runtime's single coalesced worker owns their
-                // availability retry and publishes each completed proof.
-                scheduleChildProofRecovery(
-                    generation: generation,
-                    process: process
-                )
                 attempt = resolved
                 break
             } catch {
@@ -431,14 +334,6 @@ extension NodeNetworkRuntime {
                         resolution: .terminal,
                         deficientProviders: failedOverlayProviders
                     )
-                    // Declined by this node's policy: decided here, so its
-                    // parent evidence is consumed.
-                    if let authenticatedPackage {
-                        try? await process.consumeDeclinedParentEvidence(
-                            childCID: candidate.blockCID,
-                            rootCID: authenticatedPackage.package.proof.rootCID
-                        )
-                    }
                     return
                 }
                 if let failure = error as? BlockImportError {
@@ -449,11 +344,6 @@ extension NodeNetworkRuntime {
                             resolution: .wait(.evidence),
                             deficientProviders: failedOverlayProviders
                         )
-                        await orphanUndecidedParentEvidence(
-                            candidate, package: authenticatedPackage,
-                            resolution: .wait(.evidence), decision: decision,
-                            notBefore: nil, generation: generation, process: process
-                        )
                         return
                     }
                     if decision.shouldRetryLater {
@@ -461,11 +351,6 @@ extension NodeNetworkRuntime {
                             candidate,
                             resolution: .wait(.later),
                             deficientProviders: failedOverlayProviders
-                        )
-                        await orphanUndecidedParentEvidence(
-                            candidate, package: authenticatedPackage,
-                            resolution: .wait(.later), decision: decision,
-                            notBefore: nil, generation: generation, process: process
                         )
                         return
                     }
@@ -488,11 +373,6 @@ extension NodeNetworkRuntime {
                             resolution: .wait(.later),
                             deficientProviders: failedOverlayProviders
                         )
-                        await orphanUndecidedParentEvidence(
-                            candidate, package: authenticatedPackage,
-                            resolution: .wait(.later), decision: nil,
-                            notBefore: nil, generation: generation, process: process
-                        )
                         return
                     }
                 }
@@ -505,43 +385,12 @@ extension NodeNetworkRuntime {
                 resolution: .wait(.content),
                 deficientProviders: failedOverlayProviders
             )
-            await orphanUndecidedParentEvidence(
-                candidate, package: authenticatedPackage,
-                resolution: .wait(.content), decision: nil,
-                notBefore: nil, generation: generation, process: process
-            )
-            if authenticatedPackage == nil {
-                // Only the parent's evidence opens its content to a lone
-                // child: ask the parent for it.
-                await requestParentEvidence(
-                    for: candidate.blockCID, generation: generation, process: process
-                )
-            }
             return
         }
         guard isCurrentRuntime(generation: generation, process: process) else {
             return
         }
         let outcome = attempt.value
-        guard isCurrentRuntime(generation: generation, process: process) else {
-            return
-        }
-
-        guard isCurrentRuntime(generation: generation, process: process) else {
-            return
-        }
-
-        if outcome.parentCarrierLink != nil {
-            _ = await announceCurrentCarrierChildEvidence(
-                directories: childDirectories,
-                carrierCID: candidate.blockCID,
-                generation: generation,
-                process: process
-            )
-            guard isCurrentRuntime(generation: generation, process: process) else {
-                return
-            }
-        }
         if authenticatedPackage != nil {
             // An admission under a package may have added a proof to the
             // child-evidence index: push the root if it moved.
@@ -597,13 +446,8 @@ extension NodeNetworkRuntime {
         // exactly like the live path.
         var awaitsChildProof = false
         if authenticatedPackage == nil,
-           case .unavailable(.childProof(_, let childCID)?) = outcome.decision {
+           case .unavailable(.childProof?) = outcome.decision {
             awaitsChildProof = true
-            // The parent's durable index may hold it where no overlay peer
-            // admitted it (a lone child, its orphan evicted or lost).
-            await requestParentEvidence(
-                for: childCID, generation: generation, process: process
-            )
         }
         let parkOn: String?
         if let predecessor = outcome.sameChainPredecessor,
@@ -653,51 +497,6 @@ extension NodeNetworkRuntime {
             // The tip moved while the fact was read: that wake collected
             // the parked facts before this park, so check again.
             await retryHeldParentFacts()
-        }
-        await orphanUndecidedParentEvidence(
-            candidate, package: authenticatedPackage,
-            resolution: resolution, decision: outcome.decision,
-            notBefore: outcome.notBefore, generation: generation, process: process
-        )
-        // A block reached without its parent's evidence whose content no
-        // overlay peer serves (a lone child's predecessor walk): the parent's
-        // evidence brings the block's content with it, so ask the parent.
-        if authenticatedPackage == nil, case .wait(.content) = resolution {
-            await requestParentEvidence(
-                for: candidate.blockCID, generation: generation, process: process
-            )
-        }
-        guard isCurrentRuntime(generation: generation, process: process) else {
-            return
-        }
-        // An accepted block may be what orphaned parent evidence waits on.
-        if outcome.decision.isAccepted {
-            await parentEvidenceRetryTrigger(
-                accepted: candidate.blockCID, generation: generation, process: process
-            )
-            guard isCurrentRuntime(generation: generation, process: process) else {
-                return
-            }
-        }
-        // A decided block consumed its inbox entry, accepted or not: room
-        // for evidence that waited on it.
-        let decided: Bool = switch resolution {
-        case .connected, .terminal: true
-        case .wait, .predecessor: false
-        }
-        if decided, let authenticatedPackage {
-            parentEvidenceDecided(
-                childCID: candidate.blockCID,
-                rootCID: authenticatedPackage.package.proof.rootCID
-            )
-        }
-        if decided, authenticatedPackage != nil,
-           (try? await process.store.parentEvidenceInboxHasCapacity()) == true {
-            parentEvidenceCapacityBecameAvailable()
-            await requestEvidenceIndex(
-                generation: generation,
-                process: process
-            )
         }
     }
 
@@ -753,34 +552,6 @@ extension NodeNetworkRuntime {
         return .terminal
     }
 
-    /// An undecided parent-backed import leaves the inbox as an orphan
-    /// unless a parent fact decides it (`ParentEvidenceOrphans.retry`).
-    private func orphanUndecidedParentEvidence(
-        _ candidate: Candidate,
-        package: AuthenticatedChildPackage?,
-        resolution: BlockFetcher.Resolution,
-        decision: NodeImportDecision?,
-        notBefore: Int64?,
-        generation: UInt64,
-        process: ChainProcess
-    ) async {
-        guard let package,
-              isCurrentRuntime(generation: generation, process: process),
-              let retry = ParentEvidenceOrphans.retry(
-                resolution: resolution,
-                decision: decision,
-                notBefore: notBefore,
-                now: ParentEvidenceOrphans.clock()
-              ) else { return }
-        await parentEvidenceOrphaned(
-            childCID: candidate.blockCID,
-            rootCID: package.package.proof.rootCID,
-            retry: retry,
-            generation: generation,
-            process: process
-        )
-    }
-
     private nonisolated static func enforceLocalImportPolicy(
         candidateCID: String,
         source: any ContentSource,
@@ -804,25 +575,6 @@ extension NodeNetworkRuntime {
                     throw NodePolicyDecline.tooManyWasmPolicies
                 }
             }
-        }
-    }
-
-    private func reportDeficientVolume(
-        _ rootCID: String,
-        servedBy peer: PeerID,
-        on plane: CandidateSourcePlane
-    ) async {
-        switch plane {
-        case .overlay:
-            await overlay.reportDeficientContent(
-                rootCID: rootCID,
-                servedBy: peer
-            )
-        case .hierarchy:
-            await hierarchy.reportDeficientContent(
-                rootCID: rootCID,
-                servedBy: peer
-            )
         }
     }
 

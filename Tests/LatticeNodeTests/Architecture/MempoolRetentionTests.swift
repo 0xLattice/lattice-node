@@ -132,7 +132,6 @@ final class MempoolRetentionTests: XCTestCase {
             let outcome = try await consumer.service.importNetworkCandidate(
                 BlockHeader(node: block),
                 authenticatedChildPackage: nil,
-                preparingChildDirectories: [],
                 contentSource: FetcherContentSource(producer.process),
                 weighed: true
             )
@@ -469,7 +468,6 @@ struct MempoolNode {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in }
             ),
             executionWalkRetryInterval: executionWalkRetryInterval,
@@ -682,7 +680,6 @@ struct MempoolNode {
                 let outcome = try await service.importNetworkCandidate(
                     BlockHeader(node: block),
                     authenticatedChildPackage: nil,
-                    preparingChildDirectories: [],
                     contentSource: FetcherContentSource(process)
                 )
                 guard outcome.decision.isAccepted else {

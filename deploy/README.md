@@ -26,8 +26,7 @@ were removed because those roles do not exist in Lattice.
    three, so public load can never throttle a platform health check into
    depooling the machine; its cost is bounded instead by serving it from a
    short-TTL cached snapshot, so a flood costs one read per interval.
-4. Expose the same-chain overlay and, where required, the parent/child fact
-   plane as separate ports.
+4. Expose the same-chain overlay port of each chain.
 5. Run `lattice-mining-coordinator` and external `lattice-miner` workers as
    separate processes from the node.
 6. Treat `state.db` and `volumes.db` as one backup and recovery unit.
@@ -93,7 +92,6 @@ docker run --network host \
   --data-directory /home/lattice/.lattice/chains/Nexus \
   --identity-key /home/lattice/.lattice/identity/nexus.key \
   --listen-port 4001 \
-  --fact-listen-port 4002 \
   --rpc-port 8080
 ```
 
@@ -118,8 +116,8 @@ its identity in `identity/<path>.key` under the data root:
 ```json
 {
   "chains": {
-    "Nexus": {"listen": 4001, "fact": 4002, "rpc": 8080},
-    "Nexus/Payments": {"listen": 4101, "fact": 4102, "rpc": 8180}
+    "Nexus": {"listen": 4001, "rpc": 8080},
+    "Nexus/Payments": {"listen": 4101, "rpc": 8180}
   }
 }
 ```
