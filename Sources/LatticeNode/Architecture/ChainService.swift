@@ -1720,12 +1720,13 @@ public actor ChainService {
 
     /// The co-hosted parent mined a grind carrying this level's `block`
     /// under `proof` (`ChildLevel.admitMined`): admit it weighed as a network
-    /// candidate (the weighed tier reads no parent fact), announce its proof
-    /// on this chain's overlay, then fold the grind into this level's hosted
-    /// children whatever this level decided: a relay-only block still
-    /// carries them. True iff this level admitted the block. Counted as
-    /// mining ingress: once this level's mining ingress is closed a handoff
-    /// is refused, and closing waits for one in flight.
+    /// candidate (the weighed tier reads no parent fact), announce its
+    /// proof on this chain's overlay once admitted, then fold the grind into
+    /// this level's hosted children whatever this level decided: a block
+    /// whose grind missed this level's target still carries them. True iff
+    /// this level admitted the block. Counted as mining ingress: once this
+    /// level's mining ingress is closed a handoff is refused, and closing
+    /// waits for one in flight.
     func admitMinedCarriage(block: Block, proof: ChildBlockProof) async -> Bool {
         guard (try? enterMining()) != nil else { return false }
         defer { exitMining() }

@@ -525,10 +525,9 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// change — the grind that carried it missed this chain's target (which
     /// merged mining produces every round it clears only a deeper target),
     /// the block or its evidence is invalid, or this node could not verify
-    /// it. Decided is exactly the set
-    /// the candidate fetcher never retries, by the same predicate: what it
-    /// would retry (evidence not yet held, a rule not yet met) is a deferral.
-    /// A deferral persists nothing.
+    /// it. Decided is exactly the set the candidate fetcher never retries, by
+    /// the same predicate: what it would retry (evidence not yet held, a rule
+    /// not yet met) is a deferral. A deferral persists nothing.
     static func isDecided(_ result: BlockImportResult) -> Bool {
         let decision = NodeImportDecision(result)
         return !(decision.shouldRetryWhenEvidenceChanges || decision.shouldRetryLater)
