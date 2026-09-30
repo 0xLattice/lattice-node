@@ -87,7 +87,9 @@ places are their own claim until a test covers them too.
 - **NODE-SEMANTICS-005.a** — Candidate admission blames only a complete
   `proofOfWorkInvalid` outcome (a header that proves no work the chain
   accepts), only its sole remote supplier, and only while that supplier's
-  session is ready.
+  session is ready. On a child chain the failure must be the block's own:
+  a package proof that carries no work to the block blames no one, since it
+  did not come from the block's supplier.
 - **NODE-SEMANTICS-005.b** — Every other refusal blames no one, and so does a
   bootstrap: a genesis that misses its own target is the content's fault,
   not its server's.

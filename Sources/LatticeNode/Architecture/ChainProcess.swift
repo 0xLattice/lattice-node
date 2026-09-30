@@ -39,17 +39,24 @@ public struct NodeImportOutcome: Sendable {
     /// For a block refused as not yet valid, the block's timestamp in
     /// milliseconds: the time a retry could decide it.
     let notBefore: Int64?
+    /// For a `.proofOfWorkInvalid` block, whether the failure is the block's
+    /// own: always on Nexus, and on a child chain only when the package's
+    /// proof carries work to it. When the proof carries none, the failure is
+    /// the proof's, which did not come from the block's supplier.
+    let blockSupplierAtFault: Bool
 
     init(
         decision: NodeImportDecision,
         sameChainPredecessor: SameChainPredecessorRequirement?,
         canonicalCommitReceipt: CanonicalCommitReceipt? = nil,
-        notBefore: Int64? = nil
+        notBefore: Int64? = nil,
+        blockSupplierAtFault: Bool = false
     ) {
         self.decision = decision
         self.sameChainPredecessor = sameChainPredecessor
         self.canonicalCommitReceipt = canonicalCommitReceipt
         self.notBefore = notBefore
+        self.blockSupplierAtFault = blockSupplierAtFault
     }
 }
 
@@ -823,11 +830,27 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 blockHeader, fetcher: attemptFetcher
             ).timestamp
         }
+        var blockSupplierAtFault = false
+        if decision == .proofOfWorkInvalid {
+            if configuration.address.isNexus {
+                blockSupplierAtFault = true
+            } else if let package,
+                      let child = try? await Self.resolvedCandidate(
+                        blockHeader, fetcher: attemptFetcher
+                      ) {
+                blockSupplierAtFault = await Self.proofWeighs(
+                    package.proof,
+                    child: child,
+                    chainPath: configuration.chainPath
+                )
+            }
+        }
         return NodeImportOutcome(
             decision: decision,
             sameChainPredecessor: result.sameChainPredecessor,
             canonicalCommitReceipt: receipt,
-            notBefore: notBefore
+            notBefore: notBefore,
+            blockSupplierAtFault: blockSupplierAtFault
         )
     }
 

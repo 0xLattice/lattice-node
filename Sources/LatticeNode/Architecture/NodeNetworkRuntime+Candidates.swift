@@ -404,6 +404,7 @@ extension NodeNetworkRuntime {
         let soleSupplier = attempt.attribution.soleRemoteSupplierPublicKey
         if let blamed = Self.candidateBlame(
             outcome.decision,
+            blockSupplierAtFault: outcome.blockSupplierAtFault,
             complete: attempt.attribution.allResponsesComplete,
             soleSupplier: soleSupplier,
             supplierHasReadySession: soleSupplier
@@ -500,17 +501,23 @@ extension NodeNetworkRuntime {
 
     /// The peer an admission outcome blames, or nil. Only a header that
     /// proves no work the chain accepts (`proofOfWorkInvalid`) blames its
-    /// sender; every other refusal blames no one. Even then only a complete
+    /// sender; every other refusal blames no one. On a child chain the
+    /// failure must also be the block's own (`blockSupplierAtFault`): a
+    /// proof that carries no work came from the child-evidence index, not
+    /// from the block's supplier, and the node does not know which peer
+    /// served it, so that failure blames no one. Even then only a complete
     /// candidate is attributable, and only to its sole remote supplier while
     /// that supplier's session is ready. "Blame" is a per-root routing
     /// suppression, never a ban.
     nonisolated static func candidateBlame(
         _ decision: NodeImportDecision,
+        blockSupplierAtFault: Bool,
         complete: Bool,
         soleSupplier: String?,
         supplierHasReadySession: Bool
     ) -> String? {
         guard decision == .proofOfWorkInvalid,
+              blockSupplierAtFault,
               complete,
               let soleSupplier,
               supplierHasReadySession else {

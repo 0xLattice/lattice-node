@@ -2036,6 +2036,10 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             refused.decision, .proofOfWorkInvalid,
             "a target miss proves no work"
         )
+        XCTAssertTrue(
+            refused.blockSupplierAtFault,
+            "a Nexus header's work is its own: its supplier is at fault"
+        )
         XCTAssertNil(refused.sameChainPredecessor, "not parked on its parent")
 
         // The same parent under a block that clears its target: it waits

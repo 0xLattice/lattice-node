@@ -39,6 +39,7 @@ final class CandidateAdmissionDecisionTests: XCTestCase {
     ]
 
     private struct Inputs {
+        let atFault: Bool
         let complete: Bool
         let soleSupplier: String?
         let ready: Bool
@@ -47,14 +48,17 @@ final class CandidateAdmissionDecisionTests: XCTestCase {
     /// Every combination of the attribution inputs.
     private static let inputs: [Inputs] = {
         var result: [Inputs] = []
-        for complete in [false, true] {
-            for soleSupplier in [nil, "supplier"] as [String?] {
-                for ready in [false, true] {
-                    result.append(Inputs(
-                        complete: complete,
-                        soleSupplier: soleSupplier,
-                        ready: ready
-                    ))
+        for atFault in [false, true] {
+            for complete in [false, true] {
+                for soleSupplier in [nil, "supplier"] as [String?] {
+                    for ready in [false, true] {
+                        result.append(Inputs(
+                            atFault: atFault,
+                            complete: complete,
+                            soleSupplier: soleSupplier,
+                            ready: ready
+                        ))
+                    }
                 }
             }
         }
@@ -64,6 +68,7 @@ final class CandidateAdmissionDecisionTests: XCTestCase {
     private func blame(_ decision: NodeImportDecision, _ inputs: Inputs) -> String? {
         NodeNetworkRuntime.candidateBlame(
             decision,
+            blockSupplierAtFault: inputs.atFault,
             complete: inputs.complete,
             soleSupplier: inputs.soleSupplier,
             supplierHasReadySession: inputs.ready
@@ -104,9 +109,10 @@ final class CandidateAdmissionDecisionTests: XCTestCase {
     }
 
     /// Every row of the table: blame exactly when the decision is
-    /// `proofOfWorkInvalid`, the fetch was complete, one remote peer supplied
-    /// it, and that peer's session is ready. The blamed peer is that
-    /// supplier.
+    /// `proofOfWorkInvalid` and the failure is the block's own (not a
+    /// proof's that carries no work), the fetch was complete, one remote
+    /// peer supplied it, and that peer's session is ready. The blamed peer
+    /// is that supplier.
     ///
     /// Establishes: NODE-SEMANTICS-005.a
     func testOnlyACompleteProofOfWorkFailureFromItsSoleReadySupplierIsBlamed() {
@@ -114,6 +120,7 @@ final class CandidateAdmissionDecisionTests: XCTestCase {
         for decision in Self.decisions {
             for inputs in Self.inputs {
                 let attributable = decision == .proofOfWorkInvalid
+                    && inputs.atFault
                     && inputs.complete
                     && inputs.soleSupplier != nil
                     && inputs.ready

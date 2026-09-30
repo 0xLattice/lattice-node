@@ -1126,6 +1126,16 @@ final class ChainProcessTests: XCTestCase {
             refused.decision, .proofOfWorkInvalid,
             "a grind that misses this chain's target proves no work here"
         )
+        // The failure is the proof's, not the block's: an honest supplier of
+        // the block bytes is never blamed for a proof it did not serve.
+        XCTAssertFalse(refused.blockSupplierAtFault)
+        XCTAssertNil(NodeNetworkRuntime.candidateBlame(
+            refused.decision,
+            blockSupplierAtFault: refused.blockSupplierAtFault,
+            complete: true,
+            soleSupplier: "honest-block-supplier",
+            supplierHasReadySession: true
+        ))
 
         let storage = fixture.configuration.storagePath
         let issuedScope = [
