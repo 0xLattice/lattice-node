@@ -49,6 +49,7 @@ final class MiningStepTests: XCTestCase {
         let moved = mining.step(.tipMoved(TipMove(tipCID: "B", confirmed: [], returned: [])), now: 1)
         guard case .preflight(let current)? = moved.first else { return XCTFail("the move reissues: \(moved)") }
         XCTAssertEqual(current.tipCID, "B")
+        XCTAssertEqual(mining.outstandingPreflights, 1, "only the job on the current tip is tracked")
 
         XCTAssertTrue(mining.step(.preflighted(stale, .ready), now: 2).isEmpty)
         XCTAssertEqual(mining.mempool.count, 0, "a stale verdict is never applied")

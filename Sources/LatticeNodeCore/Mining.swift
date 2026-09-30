@@ -157,7 +157,7 @@ public struct Mining: Sendable {
 
     /// Transactions awaiting a verdict before admission.
     private var admissions: [String: Admission] = [:]
-    /// The tip each outstanding preflight was issued for.
+    /// The tip each outstanding preflight on the current tip was issued for.
     private var preflighting: [String: String] = [:]
     /// Pooled transactions in the local journal.
     public private(set) var journaled: Set<String> = []
@@ -368,7 +368,9 @@ public struct Mining: Sendable {
                   !mempool.contains(cid), admissions[cid] == nil else { continue }
             admissions[cid] = Admission(transaction: transaction, origins: [.returned])
         }
-        // Every verdict the pool holds or awaits was for the old tip.
+        // Every verdict the pool holds or awaits was for the old tip: those
+        // still out will be dropped, and each is issued again here.
+        preflighting.removeAll()
         for item in mempool.items {
             preflight(item.cid, item.transaction, &turn)
         }
