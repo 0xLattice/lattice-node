@@ -215,6 +215,12 @@ extension NodeNetworkRuntime {
         serviceBlockFetcher()
     }
 
+    /// Seam: the blocks parked awaiting a child proof, which the overlay's
+    /// child-evidence lookup searches peers' indexes for.
+    func childProofWaits() -> [String] {
+        blockFetcher.childProofWaits()
+    }
+
     /// `NetworkInterface.announceCarriedEvidence`: the service admitted a
     /// carrier-linked block under a package outside the candidate worker,
     /// which may have changed the child-evidence index root.

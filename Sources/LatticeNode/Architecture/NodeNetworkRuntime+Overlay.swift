@@ -1204,7 +1204,7 @@ extension NodeNetworkRuntime {
             return
         }
         let root = PeerEvidenceRoot(sessionID: peer.sessionID, rootCID: rootCID)
-        let lookup = !blockFetcher.childProofWaits().isEmpty
+        let lookup = !childProofWaits().isEmpty
         let changed = overlayState.overlayRecords.update(session: peer) { record in
             guard record.evidenceRoot != root else { return false }
             record.evidenceRoot = root
@@ -1350,7 +1350,7 @@ extension NodeNetworkRuntime {
         var wanted: [String] = []
         if lookup {
             wanted = Self.rotatedChildProofWaits(
-                blockFetcher.childProofWaits(),
+                childProofWaits(),
                 after: overlayState.childProofLookupCursor,
                 limit: Self.maximumEvidenceCandidates
             )
