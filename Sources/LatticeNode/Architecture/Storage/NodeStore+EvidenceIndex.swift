@@ -18,13 +18,19 @@ struct IssuedChildEvidence: Sendable {
 struct ImportCarrierEvidence: Sendable {
     let proof: ChildBlockProof
     let childCID: String
+    /// The proof contributes work to the child (Lattice's
+    /// `verifySecuringWork` returned a contribution): only such proofs
+    /// enter the child-evidence index.
+    let weighs: Bool
 
     init(
         proof: ChildBlockProof,
-        childCID: String
+        childCID: String,
+        weighs: Bool = false
     ) {
         self.proof = proof
         self.childCID = childCID
+        self.weighs = weighs
     }
 }
 
@@ -56,16 +62,30 @@ struct ParentEvidenceInboxItem: Sendable {
     let package: AuthenticatedChildPackage
 }
 
-struct ChildRootAttachmentSummary: Equatable, Hashable, Sendable {
-    let edgeCID: String
-    let rootCID: String
-    let attachmentCID: String
-}
-
 struct PreparedImportCarrierEvidence {
     let edge: DirectChildEdge
     let rootCID: String
     let proofAttachment: ChildEvidenceVolume
+    let weighs: Bool
+}
+
+/// `child_evidence_root`: the root of this chain's child-evidence index.
+struct ChildEvidenceRootRow: NodeStoreRecord {
+    static let table = "child_evidence_root"
+    private let row: Row
+
+    init(_ row: Row) { self.row = row }
+
+    var rootCID: String { get throws { try row.text("root_cid") } }
+}
+
+/// `child_evidence_pins_dirty`: present while an index update's pins may
+/// be out of step with the committed root.
+struct ChildEvidencePinsDirtyRow: NodeStoreRecord {
+    static let table = "child_evidence_pins_dirty"
+    private let row: Row
+
+    init(_ row: Row) { self.row = row }
 }
 
 struct PreparedImportHierarchyArtifacts {
@@ -388,8 +408,125 @@ extension NodeStore {
         return PreparedImportCarrierEvidence(
             edge: edge,
             rootCID: evidence.proof.rootCID,
-            proofAttachment: proofAttachment
+            proofAttachment: proofAttachment,
+            weighs: evidence.weighs
         )
+    }
+
+    /// Pin owner of the child-evidence index's current Volumes.
+    var childEvidenceOwner: String { blockRetentionScope + ":child-evidence" }
+
+    /// The root of this chain's child-evidence index; nil while it is empty.
+    func childEvidenceRoot() throws -> String? {
+        let rows = try database.rows(
+            ChildEvidenceRootRow.self,
+            "SELECT root_cid FROM child_evidence_root WHERE singleton = 1"
+        )
+        guard let row = rows.first else { return nil }
+        let root = try row.rootCID
+        guard CIDIdentity.isCanonical(root) else {
+            throw NodeStoreError.corrupt("malformed child-evidence root")
+        }
+        return root
+    }
+
+    /// Owner: ImportJournal.stage / EvidenceIndex.persistIssuedHierarchyArtifacts — broker writes, outside any database transaction.
+    /// Stores and pins the index Volumes that inserting the weighing
+    /// `evidence` changes. The caller commits the returned root with the
+    /// evidence rows (`persistChildEvidenceRoot`), then releases the
+    /// replaced Volumes (`finishChildEvidenceIndex`), or drops the new pins
+    /// if the commit fails (`abandonChildEvidenceIndex`).
+    func prepareChildEvidenceIndex(
+        _ evidence: [PreparedImportCarrierEvidence]
+    ) async throws -> ChildEvidenceIndex.Update? {
+        try await prepareChildEvidenceIndex(entries: evidence.filter(\.weighs).map {
+            ChildEvidenceIndex.Entry(
+                childCID: $0.edge.childCID,
+                rootCID: $0.rootCID,
+                attachmentCID: $0.proofAttachment.rawCID
+            )
+        })
+    }
+
+    func prepareChildEvidenceIndex(
+        entries: [ChildEvidenceIndex.Entry]
+    ) async throws -> ChildEvidenceIndex.Update? {
+        guard !entries.isEmpty, var update = try await ChildEvidenceIndex.inserting(
+            entries,
+            into: try childEvidenceRoot(),
+            fetcher: recoveryVolumeBroker,
+            storer: recoveryVolumeBroker
+        ) else { return nil }
+        // Set until the replaced pins are released: a crash in between, or
+        // a pin or unpin that throws, leaves the pins to boot's reconcile.
+        // Only the update that found it clear may clear it.
+        update.markerWasSet = try childEvidencePinsDirty()
+        try setChildEvidencePinsDirty(true)
+        if !update.added.isEmpty {
+            try await recoveryVolumeBroker.pinBatch(
+                roots: update.added,
+                owner: childEvidenceOwner
+            )
+        }
+        return update
+    }
+
+    /// Owner: ImportJournal.stage / EvidenceIndex.persistIssuedHierarchyArtifacts — caller holds the transaction.
+    func persistChildEvidenceRoot(_ update: ChildEvidenceIndex.Update) throws {
+        // Admissions are serial, so the root cannot move between prepare and
+        // commit; if it did, committing would drop the other admission's
+        // entries.
+        guard try childEvidenceRoot() == update.baseRoot else {
+            throw NodeStoreError.corrupt("child-evidence root moved under an admission")
+        }
+        try database.execute(
+            "INSERT INTO child_evidence_root (singleton, root_cid) VALUES (1, ?1) ON CONFLICT(singleton) DO UPDATE SET root_cid = excluded.root_cid",
+            params: [.text(update.root)]
+        )
+    }
+
+    /// After the commit: the replaced Volumes lose their pin and are
+    /// reclaimed by ordinary eviction. A peer still walking the old root
+    /// finds them unavailable and re-reads the current root. A pin this
+    /// fails to drop is healed at boot (`BootRecovery`).
+    func finishChildEvidenceIndex(_ update: ChildEvidenceIndex.Update?) async {
+        guard let update else { return }
+        await releaseChildEvidencePins(update.released, markerWasSet: update.markerWasSet)
+    }
+
+    /// The commit failed: the new Volumes lose the pin `prepare` gave them.
+    func abandonChildEvidenceIndex(_ update: ChildEvidenceIndex.Update?) async {
+        guard let update else { return }
+        await releaseChildEvidencePins(update.added, markerWasSet: update.markerWasSet)
+    }
+
+    /// Unpins `roots`, then clears the dirty marker if this update set it.
+    /// On a failure, or a marker an earlier update left set, it stays set
+    /// and boot reconciles the pins.
+    private func releaseChildEvidencePins(_ roots: [String], markerWasSet: Bool) async {
+        do {
+            if !roots.isEmpty {
+                try await recoveryVolumeBroker.unpinBatch(items: roots.map {
+                    (root: $0, owner: childEvidenceOwner, count: 1)
+                })
+            }
+            if !markerWasSet { try setChildEvidencePinsDirty(false) }
+        } catch {}
+    }
+
+    /// Whether an index update may have left the child-evidence pins out of
+    /// step with the committed root (a crash between pin and release).
+    func childEvidencePinsDirty() throws -> Bool {
+        !(try database.rows(
+            ChildEvidencePinsDirtyRow.self,
+            "SELECT singleton FROM child_evidence_pins_dirty"
+        )).isEmpty
+    }
+
+    func setChildEvidencePinsDirty(_ dirty: Bool) throws {
+        try database.execute(dirty
+            ? "INSERT OR IGNORE INTO child_evidence_pins_dirty (singleton) VALUES (1)"
+            : "DELETE FROM child_evidence_pins_dirty")
     }
 
     private func prepareParentGenesisLinks(
@@ -503,21 +640,33 @@ extension NodeStore {
             scope: issuedRecoveryRetentionScope,
             roots: recoveryRoots
         )
-        try database.transaction {
-            try persistHierarchyArtifacts(prepared)
-            if let attachmentCID = prepared.carrierEvidence?
-                .proofAttachment.rawCID
-            {
-                try deleteParentEvidenceInbox(attachmentCID: attachmentCID)
+        let indexUpdate = try await prepareChildEvidenceIndex(
+            [prepared.carrierEvidence].compactMap { $0 }
+        )
+        do {
+            try database.transaction {
+                try persistHierarchyArtifacts(prepared)
+                if let indexUpdate {
+                    try persistChildEvidenceRoot(indexUpdate)
+                }
+                if let attachmentCID = prepared.carrierEvidence?
+                    .proofAttachment.rawCID
+                {
+                    try deleteParentEvidenceInbox(attachmentCID: attachmentCID)
+                }
+                try persistPendingChildProofRouteRows(
+                    try pendingRoutesIncludingPreparedProofs(
+                        pendingChildProofRoutes,
+                        carrierCIDs: [link.carrierCID]
+                    ),
+                    capacity: pendingChildProofCapacity
+                )
             }
-            try persistPendingChildProofRouteRows(
-                try pendingRoutesIncludingPreparedProofs(
-                    pendingChildProofRoutes,
-                    carrierCIDs: [link.carrierCID]
-                ),
-                capacity: pendingChildProofCapacity
-            )
+        } catch {
+            await abandonChildEvidenceIndex(indexUpdate)
+            throw error
         }
+        await finishChildEvidenceIndex(indexUpdate)
         if prepared.carrierEvidence != nil {
             await reconcileParentEvidenceInboxPruningProtection()
         }
@@ -1096,49 +1245,6 @@ extension NodeStore {
         )
     }
 
-    func childRootAttachmentSummaries(
-        scope: IssuedChildProofScope,
-        directory: String,
-        after: ChildRootAttachmentSummary?,
-        limit: Int
-    ) async throws -> [ChildRootAttachmentSummary] {
-        guard !directory.isEmpty, limit > 0,
-              let sqlLimit = Int64(exactly: limit) else {
-            throw NodeStoreError.invalidConfiguration(
-                "child root-attachment page must be bounded"
-            )
-        }
-        let rows: [ProofEdgeJoinRow]
-        if let after {
-            rows = try database.rows(
-                ProofEdgeJoinRow.self,
-                "SELECT p.edge_cid, e.child_cid, p.root_cid, p.attachment_cid \(Self.proofEdgeJoinSQL) WHERE p.scope = ?1 AND e.directory = ?2 AND (p.edge_cid > ?3 OR (p.edge_cid = ?3 AND p.root_cid > ?4)) ORDER BY p.edge_cid, p.root_cid LIMIT ?5",
-                params: [
-                    .text(scope.rawValue), .text(directory), .text(after.edgeCID),
-                    .text(after.rootCID), .int(sqlLimit),
-                ]
-            )
-        } else {
-            rows = try database.rows(
-                ProofEdgeJoinRow.self,
-                "SELECT p.edge_cid, e.child_cid, p.root_cid, p.attachment_cid \(Self.proofEdgeJoinSQL) WHERE p.scope = ?1 AND e.directory = ?2 ORDER BY p.edge_cid, p.root_cid LIMIT ?3",
-                params: [
-                    .text(scope.rawValue), .text(directory), .int(sqlLimit),
-                ]
-            )
-        }
-        return try rows.map { row in
-            // The child CID is projected and checked with the rest of the
-            // row even though the summary does not carry it.
-            _ = try row.childCID
-            return ChildRootAttachmentSummary(
-                edgeCID: try row.edgeCID,
-                rootCID: try row.rootCID,
-                attachmentCID: try row.attachmentCID
-            )
-        }
-    }
-
     func parentEvidenceScanCursor() throws -> ParentEvidenceScanCursor {
         let rows = try database.rows(
             ParentEvidenceScanRow.self,
@@ -1443,25 +1549,6 @@ extension NodeStore {
             ))
         }
         return items
-    }
-
-    func portableEvidenceVolumeCID(
-        scope: IssuedChildProofScope,
-        edgeCID: String,
-        rootCID: String
-    ) throws -> String? {
-        let rows = try database.rows(
-            IssuedChildProofRow.self,
-            "SELECT attachment_cid FROM issued_child_proofs WHERE scope = ?1 AND edge_cid = ?2 AND root_cid = ?3",
-            params: [
-                .text(scope.rawValue), .text(edgeCID), .text(rootCID),
-            ]
-        )
-        guard let row = rows.first else { return nil }
-        guard rows.count == 1 else {
-            throw NodeStoreError.corrupt("malformed portable recovery attachment index")
-        }
-        return try row.attachmentCID
     }
 
     /// Permanent root-independent hops already published by this parent.

@@ -132,13 +132,8 @@ extension NodeNetworkRuntime {
               let session = parentEvidenceSession(for: peer) else {
             return .rejected
         }
-        let activePortable = sessionLeases.activeEvidenceVolumes.lazy.filter {
-            $0.plane == .overlay
-        }.count
         guard let append = parentEvidence.beginAppend(
             for: session,
-            competingOperationCount: sessionLeases.portableEvidenceWork.count
-                + activePortable,
             capacity: Self.maximumEvidenceCandidates
         ) else { return .backpressured }
         let task = Task { [weak self] in
@@ -1010,9 +1005,7 @@ extension NodeNetworkRuntime {
                 : .unavailable
         }
         guard let envelope = try? ChildValidationPackageEnvelope.decode(
-            attachment.envelopeBytes,
-            maximumEncodedSize:
-                configuration.resourcePolicy.maximumParentWitnessBytes
+            attachment.envelopeBytes
         ) else {
             return .failed
         }

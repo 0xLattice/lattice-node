@@ -20,14 +20,10 @@ enum NodeNetworkTopic {
     static let forwardRangeResponse = "lattice.overlay.forward-range.response.v1"
     static let ancestorRangeRequest = "lattice.overlay.ancestor-range.request.v1"
     static let ancestorRangeResponse = "lattice.overlay.ancestor-range.response.v1"
-    static let portableAttachmentAvailable =
-        "lattice.overlay.portable-attachment.available.v1"
-    static let portableAttachmentIndexRequest =
-        "lattice.overlay.portable-attachment.index.request.v1"
-    static let portableAttachmentIndexResponse =
-        "lattice.overlay.portable-attachment.index.response.v1"
-    static let portableAttachmentLocateRequest =
-        "lattice.overlay.portable-attachment.locate.request.v1"
+    /// The sender's current child-evidence index root, pushed on overlay
+    /// hello and whenever it changes; the proofs themselves are fetched
+    /// from that root as ordinary Volumes.
+    static let childEvidenceRoot = "lattice.overlay.child-evidence.root.v1"
     static let readEndpointRequest = "lattice.overlay.read-endpoint.request.v1"
     static let readEndpointResponse = "lattice.overlay.read-endpoint.response.v1"
     static let hierarchyHello = "lattice.hierarchy.hello.v1"
@@ -38,7 +34,7 @@ enum NodeNetworkTopic {
     /// (Bitcoin's getdata). The parent answers from its durable issued index
     /// with a `childEvidenceAvailable` hint, or stays silent. Additive: a
     /// parent that does not know the topic drops it unread, and the child's
-    /// overlay locate still runs.
+    /// overlay peers' evidence indexes are still searched.
     static let parentEvidenceRequest = "lattice.hierarchy.evidence.request.v1"
 
     static func plane(for topic: String) -> Plane? {
@@ -48,10 +44,7 @@ enum NodeNetworkTopic {
              acceptedLeavesRequest, acceptedLeavesResponse,
              forwardRangeRequest, forwardRangeResponse,
              ancestorRangeRequest, ancestorRangeResponse,
-             portableAttachmentAvailable,
-             portableAttachmentIndexRequest,
-             portableAttachmentIndexResponse,
-             portableAttachmentLocateRequest,
+             childEvidenceRoot,
              readEndpointRequest, readEndpointResponse: .overlay
         case hierarchyHello, childEvidenceAvailable,
              childEvidenceIndexRequest, childEvidenceIndexResponse,
@@ -371,95 +364,12 @@ struct AncestorRangeResponseMessage: NodeJSONMessage, Equatable, Sendable {
     }
 }
 
-/// One physical outer-root attachment for a root-independent direct child
-/// edge. The edge CID addresses the canonical direct-edge object; `rootCID`
-/// identifies the upstream proof context; `attachmentCID` is its CAS manifest.
-struct PortableAttachmentSummary: Codable, Equatable, Hashable, Sendable {
-    let edgeCID: String
+/// The sender's child-evidence index root (see `ChildEvidenceIndex`).
+struct ChildEvidenceRootMessage: NodeJSONMessage, Equatable, Sendable {
     let rootCID: String
-    let attachmentCID: String
-
-    fileprivate var isValid: Bool {
-        _isCanonicalWireCID(edgeCID)
-            && _isCanonicalWireCID(rootCID)
-            && _isCanonicalWireCID(attachmentCID)
-    }
-}
-
-struct PortableAttachmentAvailableMessage: NodeJSONMessage, Equatable, Sendable {
-    let edgeCID: String
-    let rootCID: String
-    let attachmentCID: String
 
     func validate() throws {
-        guard PortableAttachmentSummary(
-            edgeCID: edgeCID,
-            rootCID: rootCID,
-            attachmentCID: attachmentCID
-        ).isValid else {
-            throw NodeNetworkWireError.malformed
-        }
-    }
-}
-
-struct PortableAttachmentIndexRequestMessage: NodeJSONMessage, Equatable, Sendable {
-    let requestID: UInt64
-    let after: PortableAttachmentSummary?
-
-    func validate() throws {
-        guard requestID != 0, after?.isValid ?? true else {
-            throw NodeNetworkWireError.malformed
-        }
-    }
-}
-
-struct PortableAttachmentIndexResponseMessage: NodeJSONMessage, Equatable, Sendable {
-    // Page size matches the sibling index/range messages (accepted-leaves,
-    // child-evidence index, forward-range all page at 64). A page of 1 made
-    // the incoming-carrier attachment walk advance one entry per round trip —
-    // an arbitrary throttle, not a size bound, that crawled deep child-evidence
-    // sync. `hasMore` pagination is unchanged.
-    static let maximumEntries = 64
-
-    let requestID: UInt64
-    let after: PortableAttachmentSummary?
-    let entries: [PortableAttachmentSummary]
-    let hasMore: Bool
-
-    func validate() throws {
-        let sorted = entries.sorted {
-            ($0.edgeCID, $0.rootCID) < ($1.edgeCID, $1.rootCID)
-        }
-        guard requestID != 0,
-              after?.isValid ?? true,
-              entries.count <= Self.maximumEntries,
-              entries == sorted,
-              Set(entries).count == entries.count,
-              entries.allSatisfy({ entry in
-                  entry.isValid && (after.map({ cursor in
-                      (entry.edgeCID, entry.rootCID)
-                          > (cursor.edgeCID, cursor.rootCID)
-                  }) ?? true)
-              }),
-              !hasMore || !entries.isEmpty else {
-            throw NodeNetworkWireError.malformed
-        }
-    }
-}
-
-/// Solicits the portable child-evidence a peer holds for ONE specific child
-/// block CID. A peer that mined (or relayed with a package) the carrier can
-/// recover the block's `ChildValidationPackage`; it answers by sending the
-/// requester a `PortableAttachmentAvailableMessage` for that block, which the
-/// requester recovers through the ordinary portable-evidence path. This lets a
-/// cold-syncing adopter obtain per-block evidence directly from the block's
-/// supplier, instead of relying on its own parent having mined the carriers.
-struct PortableAttachmentLocateRequestMessage: NodeJSONMessage, Equatable, Sendable {
-    let requestID: UInt64
-    let childCID: String
-
-    func validate() throws {
-        guard requestID != 0, _isCanonicalWireCID(childCID) else {
+        guard _isCanonicalWireCID(rootCID) else {
             throw NodeNetworkWireError.malformed
         }
     }

@@ -11,6 +11,7 @@ enum BrokerStep: Hashable, Sendable {
     case merge(scope: String)
     case advance(scope: String)
     case pinBatch(owner: String)
+    case unpinBatch(owner: String)
 }
 
 /// The error an armed step throws, before the wrapped broker sees the call.
@@ -147,6 +148,9 @@ actor FaultInjectingBroker: RetainedRootMergeBroker {
     func unpinBatch(
         items: [(root: String, owner: String, count: Int)]
     ) async throws {
+        if let owner = items.first?.owner {
+            try await reach(.unpinBatch(owner: owner))
+        }
         try await broker.unpinBatch(items: items)
     }
 

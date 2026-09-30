@@ -1444,26 +1444,22 @@ final class NodeStoreTests: XCTestCase {
             )
         }
 
-        let parentAttachments = try await parent.childRootAttachmentSummaries(
-            scope: .outgoingDirectChild,
+        let parentRoots = try await parent.issuedChildProofRoots(
+            childCID: leafCID,
             directory: "A",
-            after: nil,
+            afterRootCID: nil,
             limit: 3
         )
-        let childAttachments = try await child.childRootAttachmentSummaries(
-            scope: .incomingCarrier,
+        let childRoots = try await child.incomingCarrierProofRoots(
+            childCID: leafCID,
             directory: "A",
-            after: nil,
+            afterRootCID: nil,
             limit: 3
         )
+        XCTAssertEqual(parentRoots.sorted(), childRoots.sorted())
+        XCTAssertEqual(parentRoots.count, 2)
         XCTAssertEqual(
-            parentAttachments.map { [$0.edgeCID, $0.rootCID] },
-            childAttachments.map { [$0.edgeCID, $0.rootCID] }
-        )
-        XCTAssertEqual(parentAttachments.count, 2)
-        XCTAssertEqual(Set(parentAttachments.map(\.edgeCID)).count, 1)
-        XCTAssertEqual(
-            Set(parentAttachments.map(\.rootCID)),
+            Set(parentRoots),
             Set(absoluteProofs.map(\.rootCID))
         )
         let database = try NodeSQLite(path: parentPath.path)
@@ -1537,17 +1533,6 @@ final class NodeStoreTests: XCTestCase {
             ]
         )
         let missingRootCID = try XCTUnwrap(proofRow["root_cid"]?.textValue)
-        let indexedAttachments = try await parent.childRootAttachmentSummaries(
-            scope: .outgoingDirectChild,
-            directory: "A",
-            after: nil,
-            limit: 3
-        )
-        XCTAssertEqual(
-            indexedAttachments.first { $0.rootCID == missingRootCID }?
-                .attachmentCID,
-            missingAttachmentCID
-        )
         let indexedRoots = try await parent.issuedChildProofRoots(
             childCID: leafCID,
             directory: "A",

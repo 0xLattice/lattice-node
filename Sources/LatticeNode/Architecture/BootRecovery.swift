@@ -211,6 +211,34 @@ enum BootRecovery {
             roots: contextualCandidateRoots,
             owner: contextualCandidateOwner
         )
+        // Pins stand in for the reachability GC planned in P4, which
+        // replaces them. Only an index update a crash interrupted leaves
+        // them out of step: re-pin what the committed root reaches.
+        if try await store.childEvidencePinsDirty() {
+            let childEvidenceOwner = await store.childEvidenceOwner
+            try await broker.unpinAll(owner: childEvidenceOwner)
+            var missing: [String] = []
+            if let childEvidenceRoot = try await store.childEvidenceRoot() {
+                let volumes = await ChildEvidenceIndex.volumes(
+                    root: childEvidenceRoot,
+                    fetcher: broker
+                )
+                try await broker.pinBatch(
+                    roots: volumes.reachable,
+                    owner: childEvidenceOwner
+                )
+                missing = volumes.missing
+            }
+            if missing.isEmpty {
+                try await store.setChildEvidencePinsDirty(false)
+            } else {
+                // The marker stays set: the next boot tries again.
+                store.syncTrace(
+                    "error: child-evidence reconcile: \(missing.count) index "
+                        + "Volumes missing, pinned what is reachable"
+                )
+            }
+        }
         try await broker.advanceRetainedRoots(
             scope: preparedHierarchyRetentionScope,
             roots: preparedRecoveryRoots

@@ -43,11 +43,10 @@ struct ParentEvidenceFlow {
 
     mutating func beginAppend(
         for session: Session,
-        competingOperationCount: Int,
         capacity: Int
     ) -> Append? {
         guard !failed.contains(session) else { return nil }
-        guard operationCount + competingOperationCount < capacity else {
+        guard operationCount < capacity else {
             // Capacity is LOCAL backpressure, never the session's fault: mark
             // it backpressured (cleared by capacityBecameAvailable) so a
             // retry succeeds once the lane drains. Marking it failed here

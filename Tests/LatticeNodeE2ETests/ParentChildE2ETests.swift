@@ -1341,8 +1341,8 @@ final class ParentChildE2ETests: XCTestCase {
     /// regime end to end: the parent freezes at its own retarget window (blocks
     /// mined at CPU speed make the corrected target unreachable — exactly the
     /// production flag-day history), the child then advances by carrier-only
-    /// rounds, so its deep tail has NO parent anchors and portable evidence is
-    /// the only proof source. A brand-new permissionless joiner — which ADOPTS
+    /// rounds, so its deep tail has NO parent anchors and overlay peers'
+    /// child-evidence indexes are the only proof source. A brand-new permissionless joiner — which ADOPTS
     /// the genesis from its parent's on-chain directory rather than being
     /// seeded — must reach the producer's exact child tip over the real
     /// overlay, surviving a restart of the serving node mid-sync (session

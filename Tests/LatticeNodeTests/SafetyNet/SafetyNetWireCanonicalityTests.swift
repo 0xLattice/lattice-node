@@ -12,7 +12,7 @@ import cashew
 /// `WireProtocolFuzzTests` cover the adversarial direction (mutated bytes must
 /// be refused) from ONE hand-written seed per JSON decoder; this file covers
 /// the honest direction across the value space, and also the codecs the fuzz
-/// corpus does not reach: the three portable-attachment and three
+/// corpus does not reach: the child-evidence root and three hierarchy
 /// child-evidence JSON messages, the two binary hierarchy frames
 /// (`ParentTipContextMessage` with its `minimumWorkTrailer`,
 /// `ChildCandidateAvailableMessage` with its search witness), `ChainHello`,
@@ -293,60 +293,9 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
         }
     }
 
-    private func randomSummary(
-        _ generator: inout SplitMix64
-    ) -> PortableAttachmentSummary {
-        PortableAttachmentSummary(
-            edgeCID: randomCID(&generator),
-            rootCID: randomCID(&generator),
-            attachmentCID: randomCID(&generator)
-        )
-    }
-
-    func testPortableAttachmentAvailableIsCanonical() throws {
-        try assertCanonical(PortableAttachmentAvailableMessage.self, seed: 0x0f) { g in
-            PortableAttachmentAvailableMessage(
-                edgeCID: self.randomCID(&g),
-                rootCID: self.randomCID(&g),
-                attachmentCID: self.randomCID(&g)
-            )
-        }
-    }
-
-    func testPortableAttachmentIndexRequestIsCanonical() throws {
-        try assertCanonical(PortableAttachmentIndexRequestMessage.self, seed: 0x10) { g in
-            PortableAttachmentIndexRequestMessage(
-                requestID: self.nonZeroID(&g),
-                after: self.randomBool(&g) ? self.randomSummary(&g) : nil
-            )
-        }
-    }
-
-    func testPortableAttachmentIndexResponseIsCanonical() throws {
-        try assertCanonical(PortableAttachmentIndexResponseMessage.self, seed: 0x11) { g in
-            let count = self.randomInt(
-                &g, 0...PortableAttachmentIndexResponseMessage.maximumEntries
-            )
-            // Sorted by (edge, root), unique, all after the cursor: the cursor
-            // is the smallest of a generated pool and the page is the rest.
-            let pool = (0..<(count + 1)).map { _ in self.randomSummary(&g) }
-                .sorted { ($0.edgeCID, $0.rootCID) < ($1.edgeCID, $1.rootCID) }
-            let after = self.randomBool(&g) ? pool[0] : nil
-            let entries = Array(pool.dropFirst())
-            return PortableAttachmentIndexResponseMessage(
-                requestID: self.nonZeroID(&g),
-                after: after,
-                entries: entries,
-                hasMore: !entries.isEmpty && self.randomBool(&g)
-            )
-        }
-    }
-
-    func testPortableAttachmentLocateRequestIsCanonical() throws {
-        try assertCanonical(PortableAttachmentLocateRequestMessage.self, seed: 0x12) { g in
-            PortableAttachmentLocateRequestMessage(
-                requestID: self.nonZeroID(&g), childCID: self.randomCID(&g)
-            )
+    func testChildEvidenceRootIsCanonical() throws {
+        try assertCanonical(ChildEvidenceRootMessage.self, seed: 0x0f) { g in
+            ChildEvidenceRootMessage(rootCID: self.randomCID(&g))
         }
     }
 

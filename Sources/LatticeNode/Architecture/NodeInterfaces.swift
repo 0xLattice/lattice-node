@@ -38,8 +38,8 @@ public protocol NetworkInterface: AnyObject, Sendable {
     func chainStateChanged() async
     func publishChildProof(_ publication: DirectChildProofPublication) async throws
     /// A carrier-linked admission under `package` outside the runtime's
-    /// candidate worker (a co-hosted parent's mined grind): announce its
-    /// portable attachment on this chain's overlay, as the worker does.
+    /// candidate worker (a co-hosted parent's mined grind): announce the
+    /// child-evidence index root it may have changed, as the worker does.
     func announceCarriedEvidence(_ package: AuthenticatedChildPackage) async
     func publishAcceptedBlock(_ blockCID: String) async throws
     func publishTransaction(_ volumeRootCID: String) async throws

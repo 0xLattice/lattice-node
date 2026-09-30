@@ -171,13 +171,13 @@ cross-component invariants:
   `testAFullInboxCostsNoFetchesAndTheScanResumesWithRoom`); a restarted
   child imports the block from its inbox alone,
   weighed, with content served by the parent; no import of a block
-  reached through an overlay portable attachment uses `ImportMode.full`
+  reached through an overlay peer's child-evidence index uses `ImportMode.full`
   (`testDeferredCarriedBlockKeepsItsEvidenceInTheInboxAcrossRestart`,
   `testCarrierRefusedForGoodIsDecidedAndConsumed`,
   `testDecidedRefusalWithoutACarrierLinkIsConsumed`,
   `testDecidedIsExactlyWhatTheFetcherNeverRetries`,
   `testRestartedChildAdmitsTheParentCarriedBlockFromItsInboxWeighed`,
-  `testPortableAttachmentsKeepDistinctRootsForTheSameChildWhileAdmissionIsBlocked`); a run
+  `testColdSyncResolvesAChildProofThroughPeerIndexesAndBlamesJunk`); a run
   flows through every level — what Nexus attributes to the middle chain's
   committing block reaches the grandchild, and the middle chain's service
   pushes the run that credit changed to its own children, through their

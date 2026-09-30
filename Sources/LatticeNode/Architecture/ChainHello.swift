@@ -14,7 +14,10 @@ public enum ChainHelloError: Error, Equatable, Sendable {
 /// competing roots on one child path remain ordinary fork-choice candidates.
 public struct ChainHello: Codable, Equatable, Sendable {
     /// Version 5: blocks commit a `rewardRecipient` credited the reward plus
-    /// fees, and transactions carry no `fee` (Lattice 39 flag day).
+    /// fees, and transactions carry no `fee` (Lattice 39 flag day); child-block
+    /// proofs are exchanged through each node's child-evidence index
+    /// (`lattice.overlay.child-evidence.root.v1`), and the portable-attachment
+    /// topics are gone.
     public static let protocolVersion: UInt16 = 5
     /// Deliberately tight pre-decode guard: `decode` runs on an UNAUTHENTICATED
     /// peer's bytes, so unlike post-session messages (bounded by the transport

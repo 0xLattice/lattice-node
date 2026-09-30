@@ -25,9 +25,11 @@ extension NodeStore {
     /// each accepted block so recovery reconstructs the validated set.
     /// Epoch 40 records leaf-ness on each accepted block so the frontier page
     /// is an index read, not a per-row scan of the accepted history.
+    /// Epoch 41 records the root of the child-evidence index
+    /// (`child_evidence_root`), built fresh from the first admission.
     /// Older stores must be
     /// wiped; Nexus deterministically recreates the configured exact genesis.
-    static let currentSchemaEpoch: Int64 = 40
+    static let currentSchemaEpoch: Int64 = 41
 
     func syncSourceID() throws -> String {
         guard let metadata = try database.row(
@@ -86,6 +88,8 @@ extension NodeStore {
         "issued_parent_facts",
         "issued_child_edges",
         "issued_child_proofs",
+        "child_evidence_root",
+        "child_evidence_pins_dirty",
         "parent_evidence_scan",
         "parent_evidence_inbox",
         "local_mempool_transactions",
@@ -210,6 +214,17 @@ extension NodeStore {
                 ),
                 PRIMARY KEY (scope, edge_cid, root_cid)
             )
+            """)
+        try database.execute("""
+            CREATE TABLE IF NOT EXISTS child_evidence_root (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                root_cid TEXT NOT NULL
+            ) WITHOUT ROWID
+            """)
+        try database.execute("""
+            CREATE TABLE IF NOT EXISTS child_evidence_pins_dirty (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1)
+            ) WITHOUT ROWID
             """)
         try database.execute("""
             CREATE TABLE IF NOT EXISTS parent_evidence_scan (

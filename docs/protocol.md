@@ -170,8 +170,8 @@ without validating it, so a parent miner could otherwise carry blocks that
 never decide until the inbox was full. An orphan evicted from the pool or
 lost with a restart is gone, as in Bitcoin's orphan pool, and returns
 through ordinary acquisition: the predecessor walk reaches the block, and a
-block reached without its parent's evidence is asked for by CID of the
-overlay (the portable-attachment locate) and of the co-hosted parent level
+block reached without its parent's evidence is looked up by CID in the
+overlay peers' child-evidence indexes and asked of the co-hosted parent level
 (`lattice.hierarchy.evidence.request.v1`, answered from the parent's
 durable issued index with the ordinary evidence hint).
 When import needs a genesis or continuity fact the parent level does not
@@ -227,16 +227,33 @@ Both planes currently require node protocol version 5; mixed-version peers
 refuse the session. Co-hosted levels run one binary, so a hierarchy session
 never mixes versions.
 
-Two overlay request topics are answered in their full form so older peers
-still sync from this node: the accepted-leaves page and the portable-attachment
-index. A node sends the accepted-leaves request only as a one-shot, cursor-less
-frontier pull, when a peer's announced height is within the range-sync depth
-threshold of its own fetched tip; the cursored descent it answers is never
-sent. It never sends the portable-attachment index request: header-graph range
-sync (common-ancestor negotiation plus forward pages), live announcements and
-the predecessor walk carry sync. When a cold-synced child block needs a proof
-this node cannot recover locally, a per-block locate request asks the block's
-advertisers and supplier for its portable proof package.
+One overlay request topic is answered in its full form so older peers still
+sync from this node: the accepted-leaves page. A node sends the accepted-leaves
+request only as a one-shot, cursor-less frontier pull, when a peer's announced
+height is within the range-sync depth threshold of its own fetched tip; the
+cursored descent it answers is never sent. Header-graph range sync
+(common-ancestor negotiation plus forward pages), live announcements and the
+predecessor walk carry sync.
+
+Child-block proofs travel through each child node's child-evidence index: a
+cashew dictionary keyed by child block CID whose values are the block's proof
+set, keyed by grind (`rootCID`), each naming the `ChildEvidenceVolume` that
+carries the proof. A proof enters the index only when it contributes work to
+its block. Every trie node and every proof set is its own Volume, so the index
+root is independent of insertion order and equal sets have equal roots. A node
+pushes its root (`lattice.overlay.child-evidence.root.v1`, one CID) when a
+session becomes ready and whenever the root changes; the receiver keeps each
+peer's latest root. One serial worker then reads peers' roots as ordinary
+Volumes through one budgeted session per peer: it looks up the blocks parked
+on a missing proof (one proof each per pass; the rest arrive by the walk once
+the block is admitted and indexed), and walks the peer's trie against its own, skipping equal
+subtrees and descending only into blocks it holds, to fetch the proofs it
+lacks. Each proof fetched is admitted as a weighed package seed. A proof that
+does not bind its key and grind, or that contributes no work to a held block,
+is blamed on the sole supplier of a complete fetch, whose session is recycled
+and root dropped; content that is unavailable or incomplete is never blamed.
+No local witness-size limit applies to a proof from a peer's index: one within
+the protocol cap that weighs is admitted.
 
 Peer content exchange is Volume-native. An announcer names one complete Volume
 by its root CID and must serve that Volume from the exact authenticated session
@@ -306,8 +323,8 @@ inventories or topology to parents.
 
 On the same-chain overlay, a child advertises a child-evidence Volume whose
 envelope contains only the complete structural work proof. Parent validity
-verdicts are never serialized into the Volume. Nexus neither requests nor
-accepts portable attachments.
+verdicts are never serialized into the Volume. Nexus neither keeps nor reads a
+child-evidence index.
 
 Both inventories are cursor-bound and name one exact Volume at a time. Ivy
 streams each complete Volume as an ordered, bounded sequence of frames;

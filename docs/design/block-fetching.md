@@ -84,7 +84,7 @@ The fetcher accepts:
   announcement, a range-sync page, or a frontier pull;
 - an authenticated evidence package;
 - provider connection and disconnection;
-- parent evidence and portable evidence;
+- parent evidence and proofs from peers' child-evidence indexes;
 - a recovered durable predecessor obligation;
 - a fetch completion;
 - an import completion;

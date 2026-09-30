@@ -2306,8 +2306,8 @@ extension NodeNetworkRuntime {
         }
     }
 
-    /// Holds every evidence Volume slot with overlay work, as a burst of
-    /// portable attachments would.
+    /// Holds every evidence Volume slot, as a burst of evidence fetches
+    /// would.
     fileprivate func fillEvidenceLaneForTesting() {
         for index in 0..<Self.maximumEvidenceCandidates {
             sessionLeases.activeEvidenceVolumes.insert(EvidenceVolumeLease(

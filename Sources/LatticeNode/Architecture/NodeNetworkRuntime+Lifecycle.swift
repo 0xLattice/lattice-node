@@ -262,9 +262,12 @@ extension NodeNetworkRuntime {
         overlayState.rangeSync.reentryTask.cancel()
         sessionLeases.activeEvidenceVolumes.removeAll()
         wakeEvidenceSlotWaiters()
-        overlayState.portableEvidenceWorker.cancel()
-        sessionLeases.portableEvidenceOrder.removeAll()
-        sessionLeases.portableEvidenceWork.removeAll()
+        overlayState.childEvidenceSync.cancel()
+        overlayState.childEvidenceAnnounce.cancel()
+        overlayState.childProofLookupCursor = nil
+        overlayState.lastChildEvidencePeer = nil
+        overlayState.childEvidenceAnnounceDirty = false
+        overlayState.announcedChildEvidenceRoot = nil
         parentEvidence.reset()
         hierarchyState.refusedHintResendTask.cancel()
         hierarchyState.refusedHintResendDirty = false
