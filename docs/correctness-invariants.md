@@ -85,11 +85,12 @@ places are their own claim until a test covers them too.
 ## NODE-SEMANTICS-005 — only obtained invalid evidence is punishable
 
 - **NODE-SEMANTICS-005.a** — Candidate admission blames only a complete
-  `invalid` outcome, only its sole remote supplier, only while that
-  supplier's session is ready, and only on Nexus or when the outcome carries
-  a parent carrier link.
-- **NODE-SEMANTICS-005.b** — A child-chain candidate rejected as `invalid`
-  without a parent carrier link blames no one.
+  `proofOfWorkInvalid` outcome (a header that proves no work the chain
+  accepts), only its sole remote supplier, and only while that supplier's
+  session is ready.
+- **NODE-SEMANTICS-005.b** — Every other refusal blames no one, and so does a
+  bootstrap: a genesis that misses its own target is the content's fault,
+  not its server's.
 - **NODE-SEMANTICS-005.c** — Authenticated parent evidence establishes parent
   facts; it never vouches for a child transition.
   Gap: #213

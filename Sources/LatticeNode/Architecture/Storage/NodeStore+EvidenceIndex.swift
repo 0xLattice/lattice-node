@@ -38,7 +38,8 @@ struct ImportCarrierEvidence: Sendable {
 /// admission. They remain separate from chain facts because replay does not
 /// need them, but NodeStore commits both in one SQLite transaction.
 struct ImportHierarchyArtifacts: Sendable {
-    let carrierLink: ParentCarrierLink
+    /// The admitted block that issues these facts.
+    let blockCID: String
     let carrierEvidence: ImportCarrierEvidence?
     let parentGenesisLinks: [ParentGenesisLink]
 }
@@ -70,13 +71,14 @@ struct ChildEvidencePinsDirtyRow: NodeStoreRecord {
 }
 
 struct PreparedImportHierarchyArtifacts {
-    let carrierLink: ParentCarrierLink
+    let blockCID: String
     let carrierEvidence: PreparedImportCarrierEvidence?
     let parentGenesisLinks: [(link: ParentGenesisLink, payload: Data)]
 }
 
+/// The accepted block whose admission issued `parentGenesisLinks`.
 private struct PersistedParentFactSource: Codable {
-    let carrierLink: ParentCarrierLink
+    let blockCID: String
     let parentGenesisLinks: [ParentGenesisLink]
 }
 
@@ -213,32 +215,16 @@ extension NodeStore {
         carrierCIDs: Set<String>
     ) async throws -> PreparedImportHierarchyArtifacts? {
         guard let artifacts else { return nil }
-        let link = artifacts.carrierLink
-        guard !link.carrierCID.isEmpty,
-              !link.rootCID.isEmpty,
-              link.parentPath == chainPath,
-              carrierCIDs.contains(link.carrierCID) else {
+        let blockCID = artifacts.blockCID
+        guard !blockCID.isEmpty, carrierCIDs.contains(blockCID) else {
             throw NodeStoreError.invalidConfiguration(
                 "issued hierarchy artifacts are outside their admission batch"
             )
         }
-        if link.rootCID == link.carrierCID {
-            // A self-rooted carrier is a self-contained genesis (the Nexus root
-            // OR a self-mined child genesis): it satisfies its own PoW and is
-            // authorized by the parent's recorded GenesisAction, never by a
-            // carrier proof. It must therefore carry no evidence.
-            if artifacts.carrierEvidence != nil {
-                throw NodeStoreError.invalidConfiguration(
-                    "a self-rooted carrier must not carry parent evidence"
-                )
-            }
-        } else if chainPath.count == 1 {
+        // Nexus is its own root: its blocks never carry parent evidence.
+        if chainPath.count == 1, artifacts.carrierEvidence != nil {
             throw NodeStoreError.invalidConfiguration(
-                "Nexus carrier evidence must be rooted at its carrier"
-            )
-        } else if artifacts.carrierEvidence == nil {
-            throw NodeStoreError.invalidConfiguration(
-                "child carrier evidence requires its authenticated parent proof"
+                "Nexus blocks carry no parent evidence"
             )
         }
 
@@ -250,15 +236,15 @@ extension NodeStore {
         if let evidence = artifacts.carrierEvidence {
             carrierEvidence = try await prepareCarrierEvidence(
                 evidence,
-                expectedChildCIDs: Set([link.carrierCID]),
-                expectedRootCID: link.rootCID
+                expectedChildCIDs: Set([blockCID]),
+                expectedRootCID: nil
             )
         } else {
             carrierEvidence = nil
         }
 
         return PreparedImportHierarchyArtifacts(
-            carrierLink: link,
+            blockCID: blockCID,
             carrierEvidence: carrierEvidence,
             parentGenesisLinks: parentGenesisLinks
         )
@@ -440,7 +426,7 @@ extension NodeStore {
             try persistCarrierEvidence(evidence)
         }
         try persistParentFacts(
-            link: artifacts.carrierLink,
+            blockCID: artifacts.blockCID,
             parentGenesisLinks: artifacts.parentGenesisLinks
         )
     }
@@ -461,15 +447,15 @@ extension NodeStore {
         )
     }
 
-    /// Only genesis facts are issued: a carrier link has no reader, so a
-    /// carrier with no genesis links leaves no fact and no source.
+    /// Only genesis facts are issued: a block with no genesis links leaves
+    /// no fact and no source.
     private func persistParentFacts(
-        link: ParentCarrierLink,
+        blockCID: String,
         parentGenesisLinks: [(link: ParentGenesisLink, payload: Data)]
     ) throws {
         guard !parentGenesisLinks.isEmpty else { return }
         let source = PersistedParentFactSource(
-            carrierLink: link,
+            blockCID: blockCID,
             parentGenesisLinks: parentGenesisLinks.map(\.link)
         )
         try database.execute(
@@ -489,16 +475,16 @@ extension NodeStore {
     func persistIssuedHierarchyArtifacts(
         _ artifacts: ImportHierarchyArtifacts
     ) async throws {
-        let link = artifacts.carrierLink
+        let blockCID = artifacts.blockCID
         if !artifacts.parentGenesisLinks.isEmpty,
-           try !hasConnectedAcceptedBlock(link.carrierCID) {
+           try !hasConnectedAcceptedBlock(blockCID) {
             throw NodeStoreError.invalidConfiguration(
                 "genesis authority requires a connected parent block"
             )
         }
         guard let prepared = try await prepareHierarchyArtifacts(
             artifacts,
-            carrierCIDs: [link.carrierCID]
+            carrierCIDs: [blockCID]
         ) else {
             throw NodeStoreError.corrupt("missing issued hierarchy artifacts")
         }
@@ -863,12 +849,7 @@ extension NodeStore {
                 from: payload
             )
             guard try Self.encode(source) == payload,
-                  source.carrierLink.parentPath == chainPath,
-                  !source.carrierLink.carrierCID.isEmpty,
-                  !source.carrierLink.rootCID.isEmpty,
-                  chainPath.count > 1
-                    || source.carrierLink.carrierCID
-                        == source.carrierLink.rootCID else {
+                  !source.blockCID.isEmpty else {
                 throw NodeStoreError.corrupt("invalid parent-fact source")
             }
             let sortedGenesis = Array(Set(source.parentGenesisLinks)).sorted {
@@ -883,9 +864,7 @@ extension NodeStore {
                           && !$0.parentStateCID.isEmpty
                   }),
                   !source.parentGenesisLinks.isEmpty,
-                  connectedAcceptedBlocks.contains(
-                        source.carrierLink.carrierCID
-                    ) else {
+                  connectedAcceptedBlocks.contains(source.blockCID) else {
                 throw NodeStoreError.corrupt("invalid genesis-fact source")
             }
             for link in source.parentGenesisLinks {

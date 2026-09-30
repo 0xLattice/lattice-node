@@ -20,6 +20,8 @@ public enum NexusGenesis {
     )
     public static let config = GenesisConfig(
         spec: spec,
+        // FLAG DAY: set to the real launch time. Changing it changes
+        // `expectedBlockHash` (and every CID derived from the genesis).
         timestamp: 0
     )
 

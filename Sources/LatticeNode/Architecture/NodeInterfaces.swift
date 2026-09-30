@@ -25,7 +25,7 @@ public struct ChildCandidateRequestContext: Sendable {
 
 /// What `ChainService` needs from the network runtime.
 public protocol NetworkInterface: AnyObject, Sendable {
-    /// A carrier-linked admission under `package` outside the runtime's
+    /// An accepted admission under `package` outside the runtime's
     /// candidate worker (a co-hosted parent's mined grind): announce the
     /// child-evidence index root it may have changed, as the worker does.
     func announceCarriedEvidence(_ package: AuthenticatedChildPackage) async

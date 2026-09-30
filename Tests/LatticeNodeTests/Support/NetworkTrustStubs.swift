@@ -30,7 +30,6 @@ func duplicateNetworkHandlers() -> ClosureChainInterface {
     ClosureChainInterface(admission: { _ in
         NodeImportOutcome(
             decision: .duplicate,
-            parentCarrierLink: nil,
             sameChainPredecessor: nil
         )
     })

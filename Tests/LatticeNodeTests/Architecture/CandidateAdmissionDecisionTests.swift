@@ -31,9 +31,9 @@ final class CandidateAdmissionDecisionTests: XCTestCase {
     private static let decisions: [NodeImportDecision] = unavailable + [
         .canonicalized(commit),
         .acceptedSide(commit),
-        .carrier,
         .duplicate,
         .temporarilyInvalid,
+        .proofOfWorkInvalid,
         .invalid,
         .localFailure,
     ]
@@ -42,27 +42,19 @@ final class CandidateAdmissionDecisionTests: XCTestCase {
         let complete: Bool
         let soleSupplier: String?
         let ready: Bool
-        let isNexus: Bool
-        let hasCarrierLink: Bool
     }
 
-    /// Every combination of the attribution and chain inputs.
+    /// Every combination of the attribution inputs.
     private static let inputs: [Inputs] = {
         var result: [Inputs] = []
         for complete in [false, true] {
             for soleSupplier in [nil, "supplier"] as [String?] {
                 for ready in [false, true] {
-                    for isNexus in [false, true] {
-                        for hasCarrierLink in [false, true] {
-                            result.append(Inputs(
-                                complete: complete,
-                                soleSupplier: soleSupplier,
-                                ready: ready,
-                                isNexus: isNexus,
-                                hasCarrierLink: hasCarrierLink
-                            ))
-                        }
-                    }
+                    result.append(Inputs(
+                        complete: complete,
+                        soleSupplier: soleSupplier,
+                        ready: ready
+                    ))
                 }
             }
         }
@@ -74,9 +66,7 @@ final class CandidateAdmissionDecisionTests: XCTestCase {
             decision,
             complete: inputs.complete,
             soleSupplier: inputs.soleSupplier,
-            supplierHasReadySession: inputs.ready,
-            isNexus: inputs.isNexus,
-            hasCarrierLink: inputs.hasCarrierLink
+            supplierHasReadySession: inputs.ready
         )
     }
 
@@ -96,9 +86,14 @@ final class CandidateAdmissionDecisionTests: XCTestCase {
         }
     }
 
-    func testCarrierDuplicateTemporarilyInvalidAndAcceptedNeverBlame() {
+    /// Only a header that proves no work blames its sender: a plain
+    /// invalidity (a bad transition, malformed evidence, a rule the chain
+    /// does not accept here) blames no one.
+    ///
+    /// Establishes: NODE-SEMANTICS-005.b
+    func testInvalidDuplicateTemporarilyInvalidAndAcceptedNeverBlame() {
         let decisions: [NodeImportDecision] = [
-            .carrier, .duplicate, .temporarilyInvalid,
+            .invalid, .duplicate, .temporarilyInvalid,
             .canonicalized(Self.commit), .acceptedSide(Self.commit),
         ]
         for decision in decisions {
@@ -108,21 +103,20 @@ final class CandidateAdmissionDecisionTests: XCTestCase {
         }
     }
 
-    /// Every row of the table: blame exactly when the decision is `invalid`,
-    /// the fetch was complete, one remote peer supplied it, that peer's
-    /// session is ready, and the chain is Nexus or the outcome carries a
-    /// parent carrier link. The blamed peer is that supplier.
+    /// Every row of the table: blame exactly when the decision is
+    /// `proofOfWorkInvalid`, the fetch was complete, one remote peer supplied
+    /// it, and that peer's session is ready. The blamed peer is that
+    /// supplier.
     ///
     /// Establishes: NODE-SEMANTICS-005.a
-    func testOnlyACompleteInvalidFromItsSoleReadySupplierIsBlamed() {
+    func testOnlyACompleteProofOfWorkFailureFromItsSoleReadySupplierIsBlamed() {
         var blamedRows = 0
         for decision in Self.decisions {
             for inputs in Self.inputs {
-                let attributable = decision == .invalid
+                let attributable = decision == .proofOfWorkInvalid
                     && inputs.complete
                     && inputs.soleSupplier != nil
                     && inputs.ready
-                    && (inputs.isNexus || inputs.hasCarrierLink)
                 XCTAssertEqual(
                     blame(decision, inputs),
                     attributable ? inputs.soleSupplier : nil,
@@ -131,22 +125,7 @@ final class CandidateAdmissionDecisionTests: XCTestCase {
                 if attributable { blamedRows += 1 }
             }
         }
-        // Nexus with or without a link, or a child chain with one.
-        XCTAssertEqual(blamedRows, 3)
-    }
-
-    /// Establishes: NODE-SEMANTICS-005.b
-    func testAChildChainInvalidWithoutACarrierLinkBlamesNoOne() {
-        for inputs in Self.inputs where !inputs.isNexus && !inputs.hasCarrierLink {
-            XCTAssertNil(blame(.invalid, inputs), "\(inputs)")
-        }
-        XCTAssertEqual(
-            blame(.invalid, Inputs(
-                complete: true, soleSupplier: "supplier", ready: true,
-                isNexus: false, hasCarrierLink: true
-            )),
-            "supplier"
-        )
+        XCTAssertEqual(blamedRows, 1)
     }
 
     // MARK: - Resolution
@@ -202,7 +181,7 @@ final class CandidateAdmissionDecisionTests: XCTestCase {
             (.acceptedSide(Self.commit), "connected"),
             (.duplicate, "connected"),
             (.temporarilyInvalid, "wait later"),
-            (.carrier, "terminal"),
+            (.proofOfWorkInvalid, "terminal"),
             (.invalid, "terminal"),
             (.localFailure, "terminal"),
         ]

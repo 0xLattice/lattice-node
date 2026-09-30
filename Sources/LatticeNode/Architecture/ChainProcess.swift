@@ -32,11 +32,8 @@ public struct ChainProcessStatus: Sendable, Equatable {
     public let revision: UInt64?
 }
 
-/// The result must be routed immediately when `parentCarrierLink` is present;
-/// the link is authenticated evidence, not local consensus state.
 public struct NodeImportOutcome: Sendable {
     public let decision: NodeImportDecision
-    public let parentCarrierLink: ParentCarrierLink?
     public let sameChainPredecessor: SameChainPredecessorRequirement?
     let canonicalCommitReceipt: CanonicalCommitReceipt?
     /// For a block refused as not yet valid, the block's timestamp in
@@ -45,13 +42,11 @@ public struct NodeImportOutcome: Sendable {
 
     init(
         decision: NodeImportDecision,
-        parentCarrierLink: ParentCarrierLink?,
         sameChainPredecessor: SameChainPredecessorRequirement?,
         canonicalCommitReceipt: CanonicalCommitReceipt? = nil,
         notBefore: Int64? = nil
     ) {
         self.decision = decision
-        self.parentCarrierLink = parentCarrierLink
         self.sameChainPredecessor = sameChainPredecessor
         self.canonicalCommitReceipt = canonicalCommitReceipt
         self.notBefore = notBefore
@@ -99,8 +94,7 @@ struct DurableLocalTransaction: Sendable {
 }
 
 /// One process owns one absolute chain path. Child processes have an explicit
-/// pre-genesis phase so target-miss carriers can relay deeper accepted work
-/// without inventing local chain state.
+/// pre-genesis phase that holds no local chain state.
 public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     enum RuntimePhase: Sendable {
         case awaitingGenesis
@@ -312,13 +306,13 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             validationContentStorer: importStorage,
             materializedVolumeStorer: importStorage,
             stage: { context in
-                let hierarchyArtifacts = context.issuedCarrierLink.map {
-                    ImportHierarchyArtifacts(
-                        carrierLink: $0,
+                let hierarchyArtifacts = context.issuesHierarchyFacts
+                    ? ImportHierarchyArtifacts(
+                        blockCID: header.rawCID,
                         carrierEvidence: nil,
                         parentGenesisLinks: context.parentGenesisLinks
                     )
-                }
+                    : nil
                 try await Self.persist(
                     context.batch,
                     importStorage: importStorage,
@@ -403,7 +397,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     chainPath: configuration.chainPath,
                     childCID: blockHeader.rawCID
                 )),
-                parentCarrierLink: nil,
                 sameChainPredecessor: nil
             )
         }
@@ -417,30 +410,8 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             fetcher: attemptFetcher
         )
         if let predecessorCID = bootstrapCandidate.parent?.rawCID {
-            let relayLink: ParentCarrierLink
-            switch await package.verifiedCarrierLink(
-                child: bootstrapCandidate,
-                chainPath: configuration.chainPath
-            ) {
-            case .success(let link):
-                relayLink = link
-            case .failure(.crossChainEvidenceRequired(let requirement)):
-                return NodeImportOutcome(
-                    decision: .unavailable(requirement),
-                    parentCarrierLink: nil,
-                    sameChainPredecessor: nil
-                )
-            case .failure(.malformedEvidence),
-                 .failure(.protocolInvalid):
-                return NodeImportOutcome(
-                    decision: .invalid,
-                    parentCarrierLink: nil,
-                    sameChainPredecessor: nil
-                )
-            }
             return NodeImportOutcome(
                 decision: .unavailable(nil),
-                parentCarrierLink: relayLink,
                 sameChainPredecessor: SameChainPredecessorRequirement(
                     descendantCID: blockHeader.rawCID,
                     predecessorCID: predecessorCID
@@ -456,16 +427,15 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         )
         let stage: @Sendable (BlockImportStagingContext) async throws -> Void = {
             context in
-            let hierarchyArtifacts: ImportHierarchyArtifacts?
-            if let link = context.issuedCarrierLink {
-                hierarchyArtifacts = ImportHierarchyArtifacts(
-                    carrierLink: link,
-                    carrierEvidence: carrierEvidence,
+            // A self-contained genesis is its own root: the facts it issues
+            // carry no parent evidence.
+            let hierarchyArtifacts = context.issuesHierarchyFacts
+                ? ImportHierarchyArtifacts(
+                    blockCID: blockHeader.rawCID,
+                    carrierEvidence: nil,
                     parentGenesisLinks: context.parentGenesisLinks
                 )
-            } else {
-                hierarchyArtifacts = nil
-            }
+                : nil
             try Task.checkCancellation()
             try await Self.persist(
                 context.batch,
@@ -493,7 +463,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     childGenesisCID: blockHeader.rawCID,
                     parentStateCID: LatticeState.emptyHeader.rawCID
                 )),
-                parentCarrierLink: nil,
                 sameChainPredecessor: nil
             )
         }
@@ -506,8 +475,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             materializedVolumeStorer: importStorage,
             stage: stage
         )
-        let decision: NodeImportDecision
-        let link: ParentCarrierLink
+        let failure: BlockImportError
         switch result {
         case .accepted(let acceptance):
             runtimePhase = .active(acceptance.level)
@@ -527,34 +495,37 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             operationHeld = false
             return NodeImportOutcome(
                 decision: .canonicalized(commit),
-                parentCarrierLink: acceptance.parentCarrierLink,
                 sameChainPredecessor: nil,
                 canonicalCommitReceipt: receipt
             )
-        // A genesis this chain did not accept records nothing: its carrier
-        // evidence has no reader here.
-        case .carrier(let resultLink):
-            decision = .carrier
-            link = resultLink
-        case .rejected(let failure, let resultLink):
-            decision = NodeImportDecision(failure)
-            link = resultLink
+        // A genesis this chain did not accept records nothing.
+        case .rejected(let rejection):
+            failure = rejection
         }
         releaseOperation()
         operationHeld = false
         return NodeImportOutcome(
-            decision: decision,
-            parentCarrierLink: link,
+            decision: Self.bootstrapDecision(failure),
             sameChainPredecessor: nil
         )
     }
 
+    /// A bootstrap refusal blames no peer. A genesis that misses its own
+    /// target is the content's fault, not its server's, so its
+    /// `.proofOfWorkInvalid` is reported as a plain, blameless `.invalid`.
+    nonisolated static func bootstrapDecision(
+        _ failure: BlockImportError
+    ) -> NodeImportDecision {
+        let decision = NodeImportDecision(failure)
+        return decision == .proofOfWorkInvalid ? .invalid : decision
+    }
+
     /// Whether an admission decided the block: accepted (made durable by
     /// `stage`), a duplicate of one, or refused for a reason no retry would
-    /// change — the grind that carried it missed this chain's target (a
-    /// carrier for deeper chains only, which merged mining produces every
-    /// round it clears only a deeper target), the block or its evidence is
-    /// invalid, or this node could not verify it. Decided is exactly the set
+    /// change — the grind that carried it missed this chain's target (which
+    /// merged mining produces every round it clears only a deeper target),
+    /// the block or its evidence is invalid, or this node could not verify
+    /// it. Decided is exactly the set
     /// the candidate fetcher never retries, by the same predicate: what it
     /// would retry (evidence not yet held, a rule not yet met) is a deferral.
     /// A deferral persists nothing.
@@ -618,18 +589,16 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             mode: mode
         )
         // Keep all remote acquisition before the one serial durability lane.
-        // A ready token may gain a carrier link when its predecessor commits.
-        let mayIssueCarrierLink: Bool
+        // A refused block records no evidence.
+        let mayRecordEvidence: Bool
         switch preflight {
-        case .ready:
-            mayIssueCarrierLink = true
-        case .duplicate:
-            mayIssueCarrierLink = true
+        case .ready, .duplicate:
+            mayRecordEvidence = true
         case .terminal(let result, _):
-            mayIssueCarrierLink = result.parentCarrierLink != nil
+            mayRecordEvidence = result.failure == nil
         }
         let carrierEvidence: ImportCarrierEvidence?
-        if mayIssueCarrierLink, authenticatedPackage != nil {
+        if mayRecordEvidence, authenticatedPackage != nil {
             carrierEvidence = try await Self.canonicalCarrierEvidence(
                 blockHeader,
                 authenticatedPackage: authenticatedPackage,
@@ -712,24 +681,20 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                         )
                     )
                     // The weighed tier suppressed hierarchy issuance; validation
-                    // re-derives it, and Lattice hands the carrier link back in the
-                    // staging context. Persist it exactly as the eager path does so
-                    // a cold-synced parent relays securing proofs for children
-                    // anchored in below-tip blocks.
+                    // re-derives it, and Lattice says so in the staging
+                    // context. Persist it exactly as the eager path does.
                     // Persisted BEFORE the marker flips: a crash (or a throw)
                     // between the two leaves a weighed block the walk simply
                     // re-validates (the artifact rows are INSERT OR IGNORE), never
-                    // a validated block whose carrier link is lost for good —
-                    // boot reconciliation checks the pin, not the link.
-                    if let hierarchyArtifacts = context.issuedCarrierLink.map({
-                        ImportHierarchyArtifacts(
-                            carrierLink: $0,
-                            carrierEvidence: carrierEvidence,
-                            parentGenesisLinks: context.parentGenesisLinks
-                        )
-                    }) {
+                    // a validated block whose issued facts are lost for good —
+                    // boot reconciliation checks the pin, not the facts.
+                    if context.issuesHierarchyFacts {
                         try await self.store.persistIssuedHierarchyArtifacts(
-                            hierarchyArtifacts
+                            ImportHierarchyArtifacts(
+                                blockCID: blockHeader.rawCID,
+                                carrierEvidence: carrierEvidence,
+                                parentGenesisLinks: context.parentGenesisLinks
+                            )
                         )
                     }
                     // Appended BEFORE the marker flips, for the same reason the
@@ -755,13 +720,13 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 }
                 return
             }
-            let hierarchyArtifacts = context.issuedCarrierLink.map {
-                ImportHierarchyArtifacts(
-                    carrierLink: $0,
+            let hierarchyArtifacts = context.issuesHierarchyFacts
+                ? ImportHierarchyArtifacts(
+                    blockCID: blockHeader.rawCID,
                     carrierEvidence: carrierEvidence,
                     parentGenesisLinks: context.parentGenesisLinks
                 )
-            }
+                : nil
             try await Self.persist(
                 context.batch,
                 importStorage: importStorage,
@@ -813,19 +778,18 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
 
         let decision = NodeImportDecision(result)
         let admissionStaged = result.commit != nil
-        // Only an ACCEPTED block records its carrier evidence: a carrier this
-        // chain refused, or one Lattice returned relay-only (`.carrier`), has
-        // no reader here, so it writes no edge, proof, fact or pin. A staged
-        // acceptance already wrote its evidence in `stage`. A disconnected
-        // accepted block is not yet a parent-fact issuer: its evidence goes
-        // here with no genesis facts, and a later duplicate retry promotes the
-        // exact genesis facts after the predecessor connects.
+        // Only an ACCEPTED block records its carrier evidence: a block this
+        // chain refused has no reader here, so it writes no edge, proof, fact
+        // or pin. A staged acceptance already wrote its evidence in `stage`.
+        // A disconnected accepted block is not yet a parent-fact issuer: its
+        // evidence goes here with no genesis facts, and a later duplicate
+        // retry promotes the exact genesis facts after the predecessor
+        // connects.
         if !admissionStaged || result.sameChainPredecessor != nil,
-           decision.isAccepted,
-           let link = result.parentCarrierLink {
+           decision.isAccepted {
             try await store.persistIssuedHierarchyArtifacts(
                 ImportHierarchyArtifacts(
-                    carrierLink: link,
+                    blockCID: blockHeader.rawCID,
                     carrierEvidence: carrierEvidence,
                     parentGenesisLinks: decision.isAccepted
                         && result.sameChainPredecessor == nil
@@ -862,7 +826,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         }
         return NodeImportOutcome(
             decision: decision,
-            parentCarrierLink: result.parentCarrierLink,
             sameChainPredecessor: result.sameChainPredecessor,
             canonicalCommitReceipt: receipt,
             notBefore: notBefore

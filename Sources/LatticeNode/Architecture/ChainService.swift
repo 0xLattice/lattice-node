@@ -879,7 +879,7 @@ public actor ChainService {
             }
         )
         guard let block = await locallyStoredBlock(header) else {
-            // A target-miss carrier is intentionally not local chain state.
+            // A refused block is intentionally not local chain state.
             return outcome
         }
         _ = await handleImport(
@@ -1616,6 +1616,23 @@ public actor ChainService {
         // commits its own. No lease is held across the downward await.
         // Nexus is its own root: each hop is the whole proof.
         let admittedChildren = await handOffMined(carrier: candidate, upstream: nil)
+        // The template checked the grind against its search target, the
+        // easiest of the chains it carries. One that misses Nexus's own
+        // target is no Nexus block: it cleared only child targets, and those
+        // levels admitted it above. The same work stays open so the miner
+        // can keep searching it toward the harder targets it has not cleared
+        // yet, instead of abandoning the search at every child hit.
+        guard candidate.validateProofOfWork(
+            nexusHash: candidate.proofOfWorkHash()
+        ) else {
+            return SubmitWorkResponse(
+                accepted: false,
+                disposition: .carrier,
+                tipCID: await process.status().tipCID,
+                parentGenesisLinks: [],
+                durableChildProofs: admittedChildren
+            )
+        }
 
         await acquireOperation()
         var ownsOperation = true
@@ -1633,12 +1650,7 @@ public actor ChainService {
             header: header,
             outcome: outcome
         )
-        // A carrier cleared only child targets: the same work stays open so the
-        // miner can keep searching it toward the harder targets it has not
-        // cleared yet, instead of abandoning the search at every child hit.
-        if outcome.decision != .carrier {
-            await templates.discard(workID: request.workID)
-        }
+        await templates.discard(workID: request.workID)
 
         // The process enqueued this commit while preserving its own mutation
         // order. Release our gate before waiting because reconciliation must
@@ -1661,7 +1673,6 @@ public actor ChainService {
             accepted: accepted,
             disposition: WorkDisposition(outcome.decision),
             tipCID: status.tipCID,
-            parentCarrierLink: outcome.parentCarrierLink,
             parentGenesisLinks: effects.parentGenesisLinks,
             durableChildProofs: admittedChildren
         )
@@ -1731,7 +1742,7 @@ public actor ChainService {
             weighed: true
         )
         syncTrace("mined handoff \(header.rawCID.prefix(12)) decision=\(outcome.map { "\($0.decision)" } ?? "failed")")
-        if outcome?.parentCarrierLink != nil {
+        if outcome?.decision.isAccepted == true {
             await network.announceCarriedEvidence(package)
         }
         _ = await handOffMined(carrier: block, upstream: proof)
@@ -1985,7 +1996,7 @@ public actor ChainService {
                 executionWalkParkedCount += 1
                 scheduleExecutionWalkRetry()
                 return false
-            case .invalid, .localFailure, .carrier:
+            case .invalid, .proofOfWorkInvalid, .localFailure:
                 // Ordering / non-availability park: keep acting on the last
                 // validated tip. A later commit re-arms the walk; no self-retry
                 // (retrying an invalidity with no new fact would hot-loop).
@@ -2161,7 +2172,7 @@ public actor ChainService {
         // the parent reads.
         if outcome.decision.isAccepted {
             await pushChangedRuns(of: header.rawCID)
-            if outcome.parentCarrierLink != nil,
+            if !process.configuration.address.isNexus,
                let carriers = try? await process.incomingCarriers(
                    of: header.rawCID
                ), !carriers.isEmpty {
@@ -2866,10 +2877,10 @@ extension WorkDisposition {
         switch decision {
         case .canonicalized: self = .canonicalized
         case .acceptedSide: self = .acceptedSide
-        case .carrier: self = .carrier
         case .duplicate: self = .duplicate
         case .unavailable: self = .unavailable
         case .temporarilyInvalid: self = .temporarilyInvalid
+        case .proofOfWorkInvalid: self = .proofOfWorkInvalid
         case .invalid: self = .invalid
         case .localFailure: self = .localFailure
         }

@@ -4,10 +4,13 @@ import Lattice
 public enum NodeImportDecision: Sendable, Equatable {
     case canonicalized(ChainCommit)
     case acceptedSide(ChainCommit)
-    case carrier
     case duplicate
     case unavailable(CrossChainEvidenceRequirement?)
     case temporarilyInvalid
+    /// The header proves no work the chain accepts (Lattice
+    /// `.proofOfWorkInvalid`): the one refusal that blames its sender.
+    case proofOfWorkInvalid
+    /// Refused for a reason that blames no one.
     case invalid
     case localFailure
 
@@ -17,15 +20,13 @@ public enum NodeImportDecision: Sendable, Equatable {
             self = acceptance.commit.canonicalChanged
                 ? .canonicalized(acceptance.commit)
                 : .acceptedSide(acceptance.commit)
-        case .carrier:
-            self = .carrier
-        case .duplicate(_, _, let promotedCommit):
+        case .duplicate(_, let promotedCommit):
             if let promotedCommit, promotedCommit.canonicalChanged {
                 self = .canonicalized(promotedCommit)
             } else {
                 self = .duplicate
             }
-        case .rejected(let failure, _, _):
+        case .rejected(let failure, _):
             self.init(failure)
         }
     }
@@ -38,9 +39,10 @@ public enum NodeImportDecision: Sendable, Equatable {
             self = .unavailable(requirement)
         case .notYetValid:
             self = .temporarilyInvalid
-        case .notAcceptedAtCurrentChain:
-            self = .carrier
-        case .providerMalformedEvidence, .protocolInvalid:
+        case .proofOfWorkInvalid:
+            self = .proofOfWorkInvalid
+        case .providerMalformedEvidence, .protocolInvalid,
+             .notAcceptedAtCurrentChain:
             self = .invalid
         case .localVerificationFailure, .revisionExhausted:
             self = .localFailure

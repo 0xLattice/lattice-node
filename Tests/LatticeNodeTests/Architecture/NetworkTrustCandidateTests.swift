@@ -218,7 +218,6 @@ final class NetworkTrustCandidateTests: NetworkTrustTestCase {
                                 fromStateCID: LatticeState.emptyHeader.rawCID,
                                 toStateCID: Self.carriedParentState
                             )),
-                            parentCarrierLink: nil,
                             sameChainPredecessor: nil
                         )
                     }
