@@ -12,8 +12,7 @@ import cashew
 /// `WireProtocolFuzzTests` cover the adversarial direction (mutated bytes must
 /// be refused) from ONE hand-written seed per JSON decoder; this file covers
 /// the honest direction across the value space, and also the codecs the fuzz
-/// corpus does not reach: the child-evidence root and three hierarchy
-/// child-evidence JSON messages, the two binary hierarchy frames
+/// corpus does not reach: the child-evidence root, the two binary frames
 /// (`ParentTipContextMessage` with its `minimumWorkTrailer`,
 /// `ChildCandidateAvailableMessage` with its search witness), `ChainHello`,
 /// `ChildValidationPackageEnvelope`, `ChildEvidenceVolume`, and the RPC
@@ -81,20 +80,6 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
         let path = ["Nexus"] + (0..<extra).map { _ in randomAtom(&generator) }
         precondition(_isAbsoluteChainPath(path), "generator produced a bad path")
         return path
-    }
-
-    private func randomUUID(_ generator: inout SplitMix64) -> String {
-        let a = generator.next()
-        let b = generator.next()
-        // Version-4 / variant-1 shaped, lowercased: what the node emits.
-        return String(
-            format: "%08x-%04x-4%03x-8%03x-%012llx",
-            UInt32(truncatingIfNeeded: a),
-            UInt16(truncatingIfNeeded: a >> 32),
-            UInt16(truncatingIfNeeded: a >> 48) & 0xfff,
-            UInt16(truncatingIfNeeded: b) & 0xfff,
-            (b >> 16) & 0xffff_ffff_ffff
-        )
     }
 
     // MARK: - The property
@@ -296,88 +281,6 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
     func testChildEvidenceRootIsCanonical() throws {
         try assertCanonical(ChildEvidenceRootMessage.self, seed: 0x0f) { g in
             ChildEvidenceRootMessage(rootCID: self.randomCID(&g))
-        }
-    }
-
-    func testChildEvidenceAvailableIsCanonical() throws {
-        try assertCanonical(ChildEvidenceAvailableMessage.self, seed: 0x16) { g in
-            ChildEvidenceAvailableMessage(
-                childPath: self.randomChainPath(&g, minimumCount: 2),
-                sourceID: self.randomUUID(&g),
-                ordinal: UInt64.random(in: 1...UInt64.max, using: &g),
-                childCID: self.randomCID(&g),
-                rootCID: self.randomCID(&g),
-                attachmentCID: self.randomCID(&g)
-            )
-        }
-    }
-
-    func testParentEvidenceRequestIsCanonical() throws {
-        try assertCanonical(ParentEvidenceRequestMessage.self, seed: 0x40) { g in
-            ParentEvidenceRequestMessage(
-                requestID: self.nonZeroID(&g),
-                childPath: self.randomChainPath(&g, minimumCount: 2),
-                childCID: self.randomCID(&g)
-            )
-        }
-    }
-
-    func testChildEvidenceIndexRequestIsCanonical() throws {
-        try assertCanonical(ChildEvidenceIndexRequestMessage.self, seed: 0x17) { g in
-            let path = self.randomChainPath(&g, minimumCount: 2)
-            let requestID = self.nonZeroID(&g)
-            guard self.randomBool(&g) else {
-                // No source: the cursor must be zero and `through` absent.
-                return ChildEvidenceIndexRequestMessage(
-                    requestID: requestID, childPath: path,
-                    sourceID: nil, cursor: 0, through: nil
-                )
-            }
-            let cursor = UInt64.random(in: 0...(UInt64.max / 2), using: &g)
-            return ChildEvidenceIndexRequestMessage(
-                requestID: requestID,
-                childPath: path,
-                sourceID: self.randomUUID(&g),
-                cursor: cursor,
-                through: self.randomBool(&g)
-                    ? UInt64.random(in: cursor...UInt64.max, using: &g) : nil
-            )
-        }
-    }
-
-    func testChildEvidenceIndexResponseIsCanonical() throws {
-        try assertCanonical(ChildEvidenceIndexResponseMessage.self, seed: 0x18) { g in
-            let cursor = UInt64.random(in: 0...1_000_000, using: &g)
-            let through = cursor + UInt64(self.randomInt(&g, 0...200))
-            // Strictly increasing ordinals in (cursor, through]; `next` is the
-            // last one, or `through` for an empty page.
-            var ordinals: [UInt64] = []
-            var candidate = cursor
-            let wanted = self.randomInt(
-                &g, 0...ChildEvidenceIndexResponseMessage.maximumEntries
-            )
-            while ordinals.count < wanted {
-                candidate += UInt64(self.randomInt(&g, 1...3))
-                guard candidate <= through else { break }
-                ordinals.append(candidate)
-            }
-            let entries = ordinals.map { ordinal in
-                IssuedChildEvidenceSummary(
-                    ordinal: ordinal,
-                    childCID: self.randomCID(&g),
-                    rootCID: self.randomCID(&g),
-                    attachmentCID: self.randomCID(&g)
-                )
-            }
-            return ChildEvidenceIndexResponseMessage(
-                requestID: self.nonZeroID(&g),
-                childPath: self.randomChainPath(&g, minimumCount: 2),
-                sourceID: self.randomUUID(&g),
-                cursor: cursor,
-                through: through,
-                entries: entries,
-                next: ordinals.last ?? through
-            )
         }
     }
 

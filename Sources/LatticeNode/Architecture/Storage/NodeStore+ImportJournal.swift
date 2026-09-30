@@ -63,34 +63,23 @@ extension NodeStore {
         let factsInBatch = try Self.normalizedFacts(in: batch)
         let facts = factsInBatch.sorted { $0.key.lexicographicallyPrecedes($1.key) }
         let acceptedBlocks = try Self.acceptedBlocks(in: batch)
-        let pendingRoutes = Array(Set(persistence.pendingChildProofRoutes)).sorted {
-            ($0.carrierCID, $0.directory) < ($1.carrierCID, $1.directory)
-        }
         let carrierCIDs = Set(batch.facts.map { fact -> String in
             switch fact {
             case .block(let block): block.blockHash
             case .work(let work): work.blockHash
             // An exclusion is a standalone verdict on an already-durable block
-            // (no routes, artifacts, or carrier evidence ride with it), so its
-            // subject hash is inert for route gating here; carry it for
-            // consistency. The fact itself is still persisted via normalizedFacts
+            // (no artifacts or carrier evidence ride with it), so its subject
+            // hash is inert here; carry it for consistency. The fact itself is still persisted via normalizedFacts
             // so recovery replays it and rebuilds the excluded set.
             case .exclusion(let fact): fact.blockHash
             // A validation, like an exclusion, is a standalone judgment on an
-            // already-durable block: it rides with no routes, artifacts or
-            // carrier evidence, so its subject hash is inert for route gating.
+            // already-durable block: it rides with no artifacts or carrier
+            // evidence, so its subject hash is inert.
             // Carried for consistency; the fact is persisted via
             // normalizedFacts so recovery replays it.
             case .validation(let fact): fact.blockHash
             }
         })
-        guard pendingRoutes.allSatisfy({
-            carrierCIDs.contains($0.carrierCID) && !$0.directory.isEmpty
-        }) else {
-            throw NodeStoreError.invalidConfiguration(
-                "pending child-proof route is outside its admission batch"
-            )
-        }
         let preparedHierarchyArtifacts = try await prepareHierarchyArtifacts(
             persistence.hierarchyArtifacts,
             carrierCIDs: carrierCIDs
@@ -193,21 +182,6 @@ extension NodeStore {
                     if let indexUpdate {
                         try persistChildEvidenceRoot(indexUpdate)
                     }
-                    let admittedParentAttachments = [
-                        preparedHierarchyArtifacts?.carrierEvidence?
-                            .proofAttachment.rawCID,
-                        preparedIncomingCarrierEvidence?.proofAttachment.rawCID,
-                    ].compactMap { $0 }
-                    for attachmentCID in Set(admittedParentAttachments) {
-                        try deleteParentEvidenceInbox(attachmentCID: attachmentCID)
-                    }
-                    try persistPendingChildProofRouteRows(
-                        try pendingRoutesIncludingPreparedProofs(
-                            pendingRoutes,
-                            carrierCIDs: Set(acceptedBlocks.map(\.blockCID))
-                        ),
-                        capacity: persistence.pendingChildProofCapacity
-                    )
                     if let consensusRevisionFloor = persistence.consensusRevisionFloor {
                         try persistConsensusRevisionFloor(consensusRevisionFloor)
                     }
@@ -217,11 +191,6 @@ extension NodeStore {
             throw error
         }
         await finishChildEvidenceIndex(indexUpdate)
-        if preparedHierarchyArtifacts?.carrierEvidence != nil
-            || preparedIncomingCarrierEvidence != nil
-        {
-            await reconcileParentEvidenceInboxPruningProtection()
-        }
     }
 
     func stagedImports() async throws -> [StagedImport] {

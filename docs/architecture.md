@@ -12,13 +12,11 @@ lattice-node process
   Nexus level
     chain: Nexus
     overlay: 4001
-    hierarchy (dialed on loopback; firewall): 4002
     RPC: 127.0.0.1:8080
   Nexus/Payments level
     chain: Nexus/Payments
-    parent level: Nexus (in-process; evidence over 127.0.0.1:4002)
+    parent level: Nexus (in-process)
     overlay: 4101
-    hierarchy (dialed on loopback; firewall): 4102
     RPC: 127.0.0.1:8180
 ```
 
@@ -44,9 +42,7 @@ Examples:
 
 Nexus has no parent. Every child runs in the same `lattice-node` process as
 its whole ancestry, configured through `lattice.json` (`--config`): it reads its
-parent facts from the co-hosted parent level, and the host wires its parent
-endpoint to the parent level's hierarchy plane on loopback, which carries
-only child evidence.
+parent facts from the co-hosted parent level.
 
 ## Runtime components
 
@@ -58,7 +54,6 @@ LatticeNodeDaemon
   ├─ NodeStore             state.db: semantic facts, indexes, root references
   ├─ DiskBroker            volumes.db: materialized CAS volumes
   ├─ Ivy overlay           same-chain peers and content
-  ├─ Ivy hierarchy plane   child-evidence delivery, dialed on loopback
   └─ loopback HTTP         thin JSON adapter over ChainService
 ```
 
@@ -69,10 +64,9 @@ daemon runs them. `ChainService` reaches the runtime only through
 exposed to networking. `NodeStore` groups its tables by owner (import journal,
 block index, evidence index, candidate store, mempool journal, pruning).
 `NodeNetworkRuntime` is one actor whose code is split by concern into
-`+Lifecycle`, `+Overlay`, `+Hierarchy`, `+Candidates` (the `BlockFetcher`
-side), `+ReadURL`, and `+RangeSync`. Each plane's state lives in its own
-`OverlayState` or `HierarchyState`, per-peer state is a `PeerSet`, and one
-plane reaches another's state only through named seams. Every sleep in the node
+`+Lifecycle`, `+Overlay`, `+Candidates` (the `BlockFetcher` side),
+`+Genesis`, `+ReadURL`, and `+RangeSync`. The overlay's state lives in
+`OverlayState` and per-peer state is a `PeerSet`. Every sleep in the node
 library goes through `Timers`.
 
 `ChainProcess` is the sole block-import boundary (`importBlock`). Service and
@@ -97,46 +91,27 @@ to stall mining or RPC. Miner/RPC/reconciliation reads are local-only; remote
 content acquisition is explicit and root-scoped to network import or a
 targeted retry.
 
-Each network generation receives one immutable handler bundle before either
+Each network generation receives one immutable handler bundle before its
 listener starts. Candidate acquisition creates an explicit root-bound content
 session and passes that session through service ingress; provider identity,
 cache state, and attribution never depend on ambient task-local state.
 
 Ivy applies bounded transport admission before awaiting the runtime's inbound
-delegate, so peer work is backpressured at the transport boundary. On the
-private hierarchy plane, only the co-hosted parent level's key bypasses
-the receiver's local Tally admission; all normal hierarchy and overlay traffic
-remains reputation-gated, and the bypass grants no consensus authority.
-Its optional public-address discovery runs after listener readiness and never
-delays local RPC availability.
+delegate, so peer work is backpressured at the transport boundary. All
+overlay traffic remains reputation-gated. Its optional public-address
+discovery runs after listener readiness and never delays local RPC
+availability.
 
-## Two network planes
+## One network plane per chain
 
-The planes are deliberately separate:
-
-1. The public overlay admits peers that claim the same Nexus genesis and
-   absolute chain path. It carries block and transaction
-   Volume inventories plus content-addressed retrieval.
-2. The private hierarchy plane has no relay role. It is dialed on loopback
-   between a co-hosted parent level and its child levels (the listener binds
-   all interfaces, so firewall the hierarchy port), and carries only child
-   evidence: the evidence-available hint, the evidence index, the per-block
-   evidence request, and the evidence Volumes. The parent level's key is the
-   one parent; the child role goes only to the process key of the child
-   level the host runs for that directory, so a claimed path alone grants no
-   authority. Exact-CID exchange is explicitly enabled on this plane, but
-   only a connection that completed its own compatible hierarchy hello may
-   use it.
+Each level has one network plane, its public overlay. The overlay admits peers
+that claim the same Nexus genesis and absolute chain path. It carries block and
+transaction Volume inventories, the child-evidence index root, and
+content-addressed retrieval.
 
 Parent facts (genesis links and parent-state continuity), run reports, and
 merged-mining candidates pass in-process between co-hosted levels, never over
 a network plane.
-
-Hierarchy CAS reads are bounded, exact selections rather than database access:
-there is no enumeration or mutation API, the bytes are non-secret availability,
-and the receiver independently checks CIDs and Lattice evidence. A replacement
-connection must send a fresh hello even when it authenticates with the same
-key.
 
 A parent never waits on a child to serve a template. Each hosted child level
 keeps one pre-built candidate against its parent level's validated tip's
@@ -158,8 +133,7 @@ A candidate's content is retained by the chain that built it, as its own
 budgeted policy (`maximumRetainedCandidateOffers`, oldest offer first), never
 by a parent's reservation: the parent commits the candidate's block node it
 holds, and the carried block's import at the child later owns the roots
-the candidate pinned. Once the parent's evidence names a candidate carried,
-its row is a handoff and no wave of newer candidates evicts it. A candidate
+the candidate pinned. A candidate
 the parent never carried costs nothing for long; one evicted before its
 block landed is a lost fork, the cache-eviction outcome the design already
 takes. Every hierarchy level applies the same rule; nothing is relayed down.
@@ -167,11 +141,7 @@ takes. Every hierarchy level applies the same rule; nothing is relayed down.
 A miner learns its work is stale from one template digest, served by the
 template and by the status route alike: the validated tip, the mempool, and
 the child candidates held, so a fresh candidate at any level refreshes the
-miner's work within one status probe. A child's evidence index
-resumes from a durable `(source, ordinal)` cursor against one fixed cut; a
-changed parent store source restarts at zero. Validated attachments enter a
-durable inbox protected from VolumeBroker pruning before the cursor advances
-and leave it only after an import decides the block.
+miner's work within one status probe.
 
 ## Child genesis flow
 
@@ -207,11 +177,7 @@ There is no opaque genesis byte channel, and no parent block carries a child
 genesis.
 
 The process that directly parents an edge retains only its sparse commitment
-proof. Ordinary child validation Volumes remain child-chain data. Import stages a
-newly authorized child's proof route in the same transaction as its genesis
-link, because that child cannot authenticate before the authorization exists.
-The parent replays durable authorized-genesis availability when the child
-reconnects. An ancestor does not become an implicit archive for packages below
+proof. Ordinary child validation Volumes remain child-chain data. An ancestor does not become an implicit archive for packages below
 its direct children.
 
 Parent and child retain the same child-evidence proof attachment, but acquire it
@@ -223,20 +189,19 @@ The child never returns topology or derived work to its parent. Work is derived
 from the child proof and remains entirely inside the child process.
 
 An evidence Volume is one complete, one-entry Volume whose canonical manifest
-contains the child CID and proof envelope. Its Ivy request carries a local
-singleton/archive allocation bound even though those limits are not added to
-the wire protocol.
+contains the child CID and proof envelope.
 
 The permanent edge record is the reusable source for later outer-root
-attachments. The bounded prepared-proof store exists only to bridge a crash
-before first publication. Neither record is embedded as a backlink in a block.
+attachments. It is not embedded as a backlink in a block.
 
-Evidence discovery is only an index or live availability summary containing
-`child CID + root CID + attachment Volume CID`. The receiver fetches that
-complete Volume from the exact announcing session and verifies it locally.
-There is no second evidence request, proof-root request, or partial evidence
-response protocol; every `(child, root)` attachment is already one independent
-inventory entry, including noncanonical and repeated-child roots.
+Evidence discovery is the child-evidence index: `child CID -> root CID ->
+attachment Volume CID`, every node of it a Volume. A node announces its index
+root to same-chain overlay peers on hello and whenever it changes; a receiver
+walks a peer's index against its own, fetches the evidence Volumes it lacks as
+ordinary Volumes, and verifies them locally. There is no separate evidence
+request, proof-root request, or partial evidence response protocol; every
+`(child, root)` attachment is already one independent index entry, including
+noncanonical and repeated-child roots.
 
 ## Nexus bootstrap
 
@@ -269,7 +234,7 @@ lattice-miner workers
 lattice-mining-coordinator
   │ POST /v1/mining/work
   ▼
-lattice-node import → durability → overlay and child-proof publication
+lattice-node import → durability → overlay publication
 ```
 
 The node owns chain truth and template validity. The coordinator owns work
@@ -297,13 +262,9 @@ Each process directory contains:
 Import publishes each complete Volume, merge-retains its root, and only then
 commits the protocol fact that references it. A failed fact commit may leave a
 safe retained orphan. Import and issued hierarchy roots therefore grow
-merge-only while live. Prepared hierarchy evidence is different: it is a
-bounded cache, so one serialized store gate performs its Volume writes, SQLite
-capacity eviction, and exact retained-set advance as a single ordered
-operation. Under the exclusive startup lock, the node materializes protocol
-constants, derives the exact roots for import, issued hierarchy, and
-prepared hierarchy scopes, verifies every referenced Volume, populates the
-hierarchy scopes before removing legacy ownership, audits semantic indexes,
+merge-only while live. Under the exclusive startup lock, the node materializes
+protocol constants, derives the exact roots for the import and issued
+hierarchy scopes, verifies every referenced Volume, audits semantic indexes,
 and reconstructs the chain by replaying staged import batches. Networking
 starts afterward. Nexus also verifies the exact genesis CID.
 

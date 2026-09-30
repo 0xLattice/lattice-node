@@ -1,15 +1,17 @@
 import Foundation
 import XCTest
 
-/// Structural gate over the `NodeNetworkRuntime` plane extensions: overlay
-/// code (`+Overlay`, `+RangeSync`, `+ReadURL`) never touches
-/// `hierarchyState`, hierarchy code (`+Hierarchy`) never touches
+/// Structural gate over the `NodeNetworkRuntime` plane extensions. There is
+/// one network plane, the chain overlay (`+Overlay`, `+RangeSync`,
+/// `+ReadURL`); a child's genesis activation (`+Genesis`) reads the
+/// co-hosted parent level and fetches through the overlay's content source,
+/// and the fetcher side (`+Candidates`) admits blocks. Overlay code never
+/// touches the genesis activation state, genesis code never touches
 /// `overlayState`, neither touches the fetcher (`blockFetcher`,
-/// `candidateOfferDeferredByAdmission`), and the fetcher side
-/// (`+Candidates`) touches neither plane's state. The fetcher side reaches a
-/// plane through that plane's seam functions; overlay and hierarchy reach
-/// each other only by calling one of the named seams below, so every
-/// cross-plane dependency is listed here and nowhere else.
+/// `candidateOfferDeferredByAdmission`), and the fetcher side touches
+/// neither's state. Overlay and genesis reach each other only by calling
+/// one of the named seams below, so every cross-part dependency is listed
+/// here and nowhere else.
 ///
 /// Members are attributed by brace depth inside the file's
 /// `extension NodeNetworkRuntime`, scanned as code (`SwiftSource.code`):
@@ -20,18 +22,23 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
 
     private enum Plane: String {
         case overlay
-        case hierarchy
+        case genesis
         case fetcher
+
+        private static let genesisState = [
+            "genesisActivationTask", "genesisActivationRequested", "genesisRetryTask",
+        ]
+        private static let fetcherState = ["blockFetcher", "candidateOfferDeferredByAdmission"]
 
         /// State this plane's code never names.
         var foreignState: [String] {
             switch self {
             case .overlay:
-                return ["hierarchyState", "blockFetcher", "candidateOfferDeferredByAdmission"]
-            case .hierarchy:
-                return ["overlayState", "blockFetcher", "candidateOfferDeferredByAdmission"]
+                return Self.genesisState + Self.fetcherState
+            case .genesis:
+                return ["overlayState"] + Self.fetcherState
             case .fetcher:
-                return ["overlayState", "hierarchyState"]
+                return ["overlayState"] + Self.genesisState
             }
         }
     }
@@ -41,23 +48,18 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
         "NodeNetworkRuntime+Overlay.swift": .overlay,
         "NodeNetworkRuntime+RangeSync.swift": .overlay,
         "NodeNetworkRuntime+ReadURL.swift": .overlay,
-        "NodeNetworkRuntime+Hierarchy.swift": .hierarchy,
+        "NodeNetworkRuntime+Genesis.swift": .genesis,
         "NodeNetworkRuntime+Candidates.swift": .fetcher,
     ]
 
-    /// Hierarchy members overlay code may call.
-    private static let overlayToHierarchySeams: Set<String> = [
-        // An overlay hello or an admission makes child proofs worth another pass.
-        "scheduleChildProofRecovery",
-        // Serving and discovering read URLs includes the wired children's.
-        "anyChildDeclaredReadURL",
-        "declaredReadURLs",
+    /// Genesis members overlay code may call.
+    private static let overlayToGenesisSeams: Set<String> = [
         // A new same-chain peer may serve an adopting child its genesis.
         "overlayPeerMayProvideGenesis",
     ]
 
-    /// Overlay members hierarchy code may call.
-    private static let hierarchyToOverlaySeams: Set<String> = []
+    /// Overlay members genesis code may call.
+    private static let genesisToOverlaySeams: Set<String> = []
 
     private struct Member {
         let plane: Plane
@@ -137,18 +139,18 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
     }
 
     /// `file:line: member` for every line of `plane`'s members that names
-    /// state foreign to it, or (between overlay and hierarchy) a member of
+    /// state foreign to it, or (between overlay and genesis) a member of
     /// the other plane that is not one of the seams it may call.
     private func crossings(in members: [Member], from plane: Plane) throws -> [String] {
         var otherPlane: Plane?
         var seams: Set<String> = []
         switch plane {
         case .overlay:
-            otherPlane = .hierarchy
-            seams = Self.overlayToHierarchySeams
-        case .hierarchy:
+            otherPlane = .genesis
+            seams = Self.overlayToGenesisSeams
+        case .genesis:
             otherPlane = .overlay
-            seams = Self.hierarchyToOverlaySeams
+            seams = Self.genesisToOverlaySeams
         case .fetcher:
             otherPlane = nil
         }
@@ -193,20 +195,20 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
         extension NodeNetworkRuntime {
             func overlayWork() {
                 overlayState.rangeSync.clear()
-                // hierarchyState.receivedParentTip = nil
-                log("tip \\(hierarchyState.receivedParentTip)")
+                // genesisActivationRequested = false
+                log("tip \\(genesisActivationRequested)")
                 seam()
-                hierarchyOnly()
-                let hierarchyOnly = blockFetcher.tracks(cid)
+                genesisOnly()
+                let genesisOnly = blockFetcher.tracks(cid)
             }
             var overlayView: Int { 1 }
             nonisolated static func pure() -> Int { 1 }
         }
         """
-        let hierarchy = """
+        let genesis = """
         extension NodeNetworkRuntime {
             func seam() {}
-            private func hierarchyOnly() {
+            private func genesisOnly() {
                 if true {
                     overlayView
                     Self.pure()
@@ -218,33 +220,33 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
         extension NodeNetworkRuntime {
             func admit() {
                 blockFetcher.next()
-                hierarchyState.parentTipPushDirty = true
-                hierarchyOnly()
+                genesisActivationRequested = true
+                genesisOnly()
             }
         }
         """
         let members = try members(
             in: [
                 SourceFile(path: "o", text: overlay),
-                SourceFile(path: "h", text: hierarchy),
+                SourceFile(path: "g", text: genesis),
                 SourceFile(path: "f", text: fetcher),
             ]
-        ) { ["o": .overlay, "h": .hierarchy][$0] ?? .fetcher }
+        ) { ["o": .overlay, "g": .genesis][$0] ?? .fetcher }
         XCTAssertEqual(
             members.map { "\($0.file).\($0.name)" },
-            ["o.overlayWork", "o.overlayView", "o.pure", "h.seam", "h.hierarchyOnly", "f.admit"]
+            ["o.overlayWork", "o.overlayView", "o.pure", "g.seam", "g.genesisOnly", "f.admit"]
         )
         XCTAssertEqual(try crossings(in: members, from: .overlay), [
-            "o:5: overlayWork touches hierarchyState",
-            "o:6: overlayWork calls hierarchy seam",
-            "o:7: overlayWork calls hierarchy hierarchyOnly",
+            "o:5: overlayWork touches genesisActivationRequested",
+            "o:6: overlayWork calls genesis seam",
+            "o:7: overlayWork calls genesis genesisOnly",
             "o:8: overlayWork touches blockFetcher",
         ])
-        XCTAssertEqual(try crossings(in: members, from: .hierarchy), [
-            "h:5: hierarchyOnly calls overlay overlayView",
+        XCTAssertEqual(try crossings(in: members, from: .genesis), [
+            "g:5: genesisOnly calls overlay overlayView",
         ])
         XCTAssertEqual(try crossings(in: members, from: .fetcher), [
-            "f:4: admit touches hierarchyState",
+            "f:4: admit touches genesisActivationRequested",
         ])
     }
 
@@ -255,13 +257,13 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
         let overlay = #"""
         extension NodeNetworkRuntime {
             func overlayWork() {
-                let separator = "\\"; _ = hierarchyState
+                let separator = "\\"; _ = genesisRetryTask
             }
         }
         """#
         let members = try members(in: [SourceFile(path: "o", text: overlay)]) { _ in .overlay }
         XCTAssertEqual(try crossings(in: members, from: .overlay), [
-            "o:3: overlayWork touches hierarchyState",
+            "o:3: overlayWork touches genesisRetryTask",
         ])
     }
 
@@ -273,29 +275,29 @@ final class SafetyNetPlaneOwnershipGateTests: XCTestCase {
                 "no members found in \(file)"
             )
         }
-        let hierarchyNames = Set(members.filter { $0.plane == .hierarchy }.map(\.name))
+        let genesisNames = Set(members.filter { $0.plane == .genesis }.map(\.name))
         let overlayNames = Set(members.filter { $0.plane == .overlay }.map(\.name))
         XCTAssertEqual(
-            Self.overlayToHierarchySeams.subtracting(hierarchyNames), [],
-            "an overlay-to-hierarchy seam is no longer a hierarchy member"
+            Self.overlayToGenesisSeams.subtracting(genesisNames), [],
+            "an overlay-to-genesis seam is no longer a genesis member"
         )
         XCTAssertEqual(
-            Self.hierarchyToOverlaySeams.subtracting(overlayNames), [],
-            "a hierarchy-to-overlay seam is no longer an overlay member"
+            Self.genesisToOverlaySeams.subtracting(overlayNames), [],
+            "a genesis-to-overlay seam is no longer an overlay member"
         )
     }
 
-    func testOverlayReachesTheHierarchyOnlyThroughItsSeams() throws {
+    func testOverlayReachesGenesisOnlyThroughItsSeams() throws {
         XCTAssertEqual(
             try crossings(in: runtimeMembers(), from: .overlay), [],
-            "overlay code reaches hierarchy or fetcher state; add a named seam"
+            "overlay code reaches genesis or fetcher state; add a named seam"
         )
     }
 
-    func testHierarchyReachesTheOverlayOnlyThroughItsSeams() throws {
+    func testGenesisReachesTheOverlayOnlyThroughItsSeams() throws {
         XCTAssertEqual(
-            try crossings(in: runtimeMembers(), from: .hierarchy), [],
-            "hierarchy code reaches overlay or fetcher state; add a named seam"
+            try crossings(in: runtimeMembers(), from: .genesis), [],
+            "genesis code reaches overlay or fetcher state; add a named seam"
         )
     }
 

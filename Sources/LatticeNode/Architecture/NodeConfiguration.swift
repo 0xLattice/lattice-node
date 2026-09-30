@@ -30,24 +30,6 @@ public struct ChainAddress: Hashable, Sendable, CustomStringConvertible {
 
 }
 
-/// Where a child's hierarchy plane dials its parent: the co-hosted parent
-/// level's hierarchy plane (loopback, evidence only), wired by `ChainHost`.
-struct ParentEndpoint: Hashable, Sendable {
-    let publicKey: String
-    let host: String
-    let port: UInt16
-
-    init(publicKey: String, host: String, port: UInt16) {
-        self.publicKey = publicKey
-        self.host = host
-        self.port = port
-    }
-
-    var ivy: PeerEndpoint {
-        PeerEndpoint(publicKey: publicKey, host: host, port: port)
-    }
-}
-
 public enum NodeConfigurationError: Error, Equatable, CustomStringConvertible {
     case invalidChainPath
     case invalidPrivateKey
@@ -59,7 +41,7 @@ public enum NodeConfigurationError: Error, Equatable, CustomStringConvertible {
         case .invalidChainPath:
             "chain path must be Nexus-rooted, consensus-valid, and fit the setup wire frame"
         case .invalidPrivateKey: "process private key must be a 32-byte Ed25519 key"
-        case .invalidPorts: "overlay, fact-plane, and RPC ports must be nonzero and distinct"
+        case .invalidPorts: "overlay and RPC ports must be nonzero and distinct"
         case .invalidPublicReadURL:
             "the public read URL must be an absolute http(s) base URL with a host and no credentials, query, or fragment"
         }
@@ -73,16 +55,15 @@ public struct NodeConfiguration: Sendable {
     private let signingKeyBytes: [UInt8]
     public let processPublicKey: String
     public let listenPort: UInt16
-    public let factListenPort: UInt16
     public let rpcPort: UInt16
     public let bootstrapPeers: [PeerEndpoint]
-    /// The co-hosted parent level's hierarchy plane, which `ChainHost` wires for
-    /// every child; nil on Nexus.
-    private(set) var parentEndpoint: ParentEndpoint?
-    /// The process keys of the co-hosted child levels, by directory, which
-    /// `ChainHost` wires: only the key hosted for a directory is granted the
-    /// child role on the hierarchy plane.
-    private(set) var hostedChildKeys: [String: String] = [:]
+    /// The directories of the co-hosted child levels, which `ChainHost`
+    /// wires: this level announces their anchored geneses on its overlay.
+    private(set) var hostedChildDirectories: Set<String> = []
+    /// The public read URLs those child levels are configured with, by
+    /// directory: this level serves them to a read-endpoint ask for the
+    /// child genesis it anchored.
+    private(set) var hostedChildReadURLs: [String: String] = [:]
     public let minPeerKeyBits: Int
     /// Per-netgroup inbound/outbound overlay connection cap. Ivy buckets peers by
     /// the connection's observed remote host (/16), an anti-eclipse defense that
@@ -136,7 +117,6 @@ public struct NodeConfiguration: Sendable {
         storagePath: URL,
         privateKeyHex: String,
         listenPort: UInt16 = 4001,
-        factListenPort: UInt16 = 4002,
         rpcPort: UInt16 = 8080,
         bootstrapPeers: [PeerEndpoint] = [],
         minPeerKeyBits: Int = 0,
@@ -160,9 +140,8 @@ public struct NodeConfiguration: Sendable {
             throw NodeConfigurationError.invalidPrivateKey
         }
         guard listenPort != 0,
-              factListenPort != 0,
               rpcPort != 0,
-              Set([listenPort, factListenPort, rpcPort]).count == 3 else {
+              listenPort != rpcPort else {
             throw NodeConfigurationError.invalidPorts
         }
         // Operator input fails loudly (unlike wire ingest, which is tolerant):
@@ -184,7 +163,6 @@ public struct NodeConfiguration: Sendable {
             rawRepresentation: signingKey.publicKey.rawRepresentation
         ).hex
         self.listenPort = listenPort
-        self.factListenPort = factListenPort
         self.rpcPort = rpcPort
         self.bootstrapPeers = bootstrapPeers
         self.minPeerKeyBits = minPeerKeyBits
@@ -195,19 +173,12 @@ public struct NodeConfiguration: Sendable {
         self.resourcePolicy = resourcePolicy
     }
 
-    /// This child configuration dialing `parent`'s hierarchy plane.
-    func withParentEndpoint(_ parent: ParentEndpoint) -> NodeConfiguration {
-        precondition(!address.isNexus, "the Nexus level has no parent")
+    /// This configuration hosting the child level `directory`, configured
+    /// with the public read URL `publicReadURL`, if any.
+    func withHostedChild(directory: String, publicReadURL: String?) -> NodeConfiguration {
         var configuration = self
-        configuration.parentEndpoint = parent
-        return configuration
-    }
-
-    /// This configuration hosting the child level `directory`, whose
-    /// process key is `publicKey`.
-    func withHostedChild(directory: String, publicKey: String) -> NodeConfiguration {
-        var configuration = self
-        configuration.hostedChildKeys[directory] = publicKey
+        configuration.hostedChildDirectories.insert(directory)
+        configuration.hostedChildReadURLs[directory] = publicReadURL
         return configuration
     }
 

@@ -57,7 +57,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
         )
@@ -92,7 +91,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
         )
@@ -160,7 +158,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
         )
@@ -225,7 +222,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
         )
@@ -312,7 +308,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
         )
@@ -397,7 +392,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
         )
@@ -526,7 +520,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
         )
@@ -559,7 +552,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
         )
@@ -645,7 +637,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
         )
@@ -769,7 +760,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
         )
@@ -909,7 +899,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
         )
@@ -981,7 +970,6 @@ final class DaemonHTTPTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in },
             )
         )

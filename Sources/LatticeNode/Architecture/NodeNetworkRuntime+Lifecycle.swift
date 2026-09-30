@@ -7,8 +7,8 @@ import VolumeBroker
 import cashew
 
 extension NodeNetworkRuntime {
-    /// Installs both delegates and the recovered process's local content source
-    /// before either listener becomes visible. The private plane starts first.
+    /// Installs the delegate and the recovered process's local content source
+    /// before the listener becomes visible.
     public func start(
         process: ChainProcess,
         chain: any ChainInterface
@@ -68,54 +68,19 @@ extension NodeNetworkRuntime {
             delegate: self,
             contentSource: ChainProcessIvyContentSource(process: process)
         )
-        await hierarchy.install(
-            delegate: self,
-            contentSource: ChainProcessIvyContentSource(
-                process: process,
-                authorizes: { [weak self] peer in
-                    await self?.canServeHierarchyContent(to: peer) == true
-                }
-            )
-        )
         do {
-            let recoveredParentCandidates =
-                try await prepareParentEvidenceInbox(process: process)
-            try await Self.startPlanes(
-                startHierarchy: { try await self.hierarchy.start() },
-                startOverlay: { try await self.overlay.start() },
-                stopOverlay: { await self.overlay.stop() },
-                stopHierarchy: { await self.hierarchy.stop() }
-            )
+            do {
+                try await overlay.start()
+            } catch {
+                await overlay.stop()
+                throw error
+            }
             isRunning = true
             // Recovered seeds (the missing-predecessor frontier the reset
             // readied) run now: on a quiet network no later enqueue would
             // start the worker for them. The worker is fenced to this
             // generation by `startCandidateWorker`.
             serviceBlockFetcher()
-            for candidate in recoveredParentCandidates {
-                guard await enqueueInboxParentCandidate(
-                    candidate,
-                    generation: runtimeGeneration,
-                    process: process
-                ) else {
-                    throw NodeStoreError.corrupt(
-                        "durable parent evidence could not be replayed"
-                    )
-                }
-            }
-            // A peer may complete its hello while the listeners are starting.
-            // Replay the evidence-index pull after ingress becomes runnable so
-            // an early response cannot be the only copy we ever request.
-            if !configuration.address.isNexus {
-                await requestEvidenceIndex(
-                    generation: runtimeGeneration,
-                    process: process
-                )
-            }
-            scheduleChildProofRecovery(
-                generation: runtimeGeneration,
-                process: process
-            )
             scheduleGenesisProviderAnnounce(
                 generation: runtimeGeneration,
                 process: process
@@ -144,61 +109,18 @@ extension NodeNetworkRuntime {
         await operation.value
     }
 
-    private func prepareParentEvidenceInbox(
-        process: ChainProcess
-    ) async throws -> [CandidateSeed] {
-        var candidates: [CandidateSeed] = []
-        for item in try await process.store.parentEvidenceInbox() {
-            let directHop = await item.package.package.proof.directHop()
-            guard let childCID = directHop?.childCID else {
-                throw NodeStoreError.corrupt(
-                    "durable parent evidence could not be replayed"
-                )
-            }
-            // A parent-carried block is a network block: weighed on its
-            // proof, executed when fork choice would step into it.
-            candidates.append(CandidateSeed(
-                blockCID: childCID,
-                package: item.package,
-                weighed: true,
-                fromParent: true
-            ))
-        }
-        return candidates
-    }
-
-    func enqueueInboxParentCandidate(
-        _ candidate: CandidateSeed,
-        peer: AuthenticatedPeer? = nil,
-        generation: UInt64,
-        process: ChainProcess
-    ) async -> Bool {
-        await Timers.poll(every: .milliseconds(10), onCancel: false) {
-            guard isCurrentRuntime(generation: generation, process: process),
-                  peer.map({
-                      hierarchyState.hierarchyRecords[$0.key]?.session?.sessionID == $0.sessionID
-                        && hierarchyState.hierarchyRecords[$0.key]?.role == .parent
-                  }) ?? true else { return .done(false) }
-            return enqueueCandidate(candidate, generation: generation) ? .done(true) : .again
-        }
-    }
-
     private func stopNow() async {
         guard isRunning || process != nil else { return }
         _ = callbackEpoch.advance()
         runtimeGeneration = 0
         isRunning = false
-        await Self.stopPlanes(
-            stopOverlay: { await self.overlay.stop() },
-            stopHierarchy: { await self.hierarchy.stop() }
-        )
+        await overlay.stop()
         await clearRuntimeState()
     }
 
     private func clearRuntimeState() async {
         process = nil
         let removedOverlayRecords = overlayState.overlayRecords.removeAll()
-        let removedHierarchyRecords = hierarchyState.hierarchyRecords.removeAll()
         sessionLeases.servingReadEndpoints.removeAll()
         overlayState.readURLDiscovery.cache.removeAll()
         for inFlight in overlayState.readURLDiscovery.tasks.values {
@@ -211,26 +133,15 @@ extension NodeNetworkRuntime {
             pending.timeout.cancel()
             pending.continuation.resume(returning: [])
         }
-        for record in removedHierarchyRecords {
-            for waiter in record.evidence.waiters {
-                waiter.continuation.resume(returning: false)
-            }
-        }
         for record in removedOverlayRecords { record.helloDeadline?.task.cancel() }
-        for record in removedHierarchyRecords { record.helloDeadline?.task.cancel() }
         waitingCandidateRetryTask.cancel()
         for pending in overlayState.pendingTransactionInventories.values {
             pending.timeout.cancel()
         }
         overlayState.pendingTransactionInventories.removeAll()
         sessionLeases.activeTransactionVolumes.removeAll()
-        hierarchyState.childProofRecoveryTask.cancel()
         genesisAnnounceTask.cancel()
-        hierarchyState.genesisActivationRequested = false
-        hierarchyState.parentEvidenceOrphans.removeAll()
-        hierarchyState.orphansAwaitingRoom.removeAll()
-        hierarchyState.refetchedOrphans.removeAll()
-        hierarchyState.parentHelloReleaseSession = nil
+        genesisActivationRequested = false
         // Joined, not just cancelled: `Task.sleep` unwinds on cancellation but
         // an in-flight dial does not, and the search holds the ChainProcess
         // strongly, so an unjoined task can outlive stop() still holding the
@@ -241,39 +152,28 @@ extension NodeNetworkRuntime {
         await peerSearch?.value
         // Joined for the same reason: a genesis activation attempt holds
         // the ChainProcess and could persist the genesis after stop.
-        let genesisActivation = hierarchyState.genesisActivationTask.take()
-        let genesisRetry = hierarchyState.genesisRetryTask.take()
+        let genesisActivation = genesisActivationTask.take()
+        let genesisRetry = genesisRetryTask.take()
         genesisActivation?.cancel()
         genesisRetry?.cancel()
         await genesisActivation?.value
         await genesisRetry?.value
-        hierarchyState.childProofRecoveryNeedsRefresh = false
         sessionLeases.servingAcceptedLeaves.removeAll()
         sessionLeases.servingAncestorRange.removeAll()
         clearRangeSync()
         candidateWorker.cancel()
-        candidateOfferDeferredByAdmission = false
         blockFetcher.reset(
             retryWindow: planeConfigurations.overlay.requestTimeout
                 * Self.maximumCandidateWaitTicks
         )
-        hierarchyState.pendingEvidenceIndexes.removeAll()
         parentStateQueryGuard.removeAll()
         overlayState.rangeSync.reentryTask.cancel()
-        sessionLeases.activeEvidenceVolumes.removeAll()
-        wakeEvidenceSlotWaiters()
         overlayState.childEvidenceSync.cancel()
         overlayState.childEvidenceAnnounce.cancel()
         overlayState.childProofLookupCursor = nil
         overlayState.lastChildEvidencePeer = nil
         overlayState.childEvidenceAnnounceDirty = false
         overlayState.announcedChildEvidenceRoot = nil
-        parentEvidence.reset()
-        hierarchyState.refusedHintResendTask.cancel()
-        hierarchyState.refusedHintResendDirty = false
-        hierarchyState.evidenceRoundStarting = false
-        hierarchyState.childProofPathRotation = 0
-        hierarchyState.backfilledChildDirectories.removeAll()
         chain = nil
     }
 }

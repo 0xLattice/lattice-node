@@ -92,12 +92,6 @@ actor CanonicalCommitReceipt {
 typealias CanonicalCommitPublisher = @Sendable (ChainCommit) async
     -> CanonicalCommitReceipt
 
-struct DurableDirectChildProof: Sendable {
-    let directory: String
-    let childCID: String
-    let proof: ChildBlockProof
-}
-
 struct DurableLocalTransaction: Sendable {
     let transactionCID: String
     let addedAt: Int64
@@ -113,14 +107,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         case active(ChainLevel)
     }
 
-    private enum TargetedChildProofResolution: Sendable {
-        case absent
-        case prepared(PreparedChildProof)
-        case unavailable
-    }
-
-    private static let maximumDirectChildRoutes = 64
-    static let preparedChildProofCapacity = 16
     /// Page size for walking a child's incoming carrier-proof roots.
     private static let incomingCarrierProofRootPageSize = 257
 
@@ -340,7 +326,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     broker: self.broker,
                     retentionScope: self.retentionScope,
                     persistence: ImportPersistence(
-                        pendingChildProofCapacity: Self.preparedChildProofCapacity,
                         hierarchyArtifacts: hierarchyArtifacts
                     )
                 )
@@ -355,7 +340,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         _ blockHeader: BlockHeader,
         authenticatedChildPackage suppliedAuthenticatedChildPackage:
             AuthenticatedChildPackage? = nil,
-        preparingChildDirectories: [String] = [],
         remoteSource: (any ContentSource)? = nil,
         mode: ImportMode = .full,
         canonicalCommitPublisher: CanonicalCommitPublisher? = nil
@@ -368,13 +352,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 for: blockHeader.rawCID
             )
         }
-        let directChildDirectories = try validatedDirectChildDirectories(
-            preparingChildDirectories
-        )
-        let pendingChildProofRoutes = Self.pendingChildProofRoutes(
-            carrierCID: blockHeader.rawCID,
-            directories: directChildDirectories
-        )
 
         let package = authenticatedChildPackage?.package
         let attemptFetcher = try Self.attemptFetcher(
@@ -389,8 +366,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 level: level,
                 authenticatedPackage: authenticatedChildPackage,
                 attemptFetcher: attemptFetcher,
-                directChildDirectories: directChildDirectories,
-                pendingChildProofRoutes: pendingChildProofRoutes,
                 mode: mode,
                 canonicalCommitPublisher: canonicalCommitPublisher
             )
@@ -409,8 +384,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 level: level,
                 authenticatedPackage: authenticatedChildPackage,
                 attemptFetcher: attemptFetcher,
-                directChildDirectories: directChildDirectories,
-                pendingChildProofRoutes: pendingChildProofRoutes,
                 mode: mode,
                 canonicalCommitPublisher: canonicalCommitPublisher
             )
@@ -438,9 +411,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         // genesis attachment. That is an ordering dependency, not malformed
         // genesis. Keep the authenticated candidate parked behind its direct
         // predecessor so ordinary same-chain wake-up admits it after bootstrap.
-        // Nothing is persisted for it. Its evidence leaves the inbox as an
-        // in-memory orphan (it cannot decide until the predecessor arrives),
-        // fetched again from the parent once the predecessor is accepted.
+        // Nothing is persisted for it.
         let bootstrapCandidate = try await Self.resolvedCandidate(
             blockHeader,
             fetcher: attemptFetcher
@@ -503,14 +474,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 broker: self.broker,
                 retentionScope: self.retentionScope,
                 persistence: ImportPersistence(
-                    pendingChildProofRoutes: hierarchyArtifacts == nil
-                        ? []
-                        : Self.pendingChildProofRoutes(
-                            carrierCID: blockHeader.rawCID,
-                            directories: directChildDirectories,
-                            parentGenesisLinks: context.parentGenesisLinks
-                        ),
-                    pendingChildProofCapacity: Self.preparedChildProofCapacity,
                     hierarchyArtifacts: hierarchyArtifacts,
                     incomingCarrierEvidence: hierarchyArtifacts == nil
                         ? carrierEvidence
@@ -568,6 +531,8 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 sameChainPredecessor: nil,
                 canonicalCommitReceipt: receipt
             )
+        // A genesis this chain did not accept records nothing: its carrier
+        // evidence has no reader here.
         case .carrier(let resultLink):
             decision = .carrier
             link = resultLink
@@ -575,17 +540,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             decision = NodeImportDecision(failure)
             link = resultLink
         }
-        let evidence = try await Self.canonicalCarrierEvidence(
-            blockHeader,
-            authenticatedPackage: authenticatedChildPackage,
-            chainPath: configuration.chainPath,
-            fetcher: attemptFetcher
-        )
-        try await persistHierarchyArtifacts(
-            link,
-            carrierEvidence: evidence,
-            pendingChildProofRoutes: pendingChildProofRoutes
-        )
         releaseOperation()
         operationHeld = false
         return NodeImportOutcome(
@@ -603,15 +557,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// invalid, or this node could not verify it. Decided is exactly the set
     /// the candidate fetcher never retries, by the same predicate: what it
     /// would retry (evidence not yet held, a rule not yet met) is a deferral.
-    /// A deferral persists nothing. The block's evidence stays in the
-    /// parent-evidence inbox, replayed on restart, only while a parent fact
-    /// (its genesis or continuity answer) can decide it, so no stop or crash
-    /// between such a deferral and its retry loses it. Any other deferral
-    /// leaves the inbox as an in-memory orphan (`NodeStore.orphanParentEvidence`),
-    /// Bitcoin's orphan pool: lost with an eviction or a restart, it returns
-    /// through ordinary acquisition. A decision consumes the entry, relay or
-    /// no relay: an entry no retry is coming for would be re-admitted at
-    /// every start and, at capacity, refuse every later parent-carried block.
+    /// A deferral persists nothing.
     static func isDecided(_ result: BlockImportResult) -> Bool {
         let decision = NodeImportDecision(result)
         return !(decision.shouldRetryWhenEvidenceChanges || decision.shouldRetryLater)
@@ -659,8 +605,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         level: ChainLevel,
         authenticatedPackage: AuthenticatedChildPackage?,
         attemptFetcher: any Fetcher,
-        directChildDirectories: [String],
-        pendingChildProofRoutes: [PendingChildProofRoute],
         mode: ImportMode = .full,
         canonicalCommitPublisher: CanonicalCommitPublisher?
     ) async throws -> NodeImportOutcome {
@@ -726,7 +670,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                         broker: self.broker,
                         retentionScope: self.retentionScope,
                         persistence: ImportPersistence(
-                            pendingChildProofCapacity: Self.preparedChildProofCapacity,
                             consensusRevisionFloor: try Self.nextConsensusRevision(
                                 await level.chain.currentRevision()
                             )
@@ -771,8 +714,8 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     // The weighed tier suppressed hierarchy issuance; validation
                     // re-derives it, and Lattice hands the carrier link back in the
                     // staging context. Persist it exactly as the eager path does so
-                    // a cold-synced parent can serve child-proof routes and relay
-                    // securing proofs for children anchored in below-tip blocks.
+                    // a cold-synced parent relays securing proofs for children
+                    // anchored in below-tip blocks.
                     // Persisted BEFORE the marker flips: a crash (or a throw)
                     // between the two leaves a weighed block the walk simply
                     // re-validates (the artifact rows are INSERT OR IGNORE), never
@@ -786,13 +729,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                         )
                     }) {
                         try await self.store.persistIssuedHierarchyArtifacts(
-                            hierarchyArtifacts,
-                            pendingChildProofRoutes: Self.pendingChildProofRoutes(
-                                carrierCID: blockHeader.rawCID,
-                                directories: directChildDirectories,
-                                parentGenesisLinks: context.parentGenesisLinks
-                            ),
-                            pendingChildProofCapacity: Self.preparedChildProofCapacity
+                            hierarchyArtifacts
                         )
                     }
                     // Appended BEFORE the marker flips, for the same reason the
@@ -840,14 +777,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                         if case .header = mode { return .header }
                         return .executed
                     }(),
-                    pendingChildProofRoutes: hierarchyArtifacts == nil
-                        ? []
-                        : Self.pendingChildProofRoutes(
-                            carrierCID: blockHeader.rawCID,
-                            directories: directChildDirectories,
-                            parentGenesisLinks: context.parentGenesisLinks
-                    ),
-                    pendingChildProofCapacity: Self.preparedChildProofCapacity,
                     hierarchyArtifacts: hierarchyArtifacts,
                     incomingCarrierEvidence: hierarchyArtifacts == nil
                         ? carrierEvidence
@@ -884,35 +813,15 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
 
         let decision = NodeImportDecision(result)
         let admissionStaged = result.commit != nil
-        // A disconnected accepted block is not yet a parent-fact issuer, but
-        // its content-verified carrier remains valid relay data for deeper
-        // chains. Persist that relay with no genesis facts; a later duplicate
-        // retry promotes the exact genesis facts after the predecessor connects.
-        // Only for a DECIDED block: persisting the relay consumes the block's
-        // parent-evidence inbox entry, the one durable record that it is still
-        // to be admitted, so a deferral persists nothing and keeps that entry.
-        //
-        // A WEIGHED acceptance of a parent-carried block stages its incoming
-        // evidence, but Lattice issues no parent-process fact for a block it
-        // has not executed, so `stage` wrote no carrier link for it. The
-        // RELAY of its carriage is another matter: content-verified before
-        // any execution, owed to deeper chains whatever this chain makes of
-        // the block (a carrier it refused gets it too), and what child-proof
-        // recovery composes this block's outgoing proofs from. It goes here,
-        // with no genesis facts (validation issues those), under the same
-        // lease as the stage; the link is Lattice's to mint, so it cannot yet
-        // land in the stage's own write, and recovery tolerates the gap.
-        let relayUnissued: Bool
-        if admissionStaged, result.sameChainPredecessor == nil,
-           carrierEvidence != nil, let link = result.parentCarrierLink {
-            relayUnissued = try await store.issuedParentCarrierLink(
-                carrierCID: blockHeader.rawCID, rootCID: link.rootCID
-            ) == nil
-        } else {
-            relayUnissued = false
-        }
-        if (!admissionStaged || result.sameChainPredecessor != nil || relayUnissued),
-           Self.isDecided(result),
+        // Only an ACCEPTED block records its carrier evidence: a carrier this
+        // chain refused, or one Lattice returned relay-only (`.carrier`), has
+        // no reader here, so it writes no edge, proof, fact or pin. A staged
+        // acceptance already wrote its evidence in `stage`. A disconnected
+        // accepted block is not yet a parent-fact issuer: its evidence goes
+        // here with no genesis facts, and a later duplicate retry promotes the
+        // exact genesis facts after the predecessor connects.
+        if !admissionStaged || result.sameChainPredecessor != nil,
+           decision.isAccepted,
            let link = result.parentCarrierLink {
             try await store.persistIssuedHierarchyArtifacts(
                 ImportHierarchyArtifacts(
@@ -922,23 +831,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                         && result.sameChainPredecessor == nil
                         ? directParentGenesisLinks
                         : []
-                ),
-                pendingChildProofRoutes: Self.pendingChildProofRoutes(
-                    carrierCID: blockHeader.rawCID,
-                    directories: directChildDirectories,
-                    parentGenesisLinks: directParentGenesisLinks
-                ),
-                pendingChildProofCapacity: Self.preparedChildProofCapacity
-            )
-        }
-        // Decided with nothing persisted above — refused before a carrier
-        // link was derived (the block or its proof), or a duplicate whose
-        // promotion staged nothing — still consumes the inbox entry: no retry
-        // is coming for it.
-        if Self.isDecided(result), let authenticatedPackage {
-            try await store.consumeParentEvidence(
-                childCID: blockHeader.rawCID,
-                rootCID: authenticatedPackage.package.proof.rootCID
+                )
             )
         }
         // Only a canonical change is published: a side block's commit leaves
@@ -1605,269 +1498,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         )
     }
 
-    /// Pages authenticated root contexts for one local carrier. Nexus is its
-    /// own root; every child reuses its durable incoming-proof index.
-    func parentCarrierRootPage(
-        carrierCID: String,
-        afterRootCID: String?,
-        limit: Int
-    ) async throws -> [String] {
-        guard limit > 0 else { return [] }
-        if configuration.address.isNexus {
-            guard afterRootCID == nil,
-                  try await store.issuedParentCarrierLink(
-                    carrierCID: carrierCID,
-                    rootCID: carrierCID
-                  ) != nil else {
-                return []
-            }
-            return [carrierCID]
-        }
-        return try await store.incomingCarrierProofRoots(
-            childCID: carrierCID,
-            directory: configuration.address.directory,
-            afterRootCID: afterRootCID,
-            limit: limit
-        )
-    }
-
-    func prepareChildProofs(
-        for candidate: Block,
-        children selectedChildren: [DirectChildCandidate] = [],
-        capacity: Int
-    ) async throws -> [PreparedChildProof] {
-        try await acquireMutationOperation()
-        defer { releaseOperation() }
-        guard let children = candidate.children.node else {
-            throw ChainProcessError.malformedAuthenticatedChildProof
-        }
-        let rootHeader = try BlockHeader(node: candidate)
-        let selected = Dictionary(
-            selectedChildren.map { ($0.directory, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
-        var prepared: [PreparedChildProof] = []
-        for (directory, childHeader) in children.entries.sorted(by: {
-            $0.key < $1.key
-        }) {
-            guard let child = childHeader.node else {
-                throw ChainProcessError.malformedAuthenticatedChildProof
-            }
-            let childCID = try BlockHeader(node: child).rawCID
-            if let supplied = selected[directory] {
-                guard try BlockHeader(node: supplied.block).rawCID == childCID else {
-                    throw ChainProcessError.malformedAuthenticatedChildProof
-                }
-            }
-            let isChildGenesis = child.parent == nil
-            // Child geneses are self-contained and self-mined; a parent never
-            // carries a child genesis, so no bootstrap volume roots are staged.
-            let bootstrapRoots: [String] = []
-            prepared.append(try PreparedChildProof(
-                directory: directory,
-                childCID: childCID,
-                isChildGenesis: isChildGenesis,
-                bootstrapRoots: bootstrapRoots,
-                proof: try await ChildBlockProof.generate(
-                    rootHeader: rootHeader,
-                    childDirectory: directory,
-                    fetcher: localFetcher
-                )
-            ))
-        }
-        guard selected.keys.allSatisfy({ directory in
-            prepared.contains { $0.directory == directory }
-        }) else {
-            throw ChainProcessError.malformedAuthenticatedChildProof
-        }
-        try Task.checkCancellation()
-        try await store.persistPreparedChildProofs(
-            carrierCID: rootHeader.rawCID,
-            proofs: prepared,
-            capacity: capacity
-        )
-        return prepared
-    }
-
-    /// Targeted retry for authenticated direct-child routes. This never walks
-    /// or enumerates the complete child index.
-    func prepareChildProofs(
-        for carrier: BlockHeader,
-        directories: [String],
-        remoteSource: (any ContentSource)? = nil
-    ) async throws {
-        var directories = try validatedDirectChildDirectories(directories)
-        try await acquireMutationOperation()
-        do {
-            defer { releaseOperation() }
-            try Task.checkCancellation()
-            let available = Set(try await store.preparedChildProofs(
-                carrierCID: carrier.rawCID
-            ).map(\.directory)).union(try await store.publishedDirectChildProofs(
-                carrierCID: carrier.rawCID
-            ).map(\.directory))
-            directories.removeAll { available.contains($0) }
-            guard !directories.isEmpty else { return }
-            try await store.persistPendingChildProofRoutes(
-                carrierCID: carrier.rawCID,
-                directories: directories,
-                capacity: Self.preparedChildProofCapacity
-            )
-        }
-        _ = try await fetchPendingChildProofs(
-            carrier: carrier,
-            directories: directories,
-            fetcher: CoalescingFetcher(remoteSource.map {
-                CompositeContentSource([broker, $0])
-            } ?? broker)
-        )
-    }
-
-    /// Backfill securing-evidence issuance for one child directory across the
-    /// recent accepted-carrier window (the operator-configured
-    /// `NodeResourcePolicy.childEvidenceBackfillCarrierWindow`). Called when a
-    /// `.child` connects or a tracked child is recovered. Issuance is a
-    /// consequence of having admitted/validated the carrier — independent of
-    /// mining and of the child being a connected peer at admission. Reuses
-    /// `prepareChildProofs`: a carrier that does not commit the directory
-    /// resolves `.absent` and drops its route (self-cleaning), unavailable
-    /// content is retried by the ordinary pipeline. Never touches validation,
-    /// weight, or fork choice — the proof is still verified from content.
-    func backfillChildProofRoutes(
-        directory: String,
-        carrierLimit: Int? = nil,
-        remoteSource: (any ContentSource)? = nil
-    ) async {
-        let carrierLimit = carrierLimit
-            ?? configuration.resourcePolicy.childEvidenceBackfillCarrierWindow
-        let carriers: [String]
-        do {
-            carriers = try await store.recentAcceptedBlockCIDs(limit: carrierLimit)
-        } catch {
-            return
-        }
-        for carrierCID in carriers {
-            try? await prepareChildProofs(
-                for: BlockHeader(
-                    rawCID: carrierCID,
-                    node: nil,
-                    encryptionInfo: nil
-                ),
-                directories: [directory],
-                remoteSource: remoteSource
-            )
-        }
-    }
-
-    func pendingChildProofCarrierCIDs() async throws -> [String] {
-        await acquireOperation()
-        defer { releaseOperation() }
-        return Array(Set(
-            try await store.pendingChildProofRoutes().map(\.carrierCID)
-        )).sorted()
-    }
-
-    /// Retries one bounded carrier batch retained across a crash after remote
-    /// content is available again. Individual acquisition misses remain pending.
-    func retryPendingChildProofs(
-        carrierCID: String,
-        remoteSource: (any ContentSource)? = nil
-    ) async throws -> [String] {
-        try await acquireMutationOperation()
-        let directories: [String]
-        do {
-            defer { releaseOperation() }
-            directories = try await store.pendingChildProofRoutes()
-                .filter { $0.carrierCID == carrierCID }
-                .map(\.directory)
-                .sorted()
-        }
-        guard !directories.isEmpty else { return [] }
-        return try await fetchPendingChildProofs(
-            carrier: BlockHeader(
-                rawCID: carrierCID,
-                node: nil,
-                encryptionInfo: nil
-            ),
-            directories: directories,
-            fetcher: CoalescingFetcher(remoteSource.map {
-                CompositeContentSource([broker, $0])
-            } ?? broker)
-        )
-    }
-
-    func durableDirectChildProofs(
-        carrierCID: String,
-        rootCID: String,
-        directories: Set<String>? = nil
-    ) async throws -> [DurableDirectChildProof] {
-        var durable: [DurableDirectChildProof] = []
-        let retained = try await store.publishedDirectChildProofs(
-            carrierCID: carrierCID
-        )
-        for edge in retained
-        where directories?.contains(edge.directory) ?? true {
-            guard let evidence = try await store.issuedChildEvidence(
-                childCID: edge.childCID,
-                directory: edge.directory,
-                rootCID: rootCID
-            ) else {
-                throw ChainProcessError.malformedAuthenticatedChildProof
-            }
-            durable.append(DurableDirectChildProof(
-                directory: edge.directory,
-                childCID: edge.childCID,
-                proof: evidence.proof
-            ))
-        }
-        return durable
-    }
-
-    /// Returns whether this carrier's evidence was admitted before: then the
-    /// inbox holds no entry for it and there is nothing to admit again.
-    @discardableResult
-    func retainParentEvidence(
-        sourceID: String,
-        ordinal: UInt64,
-        attachment: ChildEvidenceVolume,
-        package: AuthenticatedChildPackage,
-        advanceScan: Bool
-    ) async throws -> Bool {
-        try await acquireMutationOperation()
-        defer { releaseOperation() }
-        // The handoff budget is deliberately NOT enforced here: evidence
-        // retention is the critical path for child admission, and evidence
-        // only arrives while the parent is mining — the same cadence on
-        // which this chain's stored offers already enforce the budget.
-        return try await store.storeParentEvidenceInbox(
-            sourceID: sourceID,
-            ordinal: ordinal,
-            attachment: attachment,
-            package: package,
-            advanceScan: advanceScan
-        )
-    }
-
-    /// The import of `childCID` under `rootCID` could not decide on a fact
-    /// the parent will send: its evidence leaves the inbox as an orphan
-    /// (`NodeStore.orphanParentEvidence`). Returns what left.
-    func orphanParentEvidence(
-        childCID: String,
-        rootCID: String
-    ) async throws -> [(sourceID: String, summary: IssuedChildEvidenceSummary)] {
-        try await acquireMutationOperation()
-        defer { releaseOperation() }
-        return try await store.orphanParentEvidence(childCID: childCID, rootCID: rootCID)
-    }
-
-    /// A node-local refusal (a resource-policy decline) decides the block
-    /// for this node: its parent evidence is consumed.
-    func consumeDeclinedParentEvidence(childCID: String, rootCID: String) async throws {
-        try await acquireMutationOperation()
-        defer { releaseOperation() }
-        try await store.consumeParentEvidence(childCID: childCID, rootCID: rootCID)
-    }
-
     public func status() async -> ChainProcessStatus {
         await acquireOperation()
         defer { releaseOperation() }
@@ -2261,39 +1891,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         operationWaiters.removeFirst().continuation.resume(returning: true)
     }
 
-    private func validatedDirectChildDirectories(
-        _ directories: [String]
-    ) throws -> [String] {
-        let canonical = Array(Set(directories)).sorted()
-        guard canonical.count <= Self.maximumDirectChildRoutes,
-              canonical.allSatisfy({ directory in
-                  !directory.isEmpty
-                      && !directory.contains("/")
-                      && directory.utf8.count <= Int(UInt16.max)
-                      && ChainAddress(
-                          configuration.chainPath + [directory]
-                      ) != nil
-              }) else {
-            throw ChainProcessError.malformedAuthenticatedChildProof
-        }
-        return canonical
-    }
-
-    private nonisolated static func pendingChildProofRoutes(
-        carrierCID: String,
-        directories: [String],
-        parentGenesisLinks: [ParentGenesisLink] = []
-    ) -> [PendingChildProofRoute] {
-        Set(directories + parentGenesisLinks.map(\.directory))
-            .sorted()
-            .map {
-                PendingChildProofRoute(
-                    carrierCID: carrierCID,
-                    directory: $0
-                )
-            }
-    }
-
     /// Proof bytes authenticate the parent path. Child validation content is
     /// resolved from this child process's local or exact peer source.
     /// `weighs`: the proof contributes work to the child, the objective
@@ -2351,322 +1948,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         return await Self.proofWeighs(
             proof, child: child, chainPath: configuration.chainPath
         )
-    }
-
-    private func fetchPendingChildProofs(
-        carrier: BlockHeader,
-        directories: [String],
-        fetcher: any Fetcher
-    ) async throws -> [String] {
-        guard !directories.isEmpty else { return [] }
-        let preparedDirectories = Set(
-            try await store.preparedChildProofs(carrierCID: carrier.rawCID)
-                .map(\.directory)
-        )
-        let retainedDirectories = Set(
-            try await store.publishedDirectChildProofs(carrierCID: carrier.rawCID)
-                .map(\.directory)
-        )
-        let availableDirectories = preparedDirectories.union(retainedDirectories)
-        var prepared: [PreparedChildProof] = []
-        var absent: [String] = []
-        for directory in directories where !availableDirectories.contains(directory) {
-            switch await Self.resolveDirectChildProof(
-                carrier: carrier,
-                directory: directory,
-                fetcher: fetcher
-            ) {
-            case .absent:
-                absent.append(directory)
-            case .prepared(let proof):
-                prepared.append(proof)
-            case .unavailable:
-                break
-            }
-        }
-        try Task.checkCancellation()
-        try await acquireMutationOperation()
-        defer { releaseOperation() }
-        let active = Set(try await store.pendingChildProofRoutes().lazy
-            .filter { $0.carrierCID == carrier.rawCID }
-            .map(\.directory))
-            .intersection(directories)
-        guard !active.isEmpty else { return [] }
-        prepared = prepared.filter { active.contains($0.directory) }
-        absent = Array(active.intersection(absent)).sorted()
-        try Task.checkCancellation()
-        try await store.persistPreparedChildProofs(
-            carrierCID: carrier.rawCID,
-            proofs: prepared,
-            capacity: Self.preparedChildProofCapacity
-        )
-        try Task.checkCancellation()
-        try await Self.promotePreparedChildProofsFromDurableEvidence(
-            store: store,
-            configuration: configuration,
-            carrierCID: carrier.rawCID
-        )
-        try Task.checkCancellation()
-        let retained = Set(try await store.publishedDirectChildProofs(
-            carrierCID: carrier.rawCID
-        ).map(\.directory))
-        let completed = Array(active.intersection(
-            Set(absent).union(retained)
-        )).sorted()
-        try await store.removePendingChildProofRoutes(
-            carrierCID: carrier.rawCID,
-            directories: completed
-        )
-        return completed
-    }
-
-    private nonisolated static func resolveDirectChildProof(
-        carrier: BlockHeader,
-        directory: String,
-        fetcher: any Fetcher
-    ) async -> TargetedChildProofResolution {
-        do {
-            let path: [[String]: ResolutionStrategy] = [
-                ["children", directory]: .targeted,
-            ]
-            let resolvedCarrier = try await carrier.resolve(
-                paths: path,
-                fetcher: fetcher
-            )
-            guard let block = resolvedCarrier.node,
-                  let children = block.children.node else {
-                return .unavailable
-            }
-            guard let childHeader = children[directory] else {
-                return .absent
-            }
-            guard let child = childHeader.node else {
-                return .unavailable
-            }
-            let proof = try await ChildBlockProof.generate(
-                rootHeader: resolvedCarrier,
-                childDirectory: directory,
-                fetcher: fetcher
-            )
-            let isChildGenesis = child.parent == nil
-            return .prepared(try PreparedChildProof(
-                directory: directory,
-                childCID: childHeader.rawCID,
-                isChildGenesis: isChildGenesis,
-                bootstrapRoots: [],
-                proof: proof
-            ))
-        } catch {
-            return .unavailable
-        }
-    }
-
-    private func persistHierarchyArtifacts(
-        _ link: ParentCarrierLink,
-        carrierEvidence: ImportCarrierEvidence?,
-        parentGenesisLinks: [ParentGenesisLink] = [],
-        pendingChildProofRoutes: [PendingChildProofRoute]
-    ) async throws {
-        try Task.checkCancellation()
-        try await store.persistIssuedHierarchyArtifacts(
-            ImportHierarchyArtifacts(
-                carrierLink: link,
-                carrierEvidence: carrierEvidence,
-                parentGenesisLinks: parentGenesisLinks
-            ),
-            pendingChildProofRoutes: pendingChildProofRoutes,
-            pendingChildProofCapacity: Self.preparedChildProofCapacity
-        )
-    }
-
-    private func promotePreparedChildProofs(
-        carrierCID: String,
-        upstreamProof: ChildBlockProof?
-    ) async throws {
-        try await Self.promotePreparedChildProofs(
-            store: store,
-            configuration: configuration,
-            carrierCID: carrierCID,
-            upstreamProof: upstreamProof
-        )
-    }
-
-    private nonisolated static func promotePreparedChildProofs(
-        store: NodeStore,
-        configuration: NodeConfiguration,
-        carrierCID: String,
-        upstreamProof: ChildBlockProof?,
-        additional: [PreparedChildProof] = []
-    ) async throws {
-        let retained = try await store.publishedDirectChildProofs(
-            carrierCID: carrierCID
-        )
-        let newlyPrepared = try await store.preparedChildProofs(
-            carrierCID: carrierCID
-        )
-        var byDirectory = Dictionary(
-            uniqueKeysWithValues: retained.map { ($0.directory, $0) }
-        )
-        for prepared in newlyPrepared {
-            if let existing = byDirectory[prepared.directory] {
-                guard existing.childCID == prepared.childCID else {
-                    throw ChainProcessError.malformedAuthenticatedChildProof
-                }
-            } else {
-                byDirectory[prepared.directory] = prepared
-            }
-        }
-        for prepared in additional {
-            if let existing = byDirectory[prepared.directory] {
-                guard existing.childCID == prepared.childCID else {
-                    throw ChainProcessError.malformedAuthenticatedChildProof
-                }
-            } else {
-                byDirectory[prepared.directory] = prepared
-            }
-        }
-        for prepared in byDirectory.values.sorted(by: {
-            $0.directory < $1.directory
-        }) {
-            if prepared.isChildGenesis,
-               let parentStateCID = await prepared.proof.directHop()?
-                    .parentStateCID,
-               try await store.issuedParentGenesisLink(
-                    directory: prepared.directory,
-                    childGenesisCID: prepared.childCID,
-                    parentStateCID: parentStateCID
-               ) == nil {
-                continue
-            }
-            let proof: ChildBlockProof
-            if configuration.address.isNexus {
-                guard upstreamProof == nil else {
-                    throw ChainProcessError.malformedAuthenticatedChildProof
-                }
-                proof = prepared.proof
-            } else {
-                guard let upstreamProof else {
-                    throw ChainProcessError.malformedAuthenticatedChildProof
-                }
-                proof = upstreamProof.composing(hop: prepared.proof)
-            }
-            // No relay link for this root: the incoming evidence landed and
-            // the link's own write did not (a stop between the two, or a
-            // store written before the link was persisted at all). Nothing
-            // to compose from yet — the route stays pending, and validation
-            // or a re-delivery issues the link — and never a reason not to
-            // boot.
-            guard try await store.issuedParentCarrierLink(
-                carrierCID: carrierCID,
-                rootCID: proof.rootCID
-            ) != nil else {
-                store.syncTrace(
-                    "child proof deferred: no relay link yet carrier=\(carrierCID.prefix(12))"
-                        + " root=\(proof.rootCID.prefix(12)) directory=\(prepared.directory)"
-                )
-                continue
-            }
-            if try await store.issuedChildEvidence(
-                childCID: prepared.childCID,
-                directory: prepared.directory,
-                rootCID: proof.rootCID
-            ) != nil {
-                try await store.removePreparedChildProof(
-                    carrierCID: carrierCID,
-                    directory: prepared.directory
-                )
-                continue
-            }
-            let rootEnvelope = try ChildValidationPackageEnvelope(proof: proof)
-            try Task.checkCancellation()
-            try await store.persistIssuedChildProof(
-                proof,
-                childCID: prepared.childCID,
-                isChildGenesis: prepared.isChildGenesis,
-                bootstrapRoots: prepared.bootstrapRoots,
-                parentCarrierCID: carrierCID,
-                rootEnvelope: rootEnvelope
-            )
-            // The permanent direct edge now contains everything needed to
-            // compose future roots. The preparation row was only a crash bridge.
-            try await store.removePreparedChildProof(
-                carrierCID: carrierCID,
-                directory: prepared.directory
-            )
-        }
-    }
-
-    nonisolated static func recoverPreparedChildProofs(
-        store: NodeStore,
-        configuration: NodeConfiguration
-    ) async throws {
-        var carrierCIDs = Set(try await store.preparedChildProofCarrierCIDs())
-        if !configuration.address.isNexus {
-            carrierCIDs.formUnion(
-                try await store.uncomposedDirectChildProofCarrierCIDs(
-                    parentDirectory: configuration.address.directory
-                )
-            )
-        }
-        for carrierCID in carrierCIDs.sorted() {
-            try await promotePreparedChildProofsFromDurableEvidence(
-                store: store,
-                configuration: configuration,
-                carrierCID: carrierCID
-            )
-        }
-    }
-
-    private nonisolated static func promotePreparedChildProofsFromDurableEvidence(
-        store: NodeStore,
-        configuration: NodeConfiguration,
-        carrierCID: String,
-        additional: [PreparedChildProof] = []
-    ) async throws {
-        if configuration.address.isNexus {
-            guard try await store.issuedParentCarrierLink(
-                carrierCID: carrierCID,
-                rootCID: carrierCID
-            ) != nil else { return }
-            try await promotePreparedChildProofs(
-                store: store,
-                configuration: configuration,
-                carrierCID: carrierCID,
-                upstreamProof: nil,
-                additional: additional
-            )
-            return
-        }
-
-        var afterRootCID: String?
-        while true {
-            let roots = try await store.incomingCarrierProofRoots(
-                childCID: carrierCID,
-                directory: configuration.address.directory,
-                afterRootCID: afterRootCID,
-                limit: Self.incomingCarrierProofRootPageSize
-            )
-            for rootCID in roots {
-                let evidence = try await store.incomingCarrierEvidence(
-                    childCID: carrierCID,
-                    directory: configuration.address.directory,
-                    rootCID: rootCID
-                )
-                guard let upstream = evidence?.proof else {
-                    throw ChainProcessError.malformedAuthenticatedChildProof
-                }
-                try await promotePreparedChildProofs(
-                    store: store,
-                    configuration: configuration,
-                    carrierCID: carrierCID,
-                    upstreamProof: upstream,
-                    additional: additional
-                )
-            }
-            guard roots.count == Self.incomingCarrierProofRootPageSize,
-                  let last = roots.last else { break }
-            afterRootCID = last
-        }
     }
 
     /// Parent proof bytes are an attempt-local acquisition overlay. Cashew and

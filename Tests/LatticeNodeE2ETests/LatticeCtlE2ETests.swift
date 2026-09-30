@@ -933,8 +933,7 @@ final class LatticeCtlE2ETests: XCTestCase {
     /// through, sitting on a carrier Nexus never admitted. The losing
     /// interleaving is the coordinator's to produce, so this is the realistic
     /// scenario, not the deterministic guard: that is the process and
-    /// network unit tests, which fail if a deferral consumes the inbox or the
-    /// inbox is seeded eagerly.
+    /// network unit tests.
     func testChildStoppedDuringCoMiningIsCreditedAfterRestart() async throws {
         let scratch = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-node-e2e-ctlkeys-\(UUID().uuidString)")

@@ -136,7 +136,6 @@ final class ChainServiceTests: XCTestCase {
         let result = try await service.importNetworkCandidate(
             header,
             authenticatedChildPackage: nil,
-            preparingChildDirectories: [],
             contentSource: FetcherContentSource(process)
         )
 
@@ -172,7 +171,6 @@ final class ChainServiceTests: XCTestCase {
             try await service.importNetworkCandidate(
                 unresolved,
                 authenticatedChildPackage: nil,
-                preparingChildDirectories: [],
                 contentSource: remote
             )
         }
@@ -227,7 +225,6 @@ final class ChainServiceTests: XCTestCase {
             try await service.importNetworkCandidate(
                 unresolved,
                 authenticatedChildPackage: nil,
-                preparingChildDirectories: [],
                 contentSource: remote
             )
         }
@@ -255,7 +252,6 @@ final class ChainServiceTests: XCTestCase {
             _ = try await service.importNetworkCandidate(
                 unresolved,
                 authenticatedChildPackage: nil,
-                preparingChildDirectories: [],
                 contentSource: remote
             )
             XCTFail("ingress admitted after shutdown")
@@ -767,18 +763,8 @@ final class ChainServiceTests: XCTestCase {
                 listenPort: 0,
                 stunServers: [],
                 mode: .overlay
-            ),
-            hierarchy: IvyConfig(
-                signingKey: configuration.signingKey,
-                listenPort: 0,
-                stunServers: [],
-                maxConnections: IvyConfig.defaultMaxConnections,
-                maxConnectionsPerNetgroup: IvyConfig.defaultMaxConnections,
-                relayEnabled: false,
-                carriers: [],
-                mode: .privateNetwork
             )
-        )
+)
         let runtime = try NodeNetworkRuntime(
             configuration: configuration,
             planeConfigurations: planes
@@ -794,7 +780,6 @@ final class ChainServiceTests: XCTestCase {
             try await service.importNetworkCandidate(
                 admission.header,
                 authenticatedChildPackage: admission.authenticatedChildPackage,
-                preparingChildDirectories: admission.preparingChildDirectories,
                 contentSource: admission.contentSource
             )
         })
@@ -1356,99 +1341,6 @@ final class ChainServiceTests: XCTestCase {
         let firstDirectory = try await scheduledDirectory()
         let secondDirectory = try await scheduledDirectory()
         XCTAssertEqual(firstDirectory, secondDirectory)
-    }
-
-    func testParentTargetMissKeepsDurableProofWhenPublicationFails() async throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("lattice-target-miss-\(UUID().uuidString)")
-        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: directory,
-            privateKeyHex: String(repeating: "01", count: 32)
-        )
-        let process = try await ChainProcess.open(configuration: configuration)
-        let genesis = try await process.canonicalTipBlock()
-        let activeChild = try await anchoredChildGenesis(
-            parent: process,
-            parentGenesis: genesis,
-            childTimestamp: 1,
-            carrierNonce: 0,
-            carrierTarget: UInt256.max >> 12
-        )
-        let anchoredParent = try await process.canonicalTipBlock()
-        // The anchored carrier is block 1, so it anchors the difficulty
-        // schedule on its own committed target: there is no interval before it
-        // to measure, and the schedule starts where it says it starts.
-        XCTAssertEqual(anchoredParent.nextTarget, anchoredParent.target)
-        XCTAssertEqual(anchoredParent.target, UInt256.max >> 12)
-        let store = try testNodeStore(
-            databasePath: directory.appendingPathComponent("state.db"),
-            nexusGenesisCID: configuration.nexusGenesisCID,
-            chainPath: configuration.chainPath,
-            issuingAuthorityKey: configuration.processPublicKey
-        )
-        let admissionsBefore = try await store.stagedImports()
-        let leavesBefore = try await process.store.acceptedLeafPage(
-            afterCID: nil,
-            snapshotSequence: nil,
-            limit: 16
-        )
-
-        let publishedProofs = PublishedProofs()
-        let publishedBlocks = PublishedBlocks()
-        let service = makeService(
-            process: process,
-            childProofPublisher: {
-                await publishedProofs.record($0)
-                throw TestPublicationError.failed
-            },
-            acceptedBlockPublisher: { blockCID in
-                await publishedBlocks.record(blockCID)
-            }
-        )
-        try await service.attachStubChildren(["Payments"], on: process) { context in
-            let child = try await BlockBuilder.buildBlock(
-                previous: activeChild.block,
-                transactions: [],
-                parentChainBlock: context.parentCarrier,
-                timestamp: context.parentCarrier.timestamp,
-                fetcher: process
-            )
-            return [DirectChildCandidate(
-                directory: "Payments",
-                block: child
-            )]
-        }
-        let template = try await service.miningTemplate(MiningTemplateRequest())
-        var nonce: UInt64 = 0
-        while template.block.replacingNonce(nonce).proofOfWorkHash()
-                <= template.block.target {
-            nonce += 1
-        }
-
-        let submitted = try await service.submitWork(SubmitWorkRequest(
-            workID: template.workID,
-            nonce: nonce
-        ))
-        XCTAssertFalse(submitted.accepted)
-        XCTAssertEqual(submitted.disposition, .carrier)
-        XCTAssertNotNil(submitted.parentCarrierLink)
-        // The hosted child admitted its carried block (the stub admits).
-        XCTAssertEqual(submitted.durableChildProofs.map(\.directory), ["Payments"])
-        // Handed off in memory: nothing is issued to the hierarchy plane.
-        let publicationCount = await publishedProofs.count()
-        XCTAssertEqual(publicationCount, 0)
-        let publishedBlockCount = await publishedBlocks.count()
-        XCTAssertEqual(publishedBlockCount, 0)
-        let admissionsAfter = try await store.stagedImports()
-        let leavesAfter = try await process.store.acceptedLeafPage(
-            afterCID: nil,
-            snapshotSequence: nil,
-            limit: 16
-        )
-        XCTAssertEqual(admissionsAfter, admissionsBefore)
-        XCTAssertEqual(leavesAfter, leavesBefore)
     }
 
     /// A grind this host mined that misses Nexus's target but clears the
@@ -2238,13 +2130,11 @@ final class ChainServiceTests: XCTestCase {
         _ child: ChainService,
         in directory: String,
         under parent: ChainService,
-        gate: @escaping @Sendable ([String]) async -> Bool = { _ in true },
         wrap: (any ChildLevel) -> any ChildLevel = { $0 }
     ) async {
         let mailbox = await child.openParentMailbox(
             tipChanged: {},
             serveParentRuns: {},
-            candidateGate: gate,
             candidateChanged: { [weak parent] in
                 await parent?.childCandidateChanged()
             }
@@ -2414,12 +2304,8 @@ final class ChainServiceTests: XCTestCase {
             nonce: 0,
             fetcher: process
         )
-        let publication = PublishedProofs()
         let provisionalParents = ProvisionalParents()
-        let service = makeService(
-            process: process,
-            childProofPublisher: { await publication.record($0) }
-        )
+        let service = makeService(process: process)
         try await service.attachStubChildren(["Existing"], on: process) { context in
             await provisionalParents.record(context.parentCarrier)
             return [DirectChildCandidate(
@@ -2465,9 +2351,7 @@ final class ChainServiceTests: XCTestCase {
                 childCID: try BlockHeader(node: child).rawCID
             )
         ])
-        // Handed off in memory: nothing is issued to the hierarchy plane.
-        let publicationCount = await publication.count()
-        XCTAssertEqual(publicationCount, 0)
+        // Handed off in memory.
     }
 
     func testIncompleteChildIsFilteredBeforeWorkWithoutNetworkFetch() async throws {
@@ -2550,7 +2434,6 @@ final class ChainServiceTests: XCTestCase {
         let service = ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in }
             ),
             maximumChildCandidates: 1
@@ -2651,18 +2534,17 @@ final class ChainServiceTests: XCTestCase {
     func testASlowChildBuildNeverDelaysTheParentTemplate() async throws {
         let fixture = try await activeChildService(spec: NexusGenesis.spec)
         let parent = makeService(process: fixture.parent)
-        let child = makeService(
-            process: fixture.process,
-            parentLevel: LocalParentLevel(fixture.parent)
-        )
         let building = Latch()
         let release = Latch()
         addTeardownBlock { await release.open() }
-        await host(child, in: "Payments", under: parent) { _ in
-            await building.open()
-            await release.wait()
-            return true
-        }
+        let child = makeService(
+            process: fixture.process,
+            parentLevel: GatedTipParentLevel(LocalParentLevel(fixture.parent)) {
+                await building.open()
+                await release.wait()
+            }
+        )
+        await host(child, in: "Payments", under: parent)
         await building.wait()
 
         let started = ContinuousClock.now
@@ -2715,21 +2597,20 @@ final class ChainServiceTests: XCTestCase {
     /// carries the child's snapshot built for the previous plan.
     func testATemplateNeverCarriesASnapshotBuiltForAnotherPlan() async throws {
         let fixture = try await activeChildService(spec: NexusGenesis.spec)
-        let payments = makeService(
-            process: fixture.process,
-            parentLevel: LocalParentLevel(fixture.parent)
-        )
         let building = Latch()
         let release = Latch()
         addTeardownBlock { await release.open() }
         let held = HeldGate()
+        let payments = makeService(
+            process: fixture.process,
+            parentLevel: GatedTipParentLevel(LocalParentLevel(fixture.parent)) {
+                guard await held.isHeld else { return }
+                await building.open()
+                await release.wait()
+            }
+        )
         let parent = makeService(process: fixture.parent)
-        await host(payments, in: "Payments", under: parent) { _ in
-            guard await held.isHeld else { return true }
-            await building.open()
-            await release.wait()
-            return true
-        }
+        await host(payments, in: "Payments", under: parent)
         func plan(_ bits: Int) -> MiningTemplateRequest {
             MiningTemplateRequest(minimumWork: [MiningMinimumWork(
                 chainPath: ["Nexus", "Payments"], work: UInt256(1) << bits
@@ -2848,6 +2729,178 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertEqual(offered.parentStateCID, again.block.prevState.rawCID)
         XCTAssertEqual(offered.cid, carried, "the child offers the carried block again")
         XCTAssertNil(again.block.children.node?["Payments"], "carried once, not twice")
+    }
+
+    /// One grind, one subtree insert, content first: `submitWork` hands the
+    /// carried child block down and the child admits it while the parent
+    /// has not yet committed its own block; the parent commits after.
+    func testSubmitWorkAdmitsTheCarriedChildBeforeTheParentCommits() async throws {
+        let fixture = try await activeChildService(spec: NexusGenesis.spec)
+        let parentTipAtHandoff = GrandchildCID()
+        let parentProcess = fixture.parent
+        let merged = await mergedMiningService(fixture) { level in
+            HandoffObservingChildLevel(level) {
+                await parentTipAtHandoff.set(await parentProcess.canonicalTip()?.cid ?? "")
+            }
+        }
+        await merged.service.serveRuns(for: "Payments")
+        try await settle(merged.child)
+        let before = await parentProcess.canonicalTip()?.cid
+
+        let carrying = try await merged.service.miningTemplate(MiningTemplateRequest())
+        let carried = try XCTUnwrap(carrying.block.children.node?["Payments"]?.rawCID)
+        let mined = try await merged.service.submitWork(SubmitWorkRequest(
+            workID: carrying.workID, nonce: solvedNonce(for: carrying)
+        ))
+        XCTAssertTrue(mined.accepted)
+        XCTAssertEqual(mined.durableChildProofs, [
+            DirectChildProofSummary(directory: "Payments", childCID: carried),
+        ])
+        let atHandoff = await parentTipAtHandoff.value
+        XCTAssertEqual(atHandoff, before, "the parent committed before its child admitted")
+        let after = await parentProcess.canonicalTip()?.cid
+        XCTAssertNotEqual(after, before, "the parent committed its block after")
+        XCTAssertEqual(after, mined.tipCID)
+    }
+
+    /// Closing mining ingress refuses new template and work requests at once
+    /// and returns only after the requests already inside have finished,
+    /// a mined handoff to a hosted child included.
+    func testClosingMiningIngressRefusesNewWorkAndDrainsTheHandoffInFlight() async throws {
+        let fixture = try await activeChildService(spec: NexusGenesis.spec)
+        let inHandoff = Latch()
+        let release = Latch()
+        addTeardownBlock { await release.open() }
+        let merged = await mergedMiningService(fixture) { level in
+            HandoffObservingChildLevel(level) {
+                await inHandoff.open()
+                await release.wait()
+            }
+        }
+        await merged.service.serveRuns(for: "Payments")
+        try await settle(merged.child)
+        let carrying = try await merged.service.miningTemplate(MiningTemplateRequest())
+        let nonce = solvedNonce(for: carrying)
+        let mining = Task {
+            try await merged.service.submitWork(SubmitWorkRequest(
+                workID: carrying.workID, nonce: nonce
+            ))
+        }
+        await inHandoff.wait()
+
+        let closed = ShutdownReturned()
+        let closing = Task {
+            await merged.service.closeMiningIngress()
+            await closed.mark()
+        }
+        try await eventually("new mining requests are refused") {
+            do {
+                _ = try await merged.service.miningTemplate(MiningTemplateRequest())
+                return false
+            } catch ChainServiceError.shuttingDown {
+                return true
+            }
+        }
+        await XCTAssertThrowsErrorAsync(
+            try await merged.service.submitWork(SubmitWorkRequest(
+                workID: carrying.workID, nonce: nonce
+            ))
+        ) { error in
+            XCTAssertEqual(error as? ChainServiceError, .shuttingDown)
+        }
+        let returnedEarly = await closed.value
+        XCTAssertFalse(returnedEarly, "closed before the handoff in flight finished")
+
+        await release.open()
+        let mined = try await mining.value
+        XCTAssertTrue(mined.accepted)
+        await closing.value
+        let returned = await closed.value
+        XCTAssertTrue(returned)
+    }
+
+    /// What `ChainHost.stop(_:)` does to a stopping child level: closing its
+    /// mining ingress waits for a mined handoff already inside it (here
+    /// parked in its own fold into a hosted grandchild) and refuses a new
+    /// one from the parent.
+    func testClosingMiningIngressDrainsAndRefusesAMinedHandoffIntoThisLevel()
+        async throws {
+        let fixture = try await activeChildService(spec: NexusGenesis.spec)
+        let payments = makeService(
+            process: fixture.process,
+            parentLevel: LocalParentLevel(fixture.parent)
+        )
+        let parked = Latch()
+        let release = Latch()
+        addTeardownBlock { await release.open() }
+        await payments.attachChildLevel(StubChildLevel(
+            directory: "Grandchild",
+            admit: { _, _ in
+                await parked.open()
+                await release.wait()
+                return true
+            }
+        ))
+        let tip = try await fixture.process.canonicalTipBlock()
+        let grandchild = try await BlockBuilder.buildChildGenesis(
+            spec: NexusGenesis.spec,
+            parentState: LatticeState.emptyHeader,
+            timestamp: 1,
+            target: UInt256.max,
+            fetcher: fixture.process
+        )
+        let block = try await BlockBuilder.buildBlock(
+            previous: tip,
+            children: ["Grandchild": grandchild],
+            parentChainBlock: fixture.parentCarrier,
+            timestamp: fixture.parentCarrier.timestamp + 1,
+            nonce: 0,
+            fetcher: fixture.process
+        )
+        let proof = try await ChildBlockProof.generate(
+            rootHeader: BlockHeader(node: fixture.parentCarrier),
+            childDirectory: "Payments",
+            fetcher: fixture.parent
+        )
+        let handing = Task {
+            await payments.admitMinedCarriage(block: block, proof: proof)
+        }
+        await parked.wait()
+
+        let closed = ShutdownReturned()
+        let closing = Task {
+            await payments.closeMiningIngress()
+            await closed.mark()
+        }
+        try await eventually("mining ingress is closed") {
+            do {
+                _ = try await payments.miningTemplate(MiningTemplateRequest())
+                return false
+            } catch ChainServiceError.shuttingDown {
+                return true
+            } catch {
+                return false
+            }
+        }
+        let answered = ShutdownReturned()
+        let second = Task {
+            let admitted = await payments.admitMinedCarriage(block: block, proof: proof)
+            await answered.mark()
+            return admitted
+        }
+        try await eventually("a new handoff is refused at once", within: .seconds(10)) {
+            await answered.value
+        }
+        let refused = await second.value
+        XCTAssertFalse(refused, "a handoff reached a level whose mining is closed")
+        let returnedEarly = await closed.value
+        XCTAssertFalse(returnedEarly, "closed before the handoff in flight finished")
+
+        await release.open()
+        _ = await handing.value
+        await closing.value
+        let returned = await closed.value
+        XCTAssertTrue(returned)
     }
 
     /// A children-only parent block leaves the post-state and the child's
@@ -4525,8 +4578,6 @@ final class ChainServiceTests: XCTestCase {
 
     private func makeService(
         process: ChainProcess,
-        chainStateChangePublisher: @escaping ClosureNetworkInterface.ChainStateChangePublisher = {},
-        childProofPublisher: @escaping ClosureNetworkInterface.ChildProofPublisher = { _ in },
         acceptedBlockPublisher: @escaping ClosureNetworkInterface.AcceptedBlockPublisher = { _ in },
         acceptedTransactionPublisher:
             @escaping ClosureNetworkInterface.AcceptedTransactionPublisher = { _ in },
@@ -4538,8 +4589,6 @@ final class ChainServiceTests: XCTestCase {
         ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                chainStateChangePublisher: chainStateChangePublisher,
-                childProofPublisher: childProofPublisher,
                 acceptedBlockPublisher: acceptedBlockPublisher,
                 acceptedTransactionPublisher: acceptedTransactionPublisher,
                 executionBodySource: executionBodySource
@@ -4734,22 +4783,6 @@ private actor CanonicalCommitLatch {
     }
 }
 
-private actor PublishedProofs {
-    private var values: [DirectChildProofPublication] = []
-
-    func record(_ publication: DirectChildProofPublication) {
-        values.append(publication)
-    }
-
-    func first() -> DirectChildProofPublication? {
-        values.first
-    }
-
-    func count() -> Int {
-        values.count
-    }
-}
-
 private actor PublishedBlocks {
     private var values: [String] = []
 
@@ -4800,6 +4833,45 @@ private actor HeldGate {
     func release() { isHeld = false }
 }
 
+/// A parent level whose validated-tip read, the start of a hosted child's
+/// candidate build, first runs `hold`: a test parks the build there.
+private final class GatedTipParentLevel: ParentLevel, Sendable {
+    let base: any ParentLevel
+    let hold: @Sendable () async -> Void
+
+    init(_ base: any ParentLevel, hold: @escaping @Sendable () async -> Void) {
+        self.base = base
+        self.hold = hold
+    }
+
+    func hasProducedState(_ stateCID: String) async -> Bool {
+        await base.hasProducedState(stateCID)
+    }
+
+    func recordedGenesisLink(
+        directory: String, childGenesisCID: String
+    ) async -> ParentGenesisLink? {
+        await base.recordedGenesisLink(
+            directory: directory, childGenesisCID: childGenesisCID
+        )
+    }
+
+    func anchoredGenesisCID(directory: String) async -> String? {
+        await base.anchoredGenesisCID(directory: directory)
+    }
+
+    func runReport(carrier: String, directory: String) async -> ParentRunReport? {
+        await base.runReport(carrier: carrier, directory: directory)
+    }
+
+    func validatedTip() async -> (cid: String, block: Block)? {
+        await hold()
+        return await base.validatedTip()
+    }
+
+    var contentSource: any ContentSource { base.contentSource }
+}
+
 private actor ShutdownReturned {
     private(set) var value = false
     func mark() { value = true }
@@ -4822,6 +4894,31 @@ private final class DecliningChildLevel: ChildLevel, Sendable {
     var readyCandidate: ReadyCandidate? { level.readyCandidate }
 
     func admitMined(block: Block, proof: ChildBlockProof) async -> Bool { false }
+}
+
+/// A hosted child level that runs `observe` when a mined handoff reaches
+/// it, before admitting.
+private final class HandoffObservingChildLevel: ChildLevel, Sendable {
+    private let level: any ChildLevel
+    private let observe: @Sendable () async -> Void
+
+    init(_ level: any ChildLevel, observe: @escaping @Sendable () async -> Void) {
+        self.level = level
+        self.observe = observe
+    }
+
+    var directory: String { level.directory }
+
+    func parentChanged(_ change: ParentChange) {
+        level.parentChanged(change)
+    }
+
+    var readyCandidate: ReadyCandidate? { level.readyCandidate }
+
+    func admitMined(block: Block, proof: ChildBlockProof) async -> Bool {
+        await observe()
+        return await level.admitMined(block: block, proof: proof)
+    }
 }
 
 private actor ReceivedProofs {

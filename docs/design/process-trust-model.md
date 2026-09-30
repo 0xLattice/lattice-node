@@ -11,23 +11,22 @@ The levels follow direct chain relationships without collapsing them into one
 chain runtime:
 
 ```text
-Nexus level  ── in-process facts; evidence dialed on loopback ──▶  Nexus/Payments level
+Nexus level  ── in-process facts ──▶  Nexus/Payments level
 ```
 
 The parent level owns only its own chain. The child level owns only its own
 chain. Neither grants the other database access, enumeration, mutation, or
 consensus authority. A child reads its parent facts through the narrow
 `ParentLevel` view, and a parent reads a child only through `ChildLevel`
-(its latest candidate, and enqueue-only notifications). An accepted direct
-relationship may request an exact set of CAS objects by CID; those read-only
-bytes are protocol availability, not access to the level's storage interface.
+(its latest candidate, and enqueue-only notifications). A child may read an
+exact set of CAS objects by CID from its parent level's local content; those
+read-only bytes are protocol availability, not access to the level's storage
+interface.
 
 ## Co-hosted parent level
 
 A non-Nexus chain runs only in the same `lattice-node` process as its whole
-ancestry. The host wires its parent endpoint to the co-hosted parent level's
-hierarchy plane, dialed on loopback, which carries only child evidence. The
-listener binds all interfaces, so firewall the hierarchy port.
+ancestry. The host wires it to the co-hosted parent level in-process.
 
 The co-hosted parent level answers two narrow facts from its own validated
 state, read in-process: exact child deployment and forward state continuity
@@ -51,35 +50,13 @@ validated. Because every child is co-hosted with its ancestry, the node
 validates its own parent chains recursively to Nexus; there is no remote
 parent to trust.
 
-## Separate planes
+## One network plane
 
-Same-chain overlay traffic and parent/child evidence use separate Ivy
-instances. The hierarchy plane is dialed on loopback between co-hosted levels
-(the listener binds all interfaces, so firewall the hierarchy port), disables
-relay, and carries only child-evidence delivery; parent facts, run
-reports, and candidates pass in-process. A public overlay peer therefore
-cannot become a parent merely by claiming a path.
-
-Direct children authenticate and advertise their absolute path on the
-hierarchy plane. The parent grants the child role only to the process key of
-the child level the host runs for that directory, whose path equals
-`parentPath + [directory]`; any other key claiming a child path is refused.
-The parent publishes a proof only to that child.
-
-Exact-CID exchange is explicitly enabled only on this private Ivy plane. A
-connection must complete its own compatible hierarchy hello before it may read
-content; reconnecting with the same key does not inherit the previous
-connection's authorization. Requests cannot enumerate storage and must name a
-complete bounded selection. The response is non-secret content-addressed
-availability: the receiver verifies every CID and all Lattice evidence before
-the bytes can affect state.
-
-The hierarchy receiver gives its co-hosted parent level a narrow
-transport-liveness exemption from its local Tally bucket. That exemption is
-limited to the private plane's exact parent key; it does not
-weaken the hierarchy hello, path, authenticated-parent, fact, or Lattice
-validation gates. Overlay peers and all other hierarchy peers remain
-Tally-gated.
+Each level has one Ivy instance, its same-chain overlay. Parent facts, run
+reports, candidates, and a mined grind's carried blocks pass in-process
+between co-hosted levels; no network peer holds a parent or child role. A
+public overlay peer therefore cannot become a parent merely by claiming a
+path. Overlay peers remain Tally-gated.
 
 ## Direct-edge retention, one-way authority
 
@@ -92,7 +69,7 @@ Volumes to same-chain peers.
 No child sends an edge inventory, accepted topology, coverage claim, or work
 back to its parent. Downstream, the parent level maintains run state for the
 directories it hosts (spec §9.10) and hands each carrier's run to that
-directory's child level in-process, beside proof publication; upstream, it
+directory's child level in-process; upstream, it
 learns nothing but each hosted child's latest candidate. The child owns the exact vertical relation used for
 consensus projection.
 ## Genesis authority
@@ -143,11 +120,10 @@ proof Volumes, while each chain level independently validates its own blocks.
 ## Operational consequence
 
 Treat the co-hosted parent level as the only source of immediate-parent
-validity; its loopback endpoint is one route for availability. Other peers may
+validity; its local content is one route for availability. Other peers may
 supply identical Volumes, but they cannot replace the parent level's fact
 needed for a new parent-state movement. Keep each level's identity key stable,
-firewall the hierarchy port (no remote peer needs it), and back up identity separately from
-wipeable chain storage.
+and back up identity separately from wipeable chain storage.
 
 A child trusts its parent level as it trusts its own binary: a bug in parent
 validation reaches the child directly, with no second implementation in

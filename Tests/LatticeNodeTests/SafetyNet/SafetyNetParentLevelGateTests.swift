@@ -226,7 +226,8 @@ final class SafetyNetParentLevelGateTests: XCTestCase {
         // The one downward await: only the mined handoff awaits a child,
         // and only with this level's lease released. `handOffMined` and the
         // child side that re-enters it take no lease, and `submitWork`
-        // releases its lease before handing off.
+        // hands off before it takes its lease (children first, then the
+        // parent's own commit).
         XCTAssertEqual(
             service.components(separatedBy: ".admitMined(").count - 1, 1,
             "a hosted child is awaited outside the mined handoff"
@@ -241,11 +242,15 @@ final class SafetyNetParentLevelGateTests: XCTestCase {
             )
         }
         let submit = try body(after: "public func submitWork(", in: service)
-        let release = try XCTUnwrap(submit.range(of: "ownsOperation = false"))
+        let lease = try XCTUnwrap(submit.range(of: "acquireOperation("))
         let handOffCall = try XCTUnwrap(submit.range(of: "handOffMined("))
         XCTAssertLessThan(
-            release.upperBound, handOffCall.lowerBound,
-            "submitWork hands off before releasing its lease"
+            handOffCall.upperBound, lease.lowerBound,
+            "submitWork hands off while holding its lease"
+        )
+        XCTAssertEqual(
+            submit.components(separatedBy: "handOffMined(").count - 1, 1,
+            "submitWork hands off more than once"
         )
         let template = try body(after: "private func buildMiningTemplate(", in: service)
         XCTAssertFalse(

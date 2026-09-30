@@ -22,17 +22,15 @@ public enum ChainHostError: Error, Equatable, CustomStringConvertible {
 /// parent-first and stopped in reverse. Each child reads its parent facts
 /// from its co-hosted parent level (`LocalParentLevel`) and is told, in
 /// order, when the parent's tip moves and when a run the parent credits into
-/// its directory changes. Its parent endpoint is the parent's hierarchy
-/// plane on loopback, which carries only the parent's evidence. Each parent
-/// grants the hierarchy child role only to the process keys of the child
-/// levels it hosts.
+/// its directory changes. Each parent announces its hosted children's
+/// geneses and serves their public read URLs.
 ///
 /// The level set is fixed when the host is built: a chain added to the
 /// configuration takes effect when the process restarts. Only the host's
 /// owner calls it, one call at a time: `startAll`, then `stop` for a child
 /// level that failed, then `stopAll`.
 public actor ChainHost {
-    /// This level's configuration. The host wires a child's parent endpoint.
+    /// This level's configuration.
     public typealias Configure = @Sendable () throws -> NodeConfiguration
     private struct Level {
         var configuration: NodeConfiguration
@@ -62,8 +60,8 @@ public actor ChainHost {
                 running: nil
             )
         }
-        // Each parent grants the hierarchy child role only to the process
-        // key of the child level it hosts.
+        // Each parent announces the genesis and serves the public read URL
+        // of each child it hosts.
         for address in levels.keys {
             guard let parent = address.parent,
                   let child = levels[address]?.configuration,
@@ -71,7 +69,7 @@ public actor ChainHost {
             else { continue }
             levels[parent]?.configuration = hosting.withHostedChild(
                 directory: address.directory,
-                publicKey: child.processPublicKey
+                publicReadURL: child.publicReadURL
             )
         }
     }
@@ -108,6 +106,7 @@ public actor ChainHost {
 
     /// Stops every running level, children first.
     public func stopAll() async {
+        await closeMiningIngress(paths)
         for address in paths.reversed() {
             await stopLevel(address)
         }
@@ -125,11 +124,21 @@ public actor ChainHost {
                 && $0.components.starts(with: address.components)
                 && levels[$0]?.running != nil
         }
+        await closeMiningIngress([address] + descendants.reversed())
         for descendant in descendants {
             await stopLevel(descendant)
         }
         await stopLevel(address)
         return descendants
+    }
+
+    /// Refuses template and work requests on `addresses`, roots first, and
+    /// waits for those in flight (a mined handoff included) before any
+    /// level stops: no grind reaches a level that is stopping.
+    private func closeMiningIngress(_ addresses: [ChainAddress]) async {
+        for address in addresses {
+            await levels[address]?.running?.node.service.closeMiningIngress()
+        }
     }
 
     private func stopLevel(_ address: ChainAddress) async {
@@ -168,9 +177,6 @@ public actor ChainHost {
                 serveParentRuns: { [weak parentService = parent.service] in
                     await parentService?.serveRuns(for: directory)
                 },
-                candidateGate: { [weak network = node.network] pendingHandoff in
-                    await network?.offerGate(pendingHandoff: pendingHandoff) ?? false
-                },
                 // Marks the parent's own rebuild; takes no lease (§2.4).
                 candidateChanged: { [weak parentService = parent.service] in
                     await parentService?.childCandidateChanged()
@@ -199,16 +205,12 @@ public actor ChainHost {
         guard let parentAddress = address.parent else {
             return try configure()
         }
-        guard let parent = levels[parentAddress] else {
+        guard levels[parentAddress] != nil else {
             throw ChainHostError.notAncestorClosed(
                 child: address.key, missingParent: parentAddress.key
             )
         }
-        return try configure().withParentEndpoint(ParentEndpoint(
-            publicKey: parent.configuration.processPublicKey,
-            host: "127.0.0.1",
-            port: parent.configuration.factListenPort
-        ))
+        return try configure()
     }
 
     private static func parentFirst(_ a: ChainAddress, _ b: ChainAddress) -> Bool {

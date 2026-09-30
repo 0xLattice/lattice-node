@@ -11,7 +11,7 @@ COPY nginx.conf /etc/nginx/nginx.conf
 COPY entrypoint.sh /usr/local/bin/read-replica-entrypoint
 RUN chmod +x /usr/local/bin/read-replica-entrypoint
 
-# 8081 = public nginx (fly maps 443/80 -> 8081); 4001/4002 = node P2P/fact plane.
-EXPOSE 8081 4001 4002
+# 8081 = public nginx (fly maps 443/80 -> 8081); 4001 = node P2P overlay.
+EXPOSE 8081 4001
 
 ENTRYPOINT ["/usr/local/bin/read-replica-entrypoint"]

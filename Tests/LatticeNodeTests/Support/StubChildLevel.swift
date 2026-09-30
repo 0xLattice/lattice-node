@@ -95,7 +95,6 @@ extension ChainService {
         openParentMailbox(
             tipChanged: tipChanged,
             serveParentRuns: serveParentRuns,
-            candidateGate: { _ in false },
             candidateChanged: {}
         )
     }

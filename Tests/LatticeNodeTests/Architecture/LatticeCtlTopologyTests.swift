@@ -11,7 +11,7 @@ final class LatticeCtlTopologyTests: XCTestCase {
     private func chain(
         _ base: UInt16
     ) -> TopologyChain {
-        TopologyChain(listen: base, fact: base + 1, rpc: base + 2)
+        TopologyChain(listen: base, rpc: base + 2)
     }
 
     /// A pending deploy is keyed by chain path, and `-` is a legal directory
@@ -86,7 +86,8 @@ final class LatticeCtlTopologyTests: XCTestCase {
     func testValidationRejectsPortCollisions() {
         XCTAssertThrowsError(try Topology(chains: [
             "Nexus": chain(4001),
-            "Nexus/Payments": chain(4002),
+            // Its listen port is Nexus's RPC port.
+            "Nexus/Payments": chain(4003),
         ]).validated())
     }
 
@@ -158,7 +159,6 @@ final class LatticeCtlTopologyTests: XCTestCase {
         let configuration = try level.configure()
         XCTAssertEqual(level.address.key, "Nexus/Payments")
         XCTAssertEqual(configuration.listenPort, 4101)
-        XCTAssertEqual(configuration.factListenPort, 4102)
         XCTAssertEqual(configuration.rpcPort, 4103)
         XCTAssertEqual(
             configuration.storagePath.path,

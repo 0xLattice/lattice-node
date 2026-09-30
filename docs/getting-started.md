@@ -23,7 +23,6 @@ The package builds four executables:
 swift run lattice-node \
   --chain-path Nexus \
   --listen-port 4001 \
-  --fact-listen-port 4002 \
   --rpc-port 8080
 ```
 
@@ -111,8 +110,8 @@ host.
 ```json
 {
   "chains": {
-    "Nexus": {"listen": 4001, "fact": 4002, "rpc": 8080},
-    "Nexus/Payments": {"listen": 4101, "fact": 4102, "rpc": 8180}
+    "Nexus": {"listen": 4001, "rpc": 8080},
+    "Nexus/Payments": {"listen": 4101, "rpc": 8180}
   }
 }
 ```

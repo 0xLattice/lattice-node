@@ -15,7 +15,6 @@ struct NodeMetadataRow: NodeStoreRecord {
     var schemaEpoch: Int64 { get throws { try row.int("schema_epoch") } }
     var nexusGenesisCID: String { get throws { try row.text("nexus_genesis_cid") } }
     var chainPath: Data { get throws { try row.blob("chain_path") } }
-    var syncSourceID: String { get throws { try row.uuid("sync_source_id") } }
 }
 
 extension NodeStore {
@@ -26,20 +25,13 @@ extension NodeStore {
     /// Epoch 40 records leaf-ness on each accepted block so the frontier page
     /// is an index read, not a per-row scan of the accepted history.
     /// Epoch 41 records the root of the child-evidence index
-    /// (`child_evidence_root`), built fresh from the first admission.
+    /// (`child_evidence_root`), built fresh from the first admission, and
+    /// drops the parent-to-child proof pipeline: the issuance ordinals and
+    /// the outgoing proofs, routes, prepared proofs, the parent-evidence scan
+    /// cursor and inbox, candidate handoffs, and the source identifier.
     /// Older stores must be
     /// wiped; Nexus deterministically recreates the configured exact genesis.
     static let currentSchemaEpoch: Int64 = 41
-
-    func syncSourceID() throws -> String {
-        guard let metadata = try database.row(
-            NodeMetadataRow.self,
-            "SELECT sync_source_id FROM node_metadata WHERE singleton = 1"
-        ) else {
-            throw NodeStoreError.corrupt("malformed sync source identifier")
-        }
-        return try metadata.syncSourceID
-    }
 
     static func validateMetadata(
         in database: NodeSQLite,
@@ -55,7 +47,7 @@ extension NodeStore {
         do {
             rows = try database.rows(
                 NodeMetadataRow.self,
-                "SELECT schema_epoch, nexus_genesis_cid, chain_path, sync_source_id FROM node_metadata WHERE singleton = 1"
+                "SELECT schema_epoch, nexus_genesis_cid, chain_path FROM node_metadata WHERE singleton = 1"
             )
         } catch {
             throw NodeStoreError.wipeRequired("unreadable schema metadata")
@@ -72,7 +64,6 @@ extension NodeStore {
                   try rows[0].chainPath == chainPath else {
                 throw changed
             }
-            _ = try rows[0].syncSourceID
         } catch NodeStoreError.malformedRow {
             throw changed
         }
@@ -90,15 +81,9 @@ extension NodeStore {
         "issued_child_proofs",
         "child_evidence_root",
         "child_evidence_pins_dirty",
-        "parent_evidence_scan",
-        "parent_evidence_inbox",
         "local_mempool_transactions",
-        "child_genesis_volume_roots",
-        "prepared_child_proofs",
-        "pending_child_proof_routes",
         "contextual_candidates",
         "contextual_candidate_roots",
-        "contextual_candidate_children",
     ]
 
     /// Owner: NodeStore.init — runs before the store exists, on an empty database.
@@ -114,17 +99,15 @@ extension NodeStore {
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                     schema_epoch INTEGER NOT NULL,
                     nexus_genesis_cid TEXT NOT NULL,
-                    chain_path BLOB NOT NULL,
-                    sync_source_id TEXT NOT NULL
+                    chain_path BLOB NOT NULL
                 )
                 """)
             try database.execute(
-                "INSERT INTO node_metadata (singleton, schema_epoch, nexus_genesis_cid, chain_path, sync_source_id) VALUES (1, ?1, ?2, ?3, ?4)",
+                "INSERT INTO node_metadata (singleton, schema_epoch, nexus_genesis_cid, chain_path) VALUES (1, ?1, ?2, ?3)",
                 params: [
                     .int(schemaEpoch),
                     .text(nexusGenesisCID),
                     .blob(chainPath),
-                    .text(UUID().uuidString.lowercased()),
                 ]
             )
             try createDataTables(in: database)
@@ -207,11 +190,7 @@ extension NodeStore {
                 edge_cid TEXT NOT NULL,
                 root_cid TEXT NOT NULL,
                 attachment_cid TEXT NOT NULL,
-                ordinal INTEGER UNIQUE CHECK (ordinal IS NULL OR ordinal > 0),
-                CHECK (
-                    (scope = 'outgoing_direct_child' AND ordinal IS NOT NULL)
-                    OR (scope != 'outgoing_direct_child' AND ordinal IS NULL)
-                ),
+                CHECK (scope = 'incoming_carrier'),
                 PRIMARY KEY (scope, edge_cid, root_cid)
             )
             """)
@@ -224,27 +203,6 @@ extension NodeStore {
         try database.execute("""
             CREATE TABLE IF NOT EXISTS child_evidence_pins_dirty (
                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1)
-            ) WITHOUT ROWID
-            """)
-        try database.execute("""
-            CREATE TABLE IF NOT EXISTS parent_evidence_scan (
-                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                source_id TEXT,
-                ordinal INTEGER NOT NULL CHECK (ordinal >= 0)
-            ) WITHOUT ROWID
-            """)
-        try database.execute(
-            "INSERT OR IGNORE INTO parent_evidence_scan (singleton, source_id, ordinal) VALUES (1, NULL, 0)"
-        )
-        try database.execute("""
-            CREATE TABLE IF NOT EXISTS parent_evidence_inbox (
-                source_id TEXT NOT NULL,
-                ordinal INTEGER NOT NULL CHECK (ordinal > 0),
-                child_cid TEXT NOT NULL,
-                root_cid TEXT NOT NULL,
-                attachment_cid TEXT NOT NULL,
-                PRIMARY KEY (source_id, ordinal),
-                UNIQUE (source_id, attachment_cid)
             ) WITHOUT ROWID
             """)
         try database.execute(
@@ -260,43 +218,12 @@ extension NodeStore {
             ) WITHOUT ROWID
             """)
         try database.execute("""
-            CREATE TABLE IF NOT EXISTS child_genesis_volume_roots (
-                child_cid TEXT NOT NULL,
-                root_cid TEXT NOT NULL,
-                PRIMARY KEY (child_cid, root_cid)
-            ) WITHOUT ROWID
-            """)
-        try database.execute("""
-            CREATE TABLE IF NOT EXISTS prepared_child_proofs (
-                carrier_cid TEXT NOT NULL,
-                batch_seq INTEGER NOT NULL,
-                directory TEXT NOT NULL,
-                child_cid TEXT NOT NULL,
-                is_child_genesis INTEGER NOT NULL
-                    CHECK (is_child_genesis IN (0, 1)),
-                attachment_cid TEXT NOT NULL,
-                PRIMARY KEY (carrier_cid, directory)
-            ) WITHOUT ROWID
-            """)
-        try database.execute("""
-            CREATE TABLE IF NOT EXISTS pending_child_proof_routes (
-                carrier_cid TEXT NOT NULL,
-                batch_seq INTEGER NOT NULL,
-                directory TEXT NOT NULL,
-                PRIMARY KEY (carrier_cid, directory)
-            ) WITHOUT ROWID
-            """)
-        try database.execute("""
             CREATE TABLE IF NOT EXISTS contextual_candidates (
                 candidate_cid TEXT PRIMARY KEY,
                 offer_seq INTEGER UNIQUE,
                 issued INTEGER NOT NULL CHECK (issued IN (0, 1)),
-                handoff INTEGER NOT NULL CHECK (handoff IN (0, 1)),
-                handoff_seq INTEGER UNIQUE,
                 CHECK (offer_seq IS NULL OR offer_seq > 0),
-                CHECK (issued = 1 OR handoff = 1 OR offer_seq IS NOT NULL),
-                CHECK (NOT (issued = 1 AND handoff = 1)),
-                CHECK ((handoff = 1) = (handoff_seq IS NOT NULL))
+                CHECK (issued = 1 OR offer_seq IS NOT NULL)
             ) WITHOUT ROWID
             """)
         try database.execute("""
@@ -304,17 +231,6 @@ extension NodeStore {
                 candidate_cid TEXT NOT NULL,
                 root_cid TEXT NOT NULL,
                 PRIMARY KEY (candidate_cid, root_cid)
-            ) WITHOUT ROWID
-            """)
-        try database.execute("""
-            -- Unused since candidates are pushed and retained locally (no
-            -- relayed reservations); kept until the next schema epoch so an
-            -- existing store opens unchanged.
-            CREATE TABLE IF NOT EXISTS contextual_candidate_children (
-                candidate_cid TEXT NOT NULL,
-                child_peer_key TEXT NOT NULL,
-                child_cid TEXT NOT NULL,
-                PRIMARY KEY (candidate_cid, child_peer_key, child_cid)
             ) WITHOUT ROWID
             """)
     }
@@ -327,8 +243,6 @@ extension NodeStore {
         let connectedAcceptedBlocks = try auditAcceptedBlocks(staged: staged)
         try auditIssuedParentFacts(connected: connectedAcceptedBlocks)
         try await auditIssuedChildAttachments()
-        try await auditParentEvidence()
-        try await auditPreparedChildProofs()
         try auditContextualCandidates()
     }
 }

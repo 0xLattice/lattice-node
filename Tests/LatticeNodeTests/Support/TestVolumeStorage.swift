@@ -11,9 +11,7 @@ func testNodeStore(
     issuingAuthorityKey: String = String(repeating: "a", count: 64),
     contextualCandidateOwner: String = "test:contextual-candidates",
     blockRetentionScope: String = "test:blocks",
-    broker suppliedBroker: (any RetainedRootMergeBroker)? = nil,
-    parentEvidenceInboxCapacity: Int = 64,
-    handoffCandidateCapacity: Int = 1_024
+    broker suppliedBroker: (any RetainedRootMergeBroker)? = nil
 ) throws -> NodeStore {
     let broker: any RetainedRootMergeBroker
     if let suppliedBroker {
@@ -31,9 +29,6 @@ func testNodeStore(
         recoveryVolumeBroker: broker,
         blockRetentionScope: blockRetentionScope,
         issuedRecoveryRetentionScope: "test:issued-hierarchy",
-        preparedRecoveryRetentionScope: "test:prepared-hierarchy",
-        parentEvidenceInboxCapacity: parentEvidenceInboxCapacity,
-        contextualCandidateOwner: contextualCandidateOwner,
-        handoffCandidateCapacity: handoffCandidateCapacity
+        contextualCandidateOwner: contextualCandidateOwner
     )
 }

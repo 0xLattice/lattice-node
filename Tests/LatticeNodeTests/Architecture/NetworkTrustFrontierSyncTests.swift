@@ -1169,14 +1169,12 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
         )
         addTeardownBlock { try? FileManager.default.removeItem(at: storage) }
         let overlayPort = NetworkTransportTestPorts.allocate()
-        let hierarchyPort = NetworkTransportTestPorts.allocate()
         let rpcPort = NetworkTransportTestPorts.allocate()
         let configuration = try NodeConfiguration(
             chainPath: ["Nexus"],
             storagePath: storage,
             privateKeyHex: String(repeating: "5d", count: 32),
             listenPort: overlayPort,
-            factListenPort: hierarchyPort,
             rpcPort: rpcPort
         )
         let planes = try NodeNetworkPlaneConfigurations(
@@ -1185,18 +1183,8 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
                 listenPort: overlayPort,
                 stunServers: [],
                 mode: .overlay
-            ),
-            hierarchy: IvyConfig(
-                signingKey: configuration.signingKey,
-                listenPort: hierarchyPort,
-                stunServers: [],
-                maxConnections: IvyConfig.defaultMaxConnections,
-                maxConnectionsPerNetgroup: IvyConfig.defaultMaxConnections,
-                relayEnabled: false,
-                carriers: [],
-                mode: .privateNetwork
             )
-        )
+)
         let runtime = try NodeNetworkRuntime(
             configuration: configuration,
             planeConfigurations: planes
@@ -1284,7 +1272,6 @@ final class NetworkTrustFrontierSyncTests: NetworkTrustTestCase {
             let outcome = try await service.importNetworkCandidate(
                 admission.header,
                 authenticatedChildPackage: admission.authenticatedChildPackage,
-                preparingChildDirectories: admission.preparingChildDirectories,
                 contentSource: admission.contentSource
             )
             let decision = switch outcome.decision {

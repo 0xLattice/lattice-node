@@ -4,37 +4,6 @@ import XCTest
 @testable import LatticeNode
 
 final class BlockFetcherTests: XCTestCase {
-    /// A candidate ready for, or in, its admission is awaiting admission;
-    /// one parked on evidence, or unknown, is not. The child's offer gate
-    /// asks this for its own carried candidates: while one is in flight the
-    /// chain builds nothing, and a park lifts the deferral.
-    func testAwaitingAdmissionIsReadyOrActiveNeverParked() throws {
-        let blockCID = "awaiting-admission"
-        let rootCID = "awaiting-root"
-        var fetcher = BlockFetcher()
-        XCTAssertFalse(fetcher.isAwaitingAdmission(blockCID))
-        XCTAssertTrue(fetcher.observe(.init(
-            blockCID: blockCID,
-            package: nil,
-            recoveryRootCID: rootCID
-        )).accepted)
-        XCTAssertTrue(fetcher.isAwaitingAdmission(blockCID), "ready")
-        let ticket = try XCTUnwrap(fetcher.next())
-        XCTAssertTrue(fetcher.isAwaitingAdmission(blockCID), "active")
-        XCTAssertTrue(fetcher.complete(
-            ticket.ticket,
-            resolution: .wait(.evidence)
-        ))
-        XCTAssertFalse(fetcher.isAwaitingAdmission(blockCID), "parked")
-        fetcher.retryExternalDependency(blockCID: blockCID, rootCID: rootCID)
-        XCTAssertTrue(fetcher.isAwaitingAdmission(blockCID), "ready again")
-        let again = try XCTUnwrap(fetcher.next())
-        XCTAssertTrue(fetcher.complete(
-            again.ticket,
-            resolution: .predecessor("awaiting-predecessor")
-        ))
-        XCTAssertFalse(fetcher.isAwaitingAdmission(blockCID), "parked on a predecessor")
-    }
 
     /// The child-evidence lookup searches exactly the blocks parked on
     /// `.wait(.evidence)` for a child proof, and a block leaves that set

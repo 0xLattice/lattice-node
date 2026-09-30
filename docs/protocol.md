@@ -39,7 +39,7 @@ the old chain directory before starting this version.
 
 ## Transactions
 
-HTTP and hierarchy messages carry concrete transaction bodies with their
+HTTP messages carry concrete transaction bodies with their
 signatures. A cashew header alone is not a complete transaction payload.
 `lattice-node` binds the concrete body back to its CID before admission, then
 Lattice validates the transaction for the process's absolute path.
@@ -141,39 +141,23 @@ accepted blocks, proof-derived work, and the attributed work-only batches it
 credited from parent run reports. A block its parent carried is a network
 block: imported weighed on the verified proof — in fork choice with its work
 at once, executed when the chain would step into it — never held back for a
-continuity fact or a rule not yet met. Its carriage is relayed at once,
-with the acceptance, as for a carrier this chain refused: deeper chains are owed the proof of carriage whatever this
-chain makes of the block, and the proofs this chain composes for its own
-children follow from that relay. Only the parent facts it answers —
+continuity fact or a rule not yet met. Its carrier evidence is recorded
+with the acceptance, and the proofs this chain composes for its own
+children follow from it. A carrier this chain refused, or one Lattice
+returns relay-only, records nothing: this chain has no reader for it.
+Only the parent facts it answers —
 the genesis links a child's first block anchors to — wait for its
 validation, since a child must not anchor to state this chain has not
-executed. Until an import DECIDES it
-(accepted, a duplicate, or refused for a reason no retry would change: the
-grind missed this chain's target, the block or its evidence is invalid, the
-node could not verify it), its evidence stays in the parent-evidence inbox,
-the one durable record of a block still to be imported, replayed on every
-restart. Decided is exactly what the node never retries: a deferral persists
-nothing, and a decision consumes the entry whether or not it leaves relay
-evidence behind. So no stop or crash between a deferral and its retry can
-lose a parent-carried block, no refusal can hold an inbox slot for good,
-and a child never stays on a branch its parent chain has left for want of
-one. The inbox keeps an undecided entry only while a parent fact (its
-genesis or continuity answer) can decide it. Any other undecided import
-leaves the inbox for a bounded in-memory orphan pool that keeps its place
-in the parent's index (at the bound a random orphan gives way). A
-node-local policy decline is a decision and consumes the entry. Each
-accepted block (by import or otherwise) releases the orphans behind it and
-those whose time has come, and each parent hello every orphan that can now
-decide; exactly those are fetched again from the parent, an orphan whose
-block the fetcher still holds staying pooled. The parent relays evidence
-without validating it, so a parent miner could otherwise carry blocks that
-never decide until the inbox was full. An orphan evicted from the pool or
-lost with a restart is gone, as in Bitcoin's orphan pool, and returns
-through ordinary acquisition: the predecessor walk reaches the block, and a
-block reached without its parent's evidence is looked up by CID in the
-overlay peers' child-evidence indexes and asked of the co-hosted parent level
-(`lattice.hierarchy.evidence.request.v1`, answered from the parent's
-durable issued index with the ordinary evidence hint).
+executed. When this host mined the grind, the parent level hands the
+carried block and its proof to the co-hosted child level in memory before
+it imports and commits its own block: one grind is one subtree insert,
+children first. A crash between the two loses only the parent block, as a
+solo miner that crashes before broadcasting loses its block; a handoff is
+not retried. A stopping host refuses template and work requests on every
+level before it stops any, so no grind is handed to a stopping level. Any other
+carried block arrives through ordinary acquisition: the child overlay
+announces it or the predecessor walk reaches it, and a block reached without
+its proof is looked up by CID in the overlay peers' child-evidence indexes.
 When import needs a genesis or continuity fact the parent level does not
 hold yet, the block parks on that fact and is readied again when the parent
 level's tip moves; nothing is asked of a peer, and no answer crosses the
@@ -207,25 +191,16 @@ durable local CID-to-bytes store. The node owns acquisition, authentication,
 pruning, routing, and operational projections. Lattice owns accepted
 consensus facts and never uses storage presence or peer identity as validity.
 
-## Network planes
+## Network plane
 
-The node uses two Ivy sessions:
-
-- the public same-chain overlay exchanges announcements and same-path content;
-- the private hierarchy plane connects each co-hosted parent level with its
-  child levels, and carries only child-evidence delivery: the hello, the
-  evidence-available hint, the evidence index request and response, the
-  per-block evidence request (getdata), and the evidence Volumes fetched from
-  that exact session. It is dialed on loopback between co-hosted levels; the
-  listener binds all interfaces, so firewall the hierarchy port. It carries
-  evidence until evidence delivery also moves in-process.
+Each chain has one Ivy network plane: the public same-chain overlay, which
+exchanges announcements, same-path content, and child-evidence index roots.
 
 Parent facts, run reports and merged-mining candidates never cross a network
 plane: they pass in-process between co-hosted levels.
 
-Both planes currently require node protocol version 5; mixed-version peers
-refuse the session. Co-hosted levels run one binary, so a hierarchy session
-never mixes versions.
+The overlay currently requires node protocol version 5; mixed-version peers
+refuse the session.
 
 One overlay request topic is answered in its full form so older peers still
 sync from this node: the accepted-leaves page. A node sends the accepted-leaves
@@ -270,7 +245,8 @@ changes, under its own lease only and reading its parent without taking the
 parent's gate or lease. The parent's template path reads each hosted child's
 latest candidate without waiting on the child: no parent path awaits a
 child, so no child can stall parent consensus. A child learns of a carry
-from the parent's evidence for it, as it learns of any. A template carries
+this host mined from the parent level's in-memory handoff, and of any other
+from its overlay. A template carries
 at most one candidate per directory, built on its current tip's post-state,
 never the block the branch already carries for that directory (a
 children-only carrier leaves the post-state, so that candidate still fits;
@@ -278,22 +254,14 @@ carried again it would only be credited once more). A sibling of the carried
 block, built before the child imports it, is carried like any candidate: the
 child's fork choice settles the siblings, as stale blocks settle in
 conventional merged mining.
-A child builds no candidate while its execution walk is stepping, while its validated
-tip is behind its weighed tip and the walk can still step, or while a
-candidate it built that the parent's evidence has named and still holds in
-its inbox is ready for or in its import; it builds again when the walk or
-the import decides, on the tip it reached, and it rebuilds only when an
-input of the candidate changed. Parent
-evidence re-served for a carrier whose import already credited the block
-(a scan, a repeated hint) is not imported again. A child checks its evidence
-inbox for room before it fetches the parent's evidence, so a full inbox costs
-the parent no fetch: the evidence waits until an import makes room.
+A child builds no candidate while its execution walk is stepping, or while its validated
+tip is behind its weighed tip and the walk can still step; it builds again
+when the walk decides, on the tip it reached, and it rebuilds only when an
+input of the candidate changed.
 Candidates are
 not miner-work durability: the child keeps a candidate's content by its own
 bounded budget, oldest first, until the carried block's import owns the
-roots or the budget sheds it, and a candidate named in the parent's evidence
-is a handoff the budget never sheds. Parent-proof acquisition is a separate
-retryable path.
+roots or the budget sheds it.
 
 Each candidate-root content session uses the node's `NodeResourcePolicy` for
 archive bytes, Volume count, and member count. `ChainSpec.maxBlockSize` remains
@@ -304,10 +272,8 @@ local ceiling declines or defers acquisition without proving the candidate
 invalid or punishing its advertiser.
 
 Hierarchy authorization comes from the host, not from a process key choosing
-a branch: a child level trusts the parent level it is co-hosted with, and a
-parent level grants the hierarchy child role only to the process key of the
-child level it hosts for that directory. Any other key claiming a child path
-is refused. CAS bytes are non-secret availability and grant no validity:
+a branch: a child level trusts only the parent level it is co-hosted with,
+read in-process, and no network peer holds a parent or child role. CAS bytes are non-secret availability and grant no validity:
 the consumer verifies every CID and the exact Lattice evidence it reads.
 
 ### Child-evidence availability
@@ -326,10 +292,8 @@ envelope contains only the complete structural work proof. Parent validity
 verdicts are never serialized into the Volume. Nexus neither keeps nor reads a
 child-evidence index.
 
-Both inventories are cursor-bound and name one exact Volume at a time. Ivy
-streams each complete Volume as an ordered, bounded sequence of frames;
-the receiver applies the one-entry evidence archive bound before allocating
-that stream. Refusing a globally valid archive because it exceeds this local
+Ivy streams each complete Volume as an ordered, bounded sequence of frames.
+Refusing a globally valid archive because it exceeds a local
 application bound, or because receive capacity is temporarily full, is
 reputation-neutral and retried; malformed framing remains punishable.
 Ivy owns request deadlines and session fencing,
@@ -337,22 +301,6 @@ while the node caps concurrent acquisition and recycles a silent or malformed
 session. Exact-announcer binding provides accountability and prevents one peer
 from making the node search the wider network for arbitrary roots; it is not a
 source of content validity.
-
-Parent-to-child evidence uses the same shape: each index or live summary names
-the parent's stable sync-source ID, monotone evidence ordinal, child CID,
-physical root CID, and complete attachment Volume CID. An index walk fixes its
-`through` ordinal on the first page and advances by durable `next` cursors, so
-new evidence cannot reshuffle the walk. A changed source ID restarts at zero.
-The child fetches the Volume directly from the exact parent session, validates
-it, and durably retains it in a pre-import inbox before advancing its scan
-cursor; it fetches nothing while the inbox is full, and what a full inbox
-stopped runs again when room frees. Live summaries use the same inbox
-without advancing that cursor.
-Import transfers ownership to ordinary chain recovery before releasing the
-inbox root. Multiple roots for one child are separate summaries. No proof-root
-pagination exists beneath this inventory; the one other evidence request is
-the per-block getdata (`lattice.hierarchy.evidence.request.v1`), which the
-parent answers with the same evidence hint or not at all.
 
 For child genesis, the parent level answers positively only for an exact
 `(directory, child CID, empty parent state)` tuple recorded by a
@@ -379,7 +327,7 @@ the receiver pulls it from that exact session, resolves the transaction, and
 re-materializes the canonical typed Volume locally. Unrelated peer-supplied
 members are never retained or relayed. Lattice then validates the transaction
 against the current state, and the node relays only a newly admitted root.
-Parent-child hierarchy sessions never merge mempools.
+Co-hosted parent and child levels never merge mempools.
 
 The pool separates executable, future-nonce, and temporarily unavailable
 transactions by signer nonce. Template selection advances a dependency

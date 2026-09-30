@@ -2,8 +2,8 @@
 
 `lattice-node` runs one chain in the Lattice hierarchy. Lattice has one root,
 **Nexus**, and every other chain is a descendant secured through merged proof of
-work. A process owns exactly one chain, one durable store, one same-chain
-overlay, and one private parent/child fact plane.
+work. A process owns exactly one chain, one durable store, and one same-chain
+overlay.
 
 ## Architecture at a glance
 
@@ -13,9 +13,9 @@ overlay, and one private parent/child fact plane.
   `Nexus`, `Nexus/Payments`, or `Nexus/Payments/Rollups`. A path that omits
   `Nexus` is invalid. A child `directory` such as `Payments` is only the final edge
   label under a known parent.
-- **Two network planes.** The public Ivy overlay carries same-chain blocks and
-  content. The private hierarchy plane carries authenticated direct-parent and
-  direct-child facts.
+- **One network plane per chain.** The public Ivy overlay carries same-chain
+  blocks, content, and the carrier evidence that arrives with them. A child
+  reads its parent's facts in-process from the co-hosted parent level.
 - **External mining.** The node creates templates, validates submitted work,
   persists accepted blocks, and publishes them. `lattice-mining-coordinator`
   schedules nonce ranges and external `lattice-miner` workers search them.
@@ -36,7 +36,6 @@ swift build
 swift run lattice-node \
   --chain-path Nexus \
   --listen-port 4001 \
-  --fact-listen-port 4002 \
   --rpc-port 8080
 
 # Add same-chain peers explicitly when needed.
@@ -54,8 +53,8 @@ chain of the tree in a `lattice.json` and host it with `--config`:
 ```json
 {
   "chains": {
-    "Nexus": {"listen": 4001, "fact": 4002, "rpc": 8080},
-    "Nexus/Payments": {"listen": 4101, "fact": 4102, "rpc": 8180}
+    "Nexus": {"listen": 4001, "rpc": 8080},
+    "Nexus/Payments": {"listen": 4101, "rpc": 8180}
   }
 }
 ```

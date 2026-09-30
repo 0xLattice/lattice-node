@@ -5,7 +5,7 @@ import UInt256
 import cashew
 
 enum NodeNetworkTopic {
-    enum Plane { case overlay, hierarchy }
+    enum Plane { case overlay }
 
     static let overlayHello = "lattice.overlay.hello.v1"
     static let blockAnnouncement = "lattice.overlay.block.v1"
@@ -26,16 +26,6 @@ enum NodeNetworkTopic {
     static let childEvidenceRoot = "lattice.overlay.child-evidence.root.v1"
     static let readEndpointRequest = "lattice.overlay.read-endpoint.request.v1"
     static let readEndpointResponse = "lattice.overlay.read-endpoint.response.v1"
-    static let hierarchyHello = "lattice.hierarchy.hello.v1"
-    static let childEvidenceAvailable = "lattice.hierarchy.evidence.available.v4"
-    static let childEvidenceIndexRequest = "lattice.hierarchy.evidence.index.request.v4"
-    static let childEvidenceIndexResponse = "lattice.hierarchy.evidence.index.response.v4"
-    /// Child → parent: the evidence for one carried child block, by CID
-    /// (Bitcoin's getdata). The parent answers from its durable issued index
-    /// with a `childEvidenceAvailable` hint, or stays silent. Additive: a
-    /// parent that does not know the topic drops it unread, and the child's
-    /// overlay peers' evidence indexes are still searched.
-    static let parentEvidenceRequest = "lattice.hierarchy.evidence.request.v1"
 
     static func plane(for topic: String) -> Plane? {
         switch topic {
@@ -46,9 +36,6 @@ enum NodeNetworkTopic {
              ancestorRangeRequest, ancestorRangeResponse,
              childEvidenceRoot,
              readEndpointRequest, readEndpointResponse: .overlay
-        case hierarchyHello, childEvidenceAvailable,
-             childEvidenceIndexRequest, childEvidenceIndexResponse,
-             parentEvidenceRequest: .hierarchy
         default: nil
         }
     }
@@ -57,7 +44,7 @@ enum NodeNetworkTopic {
 /// Asks an overlay peer — typically one DHT-discovered as a provider of
 /// `genesisCID` — for the declared public read URLs of the chain whose genesis
 /// that is. The peer answers from self-description only (its own configured
-/// URL, or ones its wired children declared in their hellos); the answer is
+/// URL, or its co-hosted children's configured ones); the answer is
 /// UNVERIFIED — a browser must match the served genesis against the parent's
 /// on-chain anchor before trusting any URL. Unknown to legacy peers, which
 /// drop the topic silently; the asker falls back on timeout.
@@ -377,93 +364,6 @@ struct ChildEvidenceRootMessage: NodeJSONMessage, Equatable, Sendable {
 
 private func _isCanonicalWireCID(_ value: String) -> Bool {
     _isBoundedWireAtom(value) && CIDIdentity.isCanonical(value)
-}
-
-struct ChildEvidenceAvailableMessage: NodeJSONMessage, Equatable, Sendable {
-    let childPath: [String]
-    let sourceID: String
-    let ordinal: UInt64
-    let childCID: String
-    let rootCID: String
-    let attachmentCID: String
-
-    func validate() throws {
-        guard _isAbsoluteChainPath(childPath), childPath.count > 1,
-              UUID(uuidString: sourceID) != nil,
-              ordinal > 0,
-              _isCanonicalWireCID(childCID),
-              _isCanonicalWireCID(rootCID),
-              _isCanonicalWireCID(attachmentCID) else {
-            throw NodeNetworkWireError.malformed
-        }
-    }
-}
-
-struct ParentEvidenceRequestMessage: NodeJSONMessage, Equatable, Sendable {
-    let requestID: UInt64
-    let childPath: [String]
-    let childCID: String
-
-    func validate() throws {
-        guard requestID != 0,
-              _isAbsoluteChainPath(childPath), childPath.count > 1,
-              _isCanonicalWireCID(childCID) else {
-            throw NodeNetworkWireError.malformed
-        }
-    }
-}
-
-struct ChildEvidenceIndexRequestMessage: NodeJSONMessage, Equatable, Sendable {
-    let requestID: UInt64
-    let childPath: [String]
-    let sourceID: String?
-    let cursor: UInt64
-    let through: UInt64?
-
-    func validate() throws {
-        guard requestID != 0,
-              _isAbsoluteChainPath(childPath), childPath.count > 1,
-              sourceID.map({ UUID(uuidString: $0) != nil }) ?? true,
-              sourceID != nil || (cursor == 0 && through == nil),
-              through.map({ cursor <= $0 }) ?? true else {
-            throw NodeNetworkWireError.malformed
-        }
-    }
-}
-
-struct ChildEvidenceIndexResponseMessage: NodeJSONMessage, Equatable, Sendable {
-    static let maximumEntries = 64
-
-    let requestID: UInt64
-    let childPath: [String]
-    let sourceID: String
-    let cursor: UInt64
-    let through: UInt64
-    let entries: [IssuedChildEvidenceSummary]
-    let next: UInt64
-
-    func validate() throws {
-        let sorted = entries.sorted { $0.ordinal < $1.ordinal }
-        guard requestID != 0,
-              _isAbsoluteChainPath(childPath), childPath.count > 1,
-              UUID(uuidString: sourceID) != nil,
-              cursor <= next, next <= through,
-              entries.count <= Self.maximumEntries,
-              entries == sorted,
-              Set(entries.map(\.ordinal)).count
-                == entries.count,
-              entries.allSatisfy({ entry in
-                  entry.ordinal > cursor
-                    && entry.ordinal <= next
-                    && _isCanonicalWireCID(entry.childCID)
-                    && _isCanonicalWireCID(entry.rootCID)
-                    && _isCanonicalWireCID(entry.attachmentCID)
-              }),
-              entries.last?.ordinal == next || entries.isEmpty,
-              !entries.isEmpty || next == through else {
-            throw NodeNetworkWireError.malformed
-        }
-    }
 }
 
 func _contentBoundBlock(cid: String, data: Data) -> Block? {

@@ -23,7 +23,6 @@ final class ChainHostTests: XCTestCase {
     ) -> ChainHost.Configure {
         let storage = root.appendingPathComponent(address.key, isDirectory: true)
         let key = String(repeating: String(format: "%02x", keyByte), count: 32)
-        let fact = NetworkTransportTestPorts.allocate()
         let rpc = NetworkTransportTestPorts.allocate()
         return {
             try NodeConfiguration(
@@ -31,7 +30,6 @@ final class ChainHostTests: XCTestCase {
                 storagePath: storage,
                 privateKeyHex: key,
                 listenPort: listen,
-                factListenPort: fact,
                 rpcPort: rpc,
                 bootstrapPeers: bootstrapPeers
             )
@@ -91,31 +89,9 @@ final class ChainHostTests: XCTestCase {
         }
     }
 
-    func testTheChildIsWiredToItsCoHostedParentOverLoopback() async throws {
-        let root = temporaryDirectory()
-        let host = try ChainHost(chains: [
-            nexus: configure(nexus, root: root, keyByte: 1),
-            child: configure(child, root: root, keyByte: 2),
-        ])
-        let parentConfiguration = await host.configuration(nexus)
-        let childConfiguration = await host.configuration(child)
-        let parent = try XCTUnwrap(parentConfiguration)
-        XCTAssertNil(parent.parentEndpoint)
-        XCTAssertEqual(
-            childConfiguration?.parentEndpoint,
-            ParentEndpoint(
-                publicKey: parent.processPublicKey,
-                host: "127.0.0.1",
-                port: parent.factListenPort
-            )
-        )
-        let paths = await host.paths
-        XCTAssertEqual(paths, [nexus, child])
-    }
-
-    /// Each level grants the hierarchy child role only to the process key of
-    /// the child level it hosts.
-    func testEachParentPinsTheChildRoleToItsHostedChildKey() async throws {
+    /// Each level knows the child levels it hosts: it announces their
+    /// geneses and serves their read URLs.
+    func testEachParentKnowsTheChildLevelsItHosts() async throws {
         let root = temporaryDirectory()
         let host = try ChainHost(chains: [
             nexus: configure(nexus, root: root, keyByte: 1),
@@ -128,23 +104,11 @@ final class ChainHostTests: XCTestCase {
         let parent = try XCTUnwrap(nexusConfiguration)
         let middle = try XCTUnwrap(childConfiguration)
         let leaf = try XCTUnwrap(grandchildConfiguration)
-        XCTAssertEqual(parent.hostedChildKeys, [child.directory: middle.processPublicKey])
-        XCTAssertEqual(middle.hostedChildKeys, [grandchild.directory: leaf.processPublicKey])
-        XCTAssertEqual(leaf.hostedChildKeys, [:])
-
-        let childHello = ChainHello(
-            nexusGenesisCID: parent.nexusGenesisCID, chainPath: child.components
-        )
-        XCTAssertEqual(
-            NodeNetworkRuntime.hierarchyRole(
-                for: childHello, peerKey: middle.processPublicKey, configuration: parent
-            ),
-            .child(child.components)
-        )
-        // The grandchild's key claiming the child's path is not the hosted one.
-        XCTAssertNil(NodeNetworkRuntime.hierarchyRole(
-            for: childHello, peerKey: leaf.processPublicKey, configuration: parent
-        ))
+        XCTAssertEqual(parent.hostedChildDirectories, [child.directory])
+        XCTAssertEqual(middle.hostedChildDirectories, [grandchild.directory])
+        XCTAssertEqual(leaf.hostedChildDirectories, [])
+        let paths = await host.paths
+        XCTAssertEqual(paths, [nexus, child, grandchild])
     }
 
     /// A child that cannot start (here: another writer holds its storage)
@@ -333,11 +297,45 @@ final class ChainHostTests: XCTestCase {
         await host.stopAll()
     }
 
-    /// With the hierarchy plane still on, each carried block reaches the
-    /// child twice: in memory at `submitWork`, and later over the plane. The
-    /// child admits it once, before `submitWork` answers, and the plane's
-    /// copy moves nothing.
-    func testTheMinedHandoffAndThePlaneAdmitACarriedBlockOnce() async throws {
+    /// Stopping the host closes mining ingress on every level before any
+    /// level stops: from then on the root refuses template and work
+    /// requests with a clear shutdown error, not a half-stopped tree.
+    func testStoppingTheHostRefusesMiningFirst() async throws {
+        let root = temporaryDirectory(create: true)
+        let (_, genesisCID) = try await seedChild(root: root, timestamp: 1_000)
+        let host = try ChainHost(chains: [
+            nexus: configure(nexus, root: root, keyByte: 1),
+            child: configure(child, root: root, keyByte: 2),
+        ])
+        let failed = try await host.startAll()
+        XCTAssertTrue(failed.isEmpty)
+        let parent = try await service(host, nexus)
+        try await anchor(genesisCID, on: host)
+        let template = try await parent.miningTemplate(MiningTemplateRequest())
+
+        let stopping = Task { await host.stopAll() }
+        try await eventually("the root refuses templates", within: .seconds(30)) {
+            do {
+                _ = try await parent.miningTemplate(MiningTemplateRequest())
+                return false
+            } catch ChainServiceError.shuttingDown {
+                return true
+            }
+        }
+        do {
+            _ = try await parent.submitWork(SubmitWorkRequest(
+                workID: template.workID, nonce: solvedNonce(for: template)
+            ))
+            XCTFail("work was accepted while the host stopped")
+        } catch {
+            XCTAssertEqual(error as? ChainServiceError, .shuttingDown)
+        }
+        await stopping.value
+    }
+
+    /// Each carried block reaches the child in memory at `submitWork`; the
+    /// child admits it once, before `submitWork` answers.
+    func testTheMinedHandoffAdmitsACarriedBlockOnce() async throws {
         let root = temporaryDirectory(create: true)
         let (_, genesisCID) = try await seedChild(root: root, timestamp: 1_000)
         let host = try ChainHost(chains: [
@@ -376,10 +374,6 @@ final class ChainHostTests: XCTestCase {
             return handedOff.count == 3
         }
 
-        // The plane's copies drain from the child's inbox without moving it.
-        try await eventually("the plane's copies drain", within: .seconds(60)) {
-            (try? await childProcess.store.pendingHandoffChildCIDs().isEmpty) ?? false
-        }
         let tip = await childProcess.canonicalTip()
         XCTAssertEqual(tip?.cid, handedOff.last)
         XCTAssertEqual(tip?.height, 3)
@@ -605,18 +599,7 @@ final class ChainHostTests: XCTestCase {
     func testStoppingALevelJoinsItsGenesisActivation() async throws {
         let root = temporaryDirectory(create: true)
         let (_, genesisCID) = try await seedChild(root: root, timestamp: 1_000)
-        let parentKey = String(repeating: "01", count: 32)
         let configuration = try configure(child, root: root, keyByte: 2)()
-            .withParentEndpoint(ParentEndpoint(
-                publicKey: try NodeConfiguration(
-                    chainPath: nexus.components,
-                    storagePath: root.appendingPathComponent("unused"),
-                    privateKeyHex: parentKey,
-                    listenPort: 1, factListenPort: 2, rpcPort: 3
-                ).processPublicKey,
-                host: "127.0.0.1",
-                port: NetworkTransportTestPorts.allocate()
-            ))
         let parent = GatedAnchorParentLevel(genesisCID: genesisCID)
         // Scoped, so nothing but the level's own tasks holds its process
         // once it has stopped.

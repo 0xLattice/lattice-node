@@ -71,18 +71,13 @@ struct BlockFetcher {
         /// self-admit path needs executed now. A predecessor park seeds the
         /// missing ancestor on its descendant's tier.
         let weighed: Bool
-        /// The package is the configured parent's evidence (its scan, its
-        /// push, or its durable inbox), not an overlay peer's. Monotone:
-        /// once a parent seed touches an attempt it stays parent-backed.
-        let fromParent: Bool
 
         init(
             blockCID: String,
             package: AuthenticatedChildPackage?,
             recoveryRootCID: String? = nil,
             provider: CandidateProvider? = nil,
-            weighed: Bool = false,
-            fromParent: Bool = false
+            weighed: Bool = false
         ) {
             self.blockCID = blockCID
             self.package = package
@@ -90,7 +85,6 @@ struct BlockFetcher {
                 ?? recoveryRootCID
             self.provider = provider
             self.weighed = weighed
-            self.fromParent = fromParent && package != nil
         }
     }
 
@@ -126,8 +120,6 @@ struct BlockFetcher {
         /// of a park nothing waits on: enough to survive a lost locate (the head
         /// the node syncs toward), then reclaimed like any unneeded park.
         var evidenceRetries: Int = 0
-        /// Seeded with the configured parent's evidence (`Seed.fromParent`).
-        var fromParent = false
         /// The parent fact a `.wait(.parentFact)` park waits on; nil when no
         /// parent level can answer it, so no tip change wakes it.
         var parentFact: ParentFact?
@@ -181,24 +173,6 @@ struct BlockFetcher {
     /// Whether any attempt for the block is held, in whatever state.
     func tracks(_ blockCID: String) -> Bool {
         records[blockCID].map { !$0.attempts.isEmpty } ?? false
-    }
-
-    /// Whether the block is ready for, or in, an admission attempt — not
-    /// parked on evidence, content, time or a missing predecessor.
-    func isAwaitingAdmission(_ blockCID: String) -> Bool {
-        guard let record = records[blockCID] else { return false }
-        return record.attempts.values.contains { attempt in
-            switch attempt.state {
-            case .ready, .active: return true
-            default: return false
-            }
-        }
-    }
-    /// Whether an attempt for the block was seeded with the configured
-    /// parent's evidence, in whatever state: the parent's word that its
-    /// admission will decide. Overlay-seeded attempts never count.
-    func hasParentAttempt(_ blockCID: String) -> Bool {
-        records[blockCID]?.attempts.values.contains { $0.fromParent } ?? false
     }
 
     var hasTimedWait: Bool {
@@ -321,7 +295,6 @@ struct BlockFetcher {
             // advertising the same attachment would re-eager a weighed block.
             attempt.weighed = attempt.weighed
                 && (seed.weighed || seed.package != nil)
-            attempt.fromParent = attempt.fromParent || seed.fromParent
             let previous = attempt.package
             var packageChanged = false
             if let package = seed.package,
@@ -356,8 +329,7 @@ struct BlockFetcher {
                 expiresAt: nil,
                 state: .ready,
                 weighed: seed.weighed
-                    || (record.attempts[nil]?.weighed ?? false),
-                fromParent: seed.fromParent
+                    || (record.attempts[nil]?.weighed ?? false)
             )
         }
         records[seed.blockCID] = record
@@ -783,12 +755,7 @@ struct BlockFetcher {
             return true
         }
         guard !readySet.contains(key) else { return true }
-        // The parent's evidence is bounded by the parent (and durable in
-        // the inbox): it is never refused for a pool an overlay peer can
-        // fill with announcements.
-        guard readySet.count < Self.readyCapacity
-                || records[key.blockCID]?.attempts[key.rootCID]?.fromParent == true
-        else {
+        guard readySet.count < Self.readyCapacity else {
             return false
         }
         readySet.insert(key)

@@ -26,7 +26,7 @@ class NetworkTrustTestCase: XCTestCase {
         requestTimeout: Duration,
         bootstrapPeers: [PeerEndpoint] = [],
         publicReadURL: String? = nil,
-        hostedChildren: [String: PeerKey] = [:]
+        hostedChildren: [String: String?] = [:]
     ) async throws -> (
         runtime: NodeNetworkRuntime,
         process: ChainProcess,
@@ -40,7 +40,6 @@ class NetworkTrustTestCase: XCTestCase {
         )
         addTeardownBlock { try? FileManager.default.removeItem(at: storage) }
         let overlayPort = NetworkTransportTestPorts.allocate()
-        let hierarchyPort = NetworkTransportTestPorts.allocate()
         let unhosted = try NodeConfiguration(
             chainPath: ["Nexus"],
             storagePath: storage,
@@ -49,12 +48,11 @@ class NetworkTrustTestCase: XCTestCase {
                 count: 32
             ),
             listenPort: overlayPort,
-            factListenPort: hierarchyPort,
             rpcPort: NetworkTransportTestPorts.allocate(),
             publicReadURL: publicReadURL
         )
         let configuration = hostedChildren.reduce(unhosted) { hosting, child in
-            hosting.withHostedChild(directory: child.key, publicKey: child.value.hex)
+            hosting.withHostedChild(directory: child.key, publicReadURL: child.value)
         }
         let runtime = try NodeNetworkRuntime(
             configuration: configuration,
@@ -67,16 +65,6 @@ class NetworkTrustTestCase: XCTestCase {
                     stunServers: [],
                     healthConfig: PeerHealthConfig(enabled: false),
                     mode: .overlay
-                ),
-                hierarchy: IvyConfig(
-                    signingKey: configuration.signingKey,
-                    listenPort: hierarchyPort,
-                    stunServers: [],
-                    maxConnections: IvyConfig.defaultMaxConnections,
-                    maxConnectionsPerNetgroup: IvyConfig.defaultMaxConnections,
-                    relayEnabled: false,
-                    carriers: [],
-                    mode: .privateNetwork
                 )
             )
         )
@@ -279,17 +267,6 @@ class NetworkTrustTestCase: XCTestCase {
         ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                chainStateChangePublisher: { [weak runtime] in
-                    await runtime?.chainStateChanged()
-                },
-                childProofPublisher: { [weak runtime] publication in
-                    guard let runtime else { throw CancellationError() }
-                    _ = try await runtime.publishChildProof(
-                        publication.proof,
-                        childDirectory: publication.directory,
-                        childCID: publication.childCID
-                    )
-                },
                 acceptedBlockPublisher: { [weak runtime] blockCID in
                     await acceptedBlockRecorder?.append(blockCID)
                     guard let runtime else { throw CancellationError() }
@@ -332,7 +309,6 @@ class NetworkTrustTestCase: XCTestCase {
                 return try await service.importNetworkCandidate(
                     admission.header,
                     authenticatedChildPackage: admission.authenticatedChildPackage,
-                    preparingChildDirectories: admission.preparingChildDirectories,
                     contentSource: admission.contentSource,
                     weighed: admission.weighed
                 )
@@ -418,91 +394,6 @@ class NetworkTrustTestCase: XCTestCase {
         )
         try serialized.validate()
         return serialized
-    }
-
-    func hierarchyRetryFixture(
-        keyByte: UInt8,
-        summary: IssuedChildEvidenceSummary?,
-        withholdFirstHello: Bool = false
-    ) async throws -> HierarchyRetryFixture {
-        let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-hierarchy-retry-\(UUID().uuidString)",
-            isDirectory: true
-        )
-        let parentKey = signingKey(keyByte)
-        let parentPeerKey = peerKey(parentKey)
-        let parentPort = NetworkTransportTestPorts.allocate()
-        let overlayPort = NetworkTransportTestPorts.allocate()
-        let hierarchyPort = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus", "Retry"],
-            storagePath: storage,
-            privateKeyHex: String(
-                repeating: String(format: "%02x", keyByte &+ 1),
-                count: 32
-            ),
-            listenPort: overlayPort,
-            factListenPort: hierarchyPort,
-            rpcPort: NetworkTransportTestPorts.allocate()
-        ).withParentEndpoint(ParentEndpoint(
-            publicKey: parentPeerKey.hex,
-            host: "127.0.0.1",
-            port: parentPort
-        ))
-        let runtime = try NodeNetworkRuntime(
-            configuration: configuration,
-            planeConfigurations: try NodeNetworkPlaneConfigurations(
-                overlay: IvyConfig(
-                    signingKey: configuration.signingKey,
-                    listenPort: overlayPort,
-                    stunServers: [],
-                    mode: .overlay
-                ),
-                hierarchy: IvyConfig(
-                    signingKey: configuration.signingKey,
-                    listenPort: hierarchyPort,
-                    bootstrapPeers: [configuration.parentEndpoint!.ivy],
-                    inboundAdmissionBypassPeerKeys: [parentPeerKey],
-                    requestTimeout: .milliseconds(100),
-                    stunServers: [],
-                    maxConnections: IvyConfig.defaultMaxConnections,
-                    maxConnectionsPerNetgroup: IvyConfig.defaultMaxConnections,
-                    relayEnabled: false,
-                    carriers: [],
-                    mode: .privateNetwork
-                )
-            )
-        )
-        let process = try await ChainProcess.open(
-            configuration: configuration
-        )
-        let recorder = HierarchyRetryRecorder(
-            withholdFirstHello: withholdFirstHello
-        )
-        let parent = Ivy(config: IvyConfig(
-            signingKey: parentKey,
-            listenPort: parentPort,
-            stunServers: [],
-            mode: .privateNetwork
-        ))
-        let delegate = HierarchyRetryPeer(
-            recorder: recorder,
-            parentHello: try ChainHello(
-                nexusGenesisCID: configuration.nexusGenesisCID,
-                chainPath: ["Nexus"]
-            ).encode(),
-            summary: summary
-        )
-        await parent.installTestDelegate(delegate)
-        return HierarchyRetryFixture(
-            storage: storage,
-            configuration: configuration,
-            runtime: runtime,
-            process: process,
-            parent: parent,
-            recorder: recorder,
-            delegate: delegate
-        )
     }
 
     func signingKey(_ byte: UInt8) -> Curve25519.Signing.PrivateKey {

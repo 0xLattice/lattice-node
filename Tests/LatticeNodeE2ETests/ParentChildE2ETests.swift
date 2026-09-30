@@ -62,7 +62,6 @@ final class ParentChildE2ETests: XCTestCase {
             name: "source",
             identity: sourceIdentity,
             overlayPort: ports[0],
-            factPort: ports[1],
             rpcPort: ports[2]
         )
         let joiner = nexusNode(
@@ -71,7 +70,6 @@ final class ParentChildE2ETests: XCTestCase {
             name: "joiner",
             identity: joinerIdentity,
             overlayPort: ports[3],
-            factPort: ports[4],
             rpcPort: ports[5]
         )
         joiner.setOverlayPeers([
@@ -160,7 +158,6 @@ final class ParentChildE2ETests: XCTestCase {
             name: "a",
             identity: aIdentity,
             overlayPort: ports[0],
-            factPort: ports[1],
             rpcPort: ports[2]
         )
         let b = nexusNode(
@@ -169,7 +166,6 @@ final class ParentChildE2ETests: XCTestCase {
             name: "b",
             identity: bIdentity,
             overlayPort: ports[3],
-            factPort: ports[4],
             rpcPort: ports[5]
         )
         let c = nexusNode(
@@ -178,7 +174,6 @@ final class ParentChildE2ETests: XCTestCase {
             name: "c",
             identity: cIdentity,
             overlayPort: ports[6],
-            factPort: ports[7],
             rpcPort: ports[8]
         )
         let d = nexusNode(
@@ -187,7 +182,6 @@ final class ParentChildE2ETests: XCTestCase {
             name: "d",
             identity: dIdentity,
             overlayPort: ports[9],
-            factPort: ports[10],
             rpcPort: ports[11]
         )
         cluster.add(a)
@@ -344,7 +338,6 @@ final class ParentChildE2ETests: XCTestCase {
             name: "a",
             identity: aIdentity,
             overlayPort: ports[0],
-            factPort: ports[1],
             rpcPort: ports[2]
         )
         let b = nexusNode(
@@ -353,7 +346,6 @@ final class ParentChildE2ETests: XCTestCase {
             name: "b",
             identity: bIdentity,
             overlayPort: ports[3],
-            factPort: ports[4],
             rpcPort: ports[5]
         )
         let c = nexusNode(
@@ -362,7 +354,6 @@ final class ParentChildE2ETests: XCTestCase {
             name: "c",
             identity: cIdentity,
             overlayPort: ports[6],
-            factPort: ports[7],
             rpcPort: ports[8]
         )
         let d = nexusNode(
@@ -371,7 +362,6 @@ final class ParentChildE2ETests: XCTestCase {
             name: "d",
             identity: dIdentity,
             overlayPort: ports[9],
-            factPort: ports[10],
             rpcPort: ports[11]
         )
         cluster.add(a)
@@ -484,7 +474,6 @@ final class ParentChildE2ETests: XCTestCase {
             name: "nexus",
             identity: nexusIdentity,
             overlayPort: ports[0],
-            factPort: ports[1],
             rpcPort: ports[2]
         )
         cluster.add(nexus)
@@ -547,7 +536,6 @@ final class ParentChildE2ETests: XCTestCase {
             identity: childIdentity,
             host: nexus,
             overlayPort: ports[3],
-            factPort: ports[4],
             rpcPort: ports[5]
         )
         try JSONEncoder().encode(seed).write(
@@ -663,7 +651,6 @@ final class ParentChildE2ETests: XCTestCase {
             name: "src-nexus",
             identity: sourceNexusIdentity,
             overlayPort: ports[0],
-            factPort: ports[1],
             rpcPort: ports[2]
         )
         cluster.add(sourceNexus)
@@ -715,7 +702,6 @@ final class ParentChildE2ETests: XCTestCase {
             identity: sourceChildIdentity,
             host: sourceNexus,
             overlayPort: ports[3],
-            factPort: ports[4],
             rpcPort: ports[5]
         )
         try JSONEncoder().encode(seed).write(
@@ -757,7 +743,6 @@ final class ParentChildE2ETests: XCTestCase {
             name: "join-nexus",
             identity: joinerNexusIdentity,
             overlayPort: ports[6],
-            factPort: ports[7],
             rpcPort: ports[8]
         )
         joinerNexus.setOverlayPeers([
@@ -777,7 +762,6 @@ final class ParentChildE2ETests: XCTestCase {
             identity: joinerChildIdentity,
             host: joinerNexus,
             overlayPort: ports[9],
-            factPort: ports[10],
             rpcPort: ports[11],
             overlayPeers: [
                 try overlayPeer(identity: sourceChildIdentity, port: ports[3])
@@ -886,7 +870,6 @@ final class ParentChildE2ETests: XCTestCase {
         name: String,
         identity: E2EIdentity,
         overlayPort: UInt16,
-        factPort: UInt16,
         rpcPort: UInt16
     ) -> E2ENode {
         E2ENode(
@@ -897,7 +880,6 @@ final class ParentChildE2ETests: XCTestCase {
                 storage: workspace.url.appendingPathComponent(name, isDirectory: true),
                 identity: identity,
                 overlayPort: overlayPort,
-                factPort: factPort,
                 rpcPort: rpcPort
             ),
             logDirectory: workspace.logs
@@ -912,7 +894,6 @@ final class ParentChildE2ETests: XCTestCase {
         name: String,
         identity: E2EIdentity,
         overlayPort: UInt16,
-        factPort: UInt16,
         rpcPort: UInt16
     ) throws -> E2ENode {
         let root = workspace.url.appendingPathComponent(name, isDirectory: true)
@@ -924,7 +905,6 @@ final class ParentChildE2ETests: XCTestCase {
                 storage: try hostedLevel("Nexus", identity: identity, root: root),
                 identity: identity,
                 overlayPort: overlayPort,
-                factPort: factPort,
                 rpcPort: rpcPort,
                 hostRoot: root
             ),
@@ -942,7 +922,6 @@ final class ParentChildE2ETests: XCTestCase {
         identity: E2EIdentity,
         host: E2ENode,
         overlayPort: UInt16,
-        factPort: UInt16,
         rpcPort: UInt16,
         overlayPeers: [E2ENode.OverlayPeer] = []
     ) throws -> E2ENode {
@@ -956,7 +935,6 @@ final class ParentChildE2ETests: XCTestCase {
                 storage: try hostedLevel(path, identity: identity, root: root),
                 identity: identity,
                 overlayPort: overlayPort,
-                factPort: factPort,
                 rpcPort: rpcPort,
                 overlayPeers: overlayPeers,
                 hostRoot: root
@@ -1385,7 +1363,6 @@ final class ParentChildE2ETests: XCTestCase {
             name: "src-nexus",
             identity: sourceNexusIdentity,
             overlayPort: ports[0],
-            factPort: ports[1],
             rpcPort: ports[2]
         )
         cluster.add(sourceNexus)
@@ -1446,7 +1423,6 @@ final class ParentChildE2ETests: XCTestCase {
             identity: sourceChildIdentity,
             host: sourceNexus,
             overlayPort: ports[3],
-            factPort: ports[4],
             rpcPort: ports[5]
         )
         try JSONEncoder().encode(seed).write(
@@ -1577,7 +1553,6 @@ final class ParentChildE2ETests: XCTestCase {
             name: "join-nexus",
             identity: joinerNexusIdentity,
             overlayPort: ports[6],
-            factPort: ports[7],
             rpcPort: ports[8]
         )
         joinerNexus.setOverlayPeers([
@@ -1599,7 +1574,6 @@ final class ParentChildE2ETests: XCTestCase {
             identity: joinerChildIdentity,
             host: joinerNexus,
             overlayPort: ports[9],
-            factPort: ports[10],
             rpcPort: ports[11],
             overlayPeers: [
                 try overlayPeer(identity: sourceChildIdentity, port: ports[3])
@@ -2173,7 +2147,6 @@ private final class E2ENode {
         let storage: URL
         let identity: E2EIdentity
         let overlayPort: UInt16
-        let factPort: UInt16
         let rpcPort: UInt16
         let overlayPeers: [OverlayPeer]
         /// The data root of the tree this node runs in (`lattice-node
@@ -2186,7 +2159,6 @@ private final class E2ENode {
             storage: URL,
             identity: E2EIdentity,
             overlayPort: UInt16,
-            factPort: UInt16,
             rpcPort: UInt16,
             overlayPeers: [OverlayPeer] = [],
             hostRoot: URL? = nil
@@ -2196,7 +2168,6 @@ private final class E2ENode {
             self.storage = storage
             self.identity = identity
             self.overlayPort = overlayPort
-            self.factPort = factPort
             self.rpcPort = rpcPort
             self.overlayPeers = overlayPeers
             self.hostRoot = hostRoot
@@ -2482,7 +2453,6 @@ private final class E2ENode {
         ([self] + hostedChildren).flatMap {
             [
                 $0.configuration.overlayPort,
-                $0.configuration.factPort,
                 $0.configuration.rpcPort,
             ]
         }
@@ -2537,7 +2507,6 @@ private final class E2ENode {
             for node in [self] + hostedChildren {
                 chains[node.configuration.chainPath] = TopologyChain(
                     listen: node.configuration.overlayPort,
-                    fact: node.configuration.factPort,
                     rpc: node.configuration.rpcPort,
                     peers: node.overlayPeers.map {
                         "\($0.publicKey)@127.0.0.1:\($0.port)"
@@ -2554,7 +2523,6 @@ private final class E2ENode {
             "--data-directory", configuration.storage.path,
             "--identity-key", configuration.identity.file.path,
             "--listen-port", String(configuration.overlayPort),
-            "--fact-listen-port", String(configuration.factPort),
             "--rpc-port", String(configuration.rpcPort),
             // A test cluster's peers are exactly the ones it wires below; the
             // shipped defaults would send these nodes at the public network.

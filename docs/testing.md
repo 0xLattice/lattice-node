@@ -14,11 +14,10 @@ The suites are grouped by the boundary they actually cross:
 - `NetworkTrust*Tests` (FrontierSync, Evidence, Candidate, ReadURL,
   HierarchySession, over the shared `NetworkTrustTestCase`): real-network
   integration tests, not E2E. They exercise
-  overlay/fact-plane separation, bounded/canonical wire input, real
-  peer-to-runtime async delegate delivery, root-scoped content attribution,
-  per-connection hierarchy authorization, lifecycle fencing, proof
-  distribution, and immediate-parent facts read from the co-hosted parent
-  level (`LocalParentLevel`).
+  bounded/canonical wire input, real peer-to-runtime async delegate
+  delivery, root-scoped content attribution, lifecycle fencing, child-proof
+  lookup through peers' child-evidence indexes, and immediate-parent facts
+  read from the co-hosted parent level (`LocalParentLevel`).
 - `MultichainInvariantTests`: direct-parent-only package acceptance, ancestor-path rejection, and durable exact-edge recovery across process reopen.
 - `ChainServiceTests`: transaction, child-deploy, template, work-submission, reconciliation ordering, and publication despite optional hierarchy availability failures.
 - `DaemonHTTPTests`: real loopback HTTP route contracts.
@@ -77,9 +76,8 @@ cross-component invariants:
   fact; neither data availability nor parent canonicity substitutes for either;
 - each root-scoped acquisition gets an independent cashew coalescer, so one
   candidate cannot inherit another candidate's Ivy attribution;
-- a hierarchy connection cannot read CAS content before its own compatible
-  hello, and a provisional carrier can be served only as its leased request
-  root and is never persisted;
+- a provisional carrier can be served only as its leased request root and
+  is never persisted;
 - a durable canonical commit reserves reconciliation before a later template
   or transaction can observe the new chain state;
 - optional child-proof materialization never suppresses canonical publication;
@@ -90,33 +88,13 @@ cross-component invariants:
   §9.5); an observation that does not clear the terminal target credits
   nothing; one chain-local location holds the strongest such observation;
   distinct grinds sum, and replay cannot multiply weight;
-- evidence inventories retain their exact cursor across
-  transient Ivy/Tally pressure on a live parent session;
-- a failed hierarchy hello or durable evidence hint recycles only that exact
-  session; reconnect repeats authorization and the complete evidence index;
-- proof recovery on a connected noncanonical carrier is announced after an
-  already-completed empty index without changing the parent's canonical tip;
 - nothing flows upstream: child topology and derived weight stay in the child
   process and are never returned to a parent; a parent maintains run state only
   for the directories it hosts (spec §9.10) and serves it downstream;
-- a child pushes its candidate for the parent's pushed tip and the parent
-  holds it with no request and no rebuild on later templates; the parent
-  pushes a miner's minimum work for the child's subtree and only that, and
-  an unchanged plan pushes nothing; a parent tip that changes state drops
-  the stale candidate until the child rebuilds on the new tip and pushes
-  again (`testChildPushesACandidateForThePushedParentTipAndTheParentHoldsIt`,
-  `testParentPushesDescendantMinimumWorkAndTheChildBuildsWithIt`,
-  `testParentTipChangeDropsTheStaleCandidateUntilTheChildRepushes`);
-- a carried child block is not carried again nor is it a template digest
-  input, while a sibling of it is carried; and an overlay peer announcing the
-  carried block without serving it does not stall the child
-  (`testTheCarriedChildBlockIsNotCarriedAgainButASiblingIs`,
-  `testAnOverlayAnnouncerThatNeverServesTheCarriedBlockCannotStallTheChild`);
-- an offer this chain built is kept by its own budget, oldest first, and a
-  candidate the parent's evidence names carried survives every newer offer
-  until the carried block's import owns its roots
-  (`testHandedOffOfferSurvivesNewerOffersUntilAdmissionOwnsRoots`,
-  `testOfferBudgetEvictsTheOldestOfferWhole`);
+- an offer this chain built is kept by its own budget, oldest first, and
+  admission releases it only once the carried block's import owns its roots
+  (`testOfferBudgetEvictsTheOldestOfferWhole`,
+  `testAdmissionReleasesAnOfferOnlyOnceItsBatchOwnsEveryRoot`);
 - the template digest changes with the tip, the mempool and the child
   candidates held, and status serves what the template carries, so a miner
   refreshes its work for a change at any level
@@ -139,44 +117,10 @@ cross-component invariants:
   for that carrier's run, so a push made before the block was held here,
   or one missed while away, never waits for the next parent block; a
   parent-carried block is imported weighed on its proof, its relay link
-  persisted with the acceptance (child-proof recovery composes from that
-  evidence and reads the link beside it; a link it does not find is not a
-  reason to refuse to boot), and until an
-  import decides it its evidence stays in the parent-evidence inbox — a
-  deferral persists nothing, the entry survives a restart and the block is
-  accepted once the rule is met; a carrier refused for good is relayed and
-  consumed and never re-imported; a refusal with no carrier link to relay is
-  consumed all the same, and decided is exactly the set the fetcher never
-  retries; an import no parent fact can decide leaves the inbox as an
-  in-memory orphan, so descendants of a withheld block or far-future blocks
-  cannot fill it; a trigger (an accepted block, a parent hello) fetches
-  exactly the orphans it releases, each once, leaving pooled those the
-  fetcher still holds; a session blip mid-refetch keeps them, fetched
-  from the new session at once if its hello came first; the pool
-  evicts at random and empties with a restart; a lone child recovers
-  evidence it lost by asking its parent for it by CID; a full inbox costs
-  no fetch; a policy decline is consumed
-  (`testOnlyAParentFactKeepsAnUndecidedEntryInTheInbox`,
-  `testAtTheBoundARandomOrphanGivesWayToTheNewcomer`,
-  `testReleaseTakesExactlyTheReadyOrphans`,
-  `testWithheldPredecessorDescendantsCannotFillTheInbox`,
-  `testFutureStampedDescendantsCannotFillTheInbox`,
-  `testATriggerFetchesExactlyTheOrphansItReleases`,
-  `testASessionBlipDuringARefetchKeepsTheOrphans`,
-  `testARefetchCutShortAfterTheReconnectsHelloFetchesFromTheNewSession`,
-  `testALoneChildRecoversLostParentEvidenceByAskingItsParent`,
-  `testALoneChildRecoversEvictedParentEvidenceByAskingItsParent`,
-  `testAFullOrphanPoolEvictsAtRandom`,
-  `testAPolicyDeclineConsumesTheParentEvidence`,
-  `testAFullInboxCostsNoFetchesAndTheScanResumesWithRoom`); a restarted
-  child imports the block from its inbox alone,
-  weighed, with content served by the parent; no import of a block
-  reached through an overlay peer's child-evidence index uses `ImportMode.full`
-  (`testDeferredCarriedBlockKeepsItsEvidenceInTheInboxAcrossRestart`,
-  `testCarrierRefusedForGoodIsDecidedAndConsumed`,
-  `testDecidedRefusalWithoutACarrierLinkIsConsumed`,
-  `testDecidedIsExactlyWhatTheFetcherNeverRetries`,
-  `testRestartedChildAdmitsTheParentCarriedBlockFromItsInboxWeighed`,
+  persisted with the acceptance; decided is exactly the set the fetcher
+  never retries; no import of a block reached through an overlay peer's
+  child-evidence index uses `ImportMode.full`
+  (`testDecidedIsExactlyWhatTheFetcherNeverRetries`,
   `testColdSyncResolvesAChildProofThroughPeerIndexesAndBlamesJunk`); a run
   flows through every level — what Nexus attributes to the middle chain's
   committing block reaches the grandchild, and the middle chain's service

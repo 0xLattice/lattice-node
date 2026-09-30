@@ -68,18 +68,18 @@ final class MultichainInvariantTests: XCTestCase {
             block: unminedCarrier,
             target: min(recordingCarrier.nextTarget, childBlock.target)
         ))
-        _ = try await parent.prepareChildProofs(for: carrier, capacity: 16)
         let carrierHeader = try BlockHeader(node: carrier)
         // Not served yet: nothing hosts Payments until the parent prepares
         // proofs for it — that is the operator's declaration, made through the
         // service, which also pushes every changed run to the hosted child.
         let servedBefore = await parent.servedRunDirectoryList()
         XCTAssertEqual(servedBefore, [])
+        // The operator's declaration that this node hosts Payments.
+        await parent.serveRuns(for: "Payments")
         let pushed = ParentRunReportSink()
         let parentService = ChainService(
             process: parent,
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in }
             )
         )
@@ -89,18 +89,14 @@ final class MultichainInvariantTests: XCTestCase {
         let carrierOutcome = try await parentService.importNetworkCandidate(
             carrierHeader,
             authenticatedChildPackage: nil,
-            preparingChildDirectories: ["Payments"],
             contentSource: FetcherContentSource(parent)
         )
         XCTAssertTrue(carrierOutcome.decision.isAccepted)
-        _ = try await parent.retryPendingChildProofs(carrierCID: carrierHeader.rawCID)
-        let issued = try await parent.store.issuedChildEvidence(
-            childCID: childBlockCID, directory: "Payments", rootCID: carrierHeader.rawCID
-        )
+        let issued = DerivedEvidence(proof: try await carriedProof(carrier, directory: "Payments", fetcher: parent))
         let evidence = try XCTUnwrap(issued)
 
         let served = await parent.servedRunDirectoryList()
-        XCTAssertEqual(served, ["Payments"], "preparing proofs for a directory serves its runs")
+        XCTAssertEqual(served, ["Payments"], "declaring a directory serves its runs")
         let carrierReports = await parent.runReports(changedBy: carrierHeader.rawCID)
         XCTAssertEqual(carrierReports.count, 1)
         let carrierReport = try XCTUnwrap(carrierReports.first)
@@ -131,7 +127,6 @@ final class MultichainInvariantTests: XCTestCase {
         var childService: ChainService? = ChainService(
             process: try child(),
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in }
             )
         )
@@ -145,7 +140,6 @@ final class MultichainInvariantTests: XCTestCase {
                     toStateCID: childBlock.parentState.rawCID
                 )
             )),
-            preparingChildDirectories: [],
             contentSource: childContent
         )
         childService = nil
@@ -177,7 +171,6 @@ final class MultichainInvariantTests: XCTestCase {
         let successorOutcome = try await parentService.importNetworkCandidate(
             successorHeader,
             authenticatedChildPackage: nil,
-            preparingChildDirectories: [],
             contentSource: FetcherContentSource(parent)
         )
         XCTAssertTrue(successorOutcome.decision.isAccepted)
@@ -341,12 +334,10 @@ final class MultichainInvariantTests: XCTestCase {
         )
         let n2 = try XCTUnwrap(BlockBuilder.mine(block: unminedN2, target: min(a1.carrier.nextTarget, a2.target)))
         let n2Header = try BlockHeader(node: n2)
-        _ = try await nexus.prepareChildProofs(for: n2, capacity: 16)
-        let n2Outcome = try await nexus.importBlock(n2Header, preparingChildDirectories: ["A"])
+        let n2Outcome = try await nexus.importBlock(n2Header)
         XCTAssertTrue(n2Outcome.decision.isAccepted)
-        _ = try await nexus.retryPendingChildProofs(carrierCID: n2Header.rawCID)
         let a2CID = try BlockHeader(node: a2).rawCID
-        let a2Issued = try await nexus.store.issuedChildEvidence(childCID: a2CID, directory: "A", rootCID: n2Header.rawCID)
+        let a2Issued = DerivedEvidence(proof: try await carriedProof(n2, directory: "A", fetcher: nexus))
         let a2Evidence = try XCTUnwrap(a2Issued)
         // A2's prevState is A1's post-state: A executed A1, Nexus never did.
         // What A pulls from Nexus's node joins what A already holds.
@@ -363,15 +354,13 @@ final class MultichainInvariantTests: XCTestCase {
                     toStateCID: a2.parentState.rawCID
                 )
             )),
-            preparingChildDirectories: ["B"],
             remoteSource: aContent
         )
         XCTAssertTrue(a2Outcome.decision.isAccepted, "A2 admitted on A with N2's proof")
         // A issues B1's proof from the carrier it now possesses.
-        _ = try await a.retryPendingChildProofs(carrierCID: a2CID, remoteSource: aContent)
         // The proof's root is the Nexus block whose work secures it, not A2.
         let b1CID = try BlockHeader(node: b1).rawCID
-        let b1Issued = try await a.store.issuedChildEvidence(childCID: b1CID, directory: "B", rootCID: n2Header.rawCID)
+        let b1Issued = DerivedEvidence(proof: try await carriedProof(a2, directory: "B", upstream: a2Evidence.proof, fetcher: UnionFetcher([a, nexus])))
         let b1Evidence = try XCTUnwrap(b1Issued)
         let bContent = InMemoryContentStore()
         try await BlockHeader(node: b1).storeBlock(fetcher: UnionFetcher([a, nexus]), storer: bContent)
@@ -488,7 +477,6 @@ final class MultichainInvariantTests: XCTestCase {
             let outcome = try await nexusService.importNetworkCandidate(
                 try BlockHeader(node: successor),
                 authenticatedChildPackage: nil,
-                preparingChildDirectories: [],
                 contentSource: FetcherContentSource(nexus)
             )
             XCTAssertTrue(outcome.decision.isAccepted)
@@ -525,7 +513,6 @@ final class MultichainInvariantTests: XCTestCase {
         let childService = ChainService(
             process: child,
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in }
             ),
             parentLevel: recording
@@ -736,18 +723,10 @@ final class MultichainInvariantTests: XCTestCase {
             block: unminedCarrier,
             target: min(recordingCarrier.nextTarget, childBlock.target)
         ))
-        _ = try await parent.prepareChildProofs(for: carrier, capacity: 16)
         let carrierHeader = try BlockHeader(node: carrier)
-        let carrierOutcome = try await parent.importBlock(
-            carrierHeader, preparingChildDirectories: ["Payments"]
-        )
+        let carrierOutcome = try await parent.importBlock(carrierHeader)
         XCTAssertTrue(carrierOutcome.decision.isAccepted)
-        _ = try await parent.retryPendingChildProofs(carrierCID: carrierHeader.rawCID)
-        let issued = try await parent.store.issuedChildEvidence(
-            childCID: try BlockHeader(node: childBlock).rawCID,
-            directory: "Payments",
-            rootCID: carrierHeader.rawCID
-        )
+        let issued = DerivedEvidence(proof: try await carriedProof(carrier, directory: "Payments", fetcher: parent))
         let evidence = try XCTUnwrap(issued)
 
         let child = try await ChainProcess.open(configuration: childConfiguration)
@@ -808,236 +787,6 @@ final class MultichainInvariantTests: XCTestCase {
         )
         let status = await child.status()
         XCTAssertEqual(status.tipCID, try BlockHeader(node: childBlock).rawCID)
-    }
-
-    func testDirectParentPackageReplaysOnlyToItsDeclaredChildAcrossRestarts()
-        async throws {
-        let parentStorage = temporaryDirectory()
-        let paymentsStorage = temporaryDirectory()
-        let receiptsStorage = temporaryDirectory()
-        let parentConfiguration = try configuration(
-            path: ["Nexus"],
-            storage: parentStorage,
-            privateKeyHex: String(repeating: "41", count: 32)
-        )
-        let paymentsConfiguration = try configuration(
-            path: ["Nexus", "Payments"],
-            storage: paymentsStorage,
-            privateKeyHex: String(repeating: "42", count: 32)
-        )
-        let receiptsConfiguration = try configuration(
-            path: ["Nexus", "Payments", "Receipts"],
-            storage: receiptsStorage,
-            privateKeyHex: String(repeating: "43", count: 32)
-        )
-
-        var parent: ChainProcess? = try await ChainProcess.open(
-            configuration: parentConfiguration
-        )
-        let parentGenesis = try await parent!.canonicalTipBlock()
-        // A self-contained child genesis (empty parentState) the parent RECORDS
-        // via a GenesisAction. The Payments node rebuilds it from `seed` and
-        // self-admits it.
-        let seed = ChildGenesisSeed(
-            spec: NexusGenesis.spec, premineTo: nil, timestamp: 1
-        )
-        let childGenesis = try await ChildGenesisBuilder.build(
-            seed: seed,
-            chainPath: ["Nexus", "Payments"],
-            fetcher: parent!
-        )
-        let childGenesisCID = try BlockHeader(node: childGenesis).rawCID
-        let authorization = try signedGenesisAnchorTransaction(
-            directory: "Payments",
-            childGenesisCID: childGenesisCID
-        )
-        try await VolumeImpl<Transaction>(node: authorization).storeRecursively(
-            storer: parent!
-        )
-        // The genesis is recorded in this carrier; the child's height-1 block is
-        // co-mined in the NEXT carrier, whose pre-state (this carrier's post-state)
-        // already records the genesis — that is block-1's parentState.
-        let unminedRecordingCarrier = try await BlockBuilder.buildBlock(
-            previous: parentGenesis,
-            transactions: [authorization],
-            timestamp: 1,
-            nonce: 0,
-            fetcher: parent!
-        )
-        let recordingCarrier = try XCTUnwrap(BlockBuilder.mine(
-            block: unminedRecordingCarrier,
-            target: unminedRecordingCarrier.target
-        ))
-        let recordingOutcome = try await parent!.importBlock(
-            try BlockHeader(node: recordingCarrier)
-        )
-        XCTAssertTrue(recordingOutcome.decision.isAccepted)
-        let provisional = try await BlockBuilder.buildBlock(
-            previous: recordingCarrier,
-            timestamp: 2,
-            nonce: 0,
-            fetcher: parent!
-        )
-        let childBlock = try await BlockBuilder.buildBlock(
-            previous: childGenesis,
-            parentChainBlock: provisional,
-            timestamp: 2,
-            fetcher: parent!
-        )
-        let childHeader = try BlockHeader(node: childBlock)
-        let unminedCarrier = try await BlockBuilder.buildBlock(
-            previous: recordingCarrier,
-            children: ["Payments": childBlock],
-            timestamp: 2,
-            nonce: 0,
-            fetcher: parent!
-        )
-        let carrier = try XCTUnwrap(BlockBuilder.mine(
-            block: unminedCarrier,
-            target: min(unminedCarrier.target, childBlock.target)
-        ))
-        _ = try await parent!.prepareChildProofs(
-            for: carrier,
-            capacity: 16
-        )
-        let carrierHeader = try BlockHeader(node: carrier)
-        let carrierOutcome = try await parent!.importBlock(
-            carrierHeader,
-            preparingChildDirectories: ["Payments"]
-        )
-        XCTAssertTrue(carrierOutcome.decision.isAccepted)
-        _ = try await parent!.retryPendingChildProofs(
-            carrierCID: carrierHeader.rawCID
-        )
-
-        XCTAssertEqual(
-            carrierOutcome.parentCarrierLink?.carrierCID,
-            carrierHeader.rawCID
-        )
-        let persistedEvidence = try await parent!.store.issuedChildEvidence(
-            childCID: childHeader.rawCID,
-            directory: "Payments",
-            rootCID: carrierHeader.rawCID
-        )
-        let beforeRestart = try XCTUnwrap(persistedEvidence)
-
-        parent = nil
-        parent = try await ChainProcess.open(configuration: parentConfiguration)
-        let reopenedEvidence = try await parent!.store.issuedChildEvidence(
-            childCID: childHeader.rawCID,
-            directory: "Payments",
-            rootCID: carrierHeader.rawCID
-        )
-        let evidence = try XCTUnwrap(reopenedEvidence)
-        let reopenedCarrierLink = try await parent!.store.issuedParentCarrierLink(
-            carrierCID: carrierHeader.rawCID,
-            rootCID: carrierHeader.rawCID
-        )
-        let carrierLink = try XCTUnwrap(reopenedCarrierLink)
-        let reopenedGenesisLink = try await parent!.store.issuedParentGenesisLink(
-            directory: "Payments",
-            childGenesisCID: childGenesisCID,
-            // A self-contained genesis's recorded link binds to the empty parent
-            // state, not the recording carrier's prevState.
-            parentStateCID: LatticeState.emptyHeader.rawCID
-        )
-        let genesisLink = try XCTUnwrap(reopenedGenesisLink)
-        XCTAssertEqual(carrierLink.parentPath, ["Nexus"])
-        XCTAssertEqual(carrierLink.carrierCID, carrierHeader.rawCID)
-        XCTAssertEqual(carrierLink.rootCID, carrierHeader.rawCID)
-        XCTAssertEqual(genesisLink.parentPath, ["Nexus"])
-        XCTAssertEqual(genesisLink.directory, "Payments")
-        XCTAssertEqual(genesisLink.childGenesisCID, childGenesisCID)
-        XCTAssertEqual(
-            try evidence.proof.serialize(),
-            try beforeRestart.proof.serialize()
-        )
-        XCTAssertEqual(evidence.proof.rootCID, carrierHeader.rawCID)
-        XCTAssertEqual(evidence.proof.directoryPath, ["Payments"])
-
-        // A height-1 block proves its `parentState` like every other height
-        // (spec §5.3 step 6, which carries no height-1 exemption). The carrier
-        // proof cannot establish it: that compares the child's declared
-        // `parentState` against a CARRIER's `prevState`, and a carrier need not
-        // be admitted, connected, valid or canonical (§9.5) — so both sides may
-        // be chosen by one party.
-        //
-        // The predecessor is the child's genesis, whose `parentState` is
-        // `emptyHeader`, so the link runs from there to the block's declared
-        // parent state. In production the node derives this itself: admission
-        // answers `crossChainEvidenceRequired(.parentStateContinuity(...))`, the
-        // node asks its parent, and builds the link from the reply.
-        let package = AuthenticatedChildPackage(
-            package: ChildValidationPackage(
-                proof: evidence.proof,
-                parentGenesisLink: nil,
-                parentStateContinuityLink: ParentStateContinuityLink(
-                    parentPath: [DEFAULT_ROOT_DIRECTORY],
-                    fromStateCID: LatticeState.emptyHeader.rawCID,
-                    toStateCID: childBlock.parentState.rawCID
-                )
-            )
-        )
-        let childBlockHeader = BlockHeader(
-            rawCID: childHeader.rawCID,
-            node: nil,
-            encryptionInfo: nil
-        )
-        let childContent = InMemoryContentStore()
-        try await childHeader.storeBlock(
-            fetcher: parent!,
-            storer: childContent
-        )
-
-        // A descendant (Receipts) must not be bootstrapped by an ancestor's
-        // (Payments') child package, even after self-admitting nothing yet.
-        var receipts: ChainProcess? = try await ChainProcess.open(
-            configuration: receiptsConfiguration
-        )
-        let receiptsOutcome = try await receipts!.importBlock(
-            childBlockHeader,
-            authenticatedChildPackage: package,
-            remoteSource: childContent
-        )
-        XCTAssertFalse(
-            receiptsOutcome.decision.isAccepted,
-            "an ancestor package must not bootstrap a descendant: \(receiptsOutcome.decision)"
-        )
-        let receiptsStatus = await receipts!.status()
-        XCTAssertEqual(receiptsStatus.phase, .awaitingGenesis)
-        XCTAssertEqual(receiptsStatus.chainPath, ["Nexus", "Payments", "Receipts"])
-        XCTAssertNil(receiptsStatus.tipCID)
-
-        receipts = nil
-        receipts = try await ChainProcess.open(configuration: receiptsConfiguration)
-        let reopenedReceiptsStatus = await receipts!.status()
-        XCTAssertEqual(reopenedReceiptsStatus.phase, .awaitingGenesis)
-        XCTAssertNil(reopenedReceiptsStatus.tipCID)
-
-        // Payments self-admits its self-contained genesis from the seed, then the
-        // parent package co-mines its height-1 block onto that genesis.
-        var payments: ChainProcess? = try await ChainProcess.open(
-            configuration: paymentsConfiguration
-        )
-        let paymentsBootstrapped = try await payments!
-            .activateChildGenesis(
-                seed: seed,
-                confirmParentRecordedGenesis: { _ in true }
-            )
-        XCTAssertTrue(paymentsBootstrapped)
-        let accepted = try await payments!.importBlock(
-            childBlockHeader,
-            authenticatedChildPackage: package,
-            remoteSource: childContent
-        )
-        XCTAssertTrue(accepted.decision.isAccepted)
-        let paymentsStatus = await payments!.status()
-        XCTAssertEqual(paymentsStatus.tipCID, childHeader.rawCID)
-
-        payments = nil
-        payments = try await ChainProcess.open(configuration: paymentsConfiguration)
-        let reopenedPaymentsStatus = await payments!.status()
-        XCTAssertEqual(reopenedPaymentsStatus.tipCID, childHeader.rawCID)
     }
 
     private func configuration(
@@ -1113,15 +862,11 @@ final class MultichainInvariantTests: XCTestCase {
         let carrier = try XCTUnwrap(BlockBuilder.mine(
             block: unminedCarrier, target: min(parentTip.nextTarget, childBlock.target)
         ))
-        _ = try await parent.prepareChildProofs(for: carrier, capacity: 16)
         let carrierHeader = try BlockHeader(node: carrier)
-        let carrierOutcome = try await parent.importBlock(carrierHeader, preparingChildDirectories: [directory])
+        let carrierOutcome = try await parent.importBlock(carrierHeader)
         XCTAssertTrue(carrierOutcome.decision.isAccepted, "carrier into \(directory)")
-        _ = try await parent.retryPendingChildProofs(carrierCID: carrierHeader.rawCID)
         let childBlockCID = try BlockHeader(node: childBlock).rawCID
-        let issued = try await parent.store.issuedChildEvidence(
-            childCID: childBlockCID, directory: directory, rootCID: carrierHeader.rawCID
-        )
+        let issued = DerivedEvidence(proof: try await carriedProof(carrier, directory: directory, fetcher: parent))
         let evidence = try XCTUnwrap(issued)
         let content = InMemoryContentStore()
         try await BlockHeader(node: childBlock).storeBlock(fetcher: UnionFetcher([parent, child]), storer: content)
@@ -1138,7 +883,6 @@ final class MultichainInvariantTests: XCTestCase {
             try await childService.importNetworkCandidate(
                 childHeader,
                 authenticatedChildPackage: package,
-                preparingChildDirectories: [],
                 contentSource: content
             )
         } else {
@@ -1189,7 +933,6 @@ final class MultichainInvariantTests: XCTestCase {
         ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in }
             )
         )
@@ -1202,7 +945,6 @@ final class MultichainInvariantTests: XCTestCase {
         ChainService(
             process: process,
             network: ClosureNetworkInterface(
-                childProofPublisher: { _ in },
                 acceptedBlockPublisher: { _ in }
             ),
             parentLevel: LocalParentLevel(parent)
@@ -1269,4 +1011,24 @@ final class MultichainInvariantTests: XCTestCase {
         }
     }
 
+}
+
+/// A child block's proof from the carrier that commits it, composed onto
+/// `upstream` (the proof securing that carrier) below Nexus.
+private struct DerivedEvidence {
+    let proof: ChildBlockProof
+}
+
+private func carriedProof(
+    _ carrier: Block,
+    directory: String,
+    upstream: ChildBlockProof? = nil,
+    fetcher: any Fetcher
+) async throws -> ChildBlockProof {
+    let hop = try await ChildBlockProof.generate(
+        rootHeader: BlockHeader(node: carrier),
+        childDirectory: directory,
+        fetcher: fetcher
+    )
+    return upstream.map { $0.composing(hop: hop) } ?? hop
 }

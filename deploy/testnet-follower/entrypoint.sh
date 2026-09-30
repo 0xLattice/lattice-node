@@ -52,7 +52,6 @@ peers_json="${peers_json%,}"
 
 chains_json="    \"Nexus\": {
       \"listen\": 4001,
-      \"fact\": 4002,
       \"rpc\": 8080,
       \"peers\": [$peers_json],
       \"externalAddress\": \"$EXTERNAL_HOST\"
@@ -61,7 +60,6 @@ chains_json="    \"Nexus\": {
 index=0
 for child_path in $CHILD_PATHS; do
     listen=$((4101 + index * 100))
-    fact=$((4102 + index * 100))
     rpc=$((8180 + index))
     public_read=$((8081 + index))
 
@@ -96,7 +94,6 @@ for child_path in $CHILD_PATHS; do
     chains_json="$chains_json,
     \"$child_path\": {
       \"listen\": $listen,
-      \"fact\": $fact,
       \"rpc\": $rpc,
       \"publicRead\": $public_read,
       \"publicReadRate\": 0,

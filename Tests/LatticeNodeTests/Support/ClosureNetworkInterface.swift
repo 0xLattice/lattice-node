@@ -8,10 +8,6 @@ import cashew
 /// operations are no-ops; an omitted body source admits broker-only and an
 /// omitted evidence source finds nothing.
 final class ClosureNetworkInterface: NetworkInterface {
-    typealias ChainStateChangePublisher = @Sendable () async -> Void
-    typealias ChildProofPublisher = @Sendable (
-        DirectChildProofPublication
-    ) async throws -> Void
     typealias AcceptedBlockPublisher = @Sendable (_ blockCID: String) async throws -> Void
     typealias AcceptedTransactionPublisher = @Sendable (
         _ volumeRootCID: String
@@ -23,32 +19,18 @@ final class ClosureNetworkInterface: NetworkInterface {
             -> NodeImportOutcome
     ) async throws -> NodeImportOutcome
 
-    private let chainStateChangePublisher: ChainStateChangePublisher
-    private let childProofPublisher: ChildProofPublisher
     private let acceptedBlockPublisher: AcceptedBlockPublisher
     private let acceptedTransactionPublisher: AcceptedTransactionPublisher
     private let executionBodySource: ExecutionBodyImport?
 
     init(
-        chainStateChangePublisher: @escaping ChainStateChangePublisher = {},
-        childProofPublisher: @escaping ChildProofPublisher,
         acceptedBlockPublisher: @escaping AcceptedBlockPublisher,
         acceptedTransactionPublisher: @escaping AcceptedTransactionPublisher = { _ in },
         executionBodySource: ExecutionBodyImport? = nil
     ) {
-        self.chainStateChangePublisher = chainStateChangePublisher
-        self.childProofPublisher = childProofPublisher
         self.acceptedBlockPublisher = acceptedBlockPublisher
         self.acceptedTransactionPublisher = acceptedTransactionPublisher
         self.executionBodySource = executionBodySource
-    }
-
-    func chainStateChanged() async {
-        await chainStateChangePublisher()
-    }
-
-    func publishChildProof(_ publication: DirectChildProofPublication) async throws {
-        try await childProofPublisher(publication)
     }
 
     func announceCarriedEvidence(_ package: AuthenticatedChildPackage) async {}
