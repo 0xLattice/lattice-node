@@ -244,4 +244,6 @@ public enum ChainServiceError: Error, Equatable, Sendable {
     case mempoolUnavailable
     case parentUnavailable
     case validateWalkInProgress
+    /// The host is stopping: mining ingress is closed.
+    case shuttingDown
 }

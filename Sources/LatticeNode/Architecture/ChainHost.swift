@@ -106,6 +106,7 @@ public actor ChainHost {
 
     /// Stops every running level, children first.
     public func stopAll() async {
+        await closeMiningIngress(paths)
         for address in paths.reversed() {
             await stopLevel(address)
         }
@@ -123,11 +124,21 @@ public actor ChainHost {
                 && $0.components.starts(with: address.components)
                 && levels[$0]?.running != nil
         }
+        await closeMiningIngress([address] + descendants.reversed())
         for descendant in descendants {
             await stopLevel(descendant)
         }
         await stopLevel(address)
         return descendants
+    }
+
+    /// Refuses template and work requests on `addresses`, roots first, and
+    /// waits for those in flight (a mined handoff included) before any
+    /// level stops: no grind reaches a level that is stopping.
+    private func closeMiningIngress(_ addresses: [ChainAddress]) async {
+        for address in addresses {
+            await levels[address]?.running?.node.service.closeMiningIngress()
+        }
     }
 
     private func stopLevel(_ address: ChainAddress) async {

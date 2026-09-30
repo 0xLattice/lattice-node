@@ -184,6 +184,12 @@ public actor ChainService {
     // for them, because a finishing import enqueues a canonical commit.
     private var ingressInFlight = 0
     private var ingressDrainWaiters: [CheckedContinuation<Void, Never>] = []
+    // Set once by `closeMiningIngress()`: template and work requests are
+    // refused from then on.
+    private var miningClosed = false
+    // Template and work requests in flight (`enterMining`).
+    private var miningInFlight = 0
+    private var miningDrainWaiters: [CheckedContinuation<Void, Never>] = []
 
     // This actor calls other actors and is therefore reentrant. Keep its pool,
     // template cache, and pending intents in one externally observable order.
@@ -280,6 +286,33 @@ public actor ChainService {
                 return
             }
         }
+    }
+
+    /// Refuses template and work requests from now on and waits for those
+    /// already inside, a mined handoff to hosted children included. A host
+    /// stopping calls it on every level before it stops any level, so no
+    /// grind is mined into, or handed down to, a level being stopped.
+    /// Idempotent.
+    public func closeMiningIngress() async {
+        miningClosed = true
+        while miningInFlight > 0 {
+            await withCheckedContinuation { miningDrainWaiters.append($0) }
+        }
+    }
+
+    /// Admits one template or work request; refused once mining ingress is
+    /// closed. Pair with `defer { exitMining() }`.
+    private func enterMining() throws {
+        guard !miningClosed else { throw ChainServiceError.shuttingDown }
+        miningInFlight += 1
+    }
+
+    private func exitMining() {
+        miningInFlight -= 1
+        guard miningInFlight == 0 else { return }
+        let waiters = miningDrainWaiters
+        miningDrainWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
     }
 
     /// Admits one network ingress call; refused once `shutdown()` has begun.
@@ -1115,6 +1148,8 @@ public actor ChainService {
     public func miningTemplate(
         _ request: MiningTemplateRequest
     ) async throws -> MiningTemplateResponse {
+        try enterMining()
+        defer { exitMining() }
         await acquireOperation()
         defer { releaseOperation() }
         try await prepareMempoolLocked()
@@ -1559,11 +1594,8 @@ public actor ChainService {
     public func submitWork(
         _ request: SubmitWorkRequest
     ) async throws -> SubmitWorkResponse {
-        await acquireOperation()
-        var ownsOperation = true
-        defer {
-            if ownsOperation { releaseOperation() }
-        }
+        try enterMining()
+        defer { exitMining() }
         guard process.configuration.address.isNexus else {
             throw ChainServiceError.parentCarrierRequired
         }
@@ -1571,12 +1603,24 @@ public actor ChainService {
               request.workID.utf8.count <= Self.maximumWorkIDBytes else {
             throw ChainServiceError.invalidWorkID
         }
+        // Verifies the grind clears the template's search target.
         let submission = try await templates.submission(
             workID: request.workID,
             nonce: request.nonce
         )
         let candidate = submission.block
         let header = try BlockHeader(node: candidate)
+        // One grind, one subtree insert, content first: the hosted children
+        // admit their carried blocks before this level takes its lease and
+        // commits its own. No lease is held across the downward await.
+        // Nexus is its own root: each hop is the whole proof.
+        let admittedChildren = await handOffMined(carrier: candidate, upstream: nil)
+
+        await acquireOperation()
+        var ownsOperation = true
+        defer {
+            if ownsOperation { releaseOperation() }
+        }
         let outcome = try await process.importBlock(
             header,
             canonicalCommitPublisher: { [self] commit in
@@ -1603,11 +1647,6 @@ public actor ChainService {
         if let receipt = outcome.canonicalCommitReceipt {
             await receipt.wait()
         }
-        // Lease released: the downward await never holds this level's gate.
-        // Nexus is its own root: each hop is the whole proof.
-        let admittedChildren = outcome.parentCarrierLink == nil
-            ? []
-            : await handOffMined(carrier: candidate, upstream: nil)
 
         let status = await process.status()
         let accepted: Bool
@@ -1634,9 +1673,14 @@ public actor ChainService {
     /// way into its own hosted children before answering. Returns the
     /// children that admitted. Called only with this level's lease released.
     ///
-    /// Drop contract: a handoff that fails loses that grind's hosted
-    /// descendants, as a solo miner that crashes before broadcasting loses
-    /// its block. Nothing retries it.
+    /// Ordering: `submitWork` hands down before the root imports and commits
+    /// its own block, and each level folds into its children before it
+    /// answers, so a grind's subtree is inserted content first, children
+    /// before their carrier. A crash after the children and before the root
+    /// loses only the root block, the miner's own loss, as if it had never
+    /// broadcast it. A child level that is not running is skipped; a host
+    /// closes mining ingress on every level before it stops any, so no
+    /// handoff races a stopping level. Nothing retries a handoff.
     private func handOffMined(
         carrier: Block,
         upstream: ChildBlockProof?

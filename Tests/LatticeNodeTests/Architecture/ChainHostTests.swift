@@ -297,6 +297,42 @@ final class ChainHostTests: XCTestCase {
         await host.stopAll()
     }
 
+    /// Stopping the host closes mining ingress on every level before any
+    /// level stops: from then on the root refuses template and work
+    /// requests with a clear shutdown error, not a half-stopped tree.
+    func testStoppingTheHostRefusesMiningFirst() async throws {
+        let root = temporaryDirectory(create: true)
+        let (_, genesisCID) = try await seedChild(root: root, timestamp: 1_000)
+        let host = try ChainHost(chains: [
+            nexus: configure(nexus, root: root, keyByte: 1),
+            child: configure(child, root: root, keyByte: 2),
+        ])
+        let failed = try await host.startAll()
+        XCTAssertTrue(failed.isEmpty)
+        let parent = try await service(host, nexus)
+        try await anchor(genesisCID, on: host)
+        let template = try await parent.miningTemplate(MiningTemplateRequest())
+
+        let stopping = Task { await host.stopAll() }
+        try await eventually("the root refuses templates", within: .seconds(30)) {
+            do {
+                _ = try await parent.miningTemplate(MiningTemplateRequest())
+                return false
+            } catch ChainServiceError.shuttingDown {
+                return true
+            }
+        }
+        do {
+            _ = try await parent.submitWork(SubmitWorkRequest(
+                workID: template.workID, nonce: solvedNonce(for: template)
+            ))
+            XCTFail("work was accepted while the host stopped")
+        } catch {
+            XCTAssertEqual(error as? ChainServiceError, .shuttingDown)
+        }
+        await stopping.value
+    }
+
     /// Each carried block reaches the child in memory at `submitWork`; the
     /// child admits it once, before `submitWork` answers.
     func testTheMinedHandoffAdmitsACarriedBlockOnce() async throws {

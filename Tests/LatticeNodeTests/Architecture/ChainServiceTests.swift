@@ -2731,6 +2731,94 @@ final class ChainServiceTests: XCTestCase {
         XCTAssertNil(again.block.children.node?["Payments"], "carried once, not twice")
     }
 
+    /// One grind, one subtree insert, content first: `submitWork` hands the
+    /// carried child block down and the child admits it while the parent
+    /// has not yet committed its own block; the parent commits after.
+    func testSubmitWorkAdmitsTheCarriedChildBeforeTheParentCommits() async throws {
+        let fixture = try await activeChildService(spec: NexusGenesis.spec)
+        let parentTipAtHandoff = GrandchildCID()
+        let parentProcess = fixture.parent
+        let merged = await mergedMiningService(fixture) { level in
+            HandoffObservingChildLevel(level) {
+                await parentTipAtHandoff.set(await parentProcess.canonicalTip()?.cid ?? "")
+            }
+        }
+        await merged.service.serveRuns(for: "Payments")
+        try await settle(merged.child)
+        let before = await parentProcess.canonicalTip()?.cid
+
+        let carrying = try await merged.service.miningTemplate(MiningTemplateRequest())
+        let carried = try XCTUnwrap(carrying.block.children.node?["Payments"]?.rawCID)
+        let mined = try await merged.service.submitWork(SubmitWorkRequest(
+            workID: carrying.workID, nonce: solvedNonce(for: carrying)
+        ))
+        XCTAssertTrue(mined.accepted)
+        XCTAssertEqual(mined.durableChildProofs, [
+            DirectChildProofSummary(directory: "Payments", childCID: carried),
+        ])
+        let atHandoff = await parentTipAtHandoff.value
+        XCTAssertEqual(atHandoff, before, "the parent committed before its child admitted")
+        let after = await parentProcess.canonicalTip()?.cid
+        XCTAssertNotEqual(after, before, "the parent committed its block after")
+        XCTAssertEqual(after, mined.tipCID)
+    }
+
+    /// Closing mining ingress refuses new template and work requests at once
+    /// and returns only after the requests already inside have finished,
+    /// a mined handoff to a hosted child included.
+    func testClosingMiningIngressRefusesNewWorkAndDrainsTheHandoffInFlight() async throws {
+        let fixture = try await activeChildService(spec: NexusGenesis.spec)
+        let inHandoff = Latch()
+        let release = Latch()
+        addTeardownBlock { await release.open() }
+        let merged = await mergedMiningService(fixture) { level in
+            HandoffObservingChildLevel(level) {
+                await inHandoff.open()
+                await release.wait()
+            }
+        }
+        await merged.service.serveRuns(for: "Payments")
+        try await settle(merged.child)
+        let carrying = try await merged.service.miningTemplate(MiningTemplateRequest())
+        let nonce = solvedNonce(for: carrying)
+        let mining = Task {
+            try await merged.service.submitWork(SubmitWorkRequest(
+                workID: carrying.workID, nonce: nonce
+            ))
+        }
+        await inHandoff.wait()
+
+        let closed = ShutdownReturned()
+        let closing = Task {
+            await merged.service.closeMiningIngress()
+            await closed.mark()
+        }
+        try await eventually("new mining requests are refused") {
+            do {
+                _ = try await merged.service.miningTemplate(MiningTemplateRequest())
+                return false
+            } catch ChainServiceError.shuttingDown {
+                return true
+            }
+        }
+        await XCTAssertThrowsErrorAsync(
+            try await merged.service.submitWork(SubmitWorkRequest(
+                workID: carrying.workID, nonce: nonce
+            ))
+        ) { error in
+            XCTAssertEqual(error as? ChainServiceError, .shuttingDown)
+        }
+        let returnedEarly = await closed.value
+        XCTAssertFalse(returnedEarly, "closed before the handoff in flight finished")
+
+        await release.open()
+        let mined = try await mining.value
+        XCTAssertTrue(mined.accepted)
+        await closing.value
+        let returned = await closed.value
+        XCTAssertTrue(returned)
+    }
+
     /// A children-only parent block leaves the post-state and the child's
     /// tip, so the child rebuilds the block the parent carried as is — even
     /// once the carrier is older than a template's lifetime — and the
@@ -4722,6 +4810,31 @@ private final class DecliningChildLevel: ChildLevel, Sendable {
     var readyCandidate: ReadyCandidate? { level.readyCandidate }
 
     func admitMined(block: Block, proof: ChildBlockProof) async -> Bool { false }
+}
+
+/// A hosted child level that runs `observe` when a mined handoff reaches
+/// it, before admitting.
+private final class HandoffObservingChildLevel: ChildLevel, Sendable {
+    private let level: any ChildLevel
+    private let observe: @Sendable () async -> Void
+
+    init(_ level: any ChildLevel, observe: @escaping @Sendable () async -> Void) {
+        self.level = level
+        self.observe = observe
+    }
+
+    var directory: String { level.directory }
+
+    func parentChanged(_ change: ParentChange) {
+        level.parentChanged(change)
+    }
+
+    var readyCandidate: ReadyCandidate? { level.readyCandidate }
+
+    func admitMined(block: Block, proof: ChildBlockProof) async -> Bool {
+        await observe()
+        return await level.admitMined(block: block, proof: proof)
+    }
 }
 
 private actor ReceivedProofs {

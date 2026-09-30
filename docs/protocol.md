@@ -149,9 +149,12 @@ Only the parent facts it answers —
 the genesis links a child's first block anchors to — wait for its
 validation, since a child must not anchor to state this chain has not
 executed. When this host mined the grind, the parent level hands the
-carried block and its proof to the co-hosted child level in memory; a
-handoff that fails is not retried and loses that grind's hosted descendants,
-as a solo miner that crashes before broadcasting loses its block. Any other
+carried block and its proof to the co-hosted child level in memory before
+it imports and commits its own block: one grind is one subtree insert,
+children first. A crash between the two loses only the parent block, as a
+solo miner that crashes before broadcasting loses its block; a handoff is
+not retried. A stopping host refuses template and work requests on every
+level before it stops any, so no grind is handed to a stopping level. Any other
 carried block arrives through ordinary acquisition: the child overlay
 announces it or the predecessor walk reaches it, and a block reached without
 its proof is looked up by CID in the overlay peers' child-evidence indexes.

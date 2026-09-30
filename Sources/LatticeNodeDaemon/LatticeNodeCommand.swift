@@ -883,7 +883,8 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
     } catch ChainServiceError.noDeploymentAvailable {
         throw HTTPError(.conflict, message: "noDeploymentAvailable")
     } catch let error as ChainServiceError
-    where error == .mempoolUnavailable || error == .parentUnavailable {
+    where error == .mempoolUnavailable || error == .parentUnavailable
+        || error == .shuttingDown {
         throw HTTPError(.serviceUnavailable, message: reason(error))
     } catch let error as ChainServiceError {
         throw HTTPError(.badRequest, message: reason(error))
