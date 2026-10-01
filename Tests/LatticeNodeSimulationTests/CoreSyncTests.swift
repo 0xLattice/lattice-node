@@ -700,6 +700,7 @@ final class CoreSyncTests: XCTestCase {
         return (server, client, side)
     }
 
+    @discardableResult
     private func exchange(
         _ server: inout Core, _ client: inout Core, side: [SimBlock], session: UInt64, dropAfterAncestors: Bool = false
     ) throws -> Int {
