@@ -166,3 +166,7 @@ enum CoreWire {
         }
     }
 }
+
+/// The core's sync message, for files that import Tally (whose `PeerID`
+/// clashes with the core's).
+typealias CoreSyncMessage = SyncMessage

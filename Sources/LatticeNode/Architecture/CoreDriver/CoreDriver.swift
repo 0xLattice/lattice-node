@@ -55,10 +55,21 @@ public final class CoreDriver: Sendable {
     private let loop: Task<Void, Never>
     private let ivy: Ivy
     private let delegate: CoreDriverIvyDelegate
+    private let gate: CoreDriverInputGate
 
+    /// How many overlay messages may wait for the loop before a delivering
+    /// connection is held back.
+    static let networkCapacity = 256
+
+    /// Overlay inputs are bounded by `gate`; every other input is bounded by
+    /// the work the core itself issued.
     enum Input: Sendable {
         case network(CoreDriverNetworkInput)
         case event(HostEvent)
+        /// A body is held locally, in these Volume roots.
+        case bodyStored(ChainPath, cid: String, roots: [String])
+        /// A session's hello deadline passed.
+        case helloDeadline(peerKey: String, session: UInt64)
         /// A worker finished: its slot frees, then its result steps.
         case jobDone(HostEvent)
         /// An RPC: its mining event under a fresh reply ID.
@@ -81,12 +92,14 @@ public final class CoreDriver: Sendable {
     ) async throws -> CoreDriver {
         let core = try await boot(process: process, configuration: configuration, coreConfig: coreConfig)
         let headers = try CoreHeaderStore(directory: configuration.storagePath)
+        let overlay = try overlay ?? NodeNetworkPlaneConfigurations(configuration).overlay
         let driver = CoreDriver(
             core: core,
             process: process,
             headers: headers,
             configuration: configuration,
-            ivy: Ivy(config: try overlay ?? NodeNetworkPlaneConfigurations(configuration).overlay),
+            ivy: Ivy(config: overlay),
+            helloTimeout: overlay.requestTimeout,
             workers: workers,
             failStop: failStop
         )
@@ -140,6 +153,7 @@ public final class CoreDriver: Sendable {
         headers: CoreHeaderStore,
         configuration: NodeConfiguration,
         ivy: Ivy,
+        helloTimeout: Duration,
         workers: Int,
         failStop: @escaping @Sendable (any Error) -> Void
     ) {
@@ -152,7 +166,9 @@ public final class CoreDriver: Sendable {
         reads = Self.reads(process: process, configuration: configuration, published: published, view: readView)
         self.inputs = inputs
         self.ivy = ivy
-        delegate = CoreDriverIvyDelegate { inputs.yield(.network($0)) }
+        let gate = CoreDriverInputGate(capacity: Self.networkCapacity)
+        self.gate = gate
+        delegate = CoreDriverIvyDelegate(gate: gate) { inputs.yield(.network($0)) }
         let initial = Loop(
             core: core,
             process: process,
@@ -166,6 +182,8 @@ public final class CoreDriver: Sendable {
             published: published,
             readView: readView,
             inputs: inputs,
+            gate: gate,
+            helloTimeout: helloTimeout,
             remote: IvyRootContentSource(ivy: ivy, policy: configuration.resourcePolicy),
             workers: max(1, workers),
             failStop: failStop
@@ -189,6 +207,9 @@ public final class CoreDriver: Sendable {
 
     /// Stop the overlay, then the loop; joins both.
     public func stop() async {
+        // Free the delegates waiting for room first: stopping Ivy waits for
+        // its deliveries.
+        await gate.close()
         await ivy.stop()
         await ivy.setContentSource(nil)
         inputs.yield(.stop)
@@ -213,6 +234,8 @@ extension CoreDriver {
         let published: PublishedValue<Snapshot>
         let readView: PublishedValue<CoreReadView>
         let inputs: AsyncStream<Input>.Continuation
+        let gate: CoreDriverInputGate
+        let helloTimeout: Duration
         let remote: IvyRootContentSource
         let workers: Int
         let failStop: @Sendable (any Error) -> Void
@@ -241,6 +264,9 @@ extension CoreDriver {
         }
         var wake: (time: Int64, task: Task<Void, Never>)?
         var bodies: [BodyKey: Task<Void, Never>] = [:]
+        /// The Volume roots each fetched body was stored in, until the
+        /// validation fact that references them is persisted with them.
+        var bodyRoots: [BodyKey: [String]] = [:]
 
         struct BodyKey: Hashable {
             let path: ChainPath
@@ -264,10 +290,14 @@ extension CoreDriver {
             published: PublishedValue<Snapshot>,
             readView: PublishedValue<CoreReadView>,
             inputs: AsyncStream<Input>.Continuation,
+            gate: CoreDriverInputGate,
+            helloTimeout: Duration,
             remote: IvyRootContentSource,
             workers: Int,
             failStop: @escaping @Sendable (any Error) -> Void
         ) {
+            self.gate = gate
+            self.helloTimeout = helloTimeout
             self.core = core
             self.process = process
             self.headers = headers
@@ -288,16 +318,30 @@ extension CoreDriver {
             case .stop:
                 return false
             case .event(let event):
-                if case .level(let path, .bodyFetched(let cid)) = event { bodies[BodyKey(path: path, cid: cid)] = nil }
                 if case .tick = event { wake = nil }
                 return await step(event)
+            case .bodyStored(let path, let cid, let roots):
+                let key = BodyKey(path: path, cid: cid)
+                bodies[key] = nil
+                bodyRoots[key] = roots
+                return await step(.level(path, .bodyFetched(cid: cid)))
+            case .helloDeadline(let key, let id):
+                guard let session = sessions[key], session.id == id, !session.ready else { return true }
+                sessions[key] = nil
+                _ = await ivy.disconnectSession(ifCurrent: session.peer)
+                return true
             case .jobDone(let event):
                 runningJobs -= 1
                 startJobs()
                 return await step(event)
             case .network(let network):
                 defer { refreshView() }
-                return await receive(network)
+                let result = await receive(network)
+                switch network {
+                case .hello, .sync, .transactionAvailable: await gate.release()
+                case .connected, .disconnected: break
+                }
+                return result
             case .request(let event, let reply):
                 let id = nextReply
                 nextReply += 1
@@ -360,8 +404,13 @@ extension CoreDriver {
                     return true
                 }
                 let replaced = sessions[peer.key.hex]
-                sessions[peer.key.hex] = Session(peer: peer, id: nextSession)
+                let id = nextSession
+                sessions[peer.key.hex] = Session(peer: peer, id: id)
                 nextSession += 1
+                let (inputs, key) = (inputs, peer.key.hex)
+                Timers.deadline(after: helloTimeout, generation: id) { id in
+                    inputs.yield(.helloDeadline(peerKey: key, session: id))
+                }
                 if let hello {
                     _ = await ivy.sendMessage(to: peer, topic: NodeNetworkTopic.overlayHello, payload: hello)
                 }
@@ -373,12 +422,11 @@ extension CoreDriver {
                       !(await ivy.connectedPeers).contains(session.peer.id) else { return true }
                 sessions[key] = nil
                 if session.ready { return await step(.peerGone(session.coreID)) }
-            case .message(let peer, let topic, let payload):
-                guard var session = sessions[peer.key.hex], session.peer.sessionID == peer.sessionID else {
+            case .hello(let peer, let payload):
+                guard var session = sessions[peer.key.hex], session.peer.sessionID == peer.sessionID,
+                      !session.ready else {
                     return true
                 }
-                if topic == NodeNetworkTopic.overlayHello {
-                    guard !session.ready else { return true }
                     guard let remote = try? ChainHello.decode(payload),
                           (try? remote.validateCompatibility(
                               expectedNexusGenesisCID: configuration.nexusGenesisCID,
@@ -388,20 +436,21 @@ extension CoreDriver {
                         _ = await ivy.disconnectSession(ifCurrent: peer)
                         return true
                     }
-                    session.ready = true
-                    sessions[peer.key.hex] = session
-                    return await step(.peerReady(session.coreID))
-                }
-                if topic == NodeNetworkTopic.transactionAvailable {
-                    fetchAnnounced(payload, from: session)
+                session.ready = true
+                sessions[peer.key.hex] = session
+                return await step(.peerReady(session.coreID))
+            case .sync(let peer, let chainPath, let message):
+                guard let session = sessions[peer.key.hex], session.peer.sessionID == peer.sessionID,
+                      session.ready else {
                     return true
                 }
-                // A malformed frame is dropped: only the core blames, and
-                // only for proof-of-work.
-                guard session.ready, let decoded = try? CoreWire.decode(topic: topic, payload: payload) else {
+                return await step(.received(session.coreID, chainPath, message))
+            case .transactionAvailable(let peer, let cid):
+                guard let session = sessions[peer.key.hex], session.peer.sessionID == peer.sessionID,
+                      session.ready else {
                     return true
                 }
-                return await step(.received(session.coreID, decoded.chainPath, decoded.message))
+                fetchAnnounced(cid, from: session)
             }
             return true
         }
@@ -409,13 +458,12 @@ extension CoreDriver {
         /// A peer announced a transaction: fetch it from that peer, and hand
         /// it to the pool as the peer's. One not pooled yet, within the
         /// per-peer bound on fetches; anything else is dropped, never blamed.
-        private mutating func fetchAnnounced(_ payload: Data, from session: Session) {
+        private mutating func fetchAnnounced(_ cid: String, from session: Session) {
             let key = session.peer.key.hex
-            guard session.ready, let announced = try? TransactionAvailableMessage.decoded(payload),
-                  core.levels[core.rootPath]?.mining.mempool.contains(announced.volumeRootCID) == false,
+            guard core.levels[core.rootPath]?.mining.mempool.contains(cid) == false,
                   (transactionFetches[key] ?? 0) < core.config.mining.maxPendingPerPeer else { return }
             transactionFetches[key, default: 0] += 1
-            let (ivy, inputs, path, cid, peer) = (ivy, inputs, core.rootPath, announced.volumeRootCID, session.coreID)
+            let (ivy, inputs, path, peer) = (ivy, inputs, core.rootPath, session.coreID)
             spawn {
                 let response = await ivy.fetchVolume(rootCID: cid, from: session.peer)
                 let transaction = try? await VolumeImpl<Transaction>(rawCID: cid, node: nil, encryptionInfo: nil)
@@ -458,8 +506,19 @@ extension CoreDriver {
                 // with `added` / `removed` level records and `issued` links.
                 // The Nexus-only host writes its root level's batch.
                 for (path, levelBatch) in batch.levels where path == core.rootPath {
+                    // A validated block's body roots are journaled with its
+                    // validation, so they stay retained across restarts.
+                    let validated = levelBatch.facts.flatMap(\.facts).compactMap { fact -> BodyKey? in
+                        guard case .validation(let validation) = fact else { return nil }
+                        return BodyKey(path: path, cid: validation.blockHash)
+                    }
                     do {
-                        try await process.persistCoreBatch(levelBatch, headers: headers)
+                        try await process.persistCoreBatch(
+                            levelBatch,
+                            headers: headers,
+                            bodyRoots: validated.flatMap { bodyRoots[$0] ?? [] }
+                        )
+                        for key in validated { bodyRoots[key] = nil }
                     } catch {
                         // Fail-stop: no later effect of this step may run.
                         failStop(error)
@@ -545,8 +604,8 @@ extension CoreDriver {
                     // core no longer wants it.
                     var backoff: UInt64 = 250
                     while !Task.isCancelled {
-                        if (try? await process.fetchCoreBody(cid, remote: remote)) != nil {
-                            inputs.yield(.event(.level(path, .bodyFetched(cid: cid))))
+                        if let roots = try? await process.fetchCoreBody(cid, remote: remote) {
+                            inputs.yield(.bodyStored(path, cid: cid, roots: roots))
                             return
                         }
                         _ = await Timers.sleep(nanoseconds: backoff * 1_000_000)
@@ -555,6 +614,7 @@ extension CoreDriver {
                 }
             case .cancelBody(let cid):
                 bodies.removeValue(forKey: BodyKey(path: path, cid: cid))?.cancel()
+                bodyRoots[BodyKey(path: path, cid: cid)] = nil
             case .connect(let job):
                 let (fetcher, parentFacts) = (process.localFetcher, core.parentFacts(for: path))
                 // PENDING N3b: `HostEvent.connected(path, verdict)` does not
