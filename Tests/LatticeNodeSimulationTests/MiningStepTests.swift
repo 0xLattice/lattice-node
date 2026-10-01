@@ -215,6 +215,79 @@ final class MiningStepTests: XCTestCase {
         XCTAssertEqual(contextual.request.parentCarrier?.cid, context.cid)
     }
 
+    func testOnlyADeterministicCheckFailureRemovesARestoredJournalRow() throws {
+        var mining = Mining(tipCID: "A", spec: testSpec(maxBlockSize: 64))
+        let tx = try transfer(nonce: 0)
+        let detached = Transaction(signatures: tx.signatures, body: tx.body.removingNode())
+        let unresolved = mining.step(.transactionReceived(detached, origin: .restored(addedAt: 1)), now: 0)
+        XCTAssertTrue(unresolved.isEmpty, "unresolved content is not a verdict: \(unresolved)")
+
+        let tooLarge = mining.step(.transactionReceived(tx, origin: .restored(addedAt: 1)), now: 0)
+        guard case .poolChanged(let delta)? = tooLarge.first else { return XCTFail("\(tooLarge)") }
+        XCTAssertEqual(delta.removed, [try Mempool.cid(of: tx)], "too large on any tip is a verdict")
+    }
+
+    func testAPeerResendingAPendingTransactionGrowsNothing() throws {
+        var mining = Mining(tipCID: "A", spec: testSpec())
+        let tx = try transfer(nonce: 0)
+        let peer = PeerID(key: "p", session: 1)
+        _ = mining.step(.transactionReceived(tx, origin: .peer(peer)), now: 0)
+        let before = (mining.pendingOrigins, mining.pendingAdmissions, mining.pendingPeerAdmissions)
+        for _ in 0..<5 {
+            XCTAssertTrue(mining.step(.transactionReceived(tx, origin: .peer(peer)), now: 0).isEmpty)
+            XCTAssertTrue(mining.step(.transactionReceived(tx, origin: .peer(PeerID(key: "q", session: 1))), now: 0).isEmpty)
+        }
+        XCTAssertEqual(mining.pendingOrigins, before.0)
+        XCTAssertEqual(mining.pendingAdmissions, before.1)
+        XCTAssertEqual(mining.pendingPeerAdmissions, before.2)
+    }
+
+    func testAJobFromBeforeATipMovesAwayAndBackIsStale() async throws {
+        var mining = Mining(tipCID: "A", spec: testSpec())
+        let tx = try transfer(nonce: 0)
+        guard case .preflight(let old)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 1)), now: 0).first,
+              case .buildTemplate(let oldBuild)? = mining.step(
+                .templateRequested(replyID: 2, TemplateRequest(rewardRecipient: nil)), now: 0
+              ).first
+        else { return XCTFail() }
+        _ = mining.step(.tipMoved(TipMove(tipCID: "B", confirmed: [], returned: [])), now: 1)
+        let back = mining.step(.tipMoved(TipMove(tipCID: "A", confirmed: [], returned: [])), now: 2)
+        XCTAssertEqual(mining.tipCID, old.tipCID)
+        XCTAssertNotEqual(mining.tipEpoch, old.tipEpoch)
+        let fresh = back.compactMap { if case .preflight(let job) = $0 { job } else { nil } }
+        XCTAssertEqual(fresh.map(\.tipEpoch), [mining.tipEpoch])
+
+        XCTAssertTrue(mining.step(.preflighted(old, .ready), now: 3).isEmpty, "A, B, A: the old verdict is stale")
+        XCTAssertEqual(mining.mempool.count, 0)
+        let block = try await candidateBlock()
+        let build = TemplateBuild(workID: "w", block: block, searchTarget: block.target, targets: [block.target])
+        XCTAssertTrue(mining.step(.templateBuilt(oldBuild, build), now: 3).isEmpty, "A, B, A: the old build is stale")
+        XCTAssertEqual(mining.waitingTemplateRequests, 1)
+    }
+
+    func testRepliesAreBoundedWhileTheTipChurns() throws {
+        var mining = Mining(tipCID: "T0", spec: testSpec(), config: MiningConfig(maxReissues: 3))
+        let tx = try transfer(nonce: 0)
+        _ = mining.step(.transactionReceived(tx, origin: .local(replyID: 1)), now: 0)
+        _ = mining.step(.templateRequested(replyID: 2, TemplateRequest(rewardRecipient: nil)), now: 0)
+        for move in 1...3 {
+            let effects = mining.step(.tipMoved(TipMove(tipCID: "T\(move)", confirmed: [], returned: [])), now: Int64(move))
+            XCTAssertFalse(effects.contains { if case .transactionRefused = $0 { true } else { false } })
+            XCTAssertFalse(effects.contains { if case .templateRefused = $0 { true } else { false } })
+        }
+        let fourth = mining.step(.tipMoved(TipMove(tipCID: "T4", confirmed: [], returned: [])), now: 4)
+        XCTAssertTrue(fourth.contains { if case .transactionRefused(1, .contextChanged) = $0 { true } else { false } }, "\(fourth)")
+        XCTAssertTrue(fourth.contains { if case .templateRefused(2, .contextChanged) = $0 { true } else { false } }, "\(fourth)")
+        XCTAssertEqual(mining.pendingAdmissions, 0)
+        XCTAssertEqual(mining.waitingTemplateRequests, 0)
+        XCTAssertFalse(fourth.contains { if case .preflight = $0 { true } else { false } })
+        XCTAssertFalse(fourth.contains { if case .buildTemplate = $0 { true } else { false } })
+    }
+
+    func testAnOrdinaryReorgReturnsEveryTransactionByDefault() {
+        XCTAssertEqual(MiningConfig().maxPendingReturned, MempoolLimits().maxCount)
+    }
+
     func testTemplateJobsCoalesceAndATipMoveReissuesAWaitingBuild() async throws {
         var mining = Mining(tipCID: "A", spec: testSpec())
         let request = TemplateRequest(rewardRecipient: address(key))

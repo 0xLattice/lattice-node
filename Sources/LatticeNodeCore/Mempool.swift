@@ -13,6 +13,10 @@ public enum MempoolError: Error, Sendable, Equatable {
     case invalidState
     case conflictingNonce
     case feeTooLow
+    /// Retriable: the executed tip moved more than `maxReissues` times while
+    /// the submit waited for its verdict (the actor's
+    /// `templateContextChanged`).
+    case contextChanged
 }
 
 /// Lattice's classification of a transaction against one executed tip.

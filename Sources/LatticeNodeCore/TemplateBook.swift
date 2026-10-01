@@ -45,6 +45,9 @@ public enum TemplateError: Error, Sendable, Equatable {
     case buildFailed
     /// Too many template requests are waiting.
     case busy
+    /// Retriable: the executed tip moved more than `maxReissues` times while
+    /// the request waited (the actor's `templateContextChanged`).
+    case contextChanged
 }
 
 /// The bounded work cache for external miners, as a value. It never searches

@@ -101,6 +101,7 @@ public struct TxWorkload {
     enum Item {
         case event(MiningEvent)
         case submit
+        case resubmit(Transaction)
         case requestTemplate
         case reorg
         case flood
@@ -157,9 +158,12 @@ public struct TxWorkload {
     /// pooled or pending transaction once, plus each new arrival.
     var preflightsOnTip = 0
     var arrivalsOnTip = 0
-    var tipAtMove = ""
+    var epochAtMove: UInt64 = .max
     var poolAtMove = 0
     var floodCount: Int64 = 0
+    /// Local submits awaiting a reply, and refused ones awaiting a retry.
+    var submissions: [UInt64: Transaction] = [:]
+    var retrying: [String: Transaction] = [:]
 
     public static func make(_ config: TxWorkloadConfig) async throws -> TxWorkload {
         let cas = SimCAS()
@@ -227,6 +231,11 @@ public struct TxWorkload {
             switch next.item {
             case .event(let event):
                 try await step(event)
+            case .resubmit(let transaction):
+                let replyID = reply()
+                submissions[replyID] = transaction
+                if let cid = try? Mempool.cid(of: transaction) { retrying[cid] = nil }
+                try await step(.transactionReceived(transaction, origin: .local(replyID: replyID)))
             case .submit:
                 try await submit()
             case .requestTemplate:
@@ -282,7 +291,9 @@ public struct TxWorkload {
             transaction = try await fresh()
         }
         recent = Array((recent + [transaction]).suffix(16))
-        try await step(.transactionReceived(transaction, origin: .local(replyID: reply())))
+        let replyID = reply()
+        submissions[replyID] = transaction
+        try await step(.transactionReceived(transaction, origin: .local(replyID: replyID)))
         if rng.chance(config.duplicateProbability) {
             let again = recent[rng.draw(0...recent.count - 1)]
             try await step(.transactionReceived(again, origin: .peer(PeerID(key: "peer", session: 1))))
@@ -309,9 +320,13 @@ public struct TxWorkload {
         let receiver = others[rng.draw(0...others.count - 1)]
         let senderAddress = CryptoUtils.createAddress(from: sender.publicKey)
         var nonce = try await nextNonce(senderAddress)
-        nonce += UInt64(mining.mempool.items.filter {
-            $0.transaction.body.node?.signers.contains(senderAddress) == true
-        }.count)
+        // Past every nonce the client already has out: pooled, awaiting a
+        // reply, or awaiting a retry.
+        let outstanding = mining.mempool.items.map(\.transaction)
+            + Array(submissions.values) + Array(retrying.values)
+        nonce += UInt64(Set(outstanding.filter {
+            $0.body.node?.signers.contains(senderAddress) == true
+        }.compactMap { try? Mempool.cid(of: $0) }).count)
         let overspend = rng.chance(config.overspendProbability)
         let amount = overspend ? Int64(1_000_000) : (sender.publicKey == bank.publicKey ? 20 : Int64(rng.draw(1...3)))
         let fee = Int64(rng.draw(0...3))
@@ -433,7 +448,7 @@ public struct TxWorkload {
         mix(Self.describe(event))
         switch event {
         case .preflighted(let job, _):
-            runningPreflights.remove(job.tipCID + "/" + job.cid)
+            runningPreflights.remove("\(job.tipEpoch)/" + job.cid)
         case .transactionReceived:
             arrivalsOnTip += 1
         default:
@@ -454,9 +469,17 @@ public struct TxWorkload {
             journal.formUnion(delta.journaled.map(\.cid))
         case .transactionAdmitted(let replyID, _, _, _):
             try answer(replyID)
+            submissions[replyID] = nil
             report.admitted += 1
-        case .transactionRefused(let replyID, _):
+        case .transactionRefused(let replyID, let error):
             try answer(replyID)
+            // A client retries a refusal the tip's churn caused.
+            if error == .contextChanged, let transaction = submissions[replyID],
+               let cid = try? Mempool.cid(of: transaction) {
+                retrying[cid] = transaction
+                schedule(at: now + delay(), .resubmit(transaction))
+            }
+            submissions[replyID] = nil
             report.refused += 1
         case .announceTransaction:
             break
@@ -483,32 +506,32 @@ public struct TxWorkload {
         }
     }
 
-    /// The executor's side of the job contract: a job whose tip is no longer
-    /// the act-on tip when it is dequeued is skipped.
+    /// The executor's side of the job contract: a job is skipped iff its tip
+    /// epoch is not `Mining.tipEpoch` when it is dequeued.
     mutating func run(_ job: PreflightJob) async throws {
-        guard job.tipCID == mining.tipCID else {
+        guard job.tipEpoch == mining.tipEpoch else {
             report.skippedJobs += 1
             return
         }
-        guard runningPreflights.insert(job.tipCID + "/" + job.cid).inserted else {
-            throw fail("preflight of \(job.cid) ran twice at once on tip \(job.tipCID)")
+        guard runningPreflights.insert("\(job.tipEpoch)/" + job.cid).inserted else {
+            throw fail("preflight of \(job.cid) ran twice at once in tip epoch \(job.tipEpoch)")
         }
-        if tipAtMove != job.tipCID {
-            tipAtMove = job.tipCID
+        if epochAtMove != job.tipEpoch {
+            epochAtMove = job.tipEpoch
             preflightsOnTip = 0
             arrivalsOnTip = 0
             poolAtMove = mining.mempool.count + mining.pendingAdmissions
         }
         preflightsOnTip += 1
         guard preflightsOnTip <= poolAtMove + arrivalsOnTip else {
-            throw fail("\(preflightsOnTip) preflights on tip \(job.tipCID): more than one tip's worth")
+            throw fail("\(preflightsOnTip) preflights in tip epoch \(job.tipEpoch): more than one tip's worth")
         }
         let verdict = try await classify(job)
         schedule(at: now + delay(), .event(.preflighted(job, verdict)))
     }
 
     mutating func run(_ job: TemplateJob) async throws {
-        guard job.tipCID == mining.tipCID else {
+        guard job.tipEpoch == mining.tipEpoch else {
             report.skippedJobs += 1
             return
         }
@@ -664,7 +687,7 @@ public struct TxWorkload {
     mutating func settle() async throws {
         queue.removeAll {
             switch $0.item {
-            case .event, .runPreflight, .runTemplate: false
+            case .event, .runPreflight, .runTemplate, .resubmit: false
             case .submit, .requestTemplate, .reorg, .flood: true
             }
         }
@@ -676,6 +699,11 @@ public struct TxWorkload {
                 case .event(let event): try await step(event)
                 case .runPreflight(let job): try await run(job)
                 case .runTemplate(let job): try await run(job)
+                case .resubmit(let transaction):
+                    let replyID = reply()
+                    submissions[replyID] = transaction
+                    if let cid = try? Mempool.cid(of: transaction) { retrying[cid] = nil }
+                    try await step(.transactionReceived(transaction, origin: .local(replyID: replyID)))
                 case .submit, .requestTemplate, .reorg, .flood: break
                 }
             }
