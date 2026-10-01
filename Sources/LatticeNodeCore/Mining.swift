@@ -141,6 +141,11 @@ public enum MiningEvent: Sendable {
     /// nil: the job could not build a block on its tip.
     case templateBuilt(TemplateJob, TemplateBuild?)
     case submitWork(replyID: UInt64, workID: String, nonce: UInt64)
+    /// The answer to `returnTransactions`: the CIDs the entered blocks
+    /// carry. Each leaves the pool, and a submit still awaiting its verdict
+    /// is answered as admitted (a restored row goes). The returned
+    /// transactions arrive separately, as `.returned` origins.
+    case confirmed(Set<String>)
 }
 
 /// The pool's durable side of one step. The shell applies it before any later
@@ -167,10 +172,11 @@ public enum MiningEffect: Sendable {
     case workRefused(replyID: UInt64, TemplateError)
     case preflight(PreflightJob)
     case buildTemplate(TemplateJob)
-    /// Read the transactions of the `left` blocks from content, less those
-    /// the `entered` blocks carry, and hand each back as
+    /// Read the transactions of the `left` and `entered` blocks from
+    /// content: answer `.confirmed` with the entered blocks' CIDs, then hand
+    /// each left-block transaction the entered blocks do not carry back as
     /// `.transactionReceived(_, origin: .returned)`. A body no longer held
-    /// returns nothing.
+    /// contributes nothing.
     case returnTransactions(left: [String], entered: [String])
 }
 
@@ -302,6 +308,8 @@ public struct Mining: Sendable {
             requestTemplate(request, waiting: [Waiting(replyID: replyID)], &turn)
         case .templateBuilt(let job, let build):
             built(job, build, now: now, &turn)
+        case .confirmed(let cids):
+            confirm(cids, &turn)
         case .submitWork(let replyID, let workID, let nonce):
             do {
                 let block = try templates.submission(workID: workID, nonce: nonce, now: now)
@@ -540,14 +548,14 @@ public struct Mining: Sendable {
         }
     }
 
-    private mutating func tipMoved(_ move: TipMove, _ turn: inout Turn) {
-        tipCID = move.tipCID
-        tipEpoch &+= 1
-        departed(mempool.remove(move.confirmed.sorted()), &turn)
-        // A transaction awaiting its verdict that the chain now carries is
-        // done: a local submit is answered as accepted, a restored row goes.
-        for cid in move.confirmed.sorted() {
+    /// Transactions the act-on chain now carries leave the pool. One still
+    /// awaiting its verdict is done: a local submit is answered as admitted,
+    /// a restored row goes.
+    private mutating func confirm(_ confirmed: Set<String>, _ turn: inout Turn) {
+        departed(mempool.remove(confirmed.sorted()), &turn)
+        for cid in confirmed.sorted() {
             guard let admission = close(cid) else { continue }
+            preflighting.remove(cid)
             for origin in admission.origins {
                 switch origin {
                 case .local(let replyID):
@@ -561,6 +569,12 @@ public struct Mining: Sendable {
                 }
             }
         }
+    }
+
+    private mutating func tipMoved(_ move: TipMove, _ turn: inout Turn) {
+        tipCID = move.tipCID
+        tipEpoch &+= 1
+        confirm(move.confirmed, &turn)
         // A local submit that has waited through too many moves is answered
         // with a retriable refusal; the admission goes on for any other origin.
         for cid in admissions.keys.sorted() {
@@ -592,7 +606,11 @@ public struct Mining: Sendable {
         for (cid, admission) in admissions.sorted(by: { $0.key < $1.key }) {
             preflight(cid, admission.transaction, &turn)
         }
-        if !move.left.isEmpty {
+        // Read the moved blocks when something left the act-on chain, or
+        // when a submit still awaits its verdict (the entered blocks may
+        // confirm it).
+        let waitingLocal = admissions.values.contains { $0.slot == .local }
+        if !move.left.isEmpty || (!move.entered.isEmpty && waitingLocal) {
             turn.jobs.append(.returnTransactions(left: move.left, entered: move.entered))
         }
         // Every waiting build was for the old tip: issue it again on this

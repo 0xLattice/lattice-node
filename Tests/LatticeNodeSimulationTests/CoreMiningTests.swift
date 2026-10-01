@@ -61,7 +61,7 @@ final class CoreMiningTests: XCTestCase {
         }
     }
 
-    func testAnExecutionThatMovesTheActOnTipMovesTheMempoolTipInTheSameStep() async throws {
+    func testAnExecutionThatConfirmsAWaitingSubmitAnswersItAsAdmitted() async throws {
         var core = weighed(Array(chain.prefix(2)))
         XCTAssertEqual(core.mining.tipCID, world.genesis.cid)
         let transaction = try signed(key, [AccountAction(owner: address(key), delta: -2)], nonce: 0)
@@ -76,12 +76,17 @@ final class CoreMiningTests: XCTestCase {
         XCTAssertEqual(core.snapshot.actOnTip, chain[0].cid)
         XCTAssertEqual(core.mining.tipCID, chain[0].cid)
         XCTAssertEqual(core.snapshot.miningEpoch, 1)
-        // The waiting submit is preflighted again on the new tip; a forward
-        // move leaves no block, so nothing is returned.
+        // A submit still awaits its verdict, so the move asks for the entered
+        // block's transactions; it left no block.
         XCTAssertTrue(mining(applied).contains {
-            if case .preflight(let job) = $0 { job.cid == cid && job.tipCID == chain[0].cid } else { false }
+            if case .returnTransactions([], [chain[0].cid]) = $0 { true } else { false }
         }, "\(mining(applied))")
-        XCTAssertFalse(mining(applied).contains { if case .returnTransactions = $0 { true } else { false } })
+        // The block carried it: the waiting submit is answered as admitted.
+        let confirmed = mining(core.step(.mining(.confirmed([cid])), now: Self.now))
+        XCTAssertTrue(confirmed.contains {
+            if case .transactionAdmitted(7, cid, _, _) = $0 { true } else { false }
+        }, "\(confirmed)")
+        XCTAssertEqual(core.mining.pendingAdmissions, 0)
         // Persist and publish precede every mining effect of the step.
         let firstMining = try XCTUnwrap(applied.firstIndex { if case .mining = $0 { true } else { false } })
         for (index, effect) in applied.enumerated() {
@@ -90,7 +95,7 @@ final class CoreMiningTests: XCTestCase {
             default: break
             }
         }
-        // The verdict on the old tip is dropped.
+        // The verdict on the old tip changes nothing.
         XCTAssertTrue(mining(core.step(.mining(.preflighted(preflight, .ready)), now: Self.now)).isEmpty)
         XCTAssertEqual(core.mining.mempool.count, 0)
     }

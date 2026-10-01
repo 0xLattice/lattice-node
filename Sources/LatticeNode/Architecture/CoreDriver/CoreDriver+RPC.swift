@@ -197,14 +197,14 @@ extension CoreDriver {
 
     // MARK: - Jobs
 
-    /// `MiningEffect.returnTransactions`: every transaction of the blocks the
-    /// act-on chain left whose bodies are still held, parent first, less
-    /// those the blocks it entered carry.
-    static func returnedTransactions(
+    /// `MiningEffect.returnTransactions`: the CIDs the blocks the act-on
+    /// chain entered carry, and every transaction of the blocks it left whose
+    /// bodies are still held, parent first, less the confirmed ones.
+    static func movedTransactions(
         left: [String],
         entered: [String],
         fetcher: any Fetcher
-    ) async -> [Transaction] {
+    ) async -> (confirmed: Set<String>, returned: [Transaction]) {
         /// A block's transactions with their bodies resolved: the pool takes
         /// resolved content only.
         func transactions(of cid: String) async -> [Transaction] {
@@ -231,7 +231,7 @@ extension CoreDriver {
                 returned.append(transaction)
             }
         }
-        return returned
+        return (carried, returned)
     }
 
     /// `MiningEffect.buildTemplate`: today's assembly (the bisecting fit, the

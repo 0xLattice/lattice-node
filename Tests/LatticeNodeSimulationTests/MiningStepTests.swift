@@ -45,8 +45,27 @@ final class MiningStepTests: XCTestCase {
         XCTAssertTrue(moved.contains {
             if case .returnTransactions(["A1"], ["B1", "B2"]) = $0 { true } else { false }
         }, "\(moved)")
+        // A forward move with no submit waiting reads nothing.
         let forward = mining.step(.tipMoved(TipMove(tipCID: "B3", entered: ["B3"])), now: 2)
         XCTAssertFalse(forward.contains { if case .returnTransactions = $0 { true } else { false } })
+    }
+
+    func testAWaitingSubmitTheEnteredBlocksCarryIsAnsweredAsAdmitted() throws {
+        var mining = Mining(tipCID: "A", spec: testSpec())
+        let tx = try transfer(nonce: 0)
+        let cid = try Mempool.cid(of: tx)
+        _ = mining.step(.transactionReceived(tx, origin: .local(replyID: 9)), now: 0)
+        let moved = mining.step(.tipMoved(TipMove(tipCID: "B", entered: ["B"])), now: 1)
+        XCTAssertTrue(moved.contains {
+            if case .returnTransactions([], ["B"]) = $0 { true } else { false }
+        }, "a waiting submit makes a forward move read the entered block: \(moved)")
+        let confirmed = mining.step(.confirmed([cid]), now: 2)
+        XCTAssertTrue(confirmed.contains {
+            if case .transactionAdmitted(9, cid, _, _) = $0 { true } else { false }
+        }, "\(confirmed)")
+        XCTAssertFalse(confirmed.contains { if case .transactionRefused = $0 { true } else { false } })
+        XCTAssertEqual(mining.pendingAdmissions, 0)
+        XCTAssertEqual(mining.outstandingPreflights, 0)
     }
 
     func testAPeerTransactionIsRelayedOnceWhenItIsNewlyPooled() throws {

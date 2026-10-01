@@ -752,9 +752,9 @@ extension CoreDriver {
                 // on any tip, and its preflight decides.
                 let fetcher = process.localFetcher
                 miningJobs.append(QueuedJob(path: path, epoch: nil) {
-                    await CoreDriver.returnedTransactions(left: left, entered: entered, fetcher: fetcher).map {
-                        .level(path, .mining(.transactionReceived($0, origin: .returned)))
-                    }
+                    let moved = await CoreDriver.movedTransactions(left: left, entered: entered, fetcher: fetcher)
+                    return [.level(path, .mining(.confirmed(moved.confirmed)))]
+                        + moved.returned.map { .level(path, .mining(.transactionReceived($0, origin: .returned))) }
                 })
                 startJobs()
             }
