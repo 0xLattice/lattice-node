@@ -70,9 +70,9 @@ public struct MempoolLimits: Sendable, Equatable {
 }
 
 /// The transaction pool of one level as a value: no IO, no awaits. The same
-/// admission, replacement, eviction and ordering rules as the shell's
-/// `TransactionPool` actor, over transactions whose content is already
-/// resolved. `version` moves on every change, so a job built from the pool
+/// admission, replacement and eviction rules as the shell's `TransactionPool`
+/// actor, over transactions whose content is already resolved; templates
+/// select by ancestor-package fee rate. `version` moves on every change, so a job built from the pool
 /// names the pool it read.
 public struct Mempool: Sendable {
     /// Bound parse work by wire capacity (a 16-bit length), not an invented
@@ -226,7 +226,9 @@ public struct Mempool: Sendable {
         var prospectiveCount = entries.count - (replacedCID == nil ? 0 : 1)
         var prospectiveBytes = byteCount - (replacedCID.flatMap { entries[$0]?.size } ?? 0)
         var evictions: [String] = []
-        let candidates = entries.values
+        // Sorted only when full: admission stays linear in the pool.
+        let full = prospectiveCount >= limits.maxCount || entry.size > limits.maxBytes - prospectiveBytes
+        let candidates = !full ? [] : entries.values
             .filter { $0.cid != replacedCID }
             .sorted { Self.retention($0, $1) < 0 }
         for candidate in candidates
@@ -251,90 +253,218 @@ public struct Mempool: Sendable {
         return mutation
     }
 
-    /// Ready and future entries in template order.
-    public func transactions(limit: Int) -> [Transaction] {
-        ordered(limit: limit, includesUnavailable: false)
+    /// Ready entries, and the future entries that extend them, in template
+    /// order, up to `limit` transactions and `maxBytes` of transaction size.
+    public func transactions(limit: Int, maxBytes: Int = .max) -> [Transaction] {
+        selected(limit: limit, maxBytes: maxBytes, includesUnavailable: false)
     }
 
     /// Candidate parent state can make a child withdrawal executable, so
-    /// unavailable entries are offered too; the builder preflights them
+    /// unavailable entries may root packages too; the builder preflights them
     /// against that context.
-    public func contextualTransactions(limit: Int) -> [Transaction] {
-        ordered(limit: limit, includesUnavailable: true)
+    public func contextualTransactions(limit: Int, maxBytes: Int = .max) -> [Transaction] {
+        selected(limit: limit, maxBytes: maxBytes, includesUnavailable: true)
     }
 
-    /// Fee-priority selection. The greedy assembler applies candidates in
-    /// order and drops any that fail at their position, so a signer's nonce N
-    /// must precede its nonce N+1, and a multi-signer transaction must follow
-    /// every signer's lower-nonce transaction. A topological (Kahn) emission
-    /// honors that: an entry is emittable once every signer's lower-nonce
-    /// entry has been emitted, and among emittable entries the highest fee
-    /// wins (CID breaks ties). Future entries stay eligible so a burst still
-    /// packs in one block.
-    private func ordered(limit: Int, includesUnavailable: Bool) -> [Transaction] {
-        let maximum = max(0, limit)
-        guard maximum > 0 else { return [] }
-        let eligible = entries.values.filter {
-            $0.disposition == .ready || $0.disposition == .future
-                || (includesUnavailable && $0.disposition == .unavailable)
+    /// Packages that fail to fit, in a row, before selection gives up on a
+    /// nearly full template (Bitcoin Core's `MAX_CONSECUTIVE_FAILURES`).
+    static let maxConsecutiveMisses = 1_000
+
+    /// Bitcoin Core's package limits (`-limitancestorcount`,
+    /// `-limitdescendantcount`), each counting the entry itself. They bound
+    /// every package walk, so selection stays linear in the pool.
+    static let maxPackageAncestors = 25
+    static let maxPackageDescendants = 25
+
+    /// Greedy ancestor-package fee-rate selection, as Bitcoin Core's
+    /// `addPackageTxs`.
+    ///
+    /// Ancestry is the nonce chain: Lattice applies each signer's
+    /// transactions at consecutive nonces, so an entry's parents are the
+    /// pooled entries at `nonce - 1` for each of its signers (a multi-signer
+    /// entry joins chains). An entry is a candidate only if it can execute
+    /// once its ancestors have: it is ready (or, contextually, unavailable),
+    /// or EVERY one of its signers has its nonce predecessor pooled; and
+    /// every ancestor is a candidate. So a nonce-gap entry, and everything
+    /// behind it, stays out. An entry with more than `maxPackageAncestors`
+    /// ancestors or `maxPackageDescendants` descendants is not a candidate.
+    ///
+    /// A package is an entry plus its unselected ancestors; its score is
+    /// (sum of verified fees) / (sum of sizes). Only a `.ready` entry's
+    /// surplus is funding-checked, so only it counts: an unverified entry can
+    /// never raise its ancestors' score. The best-scoring package is
+    /// taken whole, parents first; the packages of its descendants are then
+    /// rescored without it. A package that does not fit is skipped. Equal
+    /// rates break by the smaller CID, so the order is deterministic.
+    private func selected(limit: Int, maxBytes: Int, includesUnavailable: Bool) -> [Transaction] {
+        guard limit > 0, maxBytes > 0 else { return [] }
+
+        func parents(_ entry: Entry) -> [String] {
+            guard entry.conflictKey.nonce > 0 else { return [] }
+            return Array(Set(entry.conflictKey.signers.compactMap {
+                signerNonces[SignerNonce(signer: $0, nonce: entry.conflictKey.nonce - 1)]
+            }))
         }
-        guard !eligible.isEmpty else { return [] }
-        let ordinal = eligible.sorted {
-            $0.conflictKey.nonce != $1.conflictKey.nonce
-                ? $0.conflictKey.nonce < $1.conflictKey.nonce
-                : $0.cid < $1.cid
+        var parentsOf: [String: [String]] = [:]
+        var childrenOf: [String: [String]] = [:]
+        for entry in entries.values {
+            let found = parents(entry)
+            parentsOf[entry.cid] = found
+            for parent in found { childrenOf[parent, default: []].append(entry.cid) }
         }
-        // Each signer's entries ascending by nonce; a multi-signer entry sits
-        // in every one of its signers' chains and depends on its predecessor
-        // in each.
-        var chains: [String: [Entry]] = [:]
-        var positions: [String: [String: Int]] = [:]
-        for entry in ordinal {
-            for signer in entry.conflictKey.signers {
-                positions[entry.cid, default: [:]][signer] = chains[signer]?.count ?? 0
-                chains[signer, default: []].append(entry)
+
+        /// The entries reachable from `cid` (itself included) along `edges`
+        /// inside `within`, counted up to `cap + 1`.
+        func reach(_ cid: String, _ edges: [String: [String]], within: Set<String>, cap: Int) -> Int {
+            var seen: Set<String> = [cid]
+            var stack = [cid]
+            while seen.count <= cap, let next = stack.popLast() {
+                for other in edges[next] ?? [] where within.contains(other) && seen.insert(other).inserted {
+                    stack.append(other)
+                }
+            }
+            return seen.count
+        }
+
+        // Nonces strictly increase along every edge, so ascending nonce is a
+        // topological order.
+        let ordered = entries.values.sorted(by: Self.topological)
+        var executable = Set<String>()
+        for entry in ordered {
+            let roots = entry.disposition == .ready
+                || (includesUnavailable && entry.disposition == .unavailable)
+            let extendsEverySigner = entry.conflictKey.nonce > 0 && entry.conflictKey.signers.allSatisfy {
+                signerNonces[SignerNonce(signer: $0, nonce: entry.conflictKey.nonce - 1)] != nil
+            }
+            if (roots || extendsEverySigner),
+               (parentsOf[entry.cid] ?? []).allSatisfy(executable.contains),
+               reach(entry.cid, parentsOf, within: executable, cap: Self.maxPackageAncestors)
+                   <= Self.maxPackageAncestors {
+                executable.insert(entry.cid)
             }
         }
-        var indegree: [String: Int] = [:]
-        for entry in ordinal {
-            indegree[entry.cid] = (positions[entry.cid] ?? [:]).values.filter { $0 > 0 }.count
+        let tooWide = executable.filter {
+            reach($0, childrenOf, within: executable, cap: Self.maxPackageDescendants) > Self.maxPackageDescendants
         }
-        var frontier = FeeFrontier()
-        for entry in ordinal where indegree[entry.cid] == 0 { frontier.push(entry) }
+        var candidates = Set<String>()
+        for entry in ordered where executable.contains(entry.cid) && !tooWide.contains(entry.cid)
+            && (parentsOf[entry.cid] ?? []).allSatisfy(candidates.contains) {
+            candidates.insert(entry.cid)
+        }
+
+        var picked = Set<String>()
+        func package(_ cid: String) -> [Entry] {
+            var seen: Set<String> = [cid]
+            var stack = [cid]
+            while let next = stack.popLast() {
+                for parent in parentsOf[next] ?? [] where !picked.contains(parent) && seen.insert(parent).inserted {
+                    stack.append(parent)
+                }
+            }
+            return seen.compactMap { entries[$0] }.sorted(by: Self.topological)
+        }
+
+        var frontier = PackageFrontier()
+        var generation: [String: Int] = [:]
+        func score(_ cid: String) {
+            let members = package(cid)
+            let next = (generation[cid] ?? 0) + 1
+            generation[cid] = next
+            frontier.push(PackageScore(
+                cid: cid,
+                fee: members.reduce(.zero) { $1.disposition == .ready ? $0 + $1.minerSurplus : $0 },
+                size: members.reduce(0) { $0 + $1.size },
+                generation: next
+            ))
+        }
+        for cid in candidates.sorted() { score(cid) }
+
         var result: [Transaction] = []
-        while result.count < maximum, let pick = frontier.pop() {
-            result.append(pick.transaction)
-            for signer in pick.conflictKey.signers {
-                guard let chain = chains[signer], let index = positions[pick.cid]?[signer],
-                      index + 1 < chain.count else { continue }
-                let successor = chain[index + 1]
-                indegree[successor.cid]? -= 1
-                if indegree[successor.cid] == 0 { frontier.push(successor) }
+        var bytes = 0
+        var skipped = Set<String>()
+        var misses = 0
+        while result.count < limit, let top = frontier.pop() {
+            guard generation[top.cid] == top.generation,
+                  !picked.contains(top.cid), !skipped.contains(top.cid) else { continue }
+            let members = package(top.cid)
+            guard members.count <= limit - result.count, top.size <= maxBytes - bytes else {
+                skipped.insert(top.cid)
+                misses += 1
+                if misses >= Self.maxConsecutiveMisses { break }
+                continue
+            }
+            misses = 0
+            for member in members {
+                picked.insert(member.cid)
+                result.append(member.transaction)
+            }
+            bytes += top.size
+
+            var affected = Set<String>()
+            var stack = members.map(\.cid)
+            while let next = stack.popLast() {
+                for child in childrenOf[next] ?? [] where candidates.contains(child) && affected.insert(child).inserted {
+                    stack.append(child)
+                }
+            }
+            for cid in affected.sorted() where !picked.contains(cid) && !skipped.contains(cid) {
+                score(cid)
             }
         }
         return result
     }
 
-    /// A max-fee binary heap (CID ascending breaks ties).
-    private struct FeeFrontier {
-        private var items: [Entry] = []
+    private static func topological(_ lhs: Entry, _ rhs: Entry) -> Bool {
+        lhs.conflictKey.nonce != rhs.conflictKey.nonce
+            ? lhs.conflictKey.nonce < rhs.conflictKey.nonce
+            : lhs.cid < rhs.cid
+    }
 
-        private func precedes(_ lhs: Entry, _ rhs: Entry) -> Bool {
-            lhs.minerSurplus != rhs.minerSurplus ? lhs.minerSurplus > rhs.minerSurplus : lhs.cid < rhs.cid
+    private struct PackageScore {
+        let cid: String
+        let fee: WorkSum
+        let size: Int
+        let generation: Int
+
+        /// A higher fee rate first, compared exactly: `a.fee / a.size >
+        /// b.fee / b.size` as `a.fee * b.size > b.fee * a.size`. Equal rates
+        /// break by the smaller CID.
+        func precedes(_ other: PackageScore) -> Bool {
+            let lhs = Self.scaled(fee, by: other.size)
+            let rhs = Self.scaled(other.fee, by: size)
+            return lhs != rhs ? lhs > rhs : cid < other.cid
         }
 
-        mutating func push(_ entry: Entry) {
-            items.append(entry)
+        /// `value * factor` by doubling: WorkSum has no multiply.
+        static func scaled(_ value: WorkSum, by factor: Int) -> WorkSum {
+            var result = WorkSum.zero
+            var addend = value
+            var remaining = factor
+            while remaining > 0 {
+                if remaining & 1 == 1 { result = result + addend }
+                remaining >>= 1
+                if remaining > 0 { addend = addend + addend }
+            }
+            return result
+        }
+    }
+
+    /// A max-score binary heap; stale scores are skipped at pop.
+    private struct PackageFrontier {
+        private var items: [PackageScore] = []
+
+        mutating func push(_ score: PackageScore) {
+            items.append(score)
             var child = items.count - 1
             while child > 0 {
                 let parent = (child - 1) / 2
-                guard precedes(items[child], items[parent]) else { break }
+                guard items[child].precedes(items[parent]) else { break }
                 items.swapAt(child, parent)
                 child = parent
             }
         }
 
-        mutating func pop() -> Entry? {
+        mutating func pop() -> PackageScore? {
             guard let top = items.first else { return nil }
             items[0] = items[items.count - 1]
             items.removeLast()
@@ -342,7 +472,7 @@ public struct Mempool: Sendable {
             while true {
                 var best = parent
                 for child in [2 * parent + 1, 2 * parent + 2]
-                where child < items.count && precedes(items[child], items[best]) {
+                where child < items.count && items[child].precedes(items[best]) {
                     best = child
                 }
                 guard best != parent else { break }
