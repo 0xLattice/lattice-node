@@ -40,6 +40,26 @@ final class TxWorkloadSimulationTests: XCTestCase {
         XCTAssertEqual(first.confirmed, second.confirmed)
     }
 
+    /// A deep reorg under a peer flood: the returned set and every peer's
+    /// pending admissions stay inside their bounds at every step (checked by
+    /// the run), and local submits are still answered.
+    func testDeepReorgUnderAPeerFloodStaysBounded() async throws {
+        var config = TxWorkloadConfig(seed: 0xF100D)
+        config.transactions = 40
+        config.reorgProbability = 0.3
+        config.maxReorgDepth = 4
+        config.floodProbability = 0.3
+        config.floodPeers = 6
+        config.floodSize = 10
+        config.pending = MiningConfig(maxPendingPeerAdmissions: 8, maxPendingPerPeer: 2, maxPendingReturned: 3)
+        var workload = try await TxWorkload.make(config)
+        let report = try await workload.run()
+        XCTAssertGreaterThan(report.reorgs, 0)
+        XCTAssertGreaterThan(report.floods, 0)
+        XCTAssertGreaterThan(report.confirmed, 0)
+        XCTAssertGreaterThan(report.skippedJobs, 0, "stale jobs are skipped at dequeue")
+    }
+
     /// The fixed workload keys are real Ed25519 pairs: their signatures verify.
     func testWorkloadKeysSignVerifiably() throws {
         for key in SimTransactions.keys {

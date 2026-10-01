@@ -20,12 +20,19 @@ public struct TxWorkloadConfig: Sendable {
     public var reorderProbability = 0.1
     /// Deliver a transaction a second time, from a peer.
     public var duplicateProbability = 0.1
-    /// Replace the executed tip with an empty sibling, returning its block's
-    /// transactions to the pool.
+    /// Replace up to `maxReorgDepth` blocks of the executed chain with one
+    /// empty sibling, returning their transactions to the pool.
     public var reorgProbability = 0.1
+    public var maxReorgDepth = 1
+    /// A burst of junk from many peers: unfunded transfers and far-future
+    /// nonces, never answered.
+    public var floodProbability = 0.0
+    public var floodPeers = 4
+    public var floodSize = 8
     public var minJobDelay: Int64 = 1
     public var maxJobDelay: Int64 = 400
     public var mempool = MempoolLimits(maxCount: 24, maxNonReadyPerSigner: 4)
+    public var pending = MiningConfig(maxPendingPeerAdmissions: 16, maxPendingPerPeer: 4, maxPendingReturned: 8)
     /// Simulated time after the last submission before the run stops.
     public var settle: Int64 = 30_000
 
@@ -37,7 +44,7 @@ public struct TxWorkloadConfig: Sendable {
         var rng = SplitMix64(state: seed ^ 0x7A_0000)
         var config = TxWorkloadConfig(seed: seed)
         config.users = rng.draw(2...6)
-        config.transactions = rng.draw(30...90)
+        config.transactions = rng.draw(20...50)
         config.submitInterval = rng.draw(Int64(50)...600)
         config.templateInterval = rng.draw(Int64(400)...2_000)
         config.replaceProbability = 0.3 * rng.unit()
@@ -45,6 +52,15 @@ public struct TxWorkloadConfig: Sendable {
         config.reorderProbability = 0.2 * rng.unit()
         config.duplicateProbability = 0.2 * rng.unit()
         config.reorgProbability = 0.2 * rng.unit()
+        config.maxReorgDepth = rng.draw(1...4)
+        config.floodProbability = 0.04 * rng.unit()
+        config.floodPeers = rng.draw(1...4)
+        config.floodSize = rng.draw(1...6)
+        config.pending = MiningConfig(
+            maxPendingPeerAdmissions: rng.draw(2...24),
+            maxPendingPerPeer: rng.draw(1...6),
+            maxPendingReturned: rng.draw(1...12)
+        )
         config.maxJobDelay = rng.draw(Int64(20)...1_500)
         config.mempool = MempoolLimits(
             maxCount: rng.draw(8...64),
@@ -65,6 +81,9 @@ public struct TxWorkloadReport: Sendable {
     public var templates = 0
     public var mined = 0
     public var reorgs = 0
+    /// Jobs an executor skipped at dequeue because the tip had moved.
+    public var skippedJobs = 0
+    public var floods = 0
     /// A fingerprint of the run's event order: equal seeds, equal traces.
     public var trace: UInt64 = 0xCBF2_9CE4_8422_2325
 }
@@ -84,6 +103,10 @@ public struct TxWorkload {
         case submit
         case requestTemplate
         case reorg
+        case flood
+        /// A job the executor dequeues.
+        case runPreflight(PreflightJob)
+        case runTemplate(TemplateJob)
     }
 
     struct Scheduled {
@@ -127,6 +150,16 @@ public struct TxWorkload {
     /// A reordered nonce held back for the next submission.
     var heldBack: Transaction?
     var lastSubmission: Int64 = 0
+    /// (tip, transaction) of every preflight run whose verdict is not yet
+    /// delivered: at most one per transaction, and only on the current tip.
+    var runningPreflights: Set<String> = []
+    /// Preflights run on the current tip, and the bound on them: every
+    /// pooled or pending transaction once, plus each new arrival.
+    var preflightsOnTip = 0
+    var arrivalsOnTip = 0
+    var tipAtMove = ""
+    var poolAtMove = 0
+    var floodCount: Int64 = 0
 
     public static func make(_ config: TxWorkloadConfig) async throws -> TxWorkload {
         let cas = SimCAS()
@@ -149,7 +182,8 @@ public struct TxWorkload {
         self.spec = World.spec
         self.rng = SplitMix64(state: config.seed)
         self.now = World.genesisTime + World.blockInterval
-        precondition(config.users >= 2 && config.users < SimTransactions.keys.count)
+        // The last key is the flooder's, never funded.
+        precondition(config.users >= 2 && config.users < SimTransactions.keys.count - 1)
         self.bank = SimTransactions.keys[0]
         self.users = Array(SimTransactions.keys[1...config.users])
         self.genesis = genesis.cid
@@ -158,7 +192,12 @@ public struct TxWorkload {
         self.mining = Mining(
             tipCID: genesis.cid,
             spec: World.spec,
-            config: MiningConfig(mempool: config.mempool)
+            config: MiningConfig(
+                maxPendingPeerAdmissions: config.pending.maxPendingPeerAdmissions,
+                maxPendingPerPeer: config.pending.maxPendingPerPeer,
+                maxPendingReturned: config.pending.maxPendingReturned,
+                mempool: config.mempool
+            )
         )
         // The bank's funding blocks, then the workload.
         for index in 0..<config.fundingBlocks {
@@ -200,6 +239,12 @@ public struct TxWorkload {
                 }
             case .reorg:
                 try await reorg()
+            case .flood:
+                try await flood()
+            case .runPreflight(let job):
+                try await run(job)
+            case .runTemplate(let job):
+                try await run(job)
             }
         }
         try await settle()
@@ -244,6 +289,9 @@ public struct TxWorkload {
         }
         if rng.chance(config.reorgProbability) {
             schedule(at: now + rng.draw(Int64(1)...config.templateInterval), .reorg)
+        }
+        if rng.chance(config.floodProbability) {
+            schedule(at: now + rng.draw(Int64(1)...config.submitInterval), .flood)
         }
         submitted += 1
         if submitted < config.transactions || heldBack != nil {
@@ -304,13 +352,21 @@ public struct TxWorkload {
 
     // MARK: - Chain
 
+    /// Replace up to a seeded depth of the executed chain (never genesis's
+    /// child) with one empty sibling of the deepest block replaced.
     mutating func reorg() async throws {
-        guard let current = blocks[tip], let parentCID = current.sim.parent,
-              let parent = blocks[parentCID], parentCID != genesis
-        else { return }
+        let depth = rng.draw(1...config.maxReorgDepth)
+        var disconnected: [ChainBlock] = []
+        var forkPoint = tip
+        while disconnected.count < depth, let block = blocks[forkPoint],
+              let parent = block.sim.parent, parent != genesis {
+            disconnected.append(block)
+            forkPoint = parent
+        }
+        guard !disconnected.isEmpty, let parent = blocks[forkPoint] else { return }
         let built = try await BlockBuilder.buildBlock(
             previous: parent.sim.block,
-            timestamp: current.sim.block.timestamp + 1,
+            timestamp: max(parent.sim.block.timestamp + 1, now),
             difficultyAnchor: parent.sim.anchor,
             fetcher: cas
         )
@@ -318,13 +374,36 @@ public struct TxWorkload {
         let recorded = try await World.record(sibling, releaseAt: now, anchor: anchor(below: parent.sim, sibling), in: cas)
         blocks[recorded.cid] = ChainBlock(sim: recorded, transactions: [:])
         tip = recorded.cid
-        onChain.subtract(current.transactions.keys)
+        var returned: [Transaction] = []
+        for block in disconnected.reversed() {
+            onChain.subtract(block.transactions.keys)
+            returned += block.transactions.keys.sorted().compactMap { block.transactions[$0] }
+        }
         report.reorgs += 1
-        try await step(.tipMoved(TipMove(
-            tipCID: recorded.cid,
-            confirmed: [],
-            returned: current.transactions.keys.sorted().compactMap { current.transactions[$0] }
-        )))
+        try await step(.tipMoved(TipMove(tipCID: recorded.cid, confirmed: [], returned: returned)))
+    }
+
+    /// Junk from several peers at once: unsigned, unfunded transfers from the
+    /// flooder's key, at its first nonce (invalid) or a far one (future).
+    mutating func flood() async throws {
+        report.floods += 1
+        let flooder = SimTransactions.keys[SimTransactions.keys.count - 1]
+        let sender = CryptoUtils.createAddress(from: flooder.publicKey)
+        for peer in 0..<config.floodPeers {
+            for _ in 0..<config.floodSize {
+                floodCount += 1
+                let body = TransactionBody(
+                    accountActions: [AccountAction(owner: sender, delta: -floodCount)],
+                    actions: [], depositActions: [], genesisActions: [], receiptActions: [],
+                    withdrawalActions: [],
+                    signers: [sender],
+                    nonce: rng.chance(0.5) ? 0 : UInt64(rng.draw(1...8)),
+                    chainPath: [DEFAULT_ROOT_DIRECTORY]
+                )
+                let junk = Transaction(signatures: [flooder.publicKey: "00"], body: try HeaderImpl(node: body))
+                try await step(.transactionReceived(junk, origin: .peer(PeerID(key: "flood\(peer)", session: 1))))
+            }
+        }
     }
 
     func anchor(below parent: SimBlock, _ block: Block) -> DifficultyAnchor {
@@ -352,6 +431,14 @@ public struct TxWorkload {
     mutating func step(_ event: MiningEvent) async throws {
         report.steps += 1
         mix(Self.describe(event))
+        switch event {
+        case .preflighted(let job, _):
+            runningPreflights.remove(job.tipCID + "/" + job.cid)
+        case .transactionReceived:
+            arrivalsOnTip += 1
+        default:
+            break
+        }
         let effects = mining.step(event, now: now)
         try checkOrder(effects)
         for effect in effects {
@@ -390,12 +477,43 @@ public struct TxWorkload {
             try answer(replyID)
             try await mined(block)
         case .preflight(let job):
-            let verdict = try await classify(job)
-            schedule(at: now + delay(), .event(.preflighted(job, verdict)))
+            schedule(at: now + delay(), .runPreflight(job))
         case .buildTemplate(let job):
-            let build = try await assemble(job)
-            schedule(at: now + delay(), .event(.templateBuilt(job, build)))
+            schedule(at: now + delay(), .runTemplate(job))
         }
+    }
+
+    /// The executor's side of the job contract: a job whose tip is no longer
+    /// the act-on tip when it is dequeued is skipped.
+    mutating func run(_ job: PreflightJob) async throws {
+        guard job.tipCID == mining.tipCID else {
+            report.skippedJobs += 1
+            return
+        }
+        guard runningPreflights.insert(job.tipCID + "/" + job.cid).inserted else {
+            throw fail("preflight of \(job.cid) ran twice at once on tip \(job.tipCID)")
+        }
+        if tipAtMove != job.tipCID {
+            tipAtMove = job.tipCID
+            preflightsOnTip = 0
+            arrivalsOnTip = 0
+            poolAtMove = mining.mempool.count + mining.pendingAdmissions
+        }
+        preflightsOnTip += 1
+        guard preflightsOnTip <= poolAtMove + arrivalsOnTip else {
+            throw fail("\(preflightsOnTip) preflights on tip \(job.tipCID): more than one tip's worth")
+        }
+        let verdict = try await classify(job)
+        schedule(at: now + delay(), .event(.preflighted(job, verdict)))
+    }
+
+    mutating func run(_ job: TemplateJob) async throws {
+        guard job.tipCID == mining.tipCID else {
+            report.skippedJobs += 1
+            return
+        }
+        let build = try await assemble(job)
+        schedule(at: now + delay(), .event(.templateBuilt(job, build)))
     }
 
     mutating func delay() -> Int64 {
@@ -514,8 +632,13 @@ public struct TxWorkload {
         guard mining.mempool.count <= limits.maxCount, mining.mempool.byteCount <= limits.maxBytes else {
             throw fail("pool over its limits")
         }
-        guard mining.pendingAdmissions <= mining.config.maxPendingAdmissions,
-              mining.waitingTemplateRequests <= mining.config.maxWaitingTemplateRequests else {
+        let bounds = mining.config
+        guard mining.pendingPeerAdmissions <= bounds.maxPendingPeerAdmissions,
+              mining.pendingReturned <= bounds.maxPendingReturned,
+              (0..<config.floodPeers).allSatisfy({
+                  mining.pendingAdmissions(from: PeerID(key: "flood\($0)", session: 1)) <= bounds.maxPendingPerPeer
+              }),
+              mining.waitingTemplateRequests <= bounds.maxWaitingTemplateRequests else {
             throw fail("waiting work over its bounds")
         }
         if let stale = pooled.intersection(onChain).first {
@@ -539,12 +662,22 @@ public struct TxWorkload {
     /// transaction. Then every reply was given and no ready transaction is
     /// left unmined.
     mutating func settle() async throws {
-        queue.removeAll { if case .event = $0.item { false } else { true } }
+        queue.removeAll {
+            switch $0.item {
+            case .event, .runPreflight, .runTemplate: false
+            case .submit, .requestTemplate, .reorg, .flood: true
+            }
+        }
         for _ in 0..<Self.settleRounds {
             while !queue.isEmpty {
                 let next = queue.removeFirst()
                 now = max(now, next.time)
-                if case .event(let event) = next.item { try await step(event) }
+                switch next.item {
+                case .event(let event): try await step(event)
+                case .runPreflight(let job): try await run(job)
+                case .runTemplate(let job): try await run(job)
+                case .submit, .requestTemplate, .reorg, .flood: break
+                }
             }
             guard mining.mempool.items.contains(where: { $0.disposition == .ready }) else { break }
             try await step(.templateRequested(replyID: reply(), TemplateRequest(rewardRecipient: recipient())))
