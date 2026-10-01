@@ -295,6 +295,9 @@ public struct Core: Sendable {
         // Evict once the step's headers are processed, so a header held for
         // its future timestamp is already in the first eviction tier.
         sync.evict(to: config.pendingBudget)
+        for peer in sync.peers.keys.sorted() where sync.peers[peer]?.holes.isEmpty == false {
+            advanceCursor(of: peer)
+        }
         scheduleBodies(&turn)
         return finish(turn)
     }
@@ -475,7 +478,9 @@ public struct Core: Sendable {
     private mutating func requestStream(from peer: PeerID, _ turn: inout Turn) {
         guard let state = sync.peers[peer], state.stream == nil else { return }
         let cursor = sync.cursors[peer.key]
-        let after = state.inventory.last?.position ?? cursor?.position ?? 0
+        // Within a session, after what was taken; a new session resumes at
+        // the cursor (before anything not yet applied).
+        let after = state.inventory.last?.position ?? Swift.max(state.through, cursor?.position ?? 0)
         let requestID = nextRequestID()
         sync.peers[peer]?.stream = InFlightStream(requestID: requestID, deadline: turn.now + config.headersTimeout)
         sync.peers[peer]?.more = false
@@ -498,8 +503,11 @@ public struct Core: Sendable {
         if sync.cursors[peer.key]?.logID != page.logID {
             sync.cursors[peer.key] = StreamCursor(logID: page.logID, position: 0)
             sync.peers[peer]?.inventory = []
+            sync.peers[peer]?.holes = []
+            sync.peers[peer]?.through = 0
         }
-        var next = (sync.peers[peer]?.inventory.last?.position ?? sync.cursors[peer.key]?.position ?? 0) + 1
+        var next = (sync.peers[peer]?.inventory.last?.position
+            ?? Swift.max(sync.peers[peer]?.through ?? 0, sync.cursors[peer.key]?.position ?? 0)) + 1
         for entry in page.entries where entry.position >= next {
             guard entry.position == next else {
                 sync.peers[peer]?.more = true
@@ -509,6 +517,21 @@ public struct Core: Sendable {
             next += 1
         }
         pump(peer, &turn)
+    }
+
+    /// Whether a logged object is applied here: a header weighed, a proof
+    /// credited (logged).
+    func applied(_ entry: LogEntry) -> Bool {
+        entry.kind == .header ? index.contains(entry.block) : sync.log.contains(entry)
+    }
+
+    /// The cursor in `peer`'s log: before its first entry not yet applied,
+    /// else through the last taken.
+    mutating func advanceCursor(of peer: PeerID) {
+        guard let state = sync.peers[peer], let logID = sync.cursors[peer.key]?.logID else { return }
+        let holes = state.holes.filter { !applied($0.entry) }
+        sync.peers[peer]?.holes = holes
+        sync.cursors[peer.key] = StreamCursor(logID: logID, position: holes.first.map { $0.position - 1 } ?? state.through)
     }
 
     /// Whether this node lacks a logged object.
@@ -524,32 +547,39 @@ public struct Core: Sendable {
         }
     }
 
-    /// Apply `peer`'s inventory in order: entries this node holds advance the
-    /// cursor at once; the first batch with something lacking is asked for
-    /// (one `getData` at a time). A drained inventory asks for the next page.
+    /// Take `peer`'s inventory in order, a batch at a time: what this node
+    /// lacks is asked for (one `getData` at a time); a header it holds but
+    /// has not weighed gains the peer as an announcer (the peer holds its
+    /// ancestors). A drained inventory asks for the next page.
     private mutating func pump(_ peer: PeerID, _ turn: inout Turn) {
         while let state = sync.peers[peer], state.data == nil {
-            guard !state.inventory.isEmpty, let logID = sync.cursors[peer.key]?.logID else {
+            guard !state.inventory.isEmpty, sync.cursors[peer.key] != nil else {
                 if state.more { requestStream(from: peer, &turn) }
                 return
             }
             let batch = state.inventory.prefix(config.maxHeadersPerPage)
             sync.peers[peer]?.inventory.removeFirst(batch.count)
+            sync.peers[peer]?.through = batch.last?.position ?? state.through
             var seen = Set<String>()
-            let cids = batch.map(\.entry).filter(lacks).map(\.block).filter { seen.insert($0).inserted }
-            let through = batch.last?.position ?? 0
-            guard !cids.isEmpty else {
-                sync.cursors[peer.key] = StreamCursor(logID: logID, position: through)
-                continue
+            var cids: [String] = []
+            for item in batch where !applied(item.entry) {
+                sync.peers[peer]?.holes.append(item)
+                if lacks(item.entry) {
+                    if seen.insert(item.entry.block).inserted { cids.append(item.entry.block) }
+                } else if item.entry.kind == .header, sync.pending.entries[item.entry.block] != nil {
+                    announce(item.entry.block, by: peer, &turn)
+                }
             }
-            requestData(cids, through: through, from: peer, &turn)
+            advanceCursor(of: peer)
+            guard !cids.isEmpty else { continue }
+            requestData(cids, from: peer, &turn)
         }
     }
 
-    private mutating func requestData(_ cids: [String], through: UInt64, from peer: PeerID, _ turn: inout Turn) {
+    private mutating func requestData(_ cids: [String], from peer: PeerID, _ turn: inout Turn) {
         let requestID = nextRequestID()
         sync.peers[peer]?.data = InFlightData(
-            requestID: requestID, cids: cids, through: through, deadline: turn.now + config.headersTimeout
+            requestID: requestID, cids: cids, deadline: turn.now + config.headersTimeout
         )
         turn.effects.append(.send(peer, .getData(requestID: requestID, cids: cids)))
     }
@@ -591,12 +621,12 @@ public struct Core: Sendable {
             }
         }
         if answeredParent { nextWant(of: peer, parent: true, &turn) }
-        if let data, let logID = sync.cursors[peer.key]?.logID {
+        if let data {
             let rest = data.cids.filter { !received.contains($0) }
             if !rest.isEmpty, !received.isEmpty {
-                requestData(rest, through: data.through, from: peer, &turn)
+                requestData(rest, from: peer, &turn)
             } else {
-                sync.cursors[peer.key] = StreamCursor(logID: logID, position: data.through)
+                advanceCursor(of: peer)
                 pump(peer, &turn)
             }
         }

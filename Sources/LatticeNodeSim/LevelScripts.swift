@@ -138,23 +138,27 @@ public struct ProofWithholder: LevelScript {
         world.released(LevelWorld.alpha, at: now, withheld: true).filter { world.isWithheld(LevelWorld.alpha, $0.cid) }
     }
 
-    func headers(_ blocks: [SimBlock], requestID: UInt64 = 0) -> SyncMessage {
+    /// Its headers carry their proofs once they are public (it then weighs
+    /// its branch, as any node).
+    func headers(_ blocks: [SimBlock], now: Int64, world: LevelWorld, requestID: UInt64 = 0) -> SyncMessage {
         .headers(HeadersResponse(
             requestID: requestID,
-            entries: blocks.map { config.entry($0.block, children: $0.children) },
+            entries: blocks.map {
+                config.entry($0.block, children: $0.children, proofs: world.publicProofs(LevelWorld.alpha, $0.cid, at: now))
+            },
             hasMore: false
         ))
     }
 
     public mutating func connected(_ peer: PeerID, now: Int64, world: LevelWorld) -> [LevelAction] {
         let branch = branch(world, now)
-        return branch.isEmpty ? [] : [.send(peer, LevelWorld.alpha, headers(branch))]
+        return branch.isEmpty ? [] : [.send(peer, LevelWorld.alpha, headers(branch, now: now, world: world))]
     }
 
     public mutating func received(_ message: SyncMessage, at path: ChainPath, from peer: PeerID, now: Int64, world: LevelWorld) -> [LevelAction] {
         let mine = path == LevelWorld.alpha ? branch(world, now) : []
         guard let reply = world.answer(message, held: mine, logID: name, at: path, {
-            config.entry($0.block, children: $0.children)
+            config.entry($0.block, children: $0.children, proofs: world.publicProofs(path, $0.cid, at: now))
         }) else { return [] }
         return [.send(peer, path, reply)]
     }
@@ -173,7 +177,9 @@ public struct ProofWithholder: LevelScript {
             reshown.formUnion(published)
             fresh = branch(world, now)
         }
-        var actions: [LevelAction] = fresh.isEmpty ? [] : peers.map { .send($0, LevelWorld.alpha, headers(fresh)) }
+        var actions: [LevelAction] = fresh.isEmpty ? [] : peers.map {
+            .send($0, LevelWorld.alpha, headers(fresh, now: now, world: world))
+        }
         let times = world.grinds.filter(\.withheld).flatMap { [$0.releaseAt, $0.proofsAt] }.filter { $0 > now }
         if let next = times.min() { actions.append(.wakeAt(next)) }
         return actions

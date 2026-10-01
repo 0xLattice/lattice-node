@@ -10,9 +10,14 @@ public struct PeerSync: Sendable, Equatable {
     public internal(set) var inventory: [StreamEntry] = []
     /// The last page said more follows: ask again once the inventory drains.
     public internal(set) var more = false
-    /// The objects asked of this peer (`getData`), applying its log through
-    /// `through` once answered.
+    /// The objects asked of this peer (`getData`).
     public internal(set) var data: InFlightData?
+    /// The last position of the peer's log taken from the inventory, and
+    /// the entries up to it not yet applied (weighed, or credited): the
+    /// cursor stays before the first of them, so a later session sends it
+    /// again.
+    public internal(set) var through: UInt64 = 0
+    public internal(set) var holes: [StreamEntry] = []
     /// This peer read our log to its end: we push what we append.
     public internal(set) var subscribed = false
     /// The ancestors asked for by CID (a parent this peer's header named).
@@ -31,6 +36,7 @@ public struct PeerSync: Sendable, Equatable {
     public static func == (lhs: PeerSync, rhs: PeerSync) -> Bool {
         lhs.stream == rhs.stream && lhs.inventory == rhs.inventory && lhs.more == rhs.more
             && lhs.data == rhs.data && lhs.subscribed == rhs.subscribed
+            && lhs.through == rhs.through && lhs.holes == rhs.holes
             && lhs.parentRequest == rhs.parentRequest
             && lhs.childIndex == rhs.childIndex && lhs.serving == rhs.serving
             && lhs.queued.count == rhs.queued.count
@@ -49,7 +55,6 @@ public struct InFlightStream: Sendable, Equatable {
 public struct InFlightData: Sendable, Equatable {
     public let requestID: UInt64
     public let cids: [String]
-    public let through: UInt64
     public let deadline: Int64
 }
 
