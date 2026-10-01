@@ -14,7 +14,7 @@ extension Store {
     /// Weighed facts are never collected: only content is.
     @discardableResult
     public func collectGarbage(keeping: Set<String> = []) throws -> Int {
-        try locked {
+        try locked { db in
             var roots = keeping
             var levels: [String: Set<String>] = [:]
             try db.each("SELECT chain, kind, cid, fact FROM log ORDER BY seq") { row in

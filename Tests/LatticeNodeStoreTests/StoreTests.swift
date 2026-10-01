@@ -13,11 +13,14 @@ final class StoreTests: StoreTestCase {
         let path = dbPath(try directory())
         do {
             let store = try Store(path: path, rootGenesis: "genesis")
-            XCTAssertEqual(try Schema.version(store.db), Schema.current)
+            XCTAssertEqual(try store.locked { try Schema.version($0) }, Schema.current)
         }
         let store = try Store(path: path, rootGenesis: "genesis")
-        var tables: [String] = []
-        try store.db.each("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name") { tables.append($0.text(0)) }
+        let tables = try store.locked { db in
+            var tables: [String] = []
+            try db.each("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name") { tables.append($0.text(0)) }
+            return tables
+        }
         XCTAssertEqual(tables, ["content", "log", "mempool", "meta"])
     }
 
@@ -25,7 +28,7 @@ final class StoreTests: StoreTestCase {
         let path = dbPath(try directory())
         do {
             let store = try Store(path: path, rootGenesis: "genesis")
-            try Meta.set(Meta.schemaVersion, String(Schema.current + 1), store.db)
+            try store.locked { try Meta.set(Meta.schemaVersion, String(Schema.current + 1), $0) }
         }
         XCTAssertThrowsError(try Store(path: path, rootGenesis: "genesis")) {
             XCTAssertEqual($0 as? StoreError, .newerSchema(found: Schema.current + 1, supported: Schema.current))

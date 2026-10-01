@@ -77,7 +77,7 @@ final class CrashAndCollectorTests: StoreTestCase {
 
         let path = dbPath(try directory())
         let store = try Store(path: path, rootGenesis: fixture.rootGenesis)
-        try store.db.script("PRAGMA wal_autocheckpoint=0")
+        try store.locked { db in try db.script("PRAGMA wal_autocheckpoint=0") }
         var prefixes: Set<Int> = [0]
         var rows = 0
         for batch in batches {
@@ -99,9 +99,11 @@ final class CrashAndCollectorTests: StoreTestCase {
                 let recovered = try Store(path: copy, rootGenesis: fixture.rootGenesis)
                 let count = try logCount(recovered)
                 XCTAssertTrue(prefixes.contains(count), "cut \(cut): \(count) rows is no whole-batch prefix")
-                let missing = try recovered.db.first(
-                    "SELECT COUNT(*) FROM log WHERE kind = 'block' AND cid NOT IN (SELECT cid FROM content)"
-                ) { $0.int(0) }
+                let missing = try recovered.locked { db in
+                    try db.first(
+                        "SELECT COUNT(*) FROM log WHERE kind = 'block' AND cid NOT IN (SELECT cid FROM content)"
+                    ) { $0.int(0) }
+                }
                 XCTAssertEqual(missing, 0, "cut \(cut): a recovered block row lacks its content")
                 recoveredCounts.insert(count)
             }

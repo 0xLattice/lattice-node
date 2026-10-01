@@ -72,13 +72,13 @@ class StoreTestCase: XCTestCase {
     }
 
     func logCount(_ store: Store) throws -> Int {
-        try store.locked { try store.db.first("SELECT COUNT(*) FROM log") { Int($0.int(0)) } ?? 0 }
+        try store.locked { db in try db.first("SELECT COUNT(*) FROM log") { Int($0.int(0)) } ?? 0 }
     }
 
     func contentCIDs(_ store: Store) throws -> Set<String> {
-        try store.locked {
+        try store.locked { db in
             var cids = Set<String>()
-            try store.db.each("SELECT cid FROM content") { cids.insert($0.text(0)) }
+            try db.each("SELECT cid FROM content") { cids.insert($0.text(0)) }
             return cids
         }
     }

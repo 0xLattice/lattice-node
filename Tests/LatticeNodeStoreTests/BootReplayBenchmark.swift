@@ -104,7 +104,7 @@ final class BootReplayBenchmark: StoreTestCase {
 
     private func peakResidentBytes() -> Int {
         var usage = rusage()
-        getrusage(RUSAGE_SELF, &usage)
+        getrusage(0, &usage)  // RUSAGE_SELF on every platform
         #if os(Linux)
         return Int(usage.ru_maxrss) * 1_024
         #else

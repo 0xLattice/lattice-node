@@ -1,5 +1,6 @@
 import Foundation
 import Lattice
+import Synchronization
 import LatticeNodeCore
 import cashew
 
@@ -66,14 +67,13 @@ public struct Restored: Sendable {
 /// Everything else (the weighed graph, weights, verdicts, tips) is derived:
 /// a restart replays the log into the trees. Content is collected by
 /// reachability from what the log and the mempool name.
-public final class Store: @unchecked Sendable {
-    let db: SQLite
-    private let lock = NSLock()
+public final class Store: Sendable {
+    private let connection: Mutex<SQLite>
 
     /// Open (creating or migrating) the store at `path` for the network whose
     /// root genesis is `rootGenesis`.
     public init(path: String, rootGenesis: String) throws {
-        db = try SQLite(path: path)
+        let db = try SQLite(path: path)
         try db.script("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
         try Schema.migrate(db)
         if let stored = try Meta.get(Meta.rootGenesis, db) {
@@ -81,12 +81,12 @@ public final class Store: @unchecked Sendable {
         } else {
             try Meta.set(Meta.rootGenesis, rootGenesis, db)
         }
+        connection = Mutex(db)
     }
 
-    func locked<T>(_ body: () throws -> T) rethrows -> T {
-        lock.lock()
-        defer { lock.unlock() }
-        return try body()
+    /// Every read and write holds the one connection.
+    func locked<T: Sendable>(_ body: (SQLite) throws -> T) throws -> T {
+        try connection.withLock { db in try body(db) }
     }
 
     // MARK: - Writes
@@ -102,9 +102,9 @@ public final class Store: @unchecked Sendable {
     /// image there.
     func apply(_ batch: StoreBatch, beforeCommit: () throws -> Void) throws {
         let rows = try Self.rows(batch)
-        try locked {
+        try locked { db in
             try db.transaction {
-                try putContent(batch.content)
+                try Self.putContent(batch.content, db)
                 for row in rows {
                     try db.run(
                         "INSERT INTO log(chain, kind, cid, fact) VALUES(?, ?, ?, ?)",
@@ -119,9 +119,9 @@ public final class Store: @unchecked Sendable {
     /// Content outside a fact batch (a fetched body, a wire Volume): its own
     /// transaction. Nothing references it until a later batch does.
     public func put(_ entries: [String: Data], volumeRoot: String? = nil) throws {
-        try locked {
+        try locked { db in
             try db.transaction {
-                try putContent(entries)
+                try Self.putContent(entries, db)
                 if let volumeRoot {
                     let members = entries.keys.filter { $0 != volumeRoot }.sorted().joined(separator: "\n")
                     try db.run("UPDATE content SET members = ? WHERE cid = ?", [.blob(Data(members.utf8)), .text(volumeRoot)])
@@ -130,7 +130,7 @@ public final class Store: @unchecked Sendable {
         }
     }
 
-    private func putContent(_ entries: [String: Data]) throws {
+    private static func putContent(_ entries: [String: Data], _ db: SQLite) throws {
         for (cid, bytes) in entries.sorted(by: { $0.key < $1.key }) {
             try db.run("INSERT OR IGNORE INTO content(cid, bytes) VALUES(?, ?)", [.text(cid), .blob(bytes)])
         }
@@ -140,9 +140,9 @@ public final class Store: @unchecked Sendable {
 
     /// Journal a local transaction with its content, in one transaction.
     public func addToMempool(_ cid: String, content: [String: Data], at path: ChainPath, addedAt: Int64) throws {
-        try locked {
+        try locked { db in
             try db.transaction {
-                try putContent(content)
+                try Self.putContent(content, db)
                 try db.run(
                     "INSERT OR IGNORE INTO mempool(chain, cid, added_at) VALUES(?, ?, ?)",
                     [.text(Self.key(path)), .text(cid), .int(addedAt)]
@@ -152,7 +152,7 @@ public final class Store: @unchecked Sendable {
     }
 
     public func removeFromMempool(_ cids: [String], at path: ChainPath) throws {
-        try locked {
+        try locked { db in
             try db.transaction {
                 for cid in cids {
                     try db.run("DELETE FROM mempool WHERE chain = ? AND cid = ?", [.text(Self.key(path)), .text(cid)])
@@ -164,14 +164,14 @@ public final class Store: @unchecked Sendable {
     // MARK: - Reads
 
     public func content(_ cid: String) throws -> Data? {
-        try locked {
+        try locked { db in
             try db.first("SELECT bytes FROM content WHERE cid = ?", [.text(cid)]) { $0.blob(0) } ?? nil
         }
     }
 
     /// A wire Volume: its root and every member it was stored with.
     public func volume(_ root: String) throws -> SerializedVolume? {
-        try locked {
+        try locked { db in
             try db.transaction {
                 guard let members = try db.first("SELECT members FROM content WHERE cid = ?", [.text(root)], { $0.blob(0) }),
                       let members else { return nil }
@@ -189,7 +189,7 @@ public final class Store: @unchecked Sendable {
     /// The weight-fact stream of one level: its header and proof entries
     /// after position `seq`, in log order.
     public func weightFacts(_ path: ChainPath, after seq: Int64, limit: Int) throws -> [WeightEntry] {
-        try locked {
+        try locked { db in
             var entries: [WeightEntry] = []
             try db.each(
                 "SELECT seq, kind, cid, fact FROM log WHERE chain = ? AND seq > ? AND kind IN ('block', 'work') ORDER BY seq LIMIT ?",
@@ -211,7 +211,7 @@ public final class Store: @unchecked Sendable {
     /// Everything a restart needs, from one scan of the log in `seq` order;
     /// content is read only for each level's record (its genesis and spec).
     public func restore() throws -> Restored {
-        try locked {
+        try locked { db in
             var genesis: [ChainPath: String] = [:]
             var facts: [ChainPath: [BlockImportBatch]] = [:]
             try db.each("SELECT chain, kind, cid, fact FROM log ORDER BY seq") { row in
@@ -231,7 +231,7 @@ public final class Store: @unchecked Sendable {
             }
             var records: [LevelRecord] = []
             for (path, cid) in genesis {
-                records.append(try record(path, genesis: cid))
+                records.append(try Self.record(path, genesis: cid, db))
             }
             var mempool: [ChainPath: [String]] = [:]
             try db.each("SELECT chain, cid FROM mempool ORDER BY added_at, cid") { row in
@@ -245,7 +245,7 @@ public final class Store: @unchecked Sendable {
         }
     }
 
-    private func record(_ path: ChainPath, genesis cid: String) throws -> LevelRecord {
+    private static func record(_ path: ChainPath, genesis cid: String, _ db: SQLite) throws -> LevelRecord {
         func node<N: Node>(_ cid: String, as type: N.Type) throws -> N {
             guard let bytes = try db.first("SELECT bytes FROM content WHERE cid = ?", [.text(cid)], { $0.blob(0) }),
                   let bytes, let node = N(data: bytes) else {
