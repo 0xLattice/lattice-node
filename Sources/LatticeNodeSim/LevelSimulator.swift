@@ -176,6 +176,9 @@ public struct LevelSimulator {
     var index: [ChainPath: [String: [String: ChildBlockProof]]] = [:]
     public private(set) var report = LevelSimReport()
 
+    /// A core's durable store, by name (`report.digests` keys).
+    public func durable(_ core: String) -> HostStore? { cores[core]?.store }
+
     public static func make(_ config: LevelSimConfig) async throws -> LevelSimulator {
         var rng = SplitMix64(state: config.seed)
         let world = try await LevelWorld.generate(
