@@ -485,9 +485,6 @@ public struct LevelSimulator {
                 if time > now, !ticks.contains(Tick(node: name, time: time)) {
                     schedule(at: time, to: name, .host(.tick))
                 }
-            case .workSubmitted:
-                // This simulator's grinds carry no reply.
-                break
             }
         }
         if case .mined = event { report.minedBatches.append((persists, minedLevels)) }
@@ -582,9 +579,10 @@ public struct LevelSimulator {
         case .indexProof(let cid, let proof):
             node.store.index(proof, for: cid, at: path)
             publish(proof, for: cid, at: path)
-        case .mining:
+        case .mining, .workSubmitted:
             // The transaction workload drives `Mining` on its own
-            // (`TxWorkload`); the level simulator submits no transactions.
+            // (`TxWorkload`); the level simulator submits no transactions,
+            // and its grinds carry no reply.
             break
         case .fetchBody, .cancelBody, .connect:
             // N2's body window: this simulator executes every weighed block

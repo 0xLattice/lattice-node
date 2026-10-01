@@ -39,6 +39,16 @@ final class MiningStepTests: XCTestCase {
         XCTAssertEqual(mining.journaled, [cid])
     }
 
+    func testAMoveThatLeavesBlocksAsksForTheirTransactions() {
+        var mining = Mining(tipCID: "A1", spec: testSpec())
+        let moved = mining.step(.tipMoved(TipMove(tipCID: "B2", left: ["A1"], entered: ["B1", "B2"])), now: 1)
+        XCTAssertTrue(moved.contains {
+            if case .returnTransactions(["A1"], ["B1", "B2"]) = $0 { true } else { false }
+        }, "\(moved)")
+        let forward = mining.step(.tipMoved(TipMove(tipCID: "B3", entered: ["B3"])), now: 2)
+        XCTAssertFalse(forward.contains { if case .returnTransactions = $0 { true } else { false } })
+    }
+
     func testAPeerTransactionIsRelayedOnceWhenItIsNewlyPooled() throws {
         var mining = Mining(tipCID: "A", spec: testSpec())
         let tx = try transfer(nonce: 0)

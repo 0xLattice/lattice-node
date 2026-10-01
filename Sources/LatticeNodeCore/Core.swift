@@ -16,10 +16,8 @@ public enum Event: Sendable {
     case headersServed(PeerID, token: UInt64)
     /// The content layer holds the body Volume of this block locally.
     case bodyFetched(cid: String)
-    /// A connect job's verdict, with the executed block's transactions
-    /// (read by the job from the content it executed): what a later move of
-    /// the act-on tip confirms or returns.
-    case connected(ConnectVerdict, transactions: [Transaction] = [])
+    /// A connect job's verdict.
+    case connected(ConnectVerdict)
     case tick
     /// A child level: the evidence index's proofs for a block
     /// (`Effect.lookupProofs`).
@@ -126,6 +124,9 @@ public enum Effect: Sendable {
     /// A child level: write a credited proof to the local evidence index, so
     /// this node serves it. Emitted after the step's `persist`.
     case indexProof(childCID: String, ChildBlockProof)
+    /// The answer to a mined grind (`HostEvent.mined` with a reply ID): at
+    /// once unless its root waits to execute, then from its verdict.
+    case workSubmitted(replyID: UInt64, MinedOutcome)
     /// The level's mempool and miner work (see `MiningEffect`), after the
     /// step's `persist` and `publish`. A `poolChanged` is durable state: the
     /// shell executes it, in order, before any later effect.
@@ -189,11 +190,6 @@ public struct CoreConfig: Sendable {
     public var bodyRetryCap: Int64
     /// The level's mempool and template bounds.
     public var mining = MiningConfig()
-    /// How many blocks below the act-on tip keep their executed
-    /// transactions, so a tip move can name what it confirms and returns. A
-    /// reorg deeper than this returns nothing from the blocks below it, and a
-    /// confirmation it cannot name is found by the next preflight instead.
-    public var tipMoveDepth: UInt64 = 144
 
     public init(
         maxHeadersPerPage: Int = 2_000,
@@ -266,9 +262,10 @@ public struct Core: Sendable {
     public internal(set) var index = WeighedIndex()
     /// The level's mempool and template book, on the act-on tip.
     public internal(set) var mining: Mining
-    /// The transactions of each executed block within
-    /// `CoreConfig.tipMoveDepth` of the act-on tip, by block.
-    var executedTransactions: [String: [(cid: String, transaction: Transaction)]] = [:]
+    /// This host's mined blocks awaiting their answer, by block: answered
+    /// once executed (or proven invalid), or at once when the block is
+    /// weighed off the best chain, which the body window never executes.
+    var minedReplies: [String: UInt64] = [:]
 
     /// A core over a bootstrapped or restored root tree.
     public init(tree: ChainTree, config: CoreConfig = CoreConfig()) {
@@ -340,8 +337,8 @@ public struct Core: Sendable {
             }
         case .bodyFetched(let cid):
             bodyFetched(cid)
-        case .connected(let verdict, let transactions):
-            connected(verdict, transactions: transactions, &turn)
+        case .connected(let verdict):
+            connected(verdict, &turn)
         case .tick:
             tick(&turn)
         case .proofsFound(let cid, let proofs):
@@ -399,6 +396,7 @@ public struct Core: Sendable {
     mutating func finish(_ turn: Turn) -> [Effect] {
         var turn = turn
         moveMiningTip(&turn)
+        answerSideMined(&turn)
         var effects: [Effect] = []
         if !turn.facts.isEmpty {
             effects.append(.persist(PersistBatch(
@@ -911,9 +909,11 @@ public struct Core: Sendable {
 
     // MARK: - Mining tip
 
-    /// When the act-on tip moved, tell the mempool: the transactions of the
-    /// blocks the new act-on chain executes that the old one did not are
-    /// confirmed, and those of the blocks it left are returned.
+    /// When the act-on tip moved, tell the mempool, naming the blocks the
+    /// act-on chain left and entered: the shell reads the left blocks'
+    /// transactions from content and returns them (Bitcoin's rule, every
+    /// one whose body is still held, bounded by `maxPendingReturned`). A
+    /// confirmed transaction leaves the pool through its next preflight.
     mutating func moveMiningTip(_ turn: inout Turn) {
         let tip = tree.actOnTip()
         guard tip.hash != mining.tipCID else { return }
@@ -931,14 +931,19 @@ public struct Core: Sendable {
                 new = parent
             }
         }
-        let confirmed = Set(entered.flatMap { executedTransactions[$0]?.map(\.cid) ?? [] })
-        let returned = left.reversed().flatMap { executedTransactions[$0]?.map(\.transaction) ?? [] }
         turn.mining += mining.step(
-            .tipMoved(TipMove(tipCID: tip.hash, confirmed: confirmed, returned: returned)),
+            .tipMoved(TipMove(tipCID: tip.hash, left: left.reversed(), entered: entered.reversed())),
             now: turn.now
         )
-        executedTransactions = executedTransactions.filter {
-            (index.height[$0.key] ?? 0) + config.tipMoveDepth >= tip.height
+    }
+
+    /// Answer each mined block awaiting execution that is not on the best
+    /// chain: the body window will not execute it.
+    mutating func answerSideMined(_ turn: inout Turn) {
+        for (cid, replyID) in minedReplies.sorted(by: { $0.key < $1.key })
+        where index.contains(cid) && !tree.isCanonical(hash: cid) {
+            minedReplies[cid] = nil
+            turn.effects.append(.workSubmitted(replyID: replyID, .side))
         }
     }
 

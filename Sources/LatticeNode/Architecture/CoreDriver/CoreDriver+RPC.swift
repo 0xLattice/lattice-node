@@ -93,7 +93,7 @@ extension CoreDriver {
             targets: template.targets,
             chainPath: chainPath,
             expiresInMilliseconds: UInt64(remaining),
-            templateDigest: readView.value?.templateDigest ?? ""
+            templateDigest: template.digest
         )
     }
 
@@ -105,16 +105,17 @@ extension CoreDriver {
             .submitWork(replyID: $0, workID: request.workID, nonce: request.nonce)
         }) else { throw CoreDriverError.stopped }
         let disposition: WorkDisposition = switch outcome {
-        case .weighed(canonical: true): .canonicalized
-        case .weighed(canonical: false): .acceptedSide
+        case .executed: .canonicalized
+        case .side: .acceptedSide
         case .duplicate: .duplicate
         case .childOnly: .childOnly
-        case .refused: .invalid
+        case .invalid, .refused: .invalid
         }
+        let tipCID: String? = if case .executed(let tip) = outcome { tip } else { published.value?.actOnTip }
         return SubmitWorkResponse(
-            accepted: { if case .weighed = outcome { true } else { false } }(),
+            accepted: disposition == .canonicalized || disposition == .acceptedSide,
             disposition: disposition,
-            tipCID: published.value?.actOnTip,
+            tipCID: tipCID,
             parentGenesisLinks: [],
             durableChildProofs: []
         )
@@ -153,7 +154,7 @@ extension CoreDriver {
             canonicalCID: { height in
                 view.value?.heights[Int(clamping: height)]
             },
-            mempool: {
+            mempool: { _ in
                 view.value?.mempool ?? ChainReads.MempoolListing(count: 0, bytes: 0, cids: [])
             }
         )
@@ -196,6 +197,43 @@ extension CoreDriver {
 
     // MARK: - Jobs
 
+    /// `MiningEffect.returnTransactions`: every transaction of the blocks the
+    /// act-on chain left whose bodies are still held, parent first, less
+    /// those the blocks it entered carry.
+    static func returnedTransactions(
+        left: [String],
+        entered: [String],
+        fetcher: any Fetcher
+    ) async -> [Transaction] {
+        /// A block's transactions with their bodies resolved: the pool takes
+        /// resolved content only.
+        func transactions(of cid: String) async -> [Transaction] {
+            guard let block = try? await BlockHeader(rawCID: cid).resolve(fetcher: fetcher).node,
+                  let carried = try? await MiningTemplateAssembly.blockTransactions(in: block, fetcher: fetcher)
+            else { return [] }
+            var resolved: [Transaction] = []
+            for transaction in carried {
+                guard let body = try? await transaction.body.resolve(fetcher: fetcher), body.node != nil else { continue }
+                resolved.append(Transaction(signatures: transaction.signatures, body: body))
+            }
+            return resolved
+        }
+        var carried: Set<String> = []
+        for cid in entered {
+            for transaction in await transactions(of: cid) {
+                if let id = try? Mempool.cid(of: transaction) { carried.insert(id) }
+            }
+        }
+        var returned: [Transaction] = []
+        for cid in left {
+            for transaction in await transactions(of: cid)
+            where (try? Mempool.cid(of: transaction)).map({ !carried.contains($0) }) ?? false {
+                returned.append(transaction)
+            }
+        }
+        return returned
+    }
+
     /// `MiningEffect.buildTemplate`: today's assembly (the bisecting fit, the
     /// policy filter, the minimum-work search target) on the job's tip.
     /// Nil when no block can be built there.
@@ -237,7 +275,8 @@ extension CoreDriver {
             workID: template.workID,
             block: template.block,
             searchTarget: template.searchTarget,
-            targets: template.targets
+            targets: template.targets,
+            digest: templateDigest(tip: job.tipCID, transactions: job.transactions.compactMap { try? Mempool.cid(of: $0) })
         )
     }
 
@@ -251,10 +290,15 @@ extension CoreDriver {
     }
 
     /// The template digest without children (the driver hosts none): the
-    /// act-on tip and the transactions a template selects from.
+    /// tip and the transactions a template selects from (the pool's ready
+    /// and future entries). A template carries the digest of the inputs its
+    /// job read; status serves the current one.
     static func templateDigest(tip: String, mempool: Mempool) -> String {
-        let selectable = mempool.items.filter { $0.disposition != .unavailable }.map(\.cid).sorted()
-        let lines = ["tip:\(tip)", "mempool:" + selectable.joined(separator: ",")]
+        templateDigest(tip: tip, transactions: mempool.items.filter { $0.disposition != .unavailable }.map(\.cid))
+    }
+
+    static func templateDigest(tip: String, transactions: [String]) -> String {
+        let lines = ["tip:\(tip)", "mempool:" + transactions.sorted().joined(separator: ",")]
         return SHA256.hash(data: Data(lines.joined(separator: "\n").utf8))
             .map { String(format: "%02x", $0) }.joined()
     }

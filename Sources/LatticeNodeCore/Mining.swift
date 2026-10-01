@@ -14,17 +14,30 @@ public enum TransactionOrigin: Sendable, Equatable {
     case restored(addedAt: Int64)
 }
 
-/// The executed tip moved: the transactions the new chain carries that the
-/// old one did not, and those the old chain carried that the new one does not.
+/// The executed tip moved. `left` and `entered` name the blocks the act-on
+/// chain left and entered, parent first: the shell reads the left blocks'
+/// transactions from content (`MiningEffect.returnTransactions`). A caller
+/// that already holds the transactions passes them as `confirmed` and
+/// `returned` instead.
 public struct TipMove: Sendable {
     public let tipCID: String
     public let confirmed: Set<String>
     public let returned: [Transaction]
+    public let left: [String]
+    public let entered: [String]
 
-    public init(tipCID: String, confirmed: Set<String>, returned: [Transaction]) {
+    public init(
+        tipCID: String,
+        confirmed: Set<String> = [],
+        returned: [Transaction] = [],
+        left: [String] = [],
+        entered: [String] = []
+    ) {
         self.tipCID = tipCID
         self.confirmed = confirmed
         self.returned = returned
+        self.left = left
+        self.entered = entered
     }
 }
 
@@ -106,12 +119,16 @@ public struct TemplateBuild: Sendable {
     public let block: Block
     public let searchTarget: UInt256
     public let targets: [UInt256]
+    /// What the template was built from (its tip and pool), for a miner to
+    /// compare with the node's current digest.
+    public let digest: String
 
-    public init(workID: String, block: Block, searchTarget: UInt256, targets: [UInt256]) {
+    public init(workID: String, block: Block, searchTarget: UInt256, targets: [UInt256], digest: String = "") {
         self.workID = workID
         self.block = block
         self.searchTarget = searchTarget
         self.targets = targets
+        self.digest = digest
     }
 }
 
@@ -150,6 +167,11 @@ public enum MiningEffect: Sendable {
     case workRefused(replyID: UInt64, TemplateError)
     case preflight(PreflightJob)
     case buildTemplate(TemplateJob)
+    /// Read the transactions of the `left` blocks from content, less those
+    /// the `entered` blocks carry, and hand each back as
+    /// `.transactionReceived(_, origin: .returned)`. A body no longer held
+    /// returns nothing.
+    case returnTransactions(left: [String], entered: [String])
 }
 
 /// Bounds on transactions waiting for a preflight verdict. Local and
@@ -262,6 +284,8 @@ public struct Mining: Sendable {
     private var pendingByPeer: [PeerID: Int] = [:]
 
     public func pendingAdmissions(from peer: PeerID) -> Int { pendingByPeer[peer] ?? 0 }
+    /// Whether `cid` awaits its preflight verdict.
+    public func isPending(_ cid: String) -> Bool { admissions[cid] != nil }
     public var waitingTemplateRequests: Int { builds.values.reduce(0) { $0 + $1.replies.count } }
     public var outstandingPreflights: Int { preflighting.count }
 
@@ -568,6 +592,9 @@ public struct Mining: Sendable {
         for (cid, admission) in admissions.sorted(by: { $0.key < $1.key }) {
             preflight(cid, admission.transaction, &turn)
         }
+        if !move.left.isEmpty {
+            turn.jobs.append(.returnTransactions(left: move.left, entered: move.entered))
+        }
         // Every waiting build was for the old tip: issue it again on this
         // one, or refuse a request that has waited through too many moves.
         let stale = builds.sorted { $0.key < $1.key }
@@ -644,7 +671,8 @@ public struct Mining: Sendable {
             targets: build.targets,
             tipCID: job.tipCID,
             poolVersion: job.poolVersion,
-            expiresAt: now + templates.lifetime
+            expiresAt: now + templates.lifetime,
+            digest: build.digest
         ), now: now)
         for entry in waiting.replies {
             turn.replies.append(.templateIssued(replyID: entry.replyID, issued))

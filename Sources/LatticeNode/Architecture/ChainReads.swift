@@ -37,13 +37,15 @@ public struct ChainReads: Sendable {
     let tip: @Sendable () async -> ChainProcessStatus
     /// The block at a height of the chain to that tip.
     let canonicalCID: @Sendable (UInt64) async -> String?
-    let mempool: @Sendable () async -> MempoolListing
+    /// The pool's size, and its CIDs only when `listing` (status reads
+    /// never build the listing).
+    let mempool: @Sendable (_ listing: Bool) async -> MempoolListing
 
     init(
         process: ChainProcess,
         tip: @escaping @Sendable () async -> ChainProcessStatus,
         canonicalCID: @escaping @Sendable (UInt64) async -> String?,
-        mempool: @escaping @Sendable () async -> MempoolListing
+        mempool: @escaping @Sendable (_ listing: Bool) async -> MempoolListing
     ) {
         self.process = process
         self.tip = tip
@@ -56,7 +58,7 @@ public struct ChainReads: Sendable {
     /// every read is non-mutating.
     public func readSnapshot() async -> ChainServiceStatusResponse {
         let status = await tip()
-        let pool = await mempool()
+        let pool = await mempool(false)
         let phase: ChainServicePhase = status.phase == .active
             ? .active
             : .awaitingGenesis
@@ -371,7 +373,7 @@ public struct ChainReads: Sendable {
     /// Ungated mempool snapshot: the pool's live CIDs (never the gated,
     /// mempool-reconciling `transactionInventoryRoots()`), hard-capped at 200.
     public func explorerMempool() async -> ExplorerMempool {
-        let pool = await mempool()
+        let pool = await mempool(true)
         let cids = pool.cids
         return ExplorerMempool(
             count: pool.count,

@@ -219,11 +219,11 @@ public actor ChainService {
             process: process,
             tip: { await process.readSnapshot() },
             canonicalCID: { await process.canonicalBlockCID(atHeight: $0) },
-            mempool: {
+            mempool: { listing in
                 ChainReads.MempoolListing(
                     count: await pool.count,
                     bytes: await pool.byteCount,
-                    cids: await pool.snapshot().map(\.cid)
+                    cids: listing ? await pool.snapshot().map(\.cid) : []
                 )
             }
         )
