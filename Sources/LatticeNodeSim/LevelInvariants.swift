@@ -181,11 +181,22 @@ public enum LevelInvariants {
         if core.sync.pending.bytes > core.config.pendingBudget {
             throw fail("the pending queue holds \(core.sync.pending.bytes) bytes, over its budget")
         }
-        if core.sync.verifying.count > core.config.maxProofChecks {
-            throw fail("\(core.sync.verifying.count) proof checks in flight, over the bound")
+        let proofs = core.sync.proofs, bounds = core.config.proofs
+        if proofs.verifying.count > bounds.maxChecks {
+            throw fail("\(proofs.verifying.count) proof checks in flight, over the bound")
         }
-        if core.sync.awaitingChildIndex.count > core.config.maxAwaitingChildIndex {
-            throw fail("child-index waits exceed their bound")
+        if proofs.awaiting.count > bounds.maxAwaiting {
+            throw fail("\(proofs.awaiting.count) headers await a proof, over the bound")
+        }
+        if let full = Dictionary(grouping: proofs.verifying.values, by: { $0 }).first(where: { $0.value.count > bounds.maxChecksPerSource }) {
+            throw fail("source \(String(describing: full.key)) holds \(full.value.count) proof checks, over its share")
+        }
+        if proofs.awaiting.values.contains(where: { $0.unverified.count > bounds.maxPerHeader })
+            || core.sync.pending.entries.values.contains(where: { $0.unverified.count > bounds.maxPerHeader }) {
+            throw fail("a header holds more unchecked proofs than its bound")
+        }
+        if core.sync.pending.entries.values.contains(where: { path.count > 1 && $0.evidence.isEmpty }) {
+            throw fail("a child header with no verified work is in the pending queue")
         }
         if core.sync.pending.entries.keys.contains(where: digest.blocks.keys.contains) {
             throw fail("a weighed header is still pending")
@@ -209,8 +220,10 @@ public enum LevelInvariants {
         return runs
     }
 
-    /// Genesis links come from executed parent blocks only, and a child level
-    /// exists only while one authorizes its genesis.
+    /// Genesis links come from executed parent blocks only; a child level
+    /// exists only while one authorizes its genesis, and it is the genesis
+    /// resolved from the parent's best executed chain (never the failing
+    /// one, never the uncle's ground CID).
     static func checkGenesisLinks(
         _ node: String,
         host: HostCore,
@@ -218,25 +231,28 @@ public enum LevelInvariants {
         store: HostStore,
         world: LevelWorld
     ) throws {
-        for (child, link) in world.links.sorted(by: { $0.key.count < $1.key.count }) {
-            let parent = link.parentPath
-            guard let facts = host.parentFacts(for: child), let parentDigest = digests[parent] else {
-                if host.levels[child] != nil { throw Invariants.fail(node, "level \(child) runs without its parent") }
-                continue
+        for anchor in world.anchors {
+            guard let facts = host.parentFacts(for: anchor.child),
+                  let parentDigest = digests[anchor.link.parentPath] else { continue }
+            let executed = parentDigest.executed.contains(anchor.issuer)
+            guard facts.recordsGenesis(anchor.link) == executed else {
+                throw Invariants.fail(node, "the genesis link to \(anchor.link.childGenesisCID) is \(executed ? "missing" : "honoured") though its issuer is \(executed ? "" : "not ")executed")
             }
-            let executed = parentDigest.executed.contains(world.issuers[child] ?? "")
-            guard facts.recordsGenesis(link) == executed else {
-                throw Invariants.fail(node, "the genesis link of \(child) is \(executed ? "missing" : "honoured") though its issuer is \(executed ? "" : "not ")executed")
+        }
+        for (child, link) in world.links {
+            guard let level = host.levels[child] else { continue }
+            guard level.genesis == link.childGenesisCID else {
+                throw Invariants.fail(node, "hosts \(child) on genesis \(level.genesis), not \(link.childGenesisCID)")
             }
-            if host.levels[child] != nil, !executed {
+            guard host.parentFacts(for: child)?.recordsGenesis(link) == true else {
                 throw Invariants.fail(node, "level \(child) runs with no executed block authorizing its genesis")
             }
         }
         for (parent, links) in host.issuers {
             for (link, issuers) in links {
                 for issuer in issuers {
-                    guard world.issuers[parent + [link.directory]] == issuer,
-                          store.levels[parent]?.validations.contains(issuer) == true else {
+                    let known = world.anchors.contains { $0.link == link && $0.issuer == issuer && $0.link.parentPath == parent }
+                    guard known, store.levels[parent]?.validations.contains(issuer) == true else {
                         throw Invariants.fail(node, "\(issuer) issued a genesis link without executing it")
                     }
                 }
@@ -299,6 +315,12 @@ public enum LevelInvariants {
                 let invalid = (world.invalid[path] ?? []).filter { digest.blocks[$0] != nil }
                 guard invalid == digest.excluded else {
                     throw Invariants.fail(name, "excludes \(digest.excluded.sorted()) at \(path), invalid \(invalid.sorted())")
+                }
+                // Every public honest proof of a held block is credited.
+                for (cid, roots) in world.proofs[path] ?? [:] where digest.blocks[cid] != nil {
+                    for (root, truth) in roots where truth.releaseAt <= now && digest.blocks[cid]?.grinds[root] == nil {
+                        throw Invariants.fail(name, "never credited the grind \(root) at \(cid) at \(path)")
+                    }
                 }
                 let runs = attributedRuns(at: path, host: host, digests: digests)
                 for (hash, entry) in digest.blocks {

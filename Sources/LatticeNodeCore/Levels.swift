@@ -94,7 +94,9 @@ public struct IssuedGenesisLink: Sendable, Hashable {
     }
 }
 
-/// A level the host runs: its chain, spec and genesis header.
+/// A level the host runs: its chain, spec and genesis header. For a child
+/// chain it is also the PIN: the genesis this host chose for the directory,
+/// kept across restarts and parent reorgs.
 public struct LevelRecord: Sendable {
     public let path: ChainPath
     public let spec: ChainSpec
@@ -142,14 +144,25 @@ public struct HostCore: Sendable {
     /// issuer is executed.
     public internal(set) var issuers: [ChainPath: [ParentGenesisLink: Set<String>]] = [:]
     public internal(set) var peers: Set<PeerID> = []
-    var bootstrapping: Set<ChainPath> = []
+    /// Operator overrides: the genesis to host for a child chain.
+    public let pins: [ChainPath: String]
+    /// The genesis being bootstrapped per child chain, and the candidates
+    /// whose bootstrap failed (tried again only after every other).
+    var bootstrapping: [ChainPath: String] = [:]
+    var failed: [ChainPath: Set<String>] = [:]
     /// Per child level: the parent blocks that commit each child block.
     var committers: [ChainPath: [String: Set<String>]] = [:]
 
-    public init(root: ChainTree, hosted: Set<ChainPath>, config: CoreConfig = CoreConfig()) {
+    public init(
+        root: ChainTree,
+        hosted: Set<ChainPath>,
+        pins: [ChainPath: String] = [:],
+        config: CoreConfig = CoreConfig()
+    ) {
         let core = Core(tree: root, config: config)
         rootPath = core.chainPath
         self.hosted = hosted
+        self.pins = pins
         self.config = config
         levels[rootPath] = core
     }
@@ -161,6 +174,7 @@ public struct HostCore: Sendable {
         facts: [ChainPath: [BlockImportBatch]],
         issued: [IssuedGenesisLink],
         hosted: Set<ChainPath>,
+        pins: [ChainPath: String] = [:],
         config: CoreConfig = CoreConfig()
     ) throws -> HostCore {
         let ordered = records.sorted { order($0.path, $1.path) }
@@ -172,6 +186,7 @@ public struct HostCore: Sendable {
                 spec: root.spec
             ).tree,
             hosted: hosted,
+            pins: pins,
             config: config
         )
         for record in ordered.dropFirst() {
@@ -189,6 +204,15 @@ public struct HostCore: Sendable {
         return host
     }
 
+    /// The bootstraps a restored host owes: each hosted child chain it does
+    /// not run yet whose genesis is now resolvable. The shell steps `.tick`
+    /// after `restore`, which asks for them.
+    public mutating func pendingBootstraps(now: Int64) -> [HostEffect] {
+        var turn = Turn(now: now)
+        for parent in ordered { requestBootstraps(under: parent, &turn) }
+        return turn.effects
+    }
+
     public enum HostRestoreError: Error {
         case noRoot
     }
@@ -203,6 +227,12 @@ public struct HostCore: Sendable {
     /// What a child level's execution and bootstrap read of its parent: the
     /// parent's executed set on any branch, and the genesis links its
     /// executed blocks issued.
+    ///
+    /// N2's connect scheduler must provide what only the simulator does
+    /// today: park a child block whose verdict lacks a parent fact
+    /// (`crossChainEvidenceRequired`) until its parent level executes more
+    /// (no timer), and execute the parent's SIDE BRANCHES on demand when a
+    /// parked child names a state only a side branch produces.
     public func parentFacts(for path: ChainPath) -> ParentLevelFacts? {
         let parent = Array(path.dropLast())
         guard path.count > 1, let core = levels[parent] else { return nil }
@@ -248,6 +278,7 @@ public struct HostCore: Sendable {
             if levels[path] != nil { run(path, event, &turn) }
         case .tick:
             for path in ordered { run(path, .tick, &turn) }
+            for parent in ordered { requestBootstraps(under: parent, retryFailed: true, &turn) }
         case .connected(let path, let verdict):
             connected(verdict, at: path, &turn)
         case .bootstrapped(let path, let result):
@@ -326,7 +357,9 @@ public struct HostCore: Sendable {
 
     /// Apply a verdict. A valid block's genesis links are recorded for its
     /// issuer (only an executed block issues any), and each hosted child
-    /// chain they now authorize is bootstrapped.
+    /// chain they now resolve is bootstrapped. Parking a child block that
+    /// lacks a parent fact, and executing parent side branches on demand,
+    /// are the scheduler's (N2; see `parentFacts`).
     mutating func connected(_ verdict: ConnectVerdict, at path: ChainPath, _ turn: inout Turn) {
         guard var core = levels[path] else { return }
         let (effects, update) = core.applyConnect(verdict, now: turn.now)
@@ -341,33 +374,68 @@ public struct HostCore: Sendable {
         requestBootstraps(under: path, &turn)
     }
 
-    /// Bootstrap each hosted child of `parent` whose genesis an executed
-    /// parent block authorizes (the smallest genesis CID when several do).
-    mutating func requestBootstraps(under parent: ChainPath, _ turn: inout Turn) {
-        let links = (issuers[parent] ?? [:]).keys.sorted { $0.childGenesisCID < $1.childGenesisCID }
-        for link in links {
-            let child = parent + [link.directory]
-            guard hosted.contains(child), levels[child] == nil, !bootstrapping.contains(child),
-                  let facts = parentFacts(for: child), facts.recordsGenesis(link) else { continue }
-            bootstrapping.insert(child)
+    /// Resolve and bootstrap each hosted child of `parent` this host does
+    /// not run yet ("join the child from the chain"): the operator's pinned
+    /// genesis if any, else the links issued by EXECUTED blocks on the
+    /// parent's BEST chain (one per directory per branch), lowest issuer
+    /// first. A failed bootstrap falls through to the next candidate: a
+    /// side branch's executed link is one only once every best-chain
+    /// candidate failed, so an uncle never blocks or hijacks the directory.
+    /// A failed candidate is tried again only after every other, and then
+    /// only on a tick (`retryFailed`), never in a loop. Once bootstrapped the
+    /// genesis is pinned (`LevelRecord`): a later parent reorg never
+    /// switches it.
+    mutating func requestBootstraps(under parent: ChainPath, retryFailed: Bool = false, _ turn: inout Turn) {
+        guard let core = levels[parent] else { return }
+        var byDirectory: [String: [(side: Bool, height: UInt64, issuer: String, link: ParentGenesisLink)]] = [:]
+        for (link, issuers) in issuers[parent] ?? [:] {
+            for issuer in issuers where core.tree.hasExecutedAncestry(blockHash: issuer) {
+                let height = core.tree.headerSnapshot(of: issuer)?.tipHeight ?? .max
+                byDirectory[link.directory, default: []].append((!core.tree.isCanonical(hash: issuer), height, issuer, link))
+            }
+        }
+        for (directory, found) in byDirectory.sorted(by: { $0.key < $1.key }) {
+            let child = parent + [directory]
+            guard hosted.contains(child), levels[child] == nil, bootstrapping[child] == nil,
+                  let facts = parentFacts(for: child) else { continue }
+            let failed = failed[child] ?? []
+            let pin = pins[child]
+            let candidates = found.filter { candidate in pin.map { $0 == candidate.link.childGenesisCID } ?? true }
+            let best = candidates.filter { !$0.side }
+            let bestFailed = !best.isEmpty && best.allSatisfy { failed.contains($0.link.childGenesisCID) }
+            let pool = pin != nil || bestFailed ? candidates : best
+            let ordered = pool.sorted {
+                ($0.side ? 1 : 0, $0.height, $0.issuer) < ($1.side ? 1 : 0, $1.height, $1.issuer)
+            }.map { $0.link }
+            guard let link = ordered.first(where: { !failed.contains($0.childGenesisCID) })
+                    ?? (retryFailed ? ordered.first : nil),
+                  facts.recordsGenesis(link) else { continue }
+            if failed.contains(link.childGenesisCID) { self.failed[child] = nil }
+            bootstrapping[child] = link.childGenesisCID
             turn.effects.append(.bootstrap(child, genesisCID: link.childGenesisCID, parentFacts: facts))
         }
     }
 
-    /// A bootstrapped child chain becomes a level, if its genesis is still
-    /// authorized by an executed parent block. Its genesis persists with the
-    /// step, its parent starts serving runs for it, and it syncs from every
-    /// peer.
+    /// A bootstrapped child chain becomes a level, and its genesis the pin,
+    /// if it is the genesis asked for and still authorized by an executed
+    /// parent block. Its genesis persists with the step, its parent starts
+    /// serving runs for it, and it syncs from every peer. A failed bootstrap
+    /// falls through to the next candidate.
     mutating func bootstrapped(_ result: Result<BootstrappedLevel, BlockImportError>, at path: ChainPath, _ turn: inout Turn) {
-        guard bootstrapping.remove(path) != nil, levels[path] == nil, hosted.contains(path),
-              case .success(let level) = result,
+        guard let asked = bootstrapping.removeValue(forKey: path), levels[path] == nil, hosted.contains(path) else { return }
+        let parent = Array(path.dropLast())
+        guard case .success(let level) = result, level.genesis.blockCID == asked,
               let facts = parentFacts(for: path),
               facts.recordsGenesis(ParentGenesisLink(
-                  parentPath: Array(path.dropLast()),
+                  parentPath: parent,
                   directory: path[path.count - 1],
                   childGenesisCID: level.genesis.blockCID,
                   parentStateCID: level.genesis.block.parentState.rawCID
-              )) else { return }
+              )) else {
+            failed[path, default: []].insert(asked)
+            requestBootstraps(under: parent, &turn)
+            return
+        }
         levels[path] = Core(tree: level.bootstrap.tree, config: config)
         turn.batch.append(PersistBatch(headers: [level.genesis], facts: [level.bootstrap.facts]), at: path)
         turn.batch.added.append(LevelRecord(path: path, spec: level.spec, genesis: level.genesis))

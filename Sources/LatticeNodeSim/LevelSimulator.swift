@@ -18,6 +18,11 @@ public struct LevelSimConfig: Sendable {
     public var withholdDelay: Int64 = 8_000
     public var zeroWork = true
     public var scheduleLiar = true
+    /// A peer relaying every child block with garbage proofs and forged
+    /// twins of the honest ones.
+    public var flooder = false
+    /// The child levels' proof bounds (scaled down, pages overrun them).
+    public var proofs = ProofConfig()
     public var drop = 0.01
     public var duplicate = 0.05
     public var minDelay: Int64 = 5
@@ -26,6 +31,9 @@ public struct LevelSimConfig: Sendable {
     public var headersTimeout: Int64 = 3_000
     public var pendingBudget = 512 * 1_024
     public var reconnectDelay: Int64 = 3_000
+    /// Each peer's repair catch-up: how a proof-less header dropped before
+    /// the evidence index named it (the withholder's) comes back.
+    public var catchUpInterval: Int64 = 10_000
     public var settle: Int64 = 60_000
     public var replayInterval = 48
 
@@ -147,7 +155,7 @@ public struct LevelSimulator {
     }
 
     public let config: LevelSimConfig
-    public let coreConfig: CoreConfig
+    public private(set) var coreConfig: CoreConfig
     public let world: LevelWorld
     /// The generator right after the world was drawn: with the world, it
     /// replays the run.
@@ -192,8 +200,10 @@ public struct LevelSimulator {
         coreConfig = CoreConfig(
             maxHeadersPerPage: config.pageSize,
             headersTimeout: config.headersTimeout,
-            pendingBudget: config.pendingBudget
+            pendingBudget: config.pendingBudget,
+            catchUpInterval: config.catchUpInterval
         )
+        coreConfig.proofs = config.proofs
         for index in 0..<config.cores {
             let core = HostCore(root: world.rootBootstrap.tree, hosted: world.hosted, config: coreConfig)
             cores["core\(index)"] = HostNode(
@@ -205,6 +215,7 @@ public struct LevelSimulator {
         scripts["source"] = LevelSource(name: "source", config: coreConfig)
         if config.withholder { scripts["withholder"] = ProofWithholder(name: "withholder", config: coreConfig) }
         if config.zeroWork { scripts["zerowork"] = LoneHeader(name: "zerowork", header: world.zeroWork, blamed: false) }
+        if config.flooder { scripts["flooder"] = ProofFlooder(name: "flooder", config: coreConfig) }
         if config.scheduleLiar { scripts["liar"] = LoneHeader(name: "liar", header: world.offSchedule, blamed: true) }
 
         let names = cores.keys.sorted()
@@ -506,7 +517,7 @@ public struct LevelSimulator {
                 }
             }
             route(message, at: path, from: name, to: peer)
-        case .serveHeaders(let peer, let requestID, let blockCIDs, let hasMore):
+        case .serveHeaders(let peer, let token, let requestID, let blockCIDs, let hasMore):
             var entries: [HeaderEntry] = []
             for cid in blockCIDs {
                 guard let stored = node.store.levels[path]?.headers[cid] else {
@@ -514,8 +525,9 @@ public struct LevelSimulator {
                 }
                 entries.append(coreConfig.entry(stored.block, children: stored.children, proofs: node.store.proofs(path, cid)))
             }
-            route(.headers(HeadersResponse(requestID: requestID, entries: entries, hasMore: hasMore)), at: path, from: name, to: peer)
-            schedule(at: now, to: name, .host(.level(path, .headersServed(peer, requestID: requestID))))
+            let page = coreConfig.page(entries, hasMore: hasMore)
+            route(.headers(HeadersResponse(requestID: requestID, entries: page.entries, hasMore: page.hasMore)), at: path, from: name, to: peer)
+            schedule(at: now, to: name, .host(.level(path, .headersServed(peer, token: token))))
         case .fetchByCID(let peer, let cid):
             guard session(name, peer.key) == peer.session else { return }
             if let other = cores[peer.key] {
@@ -569,6 +581,10 @@ public struct LevelSimulator {
         }
         guard restored.issuers == node.core.issuers else {
             throw Invariants.fail(name, "replaying the store gives different genesis links")
+        }
+        var resumed = restored
+        for case .bootstrap(let path, _, _) in resumed.pendingBootstraps(now: now) where node.core.levels[path] != nil {
+            throw Invariants.fail(name, "a restored host bootstraps \(path) again, though it pinned its genesis")
         }
     }
 }

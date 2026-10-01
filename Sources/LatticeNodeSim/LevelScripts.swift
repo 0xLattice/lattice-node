@@ -219,3 +219,76 @@ public struct LoneHeader: LevelScript {
         return peers.flatMap { show($0, now) }
     }
 }
+
+/// A proof flooder: it relays every released child block of every level
+/// with as many bad proofs as a header may carry, ahead of honest relays: a
+/// forged twin of each honest proof (the same root, tampered bytes) and
+/// other blocks' proofs. Bad proofs carry no work, so it is never blamed,
+/// and every honest proof must still be credited everywhere.
+public struct ProofFlooder: LevelScript {
+    public let name: String
+    public let isHonest = true
+    let config: CoreConfig
+    var relayed: [ChainPath: Set<String>] = [:]
+
+    public init(name: String, config: CoreConfig) {
+        self.name = name
+        self.config = config
+    }
+
+    static func twin(of proof: ChildBlockProof) -> ChildBlockProof {
+        var entries = proof.entries
+        if let last = entries.indices.last {
+            var data = entries[last].data
+            if !data.isEmpty { data[data.startIndex] ^= 0xFF }
+            entries[last] = (entries[last].cid, data)
+        }
+        return ChildBlockProof(rootCID: proof.rootCID, directoryPath: proof.directoryPath, entries: entries)
+    }
+
+    func flood(_ blocks: [SimBlock], at path: ChainPath, now: Int64, world: LevelWorld) -> SyncMessage {
+        let others = (world.proofs[path] ?? [:]).sorted { $0.key < $1.key }.flatMap { $0.value.values.map(\.proof) }
+        return .headers(HeadersResponse(
+            requestID: 0,
+            entries: blocks.map { block in
+                let honest = world.publicProofs(path, block.cid, at: now)
+                let garbage = others.filter { proof in !honest.contains { $0.rootCID == proof.rootCID } }
+                let proofs = Array((honest.map(Self.twin) + garbage).prefix(config.proofs.maxPerHeader))
+                return HeaderEntry(block: block.block, children: block.children, proofs: proofs)
+            },
+            hasMore: false
+        ))
+    }
+
+    public mutating func connected(_ peer: PeerID, now: Int64, world: LevelWorld) -> [LevelAction] { [] }
+
+    public mutating func received(_ message: SyncMessage, at path: ChainPath, from peer: PeerID, now: Int64, world: LevelWorld) -> [LevelAction] {
+        switch message {
+        case .getHeaders(let request):
+            return [.send(peer, path, .headers(HeadersResponse(requestID: request.requestID, entries: [], hasMore: false)))]
+        case .getHeader(let requestID, _):
+            return [.send(peer, path, .headers(HeadersResponse(requestID: requestID, entries: [], hasMore: false)))]
+        case .headers:
+            return []
+        }
+    }
+
+    public func fetch(_ cid: String, at path: ChainPath, now: Int64, world: LevelWorld) -> ChildIndex? {
+        world.childIndex(cid, at: path, now: now)
+    }
+
+    public mutating func tick(peers: [PeerID], now: Int64, world: LevelWorld) -> [LevelAction] {
+        var actions: [LevelAction] = []
+        for path in world.paths.dropFirst() {
+            let fresh = world.released(path, at: now, withheld: false).filter {
+                $0.height > 0 && !(relayed[path]?.contains($0.cid) ?? false)
+                    && !world.publicProofs(path, $0.cid, at: now).isEmpty
+            }
+            relayed[path, default: []].formUnion(fresh.map(\.cid))
+            if !fresh.isEmpty { actions += peers.map { .send($0, path, flood(fresh, at: path, now: now, world: world)) } }
+        }
+        let times = world.grinds.map(\.releaseAt).filter { $0 > now }
+        if let next = times.min() { actions.append(.wakeAt(next)) }
+        return actions
+    }
+}
