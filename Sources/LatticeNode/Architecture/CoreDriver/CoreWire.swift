@@ -3,45 +3,84 @@ import Lattice
 import LatticeNodeCore
 import cashew
 
-/// The overlay topics of the core's header sync (`--core-driver` only). A
-/// node without the driver drops them like any unknown topic.
+/// The overlay topics of the core's sync (`--core-driver` only): the weigh
+/// log stream, content by CID, and ancestors. A node without the driver
+/// drops them like any unknown topic.
 enum CoreDriverTopic {
-    static let headersRequest = "lattice.overlay.headers.request.v1"
+    static let streamRequest = "lattice.overlay.stream.request.v1"
+    static let streamPage = "lattice.overlay.stream.page.v1"
+    static let dataRequest = "lattice.overlay.data.request.v1"
     static let headersResponse = "lattice.overlay.headers.response.v1"
     static let ancestorsRequest = "lattice.overlay.ancestors.request.v1"
 
-    static let all: Set<String> = [headersRequest, headersResponse, ancestorsRequest]
+    static let all: Set<String> = [streamRequest, streamPage, dataRequest, headersResponse, ancestorsRequest]
 }
 
-/// Where a catch-up page stopped.
-// PENDING #260: the key becomes (timestamp, cid).
-struct WireHeaderKey: Codable, Equatable, Sendable {
-    let height: UInt64
-    let cid: String
-}
-
-/// `SyncMessage.getHeaders`.
-// PENDING #260: `known` becomes `afterTimestamp: Int64` (decision 19).
-struct HeadersRequestMessage: NodeJSONMessage, Equatable, Sendable {
+/// `SyncMessage.getStream`: the sender's weigh log after `after`, if the
+/// asker's log id for it is `logID`.
+struct StreamRequestMessage: NodeJSONMessage, Equatable, Sendable {
     let chainPath: [String]
     let requestID: UInt64
-    let known: [String]
-    let after: WireHeaderKey?
+    let logID: String?
+    let after: UInt64
 
     func validate() throws {
-        guard _isAbsoluteChainPath(chainPath),
-              known.count <= HeadersRequest.maximumKnown,
-              known.allSatisfy({ _isBoundedWireAtom($0) }),
-              after.map({ _isBoundedWireAtom($0.cid) }) ?? true else {
+        guard _isAbsoluteChainPath(chainPath), logID.map({ _isBoundedWireAtom($0) }) ?? true else {
             throw NodeNetworkWireError.malformed
         }
     }
 }
 
-/// The unknown parent of a header the sender sent, and up to `maximum` of its
-/// ancestors, child to parent.
-// PENDING #260: today's core asks for one header (`SyncMessage.getHeader`),
-// sent as `maximum: 1`; #260's `getAncestors(cid, max)` maps one to one.
+/// One weigh log entry at its position: a header (`cid` = `block`) or a
+/// proof (`cid` its content identity, `block` the child block it weighs).
+struct WireLogEntry: Codable, Equatable, Sendable {
+    let position: UInt64
+    let proof: Bool
+    let cid: String
+    let block: String
+
+    var isBounded: Bool {
+        _isBoundedWireAtom(cid) && _isBoundedWireAtom(block) && (proof || cid == block)
+    }
+}
+
+/// `SyncMessage.stream`: a page of the sender's weigh log, or a push of what
+/// it appended (`requestID` 0).
+struct StreamPageMessage: NodeJSONMessage, Equatable, Sendable {
+    static let maximumEntries = 4_096
+
+    let chainPath: [String]
+    let requestID: UInt64
+    let logID: String
+    let entries: [WireLogEntry]
+    let hasMore: Bool
+
+    func validate() throws {
+        guard _isAbsoluteChainPath(chainPath), _isBoundedWireAtom(logID),
+              entries.count <= Self.maximumEntries, entries.allSatisfy(\.isBounded) else {
+            throw NodeNetworkWireError.malformed
+        }
+    }
+}
+
+/// `SyncMessage.getData`: weighed headers by CID, with their proofs.
+struct DataRequestMessage: NodeJSONMessage, Equatable, Sendable {
+    static let maximumCIDs = 4_096
+
+    let chainPath: [String]
+    let requestID: UInt64
+    let cids: [String]
+
+    func validate() throws {
+        guard _isAbsoluteChainPath(chainPath), cids.count <= Self.maximumCIDs,
+              cids.allSatisfy({ _isBoundedWireAtom($0) }) else {
+            throw NodeNetworkWireError.malformed
+        }
+    }
+}
+
+/// `SyncMessage.getAncestors`: the unknown parent of a header the sender
+/// sent, and up to `maximum` of its ancestors, child to parent.
 struct AncestorsRequestMessage: NodeJSONMessage, Equatable, Sendable {
     static let maximumAncestors = 2_048
 
@@ -76,7 +115,8 @@ struct WireHeaderEntry: Codable, Equatable, Sendable {
     }
 }
 
-/// `SyncMessage.headers`: a relay (`requestID` 0) or an answer.
+/// `SyncMessage.headers`: the answer to `getData` or `getAncestors`, or an
+/// unsolicited header (`requestID` 0).
 struct HeadersResponseMessage: NodeJSONMessage, Equatable, Sendable {
     static let maximumEntries = 4_096
 
@@ -99,17 +139,29 @@ struct HeadersResponseMessage: NodeJSONMessage, Equatable, Sendable {
 enum CoreWire {
     static func encode(_ message: SyncMessage, at chainPath: [String]) throws -> (topic: String, payload: Data) {
         switch message {
-        case .getHeaders(let request):
-            return (CoreDriverTopic.headersRequest, try HeadersRequestMessage(
-                chainPath: chainPath,
-                requestID: request.requestID,
-                known: request.known,
-                after: request.after.map { WireHeaderKey(height: $0.height, cid: $0.cid) }
+        case .getStream(let requestID, let logID, let after):
+            return (CoreDriverTopic.streamRequest, try StreamRequestMessage(
+                chainPath: chainPath, requestID: requestID, logID: logID, after: after
             ).encoded())
-        case .getHeader(let requestID, let cid):
+        case .stream(let page):
+            return (CoreDriverTopic.streamPage, try StreamPageMessage(
+                chainPath: chainPath,
+                requestID: page.requestID,
+                logID: page.logID,
+                entries: page.entries.map {
+                    WireLogEntry(position: $0.position, proof: $0.entry.kind == .proof, cid: $0.entry.cid, block: $0.entry.block)
+                },
+                hasMore: page.hasMore
+            ).encoded())
+        case .getData(let requestID, let cids):
+            return (CoreDriverTopic.dataRequest, try DataRequestMessage(
+                chainPath: chainPath, requestID: requestID, cids: cids
+            ).encoded())
+        case .getAncestors(let requestID, let cid, let max):
             return (CoreDriverTopic.ancestorsRequest, try AncestorsRequestMessage(
                 chainPath: chainPath,
-                requestID: requestID, cid: cid, maximum: 1
+                requestID: requestID, cid: cid,
+                maximum: Swift.min(Swift.max(max, 1), AncestorsRequestMessage.maximumAncestors)
             ).encoded())
         case .headers(let response):
             return (CoreDriverTopic.headersResponse, try HeadersResponseMessage(
@@ -131,16 +183,28 @@ enum CoreWire {
     /// Nil for a topic that is not the core's; throws for a malformed frame.
     static func decode(topic: String, payload: Data) throws -> (chainPath: [String], message: SyncMessage)? {
         switch topic {
-        case CoreDriverTopic.headersRequest:
-            let message = try HeadersRequestMessage.decoded(payload)
-            return (message.chainPath, .getHeaders(HeadersRequest(
+        case CoreDriverTopic.streamRequest:
+            let message = try StreamRequestMessage.decoded(payload)
+            return (message.chainPath, .getStream(requestID: message.requestID, logID: message.logID, after: message.after))
+        case CoreDriverTopic.streamPage:
+            let message = try StreamPageMessage.decoded(payload)
+            return (message.chainPath, .stream(StreamPage(
                 requestID: message.requestID,
-                known: message.known,
-                after: message.after.map { HeaderKey(height: $0.height, cid: $0.cid) }
+                logID: message.logID,
+                entries: message.entries.map {
+                    StreamEntry(
+                        position: $0.position,
+                        entry: LogEntry(kind: $0.proof ? .proof : .header, cid: $0.cid, block: $0.block)
+                    )
+                },
+                hasMore: message.hasMore
             )))
+        case CoreDriverTopic.dataRequest:
+            let message = try DataRequestMessage.decoded(payload)
+            return (message.chainPath, .getData(requestID: message.requestID, cids: message.cids))
         case CoreDriverTopic.ancestorsRequest:
             let message = try AncestorsRequestMessage.decoded(payload)
-            return (message.chainPath, .getHeader(requestID: message.requestID, cid: message.cid))
+            return (message.chainPath, .getAncestors(requestID: message.requestID, cid: message.cid, max: message.maximum))
         case CoreDriverTopic.headersResponse:
             let message = try HeadersResponseMessage.decoded(payload)
             return (message.chainPath, .headers(HeadersResponse(

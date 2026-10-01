@@ -70,8 +70,10 @@ public final class CoreDriver: Sendable {
         workers: Int = max(1, ProcessInfo.processInfo.activeProcessorCount - 1),
         failStop: @escaping @Sendable (any Error) -> Void = { fatalError("core driver: persist failed: \($0)") }
     ) async throws -> CoreDriver {
-        let core = try await boot(process: process, configuration: configuration, coreConfig: coreConfig)
         let headers = try CoreHeaderStore(directory: configuration.storagePath)
+        let core = try await boot(
+            process: process, configuration: configuration, coreConfig: coreConfig, logID: try headers.logID()
+        )
         let overlay = try overlay ?? NodeNetworkPlaneConfigurations(configuration).overlay
         let driver = CoreDriver(
             core: core,
@@ -103,14 +105,21 @@ public final class CoreDriver: Sendable {
     /// Nexus genesis and nothing else.
     // PENDING #72 (decision 18d): the configured root genesis CID moves into
     // `ChainRuntimeContext`, and Lattice refuses any other root itself.
+    ///
+    /// The root's weigh log is its weighed headers in fact order (a Nexus
+    /// level credits no proofs), under the header store's log id.
+    // PENDING P4 (one store): per-peer stream cursors are not persisted yet,
+    // so a restart reads each peer's log from 0 again (IDs only).
     static func boot(
         process: ChainProcess,
         configuration: NodeConfiguration,
-        coreConfig: CoreConfig
+        coreConfig: CoreConfig,
+        logID: String = ""
     ) async throws -> HostCore {
         guard configuration.address.isNexus else { throw CoreDriverError.notNexus }
+        let facts = try await process.coreFacts()
         let root = try Core.restore(
-            replaying: try await process.coreFacts(),
+            replaying: facts,
             context: try configuration.runtimeContext,
             spec: NexusGenesis.spec,
             config: coreConfig
@@ -118,7 +127,11 @@ public final class CoreDriver: Sendable {
         guard root.genesis == configuration.nexusGenesisCID else {
             throw CoreDriverError.wrongGenesis(root.genesis)
         }
-        return HostCore(root: root.tree, hosted: [], config: coreConfig)
+        let log = facts.flatMap(\.facts).compactMap { fact -> LogEntry? in
+            guard case .block(let block) = fact, block.blockHash != root.genesis else { return nil }
+            return .header(block.blockHash)
+        }
+        return HostCore(root: root.tree, hosted: [], config: coreConfig, logID: logID, rootLog: log)
     }
 
     private init(
