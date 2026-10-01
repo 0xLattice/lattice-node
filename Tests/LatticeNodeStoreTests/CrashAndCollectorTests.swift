@@ -122,9 +122,9 @@ final class CrashAndCollectorTests: StoreTestCase {
     func testCollectorSweepsOnlyUnreachableContent() async throws {
         let fixture = try await Self.fixture.value
         let store = try Store(path: dbPath(try directory()), rootGenesis: fixture.rootGenesis)
-        try store.apply(fixture.batch)
         try store.put(["junk": Data([0xA0]), "in-flight": Data([0xA0])])
         try store.addToMempool("pending-tx", content: ["pending-tx": Data([0xA0])], at: LevelWorld.nexus, addedAt: 1)
+        try store.apply(fixture.batch)
 
         XCTAssertEqual(try store.collectGarbage(keeping: ["in-flight"]), 1)
         let held = try contentCIDs(store)
@@ -132,6 +132,24 @@ final class CrashAndCollectorTests: StoreTestCase {
         XCTAssertTrue(held.isSuperset(of: ["in-flight", "pending-tx"]))
         XCTAssertTrue(held.isSuperset(of: fixture.batch.content.keys), "a linked node was swept")
         XCTAssertEqual(try store.collectGarbage(), 1, "in-flight content is collected once no one keeps it")
+    }
+
+    /// The write barrier: content put before the apply that references it
+    /// survives a collection in between; once an apply commits without
+    /// referencing it, it is collectable.
+    func testContentPutBeforeItsApplySurvivesACollection() async throws {
+        let fixture = try await Self.fixture.value
+        let store = try Store(path: dbPath(try directory()), rootGenesis: fixture.rootGenesis)
+        try store.put(fixture.batch.content)
+        try store.put(["orphan": Data([0xA0])])
+        XCTAssertEqual(try store.collectGarbage(), 0)
+        var rows = fixture.batch
+        rows.content = [:]
+        try store.apply(rows)
+        XCTAssertEqual(try store.collectGarbage(), 1)
+        let held = try contentCIDs(store)
+        XCTAssertTrue(held.isSuperset(of: fixture.batch.content.keys))
+        XCTAssertFalse(held.contains("orphan"))
     }
 
     /// Content a root reaches but the collector cannot read stops the sweep:

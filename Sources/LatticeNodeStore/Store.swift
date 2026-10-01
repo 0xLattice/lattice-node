@@ -43,6 +43,12 @@ public struct Restored: Sendable {
     public let mempool: [ChainPath: [String]]
 
     /// The host core these facts rebuild.
+    ///
+    /// REQUIRES the node on Lattice 41. On Lattice 40 the host re-derives its
+    /// child levels from genesis links, which this store does not keep
+    /// (decision 18d), so the first `.tick` after restore drops every child
+    /// level. Lattice 41's multi-root genesis deletes that selection
+    /// (`issuers`, `wantedGenesis`, `reconcileChildren`).
     // LATTICE 41: `ChainTree.restore` takes `specs` and a context carrying
     // the root genesis CID; `HostCore.restore` loses `issued`.
     public func host(
@@ -111,6 +117,12 @@ public final class Store: Sendable {
                         [.text(row.chain), .text(row.kind.rawValue), .text(row.cid), .blob(row.fact)]
                     )
                 }
+                // Content written before this commit is referenced by now
+                // or never will be through this batch: it becomes
+                // collectable. Later content waits for the next apply.
+                try Meta.set(Meta.collectable, String(
+                    try db.first("SELECT COALESCE(MAX(id), 0) FROM content") { $0.int(0) } ?? 0
+                ), db)
                 try beforeCommit()
             }
         }
@@ -190,10 +202,17 @@ public final class Store: Sendable {
     /// after position `seq`, in log order.
     public func weightFacts(_ path: ChainPath, after seq: Int64, limit: Int) throws -> [WeightEntry] {
         try locked { db in
+            // Only the level's current run counts: nothing after a drop,
+            // nothing before its latest record.
+            let start = try db.first(
+                "SELECT seq, kind FROM log WHERE chain = ? AND kind IN ('level', 'drop') ORDER BY seq DESC LIMIT 1",
+                [.text(Self.key(path))]
+            ) { (seq: $0.int(0), dropped: $0.text(1) == LogKind.drop.rawValue) }
+            if start?.dropped == true { return [] }
             var entries: [WeightEntry] = []
             try db.each(
                 "SELECT seq, kind, cid, fact FROM log WHERE chain = ? AND seq > ? AND kind IN ('block', 'work') ORDER BY seq LIMIT ?",
-                [.text(Self.key(path)), .int(seq), .int(Int64(limit))]
+                [.text(Self.key(path)), .int(max(seq, start?.seq ?? 0)), .int(Int64(limit))]
             ) { row in
                 let batch = try Self.decode(row.blob(3) ?? Data())
                 let grind = batch.facts.lazy.compactMap { fact -> String? in

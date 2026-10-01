@@ -11,7 +11,10 @@ extension Store {
     /// links is kept; the rest is deleted. A dropped or replaced level's
     /// earlier rows are no roots.
     ///
-    /// Weighed facts are never collected: only content is.
+    /// Weighed facts are never collected: only content is. Every weighed
+    /// block is a root, so this reclaims only content no log row ever named
+    /// (abandoned fetches, dropped mempool entries, unreferenced puts).
+    /// Content written after the last committed `apply` is never swept.
     @discardableResult
     public func collectGarbage(keeping: Set<String> = []) throws -> Int {
         try locked { db in
@@ -46,8 +49,14 @@ extension Store {
                 guard let links = Links.of(bytes) else { throw StoreError.untraceable(cid) }
                 pending += links
             }
+            // The write barrier: content newer than the last committed apply
+            // may be about to be referenced, so only older rows are swept.
+            let watermark = Int64(try Meta.get(Meta.collectable, db) ?? "0") ?? 0
             return try db.transaction {
-                try db.run("DELETE FROM content WHERE cid NOT IN (SELECT cid FROM gc_mark)")
+                try db.run(
+                    "DELETE FROM content WHERE id <= ? AND cid NOT IN (SELECT cid FROM gc_mark)",
+                    [.int(watermark)]
+                )
                 return db.changes
             }
         }

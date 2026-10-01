@@ -18,7 +18,7 @@ final class StoreTests: StoreTestCase {
         let store = try Store(path: path, rootGenesis: "genesis")
         let tables = try store.locked { db in
             var tables: [String] = []
-            try db.each("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name") { tables.append($0.text(0)) }
+            try db.each("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name") { tables.append($0.text(0)) }
             return tables
         }
         XCTAssertEqual(tables, ["content", "log", "mempool", "meta"])
@@ -82,6 +82,49 @@ final class StoreTests: StoreTestCase {
         for (chain, digest) in fixture.digests {
             XCTAssertEqual(TreeDigest(try XCTUnwrap(host.levels[chain]).tree), digest, "\(chain)")
         }
+    }
+
+    /// PENDING Lattice 41: a restored host keeps its child levels across the
+    /// first tick. On Lattice 40 the host re-derives child levels from
+    /// genesis links, which the store does not keep (18d), so they drop; this
+    /// skips until the node runs Lattice 41's multi-root genesis.
+    func testRestoredHostKeepsChildLevelsAcrossATick() async throws {
+        let fixture = try await Self.fixture.value
+        let store = try Store(path: dbPath(try directory()), rootGenesis: fixture.rootGenesis)
+        try store.apply(fixture.batch)
+        var host = try store.restore().host(hosted: fixture.hosted, config: fixture.coreConfig)
+        _ = host.step(.tick, now: Int64.max / 2)
+        guard Set(host.levels.keys) == Set(fixture.paths) else {
+            throw XCTSkip("PENDING Lattice 41: child levels drop on the first tick after restore")
+        }
+    }
+
+    /// The stream follows the level's current run: nothing after a drop,
+    /// only rows after the latest record once it is added again.
+    func testWeightFactStreamFollowsLevelRecords() async throws {
+        let fixture = try await Self.fixture.value
+        let store = try Store(path: dbPath(try directory()), rootGenesis: fixture.rootGenesis)
+        try store.apply(fixture.batch)
+        let child = LevelWorld.alpha
+        let original = try store.weightFacts(child, after: 0, limit: .max)
+        XCTAssertFalse(original.isEmpty)
+
+        var drop = StoreBatch()
+        drop.removed = [child]
+        try store.apply(drop)
+        XCTAssertEqual(try store.weightFacts(child, after: 0, limit: .max), [])
+
+        var again = StoreBatch()
+        try again.add(try XCTUnwrap(fixture.batch.added.first { $0.path == child }))
+        try store.apply(again)
+        XCTAssertEqual(try store.weightFacts(child, after: 0, limit: .max), [])
+        var facts = StoreBatch()
+        facts.levels = fixture.batch.levels.filter { $0.path == child }
+        try store.apply(facts)
+        let replayed = try store.weightFacts(child, after: 0, limit: .max)
+        XCTAssertEqual(replayed.map(\.block), original.map(\.block))
+        XCTAssertTrue(replayed.allSatisfy { $0.seq > original.last!.seq })
+        XCTAssertEqual(try store.weightFacts(child, after: replayed[0].seq, limit: .max), Array(replayed.dropFirst()))
     }
 
     /// A level added again replays from its new record; a dropped level is

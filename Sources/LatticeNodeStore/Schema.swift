@@ -26,7 +26,8 @@ enum Schema {
         Migration(version: 1) { db in
             try db.script("""
                 CREATE TABLE content(
-                    cid TEXT PRIMARY KEY,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cid TEXT NOT NULL UNIQUE,
                     bytes BLOB NOT NULL,
                     members BLOB
                 );
@@ -70,6 +71,9 @@ enum Schema {
 enum Meta {
     static let schemaVersion = "schema_version"
     static let rootGenesis = "nexus_genesis_cid"
+    /// The highest `content.id` at the last committed `apply`: the
+    /// collector's write barrier.
+    static let collectable = "gc_watermark"
 
     static func get(_ key: String, _ db: SQLite) throws -> String? {
         try db.first("SELECT value FROM meta WHERE key = ?", [.text(key)]) { row in

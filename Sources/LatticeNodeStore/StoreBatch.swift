@@ -62,6 +62,8 @@ public struct StoreBatch: Sendable {
         guard header.encryptionInfo == nil, let data = node.toData() else {
             throw StoreError.corrupt("cannot serialize \(header.rawCID)")
         }
+        // Verify, don't trust: the bytes stored under a CID hash to it.
+        try header.verifyData(data, matches: header.rawCID)
         entries[header.rawCID] = data
         var links = node.properties().sorted().compactMap { node.get(property: $0) }
         if let radix = node as? any RadixNode, let value = radix.value as? any Header {
