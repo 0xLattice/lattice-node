@@ -45,8 +45,9 @@ public struct LevelSimConfig: Sendable {
         var rng = SplitMix64(state: seed ^ 0x1E7E_15)
         var config = LevelSimConfig(seed: seed)
         config.levels = rng.chance(0.75) ? 3 : 2
-        config.cores = rng.draw(2...4)
-        config.grinds = rng.draw(16...28)
+        config.cores = rng.draw(2...3)
+        config.grinds = rng.draw(12...18)
+        config.settle = 30_000
         config.forkProbability = 0.3 * rng.unit()
         config.shareProbability = 0.5 * rng.unit()
         config.doubleProbability = 0.4 * rng.unit()

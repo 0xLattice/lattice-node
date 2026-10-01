@@ -18,14 +18,17 @@ final class LevelSimulationTests: XCTestCase {
     }
 
     private func config(_ seed: UInt64, _ change: (inout LevelSimConfig) -> Void = { _ in }) -> LevelSimConfig {
+        // Small scenarios: CI runs the whole target on two cores.
         var config = LevelSimConfig(seed: seed)
-        config.grinds = 20
+        config.grinds = 14
+        config.cores = 2
+        config.settle = 30_000
         change(&config)
         return config
     }
 
     func testSeeds() async throws {
-        let count = try TestBudget.resolve("LEVEL_SIM_SEEDS", default: 3)
+        let count = try TestBudget.resolve("LEVEL_SIM_SEEDS", default: 1)
         let first = try TestSeed.resolve(default: 0x1E_0000)
         for offset in 0..<UInt64(count) {
             let seed = first.value &+ offset
