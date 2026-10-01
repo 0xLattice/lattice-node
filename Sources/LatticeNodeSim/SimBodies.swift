@@ -3,35 +3,42 @@ import Lattice
 import LatticeNodeCore
 import cashew
 
-/// A node's view of the content layer while it executes: every CID the
-/// world holds, except a block's own body Volume, which it holds only once
-/// `fetchBody` delivered it. Executing a block whose body never arrived
-/// therefore fails to resolve, as it would on a real node.
-struct BodyGate: Fetcher {
-    let content: SimCAS
-    let blocks: Set<String>
-    let held: Set<String>
+/// What an execution reads through: the node's own store first, then the
+/// content layer, which finds the CID at any other node that stored it and
+/// keeps a copy. No content is served that no node stored: a body arrives
+/// only through `fetchBody`, and a post-state exists only where an execution
+/// stored it.
+struct ContentLayer: Fetcher {
+    let own: SimCAS
+    let providers: [SimCAS]
 
     func fetch(rawCid: String) async throws -> Data {
-        if blocks.contains(rawCid), !held.contains(rawCid) {
-            throw FetcherError.notFound(rawCid)
+        if let data = try? await own.fetch(rawCid: rawCid) { return data }
+        for provider in providers {
+            if let data = try? await provider.fetch(rawCid: rawCid) {
+                own.put([rawCid: data])
+                return data
+            }
         }
-        return try await content.fetch(rawCid: rawCid)
+        throw FetcherError.notFound(rawCid)
     }
 }
 
 /// How a crash tears a node's last write. The fact log and the content a
-/// node holds are separate stores (state.db and the volumes). Content is
-/// written before any fact that references it, so a crash can keep content
-/// without its facts, and can lose content no durable fact references —
-/// never the reverse.
+/// node holds are separate stores (state.db and the volumes), so a crash in
+/// the middle of a persist can keep either without the other.
 public enum CrashMode: CaseIterable, Sendable {
     /// The whole batch is lost.
     case loseBatch
-    /// The batch's header content survives, its facts do not.
+    /// The batch's content (headers and post-states) survives, its facts do
+    /// not.
     case keepContentLoseFacts
-    /// The batch survives, and every body Volume no durable execution
-    /// references (the downloads not yet connected) is lost.
+    /// The batch's facts survive, the post-states it carried do not: the
+    /// node has executed blocks whose states it must fetch back from the
+    /// content layer to execute on.
+    case keepFactsLoseStates
+    /// The batch survives, and every body Volume not yet executed (the
+    /// downloads in progress) is lost.
     case keepFactsLoseUnexecutedBodies
 }
 
@@ -93,7 +100,7 @@ extension Invariants {
     /// held is exactly on the best chain after the act-on tip and within the
     /// operator's count; the one connect in flight is a weighed block whose
     /// parent is executed.
-    static func checkBodies(node: String, core: Core, digest: TreeDigest) throws {
+    static func checkBodies(node: String, core: Core, digest: TreeDigest, now: Int64, wakes: [Int64]) throws {
         let window = core.bodyWindow
         let inWindow = Set(window)
         let bodies = core.bodies
@@ -106,8 +113,18 @@ extension Invariants {
         if let stray = bodies.requested.union(bodies.arrived).first(where: { !inWindow.contains($0) }) {
             throw fail(node, "body \(stray) is outside the window after the act-on tip")
         }
-        if let unasked = window.first(where: { !bodies.requested.contains($0) && !bodies.arrived.contains($0) }) {
-            throw fail(node, "window block \(unasked) has no body asked for")
+        if let stray = bodies.parked.keys.first(where: { !inWindow.contains($0) }) {
+            throw fail(node, "parked body \(stray) is outside the window")
+        }
+        let waiting = { (cid: String) in (bodies.parked[cid]?.notBefore ?? .min) > now }
+        if let unasked = window.first(where: {
+            !bodies.requested.contains($0) && !bodies.arrived.contains($0) && !waiting($0)
+        }) {
+            throw fail(node, "window block \(unasked) has no body asked for and is not parked")
+        }
+        if let retry = bodies.parked.values.map(\.notBefore).filter({ $0 > now }).min(),
+           !wakes.contains(where: { $0 <= retry }) {
+            throw fail(node, "a parked body waits until \(retry) with no wake scheduled for it")
         }
         for cid in window where digest.executed.contains(cid) {
             throw fail(node, "window block \(cid) is already executed")
@@ -118,6 +135,18 @@ extension Invariants {
             }
             if let parent = entry.parent, !digest.executed.contains(parent) {
                 throw fail(node, "connecting \(connecting) before its parent executed")
+            }
+        }
+    }
+
+    /// Content before facts: every block a persist records as executed has
+    /// its post-state in the node's own store.
+    static func checkStatesStored(node: String, batch: PersistBatch, store: SimStore, content: SimCAS) throws {
+        for fact in batch.facts.flatMap(\.facts) {
+            guard case .validation(let validation) = fact else { continue }
+            let postState = store.headers[validation.blockHash]?.block.postState.rawCID
+            guard let postState, content.contains(postState) else {
+                throw fail(node, "executed \(validation.blockHash) without storing its post-state")
             }
         }
     }
@@ -137,17 +166,29 @@ extension Simulator {
     /// its stores kept: the core is rebuilt by replaying the fact log, every
     /// session ends (both ends reconnect later), and work the dead process
     /// started never reports.
-    mutating func crash(_ name: String, tearing batch: PersistBatch, _ mode: CrashMode) throws {
+    mutating func crash(_ name: String, tearing batch: PersistBatch, _ mode: CrashMode) async throws {
         guard var node = cores[name] else { return }
         switch mode {
         case .loseBatch:
             break
         case .keepContentLoseFacts:
+            for state in batch.states {
+                try await storeMaterialized(state, in: node.content)
+            }
             node.store.appendTorn(batch)
-        case .keepFactsLoseUnexecutedBodies:
+        case .keepFactsLoseStates:
             node.store.append(batch)
-            node.bodies.formIntersection(node.store.validations.union([world.genesis.cid]))
+        case .keepFactsLoseUnexecutedBodies:
+            for state in batch.states {
+                try await storeMaterialized(state, in: node.content)
+            }
+            node.store.append(batch)
+            for cid in node.bodies.subtracting(node.store.validations) {
+                node.content.removeAll(world.blocks[cid]?.body.keys.map { $0 } ?? [])
+                node.bodies.remove(cid)
+            }
         }
+        node.fetching = []
         let restored = try Core.restore(
             replaying: node.store.facts,
             context: world.context,
@@ -167,9 +208,34 @@ extension Simulator {
             let other = pair.low == name ? pair.high : pair.low
             sessions[pair] = nil
             if cores[other] != nil {
-                try step(other, .peerGone(PeerID(key: name, session: id)))
+                try await step(other, .peerGone(PeerID(key: name, session: id)))
             }
             schedule(at: now + config.reconnectDelay, to: name, .connect(name, other))
         }
     }
+}
+
+/// Store an execution's materialized post-state as the shell does: every
+/// Volume the execution loaded, each as its own boundary. A subtree it did
+/// not load is unchanged from a state already stored.
+public func storeMaterialized(_ state: LatticeState, in storer: any VolumeStorer) async throws {
+    try await storeLoaded(LatticeStateHeader(node: state), in: storer)
+}
+
+private func storeLoaded(_ header: any Header, in storer: any VolumeStorer) async throws {
+    guard let node = loadedNode(of: header) else { return }
+    if let volume = header as? any Volume {
+        try await volume.store(storer: storer)
+    }
+    var children: [any Header] = node.properties().sorted().compactMap { node.get(property: $0) }
+    if let radix = node as? any RadixNode, let value = radix.value as? any Header {
+        children.append(value)
+    }
+    for child in children {
+        try await storeLoaded(child, in: storer)
+    }
+}
+
+private func loadedNode<H: Header>(of header: H) -> (any Node)? {
+    header.node
 }

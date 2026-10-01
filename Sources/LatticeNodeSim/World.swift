@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 import Lattice
 import LatticeNodeCore
@@ -10,7 +11,13 @@ import cashew
 public final class SimCAS: Fetcher, Storer, VolumeStorer, Sendable {
     private let entries = Mutex<[String: Data]>([:])
 
-    public init() {}
+    public init(_ initial: [String: Data] = [:]) {
+        entries.withLock { $0 = initial }
+    }
+
+    public func put(_ new: [String: Data]) {
+        entries.withLock { $0.merge(new) { _, latest in latest } }
+    }
 
     public func fetch(rawCid: String) async throws -> Data {
         guard let data = entries.withLock({ $0[rawCid] }) else {
@@ -26,6 +33,19 @@ public final class SimCAS: Fetcher, Storer, VolumeStorer, Sendable {
     public func store(volume: SerializedVolume) async throws {
         entries.withLock { $0.merge(volume.entries) { _, latest in latest } }
     }
+
+    /// Every entry held, by CID.
+    public var all: [String: Data] {
+        entries.withLock { $0 }
+    }
+
+    public func contains(_ cid: String) -> Bool {
+        entries.withLock { $0[cid] != nil }
+    }
+
+    public func removeAll(_ cids: some Sequence<String>) {
+        entries.withLock { held in for cid in cids { held[cid] = nil } }
+    }
 }
 
 /// One block the world generated.
@@ -39,6 +59,9 @@ public struct SimBlock: Sendable {
     public let releaseAt: Int64
     /// Its difficulty schedule's origin (its height-1 ancestor).
     let anchor: DifficultyAnchor?
+    /// Its body: the block Volume and its transactions, by CID — what the
+    /// content layer delivers for `fetchBody`.
+    public let body: [String: Data]
 }
 
 /// The kinds of lie the liar tells. The first three prove no work the chain
@@ -93,9 +116,9 @@ public struct World: Sendable {
     public let invalidBodyChild: String
     /// Ground truth: the blocks whose execution proves them invalid.
     public let invalidBodies: Set<String>
-    /// Every block's content (its body Volume, spec and post-state): what
-    /// the content layer serves by CID.
-    public let content: SimCAS
+    /// What every node holds from the start: the genesis block, its spec
+    /// and its states.
+    public let genesisContent: [String: Data]
 
     public static let spec = ChainSpec(
         maxNumberOfTransactionsPerBlock: 100,
@@ -125,7 +148,8 @@ public struct World: Sendable {
         spamBlocks: Int,
         garbage garbageCount: Int = 16,
         honestInterval: Int64 = blockInterval,
-        stall: (afterBlock: Int, milliseconds: Int64)? = nil
+        stall: (afterBlock: Int, milliseconds: Int64)? = nil,
+        genesisActions: Bool = false
     ) async throws -> World {
         let cas = SimCAS()
         try await LatticeState.emptyHeader.storeRecursively(storer: cas as any VolumeStorer)
@@ -161,8 +185,16 @@ public struct World: Sendable {
             let children = Dictionary(uniqueKeysWithValues: (0..<childCount).map {
                 ("Child\(index)-\($0)", genesis.block)
             })
+            // Every honest block pays its reward, so each execution produces
+            // a new state. With `genesisActions`, every other block also
+            // authorizes a child genesis and issues a link (signatures are
+            // not deterministic on every platform, so the simulator's worlds
+            // leave them out).
+            let transactions = genesisActions && index % 2 == 0
+                ? [try genesisAction(index: index, childGenesis: genesis.cid)] : []
             let next = try await extend(
-                blocks[parent]!, timestamp: time, nonce: UInt64(index) << 32, children: children, in: cas
+                blocks[parent]!, timestamp: time, nonce: UInt64(index) << 32, children: children,
+                transactions: transactions, rewardRecipient: miner, in: cas
             )
             blocks[next.cid] = next
             honest.append(next.cid)
@@ -281,7 +313,7 @@ public struct World: Sendable {
             invalidBody: invalidBody.cid,
             invalidBodyChild: invalidBodyChild.cid,
             invalidBodies: [invalidBody.cid],
-            content: cas
+            genesisContent: try await content(of: genesis.block, states: true)
         )
     }
 
@@ -290,16 +322,20 @@ public struct World: Sendable {
         timestamp: Int64,
         nonce: UInt64,
         children: [String: Block] = [:],
+        transactions: [Transaction] = [],
         target: UInt256? = nil,
+        rewardRecipient: String? = nil,
         in cas: SimCAS
     ) async throws -> SimBlock {
         let built = try await BlockBuilder.buildBlock(
             previous: parent.block,
+            transactions: transactions,
             children: children,
             timestamp: timestamp,
             target: target,
             nonce: nonce,
             difficultyAnchor: parent.anchor,
+            rewardRecipient: rewardRecipient,
             fetcher: cas
         )
         // Detach the parent node: a block value carries its own fields and
@@ -334,8 +370,55 @@ public struct World: Sendable {
             parent: block.parent?.rawCID,
             height: block.height,
             releaseAt: releaseAt,
-            anchor: anchor
+            anchor: anchor,
+            body: try await content(of: block, states: false)
         )
+    }
+
+    /// A block's own content: its Volume and its transactions, and with
+    /// `states` its spec and its declared states too.
+    static func content(of block: Block, states: Bool) async throws -> [String: Data] {
+        let cas = SimCAS()
+        try await BlockHeader(node: block).store(paths: [:], storer: cas as any VolumeStorer)
+        if block.transactions.node != nil {
+            try await block.transactions.storeRecursively(storer: cas)
+        }
+        if states {
+            try await LatticeState.emptyHeader.storeRecursively(storer: cas as any VolumeStorer)
+            try await block.spec.storeRecursively(storer: cas as any VolumeStorer)
+            if block.postState.node != nil {
+                try await block.postState.storeRecursively(storer: cas as any VolumeStorer)
+            }
+        }
+        return cas.all
+    }
+
+    /// The honest miners' reward address.
+    static let miner = CryptoUtils.createAddress(from: "ed01" + String(repeating: "5a", count: 32))
+
+    /// A signed transaction whose one `GenesisAction` authorizes a child
+    /// chain, from a signer derived from `index` (the same world, the same
+    /// bytes).
+    static func genesisAction(index: Int, childGenesis: String) throws -> Transaction {
+        var seed = [UInt8](repeating: 0x5A, count: 32)
+        withUnsafeBytes(of: UInt64(index).bigEndian) { seed.replaceSubrange(24..<32, with: $0) }
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: seed)
+        let publicKey = "ed01" + key.publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined()
+        let privateKey = key.rawRepresentation.map { String(format: "%02x", $0) }.joined()
+        let body = TransactionBody(
+            accountActions: [], actions: [], depositActions: [],
+            genesisActions: [GenesisAction(directory: "Kid\(index)", blockCID: childGenesis)],
+            receiptActions: [], withdrawalActions: [],
+            signers: [CryptoUtils.createAddress(from: publicKey)], nonce: 0,
+            chainPath: [DEFAULT_ROOT_DIRECTORY]
+        )
+        let bodyHeader = try HeaderImpl<TransactionBody>(node: body)
+        guard let signature = TransactionSigning.sign(bodyHeader: bodyHeader, privateKeyHex: privateKey),
+              let preimage = TransactionSigning.preimage(bodyHeader: bodyHeader),
+              CryptoUtils.verify(message: preimage, signature: signature, publicKeyHex: publicKey) else {
+            throw SimulationError.malformedWorld("genesis action \(index) does not sign")
+        }
+        return Transaction(signatures: [publicKey: signature], body: bodyHeader)
     }
 
     /// The first nonce at or above the block's own that meets its target.

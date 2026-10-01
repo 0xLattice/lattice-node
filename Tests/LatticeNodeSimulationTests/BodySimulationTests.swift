@@ -97,10 +97,12 @@ final class BodySimulationTests: XCTestCase {
             (at: start + 8_000, core: "core1", mode: .keepContentLoseFacts),
             (at: start + 12_000, core: "core2", mode: .keepFactsLoseUnexecutedBodies),
             (at: start + 16_000, core: "core0", mode: .keepContentLoseFacts),
+            (at: start + 18_000, core: "core1", mode: .keepFactsLoseStates),
+            (at: start + 20_000, core: "core2", mode: .keepFactsLoseStates),
         ]
         var simulator = try await Simulator.make(config)
         let report = try await simulator.run()
-        XCTAssertEqual(report.crashes, 4)
+        XCTAssertEqual(report.crashes, 6)
         let tip = try XCTUnwrap(honestBestChain(simulator.world).last)
         for (core, actOn) in report.actOnTips {
             XCTAssertEqual(actOn, tip, core)

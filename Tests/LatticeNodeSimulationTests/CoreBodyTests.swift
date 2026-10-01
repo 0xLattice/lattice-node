@@ -1,7 +1,9 @@
+import Foundation
 import Lattice
 import LatticeNodeCore
 import LatticeNodeSim
 import XCTest
+import cashew
 
 /// Body download and execution: `Core.step` asks the content layer for the
 /// window's bodies by CID and connects them in parent order.
@@ -10,11 +12,17 @@ final class CoreBodyTests: XCTestCase {
     private let peer = PeerID(key: "peer", session: 1)
     private var world: World!
     private var chain: [SimBlock] = []
+    /// The shell's content store: genesis content, the bodies delivered,
+    /// and the post-states persisted.
+    private var content: SimCAS!
 
     override func setUp() async throws {
         var rng = SplitMix64(state: 0x5_1C)
-        world = try await World.generate(rng: &rng, honestBlocks: 12, forkProbability: 0, spamBlocks: 2)
+        world = try await World.generate(
+            rng: &rng, honestBlocks: 12, forkProbability: 0, spamBlocks: 2, genesisActions: true
+        )
         chain = world.honest.compactMap { world.blocks[$0] }
+        content = SimCAS(world.genesisContent)
     }
 
     /// A core that weighed `blocks` as `peer`'s catch-up page (so nothing
@@ -62,25 +70,62 @@ final class CoreBodyTests: XCTestCase {
         }
     }
 
+    private func wakes(_ effects: [Effect]) -> [Int64] {
+        effects.compactMap {
+            if case .wakeAt(let time) = $0 { return time }
+            return nil
+        }
+    }
+
+    private func cancels(_ effects: [Effect]) -> [String] {
+        effects.compactMap {
+            if case .cancelBody(let cid) = $0 { return cid }
+            return nil
+        }
+    }
+
+    private func batches(_ effects: [Effect]) -> [PersistBatch] {
+        effects.compactMap {
+            if case .persist(let batch) = $0 { return batch }
+            return nil
+        }
+    }
+
     private func hasDisconnect(_ effects: [Effect]) -> Bool {
         effects.contains { if case .disconnect = $0 { true } else { false } }
     }
 
-    /// Run a job the way the shell does, over the whole world's content.
+    /// Run a job the way the shell does, over its content store.
     private func run(_ job: ConnectJob) async -> ConnectVerdict {
         await ChainTree.connect(
-            job, fetcher: world.content, validationContext: ValidationContext(nowMilliseconds: Self.now)
+            job, fetcher: content, validationContext: ValidationContext(nowMilliseconds: Self.now)
         )
+    }
+
+    /// The content layer delivered `cid`'s body into the store.
+    private func arrive(_ cid: String, _ core: inout Core) -> [Effect] {
+        content.put(world.blocks[cid]!.body)
+        return core.step(.bodyFetched(cid: cid), now: Self.now)
+    }
+
+    /// Execute a step's persists as the shell does: content first.
+    private func persist(_ effects: [Effect], storingStates: Bool = true) async throws {
+        for case .persist(let batch) in effects where storingStates {
+            for state in batch.states {
+                try await storeMaterialized(state, in: content)
+            }
+        }
     }
 
     /// Deliver `cid`'s body, run any connect it starts, and apply its
     /// verdict; returns the effects of the verdict's step.
-    private func deliver(_ cid: String, to core: inout Core) async -> [Effect] {
-        var effects = core.step(.bodyFetched(cid: cid), now: Self.now)
+    private func deliver(_ cid: String, to core: inout Core, storingStates: Bool = true) async throws -> [Effect] {
+        var effects = arrive(cid, &core)
         var last: [Effect] = []
         while let job = jobs(effects).first {
             let verdict = await run(job)
             effects = core.step(.connected(verdict), now: Self.now)
+            try await persist(effects, storingStates: storingStates)
             last = effects
         }
         return last
@@ -104,10 +149,10 @@ final class CoreBodyTests: XCTestCase {
     func testBodiesConnectInParentOrderWhateverOrderTheyArriveIn() async throws {
         var (core, _) = weighed(Array(chain.prefix(4)))
         // The second body alone starts nothing: its parent is not executed.
-        XCTAssertTrue(jobs(core.step(.bodyFetched(cid: chain[1].cid), now: Self.now)).isEmpty)
+        XCTAssertTrue(jobs(arrive(chain[1].cid, &core)).isEmpty)
         XCTAssertEqual(core.snapshot.actOnTip, world.genesis.cid)
 
-        let first = core.step(.bodyFetched(cid: chain[0].cid), now: Self.now)
+        let first = arrive(chain[0].cid, &core)
         let job = try XCTUnwrap(jobs(first).first)
         XCTAssertEqual(job.blockHash, chain[0].cid)
         XCTAssertEqual(core.bodies.connecting, chain[0].cid)
@@ -121,6 +166,7 @@ final class CoreBodyTests: XCTestCase {
         // The window slid: the block after the old window is asked for.
         XCTAssertEqual(bodyFetches(applied), [chain[4].cid].filter { core.tree.contains(blockHash: $0) })
 
+        try await persist(applied)
         _ = core.step(.connected(await run(jobs(applied)[0])), now: Self.now)
         XCTAssertEqual(core.snapshot.actOnTip, chain[1].cid)
     }
@@ -147,10 +193,10 @@ final class CoreBodyTests: XCTestCase {
         var before = core.tree
         let weightBefore = before.subtreeWeight(forHash: chain[1].cid)?.uint256Value
 
-        _ = await deliver(chain[0].cid, to: &core)
-        _ = await deliver(chain[1].cid, to: &core)
+        _ = try await deliver(chain[0].cid, to: &core)
+        _ = try await deliver(chain[1].cid, to: &core)
         XCTAssertEqual(core.snapshot.actOnTip, chain[1].cid)
-        let effects = await deliver(invalid.cid, to: &core)
+        let effects = try await deliver(invalid.cid, to: &core)
 
         XCTAssertTrue(facts(effects).contains { if case .exclusion(let e) = $0 { e.blockHash == invalid.cid } else { false } })
         XCTAssertTrue(core.tree.isExcludedRoot(invalid.cid))
@@ -165,24 +211,36 @@ final class CoreBodyTests: XCTestCase {
         XCTAssertNotNil(core.sync.peers[peer], "the peer that relayed it is not blamed")
     }
 
-    func testAVerdictWithoutDecisionAsksForTheBodyAgain() async throws {
+    func testAVerdictWithoutDecisionParksTheBodyWithAPacedBackoff() async throws {
         var (core, _) = weighed(Array(chain.prefix(2)))
-        let job = try XCTUnwrap(jobs(core.step(.bodyFetched(cid: chain[0].cid), now: Self.now)).first)
-        // The body is gone from the content store by the time the job runs.
-        let empty = SimCAS()
-        let verdict = await ChainTree.connect(job, fetcher: empty, validationContext: ValidationContext(nowMilliseconds: Self.now))
-        XCTAssertNotNil(verdict.retryFailure)
-        let effects = core.step(.connected(verdict), now: Self.now)
-        XCTAssertEqual(bodyFetches(effects), [chain[0].cid])
-        XCTAssertTrue(facts(effects).isEmpty)
-        XCTAssertFalse(hasDisconnect(effects))
-        XCTAssertNil(core.bodies.connecting)
+        var job = try XCTUnwrap(jobs(arrive(chain[0].cid, &core)).first)
+        let base = core.config.bodyRetryBase
+        var now = Self.now
+        // The body is gone from the content store by the time each job runs:
+        // every retry waits twice as long as the last, and a wake is asked
+        // for exactly when it is due.
+        for attempt in 0..<4 {
+            let verdict = await ChainTree.connect(job, fetcher: SimCAS(), validationContext: ValidationContext(nowMilliseconds: now))
+            XCTAssertNotNil(verdict.retryFailure)
+            let effects = core.step(.connected(verdict), now: now)
+            XCTAssertTrue(bodyFetches(effects).isEmpty, "a retry waits")
+            XCTAssertTrue(facts(effects).isEmpty)
+            XCTAssertFalse(hasDisconnect(effects))
+            XCTAssertNil(core.bodies.connecting)
+            let due = now + (base << Int64(attempt))
+            XCTAssertEqual(wakes(effects).min(), due)
+            XCTAssertTrue(bodyFetches(core.step(.tick, now: due - 1)).isEmpty)
+            now = due
+            XCTAssertEqual(bodyFetches(core.step(.tick, now: now)), [chain[0].cid])
+            job = try XCTUnwrap(jobs(core.step(.bodyFetched(cid: chain[0].cid), now: now)).first)
+        }
+        XCTAssertEqual(core.bodies.parked[chain[0].cid]?.attempts, 4)
     }
 
     func testARestartReplaysTheExecutedSetAndAsksOnlyForWhatIsLeft() async throws {
         var (core, log) = weighed(Array(chain.prefix(4)))
-        log += persisted(await deliver(chain[0].cid, to: &core))
-        log += persisted(await deliver(chain[1].cid, to: &core))
+        log += persisted(try await deliver(chain[0].cid, to: &core))
+        log += persisted(try await deliver(chain[1].cid, to: &core))
         XCTAssertEqual(core.snapshot.actOnTip, chain[1].cid)
 
         var restored = try Core.restore(
@@ -191,5 +249,94 @@ final class CoreBodyTests: XCTestCase {
         XCTAssertEqual(restored.snapshot.actOnTip, chain[1].cid)
         let effects = restored.step(.tick, now: Self.now)
         XCTAssertEqual(bodyFetches(effects), [chain[2].cid, chain[3].cid])
+    }
+
+    func testATreeChangeStartsTheBackoffOver() async throws {
+        var (core, _) = weighed(Array(chain.prefix(3)))
+        let job = try XCTUnwrap(jobs(arrive(chain[0].cid, &core)).first)
+        let verdict = await ChainTree.connect(job, fetcher: SimCAS(), validationContext: ValidationContext(nowMilliseconds: Self.now))
+        _ = core.step(.connected(verdict), now: Self.now)
+        XCTAssertNotNil(core.bodies.parked[chain[0].cid])
+        // A new header weighs: the tree changed, so the wait is over.
+        let effects = core.step(.received(peer, .headers(HeadersResponse(
+            requestID: 0, entries: [HeaderEntry(block: chain[3].block, children: chain[3].children)], hasMore: false
+        ))), now: Self.now + 1)
+        XCTAssertTrue(bodyFetches(effects).contains(chain[0].cid))
+        XCTAssertTrue(core.bodies.parked.isEmpty)
+    }
+
+    func testABodyThatLeavesTheWindowUnarrivedIsCancelled() async throws {
+        let invalid = try XCTUnwrap(world.blocks[world.invalidBody])
+        let child = try XCTUnwrap(world.blocks[world.invalidBodyChild])
+        var (core, _) = weighed(Array(chain.prefix(2)) + [invalid, child])
+        XCTAssertEqual(core.bodyWindow, [chain[0].cid, chain[1].cid, invalid.cid, child.cid])
+        _ = try await deliver(chain[0].cid, to: &core)
+        _ = try await deliver(chain[1].cid, to: &core)
+        // Executing the invalid body moves the best chain off its branch:
+        // the child's body, never arrived, is cancelled.
+        let effects = try await deliver(invalid.cid, to: &core)
+        XCTAssertEqual(cancels(effects), [child.cid])
+        XCTAssertFalse(core.bodies.requested.contains(child.cid))
+    }
+
+    func testAnExecutionPersistsItsPostStateAndGenesisLinksBeforeItsFacts() async throws {
+        var (core, _) = weighed(Array(chain.prefix(3)))
+        _ = try await deliver(chain[0].cid, to: &core)
+        // Honest block 2 carries a `GenesisAction`: its execution changes the
+        // state and issues a link.
+        let effects = try await deliver(chain[1].cid, to: &core)
+        let batch = try XCTUnwrap(batches(effects).first)
+        let state = try XCTUnwrap(batch.states.first)
+        XCTAssertEqual(try LatticeStateHeader(node: state).rawCID, chain[1].block.postState.rawCID)
+        XCTAssertNotEqual(chain[1].block.postState.rawCID, chain[1].block.prevState.rawCID)
+        XCTAssertEqual(batch.genesisLinks.count, 1)
+        XCTAssertEqual(batch.genesisLinks.first?.issuer, chain[1].cid)
+        XCTAssertEqual(batch.genesisLinks.first?.link.parentPath, world.context.path)
+        XCTAssertTrue(content.contains(chain[1].block.postState.rawCID))
+    }
+
+    func testAPostStateNeverStoredLeavesTheNextBlockWithoutAVerdict() async throws {
+        var (core, _) = weighed(Array(chain.prefix(3)))
+        _ = try await deliver(chain[0].cid, to: &core)
+        _ = try await deliver(chain[1].cid, to: &core, storingStates: false)
+        XCTAssertEqual(core.snapshot.actOnTip, chain[1].cid)
+        let effects = try await deliver(chain[2].cid, to: &core)
+        XCTAssertTrue(facts(effects).isEmpty, "block 3 executes on block 2's state, which was never stored")
+        XCTAssertNotNil(core.bodies.parked[chain[2].cid])
+        XCTAssertEqual(core.snapshot.actOnTip, chain[1].cid)
+    }
+
+    /// A node-local failure (here, content that fails to serialize while the
+    /// block executes) is no verdict on the block: retriable, never an
+    /// exclusion. The block parks and is retried after the backoff.
+    func testALocalFailureIsNeverAnExclusion() async throws {
+        var (core, _) = weighed(Array(chain.prefix(2)))
+        _ = try await deliver(chain[0].cid, to: &core)
+        let job = try XCTUnwrap(jobs(arrive(chain[1].cid, &core)).first)
+        let verdict = await ChainTree.connect(
+            job,
+            fetcher: FailingAfterBlock(content: content, block: chain[1].cid, parent: chain[0].cid),
+            validationContext: ValidationContext(nowMilliseconds: Self.now)
+        )
+        let effects = core.step(.connected(verdict), now: Self.now)
+        XCTAssertFalse(verdict.provesInvalid)
+        XCTAssertFalse(facts(effects).contains { if case .exclusion = $0 { true } else { false } })
+        XCTAssertFalse(core.tree.isExcludedRoot(chain[1].cid))
+        XCTAssertNotNil(core.bodies.parked[chain[1].cid])
+    }
+}
+
+/// Serves a block and its parent, and fails every other read as content
+/// this node cannot serialize: a local fault, not a property of the block.
+private struct FailingAfterBlock: Fetcher {
+    let content: SimCAS
+    let block: String
+    let parent: String
+
+    func fetch(rawCid: String) async throws -> Data {
+        guard rawCid == block || rawCid == parent else {
+            throw DataErrors.serializationFailed
+        }
+        return try await content.fetch(rawCid: rawCid)
     }
 }

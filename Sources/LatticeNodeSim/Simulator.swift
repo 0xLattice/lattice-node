@@ -1,5 +1,6 @@
 import Lattice
 import LatticeNodeCore
+import cashew
 
 /// One simulation's shape. `random(seed:)` draws a seed's own shape.
 public struct SimConfig: Sendable {
@@ -123,8 +124,13 @@ public struct Simulator {
         var store: SimStore
         var digest: TreeDigest
         var persists = 0
-        /// Body Volumes this node's content store holds.
-        var bodies: Set<String>
+        /// What this node stored: the genesis content, the bodies it
+        /// fetched and the post-states its executions produced. It serves
+        /// only this.
+        let content: SimCAS
+        /// Bodies it fetched, and bodies it is fetching.
+        var bodies: Set<String> = []
+        var fetching: Set<String> = []
         /// Bumped by a restart: work the dead process started never reports.
         var incarnation = 0
     }
@@ -249,7 +255,7 @@ public struct Simulator {
                 core: core,
                 store: SimStore(genesis: world.genesis, facts: world.bootstrap.facts),
                 digest: TreeDigest(core.tree),
-                bodies: [world.genesis.cid]
+                content: SimCAS(world.genesisContent)
             )
         }
         for index in 0..<config.honestSources {
@@ -328,17 +334,17 @@ public struct Simulator {
             let id = nextSession
             nextSession += 1
             sessions[Pair(a, b)] = id
-            try arrive(at: a, from: b, session: id)
-            try arrive(at: b, from: a, session: id)
+            try await arrive(at: a, from: b, session: id)
+            try await arrive(at: b, from: a, session: id)
         case .linkDown(let a, let b, let id):
             guard session(a, b) == id else { return }
             sessions[Pair(a, b)] = nil
             for (end, other) in [(a, b), (b, a)] where cores[end] != nil {
-                try step(end, .peerGone(PeerID(key: other, session: id)))
+                try await step(end, .peerGone(PeerID(key: other, session: id)))
             }
             schedule(at: now + config.reconnectDelay, to: a, .connect(a, b))
         case .core(let event):
-            try step(node, event)
+            try await step(node, event)
         case .scriptMessage(let peer, let message):
             guard session(node, peer.key) == peer.session, var script = scripts[node] else { return }
             let actions = script.received(message, from: peer, now: now, world: world)
@@ -350,18 +356,21 @@ public struct Simulator {
             send(.core(.childIndexFetched(PeerID(key: node, session: sessionID), cid: cid, index)),
                  from: node, to: from)
         case .bodyArrived(let cid, let incarnation):
-            guard cores[node]?.incarnation == incarnation else { return }
+            guard let held = cores[node], held.incarnation == incarnation,
+                  held.fetching.contains(cid), let block = world.blocks[cid] else { return }
+            held.content.put(block.body)
+            cores[node]?.fetching.remove(cid)
             cores[node]?.bodies.insert(cid)
-            try step(node, .bodyFetched(cid: cid))
+            try await step(node, .bodyFetched(cid: cid))
         case .runConnect(let job, let incarnation):
             guard let held = cores[node], held.incarnation == incarnation else { return }
             report.connects += 1
             let verdict = await ChainTree.connect(
                 job,
-                fetcher: BodyGate(content: world.content, blocks: Set(world.blocks.keys), held: held.bodies),
+                fetcher: ContentLayer(own: held.content, providers: cores.filter { $0.key != node }.sorted { $0.key < $1.key }.map(\.value.content)),
                 validationContext: ValidationContext(nowMilliseconds: now)
             )
-            try step(node, .connected(verdict))
+            try await step(node, .connected(verdict))
         case .crash(let mode):
             armedCrash[node] = mode
         case .scriptTick:
@@ -377,10 +386,10 @@ public struct Simulator {
     }
 
     /// `node` learns of a new session with `peer`.
-    mutating func arrive(at node: String, from peer: String, session id: UInt64) throws {
+    mutating func arrive(at node: String, from peer: String, session id: UInt64) async throws {
         let peerID = PeerID(key: peer, session: id)
         if cores[node] != nil {
-            try step(node, .peerReady(peerID))
+            try await step(node, .peerReady(peerID))
         } else if var script = scripts[node] {
             let actions = script.connected(peerID, now: now, world: world)
             scripts[node] = script
@@ -415,7 +424,7 @@ public struct Simulator {
     }
 
     /// One `Core.step`, its effects in order, then the invariants.
-    mutating func step(_ name: String, _ event: Event) throws {
+    mutating func step(_ name: String, _ event: Event) async throws {
         guard var node = cores[name] else { return }
         let revision = node.core.tree.currentRevision()
         var effects = node.core.step(event, now: now)
@@ -424,6 +433,7 @@ public struct Simulator {
                 + effects.filter { if case .publish = $0 { false } else { true } }
         }
         var persisted = false
+        var wakes: [Int64] = []
         for effect in effects {
             switch effect {
             case .persist(var batch):
@@ -432,14 +442,20 @@ public struct Simulator {
                     // the step runs.
                     cores[name] = node
                     report.crashes += 1
-                    try crash(name, tearing: batch, mode)
+                    try await crash(name, tearing: batch, mode)
                     return
                 }
                 if faults.dropFact, !droppedFact, let dropped = batch.facts.last {
                     droppedFact = true
                     batch = PersistBatch(headers: batch.headers, facts: batch.facts.filter { $0 != dropped })
                 }
+                // Content first: the post-states are stored before the facts
+                // that reference them.
+                for state in batch.states {
+                    try await storeMaterialized(state, in: node.content)
+                }
                 node.store.append(batch)
+                try Invariants.checkStatesStored(node: name, batch: batch, store: node.store, content: node.content)
                 persisted = true
             case .publish(let snapshot):
                 // DST 3: durability precedes visibility.
@@ -489,14 +505,18 @@ public struct Simulator {
                 }
                 schedule(at: now, to: name, .linkDown(name, peer.key, peer.session))
             case .wakeAt(let time):
+                wakes.append(time)
                 if time > now, !queue.hasTick(for: name, at: time) {
                     schedule(at: time, to: name, .core(.tick))
                 }
+            case .cancelBody(let cid):
+                node.fetching.remove(cid)
             case .fetchBody(let cid):
                 // The content layer finds a provider, verifies the CID and
                 // retries until the body is available: the core hears only
                 // of its arrival.
                 report.bodyFetches += 1
+                node.fetching.insert(cid)
                 let available = max(now, config.withheldBodies[cid] ?? now)
                 guard available != .max, world.blocks[cid] != nil else { continue }
                 schedule(
@@ -527,7 +547,7 @@ public struct Simulator {
             flipTieBreak: faults.flipReferenceTieBreak,
             treeChanged: treeChanged || persisted
         )
-        try Invariants.checkBodies(node: name, core: node.core, digest: digest)
+        try Invariants.checkBodies(node: name, core: node.core, digest: digest, now: now, wakes: wakes)
         if persisted {
             node.persists += 1
             // Replay costs the whole log, so it runs every `replayInterval`

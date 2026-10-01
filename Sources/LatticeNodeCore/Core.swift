@@ -30,16 +30,43 @@ public enum DisconnectReason: Sendable, Equatable {
     case stalled
 }
 
-/// The durable form of one step: header content first, then the facts that
-/// reference it. The shell writes it before executing any later effect of
-/// the same step.
+/// The durable form of one step: content first — header content and the
+/// post-states its executions produced, stored and pinned — then the facts
+/// that reference it, with the child-genesis links those executions issued.
+/// The shell writes it before executing any later effect of the same step.
 public struct PersistBatch: Sendable {
     public let headers: [StoredHeader]
+    /// Each executed block's materialized post-state: the state content a
+    /// later execution resolves, written before the validation that
+    /// references it.
+    public let states: [LatticeState]
     public let facts: [BlockImportBatch]
+    /// The child-genesis links this step's executions issued, each with the
+    /// block that issued it.
+    public let genesisLinks: [IssuedGenesisLink]
 
-    public init(headers: [StoredHeader], facts: [BlockImportBatch]) {
+    public init(
+        headers: [StoredHeader],
+        states: [LatticeState] = [],
+        facts: [BlockImportBatch],
+        genesisLinks: [IssuedGenesisLink] = []
+    ) {
         self.headers = headers
+        self.states = states
         self.facts = facts
+        self.genesisLinks = genesisLinks
+    }
+}
+
+/// A child-genesis link and the executed block whose `GenesisAction`
+/// authorized it: the link authorizes only while that block is executed.
+public struct IssuedGenesisLink: Sendable, Equatable {
+    public let link: ParentGenesisLink
+    public let issuer: String
+
+    public init(link: ParentGenesisLink, issuer: String) {
+        self.link = link
+        self.issuer = issuer
     }
 }
 
@@ -61,6 +88,8 @@ public enum Effect: Sendable {
     /// Fetch a block's body Volume by CID through the content layer, and
     /// report `bodyFetched` once it is held locally.
     case fetchBody(cid: String)
+    /// The window no longer wants this body: stop fetching it.
+    case cancelBody(cid: String)
     /// Run `ChainTree.connect` on this job off the core and report its
     /// verdict as `connected`.
     case connect(ConnectJob)
@@ -83,6 +112,11 @@ public struct CoreConfig: Sendable {
     /// How many weighed-but-unexecuted blocks of the best chain, after the
     /// act-on tip, have their bodies asked for at once.
     public var bodyWindow: Int
+    /// A connect with no verdict (its content was not resolvable) waits this
+    /// long before its body is asked for again, doubling per attempt up to
+    /// `bodyRetryCap`, and starting over whenever the tree changes.
+    public var bodyRetryBase: Int64
+    public var bodyRetryCap: Int64
 
     public init(
         maxHeadersPerPage: Int = 2_000,
@@ -90,7 +124,9 @@ public struct CoreConfig: Sendable {
         maxAwaitingChildIndex: Int = 64,
         maxInlineChildIndexBytes: Int = 16 * 1_024,
         pendingBudget: Int = 16 * 1_024 * 1_024,
-        bodyWindow: Int = 64
+        bodyWindow: Int = 64,
+        bodyRetryBase: Int64 = 1_000,
+        bodyRetryCap: Int64 = 60_000
     ) {
         self.maxHeadersPerPage = maxHeadersPerPage
         self.headersTimeout = headersTimeout
@@ -98,6 +134,8 @@ public struct CoreConfig: Sendable {
         self.maxInlineChildIndexBytes = maxInlineChildIndexBytes
         self.pendingBudget = pendingBudget
         self.bodyWindow = bodyWindow
+        self.bodyRetryBase = bodyRetryBase
+        self.bodyRetryCap = bodyRetryCap
     }
 
     /// A header as it travels: its child index inline when it fits.
@@ -216,7 +254,9 @@ public struct Core: Sendable {
     struct Turn {
         let now: Int64
         var headers: [StoredHeader] = []
+        var states: [LatticeState] = []
         var facts: [BlockImportBatch] = []
+        var genesisLinks: [IssuedGenesisLink] = []
         var effects: [Effect] = []
         /// Headers this step weighed, and the peer each came from.
         var relays: [(entry: HeaderEntry, from: PeerID)] = []
@@ -229,7 +269,9 @@ public struct Core: Sendable {
     private mutating func finish(_ turn: Turn) -> [Effect] {
         var effects: [Effect] = []
         if !turn.facts.isEmpty {
-            effects.append(.persist(PersistBatch(headers: turn.headers, facts: turn.facts)))
+            effects.append(.persist(PersistBatch(
+                headers: turn.headers, states: turn.states, facts: turn.facts, genesisLinks: turn.genesisLinks
+            )))
         }
         let current = snapshot
         if current != published {
@@ -248,7 +290,8 @@ public struct Core: Sendable {
             }
         }
         effects += turn.effects
-        if let deadline = sync.nextDeadline(after: turn.now) {
+        let deadlines = [sync.nextDeadline(after: turn.now), bodies.nextRetry(after: turn.now)]
+        if let deadline = deadlines.compactMap({ $0 }).min() {
             effects.append(.wakeAt(deadline))
         }
         return effects

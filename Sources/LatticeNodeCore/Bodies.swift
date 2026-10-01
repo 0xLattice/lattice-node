@@ -6,8 +6,8 @@ import Lattice
 /// next `CoreConfig.bodyWindow` weighed-but-unexecuted blocks on the best
 /// chain and connects them in parent order as their bodies arrive.
 ///
-/// There is no per-peer state here and no deadline: a missing body is an
-/// availability wait, never blame.
+/// There is no per-peer state here and no fetch deadline: a missing body is
+/// an availability wait, never blame.
 public struct Bodies: Sendable, Equatable {
     /// Bodies asked of the content layer that have not arrived.
     public internal(set) var requested: Set<String> = []
@@ -16,8 +16,29 @@ public struct Bodies: Sendable, Equatable {
     /// The block whose connect job is running: one at a time, in parent
     /// order.
     public internal(set) var connecting: String?
+    /// Blocks whose connect found its content unresolvable, waiting before
+    /// their bodies are asked for again.
+    public internal(set) var parked: [String: Parked] = [:]
+    /// The tree's revision and act-on tip when `parked` was last kept: any
+    /// change to either starts every backoff over.
+    var seen: TreeMark?
+
+    public struct Parked: Sendable, Equatable {
+        public let notBefore: Int64
+        public let attempts: Int
+    }
+
+    struct TreeMark: Sendable, Equatable {
+        let revision: UInt64
+        let actOn: String
+    }
 
     public init() {}
+
+    /// The earliest parked retry after `now`.
+    func nextRetry(after now: Int64) -> Int64? {
+        parked.values.map(\.notBefore).filter { $0 > now }.min()
+    }
 }
 
 extension Core {
@@ -39,35 +60,55 @@ extension Core {
     }
 
     /// Apply a connect verdict. Execution depends only on content, so a
-    /// verdict is never stale: a valid block joins the executed set, and a
-    /// block execution proved invalid is excluded while its work still
-    /// weighs. A verdict without a decision (the body is not resolvable
-    /// after all) is an availability wait: the body is asked for again.
+    /// verdict is never stale: a valid block joins the executed set, its
+    /// post-state and the genesis links it issued persisted with its
+    /// validation; a block execution proved invalid is excluded while its
+    /// work still weighs. A verdict without a decision (content that was not
+    /// resolvable after all) is an availability wait: the block parks, and
+    /// its body is asked for again after a backoff.
     mutating func connected(_ verdict: ConnectVerdict, _ turn: inout Turn) {
         let cid = verdict.blockHash
         if bodies.connecting == cid { bodies.connecting = nil }
         bodies.arrived.remove(cid)
         switch tree.applyConnect(verdict) {
         case .applied(let update):
+            if let state = update.materializedPostState { turn.states.append(state) }
             turn.facts += update.batches
+            turn.genesisLinks += update.parentGenesisLinks.map {
+                IssuedGenesisLink(link: $0, issuer: update.blockHash)
+            }
         case .duplicate:
             break
         case .rejected:
             // No verdict: nothing was emitted and the tree is unchanged.
-            // The window asks for the body again on this step.
-            break
+            guard verdict.retryFailure != nil else { break }
+            let attempts = (bodies.parked[cid]?.attempts ?? 0) + 1
+            let shift = min(attempts - 1, 20)
+            let wait = min(config.bodyRetryCap, config.bodyRetryBase << Int64(shift))
+            bodies.parked[cid] = Bodies.Parked(notBefore: turn.now + wait, attempts: attempts)
         }
     }
 
-    /// Ask the content layer for every body in the window not yet asked for,
-    /// forget bodies the best chain left, and start the next connect when
-    /// the block after the act-on tip has its body.
+    /// Ask the content layer for every body in the window not yet asked for
+    /// (a parked one once its wait is over), cancel bodies the best chain
+    /// left, and start the next connect when the block after the act-on tip
+    /// has its body.
     mutating func scheduleBodies(_ turn: inout Turn) {
         let window = bodyWindow
         let wanted = Set(window)
+        let mark = Bodies.TreeMark(revision: tree.currentRevision(), actOn: tree.actOnTip().hash)
+        if bodies.seen != mark {
+            bodies.seen = mark
+            bodies.parked.removeAll()
+        }
+        for cid in bodies.requested.subtracting(wanted).sorted() {
+            turn.effects.append(.cancelBody(cid: cid))
+        }
         bodies.requested.formIntersection(wanted)
         bodies.arrived.formIntersection(wanted)
+        bodies.parked = bodies.parked.filter { wanted.contains($0.key) }
         for cid in window where !bodies.requested.contains(cid) && !bodies.arrived.contains(cid) {
+            if let parked = bodies.parked[cid], parked.notBefore > turn.now { continue }
             bodies.requested.insert(cid)
             turn.effects.append(.fetchBody(cid: cid))
         }
