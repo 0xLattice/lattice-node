@@ -10,7 +10,7 @@ import cashew
 /// fetch stores the full boundary later). It lives in its own SQLite file
 /// beside state.db, committed (synchronous=FULL) before the facts.
 // PENDING P4 (one store): this sidecar folds into the node store.
-final class CoreHeaderStore: @unchecked Sendable {
+final class CoreHeaderStore: Sendable {
     static let fileName = "core-headers.db"
 
     private let database: NodeSQLite
