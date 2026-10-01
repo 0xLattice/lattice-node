@@ -1,5 +1,13 @@
 # Acquisition Work Gating (Prove Work Before Keeping It)
 
+> **Superseded for header sync.** A node weighs every connected header whose
+> proof of work verifies (its ASERT target and timestamp included) at once.
+> There is no anti-DoS work threshold and no minimum chain work, built in or
+> operator-set. Cheap headers on old forks are a storage cost the node
+> accepts. An operator may evict weighed subgraphs it considers irrelevant;
+> that is an operator policy of reachability GC, never a rule of sync or
+> consensus. The work-before-keeping gate below remains a design study only.
+
 ## Model
 
 Any peer may lie, withhold, stall, or serve valid but irrelevant data. There is
@@ -630,9 +638,9 @@ These are the ways that can happen, and how the concept handles each:
   shortcut measures against weighed-inclusive totals, so it fires rarely here
   and does not let unattached deep offers be kept during catch-up. Those offers
   still run their tally walks under the budget. Bitcoin closes the remaining
-  gap with a built-in minimum chain work. Here that could only be the operator's
-  own choice, and a minimum set above the real chain's work would strand the
-  node, so such a minimum must defer and report, never decline.
+  gap with a built-in minimum chain work. This node has none, built in or
+  operator-set: it keeps such branches and leaves their eviction to operator
+  GC policy.
 
 ## Not the miners' minimum work filter
 

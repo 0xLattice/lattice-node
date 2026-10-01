@@ -391,6 +391,19 @@ public struct World: Sendable {
         return carriers
     }
 
+    /// `count` headers on `parent` at the maximum target (any hash meets
+    /// it), dated `timestamp`: zero-work junk.
+    public func junk(on parent: SimBlock, timestamp: Int64, count: Int) async throws -> [SimBlock] {
+        let cas = SimCAS()
+        var junk: [SimBlock] = []
+        for index in 0..<count {
+            junk.append(try await World.extend(
+                parent, timestamp: timestamp, nonce: (UInt64(index) << 36) | 0x7AC, target: .max, in: cas
+            ))
+        }
+        return junk
+    }
+
     /// `count` blocks extending `parent`, one `interval` apart after it: a
     /// side branch built beside the world's own blocks.
     public func branch(from parent: SimBlock, count: Int, interval: Int64 = World.blockInterval) async throws -> [SimBlock] {

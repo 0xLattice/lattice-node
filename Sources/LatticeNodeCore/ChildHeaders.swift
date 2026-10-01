@@ -308,7 +308,7 @@ extension Core {
     mutating func promote(_ waiting: AwaitingProof, evidence: VerifiedChildEvidence, proof: ChildBlockProof, _ turn: inout Turn) {
         let cid = waiting.blockCID
         sync.proofs.queued.remove(cid)
-        guard let parent = waiting.block.parent?.rawCID else { return }
+        guard waiting.block.parent != nil else { return }
         let proofBytes = ((try? proof.serialize().count) ?? 0)
             + waiting.unverified.reduce(0) { $0 + ((try? $1.proof.serialize().count) ?? 0) }
         var header = PendingHeader(
@@ -317,8 +317,7 @@ extension Core {
             children: waiting.children,
             hash: evidence.rootHash,
             bytes: Self.size(of: waiting.block) + (waiting.children.map(Self.size) ?? 0) + proofBytes,
-            announcers: waiting.announcers,
-            linked: index.contains(parent)
+            announcers: waiting.announcers
         )
         header.evidence[evidence.grindID] = evidence
         header.proofs[evidence.grindID] = proof
@@ -437,10 +436,7 @@ extension Core {
             sync.proofs.queued.remove(cid)
             turn.headers.append(StoredHeader(blockCID: cid, block: block, children: children))
             index.add(cid, parent: block.parent?.rawCID, height: block.height)
-            for child in waiting {
-                sync.pending.entries[child]?.linked = true
-                dirty(child, &turn)
-            }
+            for child in waiting { dirty(child, &turn) }
         }
         turn.facts += update.batches
         if let proof { turn.indexed.append((cid, proof.proof)) }

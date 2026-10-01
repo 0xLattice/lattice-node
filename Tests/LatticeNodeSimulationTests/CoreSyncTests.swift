@@ -581,19 +581,52 @@ final class CoreSyncTests: XCTestCase {
         XCTAssertEqual(page.1.first, chain[10].cid, "from the fork, not from the requester's tip")
     }
 
-    func testOrphanLeavesAreEvictedBeforeLinkedOnes() async throws {
-        // Linked: its parent is weighed; it waits for a child index the peer
-        // never sends.
-        let linked = try await world.carriers(count: 1, entries: 48)[0]
+    /// Zero-work junk dated in the near future is held, and held headers
+    /// are evicted before anything else: it cannot displace an honest orphan.
+    func testFutureDatedJunkCannotDisplaceHonestOrphans() async throws {
         let orphan = world.blocks[world.orphan]!
-        let size = { (block: SimBlock) in block.block.toData()!.count }
-        var core = core(pendingBudget: size(linked) + size(orphan) - 1)
+        let junk = try await world.junk(on: chain[29], timestamp: Self.now + 3_600_000, count: 12)
+        let size = { (block: SimBlock) in block.block.toData()!.count + block.children.toData()!.count }
+        var core = core(pendingBudget: size(orphan) + 2 * size(junk[0]))
         ready(&core, peer)
-        relay(&core, [entry(linked, inline: false)], from: peer)
-        XCTAssertEqual(core.sync.pending.entries[linked.cid]?.linked, true)
-        // Over budget: the orphan goes whatever the two hashes are.
+        ready(&core, other)
+        relay(&core, chain.map { entry($0) }, from: peer)
         relay(&core, [entry(orphan)], from: peer)
-        XCTAssertNotNil(core.sync.pending.entries[linked.cid], "the linked header stays")
-        XCTAssertNil(core.sync.pending.entries[orphan.cid], "the orphan goes first")
+        for block in junk { relay(&core, [entry(block)], from: other) }
+        XCTAssertNotNil(core.sync.pending.entries[orphan.cid], "the honest orphan stays")
+        XCTAssertLessThanOrEqual(core.sync.pending.bytes, core.config.pendingBudget)
+    }
+
+    /// A crafted locator of deep side entries, or a cursor far below the
+    /// fork, costs no more than the scan budget.
+    func testCraftedLocatorsCostNoMoreThanTheScanBudget() async throws {
+        let side = try await world.branch(from: chain[0], count: 25)
+        var server = Core(tree: world.bootstrap.tree, config: CoreConfig(maxHeadersPerPage: 4, sideBranchWindow: 2))
+        ready(&server, peer)
+        relay(&server, (chain + side).map { entry($0) }, from: peer)
+        ready(&server, other)
+        let budget = server.config.serveScanBudget
+        var token: UInt64?
+        for (id, request) in [
+            HeadersRequest(requestID: 1, known: side.suffix(64).map(\.cid) + [chain.last!.cid], after: nil),
+            HeadersRequest(requestID: 2, known: [chain.last!.cid], after: HeaderKey(height: 0, cid: "")),
+        ].enumerated() {
+            if let token { _ = server.step(.headersServed(other, token: token), now: Self.now) }
+            let page = try XCTUnwrap(served(server.step(.received(other, .getHeaders(request)), now: Self.now)).first)
+            token = page.token
+            XCTAssertLessThanOrEqual(server.sync.lastServeScanned, budget, "request \(id)")
+        }
+    }
+
+    /// Zero-work junk dated in the future is off schedule (its target is
+    /// not `parent.nextTarget`, checked before the time hold): blamed and
+    /// disconnected, never held.
+    func testFutureDatedZeroWorkJunkIsBlamedNotHeld() async throws {
+        let junk = try await world.junk(on: chain[29], timestamp: Self.now + 3_600_000, count: 1)
+        var core = weighed(chain)
+        ready(&core, other)
+        let effects = relay(&core, [entry(junk[0])], from: other)
+        XCTAssertEqual(disconnects(effects), [.proofOfWorkInvalid])
+        XCTAssertTrue(core.sync.pending.entries.isEmpty)
     }
 }

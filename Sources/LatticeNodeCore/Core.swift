@@ -92,8 +92,20 @@ public struct CoreConfig: Sendable {
     public var pendingBudget: Int
     /// How far below the fork point a catch-up also serves side branches:
     /// a side block the requester missed while a link was down forks just
-    /// below its tip, where FindFork alone would never reach it.
+    /// below its tip, where FindFork alone would never reach it. The
+    /// boundary: a side block forking deeper than this that a node missed
+    /// while offline is never re-sent. It cannot change honest fork choice
+    /// (it lost by that depth), and under decision 16 an operator may evict
+    /// such a subgraph anyway.
     public var sideBranchWindow: UInt64
+
+    /// The most index entries one catch-up request may examine.
+    public var serveScanBudget: Int {
+        let (window, overflow) = Int(clamping: sideBranchWindow)
+            .multipliedReportingOverflow(by: HeadersRequest.maximumKnown)
+        let (total, sumOverflow) = window.addingReportingOverflow(maxHeadersPerPage)
+        return overflow || sumOverflow ? .max : total
+    }
     /// A header dated more than this beyond now is dropped (never blamed)
     /// instead of held: Bitcoin's two hours.
     public var maxFutureDrift: Int64
@@ -236,6 +248,9 @@ public struct Core: Sendable {
         }
         drain(&turn)
         if !isRoot { proofWork(&turn) }
+        // Evict once the step's headers are processed, so a header held for
+        // its future timestamp is already in the first eviction tier.
+        sync.evict(to: config.pendingBudget)
         // A full page continues once its headers are processed, so the next
         // locator names them.
         for (peer, after) in turn.continuations {
@@ -309,8 +324,10 @@ public struct Core: Sendable {
     private mutating func drop(_ peer: PeerID, _ turn: inout Turn) {
         guard sync.peers.removeValue(forKey: peer) != nil else { return }
         if !isRoot { dropProofSource(peer) }
-        sync.wants[WantSlot(peer: peer, parent: true)] = nil
-        sync.wants[WantSlot(peer: peer, parent: false)] = nil
+        for parent in [true, false] {
+            sync.wants[WantSlot(peer: peer, parent: parent)] = nil
+            sync.wanting[WantSlot(peer: peer, parent: parent)] = nil
+        }
         for cid in sync.announced.removeValue(forKey: peer) ?? [] {
             guard var header = sync.pending.entries[cid],
                   let position = header.announcers.firstIndex(of: peer) else { continue }
@@ -370,29 +387,45 @@ public struct Core: Sendable {
 
     /// The weighed headers after the requester's locator: from Bitcoin's
     /// FindFork (the highest locator entry on our best chain) less
-    /// `sideBranchWindow` heights, in `HeaderKey` order after the cursor,
-    /// skipping every ancestor of a held locator entry. The work is
-    /// O(page + locator × window), never O(graph).
+    /// `sideBranchWindow` heights — `after` only moves the start up — in
+    /// `HeaderKey` order, skipping what the requester holds: every best-chain
+    /// block up to the fork (or up to where a held side entry joins the best
+    /// chain), and every held side entry's ancestors down to that join. Each
+    /// request examines at most `serveScanBudget` index entries; past it the
+    /// page ends with `hasMore`.
     mutating func catchUpPage(_ request: HeadersRequest) -> (cids: [String], hasMore: Bool) {
         let held = request.known.filter(index.contains)
-        let fork = held.filter { tree.isCanonical(hash: $0) }.compactMap(index.key).max()
-        let top = (fork?.height ?? 0) + 1
-        let startHeight = request.after?.height
-            ?? (top > config.sideBranchWindow ? max(1, top - config.sideBranchWindow) : 1)
-        var skip: Set<String> = [genesis]
-        for known in held {
+        var canonicalHeld: UInt64 = 0
+        for cid in held where tree.isCanonical(hash: cid) {
+            canonicalHeld = max(canonicalHeld, index.height[cid] ?? 0)
+        }
+        let top = canonicalHeld + 1
+        let floor = HeaderKey(
+            height: top > config.sideBranchWindow ? max(1, top - config.sideBranchWindow) : 1, cid: ""
+        )
+        let start = request.after.map { max($0, floor) } ?? floor
+        var budget = config.serveScanBudget
+        var skip: Set<String> = []
+        for known in held where !tree.isCanonical(hash: known) {
             var current: String? = known
-            while let hash = current, let height = index.height[hash], height >= startHeight,
-                  skip.insert(hash).inserted {
+            while let hash = current, let height = index.height[hash], height >= floor.height, budget > 0 {
+                budget -= 1
+                if tree.isCanonical(hash: hash) {
+                    canonicalHeld = max(canonicalHeld, height)
+                    break
+                }
+                guard skip.insert(hash).inserted else { break }
                 current = index.parent[hash]
             }
         }
-        let start = request.after ?? HeaderKey(height: startHeight, cid: "")
         var cids: [String] = []
-        sync.lastServeScanned = skip.count
-        for key in index.keys(from: start, strictlyAfter: request.after != nil) {
-            sync.lastServeScanned += 1
-            guard !skip.contains(key.cid) else { continue }
+        defer { sync.lastServeScanned = config.serveScanBudget - budget }
+        for key in index.keys(from: start, strictlyAfter: start == request.after) {
+            guard budget > 0 else { return (cids, true) }
+            budget -= 1
+            if skip.contains(key.cid) { continue }
+            if key.height <= canonicalHeld, tree.isCanonical(hash: key.cid) { continue }
+            if key.cid == genesis { continue }
             if cids.count == config.maxHeadersPerPage { return (cids, true) }
             cids.append(key.cid)
         }
@@ -498,7 +531,7 @@ public struct Core: Sendable {
         if let children = entry.children, Self.cid(of: children) != entry.block.children.rawCID {
             return cid
         }
-        guard let parent = entry.block.parent?.rawCID else { return cid }
+        guard entry.block.parent != nil else { return cid }
         let (horizon, overflow) = turn.now.addingReportingOverflow(config.maxFutureDrift)
         if !overflow, entry.block.timestamp > horizon { return cid }
         if var held = sync.pending.entries[cid] {
@@ -510,7 +543,6 @@ public struct Core: Sendable {
             }
             if let children = entry.children, held.children == nil {
                 sync.pending.setChildren(children, of: cid, bytes: Self.size(of: children))
-                sync.evict(to: config.pendingBudget)
             }
             if !isRoot { offer(entry.proofs, for: entry.block, cid: cid, from: peer, &turn) }
             dirty(cid, &turn)
@@ -532,12 +564,10 @@ public struct Core: Sendable {
             children: entry.children,
             hash: entry.block.proofOfWorkHash(),
             bytes: Self.size(of: entry.block) + (entry.children.map(Self.size) ?? 0),
-            announcers: [peer],
-            linked: index.contains(parent)
+            announcers: [peer]
         ))
         sync.announced[peer, default: []].insert(cid)
         dirty(cid, &turn)
-        sync.evict(to: config.pendingBudget)
         return cid
     }
 
@@ -608,6 +638,9 @@ public struct Core: Sendable {
     private mutating func hold(_ header: PendingHeader, until time: Int64) {
         sync.pending.entries[header.blockCID]?.notBefore = time
         sync.held.push((time, header.blockCID))
+        if sync.pending.isLeaf(header.blockCID) {
+            sync.pending.leaves.push((true, header.hash, header.blockCID))
+        }
     }
 
     /// Weigh one header. Only `.proofOfWorkInvalid` blames its source; a
@@ -629,10 +662,7 @@ public struct Core: Sendable {
             index.add(cid, parent: header.parent, height: header.block.height)
             let proofs = creditRemainingProofs(of: header, &turn)
             turn.relays.append((config.entry(header.block, children: children, proofs: proofs), from: header.source))
-            for child in waiting {
-                sync.pending.entries[child]?.linked = true
-                dirty(child, &turn)
-            }
+            for child in waiting { dirty(child, &turn) }
         case .duplicate:
             let waiting = sync.pending.childrenOf[cid] ?? []
             sync.removePending(cid)
@@ -681,18 +711,23 @@ public struct Core: Sendable {
 
     private mutating func queueWant(_ cid: String, of peer: PeerID, parent: Bool) {
         let key = WantSlot(peer: peer, parent: parent)
+        guard sync.wanting[key, default: []].insert(cid).inserted else { return }
         sync.wants[key, default: Heap { $0.priority != $1.priority ? $0.priority < $1.priority : $0.cid < $1.cid }]
             .push((sync.pending.priority[cid] ?? .max, cid))
     }
 
-    /// A request slot of `peer` freed: look again at the queued header of
-    /// smallest priority that still waits on it.
+    /// A request slot of `peer` freed: look again at its queued headers,
+    /// smallest priority first, while the slot stays free.
     private mutating func nextWant(of peer: PeerID, parent: Bool, _ turn: inout Turn) {
         let key = WantSlot(peer: peer, parent: parent)
-        while let next = sync.wants[key]?.pop() {
+        func free(_ core: Core) -> Bool {
+            guard let state = core.sync.peers[peer] else { return false }
+            return parent ? state.parentRequest == nil : state.childIndex == nil
+        }
+        while free(self), let next = sync.wants[key]?.pop() {
+            sync.wanting[key]?.remove(next.cid)
             guard let header = sync.pending.entries[next.cid], header.source == peer else { continue }
             evaluate(next.cid, &turn)
-            return
         }
     }
 
@@ -724,7 +759,6 @@ public struct Core: Sendable {
             sync.pending.setChildren(index, of: header.blockCID, bytes: Self.size(of: index))
             dirty(header.blockCID, &turn)
         }
-        sync.evict(to: config.pendingBudget)
         nextWant(of: peer, parent: false, &turn)
     }
 

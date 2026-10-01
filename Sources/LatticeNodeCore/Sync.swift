@@ -116,9 +116,6 @@ public struct PendingHeader: Sendable {
     public internal(set) var askedParent = false
     /// Not before this time: a header from this node's future.
     public internal(set) var notBefore: Int64?
-    /// Its parent is weighed (it waits only for its child index or its
-    /// time): evicted after every unlinked header.
-    public internal(set) var linked = false
     /// A child header's verified grinds and their proofs, by root (it enters
     /// the queue with one), and proofs still to check for it.
     public internal(set) var evidence: [String: VerifiedChildEvidence] = [:]
@@ -142,11 +139,11 @@ public struct PendingQueue: Sendable {
     /// Pending headers by the child index CID they commit.
     var byChildIndex: [String: Set<String>] = [:]
     var priority: [String: UInt256] = [:]
-    /// Evictable leaves: unlinked (orphan) ones first, then by hash,
-    /// largest first. Stale entries are skipped; a leaf that linked since it
-    /// was pushed is pushed again as linked.
-    var leaves = Heap<(linked: Bool, hash: UInt256, cid: String)> {
-        $0.linked != $1.linked ? !$0.linked
+    /// Evictable leaves: headers held for a future timestamp first, then
+    /// by hash, largest first (decision 12). Stale entries are skipped; a
+    /// leaf whose hold changed since it was pushed is pushed again.
+    var leaves = Heap<(held: Bool, hash: UInt256, cid: String)> {
+        $0.held != $1.held ? $0.held
             : $0.hash != $1.hash ? $0.hash > $1.hash : $0.cid > $1.cid
     }
 
@@ -167,7 +164,7 @@ public struct PendingQueue: Sendable {
         bytes += header.bytes
         byChildIndex[header.block.children.rawCID, default: []].insert(cid)
         priority[cid] = min(header.hash, childrenOf[cid].map(lowestPriority) ?? .max)
-        if isLeaf(cid) { leaves.push((header.linked, header.hash, cid)) }
+        if isLeaf(cid) { leaves.push((header.notBefore != nil, header.hash, cid)) }
         if let parent = header.parent {
             childrenOf[parent, default: []].insert(cid)
             lift(from: parent)
@@ -185,7 +182,7 @@ public struct PendingQueue: Sendable {
             childrenOf[parent]?.remove(cid)
             if childrenOf[parent]?.isEmpty == true { childrenOf[parent] = nil }
             if let held = entries[parent] {
-                if isLeaf(parent) { leaves.push((held.linked, held.hash, parent)) }
+                if isLeaf(parent) { leaves.push((held.notBefore != nil, held.hash, parent)) }
                 lift(from: parent)
             }
         }
@@ -214,16 +211,15 @@ public struct PendingQueue: Sendable {
         }
     }
 
-    /// Evict while over `budget`: unlinked leaves first (headers whose
-    /// parent is not weighed), then the pending leaf with
-    /// the largest hash, so a parent is never evicted from under a child that
+    /// Evict while over `budget`: held future headers first, then the
+    /// pending leaf with the largest hash, so a parent is never evicted from under a child that
     /// lifts it. Returns the evicted headers.
     mutating func evict(to budget: Int) -> [PendingHeader] {
         var evicted: [PendingHeader] = []
         while bytes > budget, let top = leaves.pop() {
             guard let header = entries[top.cid], isLeaf(top.cid), header.hash == top.hash else { continue }
-            if !top.linked, header.linked {
-                leaves.push((true, header.hash, top.cid))
+            if top.held != (header.notBefore != nil) {
+                leaves.push((header.notBefore != nil, header.hash, top.cid))
                 continue
             }
             remove(top.cid)
@@ -350,8 +346,10 @@ public struct Sync: Sendable {
     public internal(set) var proofs = ProofSync()
     /// The pending headers each peer announced.
     var announced: [PeerID: Set<String>] = [:]
-    /// Headers waiting for a free request slot of their first announcer.
+    /// Headers waiting for a free request slot of their first announcer,
+    /// each queued once per slot.
     var wants: [WantSlot: Heap<(priority: UInt256, cid: String)>] = [:]
+    var wanting: [WantSlot: Set<String>] = [:]
     /// Held headers from this node's future, by time.
     var held = Heap<(time: Int64, cid: String)> { $0.time != $1.time ? $0.time < $1.time : $0.cid < $1.cid }
     var nextRequestID: UInt64 = 1
@@ -388,6 +386,7 @@ public struct Sync: Sendable {
             var heap = heap
             heap.compact { entries[$0.cid]?.source == slot.peer }
             wants[slot] = heap.count == 0 ? nil : heap
+            wanting[slot] = wanting[slot]?.filter { entries[$0]?.source == slot.peer }
         }
     }
 
