@@ -129,9 +129,9 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     public nonisolated let configuration: NodeConfiguration
 
     let store: NodeStore
-    private let broker: DiskBroker
-    private let localFetcher: CoalescingFetcher
-    private let retentionScope: String
+    let broker: DiskBroker
+    let localFetcher: CoalescingFetcher
+    let retentionScope: String
     private let durableMempoolOwner: String
     private let liveMempoolOwner: String
     private let directoryLock: StorageDirectoryLock
