@@ -324,6 +324,9 @@ public struct Core: Sendable {
         // its future timestamp is already in the first eviction tier.
         sync.evict(to: config.pendingBudget)
         for peer in sync.peers.keys.sorted() {
+            // Anything applied may let a lacking hole apply now: it may be
+            // asked again once more.
+            if !turn.facts.isEmpty { sync.peers[peer]?.retried = false }
             advanceCursor(of: peer, &turn)
             pump(peer, &turn)
         }
@@ -443,6 +446,11 @@ public struct Core: Sendable {
     private mutating func receive(_ message: SyncMessage, from peer: PeerID, _ turn: inout Turn) {
         switch message {
         case .getStream, .getData, .getAncestors:
+            // A peer reading our log runs this level: if its log was empty
+            // because it did not (an unhosted answer), read it again.
+            if case .getStream = message, sync.cursors[peer.key]?.logID == "", sync.peers[peer]?.stream == nil {
+                requestStream(from: peer, &turn)
+            }
             if sync.peers[peer]?.serving == nil {
                 serve(message, to: peer, &turn)
             } else if (sync.peers[peer]?.queued.count ?? 0) < 2 {

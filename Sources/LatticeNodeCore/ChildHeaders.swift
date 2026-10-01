@@ -220,7 +220,11 @@ extension Core {
     /// caps; otherwise it is dropped without blame and the block is looked
     /// up again later. Checks start in `proofWork`.
     mutating func offer(_ proofs: [ChildBlockProof], cid: String, from source: PeerID?) {
-        for proof in proofs.prefix(proofConfig.maxPerHeader) {
+        // Grinds not yet credited first, so a header served again with the
+        // same proofs offers the ones a cap left out.
+        var fresh: [ChildBlockProof] = []
+        for proof in proofs where !credits(proof.rootCID, at: cid) { fresh.append(proof) }
+        for proof in fresh.prefix(proofConfig.maxPerHeader) {
             guard let bytes = try? proof.serialize(), bytes.count <= proofConfig.maxProofBytes else { continue }
             let id = "\(UInt256.hash(bytes))"
             let queued = QueuedProof(cid: cid, proof: proof, id: id, source: source, bytes: bytes.count)

@@ -611,6 +611,16 @@ final class CoreSyncTests: XCTestCase {
         XCTAssertEqual(page.entries.first?.position, 1)
     }
 
+    /// A peer that did not run this level answered with an empty log; once
+    /// it reads ours (it runs the level now), its log is read again.
+    func testAPeerThatStartsRunningTheLevelIsReadAgain() throws {
+        var core = core()
+        let request = try XCTUnwrap(requests(ready(&core, peer)).first)
+        _ = core.step(.received(peer, .stream(StreamPage(requestID: request.requestID, logID: "", entries: [], hasMore: false))), now: Self.now)
+        let effects = core.step(.received(peer, .getStream(requestID: 9, logID: nil, after: 0)), now: Self.now)
+        XCTAssertEqual(requests(effects).count, 1)
+    }
+
     /// Until the store keeps cursors, only those it handed back outlive
     /// their session.
     func testOnlyHandedBackCursorsOutliveTheirSession() throws {

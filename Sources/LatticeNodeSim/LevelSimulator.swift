@@ -221,10 +221,10 @@ public struct LevelSimulator {
         }
         for script in scripts.keys.sorted() { schedule(at: now, to: script, .scriptTick) }
         for (position, grind) in world.grinds.enumerated() {
-            // A withheld grind's miner hands it to its node only once its
-            // proofs are public.
-            let at = grind.withheld ? grind.proofsAt : grind.releaseAt
-            schedule(at: at, to: names[Int(self.rng.next() % UInt64(names.count))], .mine(position))
+            // A withheld grind is the withholder's: it reaches nodes only
+            // through its log.
+            guard !grind.withheld else { continue }
+            schedule(at: grind.releaseAt, to: names[Int(self.rng.next() % UInt64(names.count))], .mine(position))
         }
     }
 

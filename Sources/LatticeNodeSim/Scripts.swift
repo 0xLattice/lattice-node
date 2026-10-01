@@ -273,7 +273,8 @@ public struct Liar: SimScript {
 
     /// Push each session its log once the lies are released.
     public mutating func tick(peers: [PeerID], now: Int64, world: World) -> [ScriptAction] {
-        let release = world.lies.values.compactMap { world.blocks[$0]?.releaseAt }.max() ?? now
+        let release = (Array(world.lies.values) + [world.excludedChild])
+            .compactMap { world.blocks[$0]?.releaseAt }.max() ?? now
         guard now >= release else { return [.wakeAt(release)] }
         var actions: [ScriptAction] = []
         for peer in peers where pushed.insert(peer.session).inserted {
