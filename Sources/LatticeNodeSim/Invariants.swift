@@ -16,6 +16,9 @@ public struct SimStore: Sendable {
     /// Header content a torn write kept without its facts: held, not weighed.
     public private(set) var torn: Set<String> = []
 
+    /// An empty store, for a level that starts from a bootstrap batch.
+    init() {}
+
     public init(genesis: SimBlock, facts seed: BlockImportBatch) {
         append(PersistBatch(
             headers: [StoredHeader(blockCID: genesis.cid, block: genesis.block, children: genesis.children)],

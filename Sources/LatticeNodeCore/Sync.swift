@@ -116,6 +116,10 @@ public struct PendingHeader: Sendable {
     public internal(set) var askedParent = false
     /// Not before this time: a header from this node's future.
     public internal(set) var notBefore: Int64?
+    /// A child header's verified grinds and their proofs, by root (it enters
+    /// the queue with one).
+    public internal(set) var evidence: [String: VerifiedChildEvidence] = [:]
+    public internal(set) var proofs: [String: ChildBlockProof] = [:]
 
     var parent: String? { block.parent?.rawCID }
     var source: PeerID? { announcers.first }
@@ -329,6 +333,9 @@ public struct WeighedIndex: Sendable {
 public struct Sync: Sendable {
     public internal(set) var peers: [PeerID: PeerSync] = [:]
     public internal(set) var pending = PendingQueue()
+    /// A child level's proof work: headers awaiting a proof, and checks in
+    /// flight.
+    public internal(set) var proofs = ProofSync()
     /// The pending headers each peer announced.
     var announced: [PeerID: Set<String>] = [:]
     /// Headers waiting for a free request slot of their first announcer,

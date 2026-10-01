@@ -19,6 +19,13 @@ public enum Event: Sendable {
     /// A connect job's verdict.
     case connected(ConnectVerdict)
     case tick
+    /// A child level: the evidence index's proofs for a block
+    /// (`Effect.lookupProofs`).
+    case proofsFound(childCID: String, [ChildBlockProof])
+    /// A child level: a `verifyProof` job finished.
+    case proofVerified(ProofJob, Result<VerifiedChildEvidence, ChildProofVerificationFailure>)
+    /// A child level: the evidence index's proofs changed for these blocks.
+    case evidenceChanged(childCIDs: [String])
 }
 
 public enum DisconnectReason: Sendable, Equatable {
@@ -102,6 +109,14 @@ public enum Effect: Sendable {
     case persist(PersistBatch)
     case publish(Snapshot)
     case wakeAt(Int64)
+    /// A child level: ask the evidence index for these blocks' proofs.
+    case lookupProofs([String])
+    /// A child level: run `ChildBlockProof.verifySecuringWork`, a pure job,
+    /// and answer `proofVerified`.
+    case verifyProof(ProofJob)
+    /// A child level: write a credited proof to the local evidence index, so
+    /// this node serves it. Emitted after the step's `persist`.
+    case indexProof(childCID: String, ChildBlockProof)
 }
 
 public struct CoreConfig: Sendable {
@@ -148,6 +163,8 @@ public struct CoreConfig: Sendable {
     /// How often each peer is asked for a catch-up again: the repair path
     /// for anything a relay missed.
     public var catchUpInterval: Int64
+    /// A child level's proof bounds.
+    public var proofs = ProofConfig()
     /// How many weighed-but-unexecuted blocks of the best chain, after the
     /// act-on tip, have their bodies asked for at once.
     public var bodyWindow: Int
@@ -185,9 +202,9 @@ public struct CoreConfig: Sendable {
     }
 
     /// A header as it travels: its child index inline when it fits.
-    public func entry(_ block: Block, children: ChildIndex) -> HeaderEntry {
+    public func entry(_ block: Block, children: ChildIndex, proofs: [ChildBlockProof] = []) -> HeaderEntry {
         let fits = (children.toData()?.count ?? .max) <= maxInlineChildIndexBytes
-        return HeaderEntry(block: block, children: fits ? children : nil)
+        return HeaderEntry(block: block, children: fits ? children : nil, proofs: proofs)
     }
 
     /// The answer the shell sends: `entries` cut at `maxPageBytes` (at least
@@ -221,17 +238,17 @@ public struct CoreConfig: Sendable {
 /// availability wait, never blame.
 public struct Core: Sendable {
     public internal(set) var tree: ChainTree
-    public private(set) var sync = Sync()
+    public internal(set) var sync = Sync()
     public internal(set) var bodies = Bodies()
     public private(set) var published: Snapshot?
     public let config: CoreConfig
-    let genesis: String
-    public private(set) var index = WeighedIndex()
+    public let genesis: String
+    public internal(set) var index = WeighedIndex()
 
     /// A core over a bootstrapped or restored root tree.
     public init(tree: ChainTree, config: CoreConfig = CoreConfig()) {
         var tree = tree
-        precondition(tree.context?.isRoot == true, "the core runs one root level")
+        precondition(tree.context != nil, "the core runs one chain's level")
         let genesis = tree.canonicalBlockHash(atHeight: 0) ?? tree.canonicalTip
         var index = WeighedIndex()
         var stack = [genesis]
@@ -297,8 +314,15 @@ public struct Core: Sendable {
             connected(verdict, &turn)
         case .tick:
             tick(&turn)
+        case .proofsFound(let cid, let proofs):
+            proofsFound(proofs, for: cid, &turn)
+        case .proofVerified(let job, let result):
+            proofVerified(job, result, &turn)
+        case .evidenceChanged(let cids):
+            evidenceChanged(cids)
         }
         drain(&turn)
+        if !isRoot { proofWork(&turn) }
         // Evict once the step's headers are processed, so a header held for
         // its future timestamp is already in the first eviction tier.
         sync.evict(to: config.pendingBudget)
@@ -323,6 +347,8 @@ public struct Core: Sendable {
         var effects: [Effect] = []
         /// Headers this step weighed, and the peer each came from.
         var relays: [(entry: HeaderEntry, from: PeerID?)] = []
+        /// Child proofs this step credited, to index.
+        var indexed: [(childCID: String, proof: ChildBlockProof)] = []
         /// Catch-up pages to continue, after the given header.
         var continuations: [(PeerID, HeaderKey)] = []
         /// Pending headers to look at again, smallest priority first.
@@ -335,13 +361,14 @@ public struct Core: Sendable {
 
     /// Persist first, then publish, then relay, then everything else:
     /// nothing a step makes visible precedes the write that makes it durable.
-    private mutating func finish(_ turn: Turn) -> [Effect] {
+    mutating func finish(_ turn: Turn) -> [Effect] {
         var effects: [Effect] = []
         if !turn.facts.isEmpty {
             effects.append(.persist(PersistBatch(
                 headers: turn.headers, states: turn.states, facts: turn.facts, genesisLinks: turn.genesisLinks
             )))
         }
+        effects += turn.indexed.map { .indexProof(childCID: $0.childCID, $0.proof) }
         let current = snapshot
         if current != published {
             published = current
@@ -367,7 +394,7 @@ public struct Core: Sendable {
         return effects
     }
 
-    private mutating func disconnect(_ peer: PeerID, _ reason: DisconnectReason, _ turn: inout Turn) {
+    mutating func disconnect(_ peer: PeerID, _ reason: DisconnectReason, _ turn: inout Turn) {
         guard sync.peers[peer] != nil else { return }
         drop(peer, &turn)
         turn.effects.append(.disconnect(peer, reason))
@@ -377,6 +404,7 @@ public struct Core: Sendable {
     /// live announcer.
     private mutating func drop(_ peer: PeerID, _ turn: inout Turn) {
         guard sync.peers.removeValue(forKey: peer) != nil else { return }
+        if !isRoot { dropProofSource(peer) }
         for parent in [true, false] {
             sync.wants[WantSlot(peer: peer, parent: parent)] = nil
             sync.wanting[WantSlot(peer: peer, parent: parent)] = nil
@@ -396,7 +424,7 @@ public struct Core: Sendable {
         return sync.nextRequestID
     }
 
-    private func dirty(_ cid: String, _ turn: inout Turn) {
+    func dirty(_ cid: String, _ turn: inout Turn) {
         turn.dirty.push((sync.pending.priority[cid] ?? .max, cid))
     }
 
@@ -583,7 +611,10 @@ public struct Core: Sendable {
             disconnect(peer, .proofOfWorkInvalid, &turn)
             return nil
         }
-        if index.contains(cid) { return cid }
+        if index.contains(cid) {
+            if !isRoot { offer(entry.proofs, cid: cid, from: peer) }
+            return cid
+        }
         // Structural, never blame: an inline child index that is not the one
         // the block commits, or a genesis (only bootstrap admits one).
         if let children = entry.children, Self.cid(of: children) != entry.block.children.rawCID {
@@ -602,7 +633,14 @@ public struct Core: Sendable {
             if let children = entry.children, held.children == nil {
                 sync.pending.setChildren(children, of: cid, bytes: Self.size(of: children))
             }
+            if !isRoot { offer(entry.proofs, cid: cid, from: peer) }
             dirty(cid, &turn)
+            return cid
+        }
+        // A child header's work is its proofs': it waits apart until one
+        // verifies (see `ChildHeaders.swift`).
+        if !isRoot {
+            awaitProof(entry, cid: cid, from: peer, &turn)
             return cid
         }
         guard ChainTree.rootWork(of: entry.block) != nil else {
@@ -626,7 +664,7 @@ public struct Core: Sendable {
 
     /// Look at every dirty pending header, smallest priority first; each one
     /// weighed dirties its pending children.
-    private mutating func drain(_ turn: inout Turn) {
+    mutating func drain(_ turn: inout Turn) {
         while let next = turn.dirty.pop() {
             evaluate(next.cid, &turn)
         }
@@ -697,11 +735,10 @@ public struct Core: Sendable {
     private mutating func insert(_ header: PendingHeader, _ turn: inout Turn) {
         guard let children = header.children else { return }
         let cid = header.blockCID
-        let admission = tree.insertRootHeader(
-            header.block,
-            childIndex: children,
-            validationContext: ValidationContext(nowMilliseconds: turn.now)
-        )
+        let context = ValidationContext(nowMilliseconds: turn.now)
+        let admission = isRoot
+            ? tree.insertRootHeader(header.block, childIndex: children, validationContext: context)
+            : insertChildHeader(header, children: children, context)
         switch admission {
         case .applied(let update):
             let waiting = sync.pending.childrenOf[cid] ?? []
@@ -709,7 +746,8 @@ public struct Core: Sendable {
             turn.headers.append(StoredHeader(blockCID: cid, block: header.block, children: children))
             turn.facts += update.batches
             index.add(cid, parent: header.parent, height: header.block.height)
-            turn.relays.append((config.entry(header.block, children: children), from: header.source))
+            let proofs = creditRemainingProofs(of: header, &turn)
+            turn.relays.append((config.entry(header.block, children: children, proofs: proofs), from: header.source))
             for child in waiting { dirty(child, &turn) }
         case .duplicate:
             let waiting = sync.pending.childrenOf[cid] ?? []
