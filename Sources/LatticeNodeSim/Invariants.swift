@@ -122,12 +122,13 @@ public enum Invariants {
         store: SimStore,
         world: World,
         flipTieBreak: Bool = false,
-        treeChanged: Bool = true
+        treeChanged: Bool = true,
+        weightsChanged: Bool = true
     ) throws {
         if treeChanged {
             try checkTree(
                 node: node, core: core, digest: digest, previous: previous,
-                store: store, world: world, flipTieBreak: flipTieBreak
+                store: store, world: world, flipTieBreak: flipTieBreak, weightsChanged: weightsChanged
             )
         }
 
@@ -158,7 +159,8 @@ public enum Invariants {
         previous: TreeDigest?,
         store: SimStore,
         world: World,
-        flipTieBreak: Bool
+        flipTieBreak: Bool,
+        weightsChanged: Bool = true
     ) throws {
         // The weighed graph is exactly the headers this node made durable, and
         // each of them has a durable block fact.
@@ -182,7 +184,9 @@ public enum Invariants {
         // DST 1 / validity selects / hierarchical GHOST: the head is an
         // independent reference's, built from the generator's ground truth
         // (each held block's true parent and the work its target implies),
-        // never from what the tree reports.
+        // never from what the tree reports. An execution that changed no
+        // weight, head or exclusion leaves this as the last check found it.
+        if weightsChanged {
         var reference = GhostReference(genesis: world.genesis.cid)
         reference.flipTieBreak = flipTieBreak
         reference.excluded = excluded
@@ -200,6 +204,7 @@ public enum Invariants {
         let work = reference.subtreeWork()
         for (hash, entry) in digest.blocks where entry.subtreeWork != work[hash] {
             throw fail(node, "subtree work of \(hash) is \(String(describing: entry.subtreeWork)), reference \(String(describing: work[hash]))")
+        }
         }
         if let excludedOnPath = digest.canonicalPath.first(where: digest.excluded.contains) {
             throw fail(node, "the best chain enters excluded root \(excludedOnPath)")

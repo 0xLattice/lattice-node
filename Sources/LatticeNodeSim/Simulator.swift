@@ -645,9 +645,14 @@ public struct Simulator {
         }
         // Every weight mutation advances the revision, and an execution
         // persists: otherwise the tree is unchanged, and its tree invariants
-        // already hold.
-        let treeChanged = node.core.tree.currentRevision() != revision || persisted
+        // already hold. An execution that moved no weight, head or
+        // exclusion skips the GHOST reference.
+        let revisionChanged = node.core.tree.currentRevision() != revision
+        let treeChanged = revisionChanged || persisted
         let digest = treeChanged ? TreeDigest(node.core.tree) : node.digest
+        let weightsChanged = revisionChanged
+            || digest.canonicalPath != node.digest.canonicalPath
+            || digest.excluded != node.digest.excluded
         try Invariants.check(
             node: name,
             core: node.core,
@@ -656,7 +661,8 @@ public struct Simulator {
             store: node.store,
             world: world,
             flipTieBreak: faults.flipReferenceTieBreak,
-            treeChanged: treeChanged || persisted
+            treeChanged: treeChanged,
+            weightsChanged: weightsChanged
         )
         try Invariants.checkBodies(node: name, core: node.core, digest: digest, now: now, wakes: wakes)
         if persisted {
