@@ -159,25 +159,13 @@ public struct Simulator {
         var incarnation = 0
     }
 
-    /// After the quiet point every honest core selects the same head, holds
-    /// every released honest block that clears the anti-DoS threshold, and
-    /// holds the identical weighed graph above it (the same blocks, parents,
-    /// grinds, states and exclusions). A branch under the threshold may be
-    /// held by a core that weighed it before the threshold rose, and not by
-    /// one that saw it later: that is the threshold's cost, as in Bitcoin.
+    /// After the quiet point every honest core holds the identical weighed
+    /// graph (the same blocks, grinds, subtree work and exclusions), holds
+    /// every released honest block, and selects the same head.
     func checkQuietPoint() throws {
         let nodes = cores.sorted { $0.key < $1.key }
         guard let (first, reference) = nodes.first else { return }
-        let core = reference.core
-        let clears = { (cid: String) -> Bool in core.clearsThreshold(self.trueWork(cid)) }
-        let honest = Set(world.released(world.honest, at: now).map(\.cid).filter(clears))
-        func above(_ digest: TreeDigest) -> [String: TreeDigest.Entry] {
-            digest.blocks.filter { clears($0.key) }.mapValues {
-                TreeDigest.Entry(parent: $0.parent, height: $0.height, grinds: $0.grinds,
-                                 prevState: $0.prevState, postState: $0.postState, subtreeWork: nil)
-            }
-        }
-        let graph = above(reference.digest)
+        let honest = Set(world.released(world.honest, at: now).map(\.cid))
         for (name, node) in nodes {
             if let missing = honest.subtracting(node.digest.blocks.keys).first {
                 throw Invariants.fail(name, "misses released honest block \(missing) after the quiet point")
@@ -185,9 +173,9 @@ public struct Simulator {
             // Whether a node executed an invalid body depends on whether it
             // was ever on that node's best chain (execution is local); every
             // other exclusion is the header tier's and the same everywhere.
-            let excluded = node.digest.excluded.filter(clears).subtracting(world.invalidBodies)
-            let referenceExcluded = reference.digest.excluded.filter(clears).subtracting(world.invalidBodies)
-            if above(node.digest) != graph || excluded != referenceExcluded {
+            let excluded = node.digest.excluded.subtracting(world.invalidBodies)
+            let referenceExcluded = reference.digest.excluded.subtracting(world.invalidBodies)
+            if node.digest.blocks != reference.digest.blocks || excluded != referenceExcluded {
                 throw Invariants.fail(name, "weighs a different graph than \(first) after the quiet point")
             }
             if node.digest.canonicalTip != reference.digest.canonicalTip {
@@ -197,17 +185,6 @@ public struct Simulator {
                 (config.withheldBodies[cid] ?? .min) <= now
             }
         }
-    }
-
-    /// A block's chain work from the generator's ground truth.
-    func trueWork(_ cid: String) -> WorkSum {
-        var total = WorkSum.zero
-        var current: String? = cid
-        while let hash = current, let block = world.blocks[hash] {
-            total = total + workForTarget(block.block.target)
-            current = block.parent
-        }
-        return total
     }
 
     /// DST 7: the store alone rebuilds an equal tree.
