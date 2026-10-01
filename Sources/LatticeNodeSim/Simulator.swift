@@ -48,14 +48,6 @@ public struct SimConfig: Sendable {
     public var inlineChildIndexBytes = 1_024
     public var pendingBudget = 256 * 1_024
     public var reconnectDelay: Int64 = 3_000
-    /// Each core asks each peer for a repair catch-up this often.
-    public var catchUpInterval: Int64 = 20_000
-    /// The catch-up margin (`CoreConfig.maxFutureDrift`): a catch-up asks
-    /// for headers dated after the last contact less this. It must exceed
-    /// how late a header can reach a peer (production: two hours); a header
-    /// a peer weighed later than this after its date, whose relay was lost
-    /// and that gains no child, is never re-sent.
-    public var maxFutureDrift: Int64 = 10_000
     /// One core loses every link from `from` (ms after genesis) for
     /// `milliseconds`; from 0, it is a fresh node joining late.
     public var outage: (core: Int, from: Int64, milliseconds: Int64)?
@@ -140,6 +132,8 @@ public struct SimReport: Sendable {
     /// catch-up pages and missing-parent fetches.
     public var healPages = 0
     public var healParentFetches = 0
+    /// Objects cores asked for by CID (`getData`), from the last release on.
+    public var healData = 0
     /// Body Volumes fetched through the content layer, and connect jobs run.
     public var bodyFetches = 0
     public var connects = 0
@@ -174,19 +168,12 @@ public struct Simulator {
 
     /// After the quiet point every honest core selects the same head, and
     /// holds every released honest block and the identical weighed graph
-    /// (the same blocks, grinds, subtree work and exclusions) dated after the
-    /// earliest last contact across cores less the margin. A side block
-    /// dated earlier that a core missed is never re-sent: the catch-up
-    /// margin's documented boundary.
+    /// (the same blocks, grinds, subtree work and exclusions): the stream is
+    /// exact.
     func checkQuietPoint() throws {
         let nodes = cores.sorted { $0.key < $1.key }
         guard let (first, reference) = nodes.first else { return }
-        let contact = nodes.map { $0.value.core.sync.lastContact.values.max() ?? 0 }.min() ?? 0
-        let cutoff = contact - coreConfig.maxFutureDrift
-        let dated = { (cid: String) in (world.blocks[cid]?.block.timestamp ?? .max) > cutoff }
-        let above = { (digest: TreeDigest) in digest.blocks.filter { dated($0.key) } }
-        let honest = Set(world.released(world.honest, at: now)
-            .filter { $0.block.timestamp > cutoff }.map(\.cid))
+        let honest = Set(world.released(world.honest, at: now).map(\.cid))
         for (name, node) in nodes {
             if let missing = honest.subtracting(node.digest.blocks.keys).first {
                 throw Invariants.fail(name, "misses released honest block \(missing) after the quiet point")
@@ -195,9 +182,9 @@ public struct Simulator {
             // was ever on that node's best chain (execution is local); every
             // other exclusion is the header tier's and the same everywhere.
             let deep = { (digest: TreeDigest) in
-                digest.excluded.subtracting(self.world.invalidBodies).filter(dated)
+                digest.excluded.subtracting(self.world.invalidBodies)
             }
-            if above(node.digest) != above(reference.digest) || deep(node.digest) != deep(reference.digest) {
+            if node.digest.blocks != reference.digest.blocks || deep(node.digest) != deep(reference.digest) {
                 throw Invariants.fail(name, "weighs a different graph than \(first) after the quiet point")
             }
             if node.digest.canonicalTip != reference.digest.canonicalTip {
@@ -215,8 +202,12 @@ public struct Simulator {
             replaying: node.store.facts,
             context: world.context,
             spec: world.spec,
-            config: node.core.config
+            config: node.core.config,
+            log: WeighLog(id: name, entries: node.store.log)
         )
+        guard restored.sync.log.entries == node.core.sync.log.entries else {
+            throw Invariants.fail(name, "replaying the store gives a different weigh log")
+        }
         guard TreeDigest(restored.tree) == digest else {
             throw Invariants.fail(name, "replaying the store gives a different tree")
         }
@@ -298,13 +289,11 @@ public struct Simulator {
             headersTimeout: config.headersTimeout,
             maxInlineChildIndexBytes: config.inlineChildIndexBytes,
             pendingBudget: config.pendingBudget,
-            catchUpInterval: config.catchUpInterval,
-            maxFutureDrift: config.maxFutureDrift,
             bodyWindow: config.bodyWindow
         )
         self.coreConfig = coreConfig
         for index in 0..<config.cores {
-            let core = Core(tree: world.bootstrap.tree, config: coreConfig)
+            let core = Core(tree: world.bootstrap.tree, config: coreConfig, log: WeighLog(id: "core\(index)"))
             cores["core\(index)"] = CoreNode(
                 core: core,
                 store: SimStore(genesis: world.genesis, facts: world.bootstrap.facts),
@@ -526,6 +515,7 @@ public struct Simulator {
     static func bytes(of delivery: Delivery) -> Int {
         switch delivery {
         case .core(.received(_, let message)), .scriptMessage(_, let message):
+            if case .stream(let page) = message { return 64 + 64 * page.entries.count }
             guard case .headers(let response) = message else { return 64 }
             return 64 + response.entries.reduce(0) {
                 $0 + ($1.block.toData()?.count ?? 0) + ($1.children?.toData()?.count ?? 0)
@@ -598,18 +588,18 @@ public struct Simulator {
             case .send(let peer, let message):
                 if now >= lastRelease {
                     switch message {
-                    case .getHeaders: report.healPages += 1
+                    case .getStream: report.healPages += 1
+                    case .getData(_, let cids): report.healData += cids.count
                     case .getAncestors: report.healParentFetches += 1
                     default: break
                     }
                 }
-                // Relaying a weighed header is not acting on it, but it is
+                // Streaming a weighed header is not acting on it, but it is
                 // sent only once durable.
-                if case .headers(let relayed) = message {
-                    for entry in relayed.entries {
-                        let cid = (try? BlockHeader(node: entry.block).rawCID) ?? ""
-                        guard node.store.headers[cid] != nil else {
-                            throw Invariants.fail(name, "relayed \(cid) before it was durable")
+                if case .stream(let page) = message {
+                    for entry in page.entries where entry.entry.kind == .header {
+                        guard node.store.headers[entry.entry.cid] != nil, node.store.logged.contains(entry.entry) else {
+                            throw Invariants.fail(name, "streamed \(entry.entry.cid) before it was durable")
                         }
                     }
                 }
@@ -670,6 +660,9 @@ public struct Simulator {
                     to: name,
                     .runConnect(job, incarnation: node.incarnation)
                 )
+            case .lookupProofs, .verifyProof, .indexProof:
+                // Child-level effects: a root level never emits them.
+                throw Invariants.fail(name, "a root level emitted a child-level effect")
             }
         }
         // Every weight mutation advances the revision, and an execution

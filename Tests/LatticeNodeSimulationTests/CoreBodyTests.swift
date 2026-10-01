@@ -25,16 +25,19 @@ final class CoreBodyTests: XCTestCase {
         content = SimCAS(world.genesisContent)
     }
 
-    /// A core that weighed `blocks` as `peer`'s catch-up page (so nothing
-    /// is left in flight), and the fact log it persisted from genesis.
+    /// A core that weighed `blocks` from `peer`, its stream read to the end
+    /// (so nothing is left in flight), and the fact log it persisted from genesis.
     private func weighed(_ blocks: [SimBlock], window: Int = 4) -> (Core, [BlockImportBatch]) {
         var core = Core(tree: world.bootstrap.tree, config: CoreConfig(bodyWindow: window))
         let asked = core.step(.peerReady(peer), now: Self.now).compactMap { effect -> UInt64? in
-            if case .send(_, .getHeaders(let request)) = effect { return request.requestID }
+            if case .send(_, .getStream(let id, _, _)) = effect { return id }
             return nil
         }
+        _ = core.step(.received(peer, .stream(StreamPage(
+            requestID: asked.first ?? 0, logID: "peer", entries: [], hasMore: false
+        ))), now: Self.now)
         let effects = core.step(.received(peer, .headers(HeadersResponse(
-            requestID: asked.first ?? 0,
+            requestID: 0,
             entries: blocks.map { HeaderEntry(block: $0.block, children: $0.children) },
             hasMore: false
         ))), now: Self.now)

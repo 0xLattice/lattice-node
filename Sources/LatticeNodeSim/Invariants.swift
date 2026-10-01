@@ -13,8 +13,14 @@ public struct SimStore: Sendable {
     public private(set) var blockFacts: Set<String> = []
     public private(set) var validations: Set<String> = []
     public private(set) var exclusions: Set<String> = []
+    /// The weigh log, durable with the facts.
+    public private(set) var log: [LogEntry] = []
+    public private(set) var logged: Set<LogEntry> = []
     /// Header content a torn write kept without its facts: held, not weighed.
     public private(set) var torn: Set<String> = []
+
+    /// An empty store, for a level that starts from a bootstrap batch.
+    init() {}
 
     public init(genesis: SimBlock, facts seed: BlockImportBatch) {
         append(PersistBatch(
@@ -31,6 +37,8 @@ public struct SimStore: Sendable {
             childIndexes[header.block.children.rawCID] = header.children
         }
         facts += batch.facts
+        log += batch.log
+        logged.formUnion(batch.log)
         for fact in batch.facts.flatMap(\.facts) {
             switch fact {
             case .block(let block): blockFacts.insert(block.blockHash)

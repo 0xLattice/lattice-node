@@ -32,17 +32,44 @@ func bestChain(of blocks: [SimBlock], genesis: SimBlock) -> [SimBlock] {
     return reference.descent().path.compactMap { byCID[$0] }
 }
 
-/// A catch-up page over `graph` (a script's weighed blocks, genesis
-/// excluded): every block dated after the requested time, in `HeaderKey`
-/// order after the cursor.
-func page(of graph: [SimBlock], _ request: HeadersRequest, limit: Int) -> (blocks: [SimBlock], hasMore: Bool) {
-    let rest = graph
-        .filter { $0.block.timestamp > request.afterTimestamp }
-        .map { (key: HeaderKey(timestamp: $0.block.timestamp, cid: $0.cid), block: $0) }
-        .filter { entry in request.after.map { entry.key > $0 } ?? true }
-        .sorted { $0.key < $1.key }
-        .map(\.block)
-    return (Array(rest.prefix(limit)), rest.count > limit)
+/// A script's weigh log is its released blocks in release order (a stable
+/// prefix as time passes): a page of it after `after`, from 0 if the asker's
+/// log id is not `logID`.
+func streamPage(of log: [SimBlock], logID: String, requestID: UInt64, asked: String?, after: UInt64, limit: Int) -> SyncMessage {
+    let from = asked == logID ? Int(min(after, UInt64(log.count))) : 0
+    let end = min(log.count, from + limit)
+    let entries = (from..<end).map { StreamEntry(position: UInt64($0 + 1), entry: .header(log[$0].cid)) }
+    return .stream(StreamPage(requestID: requestID, logID: logID, entries: entries, hasMore: end < log.count))
+}
+
+/// The push of a script's log entries `from..<log.count` (positions from
+/// `from + 1`).
+func streamPush(of log: [SimBlock], from: Int, logID: String) -> SyncMessage {
+    let entries = (from..<log.count).map { StreamEntry(position: UInt64($0 + 1), entry: .header(log[$0].cid)) }
+    return .stream(StreamPage(requestID: 0, logID: logID, entries: entries, hasMore: false))
+}
+
+/// A script's answer to the requests every script serves: its log (empty
+/// for an adversary that only pushes), the objects it holds, and their
+/// ancestors.
+func answer(
+    _ message: SyncMessage, log: [SimBlock], logID: String, held: Set<String>,
+    world: World, now: Int64, _ config: CoreConfig
+) -> SyncMessage? {
+    switch message {
+    case .getStream(let requestID, let asked, let after):
+        return streamPage(of: log, logID: logID, requestID: requestID, asked: asked, after: after, limit: config.maxHeadersPerPage)
+    case .getData(let requestID, let cids):
+        let blocks = world.released(cids.filter(held.contains), at: now)
+        let capped = config.page(blocks.map { config.entry($0.block, children: $0.children) }, hasMore: false)
+        return .headers(HeadersResponse(requestID: requestID, entries: capped.entries, hasMore: capped.hasMore))
+    case .getAncestors(let requestID, let cid, let max):
+        let blocks = ancestors(of: cid, max: max, held: held, world: world, now: now)
+        let capped = config.page(blocks.map { config.entry($0.block, children: $0.children) }, hasMore: false)
+        return .headers(HeadersResponse(requestID: requestID, entries: capped.entries, hasMore: false))
+    case .stream, .headers:
+        return nil
+    }
 }
 
 /// An ancestors answer over `held` (the CIDs a script serves): `cid` and up
@@ -67,9 +94,9 @@ func headers(_ blocks: [SimBlock], requestID: UInt64 = 0, hasMore: Bool = false,
     ))
 }
 
-/// An honest miner's node: it relays each honest block's header as it is
-/// released, answers catch-up with the released honest blocks, and serves
-/// any released block by CID and its child index.
+/// An honest miner's node: its weigh log is the honest blocks as they are
+/// released; it streams it (pushing each block as it is released to every
+/// peer) and serves any released block by CID and its child index.
 public struct HonestSource: SimScript {
     public let name: String
     public let isHonest = true
@@ -93,20 +120,9 @@ public struct HonestSource: SimScript {
     public mutating func connected(_ peer: PeerID, now: Int64, world: World) -> [ScriptAction] { [] }
 
     public mutating func received(_ message: SyncMessage, from peer: PeerID, now: Int64, world: World) -> [ScriptAction] {
-        switch message {
-        case .getHeaders(let request):
-            let served = page(of: world.released(mine(world), at: now), request, limit: config.maxHeadersPerPage)
-            let capped = config.page(served.blocks.map { config.entry($0.block, children: $0.children) }, hasMore: served.hasMore)
-            return [.send(peer, .headers(HeadersResponse(
-                requestID: request.requestID, entries: capped.entries, hasMore: capped.hasMore
-            )))]
-        case .getAncestors(let requestID, let cid, let max):
-            let held = ancestors(of: cid, max: max, held: Set(mine(world)), world: world, now: now)
-            let capped = config.page(held.map { config.entry($0.block, children: $0.children) }, hasMore: false)
-            return [.send(peer, .headers(HeadersResponse(requestID: requestID, entries: capped.entries, hasMore: false)))]
-        case .headers:
-            return []
-        }
+        let log = world.released(mine(world), at: now)
+        guard let reply = answer(message, log: log, logID: name, held: Set(mine(world)), world: world, now: now, config) else { return [] }
+        return [.send(peer, reply)]
     }
 
     public func fetch(_ cid: String, now: Int64, world: World) -> ChildIndex? {
@@ -115,9 +131,11 @@ public struct HonestSource: SimScript {
 
     public mutating func tick(peers: [PeerID], now: Int64, world: World) -> [ScriptAction] {
         let released = world.released(mine(world), at: now)
-        let fresh = Array(released.dropFirst(relayed))
+        let from = relayed
         relayed = released.count
-        var actions: [ScriptAction] = fresh.isEmpty ? [] : peers.map { .send($0, headers(fresh, config)) }
+        var actions: [ScriptAction] = from == released.count ? [] : peers.map {
+            .send($0, streamPush(of: released, from: from, logID: name))
+        }
         if let next = mine(world).compactMap({ world.blocks[$0]?.releaseAt }).filter({ $0 > now }).min() {
             actions.append(.wakeAt(next))
         }
@@ -165,10 +183,12 @@ public struct HeaderSpammer: SimScript {
         flood(peer, now: now, world: world)
     }
 
+    /// It streams the spam fork; it never answers a request for content.
     public mutating func received(_ message: SyncMessage, from peer: PeerID, now: Int64, world: World) -> [ScriptAction] {
-        guard case .getHeaders(let request) = message else { return [] }
-        let served = page(of: world.released(world.spam, at: now), request, limit: config.maxHeadersPerPage)
-        return [.send(peer, headers(served.blocks, requestID: request.requestID, hasMore: served.hasMore, config))]
+        guard case .getStream = message, let reply = answer(
+            message, log: world.released(world.spam, at: now), logID: name, held: [], world: world, now: now, config
+        ) else { return [] }
+        return [.send(peer, reply)]
     }
 
     public func fetch(_ cid: String, now: Int64, world: World) -> ChildIndex? { nil }
@@ -186,8 +206,8 @@ public struct HeaderSpammer: SimScript {
 }
 
 /// Shows one honest side block (the world's uncle) to a single node: the
-/// rest of the network can only learn it through that node's relay. Its own
-/// catch-up answer is empty; it serves any released block's ancestors.
+/// rest of the network can only learn it through that node's stream. Its own
+/// log is empty; it serves any released block and its ancestors.
 public struct UncleShower: SimScript {
     public let name: String
     public let isHonest = true
@@ -206,15 +226,10 @@ public struct UncleShower: SimScript {
     }
 
     public mutating func received(_ message: SyncMessage, from peer: PeerID, now: Int64, world: World) -> [ScriptAction] {
-        switch message {
-        case .getHeaders(let request):
-            return [.send(peer, headers([], requestID: request.requestID, config))]
-        case .getAncestors(let requestID, let cid, let max):
-            let held = ancestors(of: cid, max: max, held: Set(world.honest + [world.uncle]), world: world, now: now)
-            return [.send(peer, headers(held, requestID: requestID, config))]
-        case .headers:
-            return []
-        }
+        guard let reply = answer(
+            message, log: [], logID: name, held: Set(world.honest + [world.uncle]), world: world, now: now, config
+        ) else { return [] }
+        return [.send(peer, reply)]
     }
 
     public func fetch(_ cid: String, now: Int64, world: World) -> ChildIndex? {
@@ -269,17 +284,10 @@ public struct Liar: SimScript {
     }
 
     public mutating func received(_ message: SyncMessage, from peer: PeerID, now: Int64, world: World) -> [ScriptAction] {
-        switch message {
-        case .getHeaders(let request):
-            let graph = world.released(world.honest, at: now) + excluded(world, now)
-            let served = page(of: graph, request, limit: config.maxHeadersPerPage)
-            return [.send(peer, headers(served.blocks, requestID: request.requestID, hasMore: served.hasMore, config))]
-        case .getAncestors(let requestID, let cid, let max):
-            let held = ancestors(of: cid, max: max, held: Set(world.blocks.keys), world: world, now: now)
-            return [.send(peer, headers(held, requestID: requestID, config))]
-        case .headers:
-            return []
-        }
+        guard let reply = answer(
+            message, log: [], logID: name, held: Set(world.blocks.keys), world: world, now: now, config
+        ) else { return [] }
+        return [.send(peer, reply)]
     }
 
     public func fetch(_ cid: String, now: Int64, world: World) -> ChildIndex? {

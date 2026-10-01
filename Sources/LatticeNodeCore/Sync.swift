@@ -4,8 +4,17 @@ import UInt256
 /// Per-peer sync state: at most one request of each kind in flight, each
 /// with a deadline. A deadline that passes disconnects the peer.
 public struct PeerSync: Sendable, Equatable {
-    /// The catch-up page in flight.
-    public internal(set) var catchUp: InFlightPage?
+    /// The `getStream` page in flight.
+    public internal(set) var stream: InFlightStream?
+    /// Entries of the peer's log received and not yet applied, in order.
+    public internal(set) var inventory: [StreamEntry] = []
+    /// The last page said more follows: ask again once the inventory drains.
+    public internal(set) var more = false
+    /// The objects asked of this peer (`getData`), applying its log through
+    /// `through` once answered.
+    public internal(set) var data: InFlightData?
+    /// This peer read our log to its end: we push what we append.
+    public internal(set) var subscribed = false
     /// The ancestors asked for by CID (a parent this peer's header named).
     public internal(set) var parentRequest: InFlightHeader?
     /// The child index asked for by CID (one wait per peer).
@@ -16,29 +25,31 @@ public struct PeerSync: Sendable, Equatable {
     /// Requests that arrived while `serving` was being sent, in order (at
     /// most one of each kind: an honest peer has no more in flight).
     public internal(set) var queued: [SyncMessage] = []
-    /// When to ask this peer for a catch-up again (the repair path).
-    public internal(set) var nextCatchUp: Int64 = .max
 
     public init() {}
 
     public static func == (lhs: PeerSync, rhs: PeerSync) -> Bool {
-        lhs.catchUp == rhs.catchUp && lhs.parentRequest == rhs.parentRequest
+        lhs.stream == rhs.stream && lhs.inventory == rhs.inventory && lhs.more == rhs.more
+            && lhs.data == rhs.data && lhs.subscribed == rhs.subscribed
+            && lhs.parentRequest == rhs.parentRequest
             && lhs.childIndex == rhs.childIndex && lhs.serving == rhs.serving
-            && lhs.queued.count == rhs.queued.count && lhs.nextCatchUp == rhs.nextCatchUp
+            && lhs.queued.count == rhs.queued.count
     }
 
     var deadlines: [Int64] {
-        [catchUp?.deadline, parentRequest?.deadline, childIndex?.deadline].compactMap { $0 }
+        [stream?.deadline, data?.deadline, parentRequest?.deadline, childIndex?.deadline].compactMap { $0 }
     }
 }
 
-public struct InFlightPage: Sendable, Equatable {
+public struct InFlightStream: Sendable, Equatable {
     public let requestID: UInt64
-    /// The pass's time: its continuations keep it.
-    public let afterTimestamp: Int64
-    /// When the pass began: its last contact once it completes.
-    public let started: Int64
-    public let after: HeaderKey?
+    public let deadline: Int64
+}
+
+public struct InFlightData: Sendable, Equatable {
+    public let requestID: UInt64
+    public let cids: [String]
+    public let through: UInt64
     public let deadline: Int64
 }
 
@@ -120,6 +131,10 @@ public struct PendingHeader: Sendable {
     public internal(set) var askedParent = false
     /// Not before this time: a header from this node's future.
     public internal(set) var notBefore: Int64?
+    /// A child header's verified grinds and their proofs, by root (it enters
+    /// the queue with one).
+    public internal(set) var evidence: [String: VerifiedChildEvidence] = [:]
+    public internal(set) var proofs: [String: ChildBlockProof] = [:]
 
     var parent: String? { block.parent?.rawCID }
     var source: PeerID? { announcers.first }
@@ -235,71 +250,23 @@ public struct PendingQueue: Sendable {
 }
 
 /// The weighed graph as sync reads it, maintained as headers are weighed:
-/// every header by (timestamp, CID), and its parent.
+/// every header and its parent.
 public struct WeighedIndex: Sendable {
-    /// Every weighed header, sorted. Headers arrive mostly in timestamp
-    /// order, so an insert lands at or near the end.
-    var keys: [HeaderKey] = []
     var parent: [String: String] = [:]
-    var timestamp: [String: Int64] = [:]
+    var members: Set<String> = []
     /// Leaves: headers with no weighed child.
     public internal(set) var leaves: Set<String> = []
 
-    init() {}
-
-    /// An index over `headers` in any order, sorted once.
-    init(_ headers: [(cid: String, parent: String?, timestamp: Int64)]) {
-        for header in headers where timestamp[header.cid] == nil {
-            record(header.cid, parent: header.parent, timestamp: header.timestamp)
-            keys.append(HeaderKey(timestamp: header.timestamp, cid: header.cid))
+    mutating func add(_ cid: String, parent: String?) {
+        guard members.insert(cid).inserted else { return }
+        if let parent {
+            self.parent[cid] = parent
+            leaves.remove(parent)
         }
-        keys.sort()
-        for cid in parent.values { leaves.remove(cid) }
-    }
-
-    mutating func add(_ cid: String, parent: String?, timestamp: Int64) {
-        guard self.timestamp[cid] == nil else { return }
-        let key = HeaderKey(timestamp: timestamp, cid: cid)
-        keys.insert(key, at: position(after: key, inclusive: true))
-        record(cid, parent: parent, timestamp: timestamp)
-        if let parent { leaves.remove(parent) }
-    }
-
-    private mutating func record(_ cid: String, parent: String?, timestamp: Int64) {
-        self.timestamp[cid] = timestamp
-        if let parent { self.parent[cid] = parent }
         leaves.insert(cid)
     }
 
-    func contains(_ cid: String) -> Bool { timestamp[cid] != nil }
-
-    func key(_ cid: String) -> HeaderKey? {
-        timestamp[cid].map { HeaderKey(timestamp: $0, cid: cid) }
-    }
-
-    /// The first position whose key is above `key` (or at it, when
-    /// `inclusive`): a binary search, so any peer-chosen key is safe.
-    private func position(after key: HeaderKey, inclusive: Bool) -> Int {
-        var low = 0, high = keys.count
-        while low < high {
-            let middle = low + (high - low) / 2
-            if keys[middle] < key || (!inclusive && keys[middle] == key) {
-                low = middle + 1
-            } else {
-                high = middle
-            }
-        }
-        return low
-    }
-
-    /// Headers dated after `timestamp`, in `HeaderKey` order, after `cursor`
-    /// when given: one seek, then a lazy slice.
-    func keys(after timestamp: Int64, cursor: HeaderKey?) -> ArraySlice<HeaderKey> {
-        // Every CID sorts above "": this key is the first dated after.
-        var start = timestamp == .max ? keys.count : position(after: HeaderKey(timestamp: timestamp + 1, cid: ""), inclusive: true)
-        if let cursor { start = Swift.max(start, position(after: cursor, inclusive: false)) }
-        return keys[start...]
-    }
+    func contains(_ cid: String) -> Bool { members.contains(cid) }
 }
 
 /// Header sync for one level: which peers are asked for what, and the
@@ -308,6 +275,9 @@ public struct WeighedIndex: Sendable {
 public struct Sync: Sendable {
     public internal(set) var peers: [PeerID: PeerSync] = [:]
     public internal(set) var pending = PendingQueue()
+    /// A child level's proof work: headers awaiting a proof, and checks in
+    /// flight.
+    public internal(set) var proofs = ProofSync()
     /// The pending headers each peer announced.
     var announced: [PeerID: Set<String>] = [:]
     /// Headers waiting for a free request slot of their first announcer,
@@ -318,12 +288,13 @@ public struct Sync: Sendable {
     var held = Heap<(time: Int64, cid: String)> { $0.time != $1.time ? $0.time < $1.time : $0.cid < $1.cid }
     var nextRequestID: UInt64 = 1
     var nextToken: UInt64 = 1
-    /// The start of the last catch-up pass completed with each peer (by
-    /// key), with nothing it announced left pending: the requester's last
-    /// contact. The shell persists it and hands it back to `Core.init`.
-    public internal(set) var lastContact: [String: Int64] = [:]
-    /// How many index entries the last catch-up page examined: serving is
-    /// O(page), never O(graph).
+    /// This node's weigh log, which peers stream.
+    public internal(set) var log = WeighLog()
+    /// Per peer key: the last position of its log received and applied.
+    /// The shell persists it and hands it back to `Core.init`.
+    public internal(set) var cursors: [String: StreamCursor] = [:]
+    /// How many log entries the last stream page examined: serving is
+    /// O(page), never O(log).
     public internal(set) var lastServeScanned = 0
 
     public init() {}
@@ -366,7 +337,7 @@ public struct Sync: Sendable {
 
     /// The earliest time after `now` the core must wake for.
     func nextDeadline(after now: Int64) -> Int64? {
-        let requests = peers.values.flatMap { $0.deadlines + [$0.nextCatchUp] }
+        let requests = peers.values.flatMap(\.deadlines)
         let times = requests + [held.first?.time].compactMap { $0 }
         return times.filter { $0 > now && $0 != .max }.min()
     }

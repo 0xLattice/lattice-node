@@ -67,17 +67,10 @@ public struct InvalidBodyMiner: SimScript {
     }
 
     public mutating func received(_ message: SyncMessage, from peer: PeerID, now: Int64, world: World) -> [ScriptAction] {
-        switch message {
-        case .getHeaders(let request):
-            let graph = world.released(world.honest, at: now) + blocks(world, now)
-            let served = page(of: graph, request, limit: config.maxHeadersPerPage)
-            return [.send(peer, headers(served.blocks, requestID: request.requestID, hasMore: served.hasMore, config))]
-        case .getAncestors(let requestID, let cid, let max):
-            let held = ancestors(of: cid, max: max, held: Set(world.blocks.keys), world: world, now: now)
-            return [.send(peer, headers(held, requestID: requestID, config))]
-        case .headers:
-            return []
-        }
+        guard let reply = answer(
+            message, log: [], logID: name, held: Set(world.blocks.keys), world: world, now: now, config
+        ) else { return [] }
+        return [.send(peer, reply)]
     }
 
     public func fetch(_ cid: String, now: Int64, world: World) -> ChildIndex? {
@@ -196,7 +189,8 @@ extension Simulator {
             replaying: node.store.facts,
             context: world.context,
             spec: world.spec,
-            config: node.core.config
+            config: node.core.config,
+            log: WeighLog(id: name, entries: node.store.log)
         )
         node.core = restored
         node.digest = TreeDigest(restored.tree)
