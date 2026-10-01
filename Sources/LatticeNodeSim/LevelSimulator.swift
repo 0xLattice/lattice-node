@@ -20,7 +20,7 @@ public struct LevelSimConfig: Sendable {
     public var scheduleLiar = true
     /// A peer relaying every child block with garbage proofs and forged
     /// twins of the honest ones.
-    public var flooder = false
+    public var flooders = 0
     /// The child levels' proof bounds (scaled down, pages overrun them).
     public var proofs = ProofConfig()
     public var drop = 0.01
@@ -220,7 +220,9 @@ public struct LevelSimulator {
         scripts["source"] = LevelSource(name: "source", config: coreConfig)
         if config.withholder { scripts["withholder"] = ProofWithholder(name: "withholder", config: coreConfig) }
         if config.zeroWork { scripts["zerowork"] = LoneHeader(name: "zerowork", header: world.zeroWork, blamed: false) }
-        if config.flooder { scripts["flooder"] = ProofFlooder(name: "flooder", config: coreConfig) }
+        for index in 0..<config.flooders {
+            scripts["flooder\(index)"] = ProofFlooder(name: "flooder\(index)", config: coreConfig)
+        }
         if config.scheduleLiar { scripts["liar"] = LoneHeader(name: "liar", header: world.offSchedule, blamed: true) }
 
         let names = cores.keys.sorted()
@@ -475,7 +477,7 @@ public struct LevelSimulator {
                         bootstrap: bootstrap
                     )
                 }
-                schedule(at: delay(), to: name, .host(.bootstrapped(path, result)))
+                schedule(at: delay(), to: name, .host(.bootstrapped(path, genesisCID: genesisCID, result)))
             case .wakeAt(let time):
                 if time > now, !ticks.contains(Tick(node: name, time: time)) {
                     schedule(at: time, to: name, .host(.tick))

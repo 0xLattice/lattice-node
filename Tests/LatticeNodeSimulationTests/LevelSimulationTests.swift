@@ -211,11 +211,11 @@ final class LevelSimulationTests: XCTestCase {
     /// identical, and nobody is blamed for a proof.
     func testEveryHonestProofIsCreditedThroughScarceSlotsAndAFlood() async throws {
         let (_, report) = try await simulate(config(0xF100D) {
-            $0.flooder = true
+            $0.flooders = 1
             $0.doubleProbability = 0.5
             $0.pageSize = 12
             $0.proofs = ProofConfig(
-                maxChecks: 4, maxChecksPerSource: 2, maxPerHeader: 8, maxAwaiting: 64, maxAwaitingPerPeer: 32
+                maxChecks: 4, maxChecksPerSource: 2, indexReserve: 1, maxPerHeader: 8, maxAwaiting: 64, maxAwaitingPerPeer: 32
             )
             $0.withholder = false
             $0.zeroWork = false
@@ -223,6 +223,29 @@ final class LevelSimulationTests: XCTestCase {
         })
         XCTAssertTrue(report.disconnects.isEmpty, "\(report.disconnects)")
         XCTAssertGreaterThan(report.verifications, 0)
+    }
+
+    /// Sybils: more flooders (⌈maxChecks / maxChecksPerSource⌉ + 1) than the
+    /// check slots have room for, each relaying every child block with bad
+    /// proofs. Checks go round-robin across sources with a share per source
+    /// and a reserve for the evidence index, so every honest proof is still
+    /// credited everywhere with identical weights, and nobody is blamed.
+    func testSybilFloodersCannotStarveHonestProofs() async throws {
+        let proofs = ProofConfig(
+            maxChecks: 8, maxChecksPerSource: 2, indexReserve: 2, maxPerHeader: 8,
+            maxAwaiting: 64, maxAwaitingPerPeer: 16, awaitingBudget: 256 * 1_024
+        )
+        let flooders = (proofs.maxChecks + proofs.maxChecksPerSource - 1) / proofs.maxChecksPerSource + 1
+        let (_, report) = try await simulate(config(0x5B11) {
+            $0.flooders = flooders
+            $0.doubleProbability = 0.5
+            $0.pageSize = 12
+            $0.proofs = proofs
+            $0.withholder = false
+            $0.zeroWork = false
+            $0.scheduleLiar = false
+        })
+        XCTAssertTrue(report.disconnects.isEmpty, "\(report.disconnects)")
     }
 
     // MARK: - Choosing a child genesis
@@ -259,6 +282,9 @@ final class LevelSimulationTests: XCTestCase {
         var host: HostCore
         var batches: [HostBatch] = []
         var asked: [String] = []
+        /// When false, bootstraps are collected here, not answered.
+        var answer = true
+        var unanswered: [(ChainPath, String, ParentLevelFacts)] = []
 
         init(pins: [ChainPath: String] = [:]) async throws {
             var rng = SplitMix64(state: 0x914)
@@ -286,6 +312,10 @@ final class LevelSimulationTests: XCTestCase {
                         batches.append(batch)
                     case .bootstrap(let path, let cid, let facts):
                         asked.append(cid)
+                        guard answer else {
+                            unanswered.append((path, cid, facts))
+                            continue
+                        }
                         let world = world
                         let result = await ChainTree.bootstrap(
                             genesis: BlockHeader(rawCID: cid), fetcher: world.cas,
@@ -298,7 +328,7 @@ final class LevelSimulationTests: XCTestCase {
                                 spec: world.specs[path]!, bootstrap: boot
                             )
                         }
-                        queue.append(.bootstrapped(path, result))
+                        queue.append(.bootstrapped(path, genesisCID: cid, result))
                     default:
                         break
                     }
@@ -317,7 +347,7 @@ final class LevelSimulationTests: XCTestCase {
             }
         }
 
-        func restored() throws -> HostCore {
+        func restored(hosted: Set<ChainPath>? = nil) throws -> HostCore {
             var records: [ChainPath: LevelRecord] = [:]
             var facts: [ChainPath: [BlockImportBatch]] = [LevelWorld.nexus: [world.rootBootstrap.facts]]
             let genesis = world.geneses[LevelWorld.nexus]!
@@ -332,7 +362,7 @@ final class LevelSimulationTests: XCTestCase {
             }
             return try HostCore.restore(
                 records: Array(records.values), facts: facts,
-                issued: batches.flatMap(\.issued), hosted: world.hosted, pins: host.pins
+                issued: batches.flatMap(\.issued), hosted: hosted ?? world.hosted, pins: host.pins
             )
         }
     }
@@ -353,6 +383,75 @@ final class LevelSimulationTests: XCTestCase {
         var restored = try driver.restored()
         XCTAssertEqual(restored.levels[LevelWorld.alpha]?.genesis, driver.ground, "a restore keeps the switch")
         XCTAssertTrue(restored.pendingBootstraps(now: driver.now).isEmpty)
+        let unhosted = try driver.restored(hosted: [])
+        XCTAssertEqual(Array(unhosted.levels.keys), [LevelWorld.nexus], "a level no longer hosted is not restored")
+    }
+
+    /// A bootstrap answer for a genesis no longer asked (a stale failure)
+    /// changes nothing: the current genesis is not marked failed and its
+    /// own answer still lands.
+    func testAStaleBootstrapAnswerIsIgnored() async throws {
+        var driver = try await HostDriver()
+        driver.answer = false
+        try await driver.weighAndExecute([driver.block(issuing: 0)])
+        XCTAssertEqual(driver.unanswered.map(\.1), [driver.real])
+        try await driver.step(.bootstrapped(LevelWorld.alpha, genesisCID: driver.ground, .failure(.unavailableEvidence)))
+        try await driver.step(.tick)
+        XCTAssertEqual(driver.asked, [driver.real], "the stale failure neither failed nor re-asked the current genesis")
+        driver.answer = true
+        let (path, cid, facts) = driver.unanswered[0]
+        let world = driver.world
+        let result = await ChainTree.bootstrap(
+            genesis: BlockHeader(rawCID: cid), fetcher: world.cas,
+            context: try ChainRuntimeContext(path: path), parentFacts: facts,
+            validationContext: ValidationContext(nowMilliseconds: driver.now)
+        ).map { boot -> BootstrappedLevel in
+            let genesis = world.geneses[path]!
+            return BootstrappedLevel(
+                genesis: StoredHeader(blockCID: genesis.cid, block: genesis.block, children: genesis.children),
+                spec: world.specs[path]!, bootstrap: boot
+            )
+        }
+        try await driver.step(.bootstrapped(path, genesisCID: cid, result))
+        XCTAssertEqual(driver.hosted, driver.real)
+    }
+
+    /// A host restored after its parent reorged past its child's link (the
+    /// child's record still the old genesis): `pendingBootstraps` drops the
+    /// level, persisting the removal, and asks for the new genesis.
+    func testPendingBootstrapsPersistsARemovalAfterRestore() async throws {
+        var driver = try await HostDriver()
+        try await driver.weighAndExecute([driver.block(issuing: 0), driver.world.grinds[1].root])
+        XCTAssertEqual(driver.hosted, driver.real)
+        let hostedUntil = driver.batches.count
+        try await driver.weighAndExecute([driver.block(issuing: 1)] + driver.world.reorg)
+        XCTAssertEqual(driver.hosted, driver.ground)
+
+        let world = driver.world
+        let rootGenesis = world.geneses[LevelWorld.nexus]!
+        var rootFacts = [world.rootBootstrap.facts]
+        var alphaFacts: [BlockImportBatch] = []
+        for (position, batch) in driver.batches.enumerated() {
+            for (path, level) in batch.levels {
+                if path == LevelWorld.nexus { rootFacts += level.facts }
+                if path == LevelWorld.alpha, position < hostedUntil { alphaFacts += level.facts }
+            }
+        }
+        var restored = try HostCore.restore(
+            records: [LevelRecord(
+                path: LevelWorld.nexus, spec: world.specs[LevelWorld.nexus]!,
+                genesis: StoredHeader(blockCID: rootGenesis.cid, block: rootGenesis.block, children: rootGenesis.children)
+            )] + driver.batches[..<hostedUntil].flatMap(\.added),
+            facts: [LevelWorld.nexus: rootFacts, LevelWorld.alpha: alphaFacts],
+            issued: driver.batches.flatMap(\.issued),
+            hosted: world.hosted
+        )
+        XCTAssertEqual(restored.levels[LevelWorld.alpha]?.genesis, driver.real)
+        let effects = restored.pendingBootstraps(now: driver.now)
+        guard case .persist(let batch) = effects.first else { return XCTFail("no batch persisted: \(effects)") }
+        XCTAssertEqual(batch.removed, [LevelWorld.alpha])
+        XCTAssertNil(restored.levels[LevelWorld.alpha])
+        XCTAssertTrue(effects.contains { if case .bootstrap(_, let cid, _) = $0 { return cid == driver.ground } else { return false } })
     }
 
     /// A genesis that fails to bootstrap is retried on a tick (its content

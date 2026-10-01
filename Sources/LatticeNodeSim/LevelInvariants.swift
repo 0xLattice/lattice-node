@@ -185,6 +185,15 @@ public enum LevelInvariants {
         if proofs.verifying.count > bounds.maxChecks {
             throw fail("\(proofs.verifying.count) proof checks in flight, over the bound")
         }
+        if proofs.awaitingBytes > bounds.awaitingBudget
+            || proofs.awaitingBytes != proofs.awaiting.values.reduce(0, { $0 + $1.bytes }) {
+            throw fail("headers awaiting a proof hold \(proofs.awaitingBytes) bytes, over or off their budget")
+        }
+        let queuedProofs = proofs.awaiting.values.flatMap(\.unverified)
+            + core.sync.pending.entries.values.flatMap(\.unverified)
+        if queuedProofs.contains(where: { $0.bytes > bounds.maxProofBytes }) {
+            throw fail("a queued proof is larger than the per-proof bound")
+        }
         if proofs.awaiting.count > bounds.maxAwaiting {
             throw fail("\(proofs.awaiting.count) headers await a proof, over the bound")
         }

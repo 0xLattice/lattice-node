@@ -19,7 +19,8 @@ public enum HostEvent: Sendable {
     /// `connectJob`, with `parentFacts` for a child level).
     case connected(ChainPath, ConnectVerdict)
     /// The answer to a `bootstrap` effect.
-    case bootstrapped(ChainPath, Result<BootstrappedLevel, BlockImportError>)
+    /// Answers for a genesis no longer being asked are ignored.
+    case bootstrapped(ChainPath, genesisCID: String, Result<BootstrappedLevel, BlockImportError>)
     /// This host's own grind.
     case mined(MinedGrind)
 }
@@ -115,6 +116,10 @@ public struct HostBatch: Sendable {
     public internal(set) var added: [LevelRecord] = []
     /// Child levels this host stopped running (their genesis left the
     /// parent's act-on path): a restore drops them.
+    ///
+    /// For the shell: a removed level is unpublished and no longer served.
+    /// The core drops the removed level's own effects of the same step, so
+    /// nothing it emitted that step reaches the network.
     public internal(set) var removed: [ChainPath] = []
     public internal(set) var issued: [IssuedGenesisLink] = []
 
@@ -193,6 +198,9 @@ public struct HostCore: Sendable {
             config: config
         )
         for record in ordered.dropFirst() {
+            // A level the operator no longer hosts, or whose parent is gone,
+            // is not restored.
+            guard hosted.contains(record.path), host.levels[Array(record.path.dropLast())] != nil else { continue }
             host.levels[record.path] = try Core.restore(
                 replaying: facts[record.path] ?? [],
                 context: try ChainRuntimeContext(path: record.path),
@@ -213,7 +221,7 @@ public struct HostCore: Sendable {
     public mutating func pendingBootstraps(now: Int64) -> [HostEffect] {
         var turn = Turn(now: now)
         reconcileChildren(retryFailed: true, &turn)
-        return turn.effects
+        return emit(turn)
     }
 
     public enum HostRestoreError: Error {
@@ -283,8 +291,8 @@ public struct HostCore: Sendable {
             for path in ordered { run(path, .tick, &turn) }
         case .connected(let path, let verdict):
             connected(verdict, at: path, &turn)
-        case .bootstrapped(let path, let result):
-            bootstrapped(result, at: path, &turn)
+        case .bootstrapped(let path, let genesisCID, let result):
+            bootstrapped(result, genesisCID: genesisCID, at: path, &turn)
         case .mined(let grind):
             mined(grind, &turn)
         }
@@ -295,6 +303,11 @@ public struct HostCore: Sendable {
             reconcileChildren(&turn)
         }
         attributeRuns(&turn)
+        return emit(turn)
+    }
+
+    /// One step's effects: its one batch first, then the rest in order.
+    func emit(_ turn: Turn) -> [HostEffect] {
         var effects: [HostEffect] = turn.batch.isEmpty ? [] : [.persist(turn.batch)]
         effects += turn.effects
         effects += turn.disconnects.sorted { $0.key < $1.key }.map { .disconnect($0.key, $0.value) }
@@ -410,16 +423,13 @@ public struct HostCore: Sendable {
     /// its descendants, and the wanted one is bootstrapped. A failed genesis
     /// is tried again only on a tick.
     mutating func reconcileChildren(retryFailed: Bool = false, _ turn: inout Turn) {
+        for path in levels.keys.sorted(by: Self.order) where path != rootPath && !hosted.contains(path) {
+            remove(path, &turn)
+        }
         for child in hosted.sorted(by: Self.order) {
             let wanted = wantedGenesis(of: child)
             if let level = levels[child], level.genesis != wanted?.childGenesisCID {
-                for path in levels.keys where path.starts(with: child) {
-                    levels[path] = nil
-                    committers[path] = nil
-                    bootstrapping[path] = nil
-                    turn.batch.levels.removeAll { $0.path == path }
-                    turn.batch.removed.append(path)
-                }
+                remove(child, &turn)
             }
             guard let link = wanted, levels[child] == nil, let facts = parentFacts(for: child),
                   bootstrapping[child] != link.childGenesisCID else { continue }
@@ -432,11 +442,35 @@ public struct HostCore: Sendable {
         }
     }
 
+    /// Stop a child level and its descendants: recorded as removed, its
+    /// writes and effects of this step dropped.
+    mutating func remove(_ child: ChainPath, _ turn: inout Turn) {
+        for path in levels.keys.sorted(by: Self.order) where path.starts(with: child) {
+            levels[path] = nil
+            committers[path] = nil
+            bootstrapping[path] = nil
+            turn.batch.levels.removeAll { $0.path == path }
+            turn.batch.removed.append(path)
+            turn.effects.removeAll {
+                if case .level(let at, _) = $0 { return at == path }
+                return false
+            }
+        }
+    }
+
     /// A bootstrapped child chain becomes a level if it is still the wanted
     /// genesis. Its genesis persists with the step (replacing any earlier
     /// record for the path), its parent starts serving runs for it, and it
     /// syncs from every peer. A failed bootstrap is retried on a tick.
-    mutating func bootstrapped(_ result: Result<BootstrappedLevel, BlockImportError>, at path: ChainPath, _ turn: inout Turn) {
+    mutating func bootstrapped(
+        _ result: Result<BootstrappedLevel, BlockImportError>,
+        genesisCID: String,
+        at path: ChainPath,
+        _ turn: inout Turn
+    ) {
+        // A stale answer (a genesis no longer asked) changes nothing: it can
+        // never mark the current genesis failed.
+        guard bootstrapping[path] == genesisCID else { return }
         guard let asked = bootstrapping.removeValue(forKey: path), levels[path] == nil, hosted.contains(path) else { return }
         guard case .success(let level) = result, level.genesis.blockCID == asked,
               wantedGenesis(of: path)?.childGenesisCID == asked else {

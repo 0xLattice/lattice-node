@@ -3,15 +3,22 @@ import UInt256
 
 /// A child level's proof bounds.
 public struct ProofConfig: Sendable {
-    /// Proof checks in flight at once, and per source (a peer, or the
-    /// evidence index), so no source can hold every slot.
+    /// Proof checks in flight at once. `indexReserve` of them only the
+    /// evidence index (this node's own lookups) may take; peers share the
+    /// rest, each at most `maxChecksPerSource` and at most an equal share
+    /// among the peers with checks queued or in flight.
     public var maxChecks: Int
     public var maxChecksPerSource: Int
-    /// Proofs taken from, or held for, one header.
+    public var indexReserve: Int
+    /// Proofs taken from, or held for, one header, and the largest proof
+    /// taken at all (a larger one is dropped, never blamed).
     public var maxPerHeader: Int
-    /// Headers awaiting their first proof that weighs, at once and per peer.
+    public var maxProofBytes: Int
+    /// Headers awaiting their first proof that weighs: at once, per peer,
+    /// and in bytes (the headers and their queued proofs).
     public var maxAwaiting: Int
     public var maxAwaitingPerPeer: Int
+    public var awaitingBudget: Int
     /// Blocks the evidence index named that this node does not hold: a
     /// header without proofs is taken only for one of these (or a parent a
     /// waiting header names).
@@ -20,16 +27,22 @@ public struct ProofConfig: Sendable {
     public init(
         maxChecks: Int = 256,
         maxChecksPerSource: Int = 64,
+        indexReserve: Int = 32,
         maxPerHeader: Int = 8,
+        maxProofBytes: Int = 64 * 1_024,
         maxAwaiting: Int = 1_024,
         maxAwaitingPerPeer: Int = 256,
+        awaitingBudget: Int = 8 * 1_024 * 1_024,
         maxWanted: Int = 4_096
     ) {
         self.maxChecks = maxChecks
         self.maxChecksPerSource = maxChecksPerSource
+        self.indexReserve = indexReserve
         self.maxPerHeader = maxPerHeader
+        self.maxProofBytes = maxProofBytes
         self.maxAwaiting = maxAwaiting
         self.maxAwaitingPerPeer = maxAwaitingPerPeer
+        self.awaitingBudget = awaitingBudget
         self.maxWanted = maxWanted
     }
 }
@@ -50,11 +63,13 @@ public struct ProofKey: Hashable, Comparable, Sendable {
     }
 }
 
-/// A proof not yet checked, and where it came from (nil: the evidence index).
+/// A proof not yet checked, where it came from (nil: the evidence index),
+/// and its serialized size, charged to whatever holds it.
 public struct QueuedProof: Sendable {
     public let proof: ChildBlockProof
     public let id: String
     public let source: PeerID?
+    public let bytes: Int
 }
 
 /// One proof check the shell runs off the step: `verifySecuringWork` of
@@ -83,7 +98,8 @@ public struct ProofJob: Sendable {
 
 /// A child header awaiting its first proof that weighs. It lives apart from
 /// the pending queue (which holds only headers with verified work), bounded
-/// by count and per peer; an entry with a check in flight is never evicted.
+/// by count, per peer and in bytes; an entry with a check in flight is never
+/// evicted.
 public struct AwaitingProof: Sendable {
     public let blockCID: String
     public let block: Block
@@ -93,17 +109,31 @@ public struct AwaitingProof: Sendable {
     public internal(set) var inFlight: Set<String> = []
     /// Whether its proofs were looked up since the evidence index changed.
     public internal(set) var lookedUp = false
+    /// The header's bytes and its queued proofs'.
+    public internal(set) var bytes: Int
     let sequence: UInt64
+
+    var source: PeerID? { announcers.first }
+}
+
+/// A queued proof by its header and content.
+struct ProofRef: Sendable, Hashable {
+    let cid: String
+    let id: String
 }
 
 /// A child level's proof work.
 public struct ProofSync: Sendable {
     public internal(set) var awaiting: [String: AwaitingProof] = [:]
+    public internal(set) var awaitingBytes = 0
     /// Checks in flight, and the source each is charged to.
     public internal(set) var verifying: [ProofKey: PeerID?] = [:]
     var perSource: [PeerID?: Int] = [:]
-    /// Blocks with queued, unchecked proofs.
-    var queued: Set<String> = []
+    /// Queued proofs, FIFO per source, served round-robin across sources
+    /// from a rotating start.
+    var fifo: [PeerID?: [ProofRef]] = [:]
+    var rotation: [PeerID?] = []
+    var cursor = 0
     /// Weighed blocks to look up in the evidence index again.
     var relookup: Set<String> = []
     var wanted: Set<String> = []
@@ -112,8 +142,25 @@ public struct ProofSync: Sendable {
 
     public init() {}
 
+    /// Whether `source` may start a check now: a free slot, outside the
+    /// index's reserve for a peer, and within the peer's share.
     func hasSlot(for source: PeerID?, _ config: ProofConfig) -> Bool {
-        verifying.count < config.maxChecks && (perSource[source] ?? 0) < config.maxChecksPerSource
+        guard verifying.count < config.maxChecks else { return false }
+        guard let source else { return true }
+        // The reserve always leaves peers at least one slot.
+        let peerCapacity = max(1, config.maxChecks - config.indexReserve)
+        let peerChecks = verifying.count - (perSource[nil] ?? 0)
+        guard peerChecks < peerCapacity else { return false }
+        var active = Set(perSource.keys.compactMap { $0 })
+        for (queued, refs) in fifo where !refs.isEmpty { if let queued { active.insert(queued) } }
+        active.remove(source)
+        let share = max(1, min(config.maxChecksPerSource, peerCapacity / (active.count + 1)))
+        return (perSource[source] ?? 0) < share
+    }
+
+    mutating func enqueue(_ ref: ProofRef, from source: PeerID?) {
+        if fifo[source]?.isEmpty ?? true, !rotation.contains(source) { rotation.append(source) }
+        fifo[source, default: []].append(ref)
     }
 
     mutating func want(_ cid: String, _ config: ProofConfig) {
@@ -147,50 +194,81 @@ extension Core {
     mutating func awaitProof(_ entry: HeaderEntry, cid: String, from peer: PeerID, _ turn: inout Turn) {
         if var held = sync.proofs.awaiting[cid] {
             if !held.announcers.contains(peer) { held.announcers.append(peer) }
-            if held.children == nil, let children = entry.children { held.children = children }
+            if held.children == nil, let children = entry.children {
+                let size = Self.size(of: children)
+                held.children = children
+                held.bytes += size
+                sync.proofs.awaitingBytes += size
+            }
             sync.proofs.awaiting[cid] = held
             offer(entry.proofs, for: entry.block, cid: cid, from: peer, &turn)
+            trimAwaiting()
             return
         }
         let wanted = sync.proofs.wanted.contains(cid) || sync.pending.childrenOf[cid] != nil
             || sync.proofs.awaiting.values.contains { $0.block.parent?.rawCID == cid }
         guard !entry.proofs.isEmpty || wanted else { return }
-        let fromPeer = sync.proofs.awaiting.values.filter { $0.announcers.first == peer }.count
-        guard fromPeer < proofConfig.maxAwaitingPerPeer, makeRoomToAwait() else { return }
+        let fromPeer = sync.proofs.awaiting.values.filter { $0.source == peer }.count
+        let bytes = Self.size(of: entry.block) + (entry.children.map(Self.size) ?? 0)
+        guard fromPeer < proofConfig.maxAwaitingPerPeer, makeRoomToAwait(bytes) else { return }
         sync.proofs.sequence += 1
         sync.proofs.awaiting[cid] = AwaitingProof(
             blockCID: cid, block: entry.block, children: entry.children,
-            announcers: [peer], sequence: sync.proofs.sequence
+            announcers: [peer], bytes: bytes, sequence: sync.proofs.sequence
         )
+        sync.proofs.awaitingBytes += bytes
         sync.proofs.wanted.remove(cid)
         offer(entry.proofs, for: entry.block, cid: cid, from: peer, &turn)
+        trimAwaiting()
     }
 
-    /// Room for one more waiting header: evict the oldest with no check in
-    /// flight, or refuse.
-    mutating func makeRoomToAwait() -> Bool {
-        guard sync.proofs.awaiting.count >= proofConfig.maxAwaiting else { return true }
-        guard let victim = sync.proofs.awaiting.values
-            .filter({ $0.inFlight.isEmpty })
-            .min(by: { $0.sequence < $1.sequence }) else { return false }
+    /// Room for one more waiting header of `bytes`: evict from the source
+    /// holding the most entries (bytes, when over the byte budget), its
+    /// oldest with no check in flight; or refuse.
+    mutating func makeRoomToAwait(_ bytes: Int) -> Bool {
+        while sync.proofs.awaiting.count >= proofConfig.maxAwaiting
+                || sync.proofs.awaitingBytes + bytes > proofConfig.awaitingBudget {
+            let byCount = sync.proofs.awaiting.count >= proofConfig.maxAwaiting
+            guard evictAwaiting(byBytes: !byCount) else { return false }
+        }
+        return true
+    }
+
+    /// Back within the byte budget after queued proofs grew an entry.
+    mutating func trimAwaiting() {
+        while sync.proofs.awaitingBytes > proofConfig.awaitingBudget, evictAwaiting(byBytes: true) {}
+    }
+
+    mutating func evictAwaiting(byBytes: Bool) -> Bool {
+        var load: [PeerID?: Int] = [:]
+        for entry in sync.proofs.awaiting.values where entry.inFlight.isEmpty {
+            load[entry.source, default: 0] += byBytes ? entry.bytes : 1
+        }
+        guard let heaviest = load.max(by: { $0.value != $1.value ? $0.value < $1.value : "\(String(describing: $0.key))" > "\(String(describing: $1.key))" })?.key,
+              let victim = sync.proofs.awaiting.values
+                .filter({ $0.inFlight.isEmpty && $0.source == heaviest })
+                .min(by: { $0.sequence < $1.sequence }) else { return false }
         sync.proofs.awaiting[victim.blockCID] = nil
-        sync.proofs.queued.remove(victim.blockCID)
+        sync.proofs.awaitingBytes -= victim.bytes
         return true
     }
 
     /// Check each new proof (by content) of a waiting, pending or weighed
-    /// header now if a slot is free for its source, else queue it with the
-    /// header (up to `maxPerHeader`). A proof that cannot be kept clears the
-    /// header's lookup, or queues a weighed block for another, so it is
-    /// found again later.
+    /// header now if its source has a free slot and nothing queued ahead of
+    /// it, else queue it with the header (up to `maxPerHeader`, its bytes
+    /// charged there). A proof larger than `maxProofBytes` is dropped
+    /// without blame. A proof that cannot be kept clears the header's
+    /// lookup, or queues a weighed block for another, so it is found again.
     mutating func offer(_ proofs: [ChildBlockProof], for block: Block?, cid: String, from source: PeerID?, _ turn: inout Turn) {
         for proof in proofs.prefix(proofConfig.maxPerHeader) {
-            guard let id = ProofJob.id(of: proof) else { continue }
+            guard let bytes = try? proof.serialize(), bytes.count <= proofConfig.maxProofBytes else { continue }
+            let id = "\(UInt256.hash(bytes))"
             let key = ProofKey(childCID: cid, proofID: id)
             guard sync.proofs.verifying[key] == nil, !isQueued(id, at: cid), !credits(proof.rootCID, at: cid) else { continue }
-            if sync.proofs.hasSlot(for: source, proofConfig) {
-                dispatch(QueuedProof(proof: proof, id: id, source: source), cid: cid, block: block, &turn)
-            } else if !queue(QueuedProof(proof: proof, id: id, source: source), at: cid) {
+            let queued = QueuedProof(proof: proof, id: id, source: source, bytes: bytes.count)
+            if sync.proofs.fifo[source]?.isEmpty ?? true, sync.proofs.hasSlot(for: source, proofConfig) {
+                dispatch(queued, cid: cid, block: block, &turn)
+            } else if !queue(queued, at: cid) {
                 skipped(cid)
             }
         }
@@ -201,17 +279,42 @@ extension Core {
             .contains { $0.id == id }
     }
 
+    /// Queue a proof with its waiting or pending header, charging its bytes
+    /// there (the pending queue's budget then evicts as it does).
     mutating func queue(_ proof: QueuedProof, at cid: String) -> Bool {
         if var held = sync.proofs.awaiting[cid], held.unverified.count < proofConfig.maxPerHeader {
             held.unverified.append(proof)
+            held.bytes += proof.bytes
             sync.proofs.awaiting[cid] = held
+            sync.proofs.awaitingBytes += proof.bytes
         } else if let held = sync.pending.entries[cid], held.unverified.count < proofConfig.maxPerHeader {
             sync.pending.entries[cid]?.unverified.append(proof)
+            sync.pending.entries[cid]?.bytes += proof.bytes
+            sync.pending.bytes += proof.bytes
         } else {
             return false
         }
-        sync.proofs.queued.insert(cid)
+        sync.proofs.enqueue(ProofRef(cid: cid, id: proof.id), from: proof.source)
+        if sync.pending.entries[cid] != nil { sync.evict(to: config.pendingBudget) }
         return true
+    }
+
+    /// Take a queued proof back from its header, uncharging its bytes; nil
+    /// when the header or the proof is gone.
+    mutating func takeQueued(_ ref: ProofRef) -> QueuedProof? {
+        if var held = sync.proofs.awaiting[ref.cid] {
+            guard let at = held.unverified.firstIndex(where: { $0.id == ref.id }) else { return nil }
+            let proof = held.unverified.remove(at: at)
+            held.bytes -= proof.bytes
+            sync.proofs.awaiting[ref.cid] = held
+            sync.proofs.awaitingBytes -= proof.bytes
+            return proof
+        }
+        guard let at = sync.pending.entries[ref.cid]?.unverified.firstIndex(where: { $0.id == ref.id }),
+              let proof = sync.pending.entries[ref.cid]?.unverified.remove(at: at) else { return nil }
+        sync.pending.entries[ref.cid]?.bytes -= proof.bytes
+        sync.pending.bytes -= proof.bytes
+        return proof
     }
 
     /// A proof this node could not keep: look the block up again later.
@@ -244,6 +347,7 @@ extension Core {
     mutating func proofsFound(_ proofs: [ChildBlockProof], for cid: String, _ turn: inout Turn) {
         guard sync.proofs.awaiting[cid] != nil || sync.pending.entries[cid] != nil || index.contains(cid) else { return }
         offer(proofs, for: nil, cid: cid, from: nil, &turn)
+        trimAwaiting()
     }
 
     mutating func evidenceChanged(_ cids: [String]) {
@@ -295,35 +399,37 @@ extension Core {
             }
         } else if let held = sync.pending.entries[cid] {
             guard held.evidence[evidence.grindID] == nil else { return }
+            let size = (try? job.proof.serialize().count) ?? 0
             sync.pending.entries[cid]?.evidence[evidence.grindID] = evidence
             sync.pending.entries[cid]?.proofs[evidence.grindID] = job.proof
+            sync.pending.entries[cid]?.bytes += size
+            sync.pending.bytes += size
+            sync.evict(to: config.pendingBudget)
         } else if let waiting = sync.proofs.awaiting.removeValue(forKey: cid) {
+            sync.proofs.awaitingBytes -= waiting.bytes
             promote(waiting, evidence: evidence, proof: job.proof, &turn)
         }
     }
 
     /// A waiting header has verified work: it enters the pending queue, at
     /// its root's achieved hash, as `accept` enters a root header, and is
-    /// weighed at once when its parent is.
+    /// weighed at once when its parent is. Its bytes (and its queued
+    /// proofs') move with it.
     mutating func promote(_ waiting: AwaitingProof, evidence: VerifiedChildEvidence, proof: ChildBlockProof, _ turn: inout Turn) {
         let cid = waiting.blockCID
-        sync.proofs.queued.remove(cid)
         guard waiting.block.parent != nil else { return }
-        let proofBytes = ((try? proof.serialize().count) ?? 0)
-            + waiting.unverified.reduce(0) { $0 + ((try? $1.proof.serialize().count) ?? 0) }
         var header = PendingHeader(
             blockCID: cid,
             block: waiting.block,
             children: waiting.children,
             hash: evidence.rootHash,
-            bytes: Self.size(of: waiting.block) + (waiting.children.map(Self.size) ?? 0) + proofBytes,
+            bytes: waiting.bytes + ((try? proof.serialize().count) ?? 0),
             announcers: waiting.announcers
         )
         header.evidence[evidence.grindID] = evidence
         header.proofs[evidence.grindID] = proof
         header.unverified = waiting.unverified
         sync.pending.insert(header)
-        if !header.unverified.isEmpty { sync.proofs.queued.insert(cid) }
         for peer in waiting.announcers { sync.announced[peer, default: []].insert(cid) }
         dirty(cid, &turn)
         sync.evict(to: config.pendingBudget)
@@ -331,28 +437,34 @@ extension Core {
 
     // MARK: - Each step
 
-    /// Check queued proofs while slots are free, then ask the evidence index
-    /// in one batch: for every child header weighed this step (another
-    /// host's grinds), every waiting header with no proof in hand, and every
-    /// weighed block queued for another lookup.
+    /// Check queued proofs while slots are free — round-robin across
+    /// sources from a rotating start, FIFO within each, so no source wins
+    /// every freed slot — then ask the evidence index in one batch: for
+    /// every child header weighed this step (another host's grinds), every
+    /// waiting header with no proof in hand, and every weighed block queued
+    /// for another lookup.
     mutating func proofWork(_ turn: inout Turn) {
-        for cid in sync.proofs.queued.sorted() where sync.proofs.verifying.count < proofConfig.maxChecks {
-            var waiting = sync.proofs.awaiting[cid]?.unverified ?? sync.pending.entries[cid]?.unverified ?? []
-            var kept: [QueuedProof] = []
-            for queued in waiting {
-                if sync.proofs.hasSlot(for: queued.source, proofConfig), !credits(queued.proof.rootCID, at: cid) {
-                    dispatch(queued, cid: cid, block: nil, &turn)
-                } else if !credits(queued.proof.rootCID, at: cid) {
-                    kept.append(queued)
+        var progress = true
+        while progress, sync.proofs.verifying.count < proofConfig.maxChecks, !sync.proofs.rotation.isEmpty {
+            progress = false
+            let sources = sync.proofs.rotation
+            let start = sync.proofs.cursor % sources.count
+            for offset in 0..<sources.count {
+                let source = sources[(start + offset) % sources.count]
+                guard sync.proofs.hasSlot(for: source, proofConfig) else { continue }
+                while var refs = sync.proofs.fifo[source], !refs.isEmpty {
+                    let ref = refs.removeFirst()
+                    sync.proofs.fifo[source] = refs
+                    guard let queued = takeQueued(ref) else { continue }
+                    if credits(queued.proof.rootCID, at: ref.cid) { continue }
+                    dispatch(queued, cid: ref.cid, block: nil, &turn)
+                    progress = true
+                    break
                 }
             }
-            waiting = kept
-            if sync.proofs.awaiting[cid] != nil {
-                sync.proofs.awaiting[cid]?.unverified = waiting
-            } else if sync.pending.entries[cid] != nil {
-                sync.pending.entries[cid]?.unverified = waiting
-            }
-            if waiting.isEmpty { sync.proofs.queued.remove(cid) }
+            sync.proofs.cursor = start + 1
+            sync.proofs.rotation.removeAll { sync.proofs.fifo[$0]?.isEmpty ?? true }
+            for (source, refs) in sync.proofs.fifo where refs.isEmpty { sync.proofs.fifo[source] = nil }
         }
         var wanted = Set(turn.headers.map(\.blockCID))
         for (cid, held) in sync.proofs.awaiting
@@ -399,7 +511,6 @@ extension Core {
             turn.indexed.append((header.blockCID, proof))
         }
         if !header.unverified.isEmpty { sync.proofs.relookup.insert(header.blockCID) }
-        sync.proofs.queued.remove(header.blockCID)
         return credited
     }
 
@@ -432,8 +543,9 @@ extension Core {
         if !held {
             let waiting = sync.pending.childrenOf[cid] ?? []
             sync.removePending(cid)
-            sync.proofs.awaiting[cid] = nil
-            sync.proofs.queued.remove(cid)
+            if let waiting = sync.proofs.awaiting.removeValue(forKey: cid) {
+                sync.proofs.awaitingBytes -= waiting.bytes
+            }
             turn.headers.append(StoredHeader(blockCID: cid, block: block, children: children))
             index.add(cid, parent: block.parent?.rawCID, height: block.height)
             for child in waiting { dirty(child, &turn) }
