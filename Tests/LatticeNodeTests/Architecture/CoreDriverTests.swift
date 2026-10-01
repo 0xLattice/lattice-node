@@ -48,8 +48,10 @@ final class CoreDriverTests: NetworkTrustTestCase {
         let producerProcess = try await ChainProcess.open(configuration: producer.configuration)
         let clock = TestBlockClock()
         var tip = try await producerProcess.canonicalTipBlock()
+        var blockCIDs: [String] = []
         for _ in 0..<4 {
             tip = try await acceptNexusBlock(on: tip, process: producerProcess, timestamp: clock.next())
+            blockCIDs.append(try BlockHeader(node: tip).rawCID)
         }
         let tipCID = try BlockHeader(node: tip).rawCID
         let producerDriver = try await CoreDriver.start(
@@ -79,5 +81,14 @@ final class CoreDriverTests: NetworkTrustTestCase {
         let snapshot = try XCTUnwrap(host.levels[host.rootPath]?.snapshot)
         XCTAssertEqual(snapshot.actOnTip, tipCID)
         XCTAssertEqual(snapshot.bestHeaderTip, tipCID)
+
+        // The executed bodies stay retained across the restart: the node's
+        // eviction pass, with no storage-age grace, keeps every one.
+        _ = try await reopened.pruneUnpinnedVolumes()
+        _ = try await reopened.broker.evictUnpinned(graceSeconds: 0)
+        for cid in blockCIDs {
+            let volume = await reopened.volume(cid)
+            XCTAssertNotNil(volume, "body \(cid) was evicted after restart")
+        }
     }
 }

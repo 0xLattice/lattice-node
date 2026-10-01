@@ -16,14 +16,21 @@ extension ChainProcess {
 
     /// `Effect.persist`: content first — post-states into the Volume store,
     /// header bytes into the header store, both durable and the Volume roots
-    /// retained — then the batch's facts in one state.db transaction.
-    nonisolated func persistCoreBatch(_ batch: PersistBatch, headers: CoreHeaderStore) async throws {
+    /// retained — then the batch's facts in one state.db transaction, with
+    /// every root they reference: the post-states' and `bodyRoots`, the
+    /// stored bodies of the blocks it validates. Boot keeps exactly the
+    /// journaled roots retained.
+    nonisolated func persistCoreBatch(
+        _ batch: PersistBatch,
+        headers: CoreHeaderStore,
+        bodyRoots: [String] = []
+    ) async throws {
         let storage = NodeImportStorage(storage: broker)
         for state in batch.states {
             try await Self.storeExecutedState(state, in: storage)
         }
         try headers.store(batch.headers)
-        let roots = await storage.takeStoredVolumeRoots()
+        let roots = await storage.takeStoredVolumeRoots() + bodyRoots
         try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
         // PENDING #72 / decision 18d: genesis links are deleted; a Nexus-only
         // driver issues none it would need to keep.
@@ -33,14 +40,16 @@ extension ChainProcess {
     /// `Effect.fetchBody`: the block's Volume and the nested Volumes its
     /// execution reads, through the content layer (local store first, then
     /// any overlay provider of the root), stored and retained locally.
-    nonisolated func fetchCoreBody(_ cid: String, remote: IvyRootContentSource) async throws {
+    /// Returns the roots it stored in, for the validation that references
+    /// them.
+    nonisolated func fetchCoreBody(_ cid: String, remote: IvyRootContentSource) async throws -> [String] {
         try await remote.withRoot(cid) { session in
             let fetcher = CoalescingFetcher(CompositeContentSource([broker, session]))
             let storage = NodeImportStorage(storage: broker)
             try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: storage)
-            try await broker.mergeRetainedRoots(
-                scope: retentionScope, roots: await storage.takeStoredVolumeRoots()
-            )
+            let roots = await storage.takeStoredVolumeRoots()
+            try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
+            return roots
         }
     }
 
