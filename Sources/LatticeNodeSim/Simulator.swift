@@ -203,7 +203,7 @@ public struct Simulator {
             context: world.context,
             spec: world.spec,
             config: node.core.config,
-            log: WeighLog(id: name, entries: node.store.log)
+            logID: name
         )
         guard restored.sync.log.entries == node.core.sync.log.entries else {
             throw Invariants.fail(name, "replaying the store gives a different weigh log")
@@ -598,7 +598,7 @@ public struct Simulator {
                 // sent only once durable.
                 if case .stream(let page) = message {
                     for entry in page.entries where entry.entry.kind == .header {
-                        guard node.store.headers[entry.entry.cid] != nil, node.store.logged.contains(entry.entry) else {
+                        guard node.store.headers[entry.entry.cid] != nil else {
                             throw Invariants.fail(name, "streamed \(entry.entry.cid) before it was durable")
                         }
                     }

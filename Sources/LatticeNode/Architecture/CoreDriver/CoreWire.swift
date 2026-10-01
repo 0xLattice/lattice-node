@@ -25,7 +25,7 @@ struct StreamRequestMessage: NodeJSONMessage, Equatable, Sendable {
     let after: UInt64
 
     func validate() throws {
-        guard _isAbsoluteChainPath(chainPath), logID.map({ _isBoundedWireAtom($0) }) ?? true else {
+        guard _isAbsoluteChainPath(chainPath), logID.map(_isWireLogID) ?? true else {
             throw NodeNetworkWireError.malformed
         }
     }
@@ -39,8 +39,9 @@ struct WireLogEntry: Codable, Equatable, Sendable {
     let cid: String
     let block: String
 
+    /// A header names its block; a proof names its grind's root: both CIDs.
     var isBounded: Bool {
-        _isBoundedWireAtom(cid) && _isBoundedWireAtom(block) && (proof || cid == block)
+        _isCoreWireCID(cid) && _isCoreWireCID(block) && (proof || cid == block)
     }
 }
 
@@ -56,7 +57,9 @@ struct StreamPageMessage: NodeJSONMessage, Equatable, Sendable {
     let hasMore: Bool
 
     func validate() throws {
-        guard _isAbsoluteChainPath(chainPath), _isBoundedWireAtom(logID),
+        // An empty log id only on an empty page (a level the sender does not
+        // run).
+        guard _isAbsoluteChainPath(chainPath), _isWireLogID(logID), !logID.isEmpty || entries.isEmpty,
               entries.count <= Self.maximumEntries, entries.allSatisfy(\.isBounded) else {
             throw NodeNetworkWireError.malformed
         }
@@ -73,7 +76,7 @@ struct DataRequestMessage: NodeJSONMessage, Equatable, Sendable {
 
     func validate() throws {
         guard _isAbsoluteChainPath(chainPath), cids.count <= Self.maximumCIDs,
-              cids.allSatisfy({ _isBoundedWireAtom($0) }) else {
+              cids.allSatisfy(_isCoreWireCID) else {
             throw NodeNetworkWireError.malformed
         }
     }
@@ -91,7 +94,7 @@ struct AncestorsRequestMessage: NodeJSONMessage, Equatable, Sendable {
 
     func validate() throws {
         guard _isAbsoluteChainPath(chainPath),
-              _isBoundedWireAtom(cid),
+              _isCoreWireCID(cid),
               (1...Self.maximumAncestors).contains(maximum) else {
             throw NodeNetworkWireError.malformed
         }
@@ -234,3 +237,13 @@ enum CoreWire {
 /// The core's sync message, for files that import Tally (whose `PeerID`
 /// clashes with the core's).
 typealias CoreSyncMessage = SyncMessage
+
+/// A CID on the core's wire: canonical, and no longer than a CID can be.
+func _isCoreWireCID(_ value: String) -> Bool {
+    value.utf8.count <= 128 && CIDIdentity.isCanonical(value)
+}
+
+/// A weigh log id: printable ASCII, at most 128 bytes.
+func _isWireLogID(_ value: String) -> Bool {
+    value.utf8.count <= 128 && value.utf8.allSatisfy { (0x21...0x7E).contains($0) }
+}

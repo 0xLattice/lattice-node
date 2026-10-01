@@ -71,9 +71,7 @@ public final class CoreDriver: Sendable {
         failStop: @escaping @Sendable (any Error) -> Void = { fatalError("core driver: persist failed: \($0)") }
     ) async throws -> CoreDriver {
         let headers = try CoreHeaderStore(directory: configuration.storagePath)
-        let core = try await boot(
-            process: process, configuration: configuration, coreConfig: coreConfig, logID: try headers.logID()
-        )
+        let core = try await boot(process: process, configuration: configuration, coreConfig: coreConfig)
         let overlay = try overlay ?? NodeNetworkPlaneConfigurations(configuration).overlay
         let driver = CoreDriver(
             core: core,
@@ -106,20 +104,20 @@ public final class CoreDriver: Sendable {
     // PENDING #72 (decision 18d): the configured root genesis CID moves into
     // `ChainRuntimeContext`, and Lattice refuses any other root itself.
     ///
-    /// The root's weigh log is its weighed headers in fact order (a Nexus
-    /// level credits no proofs), under the header store's log id.
-    // PENDING P4 (one store): per-peer stream cursors are not persisted yet,
+    /// The weigh log is derived from the fact log; its id is the one state.db
+    /// recorded with its first fact (a fresh store: a new one, recorded with
+    /// the first fact it journals).
+    // PENDING P4 (one store): `PersistBatch.cursors` are not journaled yet,
     // so a restart reads each peer's log from 0 again (IDs only).
     static func boot(
         process: ChainProcess,
         configuration: NodeConfiguration,
-        coreConfig: CoreConfig,
-        logID: String = ""
+        coreConfig: CoreConfig
     ) async throws -> HostCore {
         guard configuration.address.isNexus else { throw CoreDriverError.notNexus }
-        let facts = try await process.coreFacts()
+        let logID = try await process.coreLogID() ?? UUID().uuidString.lowercased()
         let root = try Core.restore(
-            replaying: facts,
+            replaying: try await process.coreFacts(),
             context: try configuration.runtimeContext,
             spec: NexusGenesis.spec,
             config: coreConfig
@@ -127,11 +125,7 @@ public final class CoreDriver: Sendable {
         guard root.genesis == configuration.nexusGenesisCID else {
             throw CoreDriverError.wrongGenesis(root.genesis)
         }
-        let log = facts.flatMap(\.facts).compactMap { fact -> LogEntry? in
-            guard case .block(let block) = fact, block.blockHash != root.genesis else { return nil }
-            return .header(block.blockHash)
-        }
-        return HostCore(root: root.tree, hosted: [], config: coreConfig, logID: logID, rootLog: log)
+        return HostCore(root: root.tree, hosted: [], config: coreConfig, logID: logID, rootLog: root.sync.log.entries)
     }
 
     private init(
@@ -391,6 +385,7 @@ extension CoreDriver {
                     do {
                         try await process.persistCoreBatch(
                             levelBatch,
+                            logID: core.logID,
                             headers: headers,
                             bodyRoots: validated.flatMap { bodyRoots[$0] ?? [] }
                         )

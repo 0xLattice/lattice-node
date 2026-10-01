@@ -14,6 +14,11 @@ extension ChainProcess {
         try await store.stagedImports().map(\.batch)
     }
 
+    /// The weigh log id state.db recorded with its first core fact.
+    nonisolated func coreLogID() async throws -> String? {
+        try await store.coreLogID()
+    }
+
     /// `Effect.persist`: content first — post-states into the Volume store,
     /// header bytes into the header store, both durable and the Volume roots
     /// retained — then the batch's facts in one state.db transaction, with
@@ -22,6 +27,7 @@ extension ChainProcess {
     /// journaled roots retained.
     nonisolated func persistCoreBatch(
         _ batch: PersistBatch,
+        logID: String,
         headers: CoreHeaderStore,
         bodyRoots: [String] = []
     ) async throws {
@@ -34,7 +40,7 @@ extension ChainProcess {
         try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
         // PENDING #72 / decision 18d: genesis links are deleted; a Nexus-only
         // driver issues none it would need to keep.
-        try await store.stageCoreFacts(batch.facts, volumeRoots: roots)
+        try await store.stageCoreFacts(batch.facts, volumeRoots: roots, logID: logID)
     }
 
     /// `Effect.fetchBody`: the block's Volume and the nested Volumes its

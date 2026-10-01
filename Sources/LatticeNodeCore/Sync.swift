@@ -6,18 +6,19 @@ import UInt256
 public struct PeerSync: Sendable, Equatable {
     /// The `getStream` page in flight.
     public internal(set) var stream: InFlightStream?
-    /// Entries of the peer's log received and not yet applied, in order.
-    public internal(set) var inventory: [StreamEntry] = []
-    /// The last page said more follows: ask again once the inventory drains.
+    /// The last page said more follows.
     public internal(set) var more = false
+    /// The last position of the peer's log taken, and the entries taken that
+    /// are not yet applied (at most a page): the cursor stays before the
+    /// first of them.
+    public internal(set) var taken: UInt64 = 0
+    public internal(set) var holes: [StreamEntry] = []
+    /// The last position whose object was asked for, and whether the holes
+    /// were asked again since the cursor last moved.
+    public internal(set) var requested: UInt64 = 0
+    public internal(set) var retried = false
     /// The objects asked of this peer (`getData`).
     public internal(set) var data: InFlightData?
-    /// The last position of the peer's log taken from the inventory, and
-    /// the entries up to it not yet applied (weighed, or credited): the
-    /// cursor stays before the first of them, so a later session sends it
-    /// again.
-    public internal(set) var through: UInt64 = 0
-    public internal(set) var holes: [StreamEntry] = []
     /// This peer read our log to its end: we push what we append.
     public internal(set) var subscribed = false
     /// The ancestors asked for by CID (a parent this peer's header named).
@@ -34,9 +35,9 @@ public struct PeerSync: Sendable, Equatable {
     public init() {}
 
     public static func == (lhs: PeerSync, rhs: PeerSync) -> Bool {
-        lhs.stream == rhs.stream && lhs.inventory == rhs.inventory && lhs.more == rhs.more
+        lhs.stream == rhs.stream && lhs.more == rhs.more && lhs.taken == rhs.taken
+            && lhs.holes == rhs.holes && lhs.requested == rhs.requested && lhs.retried == rhs.retried
             && lhs.data == rhs.data && lhs.subscribed == rhs.subscribed
-            && lhs.through == rhs.through && lhs.holes == rhs.holes
             && lhs.parentRequest == rhs.parentRequest
             && lhs.childIndex == rhs.childIndex && lhs.serving == rhs.serving
             && lhs.queued.count == rhs.queued.count
@@ -296,11 +297,10 @@ public struct Sync: Sendable {
     /// This node's weigh log, which peers stream.
     public internal(set) var log = WeighLog()
     /// Per peer key: the last position of its log received and applied.
-    /// The shell persists it and hands it back to `Core.init`.
+    /// Written with the facts (`PersistBatch.cursors`) and handed back to
+    /// `Core.init`; kept only for connected peers and those handed back.
     public internal(set) var cursors: [String: StreamCursor] = [:]
-    /// How many log entries the last stream page examined: serving is
-    /// O(page), never O(log).
-    public internal(set) var lastServeScanned = 0
+    var knownCursors: Set<String> = []
 
     public init() {}
 

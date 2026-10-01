@@ -42,33 +42,31 @@ public enum CrashMode: CaseIterable, Sendable {
 }
 
 /// A miner whose block has valid proof-of-work and header linkage and an
-/// invalid body: it relays that block and a block on it once released, and
-/// answers catch-up with them. Its bodies are in the content layer like any
-/// other. It must never be blamed: only execution can tell, and an invalid
-/// body is an exclusion, not a verdict on the peer that relayed it.
+/// invalid body: its log is that block and a block on it once released.
+/// Its bodies are in the content layer like any other. It must never be
+/// blamed: only execution can tell, and an invalid body is an exclusion, not
+/// a verdict on the peer that relayed it.
 public struct InvalidBodyMiner: SimScript {
     public let name: String
     public let isHonest = true
     let config: CoreConfig
-    var relayed = false
+    var stream: ScriptStream
 
     public init(name: String, config: CoreConfig) {
         self.name = name
         self.config = config
+        stream = ScriptStream(name)
     }
 
-    func blocks(_ world: World, _ now: Int64) -> [SimBlock] {
-        world.released([world.invalidBody, world.invalidBodyChild], at: now)
+    func log(_ world: World, _ now: Int64) -> [SimBlock] {
+        logOnceReleased([world.invalidBody, world.invalidBodyChild], world: world, now: now)
     }
 
-    public mutating func connected(_ peer: PeerID, now: Int64, world: World) -> [ScriptAction] {
-        let shown = blocks(world, now)
-        return shown.isEmpty ? [] : [.send(peer, headers(shown, config))]
-    }
+    public mutating func connected(_ peer: PeerID, now: Int64, world: World) -> [ScriptAction] { [] }
 
     public mutating func received(_ message: SyncMessage, from peer: PeerID, now: Int64, world: World) -> [ScriptAction] {
-        guard let reply = answer(
-            message, log: [], logID: name, held: Set(world.blocks.keys), world: world, now: now, config
+        guard let reply = stream.answer(
+            message, log: log(world, now), held: Set(world.blocks.keys), world: world, now: now, config
         ) else { return [] }
         return [.send(peer, reply)]
     }
@@ -81,10 +79,7 @@ public struct InvalidBodyMiner: SimScript {
         let release = [world.invalidBody, world.invalidBodyChild]
             .compactMap { world.blocks[$0]?.releaseAt }.max() ?? now
         guard now >= release else { return [.wakeAt(release)] }
-        guard !relayed else { return [] }
-        relayed = true
-        let shown = blocks(world, now)
-        return peers.map { .send($0, headers(shown, config)) }
+        return stream.push(log(world, now), to: peers)
     }
 }
 
@@ -190,7 +185,8 @@ extension Simulator {
             context: world.context,
             spec: world.spec,
             config: node.core.config,
-            log: WeighLog(id: name, entries: node.store.log)
+            logID: name,
+            cursors: node.store.cursors
         )
         node.core = restored
         node.digest = TreeDigest(restored.tree)

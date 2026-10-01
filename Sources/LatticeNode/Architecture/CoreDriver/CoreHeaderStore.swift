@@ -24,20 +24,6 @@ final class CoreHeaderStore: Sendable {
         try database.execute(
             "CREATE TABLE IF NOT EXISTS child_indexes (cid TEXT PRIMARY KEY, bytes BLOB NOT NULL)"
         )
-        try database.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        try database.execute(
-            "INSERT OR IGNORE INTO meta (key, value) VALUES ('log_id', ?1)",
-            params: [.text(UUID().uuidString)]
-        )
-    }
-
-    /// This store's weigh log id: made once with the store, so a store that
-    /// resets starts a new log (peers then read it from 0).
-    func logID() throws -> String {
-        guard let row = try database.row(MetaRow.self, "SELECT value FROM meta WHERE key = 'log_id'") else {
-            throw NodeStoreError.corrupt("core header store has no log id")
-        }
-        return try row.value
     }
 
     /// One transaction: every header of a persist batch, or none.
@@ -105,12 +91,3 @@ struct CoreChildIndexRow: NodeStoreRecord {
     var bytes: Data { get throws { try row.blob("bytes") } }
 }
 
-/// `meta`: one value by key (the weigh log id).
-struct MetaRow: NodeStoreRecord {
-    static let table = "meta"
-    private let row: Row
-
-    init(_ row: Row) { self.row = row }
-
-    var value: String { get throws { try row.text("value") } }
-}

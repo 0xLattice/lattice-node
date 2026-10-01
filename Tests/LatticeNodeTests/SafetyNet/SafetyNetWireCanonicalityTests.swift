@@ -283,6 +283,19 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
         }
     }
 
+    /// Log entries name CIDs; a log id is empty only on an empty page.
+    func testCoreStreamPagesAreBounded() throws {
+        let cid = "bafyreidorreo6ltq5bs3f3g5e7hnu5nurtykfshq3iwilvrh37hmtvgopa"
+        func page(_ logID: String, _ entries: [WireLogEntry]) -> StreamPageMessage {
+            StreamPageMessage(chainPath: ["Nexus"], requestID: 1, logID: logID, entries: entries, hasMore: false)
+        }
+        XCTAssertNoThrow(try page("", []).validate())
+        XCTAssertNoThrow(try page("log", [WireLogEntry(position: 1, proof: false, cid: cid, block: cid)]).validate())
+        XCTAssertThrowsError(try page("", [WireLogEntry(position: 1, proof: false, cid: cid, block: cid)]).validate())
+        XCTAssertThrowsError(try page("log", [WireLogEntry(position: 1, proof: true, cid: "junk", block: cid)]).validate())
+        XCTAssertThrowsError(try page(String(repeating: "x", count: 129), []).validate())
+    }
+
     func testCoreDataRequestIsCanonical() throws {
         try assertCanonical(DataRequestMessage.self, seed: 0x44) { g in
             DataRequestMessage(

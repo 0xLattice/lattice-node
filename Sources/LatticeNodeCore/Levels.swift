@@ -124,7 +124,7 @@ public struct HostBatch: Sendable {
             states: held.states + batch.states,
             facts: held.facts + batch.facts,
             genesisLinks: held.genesisLinks + batch.genesisLinks,
-            log: held.log + batch.log
+            cursors: held.cursors.merging(batch.cursors) { $1 }
         )
     }
 }
@@ -164,11 +164,15 @@ public struct HostCore: Sendable {
         pins: [ChainPath: String] = [:],
         config: CoreConfig = CoreConfig(),
         logID: String = "",
-        rootLog: [LogEntry] = []
+        rootLog: [LogEntry] = [],
+        rootCursors: [String: StreamCursor] = [:]
     ) {
         var core = Core(tree: root, config: config)
         rootPath = core.chainPath
-        core = Core(tree: core.tree, config: config, log: WeighLog(id: Self.logID(logID, rootPath), entries: rootLog))
+        core = Core(
+            tree: core.tree, config: config,
+            log: WeighLog(id: Self.logID(logID, rootPath), entries: rootLog), cursors: rootCursors
+        )
         self.hosted = hosted
         self.pins = pins
         self.config = config
@@ -190,21 +194,23 @@ public struct HostCore: Sendable {
         pins: [ChainPath: String] = [:],
         config: CoreConfig = CoreConfig(),
         logID: String = "",
-        logs: [ChainPath: [LogEntry]] = [:]
+        cursors: [ChainPath: [String: StreamCursor]] = [:]
     ) throws -> HostCore {
         let ordered = records.sorted { order($0.path, $1.path) }
         guard let root = ordered.first else { throw HostRestoreError.noRoot }
+        let restoredRoot = try Core.restore(
+            replaying: facts[root.path] ?? [],
+            context: try ChainRuntimeContext(path: root.path),
+            spec: root.spec
+        )
         var host = HostCore(
-            root: try Core.restore(
-                replaying: facts[root.path] ?? [],
-                context: try ChainRuntimeContext(path: root.path),
-                spec: root.spec
-            ).tree,
+            root: restoredRoot.tree,
             hosted: hosted,
             pins: pins,
             config: config,
             logID: logID,
-            rootLog: logs[root.path] ?? []
+            rootLog: restoredRoot.sync.log.entries,
+            rootCursors: cursors[root.path] ?? [:]
         )
         for record in ordered.dropFirst() {
             // A level the operator no longer hosts, or whose parent is gone,
@@ -215,7 +221,8 @@ public struct HostCore: Sendable {
                 context: try ChainRuntimeContext(path: record.path),
                 spec: record.spec,
                 config: config,
-                log: WeighLog(id: HostCore.logID(logID, record.path), entries: logs[record.path] ?? [])
+                logID: HostCore.logID(logID, record.path),
+                cursors: cursors[record.path] ?? [:]
             )
             host.serve(record.path)
         }

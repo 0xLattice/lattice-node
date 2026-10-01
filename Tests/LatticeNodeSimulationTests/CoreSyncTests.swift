@@ -99,6 +99,14 @@ final class CoreSyncTests: XCTestCase {
         return effects
     }
 
+    /// Each test peer's log (by position) and the objects it serves.
+    private var logs: [String: [UInt64: String]] = [:]
+    private var objects: [String: [String: HeaderEntry]] = [:]
+
+    /// `entries` from `peer`: with a request ID, that answer; without, the
+    /// way a peer shows headers — appended to its log, streamed to the core,
+    /// and served as the core asks (its ancestors requests are left to the
+    /// test). Returns every effect of the exchange.
     @discardableResult
     private func relay(
         _ core: inout Core,
@@ -108,9 +116,50 @@ final class CoreSyncTests: XCTestCase {
         hasMore: Bool = false,
         at now: Int64 = CoreSyncTests.now
     ) -> [Effect] {
-        core.step(.received(peer, .headers(HeadersResponse(
-            requestID: requestID, entries: entries, hasMore: hasMore
-        ))), now: now)
+        guard requestID == 0 else {
+            return core.step(.received(peer, .headers(HeadersResponse(
+                requestID: requestID, entries: entries, hasMore: hasMore
+            ))), now: now)
+        }
+        guard let state = core.sync.peers[peer] else { return [] }
+        let logID = "log-\(peer.key)"
+        let first = core.sync.cursors[peer.key]?.logID == logID ? state.taken + 1 : 1
+        var ids: [StreamEntry] = []
+        for (offset, entry) in entries.enumerated() {
+            let cid = (try? BlockHeader(node: entry.block).rawCID) ?? ""
+            objects[peer.key, default: [:]][cid] = entry
+            logs[peer.key, default: [:]][first + UInt64(offset)] = cid
+            ids.append(StreamEntry(position: first + UInt64(offset), entry: .header(cid)))
+        }
+        let page = StreamPage(requestID: state.stream?.requestID ?? 0, logID: logID, entries: ids, hasMore: false)
+        var effects = core.step(.received(peer, .stream(page)), now: now)
+        var all = effects
+        for _ in 0..<1_000 {
+            var answers: [SyncMessage] = []
+            for effect in effects {
+                switch effect {
+                case .send(peer, .getStream(let id, _, let after)):
+                    let log = logs[peer.key] ?? [:]
+                    var page: [StreamEntry] = []
+                    var position = after + 1
+                    while let cid = log[position], page.count < core.config.maxHeadersPerPage {
+                        page.append(StreamEntry(position: position, entry: .header(cid)))
+                        position += 1
+                    }
+                    answers.append(.stream(StreamPage(requestID: id, logID: logID, entries: page, hasMore: log[position] != nil)))
+                case .send(peer, .getData(let id, let cids)):
+                    answers.append(.headers(HeadersResponse(
+                        requestID: id, entries: cids.compactMap { objects[peer.key]?[$0] }, hasMore: false
+                    )))
+                default:
+                    continue
+                }
+            }
+            guard !answers.isEmpty else { break }
+            effects = answers.flatMap { core.step(.received(peer, $0), now: now) }
+            all += effects
+        }
+        return all
     }
 
     /// A core that weighed `blocks`, relayed by `peer`.
@@ -157,7 +206,7 @@ final class CoreSyncTests: XCTestCase {
 
         guard case .persist(let batch) = effects.first else { return XCTFail("\(effects)") }
         XCTAssertEqual(batch.headers.map(\.blockCID), chain[2..<4].map(\.cid))
-        XCTAssertEqual(batch.log, chain[2..<4].map { .header($0.cid) })
+        XCTAssertEqual(batch.cursors, [server.key: StreamCursor(logID: "S", position: 4)], "the cursor is written with the facts")
         for fact in batch.facts.flatMap(\.facts) {
             switch fact {
             case .block, .work: continue
@@ -449,7 +498,7 @@ final class CoreSyncTests: XCTestCase {
         let garbage = world.garbage.compactMap { world.blocks[$0] }.filter { $0.children.entries.isEmpty }
         let sizes = garbage.map { $0.block.toData()!.count }
         let budget = sizes.prefix(4).reduce(0, +)
-        var core = core(pendingBudget: budget)
+        var core = core(pageSize: 64, pendingBudget: budget)
         ready(&core, peer)
         relay(&core, chain[0..<3].map { entry($0) }, from: peer)
         relay(&core, garbage.map { entry($0) }, from: peer)
@@ -486,12 +535,102 @@ final class CoreSyncTests: XCTestCase {
 
     // MARK: - Resume, late blocks, duplicates, resets
 
+    /// A core whose store handed back cursors for the test servers, so they
+    /// outlive each session.
+    private func keeping(_ core: Core) -> Core {
+        let fresh = StreamCursor(logID: "", position: 0)
+        return Core(tree: core.tree, config: core.config, cursors: ["server": fresh, "second": fresh])
+    }
+
+    /// A peer's log advertises only what it holds: one that serves none of
+    /// what it advertised is failing to serve — a stall, never blame.
+    func testAnAdvertisedObjectNotServedIsAStall() throws {
+        var core = core()
+        let request = try XCTUnwrap(requests(ready(&core, peer)).first)
+        var effects = core.step(.received(peer, .stream(StreamPage(
+            requestID: request.requestID, logID: "junk", entries: [StreamEntry(position: 1, entry: .header(chain[0].cid))], hasMore: false
+        ))), now: Self.now)
+        let ask = try XCTUnwrap(dataRequests(effects).first)
+        effects = relay(&core, [], from: peer, requestID: ask.requestID)
+        XCTAssertEqual(disconnects(effects), [.stalled])
+    }
+
+    /// At most a page of a peer's log is taken and not yet applied: a push
+    /// beyond it is dropped and pulled again once the holes drain.
+    func testHolesStayWithinAPageAndAPushBeyondIsPulledLater() throws {
+        var core = core(pageSize: 4)
+        let request = try XCTUnwrap(requests(ready(&core, peer)).first)
+        let ids = (0..<6).map { StreamEntry(position: UInt64($0 + 1), entry: .header(chain[$0].cid)) }
+        var effects = core.step(.received(peer, .stream(StreamPage(
+            requestID: request.requestID, logID: "L", entries: [], hasMore: false
+        ))), now: Self.now)
+        effects = core.step(.received(peer, .stream(StreamPage(requestID: 0, logID: "L", entries: ids, hasMore: false))), now: Self.now)
+        XCTAssertEqual(core.sync.peers[peer]?.holes.count, 4)
+        XCTAssertEqual(core.sync.peers[peer]?.more, true)
+        let ask = try XCTUnwrap(dataRequests(effects).first)
+        effects = relay(&core, chain[0..<4].map { entry($0) }, from: peer, requestID: ask.requestID)
+        let pull = try XCTUnwrap(requests(effects).first, "the rest is pulled once the holes drain")
+        XCTAssertEqual(pull.after, 4)
+    }
+
+    /// A hole still lacking once the peer is idle is asked again, once until
+    /// the cursor moves.
+    func testALackingHoleIsAskedAgainOnceWhenThePeerIsIdle() async throws {
+        let carrier = try await world.carriers(count: 1, entries: 48)[0]
+        var core = core()
+        let request = try XCTUnwrap(requests(ready(&core, peer)).first)
+        var effects = core.step(.received(peer, .stream(StreamPage(
+            requestID: request.requestID, logID: "L", entries: [StreamEntry(position: 1, entry: .header(carrier.cid))], hasMore: false
+        ))), now: Self.now)
+        // Served without its child index, which the peer then lacks: the
+        // header is dropped, and still lacking.
+        let ask = try XCTUnwrap(dataRequests(effects).first)
+        effects = relay(&core, [entry(carrier, inline: false)], from: peer, requestID: ask.requestID)
+        effects = core.step(.childIndexFetched(peer, cid: carrier.block.children.rawCID, nil), now: Self.now)
+        let again = try XCTUnwrap(dataRequests(effects).first, "asked again when idle")
+        XCTAssertEqual(again.cids, [carrier.cid])
+        effects = relay(&core, [entry(carrier)], from: peer, requestID: again.requestID)
+        XCTAssertTrue(core.tree.contains(blockHash: carrier.cid))
+        XCTAssertEqual(core.sync.cursors[peer.key]?.position, 1)
+    }
+
+    /// A stream request takes the serving slot like any other: it waits
+    /// behind content being sent.
+    func testAStreamRequestWaitsInTheServingSlot() throws {
+        var core = weighed(Array(chain[0..<3]))
+        _ = core.step(.peerReady(other), now: Self.now)
+        let busy = core.step(.received(other, .getData(requestID: 1, cids: [chain[0].cid])), now: Self.now)
+        let token = try XCTUnwrap(served(busy).first?.token)
+        XCTAssertFalse(core.step(.received(other, .getStream(requestID: 2, logID: nil, after: 0)), now: Self.now)
+            .contains { if case .send(other, .stream) = $0 { true } else { false } })
+        let freed = core.step(.headersServed(other, token: token), now: Self.now)
+        XCTAssertTrue(freed.contains { if case .send(other, .stream) = $0 { true } else { false } })
+        // A position past our log is a reset: from 0.
+        let reset = core.step(.received(other, .getStream(requestID: 3, logID: core.sync.log.id, after: 99)), now: Self.now)
+        guard case .send(other, .stream(let page)) = reset.first else { return XCTFail("\(reset)") }
+        XCTAssertEqual(page.entries.first?.position, 1)
+    }
+
+    /// Until the store keeps cursors, only those it handed back outlive
+    /// their session.
+    func testOnlyHandedBackCursorsOutliveTheirSession() throws {
+        var core = Core(tree: world.bootstrap.tree, cursors: ["kept": StreamCursor(logID: "K", position: 3)])
+        let kept = PeerID(key: "kept", session: 1)
+        for peer in [kept, peer] {
+            let request = try XCTUnwrap(requests(core.step(.peerReady(peer), now: Self.now)).first)
+            _ = core.step(.received(peer, .stream(StreamPage(requestID: request.requestID, logID: "K", entries: [], hasMore: false))), now: Self.now)
+            _ = core.step(.peerGone(peer), now: Self.now)
+        }
+        XCTAssertEqual(Array(core.sync.cursors.keys), ["kept"])
+    }
+
+
     /// A block weighed long after its date (an old side block), whose push
     /// a peer missed (it was offline): the peer's next session resumes from
     /// its cursor and gets it, whatever its timestamp.
     func testALateBlockWithALostPushStillArrives() async throws {
         var server = weighed(Array(chain[0..<10]))
-        var client = core()
+        var client = keeping(core())
         try link(&server, &client, session: 1)
         XCTAssertEqual(client.sync.cursors["server"]?.position, 10)
         let late = try await world.branch(from: chain[2], count: 1)
@@ -509,7 +648,7 @@ final class CoreSyncTests: XCTestCase {
         var second = Core(tree: world.bootstrap.tree, config: first.config, log: WeighLog(id: "second"))
         ready(&second, peer)
         relay(&second, chain[0..<12].reversed().map { entry($0) }, from: peer)
-        var client = core()
+        var client = keeping(core())
         try link(&first, &client, session: 1)
         var fetched = 0
         try link(&second, &client, session: 2, key: "second") { message in
@@ -524,7 +663,7 @@ final class CoreSyncTests: XCTestCase {
         var server = Core(tree: world.bootstrap.tree, config: core().config, log: WeighLog(id: "S1"))
         ready(&server, peer)
         relay(&server, chain[0..<10].map { entry($0) }, from: peer)
-        var client = core()
+        var client = keeping(core())
         try link(&server, &client, session: 1)
         XCTAssertEqual(client.sync.cursors["server"], StreamCursor(logID: "S1", position: 10))
         var reset = Core(tree: world.bootstrap.tree, config: core().config, log: WeighLog(id: "S2"))
@@ -586,10 +725,10 @@ final class CoreSyncTests: XCTestCase {
     func testACursorPastTheLogServesNothingAndNeverTraps() throws {
         var core = weighed(Array(chain[0..<3]))
         _ = core.step(.peerReady(other), now: Self.now)
-        for after: UInt64 in [.max, .max - 1, 1 << 62, 4] {
+        for after: UInt64 in [.max, .max - 1, 1 << 62, 4, 3] {
             let effects = core.step(.received(other, .getStream(requestID: 2, logID: core.sync.log.id, after: after)), now: Self.now)
             guard case .send(_, .stream(let page)) = effects.first else { return XCTFail("\(effects)") }
-            XCTAssertEqual(page.entries, [])
+            XCTAssertEqual(page.entries.first?.position, after == 3 ? nil : 1, "past the log is a reset: from 0")
         }
         let effects = core.step(.received(other, .getData(requestID: 3, cids: ["bafyunknown", world.genesis.cid])), now: Self.now)
         XCTAssertEqual(served(effects).first?.1, [])
@@ -781,8 +920,9 @@ final class CoreSyncTests: XCTestCase {
         relay(&server, (chain + side).map { entry($0) }, from: peer)
         _ = server.step(.peerReady(other), now: Self.now)
         for id in 1...6 {
-            _ = server.step(.received(other, .getStream(requestID: UInt64(id), logID: nil, after: 0)), now: Self.now)
-            XCTAssertLessThanOrEqual(server.sync.lastServeScanned, pageSize)
+            let effects = server.step(.received(other, .getStream(requestID: UInt64(id), logID: nil, after: 0)), now: Self.now)
+            guard case .send(other, .stream(let page)) = effects.first else { return XCTFail("\(effects)") }
+            XCTAssertEqual(page.entries.count, pageSize)
         }
         let everything = (chain + side).map(\.cid)
         var tokens: [UInt64] = []

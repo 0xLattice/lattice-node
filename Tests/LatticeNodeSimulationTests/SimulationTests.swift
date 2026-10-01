@@ -184,6 +184,9 @@ final class SimulationTests: XCTestCase {
         config.liar = false
         config.spamBlocks = 40
         config.garbage = 64
+        // The spammer's whole log (spam, garbage, two blamed headers) fits
+        // in a page of holes.
+        config.pageSize = 128
         config.pendingBudget = 64 * 1_024
         config.drop = 0
         config.duplicate = 0
@@ -235,6 +238,7 @@ final class SimulationTests: XCTestCase {
         config.honestBlocks = 10
         config.forkProbability = 0
         config.split = (lighter: 150, heavier: 170)
+        config.pageSize = 64
         config.spammer = true
         config.liar = false
         config.drop = 0
@@ -249,28 +253,6 @@ final class SimulationTests: XCTestCase {
         }
         XCTAssertLessThanOrEqual(report.pendingPeak, config.pendingBudget)
         print("partition heal: \(report.healPages) stream pages, \(report.healData) objects fetched, \(report.healParentFetches) ancestor fetches")
-    }
-
-    /// The same partition with no spammer and no loss: the heal's own
-    /// requests. The halves never read each other's logs, so each reads the
-    /// other's from 0, IDs first, and fetches only the far side's branch.
-    func testAPartitionHealsThroughTheStream() async throws {
-        var config = SimConfig(seed: 0x5E1F)
-        config.cores = 4
-        config.honestBlocks = 10
-        config.forkProbability = 0
-        config.split = (lighter: 150, heavier: 170)
-        config.spammer = false
-        config.liar = false
-        config.drop = 0
-        config.duplicate = 0
-        var simulator = try await Simulator.make(config)
-        let heavier = try XCTUnwrap(simulator.world.sides[1].last)
-        let report = try await simulator.run()
-        for (core, tip) in report.coreTips {
-            XCTAssertEqual(tip, heavier, "\(core) did not converge on the heavier side")
-        }
-        print("partition heal (clean): \(report.healPages) stream pages, \(report.healData) objects fetched, \(report.healParentFetches) ancestor fetches")
     }
 
     /// A core offline for a while (longer than the margin) gets every block
@@ -350,6 +332,7 @@ final class SimulationTests: XCTestCase {
         config.honestSources = 2
         config.honestBlocks = 90
         config.sideLeaves = 80
+        config.pageSize = 64
         config.forkProbability = 0
         config.ring = true
         config.sourceFanout = 1

@@ -55,22 +55,22 @@ public struct PersistBatch: Sendable {
     /// The child-genesis links this step's executions issued, each with the
     /// block that issued it.
     public let genesisLinks: [IssuedGenesisLink]
-    /// The entries this step appended to the weigh log, in order: durable
-    /// with the facts that weigh them.
-    public let log: [LogEntry]
+    /// The stream cursors this step moved, per peer key: written with the
+    /// facts that applied the entries they pass, never separately.
+    public let cursors: [String: StreamCursor]
 
     public init(
         headers: [StoredHeader],
         states: [LatticeState] = [],
         facts: [BlockImportBatch],
         genesisLinks: [IssuedGenesisLink] = [],
-        log: [LogEntry] = []
+        cursors: [String: StreamCursor] = [:]
     ) {
         self.headers = headers
         self.states = states
         self.facts = facts
         self.genesisLinks = genesisLinks
-        self.log = log
+        self.cursors = cursors
     }
 }
 
@@ -211,7 +211,7 @@ public struct Core: Sendable {
     public let genesis: String
     public internal(set) var index = WeighedIndex()
 
-    /// A core over a bootstrapped or restored tree, with the weigh log and
+    /// A core over a bootstrapped or restored tree, with its weigh log and
     /// the per-peer stream cursors the shell persisted. A node whose store
     /// resets passes a new log id.
     public init(
@@ -236,6 +236,24 @@ public struct Core: Sendable {
         self.index = index
         self.sync.log = log
         self.sync.cursors = cursors
+        self.sync.knownCursors = Set(cursors.keys)
+    }
+
+    /// The weigh log the fact log implies, in fact order: each block fact a
+    /// header, and at a child level each grind's work fact a proof (keyed by
+    /// its root). The fact log is the one source of truth; attributed runs
+    /// are derived and never logged.
+    static func logEntries(of batches: [BlockImportBatch], isRoot: Bool, genesis: String) -> [LogEntry] {
+        batches.flatMap(\.facts).compactMap { fact in
+            switch fact {
+            case .block(let block) where block.blockHash != genesis:
+                return .header(block.blockHash)
+            case .work(let work) where !isRoot && work.attributedRun == nil && work.blockHash != genesis:
+                return .proof(work.contribution.id, of: work.blockHash)
+            default:
+                return nil
+            }
+        }
     }
 
     /// Rebuild a core from its durable facts and the chain's genesis spec
@@ -245,13 +263,16 @@ public struct Core: Sendable {
         context: ChainRuntimeContext,
         spec: ChainSpec,
         config: CoreConfig = CoreConfig(),
-        log: WeighLog = WeighLog(),
+        logID: String = "",
         cursors: [String: StreamCursor] = [:]
     ) throws -> Core {
-        Core(
-            tree: try ChainTree.restore(replaying: facts, context: context, spec: spec),
+        let tree = try ChainTree.restore(replaying: facts, context: context, spec: spec)
+        return Core(
+            tree: tree,
             config: config,
-            log: log,
+            log: WeighLog(id: logID, entries: logEntries(
+                of: facts, isRoot: context.isRoot, genesis: Self.genesis(of: tree)
+            )),
             cursors: cursors
         )
     }
@@ -261,7 +282,9 @@ public struct Core: Sendable {
         switch event {
         case .peerReady(let peer):
             guard sync.peers[peer] == nil else { break }
-            sync.peers[peer] = PeerSync()
+            var state = PeerSync()
+            state.taken = sync.cursors[peer.key]?.position ?? 0
+            sync.peers[peer] = state
             requestStream(from: peer, &turn)
         case .peerGone(let peer):
             drop(peer, &turn)
@@ -295,8 +318,9 @@ public struct Core: Sendable {
         // Evict once the step's headers are processed, so a header held for
         // its future timestamp is already in the first eviction tier.
         sync.evict(to: config.pendingBudget)
-        for peer in sync.peers.keys.sorted() where sync.peers[peer]?.holes.isEmpty == false {
-            advanceCursor(of: peer)
+        for peer in sync.peers.keys.sorted() {
+            advanceCursor(of: peer, &turn)
+            pump(peer, &turn)
         }
         scheduleBodies(&turn)
         return finish(turn)
@@ -314,6 +338,8 @@ public struct Core: Sendable {
         var effects: [Effect] = []
         /// Child proofs this step credited, to index.
         var indexed: [(childCID: String, proof: ChildBlockProof)] = []
+        /// Stream cursors this step moved.
+        var cursors: [String: StreamCursor] = [:]
         /// Pending headers to look at again, smallest priority first.
         var dirty = Heap<(priority: UInt256, cid: String)> {
             $0.priority != $1.priority ? $0.priority < $1.priority : $0.cid < $1.cid
@@ -326,18 +352,15 @@ public struct Core: Sendable {
     /// nothing a step makes visible precedes the write that makes it durable.
     mutating func finish(_ turn: Turn) -> [Effect] {
         var effects: [Effect] = []
-        // Each header this step weighed, then each proof it credited: a
-        // header precedes its proofs, a parent its children.
+        // The weigh log follows the fact log: a header precedes its proofs,
+        // a parent its children.
         let start = sync.log.count
-        for header in turn.headers { sync.log.append(.header(header.blockCID)) }
-        for (cid, proof) in turn.indexed {
-            if let id = ProofJob.id(of: proof) { sync.log.append(.proof(id, of: cid)) }
-        }
+        for entry in Self.logEntries(of: turn.facts, isRoot: isRoot, genesis: genesis) { sync.log.append(entry) }
         let appended = sync.log.page(after: start, limit: .max).entries
-        if !turn.facts.isEmpty || !appended.isEmpty {
+        if !turn.facts.isEmpty || !turn.cursors.isEmpty {
             effects.append(.persist(PersistBatch(
                 headers: turn.headers, states: turn.states, facts: turn.facts, genesisLinks: turn.genesisLinks,
-                log: appended.map(\.entry)
+                cursors: turn.cursors
             )))
         }
         effects += turn.indexed.map { .indexProof(childCID: $0.childCID, $0.proof) }
@@ -376,6 +399,11 @@ public struct Core: Sendable {
     /// live announcer.
     private mutating func drop(_ peer: PeerID, _ turn: inout Turn) {
         guard sync.peers.removeValue(forKey: peer) != nil else { return }
+        // Until the store keeps cursors (P4), only those it handed back
+        // outlive their session.
+        if !sync.knownCursors.contains(peer.key), !sync.peers.keys.contains(where: { $0.key == peer.key }) {
+            sync.cursors[peer.key] = nil
+        }
         if !isRoot { dropProofSource(peer) }
         for parent in [true, false] {
             sync.wants[WantSlot(peer: peer, parent: parent)] = nil
@@ -402,11 +430,12 @@ public struct Core: Sendable {
 
     // MARK: - Serving
 
+    /// Every request takes the peer's one serving slot, queued (two at most)
+    /// while it is busy. A stream page is answered from memory and frees
+    /// the slot at once; content waits for the shell's `headersServed`.
     private mutating func receive(_ message: SyncMessage, from peer: PeerID, _ turn: inout Turn) {
         switch message {
-        case .getStream(let id, let logID, let after):
-            serveStream(id, logID: logID, after: after, to: peer, &turn)
-        case .getData, .getAncestors:
+        case .getStream, .getData, .getAncestors:
             if sync.peers[peer]?.serving == nil {
                 serve(message, to: peer, &turn)
             } else if (sync.peers[peer]?.queued.count ?? 0) < 2 {
@@ -419,25 +448,26 @@ public struct Core: Sendable {
         }
     }
 
-    /// A page of our log after `after` (from 0 if the peer's log id is not
-    /// ours), IDs only, answered from memory: at most a page. A page that
-    /// reaches the end subscribes the peer to what we append.
-    mutating func serveStream(_ requestID: UInt64, logID: String?, after: UInt64, to peer: PeerID, _ turn: inout Turn) {
-        let from = logID == sync.log.id ? after : 0
-        let page = sync.log.page(after: from, limit: config.maxHeadersPerPage)
-        sync.lastServeScanned = page.entries.count
-        sync.peers[peer]?.subscribed = !page.hasMore
-        turn.effects.append(.send(peer, .stream(StreamPage(
-            requestID: requestID, logID: sync.log.id, entries: page.entries, hasMore: page.hasMore
-        ))))
-    }
-
-    /// Answer one content request through the peer's serving slot: the
-    /// shell reads the headers (with their proofs) and caps them by bytes.
-    private mutating func serve(_ message: SyncMessage, to peer: PeerID, _ turn: inout Turn) {
+    /// Answer one request through the peer's serving slot.
+    mutating func serve(_ message: SyncMessage, to peer: PeerID, _ turn: inout Turn) {
         let requestID: UInt64
         let cids: [String]
         switch message {
+        case .getStream(let id, let logID, let after):
+            // Our log after `after`, IDs only, at most a page; from 0 if the
+            // peer's log id is not ours or its position is past our log (a
+            // reset). A page that reaches the end subscribes the peer.
+            let from = logID == sync.log.id && after <= sync.log.count ? after : 0
+            let page = sync.log.page(after: from, limit: config.maxHeadersPerPage)
+            sync.peers[peer]?.subscribed = !page.hasMore
+            turn.effects.append(.send(peer, .stream(StreamPage(
+                requestID: id, logID: sync.log.id, entries: page.entries, hasMore: page.hasMore
+            ))))
+            if let next = sync.peers[peer]?.queued.first {
+                sync.peers[peer]?.queued.removeFirst()
+                serve(next, to: peer, &turn)
+            }
+            return
         case .getAncestors(let id, let cid, let max):
             requestID = id
             cids = ancestors(of: cid, max: max)
@@ -446,7 +476,7 @@ public struct Core: Sendable {
             var seen = Set<String>()
             cids = asked.prefix(config.maxHeadersPerPage)
                 .filter { $0 != genesis && index.contains($0) && seen.insert($0).inserted }
-        case .getStream, .stream, .headers:
+        case .stream, .headers:
             return
         }
         let token = sync.nextToken
@@ -474,23 +504,23 @@ public struct Core: Sendable {
 
     // MARK: - Streams
 
-    /// Ask `peer` for its log after our cursor in it (a fresh peer: 0).
+    /// Ask `peer` for its log after what we took of it (on a new session,
+    /// after our cursor in it; a fresh peer: 0).
     private mutating func requestStream(from peer: PeerID, _ turn: inout Turn) {
         guard let state = sync.peers[peer], state.stream == nil else { return }
-        let cursor = sync.cursors[peer.key]
-        // Within a session, after what was taken; a new session resumes at
-        // the cursor (before anything not yet applied).
-        let after = state.inventory.last?.position ?? Swift.max(state.through, cursor?.position ?? 0)
         let requestID = nextRequestID()
         sync.peers[peer]?.stream = InFlightStream(requestID: requestID, deadline: turn.now + config.headersTimeout)
         sync.peers[peer]?.more = false
-        turn.effects.append(.send(peer, .getStream(requestID: requestID, logID: cursor?.logID, after: after)))
+        turn.effects.append(.send(peer, .getStream(
+            requestID: requestID, logID: sync.cursors[peer.key]?.logID, after: state.taken
+        )))
     }
 
     /// A page of `peer`'s log, asked or pushed. A log id that is not the
     /// cursor's means the peer's log reset: start over from 0. Entries are
-    /// taken in order from the next position; a gap ends the page (the next
-    /// request fills it).
+    /// taken in order from the next position while the peer's holes (taken,
+    /// not yet applied) fit in a page; a gap or a full page ends the page and
+    /// the next pull continues it.
     private mutating func receive(_ page: StreamPage, from peer: PeerID, _ turn: inout Turn) {
         guard let state = sync.peers[peer] else { return }
         if page.requestID != 0 {
@@ -502,77 +532,85 @@ public struct Core: Sendable {
         }
         if sync.cursors[peer.key]?.logID != page.logID {
             sync.cursors[peer.key] = StreamCursor(logID: page.logID, position: 0)
-            sync.peers[peer]?.inventory = []
+            turn.cursors[peer.key] = sync.cursors[peer.key]
+            sync.peers[peer]?.taken = 0
             sync.peers[peer]?.holes = []
-            sync.peers[peer]?.through = 0
+            sync.peers[peer]?.requested = 0
         }
-        var next = (sync.peers[peer]?.inventory.last?.position
-            ?? Swift.max(sync.peers[peer]?.through ?? 0, sync.cursors[peer.key]?.position ?? 0)) + 1
-        for entry in page.entries where entry.position >= next {
-            guard entry.position == next else {
+        for item in page.entries {
+            guard let state = sync.peers[peer], item.position > state.taken else { continue }
+            guard item.position == state.taken + 1, state.holes.count < config.maxHeadersPerPage else {
                 sync.peers[peer]?.more = true
                 break
             }
-            sync.peers[peer]?.inventory.append(entry)
-            next += 1
+            sync.peers[peer]?.taken = item.position
+            if !applied(item.entry) { sync.peers[peer]?.holes.append(item) }
         }
+        advanceCursor(of: peer, &turn)
         pump(peer, &turn)
     }
 
-    /// Whether a logged object is applied here: a header weighed, a proof
-    /// credited (logged).
-    func applied(_ entry: LogEntry) -> Bool {
-        entry.kind == .header ? index.contains(entry.block) : sync.log.contains(entry)
+    /// Whether a logged object is applied here: a header weighed, a grind
+    /// credited.
+    mutating func applied(_ entry: LogEntry) -> Bool {
+        guard index.contains(entry.block) else { return false }
+        return entry.kind == .header || tree.getConsensusBlock(hash: entry.block)?.workContributions[entry.cid] != nil
     }
 
-    /// The cursor in `peer`'s log: before its first entry not yet applied,
-    /// else through the last taken.
-    mutating func advanceCursor(of peer: PeerID) {
-        guard let state = sync.peers[peer], let logID = sync.cursors[peer.key]?.logID else { return }
-        let holes = state.holes.filter { !applied($0.entry) }
-        sync.peers[peer]?.holes = holes
-        sync.cursors[peer.key] = StreamCursor(logID: logID, position: holes.first.map { $0.position - 1 } ?? state.through)
+    /// The cursor in `peer`'s log: before its first hole not yet applied
+    /// (only that one is looked at), else through what was taken.
+    mutating func advanceCursor(of peer: PeerID, _ turn: inout Turn) {
+        guard var state = sync.peers[peer], let cursor = sync.cursors[peer.key] else { return }
+        let first = state.holes.first?.position
+        while let hole = state.holes.first, applied(hole.entry) { state.holes.removeFirst() }
+        if state.holes.first?.position != first { state.retried = false }
+        sync.peers[peer] = state
+        let position = state.holes.first.map { $0.position - 1 } ?? state.taken
+        guard position != cursor.position else { return }
+        sync.cursors[peer.key] = StreamCursor(logID: cursor.logID, position: position)
+        turn.cursors[peer.key] = sync.cursors[peer.key]
     }
 
-    /// Whether this node lacks a logged object.
-    func lacks(_ entry: LogEntry) -> Bool {
+    /// Whether this node lacks a logged object: nothing of it held, weighed
+    /// or in hand.
+    mutating func lacks(_ entry: LogEntry) -> Bool {
         switch entry.kind {
         case .header:
             return !index.contains(entry.block) && sync.pending.entries[entry.block] == nil
                 && sync.proofs.awaiting[entry.block] == nil
         case .proof:
-            let key = ProofKey(childCID: entry.block, proofID: entry.cid)
-            return !sync.log.contains(entry) && sync.proofs.verifying[key] == nil
-                && !sync.proofs.queued.contains { $0.key == key }
+            return !applied(entry) && sync.pending.entries[entry.block]?.evidence[entry.cid] == nil
+                && !sync.proofs.verifying.values.contains { $0.cid == entry.block && $0.proof.rootCID == entry.cid }
+                && !sync.proofs.queued.contains { $0.cid == entry.block && $0.proof.rootCID == entry.cid }
         }
     }
 
-    /// Take `peer`'s inventory in order, a batch at a time: what this node
-    /// lacks is asked for (one `getData` at a time); a header it holds but
-    /// has not weighed gains the peer as an announcer (the peer holds its
-    /// ancestors). A drained inventory asks for the next page.
-    private mutating func pump(_ peer: PeerID, _ turn: inout Turn) {
-        while let state = sync.peers[peer], state.data == nil {
-            guard !state.inventory.isEmpty, sync.cursors[peer.key] != nil else {
-                if state.more { requestStream(from: peer, &turn) }
-                return
-            }
-            let batch = state.inventory.prefix(config.maxHeadersPerPage)
-            sync.peers[peer]?.inventory.removeFirst(batch.count)
-            sync.peers[peer]?.through = batch.last?.position ?? state.through
-            var seen = Set<String>()
-            var cids: [String] = []
-            for item in batch where !applied(item.entry) {
-                sync.peers[peer]?.holes.append(item)
-                if lacks(item.entry) {
-                    if seen.insert(item.entry.block).inserted { cids.append(item.entry.block) }
-                } else if item.entry.kind == .header, sync.pending.entries[item.entry.block] != nil {
-                    announce(item.entry.block, by: peer, &turn)
-                }
-            }
-            advanceCursor(of: peer)
-            guard !cids.isEmpty else { continue }
+    /// One `getData` at a time: the holes this node lacks that it has not
+    /// asked for; once the peer has nothing more to send (idle), the holes
+    /// it still lacks are asked again, once until the cursor moves. A
+    /// header it holds but has not weighed gains the peer as an announcer
+    /// (the peer holds its ancestors). Otherwise the next page is pulled.
+    mutating func pump(_ peer: PeerID, _ turn: inout Turn) {
+        guard let state = sync.peers[peer], state.data == nil, sync.cursors[peer.key] != nil else { return }
+        var lacking: [StreamEntry] = []
+        for hole in state.holes where lacks(hole.entry) { lacking.append(hole) }
+        var ask = lacking.filter { $0.position > state.requested }
+        for hole in state.holes where hole.position > state.requested && hole.entry.kind == .header
+            && sync.pending.entries[hole.entry.block] != nil {
+            announce(hole.entry.block, by: peer, &turn)
+        }
+        let idle = state.stream == nil && (!state.more || state.holes.count >= config.maxHeadersPerPage)
+        if ask.isEmpty, idle, !state.retried {
+            ask = lacking
+            if !ask.isEmpty { sync.peers[peer]?.retried = true }
+        }
+        if let last = state.holes.last { sync.peers[peer]?.requested = Swift.max(state.requested, last.position) }
+        var seen = Set<String>()
+        let cids = ask.map(\.entry.block).filter { seen.insert($0).inserted }
+        if !cids.isEmpty {
             requestData(cids, from: peer, &turn)
+        } else if state.more, state.stream == nil, state.holes.count < config.maxHeadersPerPage {
+            requestStream(from: peer, &turn)
         }
     }
 
@@ -584,27 +622,25 @@ public struct Core: Sendable {
         turn.effects.append(.send(peer, .getData(requestID: requestID, cids: cids)))
     }
 
-    /// Headers from `peer`: the objects asked of it, the ancestors asked of
-    /// it (child to parent, taken parent first), or unsolicited. All take
-    /// the same path. An answer cut short is asked again for the rest.
+    /// Headers from `peer`: the objects asked of it, or the ancestors asked
+    /// of it (child to parent, taken parent first); anything unasked is
+    /// ignored (the stream's tail is the relay). A peer that advertised an
+    /// object and serves none of it is failing to serve: a stall, never
+    /// blame. An answer cut short by bytes is asked again for the rest.
     private mutating func receive(_ response: HeadersResponse, from peer: PeerID, _ turn: inout Turn) {
         var data: InFlightData?
-        var answeredParent = false
         var asked: String?
-        if response.requestID != 0 {
-            if let inFlight = sync.peers[peer]?.data, inFlight.requestID == response.requestID {
-                sync.peers[peer]?.data = nil
-                data = inFlight
-            } else if let request = sync.peers[peer]?.parentRequest, request.requestID == response.requestID {
-                sync.peers[peer]?.parentRequest = nil
-                answeredParent = true
-                asked = request.cid
-            } else {
-                return
-            }
+        if let inFlight = sync.peers[peer]?.data, inFlight.requestID == response.requestID {
+            sync.peers[peer]?.data = nil
+            data = inFlight
+        } else if let request = sync.peers[peer]?.parentRequest, request.requestID == response.requestID {
+            sync.peers[peer]?.parentRequest = nil
+            asked = request.cid
+        } else {
+            return
         }
         var received = Set<String>()
-        for entry in answeredParent ? response.entries.reversed() : response.entries {
+        for entry in asked != nil ? response.entries.reversed() : response.entries {
             guard let cid = accept(entry, from: peer, &turn) else { return }
             received.insert(cid)
         }
@@ -620,14 +656,15 @@ public struct Core: Sendable {
                 dirty(child, &turn)
             }
         }
-        if answeredParent { nextWant(of: peer, parent: true, &turn) }
+        if asked != nil { nextWant(of: peer, parent: true, &turn) }
         if let data {
             let rest = data.cids.filter { !received.contains($0) }
-            if !rest.isEmpty, !received.isEmpty {
-                requestData(rest, from: peer, &turn)
-            } else {
-                advanceCursor(of: peer)
+            if rest.isEmpty {
                 pump(peer, &turn)
+            } else if received.isEmpty {
+                disconnect(peer, .stalled, &turn)
+            } else {
+                requestData(rest, from: peer, &turn)
             }
         }
     }
