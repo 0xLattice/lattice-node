@@ -99,12 +99,21 @@ public struct CoreConfig: Sendable {
     /// such a subgraph anyway.
     public var sideBranchWindow: UInt64
 
-    /// The most index entries one catch-up request may examine.
-    public var serveScanBudget: Int {
-        let (window, overflow) = Int(clamping: sideBranchWindow)
+    /// The most ancestor steps one catch-up request may walk from the
+    /// requester's side entries.
+    public var serveWalkBudget: Int {
+        let (walk, overflow) = Int(clamping: sideBranchWindow)
             .multipliedReportingOverflow(by: HeadersRequest.maximumKnown)
-        let (total, sumOverflow) = window.addingReportingOverflow(maxHeadersPerPage)
-        return overflow || sumOverflow ? .max : total
+        return overflow ? .max : walk
+    }
+
+    /// The most index entries one catch-up request may examine: the walk,
+    /// then a scan of at most what it skips, `sideBranchWindow + 1`
+    /// best-chain heights and a page.
+    public var serveScanBudget: Int {
+        Core.saturatingSum([
+            serveWalkBudget, serveWalkBudget, Int(clamping: sideBranchWindow), 1, maxHeadersPerPage,
+        ])
     }
     /// A header dated more than this beyond now is dropped (never blamed)
     /// instead of held: Bitcoin's two hours.
@@ -386,30 +395,28 @@ public struct Core: Sendable {
     }
 
     /// The weighed headers after the requester's locator: from Bitcoin's
-    /// FindFork (the highest locator entry on our best chain) less
-    /// `sideBranchWindow` heights — `after` only moves the start up — in
-    /// `HeaderKey` order, skipping what the requester holds: every best-chain
-    /// block up to the fork (or up to where a held side entry joins the best
-    /// chain), and every held side entry's ancestors down to that join. Each
-    /// request examines at most `serveScanBudget` index entries; past it the
-    /// page ends with `hasMore`.
+    /// FindFork (the highest held locator entry on our best chain, or where a
+    /// held side entry joins it) less `sideBranchWindow` heights — `after`
+    /// only moves the start up — in `HeaderKey` order, skipping what the
+    /// requester holds: every best-chain block up to that point and every
+    /// held side entry's ancestors down to its join. Each request examines
+    /// at most `serveScanBudget` index entries, and a page cut by its budget
+    /// is never empty.
     mutating func catchUpPage(_ request: HeadersRequest) -> (cids: [String], hasMore: Bool) {
         let held = request.known.filter(index.contains)
         var canonicalHeld: UInt64 = 0
         for cid in held where tree.isCanonical(hash: cid) {
             canonicalHeld = max(canonicalHeld, index.height[cid] ?? 0)
         }
-        let top = canonicalHeld + 1
-        let floor = HeaderKey(
-            height: top > config.sideBranchWindow ? max(1, top - config.sideBranchWindow) : 1, cid: ""
-        )
-        let start = request.after.map { max($0, floor) } ?? floor
-        var budget = config.serveScanBudget
+        // Each held side entry's ancestors, down to where it joins our best
+        // chain, under their own cap; past it nothing more is skipped and
+        // held headers are re-sent (harmless duplicates).
+        var walk = config.serveWalkBudget
         var skip: Set<String> = []
         for known in held where !tree.isCanonical(hash: known) {
             var current: String? = known
-            while let hash = current, let height = index.height[hash], height >= floor.height, budget > 0 {
-                budget -= 1
+            while let hash = current, let height = index.height[hash], walk > 0 {
+                walk -= 1
                 if tree.isCanonical(hash: hash) {
                     canonicalHeld = max(canonicalHeld, height)
                     break
@@ -418,14 +425,24 @@ public struct Core: Sendable {
                 current = index.parent[hash]
             }
         }
+        let top = canonicalHeld + 1
+        let floor = HeaderKey(
+            height: top > config.sideBranchWindow ? max(1, top - config.sideBranchWindow) : 1, cid: ""
+        )
+        let start = request.after.map { max($0, floor) } ?? floor
+        // At most `skip.count` skipped and `window + 1` best-chain keys come
+        // before one that is sent, so this budget never ends a page empty.
+        let scanBudget = Self.saturatingSum(
+            [skip.count, Int(clamping: config.sideBranchWindow), 1, config.maxHeadersPerPage]
+        )
+        var scan = scanBudget
         var cids: [String] = []
-        defer { sync.lastServeScanned = config.serveScanBudget - budget }
+        defer { sync.lastServeScanned = (config.serveWalkBudget - walk) + (scanBudget - scan) }
         for key in index.keys(from: start, strictlyAfter: start == request.after) {
-            guard budget > 0 else { return (cids, true) }
-            budget -= 1
+            guard scan > 0 else { return (cids, true) }
+            scan -= 1
             if skip.contains(key.cid) { continue }
             if key.height <= canonicalHeld, tree.isCanonical(hash: key.cid) { continue }
-            if key.cid == genesis { continue }
             if cids.count == config.maxHeadersPerPage { return (cids, true) }
             cids.append(key.cid)
         }
@@ -638,9 +655,6 @@ public struct Core: Sendable {
     private mutating func hold(_ header: PendingHeader, until time: Int64) {
         sync.pending.entries[header.blockCID]?.notBefore = time
         sync.held.push((time, header.blockCID))
-        if sync.pending.isLeaf(header.blockCID) {
-            sync.pending.leaves.push((true, header.hash, header.blockCID))
-        }
     }
 
     /// Weigh one header. Only `.proofOfWorkInvalid` blames its source; a
@@ -786,6 +800,16 @@ public struct Core: Sendable {
     }
 
     // MARK: - Content
+
+    static func saturatingSum(_ terms: [Int]) -> Int {
+        var total = 0
+        for term in terms {
+            let (sum, overflow) = total.addingReportingOverflow(term)
+            if overflow { return .max }
+            total = sum
+        }
+        return total
+    }
 
     static func cid(of index: ChildIndex) -> String? {
         try? HeaderImpl<ChildIndex>(node: index).rawCID
