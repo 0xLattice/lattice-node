@@ -62,6 +62,13 @@ struct Heap<Element: Sendable>: Sendable {
     var count: Int { items.count }
     var first: Element? { items.first }
 
+    /// Rebuild the heap from the elements `keep` accepts (drops stale ones).
+    mutating func compact(_ keep: (Element) -> Bool) {
+        let live = items.filter(keep)
+        items = []
+        for item in live { push(item) }
+    }
+
     mutating func push(_ item: Element) {
         items.append(item)
         var child = items.count - 1
@@ -138,9 +145,12 @@ public struct PendingQueue: Sendable {
     /// Pending headers by the child index CID they commit.
     var byChildIndex: [String: Set<String>] = [:]
     var priority: [String: UInt256] = [:]
-    /// Leaves by hash, largest first (stale entries are skipped).
-    var leaves = Heap<(hash: UInt256, cid: String)> {
-        $0.hash != $1.hash ? $0.hash > $1.hash : $0.cid > $1.cid
+    /// Evictable leaves: unlinked (orphan) ones first, then by hash,
+    /// largest first. Stale entries are skipped; a leaf that linked since it
+    /// was pushed is pushed again as linked.
+    var leaves = Heap<(linked: Bool, hash: UInt256, cid: String)> {
+        $0.linked != $1.linked ? !$0.linked
+            : $0.hash != $1.hash ? $0.hash > $1.hash : $0.cid > $1.cid
     }
 
     /// Each header's priority: the smallest hash among it and its pending
@@ -160,7 +170,7 @@ public struct PendingQueue: Sendable {
         bytes += header.bytes
         byChildIndex[header.block.children.rawCID, default: []].insert(cid)
         priority[cid] = min(header.hash, childrenOf[cid].map(lowestPriority) ?? .max)
-        if isLeaf(cid) { leaves.push((header.hash, cid)) }
+        if isLeaf(cid) { leaves.push((header.chainWork != nil, header.hash, cid)) }
         if let parent = header.parent {
             childrenOf[parent, default: []].insert(cid)
             lift(from: parent)
@@ -178,7 +188,7 @@ public struct PendingQueue: Sendable {
             childrenOf[parent]?.remove(cid)
             if childrenOf[parent]?.isEmpty == true { childrenOf[parent] = nil }
             if let held = entries[parent] {
-                if isLeaf(parent) { leaves.push((held.hash, parent)) }
+                if isLeaf(parent) { leaves.push((held.chainWork != nil, held.hash, parent)) }
                 lift(from: parent)
             }
         }
@@ -207,18 +217,35 @@ public struct PendingQueue: Sendable {
         }
     }
 
-    /// Evict while over `budget`: the pending leaf with the largest hash
-    /// first, so a parent is never evicted from under a child that lifts it.
-    /// Returns the evicted headers.
-    @discardableResult
+    /// Evict while over `budget`: unlinked leaves first (headers whose
+    /// ancestry never reached the weighed graph), then the pending leaf with
+    /// the largest hash, so a parent is never evicted from under a child that
+    /// lifts it. Returns the evicted headers.
     mutating func evict(to budget: Int) -> [PendingHeader] {
         var evicted: [PendingHeader] = []
         while bytes > budget, let top = leaves.pop() {
-            guard let header = entries[top.cid], isLeaf(top.cid) else { continue }
+            guard let header = entries[top.cid], isLeaf(top.cid), header.hash == top.hash else { continue }
+            if !top.linked, header.chainWork != nil {
+                leaves.push((true, header.hash, top.cid))
+                continue
+            }
             remove(top.cid)
             evicted.append(header)
         }
         return evicted
+    }
+
+    /// Drop stale heap entries once they outnumber the live ones.
+    mutating func compact() {
+        guard leaves.count > 2 * entries.count + 8 else { return }
+        var seen = Set<String>()
+        let entries = self.entries
+        let childrenOf = self.childrenOf
+        leaves.compact { item in
+            guard let header = entries[item.cid], childrenOf[item.cid]?.isEmpty ?? true,
+                  header.hash == item.hash else { return false }
+            return seen.insert(item.cid).inserted
+        }
     }
 }
 
@@ -232,6 +259,11 @@ public struct WeighedIndex: Sendable {
     var chainWork: [String: WorkSum] = [:]
     /// Leaves: headers with no weighed child.
     public internal(set) var leaves: Set<String> = []
+    /// The highest leaves, highest first, kept as headers are added: a leaf
+    /// only leaves by gaining a child, which is higher and takes its place,
+    /// so the set stays exact without a sort of all leaves.
+    public internal(set) var topLeaves: [HeaderKey] = []
+    static let topLeafCount = HeadersRequest.maximumKnown + 1
 
     mutating func add(_ cid: String, parent: String?, height: UInt64, work: UInt256) {
         guard self.height[cid] == nil else { return }
@@ -244,8 +276,17 @@ public struct WeighedIndex: Sendable {
         if let parent {
             self.parent[cid] = parent
             leaves.remove(parent)
+            if let position = topLeaves.firstIndex(where: { $0.cid == parent }) {
+                topLeaves.remove(at: position)
+            }
         }
         leaves.insert(cid)
+        let key = HeaderKey(height: height, cid: cid)
+        let position = topLeaves.firstIndex { $0 < key } ?? topLeaves.count
+        if position < Self.topLeafCount {
+            topLeaves.insert(key, at: position)
+            if topLeaves.count > Self.topLeafCount { topLeaves.removeLast() }
+        }
     }
 
     func contains(_ cid: String) -> Bool { height[cid] != nil }
@@ -270,6 +311,9 @@ public struct WeighedIndex: Sendable {
     /// after its CID when `strictlyAfter`), as a lazy stream.
     func keys(from start: HeaderKey, strictlyAfter: Bool) -> AnySequence<HeaderKey> {
         let rows = byHeight
+        // A peer chooses `start`: a height past the graph streams nothing
+        // (and is never converted to `Int`).
+        guard start.height < UInt64(rows.count) else { return AnySequence([]) }
         return AnySequence { () -> AnyIterator<HeaderKey> in
             var height = Int(start.height)
             var column: Int = {
@@ -324,6 +368,41 @@ public struct Sync: Sendable {
     public internal(set) var lastServeScanned = 0
 
     public init() {}
+
+    /// Remove a pending header and every reference to it.
+    mutating func removePending(_ cid: String) {
+        guard let header = pending.entries[cid] else { return }
+        for peer in header.announcers { announced[peer]?.remove(cid) }
+        pending.remove(cid)
+    }
+
+    mutating func evict(to budget: Int) {
+        for header in pending.evict(to: budget) {
+            for peer in header.announcers { announced[peer]?.remove(header.blockCID) }
+        }
+    }
+
+    /// Drop stale entries of every lazy heap once they outnumber the live
+    /// ones, so bookkeeping stays O(pending).
+    mutating func compact() {
+        pending.compact()
+        let live = pending.entries.count
+        let entries = pending.entries
+        if held.count > 2 * live + 8 {
+            held.compact { entries[$0.cid]?.notBefore == $0.time }
+        }
+        for (slot, heap) in wants where heap.count > 2 * live + 8 {
+            var heap = heap
+            heap.compact { entries[$0.cid]?.source == slot.peer }
+            wants[slot] = heap.count == 0 ? nil : heap
+        }
+    }
+
+    /// Entries in the lazy heaps and announcement sets: O(pending).
+    public var bookkeeping: Int {
+        pending.leaves.count + held.count + wants.values.reduce(0) { $0 + $1.count }
+            + announced.values.reduce(0) { $0 + $1.count }
+    }
 
     /// The earliest time after `now` the core must wake for.
     func nextDeadline(after now: Int64) -> Int64? {

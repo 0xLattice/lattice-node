@@ -230,7 +230,7 @@ final class SimulationTests: XCTestCase {
         config.cores = 4
         config.honestBlocks = 10
         config.forkProbability = 0
-        config.split = (lighter: 180, heavier: 220)
+        config.split = (lighter: 150, heavier: 170)
         config.spammer = true
         config.liar = false
         config.drop = 0
