@@ -54,6 +54,9 @@ final class SafetyNetLifetimeGateTests: XCTestCase {
             "the service never restarts; shutdown finishes the tip signal and joins the drain",
         "ChainService.parentPlanDrain":
             "the service never restarts; shutdown finishes the plan signal and joins the drain",
+        "CoreDriver.loop": "the driver never restarts; stop finishes the event stream and joins the loop",
+        "Loop.wake": "owned by the serial loop alone; a fire only posts a tick, which is idempotent",
+        "Loop.bodies": "owned by the serial loop alone; a fire only posts an arrival the core may ignore",
     ]
 
     /// Members that establish a session and so may create its record.
