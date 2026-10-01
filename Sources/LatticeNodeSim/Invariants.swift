@@ -127,11 +127,9 @@ public enum Invariants {
             throw fail(node, "published snapshot is stale after the step")
         }
 
-        // DST 6: bounded sync state. The pending queue stays within the
+        // DST 6: bounded sync state (one request of each kind per peer by
+        // construction). The pending queue stays within the
         // operator's budget whatever peers send.
-        if core.sync.awaitingChildIndex.count > core.config.maxAwaitingChildIndex {
-            throw fail(node, "child-index waits exceed their bound")
-        }
         if core.sync.pending.bytes > core.config.pendingBudget {
             throw fail(node, "the pending queue holds \(core.sync.pending.bytes) bytes, over its budget")
         }

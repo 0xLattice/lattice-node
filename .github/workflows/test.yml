@@ -5,7 +5,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, "p3/**"]
 
 jobs:
   strict-concurrency:
@@ -76,7 +76,7 @@ jobs:
         run: swift build --build-tests -Xswiftc -warnings-as-errors
 
       - name: Run tests
-        run: swift test
+        run: swift test --skip LatticeNodeSimulationTests
 
       - name: Run optimized multichain E2E
         env:
@@ -127,7 +127,7 @@ jobs:
         run: swift build --build-tests -Xswiftc -warnings-as-errors
 
       - name: Run tests
-        run: swift test
+        run: swift test --skip LatticeNodeSimulationTests
 
       - name: Run optimized multichain E2E
         env:
@@ -137,7 +137,7 @@ jobs:
         run: swift test --skip-build --filter LatticeNodeE2ETests
 
       - name: Run tests with code coverage
-        run: swift test --enable-code-coverage --skip LatticeNodeE2ETests
+        run: swift test --enable-code-coverage --skip LatticeNodeE2ETests --skip LatticeNodeSimulationTests
 
       - name: Verify executables run
         run: |
@@ -288,6 +288,27 @@ jobs:
         env:
           LATTICE_FUZZ_ITERATIONS: "2000000"
         run: swift test --skip-build --filter WireProtocolFuzzTests
+
+  # The deterministic simulator runs in its own job, outside the test jobs'
+  # timeouts and coverage: a few seeds per PR, many nightly.
+  simulation-linux:
+    runs-on: ubuntu-latest
+    container: swift:6.1-jammy
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies for Linux
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev
+
+      - name: Build test targets with warnings as errors
+        run: swift build --build-tests -Xswiftc -warnings-as-errors
+
+      - name: Run the simulator
+        env:
+          SIM_SEEDS: "5"
+        run: swift test --skip-build --filter LatticeNodeSimulationTests
 
   read-replica-allowlist:
     runs-on: ubuntu-latest
