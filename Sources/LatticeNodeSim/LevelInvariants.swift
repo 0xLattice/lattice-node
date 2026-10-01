@@ -181,28 +181,30 @@ public enum LevelInvariants {
         if core.sync.pending.bytes > core.config.pendingBudget {
             throw fail("the pending queue holds \(core.sync.pending.bytes) bytes, over its budget")
         }
+        // The plain proof caps.
         let proofs = core.sync.proofs, bounds = core.config.proofs
-        if proofs.verifying.count > bounds.maxChecks {
-            throw fail("\(proofs.verifying.count) proof checks in flight, over the bound")
-        }
-        if proofs.awaitingBytes > bounds.awaitingBudget
-            || proofs.awaitingBytes != proofs.awaiting.values.reduce(0, { $0 + $1.bytes }) {
-            throw fail("headers awaiting a proof hold \(proofs.awaitingBytes) bytes, over or off their budget")
-        }
-        let queuedProofs = proofs.awaiting.values.flatMap(\.unverified)
-            + core.sync.pending.entries.values.flatMap(\.unverified)
-        if queuedProofs.contains(where: { $0.bytes > bounds.maxProofBytes }) {
-            throw fail("a queued proof is larger than the per-proof bound")
+        let held = proofs.queued + Array(proofs.verifying.values)
+        if proofs.checks(index: false) > bounds.maxChecks || proofs.checks(index: true) > bounds.indexChecks {
+            throw fail("proof checks in flight exceed their bounds")
         }
         if proofs.awaiting.count > bounds.maxAwaiting {
             throw fail("\(proofs.awaiting.count) headers await a proof, over the bound")
         }
-        if let full = Dictionary(grouping: proofs.verifying.values, by: { $0 }).first(where: { $0.value.count > bounds.maxChecksPerSource }) {
-            throw fail("source \(String(describing: full.key)) holds \(full.value.count) proof checks, over its share")
+        if held.contains(where: { $0.bytes > bounds.maxProofBytes }) {
+            throw fail("a proof larger than the per-proof bound is held")
         }
-        if proofs.awaiting.values.contains(where: { $0.unverified.count > bounds.maxPerHeader })
-            || core.sync.pending.entries.values.contains(where: { $0.unverified.count > bounds.maxPerHeader }) {
-            throw fail("a header holds more unchecked proofs than its bound")
+        var load: [PeerID?: (count: Int, bytes: Int)] = [:]
+        for proof in held {
+            let current = load[proof.source] ?? (0, 0)
+            load[proof.source] = (current.count + 1, current.bytes + proof.bytes)
+        }
+        for (source, used) in load {
+            guard used.count <= bounds.maxPerSource, used.bytes <= bounds.maxSourceBytes else {
+                throw fail("source \(String(describing: source)) holds \(used.count) proofs, \(used.bytes) bytes, over its caps")
+            }
+            if let peer = source, core.sync.peers[peer] == nil {
+                throw fail("proofs of the gone peer \(peer) are still held")
+            }
         }
         if core.sync.pending.entries.values.contains(where: { path.count > 1 && $0.evidence.isEmpty }) {
             throw fail("a child header with no verified work is in the pending queue")

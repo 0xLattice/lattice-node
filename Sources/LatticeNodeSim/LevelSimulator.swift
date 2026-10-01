@@ -73,6 +73,9 @@ public struct LevelSimReport: Sendable {
     public var verifications = 0
     public var executions = 0
     public var bootstraps = 0
+    /// The longest any core took to credit a public honest proof of a
+    /// child block it holds, from the proof's release.
+    public var creditLatency: Int64 = 0
 }
 
 /// A node's durable store across levels.
@@ -219,7 +222,7 @@ public struct LevelSimulator {
         }
         scripts["source"] = LevelSource(name: "source", config: coreConfig)
         if config.withholder { scripts["withholder"] = ProofWithholder(name: "withholder", config: coreConfig) }
-        if config.zeroWork { scripts["zerowork"] = LoneHeader(name: "zerowork", header: world.zeroWork, blamed: false) }
+        if config.zeroWork { scripts["zerowork"] = LoneHeader(name: "zerowork", header: world.zeroWork, blamed: true) }
         for index in 0..<config.flooders {
             scripts["flooder\(index)"] = ProofFlooder(name: "flooder\(index)", config: coreConfig)
         }
@@ -500,6 +503,16 @@ public struct LevelSimulator {
             node: name, host: node.core, digests: digests, previous: node.digests,
             store: node.store, world: world
         )
+        for (path, digest) in digests where path.count > 1 {
+            let before = node.digests[path]
+            for (cid, entry) in digest.blocks {
+                for root in entry.grinds.keys where before?.blocks[cid]?.grinds[root] == nil {
+                    if let truth = world.proofs[path]?[cid]?[root] {
+                        report.creditLatency = max(report.creditLatency, now - truth.releaseAt)
+                    }
+                }
+            }
+        }
         node.digests = digests
         if persisted {
             node.persists += 1

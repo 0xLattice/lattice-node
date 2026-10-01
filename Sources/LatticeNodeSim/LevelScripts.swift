@@ -220,14 +220,16 @@ public struct LoneHeader: LevelScript {
     }
 }
 
-/// A proof flooder: it relays every released child block of every level
+/// A proof flooder (blamed: its proofs fail proof-of-work, and it comes back
+/// on every reconnection, as fresh Sybils would): it relays every released
+/// child block of every level
 /// with as many bad proofs as a header may carry, ahead of honest relays: a
 /// forged twin of each honest proof (the same root, tampered bytes) and
 /// other blocks' proofs. Bad proofs carry no work, so it is never blamed,
 /// and every honest proof must still be credited everywhere.
 public struct ProofFlooder: LevelScript {
     public let name: String
-    public let isHonest = true
+    public let isHonest = false
     let config: CoreConfig
     var relayed: [ChainPath: Set<String>] = [:]
 
@@ -260,7 +262,15 @@ public struct ProofFlooder: LevelScript {
         ))
     }
 
-    public mutating func connected(_ peer: PeerID, now: Int64, world: LevelWorld) -> [LevelAction] { [] }
+    public mutating func connected(_ peer: PeerID, now: Int64, world: LevelWorld) -> [LevelAction] {
+        // Every new session gets the whole flood again.
+        world.paths.dropFirst().compactMap { path in
+            let released = world.released(path, at: now, withheld: false).filter {
+                $0.height > 0 && !world.publicProofs(path, $0.cid, at: now).isEmpty
+            }
+            return released.isEmpty ? nil : .send(peer, path, flood(released, at: path, now: now, world: world))
+        }
+    }
 
     public mutating func received(_ message: SyncMessage, at path: ChainPath, from peer: PeerID, now: Int64, world: LevelWorld) -> [LevelAction] {
         switch message {

@@ -117,10 +117,9 @@ public struct PendingHeader: Sendable {
     /// Not before this time: a header from this node's future.
     public internal(set) var notBefore: Int64?
     /// A child header's verified grinds and their proofs, by root (it enters
-    /// the queue with one), and proofs still to check for it.
+    /// the queue with one).
     public internal(set) var evidence: [String: VerifiedChildEvidence] = [:]
     public internal(set) var proofs: [String: ChildBlockProof] = [:]
-    public internal(set) var unverified: [QueuedProof] = []
 
     var parent: String? { block.parent?.rawCID }
     var source: PeerID? { announcers.first }

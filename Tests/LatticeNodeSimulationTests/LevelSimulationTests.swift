@@ -128,16 +128,17 @@ final class LevelSimulationTests: XCTestCase {
     }
 
     /// A header with a proof whose root misses the block's target carries no
-    /// work: it is never weighed, and nobody is blamed.
-    func testAZeroWorkProofIsNeverWeighedAndBlamesNoOne() async throws {
+    /// work: it is never weighed, and its sender sent a proof that fails
+    /// proof-of-work, so it alone is blamed.
+    func testAZeroWorkProofIsNeverWeighedAndItsSenderIsBlamed() async throws {
         let (simulator, report) = try await simulate(config(0x2E_20) {
             $0.withholder = false
             $0.zeroWork = true
             $0.scheduleLiar = false
         })
         let header = try XCTUnwrap(simulator.world.zeroWork)
-        XCTAssertTrue(report.disconnects.isEmpty, "\(report.disconnects)")
-        XCTAssertGreaterThan(report.verifications, 0)
+        XCTAssertTrue(report.disconnects.contains { $0.peer == "zerowork" && $0.reason == .proofOfWorkInvalid })
+        XCTAssertTrue(report.disconnects.allSatisfy { $0.peer == "zerowork" }, "\(report.disconnects)")
         for (core, digests) in report.digests {
             XCTAssertNil(digests[LevelWorld.alpha]?.blocks[header.block.cid], "\(core) weighed a zero-work header")
         }
@@ -200,47 +201,59 @@ final class LevelSimulationTests: XCTestCase {
         XCTAssertEqual(first.steps, second.steps)
     }
 
-    // MARK: - Proof retries under a flood
+    // MARK: - Proofs under a flood
 
-    /// Proof checks are scarce (4 slots, 2 per source) against pages of up
-    /// to 12 proof-bearing headers, doubled roots, and a flooder relaying
+    /// Proof checks are scarce (4 at once, 1 for the index) against pages of
+    /// up to 12 proof-bearing headers, doubled roots, and a flooder relaying
     /// every child block ahead of honest relays with forged twins of its
-    /// honest proofs and other blocks' proofs. Queued proofs are re-offered
-    /// as slots free and dropped ones looked up again: every honest proof is
-    /// credited everywhere (checked at the quiet point), weights are
-    /// identical, and nobody is blamed for a proof.
+    /// honest proofs and other blocks' proofs. Its first failed check fails
+    /// proof-of-work: it alone is blamed, and every honest proof is still
+    /// credited everywhere (checked at the quiet point) with identical
+    /// weights.
     func testEveryHonestProofIsCreditedThroughScarceSlotsAndAFlood() async throws {
         let (_, report) = try await simulate(config(0xF100D) {
             $0.flooders = 1
             $0.doubleProbability = 0.5
             $0.pageSize = 12
-            $0.proofs = ProofConfig(
-                maxChecks: 4, maxChecksPerSource: 2, indexReserve: 1, maxPerHeader: 8, maxAwaiting: 64, maxAwaitingPerPeer: 32
-            )
+            $0.proofs = ProofConfig(maxChecks: 4, indexChecks: 1, maxPerSource: 16, maxAwaiting: 64, maxAwaitingPerPeer: 32)
             $0.withholder = false
             $0.zeroWork = false
             $0.scheduleLiar = false
         })
-        XCTAssertTrue(report.disconnects.isEmpty, "\(report.disconnects)")
-        XCTAssertGreaterThan(report.verifications, 0)
+        XCTAssertFalse(report.disconnects.isEmpty, "the flooder's failing proofs were never blamed")
+        XCTAssertTrue(report.disconnects.allSatisfy { $0.peer == "flooder0" && $0.reason == .proofOfWorkInvalid },
+                      "\(report.disconnects)")
     }
 
-    /// Sybils: more flooders (⌈maxChecks / maxChecksPerSource⌉ + 1) than the
-    /// check slots have room for, each relaying every child block with bad
-    /// proofs. Checks go round-robin across sources with a share per source
-    /// and a reserve for the evidence index, so every honest proof is still
-    /// credited everywhere with identical weights, and nobody is blamed.
-    func testSybilFloodersCannotStarveHonestProofs() async throws {
-        let proofs = ProofConfig(
-            maxChecks: 8, maxChecksPerSource: 2, indexReserve: 2, maxPerHeader: 8,
-            maxAwaiting: 64, maxAwaitingPerPeer: 16, awaitingBudget: 256 * 1_024
-        )
-        let flooders = (proofs.maxChecks + proofs.maxChecksPerSource - 1) / proofs.maxChecksPerSource + 1
+    /// Sybils: more flooders than there are check slots, each relaying every
+    /// child block with free junk proofs and coming back on every
+    /// reconnection. A flooder is disconnected at its first failed check
+    /// (its other proofs forgotten), so with only plain caps every honest
+    /// proof is credited everywhere within a bounded latency, no honest peer
+    /// is blamed, and state stays within the caps (checked every step).
+    func testSybilFloodersAreDisconnectedAndCannotStarveHonestProofs() async throws {
+        let proofs = ProofConfig(maxChecks: 4, indexChecks: 1, maxPerSource: 16, maxAwaiting: 64, maxAwaitingPerPeer: 16)
+        let flooders = proofs.maxChecks + 1
         let (_, report) = try await simulate(config(0x5B11) {
             $0.flooders = flooders
             $0.doubleProbability = 0.5
             $0.pageSize = 12
             $0.proofs = proofs
+            $0.withholder = false
+            $0.zeroWork = false
+            $0.scheduleLiar = false
+        })
+        XCTAssertEqual(Set(report.disconnects.map(\.peer)), Set((0..<flooders).map { "flooder\($0)" }))
+        XCTAssertTrue(report.disconnects.allSatisfy { $0.reason == .proofOfWorkInvalid })
+        XCTAssertLessThan(report.creditLatency, 20_000, "an honest proof waited too long")
+    }
+
+    /// Blame only when proof-of-work fails: honest peers relay only proofs
+    /// they verified, so no honest peer is ever disconnected, with many
+    /// doubled roots relayed and served between cores.
+    func testHonestPeersRelayingVerifiedProofsAreNeverBlamed() async throws {
+        let (_, report) = try await simulate(config(0x40E57) {
+            $0.doubleProbability = 0.7
             $0.withholder = false
             $0.zeroWork = false
             $0.scheduleLiar = false

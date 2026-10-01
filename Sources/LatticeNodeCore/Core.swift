@@ -322,7 +322,7 @@ public struct Core: Sendable {
         return effects
     }
 
-    private mutating func disconnect(_ peer: PeerID, _ reason: DisconnectReason, _ turn: inout Turn) {
+    mutating func disconnect(_ peer: PeerID, _ reason: DisconnectReason, _ turn: inout Turn) {
         guard sync.peers[peer] != nil else { return }
         drop(peer, &turn)
         turn.effects.append(.disconnect(peer, reason))
@@ -540,7 +540,7 @@ public struct Core: Sendable {
             return nil
         }
         if index.contains(cid) {
-            if !isRoot { offer(entry.proofs, for: entry.block, cid: cid, from: peer, &turn) }
+            if !isRoot { offer(entry.proofs, cid: cid, from: peer) }
             return cid
         }
         // Structural, never blame: an inline child index that is not the one
@@ -561,7 +561,7 @@ public struct Core: Sendable {
             if let children = entry.children, held.children == nil {
                 sync.pending.setChildren(children, of: cid, bytes: Self.size(of: children))
             }
-            if !isRoot { offer(entry.proofs, for: entry.block, cid: cid, from: peer, &turn) }
+            if !isRoot { offer(entry.proofs, cid: cid, from: peer) }
             dirty(cid, &turn)
             return cid
         }
