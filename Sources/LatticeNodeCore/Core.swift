@@ -500,7 +500,7 @@ public struct Core: Sendable {
         if let children = entry.children, Self.cid(of: children) != entry.block.children.rawCID {
             return cid
         }
-        guard let parent = entry.block.parent?.rawCID else { return cid }
+        guard entry.block.parent != nil else { return cid }
         let (horizon, overflow) = turn.now.addingReportingOverflow(config.maxFutureDrift)
         if !overflow, entry.block.timestamp > horizon { return cid }
         if var held = sync.pending.entries[cid] {
