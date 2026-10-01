@@ -642,10 +642,11 @@ public struct Simulator {
             weightsChanged: weightsChanged
         )
         try Invariants.checkBodies(node: name, core: node.core, digest: digest, now: now, wakes: wakes)
-        if persisted {
+        // Replay costs the whole log, so it runs every `replayInterval`
+        // persists that moved weight, and once more at the end of the run
+        // (an execution's validation replays with the next one).
+        if persisted && revisionChanged {
             node.persists += 1
-            // Replay costs the whole log, so it runs every `replayInterval`
-            // persists and once more at the end of the run.
             if node.persists % config.replayInterval == 0 {
                 try checkReplay(name, node, digest)
             }
