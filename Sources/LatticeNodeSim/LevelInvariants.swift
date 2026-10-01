@@ -276,11 +276,29 @@ public enum LevelInvariants {
         }
     }
 
+    /// Where a level stopped executing its best chain: at the head, or at
+    /// a child block awaiting a parent fact its parent level still lacks.
+    /// A fact the parent holds there is a lost wake.
+    public static func checkExecutionStop(_ name: String, path: ChainPath, host: HostCore, digest: TreeDigest) throws {
+        let executedPrefix = digest.canonicalPath.prefix { digest.executed.contains($0) }.count
+        if executedPrefix < digest.canonicalPath.count {
+            let next = digest.canonicalPath[executedPrefix]
+            guard let fact = host.levels[path]?.bodies.awaitingParent[next] else {
+                throw Invariants.fail(name, "stopped executing the best chain at \(path) before \(next), which awaits no parent fact")
+            }
+            // A fact its parent level now holds is a lost wake.
+            if host.parentFacts(for: path)?.holds(fact) != false {
+                throw Invariants.fail(name, "lost wake: \(next) at \(path) still awaits \(fact), which its parent level holds")
+            }
+        }
+    }
+
     /// After the quiet point: every honest core hosts every level, and at
     /// each holds the identical weighed graph (blocks, grinds, subtree work)
     /// and head, every block mined publicly, and each attributed run in full.
     /// Each has executed its best chain to the head, or up to a child block
-    /// awaiting a parent fact its parent level never executed (decision 21).
+    /// awaiting a parent fact its parent level still lacks (decision 21);
+    /// a fact the parent holds means a lost wake.
     /// Executed sets and exclusions may differ: each core executed the best
     /// chains it followed.
     public static func checkQuietPoint(
@@ -331,13 +349,7 @@ public enum LevelInvariants {
                 guard digest.canonicalTip == reference.canonicalTip else {
                     throw Invariants.fail(name, "selects differently at \(path) than \(first)")
                 }
-                let executedPrefix = digest.canonicalPath.prefix { digest.executed.contains($0) }.count
-                if executedPrefix < digest.canonicalPath.count {
-                    let next = digest.canonicalPath[executedPrefix]
-                    guard host.levels[path]?.bodies.awaitingParent.contains(next) == true else {
-                        throw Invariants.fail(name, "stopped executing the best chain at \(path) before \(next), which awaits no parent fact")
-                    }
-                }
+                try checkExecutionStop(name, path: path, host: host, digest: digest)
                 // Every public honest proof of a held block is credited.
                 for (cid, roots) in world.proofs[path] ?? [:] where digest.blocks[cid] != nil {
                     for (root, truth) in roots where truth.releaseAt <= now && digest.blocks[cid]?.grinds[root] == nil {

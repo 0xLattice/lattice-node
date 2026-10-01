@@ -298,8 +298,9 @@ public struct HostCore: Sendable {
         return effects
     }
 
-    /// Step one level. A level that executed a block wakes its child
-    /// levels, whose connects waiting on a parent fact run again.
+    /// Step one level. A level that executed a block wakes each child
+    /// block awaiting a fact it now holds; a level's own verdict is checked
+    /// the same way, since its parent may have executed while it ran.
     mutating func run(_ path: ChainPath, _ event: Event, _ turn: inout Turn) {
         guard var core = levels[path] else { return }
         let effects = core.step(event, now: turn.now)
@@ -312,10 +313,22 @@ public struct HostCore: Sendable {
                 return false
             }
         }
-        guard executed else { return }
-        for child in ordered where child.dropLast().elementsEqual(path) {
-            run(child, .parentExecuted, &turn)
+        if executed {
+            for child in ordered where child.dropLast().elementsEqual(path) {
+                wakeAnswered(child, &turn)
+            }
         }
+        if case .connected = event { wakeAnswered(path, &turn) }
+    }
+
+    /// Connect again the blocks of a child level whose awaited parent fact
+    /// is now present; a level with none is not stepped.
+    mutating func wakeAnswered(_ path: ChainPath, _ turn: inout Turn) {
+        guard let core = levels[path], !core.bodies.awaitingParent.isEmpty,
+              let facts = parentFacts(for: path) else { return }
+        let present = core.bodies.awaitingParent.filter { facts.holds($0.value) }.keys.sorted()
+        guard !present.isEmpty else { return }
+        run(path, .parentFactsPresent(present), &turn)
     }
 
     /// A level's effects join the host's: persists merge into the step's one
@@ -546,6 +559,24 @@ public struct HostCore: Sendable {
                 levels[path] = core
                 absorb(effects, at: path, &turn)
             }
+        }
+    }
+}
+
+extension ParentLevelFacts {
+    /// Whether these facts hold what a child connect lacked.
+    public func holds(_ fact: CrossChainEvidenceRequirement) -> Bool {
+        switch fact {
+        case .parentStateContinuity(let parentPath, let from, let to):
+            hasContinuity(ParentStateContinuityLink(parentPath: parentPath, fromStateCID: from, toStateCID: to))
+        case .parentGenesis(let parentPath, let directory, let genesis, let parentState):
+            // Deleted with genesis links in Lattice 41 (decision 18d).
+            recordsGenesis(ParentGenesisLink(
+                parentPath: parentPath, directory: directory,
+                childGenesisCID: genesis, parentStateCID: parentState
+            ))
+        case .childProof:
+            false
         }
     }
 }

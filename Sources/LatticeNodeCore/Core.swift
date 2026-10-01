@@ -18,9 +18,9 @@ public enum Event: Sendable {
     case bodyFetched(cid: String)
     /// A connect job's verdict.
     case connected(ConnectVerdict)
-    /// A child level: its parent level executed a block, so a connect that
-    /// lacked a parent fact may now succeed.
-    case parentExecuted
+    /// A child level: its parent level now holds the facts these blocks'
+    /// connects lacked.
+    case parentFactsPresent([String])
     case tick
     /// A child level: the evidence index's proofs for a block
     /// (`Effect.lookupProofs`).
@@ -315,8 +315,8 @@ public struct Core: Sendable {
             bodyFetched(cid)
         case .connected(let verdict):
             connected(verdict, &turn)
-        case .parentExecuted:
-            parentExecuted()
+        case .parentFactsPresent(let blocks):
+            parentFactsPresent(blocks)
         case .tick:
             tick(&turn)
         case .proofsFound(let cid, let proofs):

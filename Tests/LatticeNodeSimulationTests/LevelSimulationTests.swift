@@ -305,6 +305,8 @@ final class LevelSimulationTests: XCTestCase {
         /// When true, root connect jobs are held here, not run.
         var holdRoot = false
         var heldRoot: [ConnectJob] = []
+        /// Connect jobs emitted, per block.
+        var connects: [String: Int] = [:]
 
         init(pins: [ChainPath: String] = [:]) async throws {
             var rng = SplitMix64(state: 0x914)
@@ -352,8 +354,10 @@ final class LevelSimulationTests: XCTestCase {
                     case .level(let path, .fetchBody(let cid)):
                         queue.append(.level(path, .bodyFetched(cid: cid)))
                     case .connect(let path, let job, _) where holdRoot && path == LevelWorld.nexus:
+                        connects[job.blockHash, default: 0] += 1
                         heldRoot.append(job)
                     case .connect(let path, let job, let facts):
+                        connects[job.blockHash, default: 0] += 1
                         let verdict = await ChainTree.connect(
                             job, fetcher: world.cas, parentFacts: facts,
                             validationContext: ValidationContext(nowMilliseconds: now)
@@ -428,7 +432,8 @@ final class LevelSimulationTests: XCTestCase {
         let first = try XCTUnwrap(grinds[2].mined.carried.first).block
         let firstCID = try BlockHeader(node: first).rawCID
         var alpha = try XCTUnwrap(driver.host.levels[LevelWorld.alpha])
-        XCTAssertEqual(alpha.bodies.awaitingParent, [firstCID])
+        XCTAssertEqual(Array(alpha.bodies.awaitingParent.keys), [firstCID])
+        try LevelInvariants.checkExecutionStop("driver", path: LevelWorld.alpha, host: driver.host, digest: TreeDigest(alpha.tree))
         XCTAssertEqual(alpha.snapshot.actOnHeight, 0)
         XCTAssertTrue(TreeDigest(alpha.tree).excluded.isEmpty, "a missing parent fact is never invalidity")
 
@@ -443,9 +448,54 @@ final class LevelSimulationTests: XCTestCase {
         let nexus = try XCTUnwrap(driver.host.levels[LevelWorld.nexus]).snapshot
         XCTAssertEqual(nexus.actOnTip, nexus.bestHeaderTip)
         alpha = try XCTUnwrap(driver.host.levels[LevelWorld.alpha])
+        try LevelInvariants.checkExecutionStop("driver", path: LevelWorld.alpha, host: driver.host, digest: TreeDigest(alpha.tree))
         XCTAssertTrue(alpha.bodies.awaitingParent.isEmpty)
+        XCTAssertEqual(driver.connects[firstCID], 2, "parked once, connected again once when its fact arrived")
         XCTAssertEqual(alpha.snapshot.actOnTip, alpha.snapshot.bestHeaderTip, "the woken child level executed its whole chain")
         XCTAssertGreaterThan(alpha.snapshot.actOnHeight, 1)
+    }
+
+    /// A parked child block is connected again only when its parent level
+    /// holds the fact it lacked: parent executions in between that do not
+    /// produce it leave it parked, unstepped.
+    func testAParkedChildIsConnectedAgainOnlyWhenItsFactArrives() async throws {
+        // Pinned, so the uncle's branch executing keeps Alpha hosted.
+        let probe = try await HostDriver()
+        var driver = try await HostDriver(pins: [LevelWorld.alpha: probe.real])
+        let grinds = driver.world.grinds
+        try await driver.step(.mined(grinds[0].mined))
+        XCTAssertNotNil(driver.hosted)
+        // The uncle's heavier branch becomes best, its executions held...
+        driver.holdRoot = true
+        try await driver.weighAndExecute([driver.block(issuing: 1)] + driver.world.reorg)
+        // ...while Alpha's first block parks on block 1's state, which only
+        // the lighter branch produces.
+        try await driver.step(.mined(grinds[1].mined))
+        try await driver.step(.mined(grinds[2].mined))
+        let first = try BlockHeader(node: try XCTUnwrap(grinds[2].mined.carried.first).block).rawCID
+        XCTAssertEqual(driver.host.levels[LevelWorld.alpha]?.bodies.awaitingParent.keys.sorted(), [first])
+        var inBetween = 0
+        while !driver.heldRoot.isEmpty {
+            let job = driver.heldRoot.removeFirst()
+            let verdict = await ChainTree.connect(
+                job, fetcher: driver.world.cas, validationContext: ValidationContext(nowMilliseconds: driver.now)
+            )
+            try await driver.step(.level(LevelWorld.nexus, .connected(verdict)))
+            inBetween += 1
+            XCTAssertNotNil(driver.host.levels[LevelWorld.alpha]?.bodies.awaitingParent[first])
+        }
+        let nexus = try XCTUnwrap(driver.host.levels[LevelWorld.nexus]).snapshot
+        XCTAssertEqual(nexus.actOnTip, driver.world.reorg.last?.cid)
+        XCTAssertGreaterThan(inBetween, 1)
+        XCTAssertEqual(driver.connects[first], 1, "parent executions that lack its fact never reconnect it")
+
+        // The lighter branch overtakes and executes: the fact arrives.
+        driver.holdRoot = false
+        for grind in grinds[3...6] { try await driver.step(.mined(grind.mined)) }
+        let alpha = try XCTUnwrap(driver.host.levels[LevelWorld.alpha])
+        XCTAssertNil(alpha.bodies.awaitingParent[first])
+        XCTAssertGreaterThan(alpha.snapshot.actOnHeight, 1)
+        XCTAssertEqual(driver.connects[first], 2, "connected again exactly once, when its fact arrived")
     }
 
     /// A bootstrap answer for a genesis no longer asked (a stale failure)

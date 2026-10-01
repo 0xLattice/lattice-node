@@ -20,13 +20,11 @@ public struct Bodies: Sendable, Equatable {
     /// their bodies are asked for again.
     public internal(set) var parked: [String: Parked] = [:]
     /// Child-level blocks whose connect lacked a parent fact (decision 21:
-    /// a parent state this node has not executed). Never invalid and never
-    /// timed: each is connected again once the parent level executes more
-    /// (`Event.parentExecuted`). Their bodies stay arrived.
-    public internal(set) var awaitingParent: Set<String> = []
-    /// The parent level executed since the running connect started: its
-    /// parent facts may be stale, so a missing one does not park it.
-    var parentGrew = false
+    /// a parent state this node has not executed), with the fact. Never
+    /// invalid and never timed: each is connected again once its parent
+    /// level holds that fact (`Event.parentFactsPresent`). Their bodies stay
+    /// arrived.
+    public internal(set) var awaitingParent: [String: CrossChainEvidenceRequirement] = [:]
     /// The act-on tip and window when `parked` was last kept: a change to
     /// either (an execution, or a best chain that moved) starts every
     /// backoff over. A header weighed off the best chain changes neither.
@@ -81,9 +79,14 @@ extension Core {
         let cid = verdict.blockHash
         if bodies.connecting == cid { bodies.connecting = nil }
         switch verdict.retryFailure {
-        case .crossChainEvidenceRequired(.parentStateContinuity)?, .crossChainEvidenceRequired(.parentGenesis)?:
-            if !bodies.parentGrew { bodies.awaitingParent.insert(cid) }
-            return
+        case .crossChainEvidenceRequired(let fact)?:
+            switch fact {
+            case .parentStateContinuity, .parentGenesis:
+                bodies.awaitingParent[cid] = fact
+                return
+            case .childProof:
+                break
+            }
         default:
             break
         }
@@ -109,11 +112,10 @@ extension Core {
         }
     }
 
-    /// The parent level executed a block: every block awaiting a parent
-    /// fact is connected again.
-    mutating func parentExecuted() {
-        bodies.awaitingParent.removeAll()
-        bodies.parentGrew = true
+    /// The parent level now holds the facts these blocks awaited: they are
+    /// connected again.
+    mutating func parentFactsPresent(_ blocks: [String]) {
+        for cid in blocks { bodies.awaitingParent[cid] = nil }
     }
 
     /// Ask the content layer for every body in the window not yet asked for
@@ -134,17 +136,16 @@ extension Core {
         bodies.requested.formIntersection(wanted)
         bodies.arrived.formIntersection(wanted)
         bodies.parked = bodies.parked.filter { wanted.contains($0.key) }
-        bodies.awaitingParent.formIntersection(wanted)
+        bodies.awaitingParent = bodies.awaitingParent.filter { wanted.contains($0.key) }
         for cid in window where !bodies.requested.contains(cid) && !bodies.arrived.contains(cid) {
             if let parked = bodies.parked[cid], parked.notBefore > turn.now { continue }
             bodies.requested.insert(cid)
             turn.effects.append(.fetchBody(cid: cid))
         }
         guard bodies.connecting == nil, let next = window.first,
-              bodies.arrived.contains(next), !bodies.awaitingParent.contains(next),
+              bodies.arrived.contains(next), bodies.awaitingParent[next] == nil,
               let job = tree.connectJob(for: next) else { return }
         bodies.connecting = next
-        bodies.parentGrew = false
         turn.effects.append(.connect(job))
     }
 }
