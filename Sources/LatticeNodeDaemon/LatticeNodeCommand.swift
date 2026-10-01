@@ -97,7 +97,13 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Data root for --config: chains/<path> holds each chain's storage and identity/ its keys. Defaults to the config file's directory.")
     var dataRoot: String?
 
+    @Flag(name: .customLong("core-driver"), help: "Experimental: run Nexus sync on the sans-IO core driver (headers-first sync, bodies by CID) instead of the network runtime. Nexus only, without --config. Off by default.")
+    var coreDriver = false
+
     mutating func run() async throws {
+        if coreDriver, config != nil {
+            throw ValidationError("--core-driver runs Nexus only; it does not combine with --config")
+        }
         if let config {
             try await runHost(configPath: config)
             return
@@ -149,6 +155,10 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             publicReadURL: publicReadUrl,
             peerSearchInterval: peerSearchInterval
         )
+        if coreDriver {
+            try await runCoreDriver(configuration: configuration)
+            return
+        }
 
         let node = try await Node.build(configuration: configuration)
         let network = node.network
