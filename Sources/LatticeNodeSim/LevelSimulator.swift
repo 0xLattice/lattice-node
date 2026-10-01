@@ -94,6 +94,10 @@ public struct HostStore: Sendable {
     }
 
     mutating func append(_ batch: HostBatch) {
+        for path in batch.removed {
+            records[path] = nil
+            levels[path] = nil
+        }
         for record in batch.added {
             records[record.path] = record
             levels[record.path] = SimStore()

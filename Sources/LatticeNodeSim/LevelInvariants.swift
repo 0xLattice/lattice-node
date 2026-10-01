@@ -239,13 +239,14 @@ public enum LevelInvariants {
                 throw Invariants.fail(node, "the genesis link to \(anchor.link.childGenesisCID) is \(executed ? "missing" : "honoured") though its issuer is \(executed ? "" : "not ")executed")
             }
         }
-        for (child, link) in world.links {
-            guard let level = host.levels[child] else { continue }
-            guard level.genesis == link.childGenesisCID else {
-                throw Invariants.fail(node, "hosts \(child) on genesis \(level.genesis), not \(link.childGenesisCID)")
-            }
-            guard host.parentFacts(for: child)?.recordsGenesis(link) == true else {
-                throw Invariants.fail(node, "level \(child) runs with no executed block authorizing its genesis")
+        // Decision 15c: a hosted child runs on the link issued by the
+        // executed parent block on the path to the parent's act-on tip.
+        for child in world.links.keys {
+            guard let level = host.levels[child], let parentDigest = digests[Array(child.dropLast())] else { continue }
+            let actOnPath = Set(parentDigest.canonicalPath.prefix { parentDigest.executed.contains($0) })
+            let wanted = world.anchors.first { $0.child == child && actOnPath.contains($0.issuer) }
+            guard level.genesis == wanted?.link.childGenesisCID else {
+                throw Invariants.fail(node, "hosts \(child) on genesis \(level.genesis), not the act-on path's \(String(describing: wanted?.link.childGenesisCID))")
             }
         }
         for (parent, links) in host.issuers {

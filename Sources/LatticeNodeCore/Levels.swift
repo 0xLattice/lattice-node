@@ -94,9 +94,9 @@ public struct IssuedGenesisLink: Sendable, Hashable {
     }
 }
 
-/// A level the host runs: its chain, spec and genesis header. For a child
-/// chain it is also the PIN: the genesis this host chose for the directory,
-/// kept across restarts and parent reorgs.
+/// A level the host runs: its chain, spec and genesis header. A record for
+/// a path that already has one replaces it: that path's earlier facts are
+/// left unreferenced.
 public struct LevelRecord: Sendable {
     public let path: ChainPath
     public let spec: ChainSpec
@@ -113,9 +113,12 @@ public struct LevelRecord: Sendable {
 public struct HostBatch: Sendable {
     public internal(set) var levels: [(path: ChainPath, batch: PersistBatch)] = []
     public internal(set) var added: [LevelRecord] = []
+    /// Child levels this host stopped running (their genesis left the
+    /// parent's act-on path): a restore drops them.
+    public internal(set) var removed: [ChainPath] = []
     public internal(set) var issued: [IssuedGenesisLink] = []
 
-    public var isEmpty: Bool { levels.isEmpty && added.isEmpty && issued.isEmpty }
+    public var isEmpty: Bool { levels.isEmpty && added.isEmpty && issued.isEmpty && removed.isEmpty }
 
     mutating func append(_ batch: PersistBatch, at path: ChainPath) {
         guard let index = levels.firstIndex(where: { $0.path == path }) else {
@@ -146,8 +149,8 @@ public struct HostCore: Sendable {
     public internal(set) var peers: Set<PeerID> = []
     /// Operator overrides: the genesis to host for a child chain.
     public let pins: [ChainPath: String]
-    /// The genesis being bootstrapped per child chain, and the candidates
-    /// whose bootstrap failed (tried again only after every other).
+    /// The genesis being bootstrapped per child chain, and the geneses whose
+    /// bootstrap failed (tried again on a tick: their content may arrive).
     var bootstrapping: [ChainPath: String] = [:]
     var failed: [ChainPath: Set<String>] = [:]
     /// Per child level: the parent blocks that commit each child block.
@@ -209,7 +212,7 @@ public struct HostCore: Sendable {
     /// after `restore`, which asks for them.
     public mutating func pendingBootstraps(now: Int64) -> [HostEffect] {
         var turn = Turn(now: now)
-        for parent in ordered { requestBootstraps(under: parent, &turn) }
+        reconcileChildren(retryFailed: true, &turn)
         return turn.effects
     }
 
@@ -278,7 +281,6 @@ public struct HostCore: Sendable {
             if levels[path] != nil { run(path, event, &turn) }
         case .tick:
             for path in ordered { run(path, .tick, &turn) }
-            for parent in ordered { requestBootstraps(under: parent, retryFailed: true, &turn) }
         case .connected(let path, let verdict):
             connected(verdict, at: path, &turn)
         case .bootstrapped(let path, let result):
@@ -287,6 +289,11 @@ public struct HostCore: Sendable {
             mined(grind, &turn)
         }
         dropDisconnected(&turn)
+        if case .tick = event {
+            reconcileChildren(retryFailed: true, &turn)
+        } else {
+            reconcileChildren(&turn)
+        }
         attributeRuns(&turn)
         var effects: [HostEffect] = turn.batch.isEmpty ? [] : [.persist(turn.batch)]
         effects += turn.effects
@@ -370,73 +377,75 @@ public struct HostCore: Sendable {
                   issuers[path, default: [:]][link, default: []].insert(issuer).inserted else { continue }
             turn.batch.issued.append(IssuedGenesisLink(link: link, issuer: issuer))
         }
-        guard update != nil else { return }
-        requestBootstraps(under: path, &turn)
+
     }
 
-    /// Resolve and bootstrap each hosted child of `parent` this host does
-    /// not run yet ("join the child from the chain"): the operator's pinned
-    /// genesis if any, else the links issued by EXECUTED blocks on the
-    /// parent's BEST chain (one per directory per branch), lowest issuer
-    /// first. A failed bootstrap falls through to the next candidate: a
-    /// side branch's executed link is one only once every best-chain
-    /// candidate failed, so an uncle never blocks or hijacks the directory.
-    /// A failed candidate is tried again only after every other, and then
-    /// only on a tick (`retryFailed`), never in a loop. Once bootstrapped the
-    /// genesis is pinned (`LevelRecord`): a later parent reorg never
-    /// switches it.
-    mutating func requestBootstraps(under parent: ChainPath, retryFailed: Bool = false, _ turn: inout Turn) {
-        guard let core = levels[parent] else { return }
-        var byDirectory: [String: [(side: Bool, height: UInt64, issuer: String, link: ParentGenesisLink)]] = [:]
-        for (link, issuers) in issuers[parent] ?? [:] {
-            for issuer in issuers where core.tree.hasExecutedAncestry(blockHash: issuer) {
-                let height = core.tree.headerSnapshot(of: issuer)?.tipHeight ?? .max
-                byDirectory[link.directory, default: []].append((!core.tree.isCanonical(hash: issuer), height, issuer, link))
-            }
+    /// The genesis a hosted child chain must run on (decision 15c): the
+    /// operator's pinned genesis, once an executed parent block authorizes
+    /// it; otherwise the link issued by the executed parent block on the
+    /// path to the parent's act-on tip (a path holds at most one link per
+    /// directory). Nil: host nothing.
+    func wantedGenesis(of child: ChainPath) -> ParentGenesisLink? {
+        let parent = Array(child.dropLast())
+        guard let core = levels[parent], let facts = parentFacts(for: child) else { return nil }
+        let directory = child[child.count - 1]
+        let links = (issuers[parent] ?? [:]).filter { $0.key.directory == directory }
+        if let pin = pins[child] {
+            return links.keys.filter { $0.childGenesisCID == pin && facts.recordsGenesis($0) }
+                .min { $0.parentStateCID < $1.parentStateCID }
         }
-        for (directory, found) in byDirectory.sorted(by: { $0.key < $1.key }) {
-            let child = parent + [directory]
-            guard hosted.contains(child), levels[child] == nil, bootstrapping[child] == nil,
-                  let facts = parentFacts(for: child) else { continue }
-            let failed = failed[child] ?? []
-            let pin = pins[child]
-            let candidates = found.filter { candidate in pin.map { $0 == candidate.link.childGenesisCID } ?? true }
-            let best = candidates.filter { !$0.side }
-            let bestFailed = !best.isEmpty && best.allSatisfy { failed.contains($0.link.childGenesisCID) }
-            let pool = pin != nil || bestFailed ? candidates : best
-            let ordered = pool.sorted {
-                ($0.side ? 1 : 0, $0.height, $0.issuer) < ($1.side ? 1 : 0, $1.height, $1.issuer)
-            }.map { $0.link }
-            guard let link = ordered.first(where: { !failed.contains($0.childGenesisCID) })
-                    ?? (retryFailed ? ordered.first : nil),
-                  facts.recordsGenesis(link) else { continue }
-            if failed.contains(link.childGenesisCID) { self.failed[child] = nil }
+        let actOn = core.snapshot.actOnHeight
+        return links.compactMap { link, issuers -> (UInt64, ParentGenesisLink)? in
+            let onPath = issuers.compactMap { issuer -> UInt64? in
+                guard core.tree.isCanonical(hash: issuer), core.tree.hasExecutedAncestry(blockHash: issuer),
+                      let height = core.tree.headerSnapshot(of: issuer)?.tipHeight, height <= actOn else { return nil }
+                return height
+            }
+            return onPath.min().map { ($0, link) }
+        }.min { $0.0 < $1.0 }?.1
+    }
+
+    /// Make every hosted child chain run on its wanted genesis, parent before
+    /// child: a level on another genesis (or with none wanted) stops, with
+    /// its descendants, and the wanted one is bootstrapped. A failed genesis
+    /// is tried again only on a tick.
+    mutating func reconcileChildren(retryFailed: Bool = false, _ turn: inout Turn) {
+        for child in hosted.sorted(by: Self.order) {
+            let wanted = wantedGenesis(of: child)
+            if let level = levels[child], level.genesis != wanted?.childGenesisCID {
+                for path in levels.keys where path.starts(with: child) {
+                    levels[path] = nil
+                    committers[path] = nil
+                    bootstrapping[path] = nil
+                    turn.batch.levels.removeAll { $0.path == path }
+                    turn.batch.removed.append(path)
+                }
+            }
+            guard let link = wanted, levels[child] == nil, let facts = parentFacts(for: child),
+                  bootstrapping[child] != link.childGenesisCID else { continue }
+            if failed[child]?.contains(link.childGenesisCID) == true {
+                guard retryFailed else { continue }
+                failed[child]?.remove(link.childGenesisCID)
+            }
             bootstrapping[child] = link.childGenesisCID
             turn.effects.append(.bootstrap(child, genesisCID: link.childGenesisCID, parentFacts: facts))
         }
     }
 
-    /// A bootstrapped child chain becomes a level, and its genesis the pin,
-    /// if it is the genesis asked for and still authorized by an executed
-    /// parent block. Its genesis persists with the step, its parent starts
-    /// serving runs for it, and it syncs from every peer. A failed bootstrap
-    /// falls through to the next candidate.
+    /// A bootstrapped child chain becomes a level if it is still the wanted
+    /// genesis. Its genesis persists with the step (replacing any earlier
+    /// record for the path), its parent starts serving runs for it, and it
+    /// syncs from every peer. A failed bootstrap is retried on a tick.
     mutating func bootstrapped(_ result: Result<BootstrappedLevel, BlockImportError>, at path: ChainPath, _ turn: inout Turn) {
         guard let asked = bootstrapping.removeValue(forKey: path), levels[path] == nil, hosted.contains(path) else { return }
-        let parent = Array(path.dropLast())
         guard case .success(let level) = result, level.genesis.blockCID == asked,
-              let facts = parentFacts(for: path),
-              facts.recordsGenesis(ParentGenesisLink(
-                  parentPath: parent,
-                  directory: path[path.count - 1],
-                  childGenesisCID: level.genesis.blockCID,
-                  parentStateCID: level.genesis.block.parentState.rawCID
-              )) else {
-            failed[path, default: []].insert(asked)
-            requestBootstraps(under: parent, &turn)
+              wantedGenesis(of: path)?.childGenesisCID == asked else {
+            if case .failure = result { failed[path, default: []].insert(asked) }
             return
         }
         levels[path] = Core(tree: level.bootstrap.tree, config: config)
+        turn.batch.removed.removeAll { $0 == path }
+        turn.batch.levels.removeAll { $0.path == path }
         turn.batch.append(PersistBatch(headers: [level.genesis], facts: [level.bootstrap.facts]), at: path)
         turn.batch.added.append(LevelRecord(path: path, spec: level.spec, genesis: level.genesis))
         serve(path)

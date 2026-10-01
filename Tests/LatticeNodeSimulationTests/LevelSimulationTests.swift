@@ -229,9 +229,10 @@ final class LevelSimulationTests: XCTestCase {
 
     /// Alpha's real genesis link is in Nexus block 1; a competing genesis
     /// whose CID is ground below it is anchored by an uncle off the best
-    /// chain, which every node weighs and executes. The uncle neither blocks
-    /// nor hijacks the directory: every node hosts the real genesis (the
-    /// invariants check each node's hosted genesis after every step).
+    /// chain, which every node weighs and executes. The uncle's genesis is
+    /// never hosted, and all honest nodes on the same tip host the same
+    /// child (the invariants check each node's hosted genesis against its
+    /// act-on path after every step).
     func testTheChildGenesisResolvesFromTheBestExecutedChain() async throws {
         let (simulator, report) = try await simulate(config(0x6E2E5) {
             $0.withholder = false
@@ -250,36 +251,48 @@ final class LevelSimulationTests: XCTestCase {
         }
     }
 
-    /// Once bootstrapped, the child genesis is pinned: a parent reorg onto
-    /// the competing genesis's issuer does not switch it, and a host
-    /// restored from its batches keeps it and bootstraps nothing.
-    func testThePinnedGenesisSurvivesAParentReorgAndARestore() async throws {
-        var rng = SplitMix64(state: 0x914)
-        let world = try await LevelWorld.generate(
-            rng: &rng, levels: 2, grinds: 12, forkProbability: 0, shareProbability: 0,
-            doubleProbability: 0, withholdDelay: 1_000
-        )
-        let real = try XCTUnwrap(world.links[LevelWorld.alpha]).childGenesisCID
+    /// Drives one host by hand over a two-level world: weighs and executes
+    /// root blocks, and answers bootstraps from the world's content.
+    struct HostDriver {
+        let world: LevelWorld
         let now = World.genesisTime + 10_000
-        var host = HostCore(root: world.rootBootstrap.tree, hosted: world.hosted)
+        var host: HostCore
         var batches: [HostBatch] = []
+        var asked: [String] = []
 
-        func step(_ event: HostEvent) async throws {
+        init(pins: [ChainPath: String] = [:]) async throws {
+            var rng = SplitMix64(state: 0x914)
+            world = try await LevelWorld.generate(
+                rng: &rng, levels: 2, grinds: 12, forkProbability: 0, shareProbability: 0,
+                doubleProbability: 0, withholdDelay: 1_000
+            )
+            host = HostCore(root: world.rootBootstrap.tree, hosted: world.hosted, pins: pins)
+        }
+
+        var anchors: [GenesisAnchor] { world.anchors.filter { $0.child == LevelWorld.alpha } }
+        var real: String { anchors[0].link.childGenesisCID }
+        var ground: String { anchors[1].link.childGenesisCID }
+        var failing: String { anchors[2].link.childGenesisCID }
+        var hosted: String? { host.levels[LevelWorld.alpha]?.genesis }
+
+        func block(issuing index: Int) -> SimBlock { world.blocks[LevelWorld.nexus]![anchors[index].issuer]! }
+
+        mutating func step(_ event: HostEvent) async throws {
             var queue = [event]
             while !queue.isEmpty {
-                let effects = host.step(queue.removeFirst(), now: now)
-                for effect in effects {
+                for effect in host.step(queue.removeFirst(), now: now) {
                     switch effect {
                     case .persist(let batch):
                         batches.append(batch)
                     case .bootstrap(let path, let cid, let facts):
-                        XCTAssertNil(host.levels[path], "bootstraps \(path) though it runs it")
+                        asked.append(cid)
+                        let world = world
                         let result = await ChainTree.bootstrap(
                             genesis: BlockHeader(rawCID: cid), fetcher: world.cas,
                             context: try ChainRuntimeContext(path: path), parentFacts: facts,
                             validationContext: ValidationContext(nowMilliseconds: now)
                         ).map { boot -> BootstrappedLevel in
-                            let genesis = world.geneses[path]!
+                            let genesis = cid == world.groundGenesis?.cid ? world.groundGenesis! : world.geneses[path]!
                             return BootstrappedLevel(
                                 genesis: StoredHeader(blockCID: genesis.cid, block: genesis.block, children: genesis.children),
                                 spec: world.specs[path]!, bootstrap: boot
@@ -293,92 +306,78 @@ final class LevelSimulationTests: XCTestCase {
             }
         }
 
-        func weighAndExecute(_ block: SimBlock) async throws {
-            try await step(.mined(MinedGrind(root: block.block, rootChildren: block.children, carried: [])))
-            let job = try XCTUnwrap(host.connectJob(for: block.cid, at: LevelWorld.nexus))
-            let verdict = await ChainTree.connect(
-                job, fetcher: world.cas, validationContext: ValidationContext(nowMilliseconds: now)
-            )
-            try await step(.connected(LevelWorld.nexus, verdict))
-        }
-
-        let nexus = world.blocks[LevelWorld.nexus] ?? [:]
-        let anchors = world.anchors.filter { $0.child == LevelWorld.alpha }
-        try await weighAndExecute(try XCTUnwrap(nexus[anchors[0].issuer]))
-        XCTAssertEqual(host.levels[LevelWorld.alpha]?.genesis, real)
-
-        let uncle = try XCTUnwrap(nexus[anchors[1].issuer])
-        try await weighAndExecute(uncle)
-        for block in world.reorg { try await weighAndExecute(block) }
-        let root = try XCTUnwrap(host.levels[LevelWorld.nexus])
-        XCTAssertEqual(root.tree.canonicalTip, world.reorg.last?.cid, "the parent reorged onto the uncle")
-        XCTAssertTrue(host.parentFacts(for: LevelWorld.alpha)?.recordsGenesis(anchors[1].link) == true)
-        XCTAssertEqual(host.levels[LevelWorld.alpha]?.genesis, real, "a reorg never switches the pinned child")
-
-        let rootGenesis = world.geneses[LevelWorld.nexus]!
-        var facts: [ChainPath: [BlockImportBatch]] = [LevelWorld.nexus: [world.rootBootstrap.facts]]
-        for batch in batches { for (path, level) in batch.levels { facts[path, default: []] += level.facts } }
-        var restored = try HostCore.restore(
-            records: [LevelRecord(
-                path: LevelWorld.nexus, spec: world.specs[LevelWorld.nexus]!,
-                genesis: StoredHeader(blockCID: rootGenesis.cid, block: rootGenesis.block, children: rootGenesis.children)
-            )] + batches.flatMap(\.added),
-            facts: facts,
-            issued: batches.flatMap(\.issued),
-            hosted: world.hosted
-        )
-        XCTAssertEqual(restored.levels[LevelWorld.alpha]?.genesis, real, "the pin survives a restore")
-        XCTAssertTrue(restored.pendingBootstraps(now: now).isEmpty)
-    }
-
-    /// The best chain's only candidate fails to bootstrap (its genesis is
-    /// never stored): the host falls through to the executed side branch's
-    /// link, and never retries the failed one ahead of it.
-    func testAFailedGenesisFallsThroughToTheNextCandidate() async throws {
-        var rng = SplitMix64(state: 0x914)
-        let world = try await LevelWorld.generate(
-            rng: &rng, levels: 2, grinds: 12, forkProbability: 0, shareProbability: 0,
-            doubleProbability: 0, withholdDelay: 1_000
-        )
-        let now = World.genesisTime + 10_000
-        var host = HostCore(root: world.rootBootstrap.tree, hosted: world.hosted)
-        var asked: [String] = []
-        let anchors = world.anchors.filter { $0.child == LevelWorld.alpha }
-        let ground = anchors[1].link.childGenesisCID
-        let failing = anchors[2].link.childGenesisCID
-        let uncle = try XCTUnwrap(world.blocks[LevelWorld.nexus]?[anchors[1].issuer])
-
-        func step(_ event: HostEvent) async throws {
-            var queue = [event]
-            while !queue.isEmpty {
-                for case .bootstrap(let path, let cid, let facts) in host.step(queue.removeFirst(), now: now) {
-                    asked.append(cid)
-                    let result = await ChainTree.bootstrap(
-                        genesis: BlockHeader(rawCID: cid), fetcher: world.cas,
-                        context: try ChainRuntimeContext(path: path), parentFacts: facts,
-                        validationContext: ValidationContext(nowMilliseconds: now)
-                    ).map { boot -> BootstrappedLevel in
-                        let genesis = cid == ground ? world.groundGenesis! : world.geneses[path]!
-                        return BootstrappedLevel(
-                            genesis: StoredHeader(blockCID: genesis.cid, block: genesis.block, children: genesis.children),
-                            spec: world.specs[path]!, bootstrap: boot
-                        )
-                    }
-                    queue.append(.bootstrapped(path, result))
-                }
+        mutating func weighAndExecute(_ blocks: [SimBlock]) async throws {
+            for block in blocks {
+                try await step(.mined(MinedGrind(root: block.block, rootChildren: block.children, carried: [])))
+                let job = try XCTUnwrap(host.connectJob(for: block.cid, at: LevelWorld.nexus))
+                let verdict = await ChainTree.connect(
+                    job, fetcher: world.cas, validationContext: ValidationContext(nowMilliseconds: now)
+                )
+                try await step(.connected(LevelWorld.nexus, verdict))
             }
         }
 
-        for block in world.failingBranch + [uncle] {
-            try await step(.mined(MinedGrind(root: block.block, rootChildren: block.children, carried: [])))
-            let job = try XCTUnwrap(host.connectJob(for: block.cid, at: LevelWorld.nexus))
-            let verdict = await ChainTree.connect(job, fetcher: world.cas, validationContext: ValidationContext(nowMilliseconds: now))
-            try await step(.connected(LevelWorld.nexus, verdict))
+        func restored() throws -> HostCore {
+            var records: [ChainPath: LevelRecord] = [:]
+            var facts: [ChainPath: [BlockImportBatch]] = [LevelWorld.nexus: [world.rootBootstrap.facts]]
+            let genesis = world.geneses[LevelWorld.nexus]!
+            records[LevelWorld.nexus] = LevelRecord(
+                path: LevelWorld.nexus, spec: world.specs[LevelWorld.nexus]!,
+                genesis: StoredHeader(blockCID: genesis.cid, block: genesis.block, children: genesis.children)
+            )
+            for batch in batches {
+                for path in batch.removed { records[path] = nil; facts[path] = nil }
+                for record in batch.added { records[record.path] = record; facts[record.path] = [] }
+                for (path, level) in batch.levels { facts[path, default: []] += level.facts }
+            }
+            return try HostCore.restore(
+                records: Array(records.values), facts: facts,
+                issued: batches.flatMap(\.issued), hosted: world.hosted, pins: host.pins
+            )
         }
-        XCTAssertEqual(host.levels[LevelWorld.nexus]?.tree.canonicalTip, world.failingBranch.last?.cid)
-        XCTAssertEqual(asked, [failing, ground], "the best chain's candidate first, then the side branch's")
-        XCTAssertEqual(host.levels[LevelWorld.alpha]?.genesis, ground)
-        try await step(.tick)
-        XCTAssertEqual(asked.count, 2, "nothing retried once a level runs")
+    }
+
+    /// Decision 15c: the hosted child follows the link on the path to the
+    /// parent's act-on tip. A reorg onto the uncle's branch (another link)
+    /// switches it, and a restore keeps the switch.
+    func testAReorgOntoABranchWithAnotherLinkSwitchesTheHostedChild() async throws {
+        var driver = try await HostDriver()
+        try await driver.weighAndExecute([driver.block(issuing: 0), driver.world.grinds[1].root])
+        XCTAssertEqual(driver.hosted, driver.real)
+        try await driver.weighAndExecute([driver.block(issuing: 1)])
+        XCTAssertEqual(driver.hosted, driver.real, "an uncle's genesis is never hosted")
+        try await driver.weighAndExecute(driver.world.reorg)
+        XCTAssertEqual(driver.host.levels[LevelWorld.nexus]?.tree.canonicalTip, driver.world.reorg.last?.cid)
+        XCTAssertEqual(driver.hosted, driver.ground, "the reorg switched the hosted child")
+        XCTAssertEqual(driver.asked, [driver.real, driver.ground])
+        var restored = try driver.restored()
+        XCTAssertEqual(restored.levels[LevelWorld.alpha]?.genesis, driver.ground, "a restore keeps the switch")
+        XCTAssertTrue(restored.pendingBootstraps(now: driver.now).isEmpty)
+    }
+
+    /// A genesis that fails to bootstrap is retried on a tick (its content
+    /// may arrive later), never swapped for an uncle's.
+    func testAFailedGenesisIsRetriedNotSwapped() async throws {
+        var driver = try await HostDriver()
+        try await driver.weighAndExecute(driver.world.failingBranch)
+        XCTAssertEqual(driver.asked, [driver.failing])
+        try await driver.weighAndExecute([driver.block(issuing: 1)])
+        XCTAssertEqual(driver.asked, [driver.failing], "no retry before a tick, and no side-branch fallback")
+        try await driver.step(.tick)
+        XCTAssertEqual(driver.asked, [driver.failing, driver.failing], "retried on a tick")
+        XCTAssertNil(driver.hosted)
+    }
+
+    /// An operator pin overrides the act-on path once an executed parent
+    /// block authorizes the pinned genesis.
+    func testAnOperatorPinOverridesTheActOnPath() async throws {
+        var probe = try await HostDriver()
+        let ground = probe.ground
+        probe = try await HostDriver(pins: [LevelWorld.alpha: ground])
+        try await probe.weighAndExecute([probe.block(issuing: 0)])
+        XCTAssertNil(probe.hosted, "the pinned genesis is not authorized yet")
+        try await probe.weighAndExecute([probe.block(issuing: 1)])
+        XCTAssertEqual(probe.hosted, ground)
+        XCTAssertEqual(probe.asked, [ground])
     }
 }
