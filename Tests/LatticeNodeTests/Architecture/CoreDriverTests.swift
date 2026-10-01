@@ -73,10 +73,11 @@ final class CoreDriverTests: NetworkTrustTestCase {
 
         // Restart: the joiner's own journal replays to the same tip.
         let reopened = try await ChainProcess.open(configuration: joiner.configuration)
-        let core = try await CoreDriver.boot(
+        let host = try await CoreDriver.boot(
             process: reopened, configuration: joiner.configuration, coreConfig: .init()
         )
-        XCTAssertEqual(core.snapshot.actOnTip, tipCID)
-        XCTAssertEqual(core.snapshot.bestHeaderTip, tipCID)
+        let snapshot = try XCTUnwrap(host.levels[host.rootPath]?.snapshot)
+        XCTAssertEqual(snapshot.actOnTip, tipCID)
+        XCTAssertEqual(snapshot.bestHeaderTip, tipCID)
     }
 }

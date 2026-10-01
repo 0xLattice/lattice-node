@@ -12,27 +12,29 @@ public enum CoreDriverError: Error, Equatable, Sendable {
     case notNexus
 }
 
-/// The production shell around the sans-IO `LatticeNodeCore.Core` (behind
-/// `--core-driver`, Nexus only). It is plumbing: one serial task owns the
-/// core, drains one event channel (network messages, content arrivals, job
+/// The production shell around the sans-IO `LatticeNodeCore.HostCore`
+/// (behind `--core-driver`; it hosts the Nexus level only for now). It is
+/// plumbing: one serial task owns the host core, drains one event channel (network messages, content arrivals, job
 /// results, timers), calls `step(event, now)` and executes the effects in
 /// order — persist, then publish, then everything else. Every decision is
 /// the core's.
 ///
-/// - `persist` → the opened `ChainProcess`'s Volume store and state.db
+/// - `persist` (one `HostBatch`) → the opened `ChainProcess`'s Volume store and state.db
 ///   (content fsynced first, then the facts in one transaction). A failure
 ///   stops the process: restart replays the journal.
 /// - `publish` → `published`, read by RPC without touching the loop.
 /// - `send` / `serveHeaders` / `disconnect` → the Ivy overlay.
 /// - `fetchBody` / `cancelBody` / `fetchByCID` → the content layer
 ///   (VolumeBroker, then overlay providers by CID).
-/// - `connect` → a bounded worker pool; the verdict comes back as an event.
+/// - `connect` / `verifyProof` → a bounded worker pool; the result comes
+///   back as an event.
 /// - `wakeAt` → one timer that posts `tick`.
 ///
 /// Network and fetch effects spawn tasks that only post events back, so no
 /// suspension ever interleaves two steps.
-// PENDING #259: `Core` becomes the multi-level `HostCore`; the loop is the
-// same, events and effects gain a level.
+// PENDING (child levels): `hosted` is empty, so no `bootstrap` effect and no
+// child level arise yet. Hosting children needs per-level stores (P4) and
+// the evidence index behind `lookupProofs` / `indexProof`.
 public final class CoreDriver: Sendable {
     public let published: PublishedValue<Snapshot>
     private let inputs: AsyncStream<Input>.Continuation
@@ -42,9 +44,9 @@ public final class CoreDriver: Sendable {
 
     enum Input: Sendable {
         case network(CoreDriverNetworkInput)
-        case event(LatticeNodeCore.Event)
+        case event(HostEvent)
         /// A worker finished: its slot frees, then its result steps.
-        case jobDone(LatticeNodeCore.Event)
+        case jobDone(HostEvent)
         case stop
     }
 
@@ -92,23 +94,22 @@ public final class CoreDriver: Sendable {
         process: ChainProcess,
         configuration: NodeConfiguration,
         coreConfig: CoreConfig
-    ) async throws -> Core {
+    ) async throws -> HostCore {
         guard configuration.address.isNexus else { throw CoreDriverError.notNexus }
-        let core = try Core.restore(
+        let root = try Core.restore(
             replaying: try await process.coreFacts(),
             context: try configuration.runtimeContext,
             spec: NexusGenesis.spec,
             config: coreConfig
         )
-        let genesis = core.tree.canonicalBlockHash(atHeight: 0)
-        guard genesis == configuration.nexusGenesisCID else {
-            throw CoreDriverError.wrongGenesis(genesis)
+        guard root.genesis == configuration.nexusGenesisCID else {
+            throw CoreDriverError.wrongGenesis(root.genesis)
         }
-        return core
+        return HostCore(root: root.tree, hosted: [], config: coreConfig)
     }
 
     private init(
-        core: Core,
+        core: HostCore,
         process: ChainProcess,
         headers: CoreHeaderStore,
         configuration: NodeConfiguration,
@@ -117,7 +118,7 @@ public final class CoreDriver: Sendable {
         failStop: @escaping @Sendable (any Error) -> Void
     ) {
         let (stream, inputs) = AsyncStream<Input>.makeStream()
-        let published = PublishedValue(core.snapshot)
+        let published = PublishedValue(core.levels[core.rootPath]?.snapshot)
         self.published = published
         self.inputs = inputs
         self.ivy = ivy
@@ -164,7 +165,7 @@ public final class CoreDriver: Sendable {
 extension CoreDriver {
     /// Everything the loop task owns. Only the loop touches it.
     struct Loop: Sendable {
-        var core: Core
+        var core: HostCore
         let process: ChainProcess
         let headers: CoreHeaderStore
         let ivy: Ivy
@@ -180,9 +181,14 @@ extension CoreDriver {
         var sessions: [String: Session] = [:]
         var nextSession: UInt64 = 1
         var runningJobs = 0
-        var queuedJobs: [@Sendable () async -> LatticeNodeCore.Event] = []
+        var queuedJobs: [@Sendable () async -> HostEvent] = []
         var wake: (time: Int64, task: Task<Void, Never>)?
-        var bodies: [String: Task<Void, Never>] = [:]
+        var bodies: [BodyKey: Task<Void, Never>] = [:]
+
+        struct BodyKey: Hashable {
+            let path: ChainPath
+            let cid: String
+        }
 
         struct Session {
             let peer: AuthenticatedPeer
@@ -192,7 +198,7 @@ extension CoreDriver {
         }
 
         init(
-            core: Core,
+            core: HostCore,
             process: ChainProcess,
             headers: CoreHeaderStore,
             ivy: Ivy,
@@ -223,7 +229,7 @@ extension CoreDriver {
             case .stop:
                 return false
             case .event(let event):
-                if case .bodyFetched(let cid) = event { bodies[cid] = nil }
+                if case .level(let path, .bodyFetched(let cid)) = event { bodies[BodyKey(path: path, cid: cid)] = nil }
                 if case .tick = event { wake = nil }
                 return await step(event)
             case .jobDone(let event):
@@ -279,23 +285,24 @@ extension CoreDriver {
                 }
                 // A malformed frame is dropped: only the core blames, and
                 // only for proof-of-work.
-                guard session.ready, let message = try? CoreWire.decode(topic: topic, payload: payload) else {
+                guard session.ready, let decoded = try? CoreWire.decode(topic: topic, payload: payload) else {
                     return true
                 }
-                return await step(.received(session.coreID, message))
+                return await step(.received(session.coreID, decoded.chainPath, decoded.message))
             }
             return true
         }
 
         // MARK: - Step and effects
 
-        private mutating func step(_ event: LatticeNodeCore.Event) async -> Bool {
+        private mutating func step(_ event: HostEvent) async -> Bool {
             let effects = core.step(event, now: CoreDriver.now())
+            SyncTrace.log(chain: core.rootPath, "core-driver step \(String(describing: event).prefix(160)) -> \(effects.map { String(describing: $0).prefix(80) })")
             // Persist, then publish, then everything else, each in order.
-            func rank(_ effect: LatticeNodeCore.Effect) -> Int {
+            func rank(_ effect: HostEffect) -> Int {
                 switch effect {
                 case .persist: 0
-                case .publish: 1
+                case .level(_, .publish): 1
                 default: 2
                 }
             }
@@ -308,24 +315,58 @@ extension CoreDriver {
             return true
         }
 
-        private mutating func execute(_ effect: LatticeNodeCore.Effect) async -> Bool {
+        private mutating func execute(_ effect: HostEffect) async -> Bool {
             switch effect {
             case .persist(let batch):
-                do {
-                    try await process.persistCoreBatch(batch, headers: headers)
-                } catch {
-                    // Fail-stop: no later effect of this step may run.
-                    failStop(error)
-                    return false
+                // PENDING (child levels, P4): one transaction across levels,
+                // with `added` / `removed` level records and `issued` links.
+                // The Nexus-only host writes its root level's batch.
+                for (path, levelBatch) in batch.levels where path == core.rootPath {
+                    do {
+                        try await process.persistCoreBatch(levelBatch, headers: headers)
+                    } catch {
+                        // Fail-stop: no later effect of this step may run.
+                        failStop(error)
+                        return false
+                    }
                 }
+            case .level(let path, let effect):
+                return await execute(effect, at: path)
+            case .disconnect(let peer, _):
+                guard let session = session(peer) else { break }
+                sessions[peer.key] = nil
+                _ = await ivy.disconnectSession(ifCurrent: session.peer)
+            case .bootstrap:
+                // PENDING (child levels): never emitted while `hosted` is empty.
+                break
+            case .wakeAt(let time):
+                if let wake, wake.time <= time { break }
+                wake?.task.cancel()
+                let inputs = inputs
+                wake = (time, Task {
+                    let delay = UInt64(max(0, time - CoreDriver.now()))
+                    guard await Timers.sleep(nanoseconds: delay * 1_000_000) else { return }
+                    inputs.yield(.event(.tick))
+                })
+            }
+            return true
+        }
+
+        private mutating func execute(_ effect: LatticeNodeCore.Effect, at path: ChainPath) async -> Bool {
+            switch effect {
+            case .persist, .disconnect, .wakeAt:
+                // The host merges these into its own effects.
+                break
             case .publish(let snapshot):
-                published.publish(snapshot)
+                if path == core.rootPath { published.publish(snapshot) }
             case .send(let peer, let message):
-                guard let session = session(peer), let frame = try? CoreWire.encode(message) else { break }
+                guard let session = session(peer), let frame = try? CoreWire.encode(message, at: path) else { break }
                 _ = await ivy.sendMessage(to: session.peer, topic: frame.topic, payload: frame.payload)
             case .serveHeaders(let peer, let token, let requestID, let blockCIDs, let hasMore):
                 guard let session = session(peer) else { break }
                 let (process, headers, ivy, inputs, config) = (process, headers, ivy, inputs, core.config)
+                // PENDING (child levels): a child header's proofs are served
+                // from the evidence index.
                 spawn {
                     var entries: [HeaderEntry] = []
                     for cid in blockCIDs {
@@ -335,10 +376,10 @@ extension CoreDriver {
                     let page = config.page(entries, hasMore: hasMore)
                     if let frame = try? CoreWire.encode(.headers(HeadersResponse(
                         requestID: requestID, entries: page.entries, hasMore: page.hasMore
-                    ))) {
+                    )), at: path) {
                         _ = await ivy.sendMessage(to: session.peer, topic: frame.topic, payload: frame.payload)
                     }
-                    inputs.yield(.event(.headersServed(peer, token: token)))
+                    inputs.yield(.event(.level(path, .headersServed(peer, token: token))))
                 }
             case .fetchByCID(let peer, let cid):
                 guard let session = session(peer) else { break }
@@ -352,18 +393,19 @@ extension CoreDriver {
                     }
                     // No answer is no event: the request's deadline decides.
                     guard let bytes, let index = ChildIndex(data: bytes) else { return }
-                    inputs.yield(.event(.childIndexFetched(peer, cid: cid, index)))
+                    inputs.yield(.event(.level(path, .childIndexFetched(peer, cid: cid, index))))
                 }
             case .fetchBody(let cid):
-                guard bodies[cid] == nil else { break }
+                let key = BodyKey(path: path, cid: cid)
+                guard bodies[key] == nil else { break }
                 let (process, remote, inputs) = (process, remote, inputs)
-                bodies[cid] = Task {
+                bodies[key] = Task {
                     // The content layer retries until the body is held or the
                     // core no longer wants it.
                     var backoff: UInt64 = 250
                     while !Task.isCancelled {
                         if (try? await process.fetchCoreBody(cid, remote: remote)) != nil {
-                            inputs.yield(.event(.bodyFetched(cid: cid)))
+                            inputs.yield(.event(.level(path, .bodyFetched(cid: cid))))
                             return
                         }
                         _ = await Timers.sleep(nanoseconds: backoff * 1_000_000)
@@ -371,30 +413,33 @@ extension CoreDriver {
                     }
                 }
             case .cancelBody(let cid):
-                bodies.removeValue(forKey: cid)?.cancel()
+                bodies.removeValue(forKey: BodyKey(path: path, cid: cid))?.cancel()
             case .connect(let job):
-                let fetcher = process.localFetcher
+                let (fetcher, parentFacts) = (process.localFetcher, core.parentFacts(for: path))
+                // PENDING N3b: `HostEvent.connected(path, verdict)` does not
+                // yet go through the level's body window (it never clears the
+                // running connect, so execution stops after one block). Until
+                // the one execution path lands, the verdict goes to the level
+                // itself; the host's genesis-link bookkeeping it skips matters
+                // only for hosted children, of which there are none.
                 queuedJobs.append {
-                    .connected(await ChainTree.connect(
+                    .level(path, .connected(await ChainTree.connect(
                         job,
                         fetcher: fetcher,
+                        parentFacts: parentFacts,
                         validationContext: ValidationContext(nowMilliseconds: CoreDriver.now())
-                    ))
+                    )))
                 }
                 startJobs()
-            case .disconnect(let peer, _):
-                guard let session = session(peer) else { break }
-                sessions[peer.key] = nil
-                _ = await ivy.disconnectSession(ifCurrent: session.peer)
-            case .wakeAt(let time):
-                if let wake, wake.time <= time { break }
-                wake?.task.cancel()
-                let inputs = inputs
-                wake = (time, Task {
-                    let delay = UInt64(max(0, time - CoreDriver.now()))
-                    guard await Timers.sleep(nanoseconds: delay * 1_000_000) else { return }
-                    inputs.yield(.event(.tick))
-                })
+            case .verifyProof(let job):
+                // A job without its block reads it from the header store.
+                guard let block = job.block ?? headers.header(job.childCID)?.block else { break }
+                queuedJobs.append { .level(path, .proofVerified(job, await job.run(block))) }
+                startJobs()
+            case .lookupProofs, .indexProof:
+                // PENDING (child levels): the child-evidence index (#253).
+                // A root level never emits these.
+                break
             }
             return true
         }

@@ -259,6 +259,7 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
     func testCoreHeadersRequestIsCanonical() throws {
         try assertCanonical(HeadersRequestMessage.self, seed: 0x40) { g in
             HeadersRequestMessage(
+                chainPath: self.randomChainPath(&g, minimumCount: 1),
                 requestID: self.nonZeroID(&g),
                 known: (0..<self.randomInt(&g, 0...HeadersRequest.maximumKnown)).map { _ in self.randomCID(&g) },
                 after: self.randomBool(&g)
@@ -271,6 +272,7 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
     func testCoreAncestorsRequestIsCanonical() throws {
         try assertCanonical(AncestorsRequestMessage.self, seed: 0x41) { g in
             AncestorsRequestMessage(
+                chainPath: self.randomChainPath(&g, minimumCount: 1),
                 requestID: self.nonZeroID(&g),
                 cid: self.randomCID(&g),
                 maximum: self.randomInt(&g, 1...AncestorsRequestMessage.maximumAncestors)
@@ -299,12 +301,21 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
                 let children = self.randomBool(&g)
                     ? ChildIndex(entries: [self.randomAtom(&g): VolumeImpl<Block>(rawCID: self.randomCID(&g))])
                     : nil
+                let proofs = try (0..<self.randomInt(&g, 0...2)).map { _ in
+                    try ChildBlockProof(
+                        rootCID: self.randomCID(&g),
+                        directoryPath: self.randomChainPath(&g, minimumCount: 2),
+                        entries: [(cid: self.randomCID(&g), data: Data(self.randomAtom(&g).utf8))]
+                    ).serialize()
+                }
                 return WireHeaderEntry(
                     block: try XCTUnwrap(block.toData()),
-                    children: try children.map { try XCTUnwrap($0.toData()) }
+                    children: try children.map { try XCTUnwrap($0.toData()) },
+                    proofs: proofs
                 )
             }
             return HeadersResponseMessage(
+                chainPath: self.randomChainPath(&g, minimumCount: 1),
                 requestID: UInt64.random(in: 0...UInt64.max, using: &g),
                 entries: entries,
                 hasMore: self.randomBool(&g)
