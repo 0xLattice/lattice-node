@@ -461,6 +461,9 @@ extension Core {
         ))
         drain(&turn)
         if !isRoot { proofWork(&turn) }
+        // A weighed own block is executed like any other: its body is asked
+        // for in the same step.
+        scheduleBodies(&turn)
         return finish(turn)
     }
 
