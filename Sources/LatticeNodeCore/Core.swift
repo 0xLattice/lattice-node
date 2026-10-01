@@ -40,15 +40,6 @@ public struct PersistBatch: Sendable {
     }
 }
 
-/// What readers see: the best header tip and the tip a node acts on — the
-/// deepest executed block on the best chain.
-public struct Snapshot: Sendable, Equatable {
-    public let bestHeaderTip: String
-    public let bestHeaderHeight: UInt64
-    public let actOnTip: String
-    public let actOnHeight: UInt64
-}
-
 public enum Effect: Sendable {
     case send(PeerID, SyncMessage)
     /// Answer request `requestID` with these weighed headers, in order, then
@@ -75,31 +66,14 @@ public struct CoreConfig: Sendable {
     public var maxInlineChildIndexBytes: Int
     /// The operator's byte budget for headers not yet connected.
     public var pendingBudget: Int
-    /// How far below the fork point a catch-up also serves side branches:
-    /// a side block the requester missed while a link was down forks just
-    /// below its tip, where FindFork alone would never reach it. The
-    /// boundary: a side block forking deeper than this that a node missed
-    /// while offline is never re-sent. It cannot change honest fork choice
-    /// (it lost by that depth), and under decision 16 an operator may evict
-    /// such a subgraph anyway.
-    public var sideBranchWindow: UInt64
+    /// How far below its highest weighed height a node asks for catch-up:
+    /// a request names `max height - catchUpWindow` (saturating at 0) and
+    /// gets every weighed header above it, on every branch. Above that
+    /// height, quiet nodes hold identical weighed graphs; a side block a node
+    /// missed deeper than this is never re-sent (it lost by that depth, and
+    /// under decision 16 an operator may evict such a subgraph anyway).
+    public var catchUpWindow: UInt64
 
-    /// The most ancestor steps one catch-up request may walk from the
-    /// requester's side entries.
-    public var serveWalkBudget: Int {
-        let (walk, overflow) = Int(clamping: sideBranchWindow)
-            .multipliedReportingOverflow(by: HeadersRequest.maximumKnown)
-        return overflow ? .max : walk
-    }
-
-    /// The most index entries one catch-up request may examine: the walk,
-    /// then a scan of at most what it skips, `sideBranchWindow + 1`
-    /// best-chain heights and a page.
-    public var serveScanBudget: Int {
-        Core.saturatingSum([
-            serveWalkBudget, serveWalkBudget, Int(clamping: sideBranchWindow), 1, maxHeadersPerPage,
-        ])
-    }
     /// A header dated more than this beyond now is dropped (never blamed)
     /// instead of held: Bitcoin's two hours.
     public var maxFutureDrift: Int64
@@ -113,12 +87,12 @@ public struct CoreConfig: Sendable {
         headersTimeout: Int64 = 30_000,
         maxInlineChildIndexBytes: Int = 16 * 1_024,
         pendingBudget: Int = 16 * 1_024 * 1_024,
-        sideBranchWindow: UInt64 = 144,
+        catchUpWindow: UInt64 = 144,
         catchUpInterval: Int64 = 600_000,
         maxFutureDrift: Int64 = 2 * 60 * 60 * 1_000
     ) {
         self.maxFutureDrift = maxFutureDrift
-        self.sideBranchWindow = sideBranchWindow
+        self.catchUpWindow = catchUpWindow
         self.maxHeadersPerPage = maxHeadersPerPage
         self.maxPageBytes = maxPageBytes
         self.headersTimeout = headersTimeout
@@ -155,9 +129,10 @@ public struct CoreConfig: Sendable {
 /// Sync replicates the level's weighed subgraph. A connected header with
 /// valid proof-of-work is weighed at once by `insertRootHeader`;
 /// every newly weighed header — excluded ones too — is relayed to every other
-/// ready peer; an unknown parent is asked by CID of a peer that sent the
-/// header; catch-up asks a peer for its weighed headers after a locator of
-/// ours. Only a proof-of-work failure blames a peer.
+/// ready peer; an unknown parent is fetched with its ancestors from a peer
+/// that sent the header; catch-up asks a peer for every weighed header above
+/// a height of ours. Sync never reads canonicity. Only a proof-of-work
+/// failure blames a peer.
 public struct Core: Sendable {
     public private(set) var tree: ChainTree
     public private(set) var sync = Sync()
@@ -170,7 +145,7 @@ public struct Core: Sendable {
     public init(tree: ChainTree, config: CoreConfig = CoreConfig()) {
         var tree = tree
         precondition(tree.context?.isRoot == true, "the core runs one root level")
-        let genesis = tree.canonicalBlockHash(atHeight: 0) ?? tree.canonicalTip
+        let genesis = Self.genesis(of: tree)
         var index = WeighedIndex()
         var stack = [genesis]
         while let hash = stack.popLast() {
@@ -198,23 +173,13 @@ public struct Core: Sendable {
         )
     }
 
-    public var snapshot: Snapshot {
-        let actOn = tree.actOnTip()
-        return Snapshot(
-            bestHeaderTip: tree.canonicalTip,
-            bestHeaderHeight: tree.headerSnapshot(of: tree.canonicalTip)?.tipHeight ?? 0,
-            actOnTip: actOn.hash,
-            actOnHeight: actOn.height
-        )
-    }
-
     public mutating func step(_ event: Event, now: Int64) -> [Effect] {
         var turn = Turn(now: now)
         switch event {
         case .peerReady(let peer):
             guard sync.peers[peer] == nil else { break }
             sync.peers[peer] = PeerSync()
-            requestCatchUp(from: peer, after: nil, &turn)
+            requestCatchUp(from: peer, &turn)
         case .peerGone(let peer):
             drop(peer, &turn)
         case .received(let peer, let message):
@@ -236,10 +201,8 @@ public struct Core: Sendable {
         // Evict once the step's headers are processed, so a header held for
         // its future timestamp is already in the first eviction tier.
         sync.evict(to: config.pendingBudget)
-        // A full page continues once its headers are processed, so the next
-        // locator names them.
-        for (peer, after) in turn.continuations {
-            requestCatchUp(from: peer, after: after, &turn)
+        for (peer, aboveHeight, after) in turn.continuations {
+            requestCatchUp(from: peer, aboveHeight: aboveHeight, after: after, &turn)
         }
         return finish(turn)
     }
@@ -254,8 +217,9 @@ public struct Core: Sendable {
         var effects: [Effect] = []
         /// Headers this step weighed, and the peer each came from.
         var relays: [(entry: HeaderEntry, from: PeerID?)] = []
-        /// Catch-up pages to continue, after the given header.
-        var continuations: [(PeerID, HeaderKey)] = []
+        /// Catch-up passes to continue: the pass's height, after the given
+        /// header.
+        var continuations: [(PeerID, UInt64, HeaderKey)] = []
         /// Pending headers to look at again, smallest priority first.
         var dirty = Heap<(priority: UInt256, cid: String)> {
             $0.priority != $1.priority ? $0.priority < $1.priority : $0.cid < $1.cid
@@ -332,7 +296,7 @@ public struct Core: Sendable {
 
     private mutating func receive(_ message: SyncMessage, from peer: PeerID, _ turn: inout Turn) {
         switch message {
-        case .getHeaders, .getHeader:
+        case .getHeaders, .getAncestors:
             if sync.peers[peer]?.serving == nil {
                 serve(message, to: peer, &turn)
             } else if (sync.peers[peer]?.queued.count ?? 0) < 2 {
@@ -348,11 +312,10 @@ public struct Core: Sendable {
         let requestID: UInt64
         let page: (cids: [String], hasMore: Bool)
         switch message {
-        case .getHeader(let id, let cid):
+        case .getAncestors(let id, let cid, let max):
             requestID = id
-            page = (cid != genesis && index.contains(cid) ? [cid] : [], false)
+            page = (ancestors(of: cid, max: max), false)
         case .getHeaders(let request):
-            guard request.known.count <= HeadersRequest.maximumKnown else { return }
             requestID = request.requestID
             page = catchUpPage(request)
         case .headers:
@@ -366,115 +329,68 @@ public struct Core: Sendable {
         ))
     }
 
-    /// The weighed headers after the requester's locator: from Bitcoin's
-    /// FindFork (the highest held locator entry on our best chain, or where a
-    /// held side entry joins it) less `sideBranchWindow` heights — `after`
-    /// only moves the start up — in `HeaderKey` order, skipping what the
-    /// requester holds: every best-chain block up to that point and every
-    /// held side entry's ancestors down to its join. Each request examines
-    /// at most `serveScanBudget` index entries, and a page cut by its budget
-    /// is never empty.
+    /// Every weighed header with height above `aboveHeight`, on every
+    /// branch, in `HeaderKey` order after `after`: one seek into the index,
+    /// then at most a page plus one look-ahead. Nothing is skipped.
     mutating func catchUpPage(_ request: HeadersRequest) -> (cids: [String], hasMore: Bool) {
-        let held = request.known.filter(index.contains)
-        var canonicalHeld: UInt64 = 0
-        for cid in held where tree.isCanonical(hash: cid) {
-            canonicalHeld = max(canonicalHeld, index.height[cid] ?? 0)
-        }
-        // Each held side entry's ancestors, down to where it joins our best
-        // chain, under their own cap; past it nothing more is skipped and
-        // held headers are re-sent (harmless duplicates).
-        var walk = config.serveWalkBudget
-        var skip: Set<String> = []
-        for known in held where !tree.isCanonical(hash: known) {
-            var current: String? = known
-            while let hash = current, let height = index.height[hash], walk > 0 {
-                walk -= 1
-                if tree.isCanonical(hash: hash) {
-                    canonicalHeld = max(canonicalHeld, height)
-                    break
-                }
-                guard skip.insert(hash).inserted else { break }
-                current = index.parent[hash]
-            }
-        }
-        let top = canonicalHeld + 1
-        let floor = HeaderKey(
-            height: top > config.sideBranchWindow ? max(1, top - config.sideBranchWindow) : 1, cid: ""
-        )
-        let start = request.after.map { max($0, floor) } ?? floor
-        // At most `skip.count` skipped and `window + 1` best-chain keys come
-        // before one that is sent, so this budget never ends a page empty.
-        let scanBudget = Self.saturatingSum(
-            [skip.count, Int(clamping: config.sideBranchWindow), 1, config.maxHeadersPerPage]
-        )
-        var scan = scanBudget
         var cids: [String] = []
-        defer { sync.lastServeScanned = (config.serveWalkBudget - walk) + (scanBudget - scan) }
+        var scanned = 0
+        defer { sync.lastServeScanned = scanned }
+        // A peer chooses the height: one past every height serves nothing,
+        // and it is never converted before `keys(from:)` bounds it.
+        guard request.aboveHeight < .max else { return ([], false) }
+        let floor = HeaderKey(height: request.aboveHeight + 1, cid: "")
+        let start = request.after.map { max($0, floor) } ?? floor
         for key in index.keys(from: start, strictlyAfter: start == request.after) {
-            guard scan > 0 else { return (cids, true) }
-            scan -= 1
-            if skip.contains(key.cid) { continue }
-            if key.height <= canonicalHeld, tree.isCanonical(hash: key.cid) { continue }
+            scanned += 1
             if cids.count == config.maxHeadersPerPage { return (cids, true) }
             cids.append(key.cid)
         }
         return (cids, false)
     }
 
-    // MARK: - Catch-up
-
-    /// A Bitcoin-style locator: the best chain from its tip (ten, then
-    /// doubling steps back to genesis), then our leaves, highest first, each
-    /// with doubling steps back until the best chain; at most
-    /// `HeadersRequest.maximumKnown` entries.
-    func locator() -> [String] {
-        let limit = HeadersRequest.maximumKnown
-        var entries: [String] = []
-        var seen = Set<String>()
-        func add(_ cid: String?) {
-            guard let cid, entries.count < limit, seen.insert(cid).inserted else { return }
-            entries.append(cid)
+    /// The weighed header `cid` and up to `max` of its ancestors (capped by
+    /// the page), child to parent, stopping above genesis: one parent step
+    /// each.
+    func ancestors(of cid: String, max: Int) -> [String] {
+        guard cid != genesis, index.contains(cid) else { return [] }
+        var cids = [cid]
+        var current = cid
+        let limit = Swift.min(Swift.max(max, 0), config.maxHeadersPerPage)
+        while cids.count <= limit, let parent = index.parent[current], parent != genesis {
+            cids.append(parent)
+            current = parent
         }
-        let tipHeight = index.height[tree.canonicalTip] ?? 0
-        var height = tipHeight
-        var step: UInt64 = 1
-        while true {
-            add(tree.canonicalBlockHash(atHeight: height))
-            if height == 0 { break }
-            if entries.count >= 10 { step *= 2 }
-            height = height > step ? height - step : 0
-        }
-        for leaf in index.topLeaves where entries.count < limit && !tree.isCanonical(hash: leaf.cid) {
-            add(leaf.cid)
-            var step: UInt64 = 1
-            var height = leaf.height
-            while height > step, entries.count < limit {
-                height -= step
-                step *= 2
-                guard let ancestor = index.ancestor(of: leaf.cid, atHeight: height) else { break }
-                if tree.isCanonical(hash: ancestor) { break }
-                add(ancestor)
-            }
-        }
-        return entries
+        return cids
     }
 
-    /// Ask `peer` for its weighed headers after our locator, continuing
+    // MARK: - Catch-up
+
+    /// Ask `peer` for every weighed header above our highest weighed height
+    /// less `catchUpWindow`; a continued pass keeps its height and climbs
     /// after `after`.
-    private mutating func requestCatchUp(from peer: PeerID, after: HeaderKey?, _ turn: inout Turn) {
+    private mutating func requestCatchUp(
+        from peer: PeerID,
+        aboveHeight: UInt64? = nil,
+        after: HeaderKey? = nil,
+        _ turn: inout Turn
+    ) {
         guard let state = sync.peers[peer], state.catchUp == nil else { return }
+        let top = index.maxHeight
+        let height = aboveHeight ?? (top > config.catchUpWindow ? top - config.catchUpWindow : 0)
         let requestID = nextRequestID()
         sync.peers[peer]?.catchUp = InFlightPage(
-            requestID: requestID, after: after, deadline: turn.now + config.headersTimeout
+            requestID: requestID, aboveHeight: height, after: after, deadline: turn.now + config.headersTimeout
         )
         sync.peers[peer]?.nextCatchUp = turn.now + config.catchUpInterval
         turn.effects.append(.send(peer, .getHeaders(HeadersRequest(
-            requestID: requestID, known: locator(), after: after
+            requestID: requestID, aboveHeight: height, after: after
         ))))
     }
 
-    /// Headers from `peer`: a relay, a catch-up page, or the parent asked of
-    /// it. All take the same path; only a page continues.
+    /// Headers from `peer`: a relay, a catch-up page, or the ancestors asked
+    /// of it (child to parent, taken parent first). All take the same path;
+    /// only a page continues.
     private mutating func receive(_ response: HeadersResponse, from peer: PeerID, _ turn: inout Turn) {
         var page: InFlightPage?
         var answeredParent = false
@@ -490,14 +406,14 @@ public struct Core: Sendable {
             }
         }
         var last: HeaderKey?
-        for entry in response.entries {
+        for entry in answeredParent ? response.entries.reversed() : response.entries {
             guard let cid = accept(entry, from: peer, &turn) else { return }
             last = HeaderKey(height: entry.block.height, cid: cid)
         }
         if answeredParent { nextWant(of: peer, parent: true, &turn) }
         // The cursor only climbs, so a page that repeats itself ends here.
         if let page, response.hasMore, let last, page.after.map({ last > $0 }) ?? true {
-            turn.continuations.append((peer, last))
+            turn.continuations.append((peer, page.aboveHeight, last))
         }
     }
 
@@ -655,13 +571,14 @@ public struct Core: Sendable {
 
     // MARK: - Requests for what a pending header lacks
 
-    /// Ask the header's first announcer for its parent or its child index,
+    /// Ask the header's first announcer for its parent (with its ancestors)
+    /// or its child index,
     /// or queue the ask until that request slot frees. A header no live
     /// peer announced starts a catch-up from another peer instead.
     private mutating func want(_ header: PendingHeader, parent: Bool, _ turn: inout Turn) {
         guard let source = header.source, let state = sync.peers[source] else {
             if let other = sync.peers.keys.sorted().first(where: { sync.peers[$0]?.catchUp == nil }) {
-                requestCatchUp(from: other, after: nil, &turn)
+                requestCatchUp(from: other, &turn)
             }
             return
         }
@@ -674,7 +591,9 @@ public struct Core: Sendable {
                 requestID: requestID, cid: parentHash, deadline: turn.now + config.headersTimeout
             )
             sync.pending.entries[cid]?.askedParent = true
-            turn.effects.append(.send(source, .getHeader(requestID: requestID, cid: parentHash)))
+            turn.effects.append(.send(source, .getAncestors(
+                requestID: requestID, cid: parentHash, max: config.maxHeadersPerPage
+            )))
         } else {
             guard state.childIndex == nil else { return queueWant(cid, of: source, parent: false) }
             let children = header.block.children.rawCID
@@ -757,21 +676,11 @@ public struct Core: Sendable {
             }
         }
         for peer in sync.peers.keys.sorted() where (sync.peers[peer]?.nextCatchUp ?? .max) <= now {
-            requestCatchUp(from: peer, after: nil, &turn)
+            requestCatchUp(from: peer, &turn)
         }
     }
 
     // MARK: - Content
-
-    static func saturatingSum(_ terms: [Int]) -> Int {
-        var total = 0
-        for term in terms {
-            let (sum, overflow) = total.addingReportingOverflow(term)
-            if overflow { return .max }
-            total = sum
-        }
-        return total
-    }
 
     static func cid(of index: ChildIndex) -> String? {
         try? HeaderImpl<ChildIndex>(node: index).rawCID

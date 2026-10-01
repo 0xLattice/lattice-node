@@ -41,7 +41,7 @@ final class CoreSyncTests: XCTestCase {
 
     private func parentRequests(_ effects: [Effect]) -> [(PeerID, UInt64, String)] {
         effects.compactMap {
-            if case .send(let to, .getHeader(let id, let cid)) = $0 { return (to, id, cid) }
+            if case .send(let to, .getAncestors(let id, let cid, _)) = $0 { return (to, id, cid) }
             return nil
         }
     }
@@ -112,11 +112,11 @@ final class CoreSyncTests: XCTestCase {
 
     // MARK: - Catch-up
 
-    func testPeerReadyAsksForHeadersAfterItsLeavesAndArmsADeadline() throws {
+    func testPeerReadyAsksForHeadersAboveItsHeightAndArmsADeadline() throws {
         var core = core()
         let effects = ready(&core, peer)
         let request = try XCTUnwrap(requests(effects).first)
-        XCTAssertEqual(request.known, [world.genesis.cid])
+        XCTAssertEqual(request.aboveHeight, 0)
         XCTAssertNil(request.after)
         XCTAssertEqual(core.sync.peers[peer]?.catchUp?.deadline, Self.now + 1_000)
         guard case .wakeAt(let wake) = effects.last else { return XCTFail("\(effects)") }
@@ -145,7 +145,7 @@ final class CoreSyncTests: XCTestCase {
         XCTAssertEqual(relayed.requestID, 0)
         XCTAssertFalse(relays(effects).contains { $0.0 == peer })
         let next = try XCTUnwrap(requests(effects).first)
-        XCTAssertEqual(next.known.first, chain[3].cid, "the locator starts at the tip")
+        XCTAssertEqual(next.aboveHeight, 0, "a pass keeps its height")
         XCTAssertEqual(next.after, HeaderKey(height: 4, cid: chain[3].cid))
     }
 
@@ -161,29 +161,25 @@ final class CoreSyncTests: XCTestCase {
         XCTAssertNil(core.sync.peers[peer]?.catchUp)
     }
 
-    func testServingListsTheWholeWeighedSubgraphAfterTheKnownCIDsPaged() async throws {
+    func testServingListsEveryWeighedHeaderAboveTheHeightOnEveryBranchPaged() async throws {
         let side = try await world.branch(from: chain[1], count: 2)
         var core = weighed(Array(chain[0..<6]) + side)
-        let known = chain[3].cid
-        var effects = core.step(.received(other, .getHeaders(HeadersRequest(
-            requestID: 7, known: [known, "bafyunknown"], after: nil
-        ))), now: Self.now)
+        let request = HeadersRequest(requestID: 7, aboveHeight: 3, after: nil)
+        var effects = core.step(.received(other, .getHeaders(request)), now: Self.now)
         XCTAssertTrue(served(effects).isEmpty, "a peer that is not ready is not served")
         ready(&core, other)
-        effects = core.step(.received(other, .getHeaders(HeadersRequest(
-            requestID: 7, known: [known, "bafyunknown"], after: nil
-        ))), now: Self.now)
-        let expected = (side + chain[4..<6])
+        effects = core.step(.received(other, .getHeaders(request)), now: Self.now)
+        let expected = (Array(chain[3..<6]) + side.suffix(1))
             .map { HeaderKey(height: $0.height, cid: $0.cid) }
             .sorted()
         let page = try XCTUnwrap(served(effects).first)
         XCTAssertEqual(page.0, 7)
-        XCTAssertEqual(page.1, expected.map(\.cid), "side branches included, ancestors of known excluded")
+        XCTAssertEqual(page.1, expected.map(\.cid), "every branch above the height, in (height, CID) order")
         XCTAssertFalse(page.2)
 
         _ = core.step(.headersServed(other, token: page.token), now: Self.now)
         effects = core.step(.received(other, .getHeaders(HeadersRequest(
-            requestID: 8, known: [known], after: expected[1]
+            requestID: 8, aboveHeight: 3, after: expected[1]
         ))), now: Self.now)
         XCTAssertEqual(served(effects).first?.1, expected.dropFirst(2).map(\.cid))
     }
@@ -191,14 +187,14 @@ final class CoreSyncTests: XCTestCase {
     func testOnlyOneServedPagePerPeerIsOutstandingAndTheNextWaitsForIt() throws {
         var core = weighed(Array(chain[0..<3]))
         ready(&core, other)
-        let first = core.step(.received(other, .getHeaders(HeadersRequest(requestID: 1, known: [], after: nil))), now: Self.now)
+        let first = core.step(.received(other, .getHeaders(HeadersRequest(requestID: 1, aboveHeight: 0, after: nil))), now: Self.now)
         XCTAssertEqual(served(first).count, 1)
-        let second = core.step(.received(other, .getHeaders(HeadersRequest(requestID: 2, known: [], after: nil))), now: Self.now)
+        let second = core.step(.received(other, .getHeaders(HeadersRequest(requestID: 2, aboveHeight: 0, after: nil))), now: Self.now)
         XCTAssertTrue(served(second).isEmpty)
         let sent = core.step(.headersServed(other, token: served(first)[0].token), now: Self.now)
         XCTAssertEqual(served(sent).first?.0, 2)
-        // A `getHeader` takes the same slot.
-        let third = core.step(.received(other, .getHeader(requestID: 3, cid: chain[0].cid)), now: Self.now)
+        // A `getAncestors` takes the same slot.
+        let third = core.step(.received(other, .getAncestors(requestID: 3, cid: chain[0].cid, max: 4)), now: Self.now)
         XCTAssertTrue(served(third).isEmpty)
         let after = core.step(.headersServed(other, token: served(sent)[0].token), now: Self.now)
         XCTAssertEqual(served(after).first?.1, [chain[0].cid])
@@ -280,7 +276,7 @@ final class CoreSyncTests: XCTestCase {
 
     // MARK: - Unknown parents, child indexes, future headers
 
-    func testAnUnknownParentIsAskedByCIDOfTheSender() throws {
+    func testAnUnknownParentIsFetchedWithItsAncestorsFromTheSender() throws {
         var core = core()
         ready(&core, peer)
         ready(&core, other)
@@ -297,6 +293,40 @@ final class CoreSyncTests: XCTestCase {
         XCTAssertTrue(core.tree.contains(blockHash: withheld.cid))
         XCTAssertTrue(core.tree.contains(blockHash: orphan.cid))
         XCTAssertEqual(relays(effects).first?.1, [withheld.cid, orphan.cid], "parent before child")
+    }
+
+    /// One `getAncestors` round trip connects a branch whose fork lies
+    /// deep below: the answer lists child to parent and is taken parent
+    /// first, and nothing more is asked.
+    func testOneAncestorsAnswerConnectsADeepBranch() async throws {
+        let branch = try await world.branch(from: chain[5], count: 8)
+        var core = weighed(Array(chain[0..<12]), pageSize: 16)
+        ready(&core, other)
+        let effects = relay(&core, [entry(branch.last!)], from: other)
+        let ask = try XCTUnwrap(parentRequests(effects).first)
+        XCTAssertEqual(ask.2, branch[6].cid)
+        // The server's answer: the header, then its ancestors down past the
+        // fork (held ones are dropped as duplicates).
+        let answer = (Array(chain[0...5]) + branch.dropLast()).reversed().map { entry($0) }
+        let done = relay(&core, answer, from: other, requestID: ask.1)
+        for block in branch { XCTAssertTrue(core.tree.contains(blockHash: block.cid)) }
+        XCTAssertTrue(parentRequests(done).isEmpty)
+        XCTAssertTrue(disconnects(done).isEmpty)
+        XCTAssertTrue(core.sync.pending.entries.isEmpty)
+    }
+
+    func testTheServerAnswersAncestorsChildToParentCappedAboveGenesis() throws {
+        var core = weighed(Array(chain[0..<10]), pageSize: 4)
+        ready(&core, other)
+        let effects = core.step(.received(other, .getAncestors(requestID: 5, cid: chain[9].cid, max: .max)), now: Self.now)
+        let page = try XCTUnwrap(served(effects).first)
+        XCTAssertEqual(page.1, chain[4...9].reversed().prefix(5).map(\.cid), "the header and at most a page of ancestors")
+        _ = core.step(.headersServed(other, token: page.token), now: Self.now)
+        let low = core.step(.received(other, .getAncestors(requestID: 6, cid: chain[1].cid, max: 9)), now: Self.now)
+        XCTAssertEqual(served(low).first?.1, [chain[1].cid, chain[0].cid], "never genesis")
+        _ = core.step(.headersServed(other, token: served(low)[0].token), now: Self.now)
+        let unknown = core.step(.received(other, .getAncestors(requestID: 7, cid: "bafyunknown", max: -3)), now: Self.now)
+        XCTAssertEqual(served(unknown).first?.1, [])
     }
 
     func testAnUnansweredParentIsNotBlameAndNotAskedAgain() throws {
@@ -451,34 +481,42 @@ final class CoreSyncTests: XCTestCase {
         XCTAssertTrue(core.sync.pending.entries.isEmpty, "the pending queue holds only unconnected headers")
     }
 
-    // MARK: - Locators and the indexed serve
+    // MARK: - The request height and the indexed serve
 
-    func testTheLocatorIsBitcoinStyleAndBounded() async throws {
-        var core = weighed(chain)
-        for index in 0..<70 {
-            let side = try await world.branch(from: chain[index % 29], count: 1, interval: 500 + Int64(index))
-            relay(&core, side.map { entry($0) }, from: peer)
-        }
-        XCTAssertGreaterThan(core.index.leaves.count, 64)
+    /// The request names the highest weighed height on any branch less the
+    /// window — not the best tip.
+    func testTheRequestHeightIsTheHighestWeighedHeightLessTheWindow() async throws {
+        var core = Core(tree: world.bootstrap.tree, config: CoreConfig(catchUpWindow: 10))
+        ready(&core, peer)
+        relay(&core, chain.map { entry($0) }, from: peer)
+        let side = try await world.branch(from: chain[27], count: 4, interval: 50_000)
+        relay(&core, side.map { entry($0) }, from: peer)
+        XCTAssertEqual(core.index.maxHeight, 32)
         let request = try XCTUnwrap(requests(core.step(.peerReady(other), now: Self.now)).first)
-        XCTAssertEqual(request.known.count, HeadersRequest.maximumKnown)
-        XCTAssertEqual(request.known.first, core.tree.canonicalTip, "the best chain from its tip")
-        XCTAssertTrue(request.known.prefix(10).allSatisfy { core.tree.isCanonical(hash: $0) })
-        XCTAssertTrue(request.known.contains(world.genesis.cid))
+        XCTAssertEqual(request.aboveHeight, 22)
+        XCTAssertNil(request.after)
+        // Saturating at 0 below the window.
+        var young = Core(tree: world.bootstrap.tree, config: CoreConfig(catchUpWindow: 10))
+        ready(&young, peer)
+        relay(&young, chain.prefix(3).map { entry($0) }, from: peer)
+        XCTAssertEqual(requests(young.step(.peerReady(other), now: Self.now)).first?.aboveHeight, 0)
     }
 
-    /// A server one block behind the requester answers with nothing, and
-    /// examines O(window) index entries, not the graph.
+    /// A server one block behind the requester answers with the one header
+    /// above the height it holds (a duplicate the requester drops), and
+    /// examines O(page) index entries, not the graph.
     func testTheOneBlockRaceCostsNoHistory() throws {
-        var requester = weighed(chain)
-        var server = Core(tree: world.bootstrap.tree, config: CoreConfig(sideBranchWindow: 2))
+        var requester = Core(tree: world.bootstrap.tree, config: CoreConfig(catchUpWindow: 2))
+        ready(&requester, peer)
+        relay(&requester, chain.map { entry($0) }, from: peer)
+        var server = Core(tree: world.bootstrap.tree, config: CoreConfig(catchUpWindow: 2))
         ready(&server, peer)
         relay(&server, chain.dropLast().map { entry($0) }, from: peer)
         let request = try XCTUnwrap(requests(requester.step(.peerReady(other), now: Self.now)).first)
         ready(&server, other)
         let effects = server.step(.received(other, .getHeaders(request)), now: Self.now)
-        XCTAssertEqual(served(effects).first?.1, [])
-        XCTAssertLessThanOrEqual(server.sync.lastServeScanned, 8)
+        XCTAssertEqual(served(effects).first?.1, [chain[28].cid])
+        XCTAssertLessThanOrEqual(server.sync.lastServeScanned, 2)
     }
 
     func testPagesAreCappedByBytes() throws {
@@ -535,15 +573,24 @@ final class CoreSyncTests: XCTestCase {
         XCTAssertEqual(requests(core.step(.tick, now: later)).count, 1)
     }
 
-    // MARK: - Round 2: hostile cursors, bounded bookkeeping, FindFork
+    // MARK: - Round 2: hostile cursors, bounded bookkeeping, heals
 
     func testACursorPastAnyHeightServesNothingAndNeverTraps() throws {
         var core = weighed(Array(chain[0..<3]))
         ready(&core, other)
         let effects = core.step(.received(other, .getHeaders(HeadersRequest(
-            requestID: 1, known: [], after: HeaderKey(height: .max, cid: "x")
+            requestID: 1, aboveHeight: 0, after: HeaderKey(height: .max, cid: "x")
         ))), now: Self.now)
         XCTAssertEqual(served(effects).first?.1, [])
+        _ = core.step(.headersServed(other, token: served(effects)[0].token), now: Self.now)
+        for height: UInt64 in [.max, .max - 1, 1 << 40] {
+            let effects = core.step(.received(other, .getHeaders(HeadersRequest(
+                requestID: 2, aboveHeight: height, after: nil
+            ))), now: Self.now)
+            let page = try XCTUnwrap(served(effects).first)
+            XCTAssertEqual(page.1, [])
+            _ = core.step(.headersServed(other, token: page.token), now: Self.now)
+        }
     }
 
     func testWeighingLeavesTheBookkeepingProportionalToThePendingQueue() throws {
@@ -560,25 +607,6 @@ final class CoreSyncTests: XCTestCase {
         XCTAssertTrue(disconnects(effects).isEmpty)
         XCTAssertTrue(core.sync.pending.entries.isEmpty)
         XCTAssertEqual(core.sync.bookkeeping, 0)
-    }
-
-    /// A requester on a branch the server holds but does not select: the
-    /// server forks from the highest locator entry on ITS best chain, so the
-    /// requester still gets the server's whole best chain past the fork.
-    func testTheServerForksFromItsOwnBestChainAfterADeepReorg() async throws {
-        let side = try await world.branch(from: chain[9], count: 5)
-        // The side branch is weighed while it is the best chain, then the
-        // main chain overtakes it.
-        var server = Core(tree: world.bootstrap.tree, config: CoreConfig(sideBranchWindow: 2))
-        ready(&server, peer)
-        relay(&server, (chain + side).map { entry($0) }, from: peer)
-        var requester = weighed(Array(chain[0...9]) + side)
-        XCTAssertEqual(requester.tree.canonicalTip, side.last?.cid)
-        XCTAssertFalse(server.tree.isCanonical(hash: side.last!.cid))
-        let request = try XCTUnwrap(requests(requester.step(.peerReady(other), now: Self.now)).first)
-        ready(&server, other)
-        let page = try XCTUnwrap(served(server.step(.received(other, .getHeaders(request)), now: Self.now)).first)
-        XCTAssertEqual(page.1.first, chain[10].cid, "from the fork, not from the requester's tip")
     }
 
     /// Zero-work orphan junk dated now floods the budget; eviction takes
@@ -599,11 +627,13 @@ final class CoreSyncTests: XCTestCase {
     }
 
     /// A partition heal: the requester's best chain is a side branch the
-    /// server holds but does not select. With no window and small pages, a
-    /// page is never empty with `hasMore`, and catch-up completes.
-    func testCatchUpFromAHeldSideBranchNeverStallsOnAnEmptyPage() async throws {
-        let side = try await world.branch(from: chain[9], count: 6)
-        let config = CoreConfig(maxHeadersPerPage: 4, sideBranchWindow: 0)
+    /// server holds but does not select, forked deeper than the window
+    /// below the requester's height. The pages above that height and one
+    /// ancestors fetch per missing stretch connect the server's branch,
+    /// with no depth cap and no empty page with `hasMore`.
+    func testAPartitionHealConvergesThroughAncestorsWithNoDepthCap() async throws {
+        let side = try await world.branch(from: chain[9], count: 12)
+        let config = CoreConfig(maxHeadersPerPage: 4, catchUpWindow: 2)
         var server = Core(tree: world.bootstrap.tree, config: config)
         ready(&server, peer)
         relay(&server, (chain + side).map { entry($0) }, from: peer)
@@ -615,39 +645,78 @@ final class CoreSyncTests: XCTestCase {
         let serverSide = PeerID(key: "client", session: 9)
         let clientSide = PeerID(key: "server", session: 9)
         ready(&server, serverSide)
-        var toServer = ready(&client, clientSide)
-        var pages = 0
-        while let request = requests(toServer).first, pages < 40 {
-            pages += 1
-            let effects = server.step(.received(serverSide, .getHeaders(request)), now: Self.now)
+        var outbox = ready(&client, clientSide).compactMap { effect -> SyncMessage? in
+            if case .send(clientSide, let message) = effect, case .headers = message { return nil }
+            if case .send(clientSide, let message) = effect { return message }
+            return nil
+        }
+        var roundTrips = 0
+        while let message = outbox.first, roundTrips < 40 {
+            outbox.removeFirst()
+            roundTrips += 1
+            let effects = server.step(.received(serverSide, message), now: Self.now)
             let page = try XCTUnwrap(served(effects).first)
             XCTAssertFalse(page.1.isEmpty && page.2, "an empty page with hasMore")
             _ = server.step(.headersServed(serverSide, token: page.token), now: Self.now)
             let entries = page.1.map { cid in entry(world.blocks[cid] ?? side.first { $0.cid == cid }!) }
-            toServer = relay(&client, entries, from: clientSide, requestID: page.0, hasMore: page.2)
+            let answer = config.page(entries, hasMore: page.2)
+            outbox += relay(&client, answer.entries, from: clientSide, requestID: page.0, hasMore: answer.hasMore)
+                .compactMap { effect -> SyncMessage? in
+                    if case .send(clientSide, let message) = effect, case .headers = message { return nil }
+                    if case .send(clientSide, let message) = effect { return message }
+                    return nil
+                }
         }
         for block in chain { XCTAssertTrue(client.tree.contains(blockHash: block.cid)) }
         XCTAssertEqual(client.tree.canonicalTip, chain.last?.cid)
+        XCTAssertTrue(client.sync.pending.entries.isEmpty)
+        XCTAssertLessThanOrEqual(roundTrips, 10, "pages above the height and bulk ancestors, not one CID per trip")
     }
 
-    /// A crafted locator of deep side entries, or a cursor far below the
-    /// fork, costs no more than the scan budget.
-    func testCraftedLocatorsCostNoMoreThanTheScanBudget() async throws {
+    /// A crafted request (height 0, over and over) costs one seek and at
+    /// most a page plus one look-ahead each, and holds the peer to its
+    /// serving slot: one served, two queued, the rest dropped.
+    func testACraftedRequestCostsAPageAndStaysInTheServingSlot() async throws {
         let side = try await world.branch(from: chain[0], count: 25)
-        var server = Core(tree: world.bootstrap.tree, config: CoreConfig(maxHeadersPerPage: 4, sideBranchWindow: 2))
+        let pageSize = 4
+        var server = Core(tree: world.bootstrap.tree, config: CoreConfig(maxHeadersPerPage: pageSize, catchUpWindow: 2))
         ready(&server, peer)
         relay(&server, (chain + side).map { entry($0) }, from: peer)
         ready(&server, other)
-        let budget = server.config.serveScanBudget
-        var token: UInt64?
-        for (id, request) in [
-            HeadersRequest(requestID: 1, known: side.suffix(64).map(\.cid) + [chain.last!.cid], after: nil),
-            HeadersRequest(requestID: 2, known: [chain.last!.cid], after: HeaderKey(height: 0, cid: "")),
-        ].enumerated() {
-            if let token { _ = server.step(.headersServed(other, token: token), now: Self.now) }
-            let page = try XCTUnwrap(served(server.step(.received(other, .getHeaders(request)), now: Self.now)).first)
-            token = page.token
-            XCTAssertLessThanOrEqual(server.sync.lastServeScanned, budget, "request \(id)")
+        var tokens: [UInt64] = []
+        for id in 1...6 {
+            let effects = server.step(.received(other, .getHeaders(HeadersRequest(
+                requestID: UInt64(id), aboveHeight: 0, after: nil
+            ))), now: Self.now)
+            tokens += served(effects).map(\.token)
+            XCTAssertLessThanOrEqual(server.sync.lastServeScanned, pageSize + 1)
+        }
+        XCTAssertEqual(tokens.count, 1, "one served request per peer at a time")
+        XCTAssertEqual(server.sync.peers[other]?.queued.count, 2)
+        var served = 1
+        while let token = tokens.popLast() {
+            let effects = server.step(.headersServed(other, token: token), now: Self.now)
+            XCTAssertLessThanOrEqual(server.sync.lastServeScanned, pageSize + 1)
+            tokens += self.served(effects).map(\.token)
+            served += self.served(effects).count
+        }
+        XCTAssertEqual(served, 3, "the rest were dropped")
+    }
+
+    /// Sync never reads canonicity: the core's sync sources name no best-
+    /// chain API. Only `ActOn.swift` (the snapshot and act-on tip) may.
+    func testSyncNeverReadsCanonicity() throws {
+        let sources = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/LatticeNodeCore")
+        let files = try FileManager.default.contentsOfDirectory(atPath: sources.path)
+            .filter { $0.hasSuffix(".swift") && $0 != "ActOn.swift" }
+        XCTAssertTrue(files.contains("Core.swift") && files.contains("Sync.swift"), "\(files)")
+        for file in files {
+            let text = try String(contentsOf: sources.appendingPathComponent(file), encoding: .utf8)
+            for api in ["isCanonical", "canonicalTip", "canonicalBlockHash", "canonicalChain", "actOnTip", "bestChain"] {
+                XCTAssertFalse(text.contains(api), "\(file) reads \(api)")
+            }
         }
     }
 

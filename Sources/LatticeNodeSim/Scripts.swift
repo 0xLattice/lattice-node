@@ -33,23 +33,29 @@ func bestChain(of blocks: [SimBlock], genesis: SimBlock) -> [SimBlock] {
 }
 
 /// A catch-up page over `graph` (a script's weighed blocks, genesis
-/// excluded): every block that is neither known nor an ancestor of a known
-/// one, in `HeaderKey` order after the cursor.
-func page(of graph: [SimBlock], _ request: HeadersRequest, world: World, limit: Int) -> (blocks: [SimBlock], hasMore: Bool) {
-    var skip: Set<String> = [world.genesis.cid]
-    for known in request.known {
-        var cursor: String? = known
-        while let cid = cursor, skip.insert(cid).inserted {
-            cursor = world.blocks[cid]?.parent
-        }
-    }
+/// excluded): every block above the requested height, in `HeaderKey` order
+/// after the cursor.
+func page(of graph: [SimBlock], _ request: HeadersRequest, limit: Int) -> (blocks: [SimBlock], hasMore: Bool) {
     let rest = graph
-        .filter { !skip.contains($0.cid) }
+        .filter { $0.height > request.aboveHeight }
         .map { (key: HeaderKey(height: $0.height, cid: $0.cid), block: $0) }
         .filter { entry in request.after.map { entry.key > $0 } ?? true }
         .sorted { $0.key < $1.key }
         .map(\.block)
     return (Array(rest.prefix(limit)), rest.count > limit)
+}
+
+/// An ancestors answer over `held` (the CIDs a script serves): `cid` and up
+/// to `max` of its held ancestors, child to parent, stopping above genesis.
+func ancestors(of cid: String, max: Int, held: Set<String>, world: World, now: Int64) -> [SimBlock] {
+    var blocks: [SimBlock] = []
+    var current: String? = cid
+    while let hash = current, blocks.count <= max, hash != world.genesis.cid, held.contains(hash),
+          let block = world.blocks[hash], block.releaseAt <= now {
+        blocks.append(block)
+        current = block.parent
+    }
+    return blocks
 }
 
 /// Headers as a relay or an answer, each child index inline when it fits.
@@ -89,14 +95,15 @@ public struct HonestSource: SimScript {
     public mutating func received(_ message: SyncMessage, from peer: PeerID, now: Int64, world: World) -> [ScriptAction] {
         switch message {
         case .getHeaders(let request):
-            let served = page(of: world.released(mine(world), at: now), request, world: world, limit: config.maxHeadersPerPage)
+            let served = page(of: world.released(mine(world), at: now), request, limit: config.maxHeadersPerPage)
             let capped = config.page(served.blocks.map { config.entry($0.block, children: $0.children) }, hasMore: served.hasMore)
             return [.send(peer, .headers(HeadersResponse(
                 requestID: request.requestID, entries: capped.entries, hasMore: capped.hasMore
             )))]
-        case .getHeader(let requestID, let cid):
-            let held = mine(world).contains(cid) ? [cid] : []
-            return [.send(peer, headers(world.released(held, at: now), requestID: requestID, config))]
+        case .getAncestors(let requestID, let cid, let max):
+            let held = ancestors(of: cid, max: max, held: Set(mine(world)), world: world, now: now)
+            let capped = config.page(held.map { config.entry($0.block, children: $0.children) }, hasMore: false)
+            return [.send(peer, .headers(HeadersResponse(requestID: requestID, entries: capped.entries, hasMore: false)))]
         case .headers:
             return []
         }
@@ -120,7 +127,7 @@ public struct HonestSource: SimScript {
 
 /// Header spammer: relays the ASERT-saturation fork (valid proof-of-work at
 /// the easiest target the schedule allows) as it is released, then floods
-/// garbage whose parents it never serves (it leaves every `getHeader`
+/// garbage whose parents it never serves (it leaves every `getAncestors`
 /// unanswered, so it stalls), ending each flood with a header that fails
 /// proof-of-work.
 public struct HeaderSpammer: SimScript {
@@ -160,7 +167,7 @@ public struct HeaderSpammer: SimScript {
 
     public mutating func received(_ message: SyncMessage, from peer: PeerID, now: Int64, world: World) -> [ScriptAction] {
         guard case .getHeaders(let request) = message else { return [] }
-        let served = page(of: world.released(world.spam, at: now), request, world: world, limit: config.maxHeadersPerPage)
+        let served = page(of: world.released(world.spam, at: now), request, limit: config.maxHeadersPerPage)
         return [.send(peer, headers(served.blocks, requestID: request.requestID, hasMore: served.hasMore, config))]
     }
 
@@ -180,7 +187,7 @@ public struct HeaderSpammer: SimScript {
 
 /// Shows one honest side block (the world's uncle) to a single node: the
 /// rest of the network can only learn it through that node's relay. Its own
-/// catch-up answer is empty; it serves any released block by CID.
+/// catch-up answer is empty; it serves any released block's ancestors.
 public struct UncleShower: SimScript {
     public let name: String
     public let isHonest = true
@@ -202,9 +209,9 @@ public struct UncleShower: SimScript {
         switch message {
         case .getHeaders(let request):
             return [.send(peer, headers([], requestID: request.requestID, config))]
-        case .getHeader(let requestID, let cid):
-            let held = world.honest.contains(cid) || cid == world.uncle ? [cid] : []
-            return [.send(peer, headers(world.released(held, at: now), requestID: requestID, config))]
+        case .getAncestors(let requestID, let cid, let max):
+            let held = ancestors(of: cid, max: max, held: Set(world.honest + [world.uncle]), world: world, now: now)
+            return [.send(peer, headers(held, requestID: requestID, config))]
         case .headers:
             return []
         }
@@ -265,10 +272,11 @@ public struct Liar: SimScript {
         switch message {
         case .getHeaders(let request):
             let graph = world.released(world.honest, at: now) + excluded(world, now)
-            let served = page(of: graph, request, world: world, limit: config.maxHeadersPerPage)
+            let served = page(of: graph, request, limit: config.maxHeadersPerPage)
             return [.send(peer, headers(served.blocks, requestID: request.requestID, hasMore: served.hasMore, config))]
-        case .getHeader(let requestID, let cid):
-            return [.send(peer, headers(world.released([cid], at: now), requestID: requestID, config))]
+        case .getAncestors(let requestID, let cid, let max):
+            let held = ancestors(of: cid, max: max, held: Set(world.blocks.keys), world: world, now: now)
+            return [.send(peer, headers(held, requestID: requestID, config))]
         case .headers:
             return []
         }

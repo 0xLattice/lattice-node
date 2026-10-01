@@ -6,7 +6,7 @@ import UInt256
 public struct PeerSync: Sendable, Equatable {
     /// The catch-up page in flight.
     public internal(set) var catchUp: InFlightPage?
-    /// The header asked for by CID (a parent this peer's header named).
+    /// The ancestors asked for by CID (a parent this peer's header named).
     public internal(set) var parentRequest: InFlightHeader?
     /// The child index asked for by CID (one wait per peer).
     public internal(set) var childIndex: InFlightFetch?
@@ -34,6 +34,8 @@ public struct PeerSync: Sendable, Equatable {
 
 public struct InFlightPage: Sendable, Equatable {
     public let requestID: UInt64
+    /// The pass's height: its continuations keep it.
+    public let aboveHeight: UInt64
     public let after: HeaderKey?
     public let deadline: Int64
 }
@@ -239,11 +241,6 @@ public struct WeighedIndex: Sendable {
     var height: [String: UInt64] = [:]
     /// Leaves: headers with no weighed child.
     public internal(set) var leaves: Set<String> = []
-    /// The highest leaves, highest first, kept as headers are added: a leaf
-    /// only leaves by gaining a child, which is higher and takes its place,
-    /// so the set stays exact without a sort of all leaves.
-    public internal(set) var topLeaves: [HeaderKey] = []
-    static let topLeafCount = HeadersRequest.maximumKnown + 1
 
     mutating func add(_ cid: String, parent: String?, height: UInt64) {
         guard self.height[cid] == nil else { return }
@@ -254,34 +251,17 @@ public struct WeighedIndex: Sendable {
         if let parent {
             self.parent[cid] = parent
             leaves.remove(parent)
-            if let position = topLeaves.firstIndex(where: { $0.cid == parent }) {
-                topLeaves.remove(at: position)
-            }
         }
         leaves.insert(cid)
-        let key = HeaderKey(height: height, cid: cid)
-        let position = topLeaves.firstIndex { $0 < key } ?? topLeaves.count
-        if position < Self.topLeafCount {
-            topLeaves.insert(key, at: position)
-            if topLeaves.count > Self.topLeafCount { topLeaves.removeLast() }
-        }
     }
 
     func contains(_ cid: String) -> Bool { height[cid] != nil }
 
+    /// The highest weighed height on any branch (not the best tip).
+    public var maxHeight: UInt64 { UInt64(Swift.max(byHeight.count, 1) - 1) }
 
     func key(_ cid: String) -> HeaderKey? {
         height[cid].map { HeaderKey(height: $0, cid: cid) }
-    }
-
-    /// The ancestor of `cid` at `target` height, walking parents.
-    func ancestor(of cid: String, atHeight target: UInt64) -> String? {
-        var current = cid
-        while let h = height[current], h > target {
-            guard let up = parent[current] else { return nil }
-            current = up
-        }
-        return height[current] == target ? current : nil
     }
 
     /// Headers in `HeaderKey` order from `start` (inclusive of its height,
@@ -340,7 +320,7 @@ public struct Sync: Sendable {
     var nextRequestID: UInt64 = 1
     var nextToken: UInt64 = 1
     /// How many index entries the last catch-up page examined: serving is
-    /// O(page + locator × window), never O(graph).
+    /// O(page), never O(graph).
     public internal(set) var lastServeScanned = 0
 
     public init() {}
@@ -389,29 +369,9 @@ public struct Sync: Sendable {
     }
 }
 
-/// One request slot of one peer: its parent request or its child-index wait.
+/// One request slot of one peer: its ancestors request or its child-index
+/// wait.
 struct WantSlot: Hashable, Sendable {
     let peer: PeerID
     let parent: Bool
-}
-
-extension ChainTree {
-    /// The deepest block on the best header chain whose ancestry is executed
-    /// from genesis: the tip a node acts on. The executed blocks on one path
-    /// are a prefix of it, so this is a binary search over heights.
-    func actOnTip() -> (hash: String, height: UInt64) {
-        let tipHeight = headerSnapshot(of: canonicalTip)?.tipHeight ?? 0
-        var low: UInt64 = 0
-        var high = tipHeight
-        while low < high {
-            let middle = low + (high - low + 1) / 2
-            if let hash = canonicalBlockHash(atHeight: middle),
-               hasExecutedAncestry(blockHash: hash) {
-                low = middle
-            } else {
-                high = middle - 1
-            }
-        }
-        return (canonicalBlockHash(atHeight: low) ?? canonicalTip, low)
-    }
 }

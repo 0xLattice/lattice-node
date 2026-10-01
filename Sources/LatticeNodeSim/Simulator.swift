@@ -106,6 +106,10 @@ public struct SimReport: Sendable {
     public var fetches = 0
     /// The most bytes any core's pending queue held after a step.
     public var pendingPeak = 0
+    /// Requests cores sent from the last release on (a partition's heal):
+    /// catch-up pages and missing-parent fetches.
+    public var healPages = 0
+    public var healParentFetches = 0
     /// A fingerprint of the run's event order: equal seeds, equal traces.
     public var trace: UInt64 = 0xCBF2_9CE4_8422_2325
 }
@@ -122,17 +126,17 @@ public struct Simulator {
     }
 
     /// After the quiet point every honest core selects the same head, and
-    /// above the head's height less `sideBranchWindow` holds every released
-    /// honest block and the identical weighed graph (the same blocks,
-    /// grinds, subtree work and exclusions). A side block forking deeper that
-    /// a core missed while a link was down is never re-sent: the catch-up
-    /// window's documented boundary.
+    /// above the highest weighed height less `catchUpWindow` holds every
+    /// released honest block and the identical weighed graph (the same
+    /// blocks, grinds, subtree work and exclusions). A side block a core
+    /// missed deeper than that is never re-sent: the catch-up window's
+    /// documented boundary.
     func checkQuietPoint() throws {
         let nodes = cores.sorted { $0.key < $1.key }
         guard let (first, reference) = nodes.first else { return }
-        let headHeight = reference.digest.blocks[reference.digest.canonicalTip]?.height ?? 0
-        let window = coreConfig.sideBranchWindow
-        let cutoff = headHeight > window ? headHeight - window : 0
+        let top = reference.digest.blocks.values.map(\.height).max() ?? 0
+        let window = coreConfig.catchUpWindow
+        let cutoff = top > window ? top - window : 0
         let above = { (digest: TreeDigest) in digest.blocks.filter { $0.value.height > cutoff } }
         let honest = Set(world.released(world.honest, at: now)
             .filter { $0.height > cutoff }.map(\.cid))
@@ -465,6 +469,13 @@ public struct Simulator {
                     throw Invariants.fail(name, "published tip \(tip) is not durable")
                 }
             case .send(let peer, let message):
+                if now >= lastRelease {
+                    switch message {
+                    case .getHeaders: report.healPages += 1
+                    case .getAncestors: report.healParentFetches += 1
+                    default: break
+                    }
+                }
                 // Relaying a weighed header is not acting on it, but it is
                 // sent only once durable.
                 if case .headers(let relayed) = message {

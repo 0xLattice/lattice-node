@@ -62,26 +62,26 @@ public struct HeaderKey: Sendable, Hashable, Comparable {
     }
 }
 
-/// Catch-up: "your weighed headers after these known CIDs". The server
-/// answers every header it weighed that is neither one of `known` nor an
-/// ancestor of one — side branches included — in `HeaderKey` order, after
-/// `after` (the last header of the previous page).
+/// Catch-up: "every header you weighed above this height". The server
+/// answers every weighed header with height > `aboveHeight`, on every
+/// branch, in `HeaderKey` order, after `after` (the last header of the
+/// previous page). No canonicity: the requester picks the height, from its
+/// own highest weighed height less `CoreConfig.catchUpWindow`.
 public struct HeadersRequest: Sendable, Equatable {
-    public static let maximumKnown = 64
-
     public let requestID: UInt64
-    public let known: [String]
+    public let aboveHeight: UInt64
     public let after: HeaderKey?
 
-    public init(requestID: UInt64, known: [String], after: HeaderKey?) {
+    public init(requestID: UInt64, aboveHeight: UInt64, after: HeaderKey?) {
         self.requestID = requestID
-        self.known = known
+        self.aboveHeight = aboveHeight
         self.after = after
     }
 }
 
 /// Headers the sender weighed: a relay (`requestID` 0) or the answer to a
-/// request. `hasMore` continues a catch-up page.
+/// request. `hasMore` continues a catch-up page. An ancestors answer lists
+/// child to parent.
 public struct HeadersResponse: Sendable {
     public let requestID: UInt64
     public let entries: [HeaderEntry]
@@ -98,7 +98,9 @@ public struct HeadersResponse: Sendable {
 /// belongs to the shell.
 public enum SyncMessage: Sendable {
     case getHeaders(HeadersRequest)
-    /// One header by CID: the unknown parent of a header the sender sent.
-    case getHeader(requestID: UInt64, cid: String)
+    /// The header `cid` (the unknown parent of a header the sender sent)
+    /// and up to `max` of its ancestors, child to parent: Ethereum's reverse
+    /// `GetBlockHeaders`, Avalanche's `GetAncestors`.
+    case getAncestors(requestID: UInt64, cid: String, max: Int)
     case headers(HeadersResponse)
 }
