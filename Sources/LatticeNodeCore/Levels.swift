@@ -21,8 +21,24 @@ public enum HostEvent: Sendable {
     /// The answer to a `bootstrap` effect.
     /// Answers for a genesis no longer being asked are ignored.
     case bootstrapped(ChainPath, genesisCID: String, Result<BootstrappedLevel, BlockImportError>)
-    /// This host's own grind.
-    case mined(MinedGrind)
+    /// This host's own grind: a level's `MiningEffect.mined`, its content
+    /// stored and its carried blocks' proofs verified by the shell. With a
+    /// reply ID, the step answers `workSubmitted`.
+    case mined(MinedGrind, replyID: UInt64? = nil)
+}
+
+/// What a submitted grind did at the root level.
+public enum MinedOutcome: Sendable, Equatable {
+    /// The root met its own target and its header is weighed; `canonical`
+    /// when it is on the best chain.
+    case weighed(canonical: Bool)
+    /// The root was already weighed.
+    case duplicate
+    /// The grind missed the root's own target: only the blocks it carries
+    /// weigh, and the work stays open.
+    case childOnly
+    /// The root header was refused.
+    case refused
 }
 
 /// A hosted child chain's genesis, bootstrapped by the shell.
@@ -81,6 +97,9 @@ public enum HostEffect: Sendable {
     /// block authorized, reading `parentFacts`; answer `bootstrapped`.
     case bootstrap(ChainPath, genesisCID: String, parentFacts: ParentLevelFacts)
     case wakeAt(Int64)
+    /// The answer to a `mined` event with a reply ID, after the step's
+    /// `persist`.
+    case workSubmitted(replyID: UInt64, MinedOutcome)
 }
 
 /// A level the host runs: its chain, spec and genesis header. A record for
@@ -286,8 +305,9 @@ public struct HostCore: Sendable {
             connected(verdict, at: path, &turn)
         case .bootstrapped(let path, let genesisCID, let result):
             bootstrapped(result, genesisCID: genesisCID, at: path, &turn)
-        case .mined(let grind):
-            mined(grind, &turn)
+        case .mined(let grind, let replyID):
+            let outcome = mined(grind, &turn)
+            if let replyID { turn.effects.append(.workSubmitted(replyID: replyID, outcome)) }
         }
         dropDisconnected(&turn)
         if case .tick = event {
@@ -486,9 +506,15 @@ public struct HostCore: Sendable {
     /// step: the root block when its hash meets its own target (a share that
     /// misses it weighs only the child blocks it carries), then each carried
     /// block, parent level before child.
-    mutating func mined(_ grind: MinedGrind, _ turn: inout Turn) {
-        if ChainTree.rootWork(of: grind.root) != nil, var core = levels[rootPath] {
+    @discardableResult
+    mutating func mined(_ grind: MinedGrind, _ turn: inout Turn) -> MinedOutcome {
+        var outcome = MinedOutcome.childOnly
+        if ChainTree.rootWork(of: grind.root) != nil, var core = levels[rootPath],
+           let cid = try? BlockHeader(node: grind.root).rawCID {
+            let held = core.index.contains(cid)
             let effects = core.weighOwn(grind.root, children: grind.rootChildren, proof: nil, now: turn.now)
+            outcome = held ? .duplicate
+                : core.index.contains(cid) ? .weighed(canonical: core.tree.isCanonical(hash: cid)) : .refused
             levels[rootPath] = core
             absorb(effects, at: rootPath, &turn)
         }
@@ -501,6 +527,7 @@ public struct HostCore: Sendable {
             levels[carried.path] = core
             absorb(effects, at: carried.path, &turn)
         }
+        return outcome
     }
 
     // MARK: - Run attribution (hierarchical GHOST)

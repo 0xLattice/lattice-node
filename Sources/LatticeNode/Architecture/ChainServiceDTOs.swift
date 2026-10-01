@@ -132,6 +132,24 @@ public struct MiningTemplateResponse: Codable, Sendable {
     public let templateDigest: String
 
     init(
+        workID: String,
+        block: Block,
+        searchTarget: UInt256,
+        targets: [UInt256],
+        chainPath: [String],
+        expiresInMilliseconds: UInt64,
+        templateDigest: String
+    ) {
+        self.workID = workID
+        self.block = block
+        self.searchTarget = searchTarget
+        self.targets = targets
+        self.chainPath = chainPath
+        self.expiresInMilliseconds = expiresInMilliseconds
+        self.templateDigest = templateDigest
+    }
+
+    init(
         template: MiningTemplate,
         maximumLifetimeMilliseconds: UInt64,
         templateDigest: String

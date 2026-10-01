@@ -1,6 +1,7 @@
 import Foundation
 import Ivy
 import Lattice
+import LatticeNodeCore
 import XCTest
 @testable import LatticeNode
 
@@ -79,5 +80,73 @@ final class CoreDriverTests: NetworkTrustTestCase {
         let snapshot = try XCTUnwrap(host.levels[host.rootPath]?.snapshot)
         XCTAssertEqual(snapshot.actOnTip, tipCID)
         XCTAssertEqual(snapshot.bestHeaderTip, tipCID)
+    }
+
+    /// RPC writes are core events answered from effects, and RPC reads come
+    /// from the published snapshot: a template on the act-on tip, a grind
+    /// submitted and weighed, its body connected, and every read following.
+    func testRPCWritesAreCoreEventsAndReadsFollowThePublishedSnapshot() async throws {
+        let node = try host(keyByte: 0x33)
+        let process = try await ChainProcess.open(configuration: node.configuration)
+        let driver = try await CoreDriver.start(
+            process: process, configuration: node.configuration, overlay: node.overlay
+        )
+        let genesis = try XCTUnwrap(driver.published.value?.actOnTip)
+
+        let template = try await driver.miningTemplate(MiningTemplateRequest())
+        XCTAssertEqual(template.block.parent?.rawCID, genesis)
+        var nonce: UInt64 = 0
+        while Self.block(template.block, nonce: nonce).proofOfWorkHash() > template.searchTarget {
+            nonce += 1
+        }
+        let cid = try BlockHeader(node: Self.block(template.block, nonce: nonce)).rawCID
+        let submitted = try await driver.submitWork(SubmitWorkRequest(workID: template.workID, nonce: nonce))
+        XCTAssertTrue(submitted.accepted)
+        XCTAssertEqual(submitted.disposition, .canonicalized)
+
+        try await eventually("the mined block executes") { driver.published.value?.actOnTip == cid }
+        let read = await driver.reads.readSnapshot()
+        XCTAssertEqual(read.tipCID, cid)
+        XCTAssertEqual(read.height, 1)
+        let canonical = await driver.reads.explorerCanonicalBlockCID(atHeight: 1)
+        XCTAssertEqual(canonical, cid)
+        let block = await driver.reads.block(cid: cid)
+        XCTAssertEqual(block?.height, 1)
+        let status = await driver.status()
+        XCTAssertNotNil(status.templateDigest)
+
+        // The root cleared its own target, so its work is closed.
+        do {
+            _ = try await driver.submitWork(SubmitWorkRequest(workID: template.workID, nonce: nonce))
+            XCTFail("closed work was accepted again")
+        } catch let error as TemplateError {
+            XCTAssertEqual(error, .unknownWork)
+        }
+        await driver.stop()
+        do {
+            _ = try await driver.miningTemplate(MiningTemplateRequest())
+            XCTFail("a stopped driver answered")
+        } catch let error as CoreDriverError {
+            XCTAssertEqual(error, .stopped)
+        }
+    }
+
+    private static func block(_ block: Block, nonce: UInt64) -> Block {
+        Block(
+            version: block.version,
+            parent: block.parent,
+            transactions: block.transactions,
+            target: block.target,
+            nextTarget: block.nextTarget,
+            spec: block.spec,
+            parentState: block.parentState,
+            prevState: block.prevState,
+            postState: block.postState,
+            children: block.children,
+            height: block.height,
+            timestamp: block.timestamp,
+            rewardRecipient: block.rewardRecipient,
+            nonce: nonce
+        )
     }
 }

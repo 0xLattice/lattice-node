@@ -612,6 +612,10 @@ public struct Simulator {
                 if time > now, !queue.hasTick(for: name, at: time) {
                     schedule(at: time, to: name, .core(.tick))
                 }
+            case .mining:
+                // The transaction workload drives `Mining` on its own
+                // (`TxWorkload`); this simulator submits no transactions.
+                break
             case .cancelBody(let cid):
                 node.fetching.remove(cid)
             case .fetchBody(let cid):

@@ -39,6 +39,23 @@ final class MiningStepTests: XCTestCase {
         XCTAssertEqual(mining.journaled, [cid])
     }
 
+    func testAPeerTransactionIsRelayedOnceWhenItIsNewlyPooled() throws {
+        var mining = Mining(tipCID: "A", spec: testSpec())
+        let tx = try transfer(nonce: 0)
+        let cid = try Mempool.cid(of: tx)
+        let peer = PeerID(key: "p", session: 1)
+        guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .peer(peer)), now: 0).first else {
+            return XCTFail()
+        }
+        let admitted = mining.step(.preflighted(job, .ready), now: 1)
+        XCTAssertTrue(admitted.contains { if case .announceTransaction(cid) = $0 { true } else { false } })
+        XCTAssertFalse(admitted.contains { if case .transactionAdmitted = $0 { true } else { false } },
+                       "a peer is never answered")
+        let resent = mining.step(.transactionReceived(tx, origin: .peer(PeerID(key: "q", session: 1))), now: 2)
+        XCTAssertFalse(resent.contains { if case .announceTransaction = $0 { true } else { false } },
+                       "a resend of a pooled transaction is not relayed again")
+    }
+
     func testAVerdictOnAMovedTipIsDroppedAndTheMoveReissuesIt() throws {
         var mining = Mining(tipCID: "A", spec: testSpec())
         let tx = try transfer(nonce: 0)

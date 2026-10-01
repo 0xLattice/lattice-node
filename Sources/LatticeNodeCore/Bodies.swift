@@ -67,7 +67,7 @@ extension Core {
     /// work still weighs. A verdict without a decision (content that was not
     /// resolvable after all) is an availability wait: the block parks, and
     /// its body is asked for again after a backoff.
-    mutating func connected(_ verdict: ConnectVerdict, _ turn: inout Turn) {
+    mutating func connected(_ verdict: ConnectVerdict, transactions: [Transaction], _ turn: inout Turn) {
         let cid = verdict.blockHash
         if bodies.connecting == cid { bodies.connecting = nil }
         bodies.arrived.remove(cid)
@@ -77,6 +77,11 @@ extension Core {
             turn.facts += update.batches
             turn.genesisLinks += update.parentGenesisLinks.map {
                 IssuedGenesisLink(link: $0, issuer: update.blockHash)
+            }
+            if !update.excluded {
+                executedTransactions[cid] = transactions.compactMap { transaction in
+                    (try? Mempool.cid(of: transaction)).map { ($0, transaction) }
+                }
             }
         case .duplicate:
             break

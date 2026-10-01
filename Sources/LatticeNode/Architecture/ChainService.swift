@@ -35,13 +35,9 @@ public actor ChainService {
         let genesisCID: String
     }
 
-    private struct ValidatedRecipientPlan {
+    struct ValidatedRecipientPlan {
         let current: String?
         let descendants: [MiningRecipient]
-    }
-
-    private struct FittingMiningTemplate {
-        let template: MiningTemplate
     }
 
     private struct QueuedCanonicalCommit: Sendable {
@@ -69,17 +65,11 @@ public actor ChainService {
     private static let templateLifetimeSeconds: Int64 = 30
     private static let templateLifetimeMilliseconds: UInt64 = 30_000
     private static let templateCapacity = 16
-    private static let maximumReadResponseBytes = Int(IvyConfig.defaultProtocolMaxFrameSize)
-    public static let maximumRecentBlocksLimit = 50
-    private static let maximumExplorerPageLimit = 100
-    private static let maximumExplorerMempoolListing = 200
-
-    private static func boundedExplorerLimit(_ limit: Int) -> Int {
-        min(max(limit, 0), maximumExplorerPageLimit)
-    }
-
     private let process: ChainProcess
     private let pool: TransactionPool
+    /// The read surface: tip and canonical heights from the process, the
+    /// listing from the pool.
+    public nonisolated let reads: ChainReads
     private let templates: MiningTemplateBook
     private let network: any NetworkInterface
     /// The co-hosted parent level's facts; nil on Nexus.
@@ -224,6 +214,19 @@ public actor ChainService {
             capacity: Self.templateCapacity
         )
         self.maximumChildCandidates = maximumChildCandidates
+        let pool = self.pool
+        reads = ChainReads(
+            process: process,
+            tip: { await process.readSnapshot() },
+            canonicalCID: { await process.canonicalBlockCID(atHeight: $0) },
+            mempool: {
+                ChainReads.MempoolListing(
+                    count: await pool.count,
+                    bytes: await pool.byteCount,
+                    cids: await pool.snapshot().map(\.cid)
+                )
+            }
+        )
     }
 
     /// Stop this service's background work and join what is in flight:
@@ -366,27 +369,6 @@ public actor ChainService {
         )
     }
 
-    /// Ungated mirror of `status()` for public read RPC: no `acquireOperation()`,
-    /// no `prepareMempoolLocked()` (which may restore durable local transactions) —
-    /// every read is non-mutating.
-    public func readSnapshot() async -> ChainServiceStatusResponse {
-        let status = await process.readSnapshot()
-        let phase: ChainServicePhase = status.phase == .active
-            ? .active
-            : .awaitingGenesis
-        return ChainServiceStatusResponse(
-            phase: phase,
-            chainPath: status.chainPath,
-            nexusGenesisCID: status.nexusGenesisCID,
-            tipCID: status.tipCID,
-            height: status.height,
-            revision: status.revision,
-            mempoolCount: await pool.count,
-            mempoolBytes: await pool.byteCount,
-            templateDigest: nil
-        )
-    }
-
     /// The operator `/metrics` exposition: an ungated read costing what
     /// `/health` does (one validated-tip walk plus the live pool count).
     public func metricsExposition(peers: Int, processStartTime: Date) async -> String {
@@ -404,439 +386,6 @@ public actor ChainService {
             executionWalkParked: executionWalkParkedCount,
             candidateSessionReads: candidateSessionReadCount
         ))
-    }
-
-    /// Bounded public read: a decoded, content-verified block, gated to only
-    /// what this node has durably accepted. Never takes the operation gate —
-    /// reads only ChainProcess's ungated CAS path.
-    public func block(cid: String) async -> Block? {
-        guard await process.hasAcceptedBlock(cid) else { return nil }
-        guard let data = await process.content([cid])[cid],
-              data.count <= Self.maximumReadResponseBytes else {
-            return nil
-        }
-        return _contentBoundBlock(cid: cid, data: data)
-    }
-
-    /// Bounded public read: a decoded, content-verified transaction. Resolving
-    /// and content-binding as a `Transaction` is itself the gate that keeps
-    /// internal (non-transaction) objects from being served by CID.
-    public func transaction(cid: String) async -> Transaction? {
-        guard let data = await process.content([cid])[cid],
-              data.count <= Self.maximumReadResponseBytes else {
-            return nil
-        }
-        guard let transaction = Transaction(data: data),
-              (try? VolumeImpl<Transaction>(node: transaction).rawCID) == cid
-        else { return nil }
-        return transaction
-    }
-
-    /// Bounded public read: an account's balance and next-expected nonce as of
-    /// one accepted block's post-state. Never takes the operation gate — reads
-    /// only ChainProcess's ungated CAS path plus targeted trie resolution.
-    public func account(
-        owner: String,
-        blockCID: String
-    ) async -> (balance: UInt64, nonce: UInt64)? {
-        guard await process.hasAcceptedBlock(blockCID) else { return nil }
-        guard let data = await process.content([blockCID])[blockCID],
-              data.count <= Self.maximumReadResponseBytes,
-              let block = _contentBoundBlock(cid: blockCID, data: data) else {
-            return nil
-        }
-        guard let state = try? await block.postState.resolve(fetcher: process).node else {
-            return nil
-        }
-        guard let nonce = try? await state.accountState.nextExpectedNonce(
-                for: owner,
-                fetcher: process
-              ),
-              let resolved = try? await state.accountState.resolve(
-                paths: [[owner]: .targeted],
-                fetcher: process
-              ),
-              let accountNode = resolved.node else {
-            return nil
-        }
-        let balance: UInt64 = (try? accountNode.get(key: owner)) ?? 0
-        return (balance: balance, nonce: nonce)
-    }
-
-    /// Bounded public read: recent block headers walking parent links from
-    /// `startCID` (or the current tip when `nil`) for up to `limit` steps
-    /// (hard-capped at `maximumRecentBlocksLimit`). Each step is one bounded
-    /// content fetch for the block plus one bounded content fetch for its
-    /// transactions-dictionary header (to read its count) — full transaction
-    /// bodies are never fetched. Never takes the operation gate. Returns nil
-    /// when `startCID` is given but is not an accepted block.
-    public func recentBlocks(before startCID: String?, limit: Int) async -> [BlockSummary]? {
-        let boundedLimit = min(max(limit, 0), Self.maximumRecentBlocksLimit)
-        guard boundedLimit > 0 else { return [] }
-
-        var cid: String
-        if let startCID {
-            guard await process.hasAcceptedBlock(startCID) else { return nil }
-            cid = startCID
-        } else {
-            guard let tip = await process.readSnapshot().tipCID else { return [] }
-            cid = tip
-        }
-
-        var summaries: [BlockSummary] = []
-        summaries.reserveCapacity(boundedLimit)
-        for _ in 0..<boundedLimit {
-            guard let data = await process.content([cid])[cid],
-                  data.count <= Self.maximumReadResponseBytes,
-                  let block = _contentBoundBlock(cid: cid, data: data) else {
-                break
-            }
-            let transactionCount = (try? await block.transactions.resolve(
-                fetcher: process
-            ))?.node?.count ?? 0
-            summaries.append(BlockSummary(
-                cid: cid,
-                height: block.height,
-                parentCID: block.parent?.rawCID,
-                timestamp: block.timestamp,
-                transactionCount: transactionCount
-            ))
-            guard let parent = block.parent else { break }
-            cid = parent.rawCID
-        }
-        return summaries
-    }
-
-    // MARK: - Explorer read API
-    //
-    // Ungated public reads for the browser explorer. Each mirrors the bounded,
-    // content-verified by-CID path above and never takes the operation gate.
-
-    /// This node's own absolute chain path — the single chain it serves. Used
-    /// by the daemon to answer the explorer's optional `?chainPath=` filter.
-    public nonisolated func explorerChainPath() -> [String] {
-        process.configuration.chainPath
-    }
-
-    /// Main-chain block CID at `height` (ungated height-index lookup), so the
-    /// daemon can resolve a numeric `:id` to a CID before reading.
-    public func explorerCanonicalBlockCID(atHeight height: UInt64) async -> String? {
-        await process.canonicalBlockCID(atHeight: height)
-    }
-
-    public func explorerLatestBlock() async -> ExplorerLatestBlock? {
-        guard let summary = (await recentBlocks(before: nil, limit: 1))?.first else {
-            return nil
-        }
-        return ExplorerLatestBlock(
-            height: summary.height,
-            hash: summary.cid,
-            transactionCount: summary.transactionCount,
-            timestamp: summary.timestamp,
-            previousBlock: summary.parentCID
-        )
-    }
-
-    public func explorerBlock(cid: String) async -> ExplorerBlock? {
-        guard let block = await block(cid: cid) else { return nil }
-        let transactionCount = (try? await block.transactions.resolve(
-            fetcher: process
-        ))?.node?.count ?? 0
-        let childBlockCount = (try? await block.children.resolve(
-            fetcher: process
-        ))?.node?.count ?? 0
-        return ExplorerBlock(
-            height: block.height,
-            hash: cid,
-            timestamp: block.timestamp,
-            previousBlock: block.parent?.rawCID,
-            transactionCount: transactionCount,
-            childBlockCount: childBlockCount,
-            nonce: block.nonce,
-            version: block.version,
-            target: block.target,
-            nextTarget: block.nextTarget,
-            transactionsCID: block.transactions.rawCID,
-            postStateCID: block.postState.rawCID,
-            chain: process.configuration.chainPath,
-            rewardRecipient: block.rewardRecipient,
-            rewardAmount: await rewardAmount(of: block)
-        )
-    }
-
-    /// What `block` credited its recipient: the block reward plus fees, by
-    /// the rule consensus applies. Nil when nothing was credited (no
-    /// recipient, so it burned) or the block's content is not held here.
-    private func rewardAmount(of block: Block) async -> UInt64? {
-        guard block.rewardRecipient != nil,
-              let spec = try? await chainSpec(for: block),
-              let transactions = try? await blockTransactions(in: block)
-        else { return nil }
-        var bodies: [TransactionBody] = []
-        for transaction in transactions {
-            guard let body = try? await transaction.body.resolve(
-                fetcher: process
-            ).node else { return nil }
-            bodies.append(body)
-        }
-        guard case .success(let amount) = Block.coinbaseAmount(
-            spec: spec,
-            height: block.height,
-            accountActions: bodies.flatMap(\.accountActions),
-            depositActions: bodies.flatMap(\.depositActions),
-            withdrawalActions: bodies.flatMap(\.withdrawalActions)
-        ) else { return nil }
-        return amount.uint64Value
-    }
-
-    /// Page over an accepted block's transaction dictionary by numeric index
-    /// [offset, offset+limit). Each index is a *targeted* resolution of just
-    /// that key — never a full `boundedKeysAndValues(limit: count)` fan-out —
-    /// so an untrusted request cannot force materializing the whole dictionary.
-    public func explorerBlockTransactions(
-        cid: String,
-        offset: Int,
-        limit: Int
-    ) async -> ExplorerBlockTransactions? {
-        guard offset >= 0 else { return nil }
-        guard let block = await block(cid: cid) else { return nil }
-        guard let dictionary = (try? await block.transactions.resolve(
-            fetcher: process
-        ))?.node else { return nil }
-        let total = dictionary.count
-        let boundedLimit = Self.boundedExplorerLimit(limit)
-        // Short-circuit before the addition: a public caller controls `offset`,
-        // and `offset + boundedLimit` would be a checked-arithmetic TRAP (an
-        // uncatchable crash, not a throwable) for an offset near Int.max. With
-        // offset < total (a small, consensus-bounded count) the add is safe.
-        guard offset < total else {
-            return ExplorerBlockTransactions(transactions: [], nextOffset: nil)
-        }
-        let end = min(offset + boundedLimit, total)
-        var summaries: [ExplorerTransactionSummary] = []
-        if offset < end {
-            for index in offset..<end {
-                let key = String(index)
-                guard let node = (try? await block.transactions.resolve(
-                        paths: [[key]: .targeted],
-                        fetcher: process
-                      ))?.node,
-                      let volume = (try? node.get(key: key)) ?? nil else {
-                    continue
-                }
-                guard let transaction = try? await volume.resolve(
-                        fetcher: process
-                      ).node,
-                      let body = try? await transaction.body.resolve(
-                        fetcher: process
-                      ).node else {
-                    continue
-                }
-                summaries.append(ExplorerTransactionSummary(
-                    txCID: volume.rawCID,
-                    signers: body.signers,
-                    accountActionCount: body.accountActions.count,
-                    depositActionCount: body.depositActions.count,
-                    receiptActionCount: body.receiptActions.count,
-                    withdrawalActionCount: body.withdrawalActions.count
-                ))
-            }
-        }
-        return ExplorerBlockTransactions(
-            transactions: summaries,
-            nextOffset: end < total ? end : nil
-        )
-    }
-
-    public func explorerBlockChildren(
-        cid: String,
-        limit: Int
-    ) async -> ExplorerBlockChildren? {
-        guard let block = await block(cid: cid) else { return nil }
-        guard let index = (try? await block.children.resolve(
-            fetcher: process
-        ))?.node else { return nil }
-        let boundedLimit = Self.boundedExplorerLimit(limit)
-        guard boundedLimit > 0 else { return ExplorerBlockChildren(children: []) }
-        // The index is one node: the first `limit` directories in order.
-        let entries = index.entries.keys.sorted().prefix(boundedLimit).map {
-            ($0, index.entries[$0]!)
-        }
-        var children: [ExplorerChildBlock] = []
-        for (directory, volume) in entries {
-            guard let child = try? await volume.resolve(fetcher: process).node else {
-                continue
-            }
-            let transactionCount = (try? await child.transactions.resolve(
-                fetcher: process
-            ))?.node?.count ?? 0
-            children.append(ExplorerChildBlock(
-                directory: directory,
-                blockHash: volume.rawCID,
-                height: child.height,
-                transactionCount: transactionCount
-            ))
-        }
-        return ExplorerBlockChildren(children: children)
-    }
-
-    public func explorerTransaction(cid: String) async -> ExplorerTransaction? {
-        guard let transaction = await transaction(cid: cid) else { return nil }
-        guard let body = try? await transaction.body.resolve(fetcher: process).node else {
-            return nil
-        }
-        return ExplorerTransaction(
-            txCID: cid,
-            blockHeight: nil,
-            blockHash: nil,
-            timestamp: nil,
-            nonce: body.nonce,
-            signers: body.signers,
-            chainPath: body.chainPath,
-            chain: body.chainPath,
-            accountActions: body.accountActions.map {
-                ExplorerAccountAction(owner: $0.owner, delta: $0.delta)
-            },
-            depositActions: body.depositActions.map {
-                ExplorerDepositAction(
-                    nonce: String($0.nonce),
-                    demander: $0.demander,
-                    amountDemanded: $0.amountDemanded,
-                    amountDeposited: $0.amountDeposited
-                )
-            },
-            receiptActions: body.receiptActions.map {
-                ExplorerReceiptAction(
-                    withdrawer: $0.withdrawer,
-                    nonce: String($0.nonce),
-                    demander: $0.demander,
-                    amountDemanded: $0.amountDemanded,
-                    directory: $0.directory
-                )
-            },
-            withdrawalActions: body.withdrawalActions.map {
-                ExplorerWithdrawalAction(
-                    withdrawer: $0.withdrawer,
-                    nonce: String($0.nonce),
-                    demander: $0.demander,
-                    amountDemanded: $0.amountDemanded,
-                    amountWithdrawn: $0.amountWithdrawn
-                )
-            }
-        )
-    }
-
-    public func explorerAccount(owner: String) async -> ExplorerAccount? {
-        guard let tip = await process.readSnapshot().tipCID else { return nil }
-        guard let account = await account(owner: owner, blockCID: tip) else { return nil }
-        return ExplorerAccount(
-            owner: owner,
-            balance: account.balance,
-            nonce: account.nonce
-        )
-    }
-
-    /// Ungated mempool snapshot: the pool's live CIDs (never the gated,
-    /// mempool-reconciling `transactionInventoryRoots()`), hard-capped at 200.
-    public func explorerMempool() async -> ExplorerMempool {
-        let cids = await pool.snapshot().map(\.cid)
-        return ExplorerMempool(
-            count: await pool.count,
-            transactions: Array(cids.prefix(Self.maximumExplorerMempoolListing))
-        )
-    }
-
-    public func explorerChainInfo() async -> ExplorerChainInfo {
-        let snapshot = await process.readSnapshot()
-        return ExplorerChainInfo(
-            genesisHash: await process.canonicalBlockCID(atHeight: 0),
-            height: snapshot.height,
-            tipCID: snapshot.tipCID,
-            chain: process.configuration.chainPath
-        )
-    }
-
-    public func explorerChainSpec() async -> ExplorerChainSpec? {
-        guard let tip = await process.readSnapshot().tipCID,
-              let block = await block(cid: tip),
-              let spec = try? await block.spec.resolve(fetcher: process).node else {
-            return nil
-        }
-        return ExplorerChainSpec(
-            targetBlockTime: spec.targetBlockTime,
-            initialReward: spec.initialReward,
-            halvingInterval: spec.halvingInterval,
-            maxBlockSize: spec.maxBlockSize,
-            maxNumberOfTransactionsPerBlock: spec.maxNumberOfTransactionsPerBlock,
-            premine: spec.premine,
-            halfLife: spec.halfLife
-        )
-    }
-
-    public func explorerChainGenesis() async -> ExplorerChainGenesis {
-        ExplorerChainGenesis(
-            genesisHash: await process.readSnapshot().nexusGenesisCID
-        )
-    }
-
-    /// Best-effort child directory listing from the tip block's committed
-    /// `genesisState` subtrie, capped at 100. Each entry maps a child directory
-    /// to its anchored genesisCID.
-    public func explorerChainChildren(limit: Int) async -> ExplorerChainChildren {
-        let boundedLimit = Self.boundedExplorerLimit(limit)
-        guard boundedLimit > 0 else { return ExplorerChainChildren(children: []) }
-        let base = process.configuration.chainPath
-        var seen = Set<String>()
-        var children: [ExplorerChainChild] = []
-        // Canonical source: the committed `genesisState` subtrie of the tip's
-        // post-state maps every anchored child's directory -> its genesisCID.
-        // Anchoring a child (a GenesisAction in a parent block) writes this
-        // entry, so this trie IS the permissionless child index — no registry.
-        // The genesisCID is what a client uses to (a) genesis-verify any node it
-        // later discovers as a DHT provider of that CID and (b) resolve the
-        // child's spec; walk it in one bounded enumeration.
-        if let tip = await process.readSnapshot().tipCID,
-           let block = await block(cid: tip),
-           let state = try? await block.postState.resolve(
-               fetcher: process
-           ).node,
-           let genesis = (try? await state.genesisState.resolve(
-               fetcher: process
-           ))?.node,
-           let entries = try? await genesis.boundedKeysAndValues(
-               limit: boundedLimit,
-               fetcher: process
-           ) {
-            for (directory, genesisCID) in entries {
-                guard children.count < boundedLimit else { break }
-                guard seen.insert(directory).inserted else { continue }
-                children.append(ExplorerChainChild(
-                    chainPath: base + [directory],
-                    genesisHash: genesisCID
-                ))
-            }
-        }
-        return ExplorerChainChildren(children: Array(children.prefix(boundedLimit)))
-    }
-
-    /// The anchored genesisCID of a direct child `directory` of this chain, read
-    /// from the committed `genesisState` subtrie (targeted, single-key). nil if
-    /// no such child is anchored. The daemon uses this to turn a `?chainPath=`
-    /// into the CID it then runs a DHT provider discovery on for /api/chain/endpoints.
-    public func explorerChildGenesisCID(directory: String) async -> String? {
-        guard let tip = await process.readSnapshot().tipCID,
-              let block = await block(cid: tip),
-              let state = try? await block.postState.resolve(
-                  fetcher: process
-              ).node,
-              let resolved = try? await state.genesisState.resolve(
-                  paths: [[directory]: .targeted],
-                  fetcher: process
-              ),
-              let node = resolved.node else {
-            return nil
-        }
-        return (try? node.get(key: directory)) ?? nil
     }
 
     /// Appends a canonical commit while ChainProcess still owns mutation order.
@@ -1160,8 +709,12 @@ public actor ChainService {
         // Children build their next candidates against this miner's plan for
         // them. Read before the build, so a refused plan refuses the request
         // and never reaches a child.
-        let recipientPlan = try validatedRecipientPlan(request.recipients)
-        let minimumWorkPlan = try validatedMinimumWorkPlan(request.minimumWork)
+        let recipientPlan = try Self.validatedRecipientPlan(
+            request.recipients, chainPath: process.configuration.chainPath
+        )
+        let minimumWorkPlan = try Self.validatedMinimumWorkPlan(
+            request.minimumWork, chainPath: process.configuration.chainPath
+        )
         // Adopted before the digest and the build, which carry only the
         // snapshots built on it.
         sendDescendantPlan(DescendantPlan(
@@ -1396,16 +949,16 @@ public actor ChainService {
         let spec = try await chainSpec(for: previous)
         // The recipient is a header field, not a transaction: it takes no
         // pool slot, and the builder credits it the reward plus fees.
-        let recipient = try validatedRecipientPlan(recipients).current
-        let minimumWorkPlan = try validatedMinimumWorkPlan(minimumWork)
-        let timestamp = try nextTimestamp(
+        let recipient = try Self.validatedRecipientPlan(
+            recipients, chainPath: process.configuration.chainPath
+        ).current
+        let minimumWorkPlan = try Self.validatedMinimumWorkPlan(
+            minimumWork, chainPath: process.configuration.chainPath
+        )
+        let timestamp = try Self.nextTimestamp(
             after: previous.timestamp,
             parentCarrier: parentCarrier
         )
-        var poolLimit = Int(clamping: spec.maxNumberOfTransactionsPerBlock)
-        var largestFittingPoolLimit = -1
-        var largestFittingTemplate: FittingMiningTemplate?
-        var maximumPoolLimit = poolLimit
         let candidates: [Transaction]
         if let parentCarrier {
             var contextual: [Transaction] = []
@@ -1424,8 +977,9 @@ public actor ChainService {
         } else {
             candidates = await pool.transactions(limit: .max)
         }
-        let pooled = await policyAcceptedTransactions(
+        let pooled = await Self.policyAcceptedTransactions(
             candidates,
+            chainPath: process.configuration.chainPath,
             previous: previous,
             timestamp: timestamp,
             spec: spec,
@@ -1446,150 +1000,20 @@ public actor ChainService {
             tipCID: try BlockHeader(node: previous).rawCID
         )
 
-        while true {
-            let provisional = try await templates.preview(
-                previous: previous,
-                transactions: pooled,
-                children: [],
-                parentCarrier: parentCarrier,
-                timestamp: timestamp,
-                transactionLimit: poolLimit,
-                rewardRecipient: recipient,
-                minimumWork: minimumWorkPlan.works,
-                difficultyAnchor: difficultyAnchor,
-                fetcher: fetcher
-            )
-            if try await !blockFits(
-                provisional.block,
-                spec: spec,
-                fetcher: fetcher
-            ) {
-                maximumPoolLimit = poolLimit - 1
-                if maximumPoolLimit <= largestFittingPoolLimit {
-                    guard let largestFittingTemplate else {
-                        throw ChainServiceError.templateTooLarge
-                    }
-                    return finishMiningTemplate(largestFittingTemplate)
-                }
-                poolLimit = largestFittingPoolLimit
-                    + (maximumPoolLimit - largestFittingPoolLimit + 1) / 2
-                continue
-            }
-
-            let selectedTransactions = try await blockTransactions(
-                in: provisional.block
-            )
-            var optionalChildren = provided
-            if !optionalChildren.isEmpty {
-                let offset = Int(
-                    previous.height % UInt64(optionalChildren.count)
-                )
-                optionalChildren = Array(optionalChildren[offset...])
-                    + optionalChildren[..<offset]
-            }
-
-            let selectedChildCount = optionalChildren.count
-            var template = try await templates.preview(
-                previous: previous,
-                transactions: selectedTransactions,
-                children: optionalChildren.prefix(selectedChildCount)
-                    .sorted { $0.directory < $1.directory },
-                parentCarrier: parentCarrier,
-                timestamp: timestamp,
-                rewardRecipient: recipient,
-                minimumWork: minimumWorkPlan.works,
-                difficultyAnchor: difficultyAnchor,
-                fetcher: fetcher
-            )
-            try requireSameTemplateContext(
-                provisional.block,
-                final: template.block
-            )
-            if try await !blockFits(
-                template.block,
-                spec: spec,
-                fetcher: fetcher
-            ), !optionalChildren.isEmpty {
-                let minimumChildCount = poolLimit == 0 ? 0 : 1
-                let minimumTemplate = try await templates.preview(
-                    previous: previous,
-                    transactions: selectedTransactions,
-                    children: optionalChildren.prefix(minimumChildCount)
-                        .sorted { $0.directory < $1.directory },
-                    parentCarrier: parentCarrier,
-                    timestamp: timestamp,
-                    rewardRecipient: recipient,
-                    minimumWork: minimumWorkPlan.works,
-                    difficultyAnchor: difficultyAnchor,
-                    fetcher: fetcher
-                )
-                if try await blockFits(
-                    minimumTemplate.block,
-                    spec: spec,
-                    fetcher: fetcher
-                ) {
-                    var fittingLimit = minimumChildCount
-                    var failingLimit = optionalChildren.count
-                    template = minimumTemplate
-                    while fittingLimit + 1 < failingLimit {
-                        let probeLimit = fittingLimit
-                            + (failingLimit - fittingLimit) / 2
-                        let probe = try await templates.preview(
-                            previous: previous,
-                            transactions: selectedTransactions,
-                            children: optionalChildren.prefix(probeLimit)
-                                .sorted { $0.directory < $1.directory },
-                            parentCarrier: parentCarrier,
-                            timestamp: timestamp,
-                            rewardRecipient: recipient,
-                            minimumWork: minimumWorkPlan.works,
-                            difficultyAnchor: difficultyAnchor,
-                            fetcher: fetcher
-                        )
-                        if try await blockFits(
-                            probe.block,
-                            spec: spec,
-                            fetcher: fetcher
-                        ) {
-                            fittingLimit = probeLimit
-                            template = probe
-                        } else {
-                            failingLimit = probeLimit
-                        }
-                    }
-                }
-            }
-
-            if try await blockFits(
-                template.block,
-                spec: spec,
-                fetcher: fetcher
-            ) {
-                largestFittingPoolLimit = poolLimit
-                let fittingTemplate = FittingMiningTemplate(template: template)
-                largestFittingTemplate = fittingTemplate
-                if poolLimit < maximumPoolLimit {
-                    poolLimit += (maximumPoolLimit - poolLimit + 1) / 2
-                    continue
-                }
-                return finishMiningTemplate(fittingTemplate)
-            }
-            maximumPoolLimit = poolLimit - 1
-            if maximumPoolLimit <= largestFittingPoolLimit {
-                guard let largestFittingTemplate else {
-                    throw ChainServiceError.templateTooLarge
-                }
-                return finishMiningTemplate(largestFittingTemplate)
-            }
-            poolLimit = largestFittingPoolLimit
-                + (maximumPoolLimit - largestFittingPoolLimit + 1) / 2
-        }
-    }
-
-    private func finishMiningTemplate(
-        _ fitting: FittingMiningTemplate
-    ) -> MiningTemplate {
-        fitting.template
+        return try await MiningTemplateAssembly.fit(
+            chainPath: process.configuration.chainPath,
+            lifetime: .seconds(Self.templateLifetimeSeconds),
+            previous: previous,
+            pooled: pooled,
+            provided: provided,
+            parentCarrier: parentCarrier,
+            timestamp: timestamp,
+            rewardRecipient: recipient,
+            minimumWork: minimumWorkPlan.works,
+            difficultyAnchor: difficultyAnchor,
+            spec: spec,
+            fetcher: fetcher
+        )
     }
 
     public func submitWork(
@@ -2572,8 +1996,9 @@ public actor ChainService {
     /// commits, and the descendants', which travel with the child candidate
     /// requests. Each is a canonical address on a chain at or below this one,
     /// at most one per chain.
-    private func validatedRecipientPlan(
-        _ recipients: [MiningRecipient]
+    static func validatedRecipientPlan(
+        _ recipients: [MiningRecipient],
+        chainPath currentPath: [String]
     ) throws -> ValidatedRecipientPlan {
         guard let encoded = try? JSONEncoder().encode(
                   MiningTemplateRequest(recipients: recipients)
@@ -2581,7 +2006,6 @@ public actor ChainService {
               encoded.count <= Self.maximumMiningPlanBytes else {
             throw ChainServiceError.invalidRecipientPlan
         }
-        let currentPath = process.configuration.chainPath
         var seen: Set<String> = []
         var current: String?
         var descendants: [MiningRecipient] = []
@@ -2614,8 +2038,9 @@ public actor ChainService {
     /// A miner's minimum-work entries by chain path — this chain's and its
     /// descendants', which bound the template's search — and the descendants'
     /// alone, which travel with the child candidate requests.
-    private func validatedMinimumWorkPlan(
-        _ entries: [MiningMinimumWork]
+    static func validatedMinimumWorkPlan(
+        _ entries: [MiningMinimumWork],
+        chainPath currentPath: [String]
     ) throws -> (works: [[String]: UInt256], descendants: [MiningMinimumWork]) {
         // The same payload cap the recipient plan honours. Bounding it here means
         // an oversized plan is a named refusal to the miner that sent it,
@@ -2627,7 +2052,6 @@ public actor ChainService {
               encoded.count <= Self.maximumMiningPlanBytes else {
             throw ChainServiceError.minimumWorkPlanTooLarge
         }
-        let currentPath = process.configuration.chainPath
         var seen: Set<String> = []
         var works: [[String]: UInt256] = [:]
         var descendants: [MiningMinimumWork] = []
@@ -2738,36 +2162,6 @@ public actor ChainService {
         return (leftCID ?? "") < (rightCID ?? "")
     }
 
-    private func blockFits(
-        _ block: Block,
-        spec: ChainSpec,
-        fetcher: any Fetcher
-    ) async throws -> Bool {
-        try await block.logicalContentByteSize(fetcher: fetcher)
-            <= spec.maxBlockSize
-    }
-
-    private func requireSameTemplateContext(
-        _ provisional: Block,
-        final: Block
-    ) throws {
-        guard provisional.version == final.version,
-              provisional.parent?.rawCID == final.parent?.rawCID,
-              provisional.transactions.rawCID == final.transactions.rawCID,
-              provisional.target == final.target,
-              provisional.nextTarget == final.nextTarget,
-              provisional.spec.rawCID == final.spec.rawCID,
-              provisional.parentState.rawCID == final.parentState.rawCID,
-              provisional.prevState.rawCID == final.prevState.rawCID,
-              provisional.postState.rawCID == final.postState.rawCID,
-              provisional.height == final.height,
-              provisional.timestamp == final.timestamp,
-              provisional.rewardRecipient == final.rewardRecipient,
-              provisional.nonce == final.nonce else {
-            throw ChainServiceError.templateContextChanged
-        }
-    }
-
     private func anchors(in transactions: [Transaction]) -> Set<Anchor> {
         Set(transactions.flatMap { transaction in
             transaction.body.node?.genesisActions.map {
@@ -2780,40 +2174,16 @@ public actor ChainService {
     }
 
     private func blockTransactions(in block: Block) async throws -> [Transaction] {
-        let transactionsHeader = try await block.transactions.resolve(
-            fetcher: process
-        )
-        guard let dictionary = transactionsHeader.node else {
-            throw ChainServiceError.unresolvedTransactionContent
-        }
-        let entries = try await dictionary.boundedKeysAndValues(
-            limit: dictionary.count,
-            fetcher: process
-        )
-        guard entries.count == dictionary.count else {
-            throw ChainServiceError.unresolvedTransactionContent
-        }
-        let headers = Dictionary(uniqueKeysWithValues: entries)
-        var transactions: [Transaction] = []
-        for index in 0..<headers.count {
-            guard let transactionHeader = headers[String(index)] else {
-                throw ChainServiceError.unresolvedTransactionContent
-            }
-            let resolved = try await transactionHeader.resolve(fetcher: process)
-            guard let transaction = resolved.node else {
-                throw ChainServiceError.unresolvedTransactionContent
-            }
-            transactions.append(transaction)
-        }
-        return transactions
+        try await MiningTemplateAssembly.blockTransactions(in: block, fetcher: process)
     }
 
     /// Policies may read the carrying block's height and timestamp, which a
     /// pool verdict (taken against the tip, at its own time) did not see. Offer
     /// only transactions the policies accept for THIS template; a skipped one
     /// stays pooled until it passes or a tip change evicts it.
-    private func policyAcceptedTransactions(
+    static func policyAcceptedTransactions(
         _ transactions: [Transaction],
+        chainPath: [String],
         previous: Block,
         timestamp: Int64,
         spec: ChainSpec,
@@ -2828,7 +2198,7 @@ public actor ChainService {
                   (try? await TransactionBody.batchVerifyPolicies(
                       bodies: [body],
                       spec: spec,
-                      chainPath: process.configuration.chainPath,
+                      chainPath: chainPath,
                       height: height,
                       timestamp: timestamp,
                       fetcher: fetcher
@@ -2838,7 +2208,7 @@ public actor ChainService {
         return accepted
     }
 
-    private func nextTimestamp(
+    static func nextTimestamp(
         after previous: Int64,
         parentCarrier: Block?
     ) throws -> Int64 {

@@ -442,7 +442,7 @@ public struct Mining: Sendable {
             departed(mutation, &turn)
             if let inserted = mutation.inserted { turn.delta.added.append(inserted) }
             guard let item = mempool.item(cid) else { return }
-            admitted(item, origins: admission.origins, &turn)
+            admitted(item, origins: admission.origins, inserted: mutation.inserted != nil, &turn)
         } catch {
             // Only the verdict makes a refusal final for a journal row; a
             // capacity or conflict refusal leaves the row for the next boot.
@@ -452,8 +452,15 @@ public struct Mining: Sendable {
     }
 
     /// `item` is pooled: journal and answer each local origin, and announce
-    /// it for a local or returned one.
-    private mutating func admitted(_ item: MempoolItem, origins: [TransactionOrigin], _ turn: inout Turn) {
+    /// it for a local or returned one, or for a peer's when this admission
+    /// newly pooled it (relayed once, as the actor path relays: a resend of a
+    /// pooled transaction is never announced again).
+    private mutating func admitted(
+        _ item: MempoolItem,
+        origins: [TransactionOrigin],
+        inserted: Bool = false,
+        _ turn: inout Turn
+    ) {
         var announce = false
         for origin in origins {
             switch origin {
@@ -469,7 +476,7 @@ public struct Mining: Sendable {
             case .returned:
                 announce = true
             case .peer:
-                break
+                announce = announce || inserted
             }
         }
         if announce { turn.replies.append(.announceTransaction(item.cid)) }

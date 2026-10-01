@@ -16,8 +16,10 @@ public enum Event: Sendable {
     case headersServed(PeerID, token: UInt64)
     /// The content layer holds the body Volume of this block locally.
     case bodyFetched(cid: String)
-    /// A connect job's verdict.
-    case connected(ConnectVerdict)
+    /// A connect job's verdict, with the executed block's transactions
+    /// (read by the job from the content it executed): what a later move of
+    /// the act-on tip confirms or returns.
+    case connected(ConnectVerdict, transactions: [Transaction] = [])
     case tick
     /// A child level: the evidence index's proofs for a block
     /// (`Effect.lookupProofs`).
@@ -26,6 +28,9 @@ public enum Event: Sendable {
     case proofVerified(ProofJob, Result<VerifiedChildEvidence, ChildProofVerificationFailure>)
     /// A child level: the evidence index's proofs changed for these blocks.
     case evidenceChanged(childCIDs: [String])
+    /// The level's mempool and miner work: transactions, preflight and
+    /// template results, template requests and submitted work.
+    case mining(MiningEvent)
 }
 
 public enum DisconnectReason: Sendable, Equatable {
@@ -82,12 +87,16 @@ public struct IssuedGenesisLink: Sendable, Equatable {
 }
 
 /// What readers see: the best header tip and the tip a node acts on — the
-/// deepest executed block on the best chain.
+/// deepest executed block on the best chain — with the mining tip epoch (a
+/// worker skips a job whose epoch is not this one) and the pool's size.
 public struct Snapshot: Sendable, Equatable {
     public let bestHeaderTip: String
     public let bestHeaderHeight: UInt64
     public let actOnTip: String
     public let actOnHeight: UInt64
+    public let miningEpoch: UInt64
+    public let mempoolCount: Int
+    public let mempoolBytes: Int
 }
 
 public enum Effect: Sendable {
@@ -117,6 +126,10 @@ public enum Effect: Sendable {
     /// A child level: write a credited proof to the local evidence index, so
     /// this node serves it. Emitted after the step's `persist`.
     case indexProof(childCID: String, ChildBlockProof)
+    /// The level's mempool and miner work (see `MiningEffect`), after the
+    /// step's `persist` and `publish`. A `poolChanged` is durable state: the
+    /// shell executes it, in order, before any later effect.
+    case mining(MiningEffect)
 }
 
 public struct CoreConfig: Sendable {
@@ -174,6 +187,13 @@ public struct CoreConfig: Sendable {
     /// window changes.
     public var bodyRetryBase: Int64
     public var bodyRetryCap: Int64
+    /// The level's mempool and template bounds.
+    public var mining = MiningConfig()
+    /// How many blocks below the act-on tip keep their executed
+    /// transactions, so a tip move can name what it confirms and returns. A
+    /// reorg deeper than this returns nothing from the blocks below it, and a
+    /// confirmation it cannot name is found by the next preflight instead.
+    public var tipMoveDepth: UInt64 = 144
 
     public init(
         maxHeadersPerPage: Int = 2_000,
@@ -244,11 +264,18 @@ public struct Core: Sendable {
     public let config: CoreConfig
     public let genesis: String
     public internal(set) var index = WeighedIndex()
+    /// The level's mempool and template book, on the act-on tip.
+    public internal(set) var mining: Mining
+    /// The transactions of each executed block within
+    /// `CoreConfig.tipMoveDepth` of the act-on tip, by block.
+    var executedTransactions: [String: [(cid: String, transaction: Transaction)]] = [:]
 
     /// A core over a bootstrapped or restored root tree.
     public init(tree: ChainTree, config: CoreConfig = CoreConfig()) {
         var tree = tree
         precondition(tree.context != nil, "the core runs one chain's level")
+        guard let spec = tree.spec else { preconditionFailure("the core runs a chain bound to its genesis spec") }
+        mining = Mining(tipCID: tree.actOnTip().hash, spec: spec, config: config.mining)
         let genesis = tree.canonicalBlockHash(atHeight: 0) ?? tree.canonicalTip
         var index = WeighedIndex()
         var stack = [genesis]
@@ -283,7 +310,10 @@ public struct Core: Sendable {
             bestHeaderTip: tree.canonicalTip,
             bestHeaderHeight: tree.headerSnapshot(of: tree.canonicalTip)?.tipHeight ?? 0,
             actOnTip: actOn.hash,
-            actOnHeight: actOn.height
+            actOnHeight: actOn.height,
+            miningEpoch: mining.tipEpoch,
+            mempoolCount: mining.mempool.count,
+            mempoolBytes: mining.mempool.byteCount
         )
     }
 
@@ -310,8 +340,8 @@ public struct Core: Sendable {
             }
         case .bodyFetched(let cid):
             bodyFetched(cid)
-        case .connected(let verdict):
-            connected(verdict, &turn)
+        case .connected(let verdict, let transactions):
+            connected(verdict, transactions: transactions, &turn)
         case .tick:
             tick(&turn)
         case .proofsFound(let cid, let proofs):
@@ -320,6 +350,8 @@ public struct Core: Sendable {
             proofVerified(job, result, &turn)
         case .evidenceChanged(let cids):
             evidenceChanged(cids)
+        case .mining(let event):
+            turn.mining += mining.step(event, now: turn.now)
         }
         drain(&turn)
         if !isRoot { proofWork(&turn) }
@@ -351,6 +383,7 @@ public struct Core: Sendable {
         var indexed: [(childCID: String, proof: ChildBlockProof)] = []
         /// Catch-up pages to continue, after the given header.
         var continuations: [(PeerID, HeaderKey)] = []
+        var mining: [MiningEffect] = []
         /// Pending headers to look at again, smallest priority first.
         var dirty = Heap<(priority: UInt256, cid: String)> {
             $0.priority != $1.priority ? $0.priority < $1.priority : $0.cid < $1.cid
@@ -359,9 +392,13 @@ public struct Core: Sendable {
         init(now: Int64) { self.now = now }
     }
 
-    /// Persist first, then publish, then relay, then everything else:
-    /// nothing a step makes visible precedes the write that makes it durable.
+    /// Persist first, then publish, then relay, then everything else, the
+    /// mining effects last: nothing a step makes visible precedes the write
+    /// that makes it durable. A move of the act-on tip reaches the mempool
+    /// in the same step.
     mutating func finish(_ turn: Turn) -> [Effect] {
+        var turn = turn
+        moveMiningTip(&turn)
         var effects: [Effect] = []
         if !turn.facts.isEmpty {
             effects.append(.persist(PersistBatch(
@@ -386,6 +423,7 @@ public struct Core: Sendable {
             }
         }
         effects += turn.effects
+        effects += turn.mining.map { .mining($0) }
         sync.compact()
         let deadlines = [sync.nextDeadline(after: turn.now), bodies.nextRetry(after: turn.now)]
         if let deadline = deadlines.compactMap({ $0 }).min() {
@@ -868,6 +906,39 @@ public struct Core: Sendable {
         }
         for peer in sync.peers.keys.sorted() where (sync.peers[peer]?.nextCatchUp ?? .max) <= now {
             requestCatchUp(from: peer, after: nil, &turn)
+        }
+    }
+
+    // MARK: - Mining tip
+
+    /// When the act-on tip moved, tell the mempool: the transactions of the
+    /// blocks the new act-on chain executes that the old one did not are
+    /// confirmed, and those of the blocks it left are returned.
+    mutating func moveMiningTip(_ turn: inout Turn) {
+        let tip = tree.actOnTip()
+        guard tip.hash != mining.tipCID else { return }
+        var entered: [String] = []
+        var left: [String] = []
+        var (old, new) = (mining.tipCID, tip.hash)
+        while old != new, let oldHeight = index.height[old], let newHeight = index.height[new] {
+            if oldHeight >= newHeight {
+                left.append(old)
+                guard let parent = index.parent[old] else { break }
+                old = parent
+            } else {
+                entered.append(new)
+                guard let parent = index.parent[new] else { break }
+                new = parent
+            }
+        }
+        let confirmed = Set(entered.flatMap { executedTransactions[$0]?.map(\.cid) ?? [] })
+        let returned = left.reversed().flatMap { executedTransactions[$0]?.map(\.transaction) ?? [] }
+        turn.mining += mining.step(
+            .tipMoved(TipMove(tipCID: tip.hash, confirmed: confirmed, returned: returned)),
+            now: turn.now
+        )
+        executedTransactions = executedTransactions.filter {
+            (index.height[$0.key] ?? 0) + config.tipMoveDepth >= tip.height
         }
     }
 

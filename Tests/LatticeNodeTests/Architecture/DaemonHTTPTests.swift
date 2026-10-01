@@ -944,7 +944,7 @@ final class DaemonHTTPTests: XCTestCase {
             }
         }
 
-        let directSnapshot = await service.readSnapshot()
+        let directSnapshot = await service.reads.readSnapshot()
         XCTAssertEqual(directSnapshot.phase, .active)
 
         // Release the held gate and confirm both blocked operations then
