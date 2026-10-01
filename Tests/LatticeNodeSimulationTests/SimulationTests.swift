@@ -41,6 +41,12 @@ final class SimulationTests: XCTestCase {
         var config = SimConfig.random(seed: 0xD37)
         config.drop = 0.15
         config.duplicate = 0.1
+        // Every repair pass re-sends the window (all branches above the
+        // highest height less `catchUpWindow`, here the whole graph). At
+        // 15% loss per message a pass of a dozen tiny pages almost never
+        // completes; one page per pass, as in production (2,000 headers),
+        // does.
+        config.pageSize = 64
         var a = try await Simulator.make(config)
         var b = try await Simulator.make(config)
         let first = try a.run()
@@ -245,6 +251,31 @@ final class SimulationTests: XCTestCase {
         }
         XCTAssertLessThanOrEqual(report.pendingPeak, config.pendingBudget)
         print("partition heal: \(report.healPages) pages, \(report.healParentFetches) ancestor fetches")
+    }
+
+    /// The same partition with no spammer, no loss and no repair pass in
+    /// the run: the heal's own requests. The side each core lacks forks
+    /// more than `catchUpWindow` below its height, so the pages above that
+    /// height leave a gap that only chained `getAncestors` fetches close.
+    func testAPartitionHealsThroughAncestorFetchesWithNoDepthCap() async throws {
+        var config = SimConfig(seed: 0x5E1F)
+        config.cores = 4
+        config.honestBlocks = 10
+        config.forkProbability = 0
+        config.split = (lighter: 150, heavier: 170)
+        config.spammer = false
+        config.liar = false
+        config.drop = 0
+        config.duplicate = 0
+        config.catchUpInterval = 10 * config.settle
+        var simulator = try await Simulator.make(config)
+        let heavier = try XCTUnwrap(simulator.world.sides[1].last)
+        let report = try simulator.run()
+        for (core, tip) in report.coreTips {
+            XCTAssertEqual(tip, heavier, "\(core) did not converge on the heavier side")
+        }
+        XCTAssertGreaterThan(report.healParentFetches, 0)
+        print("partition heal (clean): \(report.healPages) pages, \(report.healParentFetches) ancestor fetches")
     }
 
     /// A slow honest link: a page takes longer to transfer than the request

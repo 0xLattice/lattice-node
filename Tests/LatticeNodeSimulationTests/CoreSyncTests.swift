@@ -671,6 +671,7 @@ final class CoreSyncTests: XCTestCase {
         XCTAssertEqual(client.tree.canonicalTip, chain.last?.cid)
         XCTAssertTrue(client.sync.pending.entries.isEmpty)
         XCTAssertLessThanOrEqual(roundTrips, 10, "pages above the height and bulk ancestors, not one CID per trip")
+        print("heal of a 12-block side branch: \(roundTrips) round trips")
     }
 
     /// A crafted request (height 0, over and over) costs one seek and at
