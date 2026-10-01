@@ -633,6 +633,9 @@ public struct Simulator {
                     to: name,
                     .runConnect(job, incarnation: node.incarnation)
                 )
+            case .lookupProofs, .verifyProof, .indexProof:
+                // Child-level effects: a root level never emits them.
+                throw Invariants.fail(name, "a root level emitted a child-level effect")
             }
         }
         // Every weight mutation advances the revision, and an execution
