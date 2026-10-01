@@ -119,25 +119,16 @@ public struct HostStore: Sendable {
 
 /// A deterministic network of host cores, each running every level it
 /// hosts, beside scripted peers; an evidence index the cores and the
-/// withholder publish to; and an executor standing in for body execution,
-/// which runs `ChainTree.connect` on every weighed block whose parent is
-/// executed. Every step runs `HostCore.step`, executes its effects, then
-/// checks the invariants at every level.
+/// withholder publish to; and a content layer holding every body, which
+/// answers each level's body window and runs its connect jobs. Every step
+/// runs `HostCore.step`, executes its effects, then checks the invariants at
+/// every level.
 public struct LevelSimulator {
     struct HostNode {
         var core: HostCore
         var store: HostStore
         var digests: [ChainPath: TreeDigest]
         var persists = 0
-        var executing: Set<ExecKey> = []
-        /// A block whose execution lacked a parent fact, with the parent's
-        /// executed count then: it is tried again once that grows.
-        var retry: [ExecKey: Int] = [:]
-    }
-
-    struct ExecKey: Hashable {
-        let path: ChainPath
-        let cid: String
     }
 
     enum Delivery {
@@ -147,7 +138,6 @@ public struct LevelSimulator {
         case scriptTick
         case connect(String, String)
         case linkDown(String, String, UInt64)
-        case execute(ChainPath, String)
         case mine(Int)
     }
 
@@ -336,8 +326,6 @@ public struct LevelSimulator {
             let actions = script.tick(peers: peers, now: now, world: world)
             scripts[node] = script
             perform(actions, by: node)
-        case .execute(let path, let cid):
-            try await execute(cid, at: path, on: node)
         case .mine(let position):
             // The miner hands its grind to its node, whatever levels that
             // node runs yet; its log carries the grind to everyone.
@@ -375,47 +363,6 @@ public struct LevelSimulator {
         } else if session(name, peer.key) == peer.session {
             send(.script(from, path, message), from: name, to: peer.key)
         }
-    }
-
-    // MARK: - Execution (the stand-in for body execution)
-
-    mutating func execute(_ cid: String, at path: ChainPath, on name: String) async throws {
-        guard var node = cores[name] else { return }
-        let key = ExecKey(path: path, cid: cid)
-        guard let job = node.core.connectJob(for: cid, at: path) else {
-            node.executing.remove(key)
-            cores[name] = node
-            return
-        }
-        cores[name] = node
-        report.executions += 1
-        let verdict = await ChainTree.connect(
-            job,
-            fetcher: world.cas,
-            parentFacts: node.core.parentFacts(for: path),
-            validationContext: ValidationContext(nowMilliseconds: now)
-        )
-        schedule(at: delay(), to: name, .host(.connected(path, verdict)))
-    }
-
-    /// Execute every weighed block whose parent is executed, once per
-    /// attempt; a block that lacked a parent fact waits for its parent level
-    /// to execute more.
-    mutating func scheduleExecutions(_ name: String) {
-        guard var node = cores[name] else { return }
-        for path in node.core.ordered {
-            guard let digest = node.digests[path] else { continue }
-            let parentExecuted = path.count > 1 ? node.digests[Array(path.dropLast())]?.executed.count ?? 0 : 0
-            for (hash, entry) in digest.blocks.sorted(by: { $0.key < $1.key }) {
-                let key = ExecKey(path: path, cid: hash)
-                guard !digest.executed.contains(hash), !digest.excluded.contains(hash),
-                      let parent = entry.parent, digest.executed.contains(parent),
-                      !node.executing.contains(key), node.retry[key] != parentExecuted else { continue }
-                node.executing.insert(key)
-                schedule(at: delay(), to: name, .execute(path, hash))
-            }
-        }
-        cores[name] = node
     }
 
     // MARK: - Steps
@@ -459,6 +406,15 @@ public struct LevelSimulator {
                     )
                 }
                 schedule(at: delay(), to: name, .host(.bootstrapped(path, genesisCID: genesisCID, result)))
+            case .connect(let path, let job, let facts):
+                report.executions += 1
+                let verdict = await ChainTree.connect(
+                    job,
+                    fetcher: world.cas,
+                    parentFacts: facts,
+                    validationContext: ValidationContext(nowMilliseconds: now)
+                )
+                schedule(at: delay(), to: name, .host(.level(path, .connected(verdict))))
             case .wakeAt(let time):
                 if time > now, !ticks.contains(Tick(node: name, time: time)) {
                     schedule(at: time, to: name, .host(.tick))
@@ -469,13 +425,6 @@ public struct LevelSimulator {
         var digests: [ChainPath: TreeDigest] = [:]
         for (path, level) in node.core.levels {
             digests[path] = TreeDigest(level.tree)
-        }
-        if case .connected(let path, let verdict) = event, let digest = digests[path] {
-            let key = ExecKey(path: path, cid: verdict.blockHash)
-            node.executing.remove(key)
-            if !digest.executed.contains(verdict.blockHash), !digest.excluded.contains(verdict.blockHash) {
-                node.retry[key] = path.count > 1 ? digests[Array(path.dropLast())]?.executed.count ?? 0 : 0
-            }
         }
         try LevelInvariants.check(
             node: name, host: node.core, digests: digests, previous: node.digests,
@@ -497,7 +446,6 @@ public struct LevelSimulator {
             if node.persists % config.replayInterval == 0 { try checkReplay(name, node) }
         }
         cores[name] = node
-        scheduleExecutions(name)
     }
 
     mutating func perform(_ effect: Effect, at path: ChainPath, by name: String, _ node: inout HostNode) async throws {
@@ -557,12 +505,12 @@ public struct LevelSimulator {
             schedule(at: delay(), to: name, .host(.level(path, .proofVerified(job, result))))
         case .indexProof(let cid, let proof):
             node.store.index(proof, for: cid, at: path)
-        case .fetchBody, .cancelBody, .connect:
-            // N2's body window: this simulator executes every weighed block
-            // itself (`HostEvent.connected`, parent side branches included),
-            // so the window's requests go unanswered here.
+        case .fetchBody(let cid):
+            // The content layer holds every body.
+            schedule(at: delay(), to: name, .host(.level(path, .bodyFetched(cid: cid))))
+        case .cancelBody:
             break
-        case .persist, .disconnect, .wakeAt:
+        case .persist, .disconnect, .wakeAt, .connect:
             throw Invariants.fail(name, "a level effect escaped the host")
         }
     }

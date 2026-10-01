@@ -402,6 +402,17 @@ extension CoreDriver {
                 guard let session = session(peer) else { break }
                 sessions[peer.key] = nil
                 _ = await ivy.disconnectSession(ifCurrent: session.peer)
+            case .connect(let path, let job, let parentFacts):
+                let fetcher = process.localFetcher
+                queuedJobs.append {
+                    .level(path, .connected(await ChainTree.connect(
+                        job,
+                        fetcher: fetcher,
+                        parentFacts: parentFacts,
+                        validationContext: ValidationContext(nowMilliseconds: CoreDriver.now())
+                    )))
+                }
+                startJobs()
             case .bootstrap:
                 // PENDING (child levels): never emitted while `hosted` is empty.
                 break
@@ -420,7 +431,7 @@ extension CoreDriver {
 
         private mutating func execute(_ effect: LatticeNodeCore.Effect, at path: ChainPath) async -> Bool {
             switch effect {
-            case .persist, .disconnect, .wakeAt:
+            case .persist, .disconnect, .wakeAt, .connect:
                 // The host merges these into its own effects.
                 break
             case .publish(let snapshot):
@@ -481,23 +492,6 @@ extension CoreDriver {
             case .cancelBody(let cid):
                 bodies.removeValue(forKey: BodyKey(path: path, cid: cid))?.cancel()
                 bodyRoots[BodyKey(path: path, cid: cid)] = nil
-            case .connect(let job):
-                let (fetcher, parentFacts) = (process.localFetcher, core.parentFacts(for: path))
-                // PENDING N3b: `HostEvent.connected(path, verdict)` does not
-                // yet go through the level's body window (it never clears the
-                // running connect, so execution stops after one block). Until
-                // the one execution path lands, the verdict goes to the level
-                // itself; the host's genesis-link bookkeeping it skips matters
-                // only for hosted children, of which there are none.
-                queuedJobs.append {
-                    .level(path, .connected(await ChainTree.connect(
-                        job,
-                        fetcher: fetcher,
-                        parentFacts: parentFacts,
-                        validationContext: ValidationContext(nowMilliseconds: CoreDriver.now())
-                    )))
-                }
-                startJobs()
             case .verifyProof(let job):
                 // A job without its block reads it from the header store.
                 guard let block = job.block ?? headers.header(job.childCID)?.block else { break }

@@ -15,9 +15,6 @@ public enum HostEvent: Sendable {
     /// found or verified, an evidence index change.
     case level(ChainPath, Event)
     case tick
-    /// The verdict of executing a block of a level (`ChainTree.connect` over
-    /// `connectJob`, with `parentFacts` for a child level).
-    case connected(ChainPath, ConnectVerdict)
     /// The answer to a `bootstrap` effect.
     /// Answers for a genesis no longer being asked are ignored.
     case bootstrapped(ChainPath, genesisCID: String, Result<BootstrappedLevel, BlockImportError>)
@@ -75,7 +72,11 @@ public enum HostEffect: Sendable {
     /// Every level's writes of one step, in one transaction, before any
     /// later effect of the step.
     case persist(HostBatch)
+    /// Every level effect but `connect`.
     case level(ChainPath, Effect)
+    /// Run `ChainTree.connect` on a level's job, reading `parentFacts` for a
+    /// child level, and report the verdict as `.level(path, .connected)`.
+    case connect(ChainPath, ConnectJob, parentFacts: ParentLevelFacts?)
     case disconnect(PeerID, DisconnectReason)
     /// Bootstrap a hosted child chain from the genesis a parent's executed
     /// block authorized, reading `parentFacts`; answer `bootstrapped`.
@@ -146,7 +147,7 @@ public struct HostCore: Sendable {
     public internal(set) var levels: [ChainPath: Core] = [:]
     /// Per parent level: each genesis link its executions issued, by issuer.
     /// Read through `ParentLevelFacts`, which honours a link only while an
-    /// issuer is executed.
+    /// issuer is executed. Deleted in Lattice 41 (decision 18d).
     public internal(set) var issuers: [ChainPath: [ParentGenesisLink: Set<String>]] = [:]
     public internal(set) var peers: Set<PeerID> = []
     /// Operator overrides: the genesis to host for a child chain.
@@ -254,22 +255,13 @@ public struct HostCore: Sendable {
 
     /// What a child level's execution and bootstrap read of its parent: the
     /// parent's executed set on any branch, and the genesis links its
-    /// executed blocks issued.
-    ///
-    /// N2's connect scheduler must provide what only the simulator does
-    /// today: park a child block whose verdict lacks a parent fact
-    /// (`crossChainEvidenceRequired`) until its parent level executes more
-    /// (no timer), and execute the parent's SIDE BRANCHES on demand when a
-    /// parked child names a state only a side branch produces.
+    /// executed blocks issued. A parent level executes only along its own
+    /// best chain (decision 21): a child block naming a state it never
+    /// executed waits, unvalidated, until it does.
     public func parentFacts(for path: ChainPath) -> ParentLevelFacts? {
         let parent = Array(path.dropLast())
         guard path.count > 1, let core = levels[parent] else { return nil }
         return ParentLevelFacts(tree: core.tree, genesisIssuers: issuers[parent] ?? [:])
-    }
-
-    /// What executing a held block needs, captured from its level's tree.
-    public mutating func connectJob(for blockHash: String, at path: ChainPath) -> ConnectJob? {
-        levels[path]?.tree.connectJob(for: blockHash)
     }
 
     // MARK: - Step
@@ -306,8 +298,6 @@ public struct HostCore: Sendable {
             if levels[path] != nil { run(path, event, &turn) }
         case .tick:
             for path in ordered { run(path, .tick, &turn) }
-        case .connected(let path, let verdict):
-            connected(verdict, at: path, &turn)
         case .bootstrapped(let path, let genesisCID, let result):
             bootstrapped(result, genesisCID: genesisCID, at: path, &turn)
         case .mined(let grind):
@@ -332,11 +322,37 @@ public struct HostCore: Sendable {
         return effects
     }
 
+    /// Step one level. A level that executed a block wakes each child
+    /// block awaiting a fact it now holds; a level's own verdict is checked
+    /// the same way, since its parent may have executed while it ran.
     mutating func run(_ path: ChainPath, _ event: Event, _ turn: inout Turn) {
         guard var core = levels[path] else { return }
         let effects = core.step(event, now: turn.now)
         levels[path] = core
         absorb(effects, at: path, &turn)
+        let executed = effects.contains {
+            guard case .persist(let batch) = $0 else { return false }
+            return batch.facts.flatMap(\.facts).contains {
+                if case .validation = $0 { return true }
+                return false
+            }
+        }
+        if executed {
+            for child in ordered where child.dropLast().elementsEqual(path) {
+                wakeAnswered(child, &turn)
+            }
+        }
+        if case .connected = event { wakeAnswered(path, &turn) }
+    }
+
+    /// Connect again the blocks of a child level whose awaited parent fact
+    /// is now present; a level with none is not stepped.
+    mutating func wakeAnswered(_ path: ChainPath, _ turn: inout Turn) {
+        guard let core = levels[path], !core.bodies.awaitingParent.isEmpty,
+              let facts = parentFacts(for: path) else { return }
+        let present = core.bodies.awaitingParent.filter { facts.holds($0.value) }.keys.sorted()
+        guard !present.isEmpty else { return }
+        run(path, .parentFactsPresent(present), &turn)
     }
 
     /// A level's effects join the host's: persists merge into the step's one
@@ -346,6 +362,12 @@ public struct HostCore: Sendable {
             switch effect {
             case .persist(let batch):
                 turn.batch.append(batch, at: path)
+                // Genesis links: deleted in Lattice 41 (decision 18d), and
+                // this recording with them.
+                for issued in batch.genesisLinks
+                where issuers[path, default: [:]][issued.link, default: []].insert(issued.issuer).inserted {
+                    turn.batch.issued.append(issued)
+                }
                 for fact in batch.facts.flatMap(\.facts) {
                     switch fact {
                     case .block(let block): turn.touched[path, default: []].insert(block.blockHash)
@@ -364,6 +386,8 @@ public struct HostCore: Sendable {
                 turn.disconnects[peer] = turn.disconnects[peer] ?? reason
             case .wakeAt(let time):
                 turn.wake = min(turn.wake ?? time, time)
+            case .connect(let job):
+                turn.effects.append(.connect(path, job, parentFacts: parentFacts(for: path)))
             default:
                 turn.effects.append(.level(path, effect))
             }
@@ -394,25 +418,7 @@ public struct HostCore: Sendable {
         )))))
     }
 
-    // MARK: - Execution and genesis links
-
-    /// Apply a verdict. A valid block's genesis links are recorded for its
-    /// issuer (only an executed block issues any), and each hosted child
-    /// chain they now resolve is bootstrapped. Parking a child block that
-    /// lacks a parent fact, and executing parent side branches on demand,
-    /// are the scheduler's (N2; see `parentFacts`).
-    mutating func connected(_ verdict: ConnectVerdict, at path: ChainPath, _ turn: inout Turn) {
-        guard var core = levels[path] else { return }
-        let (effects, update) = core.applyConnect(verdict, now: turn.now)
-        levels[path] = core
-        absorb(effects, at: path, &turn)
-        for link in update?.parentGenesisLinks ?? [] {
-            guard let issuer = update?.blockHash,
-                  issuers[path, default: [:]][link, default: []].insert(issuer).inserted else { continue }
-            turn.batch.issued.append(IssuedGenesisLink(link: link, issuer: issuer))
-        }
-
-    }
+    // MARK: - Genesis links
 
     /// The genesis a hosted child chain must run on (decision 15c): the
     /// operator's pinned genesis, once an executed parent block authorizes
@@ -473,8 +479,10 @@ public struct HostCore: Sendable {
             turn.batch.levels.removeAll { $0.path == path }
             turn.batch.removed.append(path)
             turn.effects.removeAll {
-                if case .level(let at, _) = $0 { return at == path }
-                return false
+                switch $0 {
+                case .level(let at, _), .connect(let at, _, _): return at == path
+                default: return false
+                }
             }
         }
     }
@@ -579,6 +587,24 @@ public struct HostCore: Sendable {
                 levels[path] = core
                 absorb(effects, at: path, &turn)
             }
+        }
+    }
+}
+
+extension ParentLevelFacts {
+    /// Whether these facts hold what a child connect lacked.
+    public func holds(_ fact: CrossChainEvidenceRequirement) -> Bool {
+        switch fact {
+        case .parentStateContinuity(let parentPath, let from, let to):
+            hasContinuity(ParentStateContinuityLink(parentPath: parentPath, fromStateCID: from, toStateCID: to))
+        case .parentGenesis(let parentPath, let directory, let genesis, let parentState):
+            // Deleted with genesis links in Lattice 41 (decision 18d).
+            recordsGenesis(ParentGenesisLink(
+                parentPath: parentPath, directory: directory,
+                childGenesisCID: genesis, parentStateCID: parentState
+            ))
+        case .childProof:
+            false
         }
     }
 }

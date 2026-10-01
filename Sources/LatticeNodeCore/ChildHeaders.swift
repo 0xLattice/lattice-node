@@ -458,18 +458,6 @@ extension Core {
         return finish(turn)
     }
 
-    /// Apply an execution verdict: a validation joins the executed set, a
-    /// proven-invalid block is excluded with its work still weighing.
-    mutating func applyConnect(_ verdict: ConnectVerdict, now: Int64) -> (effects: [Effect], update: ChainTreeUpdate?) {
-        var turn = Turn(now: now)
-        let update = tree.applyConnect(verdict).update
-        if let update {
-            if let state = update.materializedPostState { turn.states.append(state) }
-            turn.facts += update.batches
-        }
-        return (finish(turn), update)
-    }
-
     /// Credit a parent's attributed run at one of this level's blocks
     /// (hierarchical GHOST), derived and applied in one step.
     mutating func strengthen(

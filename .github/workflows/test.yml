@@ -7,6 +7,10 @@ on:
   pull_request:
     branches: [main, "p3/**"]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   strict-concurrency:
     runs-on: ubuntu-latest
@@ -211,6 +215,8 @@ jobs:
           if-no-files-found: ignore
 
   thread-sanitizer:
+    # macOS runners are scarce: run on main and merge-queue pushes, not on every PR push.
+    if: github.event_name != 'pull_request'
     runs-on: macos-15
     timeout-minutes: 90
     steps:
@@ -232,6 +238,8 @@ jobs:
         run: scripts/reproducible-build.sh
 
   sanitizer-macos:
+    # macOS runners are scarce: run on main and merge-queue pushes, not on every PR push.
+    if: github.event_name != 'pull_request'
     runs-on: macos-15
     timeout-minutes: 90
     env:
