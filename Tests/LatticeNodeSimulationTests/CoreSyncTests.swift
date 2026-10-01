@@ -704,16 +704,15 @@ final class CoreSyncTests: XCTestCase {
         XCTAssertEqual(served, 3, "the rest were dropped")
     }
 
-    /// Sync never reads canonicity: the core's sync sources name no best-
-    /// chain API. Only `ActOn.swift` (the snapshot and act-on tip) may.
+    /// Sync never reads canonicity: the sync sources (the step, serving,
+    /// catch-up, the pending queue, the messages) name no best-chain API.
+    /// Only what acts on the best chain may: `ActOn.swift` (the snapshot and
+    /// act-on tip), execution and templates.
     func testSyncNeverReadsCanonicity() throws {
         let sources = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/LatticeNodeCore")
-        let files = try FileManager.default.contentsOfDirectory(atPath: sources.path)
-            .filter { $0.hasSuffix(".swift") && $0 != "ActOn.swift" }
-        XCTAssertTrue(files.contains("Core.swift") && files.contains("Sync.swift"), "\(files)")
-        for file in files {
+        for file in ["Core.swift", "Sync.swift", "Messages.swift"] {
             let text = try String(contentsOf: sources.appendingPathComponent(file), encoding: .utf8)
             for api in ["isCanonical", "canonicalTip", "canonicalBlockHash", "canonicalChain", "actOnTip", "bestChain"] {
                 XCTAssertFalse(text.contains(api), "\(file) reads \(api)")
