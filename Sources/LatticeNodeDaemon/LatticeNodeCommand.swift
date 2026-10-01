@@ -80,7 +80,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Per-client arrival-rate ceiling for the general public read routes, in requests per second. The client is the PEER SOCKET ADDRESS (no forwarded-for header is trusted), so behind a proxy that presents one address for every client this throttles the whole internet as one user — set it to 0 there. 0 disables this ceiling.")
     var publicReadRate = PublicReadRateLimits.defaultGeneralRate
 
-    @Option(help: "Per-client arrival-rate ceiling, in requests per second, for the expensive public reads: /v1/blocks (a recent-block walk), /api/chain/endpoints (a peer fan-out), and a block's /transactions or /children (hundreds of content fetches). Keyed like --public-read-rate; 0 disables it.")
+    @Option(help: "Per-client arrival-rate ceiling, in requests per second, for the expensive public reads: /api/chain/endpoints (a peer fan-out), and a block's /transactions or /children (hundreds of content fetches). Keyed like --public-read-rate; 0 disables it.")
     var publicReadExpensiveRate = PublicReadRateLimits.defaultExpensiveRate
 
     @Option(help: "Listener-wide arrival-rate ceiling for the public read port, in requests per second. Address-agnostic, so it remains correct behind a proxy that collapses every client onto one address. 0 disables it; all three rates 0 is no rate limiting at all.")
@@ -421,7 +421,7 @@ func makeApplication(
 }
 
 /// The public read application: exactly the bounded, non-mutating GET routes
-/// the read-replica nginx allowlist exposes (/health, /v1/blocks*,
+/// the read-replica nginx allowlist exposes (/health,
 /// /v1/transactions/:cid, /v1/accounts/:owner, /api/*), enforced in code.
 /// Registered from the same function as the loopback application's read
 /// surface so the two cannot drift apart.
@@ -540,20 +540,6 @@ private func addPublicReadRoutes<Context: RequestContext>(
     router.head("health") { request, context in
         try await health(request, context).createHeadResponse()
     }
-    router.get("v1/blocks/:cid") { request, context in
-        guard let cid = context.parameters.get("cid"), isPlausibleCID(cid) else {
-            throw HTTPError(.badRequest)
-        }
-        guard let block = await service.block(cid: cid) else {
-            throw HTTPError(.notFound)
-        }
-        return try jsonCached(
-            BlockResponse(cid: cid, block: block),
-            cacheControl: immutableCacheControl,
-            request: request,
-            context: context
-        )
-    }
     router.get("v1/transactions/:cid") { request, context in
         guard let cid = context.parameters.get("cid"), isPlausibleCID(cid) else {
             throw HTTPError(.badRequest)
@@ -587,40 +573,6 @@ private func addPublicReadRoutes<Context: RequestContext>(
                 nonce: account.nonce
             ),
             cacheControl: immutableCacheControl,
-            request: request,
-            context: context
-        )
-    }
-    router.get("v1/blocks") { request, context in
-        let query = request.uri.queryParameters
-        var before: String?
-        if let cid = query["before"] {
-            let value = String(cid)
-            guard isPlausibleCID(value) else { throw HTTPError(.badRequest) }
-            before = value
-        }
-        let limit: Int
-        if let requested = query["limit"] {
-            guard let parsed = Int(requested), parsed > 0 else {
-                throw HTTPError(.badRequest)
-            }
-            limit = parsed
-        } else {
-            limit = 20
-        }
-        guard let blocks = await service.recentBlocks(before: before, limit: limit) else {
-            throw HTTPError(.notFound)
-        }
-        // A `before` walk is immutable ONLY when it is complete — it returned
-        // the full (capped) limit or reached genesis. If it truncated early
-        // because a parent body was pruned/temporarily unavailable, the list
-        // can grow later, so it must not be cached as immutable for a year.
-        let cappedLimit = min(limit, ChainReads.maximumRecentBlocksLimit)
-        let complete = blocks.count >= cappedLimit || blocks.last?.parentCID == nil
-        return try jsonCached(
-            blocks,
-            cacheControl: (before != nil && complete)
-                ? immutableCacheControl : statusCacheControl,
             request: request,
             context: context
         )
@@ -1049,13 +1001,6 @@ private func jsonCached<Value: Encodable, Context: RequestContext>(
     var response = try json(value, request: request, context: context)
     response.headers[.cacheControl] = cacheControl
     return response
-}
-
-/// GET /v1/blocks/:cid response: the decoded, content-verified block, echoing
-/// the requested CID (Codable, never raw CBOR).
-struct BlockResponse: Codable {
-    let cid: String
-    let block: Block
 }
 
 /// GET /v1/transactions/:cid response: the decoded, content-verified

@@ -100,10 +100,9 @@ it enforces its own arrival-rate ceilings — the same numbers
 | `--public-read-max-rate` | 200/s | The whole listener |
 
 `0` disables that ceiling; all three `0` is no rate limiting at all. The live
-values are printed on the startup banner. The expensive set is `/v1/blocks`
-(a recent-block walk), `/api/chain/endpoints` (a peer fan-out), and a block's
-`/transactions` or `/children` (hundreds of content fetches at `?limit=100`);
-`/v1/blocks/<cid>` is block detail and is general.
+values are printed on the startup banner. The expensive set is
+`/api/chain/endpoints` (a peer fan-out) and a block's `/transactions` or
+`/children` (hundreds of content fetches at `?limit=100`).
 
 **`GET`/`HEAD` `/health` is exempt from all three** — a platform health check
 that public load can throttle turns load into a depooled machine, and on the

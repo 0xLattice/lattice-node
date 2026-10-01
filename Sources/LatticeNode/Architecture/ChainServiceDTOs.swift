@@ -229,18 +229,6 @@ public struct ChainServiceStatusResponse: Codable, Sendable, Equatable {
     public let templateDigest: String?
 }
 
-/// One accepted block's header/summary: enough to build a recent-blocks index
-/// without serving the full body (whose transactions could each be up to
-/// `ChainServiceLimits.maximumPayloadBytes` — an N-block walk that fetched full
-/// bodies would amplify to N × maxBlockSize).
-public struct BlockSummary: Codable, Sendable, Equatable {
-    public let cid: String
-    public let height: UInt64
-    public let parentCID: String?
-    public let timestamp: Int64
-    public let transactionCount: Int
-}
-
 public enum ChainServiceError: Error, Equatable, Sendable {
     case unresolvedChainSpec
     case invalidRecipientPlan

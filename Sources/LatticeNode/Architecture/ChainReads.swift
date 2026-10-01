@@ -25,7 +25,6 @@ public struct ChainReads: Sendable {
     }
 
     private static let maximumReadResponseBytes = Int(IvyConfig.defaultProtocolMaxFrameSize)
-    public static let maximumRecentBlocksLimit = 50
     private static let maximumExplorerPageLimit = 100
     private static let maximumExplorerMempoolListing = 200
 
@@ -74,10 +73,10 @@ public struct ChainReads: Sendable {
         )
     }
 
-    /// Bounded public read: a decoded, content-verified block, gated to only
-    /// what this node has durably accepted. Never takes the operation gate —
-    /// reads only ChainProcess's ungated CAS path.
-    public func block(cid: String) async -> Block? {
+    /// A decoded, content-verified block, gated to only what this node has
+    /// durably accepted. Never takes the operation gate — reads only
+    /// ChainProcess's ungated CAS path.
+    func block(cid: String) async -> Block? {
         guard await process.hasAcceptedBlock(cid) else { return nil }
         guard let data = await process.content([cid])[cid],
               data.count <= Self.maximumReadResponseBytes else {
@@ -131,50 +130,6 @@ public struct ChainReads: Sendable {
         return (balance: balance, nonce: nonce)
     }
 
-    /// Bounded public read: recent block headers walking parent links from
-    /// `startCID` (or the current tip when `nil`) for up to `limit` steps
-    /// (hard-capped at `maximumRecentBlocksLimit`). Each step is one bounded
-    /// content fetch for the block plus one bounded content fetch for its
-    /// transactions-dictionary header (to read its count) — full transaction
-    /// bodies are never fetched. Never takes the operation gate. Returns nil
-    /// when `startCID` is given but is not an accepted block.
-    public func recentBlocks(before startCID: String?, limit: Int) async -> [BlockSummary]? {
-        let boundedLimit = min(max(limit, 0), Self.maximumRecentBlocksLimit)
-        guard boundedLimit > 0 else { return [] }
-
-        var cid: String
-        if let startCID {
-            guard await process.hasAcceptedBlock(startCID) else { return nil }
-            cid = startCID
-        } else {
-            guard let tip = await tip().tipCID else { return [] }
-            cid = tip
-        }
-
-        var summaries: [BlockSummary] = []
-        summaries.reserveCapacity(boundedLimit)
-        for _ in 0..<boundedLimit {
-            guard let data = await process.content([cid])[cid],
-                  data.count <= Self.maximumReadResponseBytes,
-                  let block = _contentBoundBlock(cid: cid, data: data) else {
-                break
-            }
-            let transactionCount = (try? await block.transactions.resolve(
-                fetcher: process
-            ))?.node?.count ?? 0
-            summaries.append(BlockSummary(
-                cid: cid,
-                height: block.height,
-                parentCID: block.parent?.rawCID,
-                timestamp: block.timestamp,
-                transactionCount: transactionCount
-            ))
-            guard let parent = block.parent else { break }
-            cid = parent.rawCID
-        }
-        return summaries
-    }
-
     // MARK: - Explorer read API
     //
     // Ungated public reads for the browser explorer. Each mirrors the bounded,
@@ -192,16 +147,25 @@ public struct ChainReads: Sendable {
         await canonicalCID(height)
     }
 
+    /// The tip block's summary: one bounded block fetch plus its
+    /// transactions-dictionary header (for the count); no transaction body is
+    /// fetched.
     public func explorerLatestBlock() async -> ExplorerLatestBlock? {
-        guard let summary = (await recentBlocks(before: nil, limit: 1))?.first else {
+        guard let cid = await tip().tipCID,
+              let data = await process.content([cid])[cid],
+              data.count <= Self.maximumReadResponseBytes,
+              let block = _contentBoundBlock(cid: cid, data: data) else {
             return nil
         }
+        let transactionCount = (try? await block.transactions.resolve(
+            fetcher: process
+        ))?.node?.count ?? 0
         return ExplorerLatestBlock(
-            height: summary.height,
-            hash: summary.cid,
-            transactionCount: summary.transactionCount,
-            timestamp: summary.timestamp,
-            previousBlock: summary.parentCID
+            height: block.height,
+            hash: cid,
+            transactionCount: transactionCount,
+            timestamp: block.timestamp,
+            previousBlock: block.parent?.rawCID
         )
     }
 
