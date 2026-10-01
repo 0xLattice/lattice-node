@@ -199,7 +199,7 @@ public struct World: Sendable {
                 ? [try genesisAction(index: index, childGenesis: genesis.cid)] : []
             let next = try await extend(
                 blocks[parent]!, timestamp: time, nonce: UInt64(index) << 32, children: children,
-                transactions: transactions, rewardRecipient: miner, in: cas
+                transactions: transactions, rewardRecipient: try miner(index), in: cas
             )
             blocks[next.cid] = next
             honest.append(next.cid)
@@ -441,18 +441,26 @@ public struct World: Sendable {
         return cas.all
     }
 
-    /// The honest miners' reward address.
-    static let miner = CryptoUtils.createAddress(from: "ed01" + String(repeating: "5a", count: 32))
+    /// Honest block `index`'s reward address: a different account for every
+    /// block, so each execution creates new state subtrees.
+    static func miner(_ index: Int) throws -> String {
+        CryptoUtils.createAddress(from: try signer(index).publicKey)
+    }
+
+    /// The key derived from `index`: the same world, the same keys.
+    static func signer(_ index: Int) throws -> (privateKey: String, publicKey: String) {
+        var seed = [UInt8](repeating: 0x5A, count: 32)
+        withUnsafeBytes(of: UInt64(index).bigEndian) { seed.replaceSubrange(24..<32, with: $0) }
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: seed)
+        let hex = { (bytes: Data) in bytes.map { String(format: "%02x", $0) }.joined() }
+        return (hex(key.rawRepresentation), "ed01" + hex(key.publicKey.rawRepresentation))
+    }
 
     /// A signed transaction whose one `GenesisAction` authorizes a child
     /// chain, from a signer derived from `index` (the same world, the same
     /// bytes).
     static func genesisAction(index: Int, childGenesis: String) throws -> Transaction {
-        var seed = [UInt8](repeating: 0x5A, count: 32)
-        withUnsafeBytes(of: UInt64(index).bigEndian) { seed.replaceSubrange(24..<32, with: $0) }
-        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: seed)
-        let publicKey = "ed01" + key.publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined()
-        let privateKey = key.rawRepresentation.map { String(format: "%02x", $0) }.joined()
+        let (privateKey, publicKey) = try signer(index)
         let body = TransactionBody(
             accountActions: [], actions: [], depositActions: [],
             genesisActions: [GenesisAction(directory: "Kid\(index)", blockCID: childGenesis)],

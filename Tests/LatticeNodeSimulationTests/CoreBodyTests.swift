@@ -255,13 +255,23 @@ final class CoreBodyTests: XCTestCase {
         XCTAssertEqual(bodyFetches(effects), [chain[2].cid, chain[3].cid])
     }
 
-    func testATreeChangeStartsTheBackoffOver() async throws {
+    func testAWindowChangeStartsTheBackoffOver() async throws {
         var (core, _) = weighed(Array(chain.prefix(3)))
         let job = try XCTUnwrap(jobs(arrive(chain[0].cid, &core)).first)
         let verdict = await ChainTree.connect(job, fetcher: SimCAS(), validationContext: ValidationContext(nowMilliseconds: Self.now))
         _ = core.step(.connected(verdict), now: Self.now)
-        XCTAssertNotNil(core.bodies.parked[chain[0].cid])
-        // A new header weighs: the tree changed, so the wait is over.
+        let parked = try XCTUnwrap(core.bodies.parked[chain[0].cid])
+        // A header weighed off the best chain moves neither the act-on tip
+        // nor the window: the wait stands.
+        let side = try XCTUnwrap(world.blocks[world.spam[0]])
+        let off = core.step(.received(peer, .headers(HeadersResponse(
+            requestID: 0, entries: [HeaderEntry(block: side.block, children: side.children)], hasMore: false
+        ))), now: Self.now + 1)
+        XCTAssertTrue(core.tree.contains(blockHash: side.cid))
+        XCTAssertFalse(bodyFetches(off).contains(chain[0].cid))
+        XCTAssertEqual(core.bodies.parked[chain[0].cid], parked)
+        // A new header extends the best chain: the window changed, so the
+        // wait is over.
         let effects = core.step(.received(peer, .headers(HeadersResponse(
             requestID: 0, entries: [HeaderEntry(block: chain[3].block, children: chain[3].children)], hasMore: false
         ))), now: Self.now + 1)

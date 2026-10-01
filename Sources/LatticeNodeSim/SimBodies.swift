@@ -25,18 +25,17 @@ struct ContentLayer: Fetcher {
 }
 
 /// How a crash tears a node's last write. The fact log and the content a
-/// node holds are separate stores (state.db and the volumes), so a crash in
-/// the middle of a persist can keep either without the other.
+/// node holds are separate stores (state.db and the volumes). The shell
+/// fsyncs a batch's content before it commits the facts (`PersistBatch`), so
+/// a crash can lose facts whose content is durable, or content no durable
+/// fact references, but never content a durable fact references: facts kept
+/// with their states lost is an ordering violation, not a crash mode.
 public enum CrashMode: CaseIterable, Sendable {
     /// The whole batch is lost.
     case loseBatch
     /// The batch's content (headers and post-states) survives, its facts do
     /// not.
     case keepContentLoseFacts
-    /// The batch's facts survive, the post-states it carried do not: the
-    /// node has executed blocks whose states it must fetch back from the
-    /// content layer to execute on.
-    case keepFactsLoseStates
     /// The batch survives, and every body Volume not yet executed (the
     /// downloads in progress) is lost.
     case keepFactsLoseUnexecutedBodies
@@ -140,13 +139,18 @@ extension Invariants {
     }
 
     /// Content before facts: every block a persist records as executed has
-    /// its post-state in the node's own store.
-    static func checkStatesStored(node: String, batch: PersistBatch, store: SimStore, content: SimCAS) throws {
+    /// its whole post-state — every node of it, not only the root — in the
+    /// node's own store.
+    static func checkStatesStored(node: String, batch: PersistBatch, store: SimStore, content: SimCAS) async throws {
         for fact in batch.facts.flatMap(\.facts) {
             guard case .validation(let validation) = fact else { continue }
-            let postState = store.headers[validation.blockHash]?.block.postState.rawCID
-            guard let postState, content.contains(postState) else {
-                throw fail(node, "executed \(validation.blockHash) without storing its post-state")
+            guard let postState = store.headers[validation.blockHash]?.block.postState else {
+                throw fail(node, "executed \(validation.blockHash) has no durable header")
+            }
+            do {
+                _ = try await LatticeStateHeader(rawCID: postState.rawCID).resolveRecursive(fetcher: content)
+            } catch {
+                throw fail(node, "executed \(validation.blockHash) without storing its whole post-state: \(error)")
             }
         }
     }
@@ -176,8 +180,6 @@ extension Simulator {
                 try await storeMaterialized(state, in: node.content)
             }
             node.store.appendTorn(batch)
-        case .keepFactsLoseStates:
-            node.store.append(batch)
         case .keepFactsLoseUnexecutedBodies:
             for state in batch.states {
                 try await storeMaterialized(state, in: node.content)

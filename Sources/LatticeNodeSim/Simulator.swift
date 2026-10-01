@@ -544,7 +544,12 @@ public struct Simulator {
                 }
                 if faults.dropFact, !droppedFact, let dropped = batch.facts.last {
                     droppedFact = true
-                    batch = PersistBatch(headers: batch.headers, facts: batch.facts.filter { $0 != dropped })
+                    batch = PersistBatch(
+                        headers: batch.headers,
+                        states: batch.states,
+                        facts: batch.facts.filter { $0 != dropped },
+                        genesisLinks: batch.genesisLinks
+                    )
                 }
                 // Content first: the post-states are stored before the facts
                 // that reference them.
@@ -552,7 +557,7 @@ public struct Simulator {
                     try await storeMaterialized(state, in: node.content)
                 }
                 node.store.append(batch)
-                try Invariants.checkStatesStored(node: name, batch: batch, store: node.store, content: node.content)
+                try await Invariants.checkStatesStored(node: name, batch: batch, store: node.store, content: node.content)
                 persisted = true
             case .publish(let snapshot):
                 // DST 3: durability precedes visibility.

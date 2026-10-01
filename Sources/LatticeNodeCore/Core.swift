@@ -32,9 +32,12 @@ public enum DisconnectReason: Sendable, Equatable {
 }
 
 /// The durable form of one step: content first — header content and the
-/// post-states its executions produced, stored and pinned — then the facts
-/// that reference it, with the child-genesis links those executions issued.
-/// The shell writes it before executing any later effect of the same step.
+/// post-states its executions produced, stored, pinned and fsynced — then
+/// the facts that reference it, with the child-genesis links those
+/// executions issued, committed. The shell writes it before executing any
+/// later effect of the same step. Facts durable without their content is an
+/// ordering violation the shell must prevent: a crash may lose the facts of
+/// durable content, never the reverse.
 public struct PersistBatch: Sendable {
     public let headers: [StoredHeader]
     /// Each executed block's materialized post-state: the state content a
@@ -141,7 +144,8 @@ public struct CoreConfig: Sendable {
     public var bodyWindow: Int
     /// A connect with no verdict (its content was not resolvable) waits this
     /// long before its body is asked for again, doubling per attempt up to
-    /// `bodyRetryCap`, and starting over whenever the tree changes.
+    /// `bodyRetryCap`, and starting over whenever the act-on tip or the
+    /// window changes.
     public var bodyRetryBase: Int64
     public var bodyRetryCap: Int64
 

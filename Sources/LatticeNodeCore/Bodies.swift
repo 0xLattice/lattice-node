@@ -19,8 +19,9 @@ public struct Bodies: Sendable, Equatable {
     /// Blocks whose connect found its content unresolvable, waiting before
     /// their bodies are asked for again.
     public internal(set) var parked: [String: Parked] = [:]
-    /// The tree's revision and act-on tip when `parked` was last kept: any
-    /// change to either starts every backoff over.
+    /// The act-on tip and window when `parked` was last kept: a change to
+    /// either (an execution, or a best chain that moved) starts every
+    /// backoff over. A header weighed off the best chain changes neither.
     var seen: TreeMark?
 
     public struct Parked: Sendable, Equatable {
@@ -29,8 +30,8 @@ public struct Bodies: Sendable, Equatable {
     }
 
     struct TreeMark: Sendable, Equatable {
-        let revision: UInt64
         let actOn: String
+        let window: [String]
     }
 
     public init() {}
@@ -96,7 +97,7 @@ extension Core {
     mutating func scheduleBodies(_ turn: inout Turn) {
         let window = bodyWindow
         let wanted = Set(window)
-        let mark = Bodies.TreeMark(revision: tree.currentRevision(), actOn: tree.actOnTip().hash)
+        let mark = Bodies.TreeMark(actOn: tree.actOnTip().hash, window: window)
         if bodies.seen != mark {
             bodies.seen = mark
             bodies.parked.removeAll()
