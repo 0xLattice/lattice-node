@@ -617,4 +617,16 @@ final class CoreSyncTests: XCTestCase {
             XCTAssertLessThanOrEqual(server.sync.lastServeScanned, budget, "request \(id)")
         }
     }
+
+    /// Zero-work junk dated in the future is off schedule (its target is
+    /// not `parent.nextTarget`, checked before the time hold): blamed and
+    /// disconnected, never held.
+    func testFutureDatedZeroWorkJunkIsBlamedNotHeld() async throws {
+        let junk = try await world.junk(on: chain[29], timestamp: Self.now + 3_600_000, count: 1)
+        var core = weighed(chain)
+        ready(&core, other)
+        let effects = relay(&core, [entry(junk[0])], from: other)
+        XCTAssertEqual(disconnects(effects), [.proofOfWorkInvalid])
+        XCTAssertTrue(core.sync.pending.entries.isEmpty)
+    }
 }
