@@ -82,6 +82,7 @@ let package = Package(
             name: "LatticeNode",
             dependencies: [
                 "CSQLite",
+                "LatticeNodeCore",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy"),
                 .product(name: "Tally", package: "Tally"),
@@ -94,6 +95,7 @@ let package = Package(
             name: "LatticeNodeDaemon",
             dependencies: [
                 "LatticeNode",
+                "LatticeNodeCore",
                 "LatticeCtlCore",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy"),
@@ -168,6 +170,7 @@ let package = Package(
                 "LatticeNodeDaemon",
                 "LatticeMinerCore",
                 "LatticeNodeSim",
+                "LatticeNodeCore",
                 "CSQLite",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "LatticeBlockTree", package: "lattice"),

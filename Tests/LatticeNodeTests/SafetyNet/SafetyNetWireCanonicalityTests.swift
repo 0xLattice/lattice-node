@@ -1,6 +1,7 @@
 import Foundation
 import Lattice
 import UInt256
+import LatticeNodeCore
 import LatticeNodeSim
 import XCTest
 import cashew
@@ -249,6 +250,64 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
                 commonAncestor: ancestor,
                 blockCIDs: blocks,
                 hasMore: hasMore
+            )
+        }
+    }
+
+    // MARK: - Core driver header sync topics
+
+    func testCoreHeadersRequestIsCanonical() throws {
+        try assertCanonical(HeadersRequestMessage.self, seed: 0x40) { g in
+            HeadersRequestMessage(
+                requestID: self.nonZeroID(&g),
+                known: (0..<self.randomInt(&g, 0...HeadersRequest.maximumKnown)).map { _ in self.randomCID(&g) },
+                after: self.randomBool(&g)
+                    ? WireHeaderKey(height: UInt64(self.randomInt(&g, 0...1_000_000)), cid: self.randomCID(&g))
+                    : nil
+            )
+        }
+    }
+
+    func testCoreAncestorsRequestIsCanonical() throws {
+        try assertCanonical(AncestorsRequestMessage.self, seed: 0x41) { g in
+            AncestorsRequestMessage(
+                requestID: self.nonZeroID(&g),
+                cid: self.randomCID(&g),
+                maximum: self.randomInt(&g, 1...AncestorsRequestMessage.maximumAncestors)
+            )
+        }
+    }
+
+    func testCoreHeadersResponseIsCanonical() throws {
+        try assertCanonical(HeadersResponseMessage.self, seed: 0x42) { g in
+            let entries = try (0..<self.randomInt(&g, 0...8)).map { _ -> WireHeaderEntry in
+                let block = Block(
+                    parent: self.randomBool(&g) ? VolumeImpl<Block>(rawCID: self.randomCID(&g)) : nil,
+                    transactions: HeaderImpl(rawCID: self.randomCID(&g)),
+                    target: UInt256(UInt64.random(in: 1...UInt64.max, using: &g)),
+                    nextTarget: UInt256(UInt64.random(in: 1...UInt64.max, using: &g)),
+                    spec: VolumeImpl(rawCID: self.randomCID(&g)),
+                    parentState: LatticeStateHeader(rawCID: self.randomCID(&g)),
+                    prevState: LatticeStateHeader(rawCID: self.randomCID(&g)),
+                    postState: LatticeStateHeader(rawCID: self.randomCID(&g)),
+                    children: HeaderImpl(rawCID: self.randomCID(&g)),
+                    height: UInt64(self.randomInt(&g, 0...1_000_000)),
+                    timestamp: Int64(self.randomInt(&g, 0...Int(Int32.max))),
+                    rewardRecipient: nil,
+                    nonce: UInt64.random(in: 0...UInt64.max, using: &g)
+                )
+                let children = self.randomBool(&g)
+                    ? ChildIndex(entries: [self.randomAtom(&g): VolumeImpl<Block>(rawCID: self.randomCID(&g))])
+                    : nil
+                return WireHeaderEntry(
+                    block: try XCTUnwrap(block.toData()),
+                    children: try children.map { try XCTUnwrap($0.toData()) }
+                )
+            }
+            return HeadersResponseMessage(
+                requestID: UInt64.random(in: 0...UInt64.max, using: &g),
+                entries: entries,
+                hasMore: self.randomBool(&g)
             )
         }
     }
