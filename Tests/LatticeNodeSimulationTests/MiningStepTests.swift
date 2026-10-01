@@ -120,14 +120,102 @@ final class MiningStepTests: XCTestCase {
         XCTAssertEqual(delta.removed, [try Mempool.cid(of: restored)], "the journal row goes with the refusal")
     }
 
-    func testPendingAdmissionsAreBounded() throws {
-        var mining = Mining(tipCID: "A", spec: testSpec(), config: MiningConfig(maxPendingAdmissions: 1))
-        _ = mining.step(.transactionReceived(try transfer(nonce: 0), origin: .local(replyID: 1)), now: 0)
-        let refused = mining.step(.transactionReceived(try transfer(nonce: 1), origin: .local(replyID: 2)), now: 0)
-        guard case .transactionRefused(2, .full)? = refused.first else { return XCTFail("\(refused)") }
+    func testRestoredAndLocalArrivalsAreNeverRefusedForCapacityAndKeepTheirJournalRows() throws {
+        var mining = Mining(tipCID: "A", spec: testSpec(), config: MiningConfig(
+            maxPendingPeerAdmissions: 1, maxPendingPerPeer: 1, maxPendingReturned: 1,
+            mempool: MempoolLimits(maxCount: 1)
+        ))
+        let otherKey = CryptoUtils.generateKeyPair()
+        let first = try transfer(nonce: 0)
+        let second = try signed(otherKey, [AccountAction(owner: address(otherKey), delta: -1)], nonce: 0)
+        var jobs: [PreflightJob] = []
+        for tx in [first, second] {
+            let effects = mining.step(.transactionReceived(tx, origin: .restored(addedAt: 1)), now: 0)
+            guard case .preflight(let job)? = effects.first else { return XCTFail("no pending cap: \(effects)") }
+            jobs.append(job)
+        }
+        let local = mining.step(.transactionReceived(try transfer(nonce: 1), origin: .local(replyID: 3)), now: 0)
+        guard case .preflight? = local.first else { return XCTFail("no pending cap: \(local)") }
+
+        _ = mining.step(.preflighted(jobs[0], .ready), now: 1)
+        // The pool is full and the second pays less: a capacity refusal, not a verdict.
+        let full = mining.step(.preflighted(jobs[1], .ready), now: 1)
+        XCTAssertFalse(full.contains { if case .poolChanged(let delta) = $0 { !delta.removed.isEmpty } else { false } },
+                       "a capacity refusal never removes a journal row: \(full)")
     }
 
-    func testTemplateJobsCoalesceAndAStaleBuildIsRebuiltOnTheNewTip() async throws {
+    func testPeerAdmissionsAreBoundedPerPeerAndInTotalWithoutCrowdingOutLocals() throws {
+        var mining = Mining(tipCID: "A", spec: testSpec(), config: MiningConfig(
+            maxPendingPeerAdmissions: 2, maxPendingPerPeer: 1
+        ))
+        let (a, b, c) = (PeerID(key: "a", session: 1), PeerID(key: "b", session: 1), PeerID(key: "c", session: 1))
+        func jobs(_ effects: [MiningEffect]) -> Int {
+            effects.filter { if case .preflight = $0 { true } else { false } }.count
+        }
+        let fromA = try transfer(nonce: 0)
+        XCTAssertEqual(jobs(mining.step(.transactionReceived(fromA, origin: .peer(a)), now: 0)), 1)
+        XCTAssertEqual(jobs(mining.step(.transactionReceived(try transfer(nonce: 1), origin: .peer(a)), now: 0)), 0,
+                       "over its own sub-cap, a peer's arrival is dropped")
+        XCTAssertEqual(jobs(mining.step(.transactionReceived(try transfer(nonce: 2), origin: .peer(b)), now: 0)), 1)
+        XCTAssertEqual(jobs(mining.step(.transactionReceived(try transfer(nonce: 3), origin: .peer(c)), now: 0)), 0,
+                       "over the peers' total, dropped")
+        XCTAssertEqual(mining.pendingPeerAdmissions, 2)
+        for nonce in UInt64(4)...6 {
+            XCTAssertEqual(jobs(mining.step(.transactionReceived(try transfer(nonce: nonce), origin: .local(replyID: nonce)), now: 0)), 1,
+                           "a peer flood never refuses a local submit")
+        }
+        // A local submit joining a peer's admission takes it off the peer's bound.
+        _ = mining.step(.transactionReceived(fromA, origin: .local(replyID: 99)), now: 0)
+        XCTAssertEqual(mining.pendingAdmissions(from: a), 0)
+        XCTAssertEqual(mining.pendingPeerAdmissions, 1)
+    }
+
+    func testReturnedTransactionsAreBoundedAndTheExcessSpilled() throws {
+        var mining = Mining(tipCID: "A", spec: testSpec(), config: MiningConfig(maxPendingReturned: 2))
+        let returned = try (0..<5).map { try transfer(nonce: UInt64($0)) }
+        let effects = mining.step(.tipMoved(TipMove(tipCID: "B", confirmed: [], returned: returned)), now: 0)
+        XCTAssertEqual(mining.pendingReturned, 2)
+        XCTAssertEqual(mining.pendingAdmissions, 2)
+        XCTAssertEqual(effects.filter { if case .preflight = $0 { true } else { false } }.count, 2)
+    }
+
+    func testAPendingSubmitTheChainConfirmsIsAnsweredAsAccepted() throws {
+        var mining = Mining(tipCID: "A", spec: testSpec())
+        let tx = try transfer(nonce: 0)
+        let cid = try Mempool.cid(of: tx)
+        guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 5)), now: 0).first
+        else { return XCTFail() }
+        let moved = mining.step(.tipMoved(TipMove(tipCID: "B", confirmed: [cid], returned: [])), now: 1)
+        XCTAssertTrue(moved.contains { if case .transactionAdmitted(5, cid, _, _) = $0 { true } else { false } }, "\(moved)")
+        XCTAssertFalse(moved.contains { if case .transactionRefused = $0 { true } else { false } })
+        XCTAssertFalse(moved.contains { if case .preflight = $0 { true } else { false } }, "nothing left to classify")
+        XCTAssertEqual(mining.pendingAdmissions, 0)
+        XCTAssertTrue(mining.step(.preflighted(job, .ready), now: 2).isEmpty)
+    }
+
+    func testAChildCandidateRequestSelectsTheContextualPool() async throws {
+        var mining = Mining(tipCID: "A", spec: testSpec())
+        let tx = try transfer(nonce: 0)
+        guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 1)), now: 0).first
+        else { return XCTFail() }
+        // A withdrawal waiting on its parent receipt classifies unavailable.
+        _ = mining.step(.preflighted(job, .unavailable), now: 0)
+
+        guard case .buildTemplate(let plain)? = mining.step(
+            .templateRequested(replyID: 2, TemplateRequest(rewardRecipient: nil)), now: 0
+        ).first else { return XCTFail() }
+        XCTAssertTrue(plain.transactions.isEmpty)
+
+        let carrier = try await candidateBlock()
+        let context = ParentCarrier(cid: try BlockHeader(node: carrier).rawCID, block: carrier)
+        guard case .buildTemplate(let contextual)? = mining.step(
+            .templateRequested(replyID: 3, TemplateRequest(rewardRecipient: nil, parentCarrier: context)), now: 0
+        ).first else { return XCTFail("another carrier is another plan") }
+        XCTAssertEqual(contextual.transactions.map(\.body.rawCID), [tx.body.rawCID])
+        XCTAssertEqual(contextual.request.parentCarrier?.cid, context.cid)
+    }
+
+    func testTemplateJobsCoalesceAndATipMoveReissuesAWaitingBuild() async throws {
         var mining = Mining(tipCID: "A", spec: testSpec())
         let request = TemplateRequest(rewardRecipient: address(key))
         guard case .buildTemplate(let job)? = mining.step(.templateRequested(replyID: 1, request), now: 0).first
@@ -137,14 +225,16 @@ final class MiningStepTests: XCTestCase {
                       "the same plan on the same tip and pool joins the running build")
         XCTAssertEqual(mining.waitingTemplateRequests, 2)
 
-        _ = mining.step(.tipMoved(TipMove(tipCID: "B", confirmed: [], returned: [])), now: 1)
+        // The move issues the waiting build again on the new tip, so an
+        // executor may skip the stale job.
+        let moved = mining.step(.tipMoved(TipMove(tipCID: "B", confirmed: [], returned: [])), now: 1)
+        guard case .buildTemplate(let fresh)? = moved.last else { return XCTFail("\(moved)") }
+        XCTAssertEqual(fresh.tipCID, "B")
+        XCTAssertEqual(mining.waitingTemplateRequests, 2)
+
         let block = try await candidateBlock()
         let build = TemplateBuild(workID: "w", block: block, searchTarget: block.target, targets: [block.target])
-        let rebuilt = mining.step(.templateBuilt(job, build), now: 2)
-        guard case .buildTemplate(let fresh)? = rebuilt.first, rebuilt.count == 1 else {
-            return XCTFail("a stale build is never issued: \(rebuilt)")
-        }
-        XCTAssertEqual(fresh.tipCID, "B")
+        XCTAssertTrue(mining.step(.templateBuilt(job, build), now: 2).isEmpty, "a stale build is never issued")
         XCTAssertEqual(mining.templates.count, 0)
 
         let issued = mining.step(.templateBuilt(fresh, build), now: 3)

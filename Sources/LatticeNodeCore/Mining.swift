@@ -30,6 +30,11 @@ public struct TipMove: Sendable {
 
 /// Classify one transaction against the executed tip `tipCID` (Lattice's
 /// `preflightTransaction`). Built from `poolVersion`.
+///
+/// Job contract: an executor MUST skip a job whose `tipCID` is not the
+/// current act-on tip when it dequeues it. Its verdict would be dropped
+/// anyway, and the tip move already issued the job again on the new tip, so
+/// a backlog never runs more than one tip's worth of preflights.
 public struct PreflightJob: Sendable {
     public let cid: String
     public let transaction: Transaction
@@ -37,20 +42,51 @@ public struct PreflightJob: Sendable {
     public let poolVersion: UInt64
 }
 
-/// A miner's plan for a template: who the block credits, and the minimum
-/// work per chain path the miner searches for.
+/// The parent level's provisional carrier a child candidate builds under:
+/// its `prevState` is the parent state a child withdrawal is checked
+/// against. Two contexts are the same carrier when their CIDs are.
+public struct ParentCarrier: Sendable, Equatable {
+    public let cid: String
+    public let block: Block
+
+    public init(cid: String, block: Block) {
+        self.cid = cid
+        self.block = block
+    }
+
+    public static func == (lhs: ParentCarrier, rhs: ParentCarrier) -> Bool {
+        lhs.cid == rhs.cid
+    }
+}
+
+/// A miner's plan for a template: who the block credits, the minimum work
+/// per chain path the miner searches for, and, for a child level's
+/// candidate, the parent carrier it builds under.
 public struct TemplateRequest: Sendable, Equatable {
     public let rewardRecipient: String?
     public let minimumWork: [[String]: UInt256]
+    public let parentCarrier: ParentCarrier?
 
-    public init(rewardRecipient: String?, minimumWork: [[String]: UInt256] = [:]) {
+    public init(
+        rewardRecipient: String?,
+        minimumWork: [[String]: UInt256] = [:],
+        parentCarrier: ParentCarrier? = nil
+    ) {
         self.rewardRecipient = rewardRecipient
         self.minimumWork = minimumWork
+        self.parentCarrier = parentCarrier
     }
 }
 
 /// Assemble a candidate on the executed tip `tipCID` from `transactions`, in
-/// this order, read from the pool at `poolVersion`.
+/// this order, read from the pool at `poolVersion`. With a parent carrier the
+/// transactions are the pool's contextual set (unavailable entries included),
+/// and the job preflights each against the carrier's `prevState`, as the
+/// shell's assembler does today.
+///
+/// Job contract: as for `PreflightJob`, an executor MUST skip a job whose
+/// `tipCID` is not the current act-on tip when it dequeues it; the tip move
+/// already issued the build again for the same requests.
 public struct TemplateJob: Sendable {
     public let id: UInt64
     public let tipCID: String
@@ -111,9 +147,18 @@ public enum MiningEffect: Sendable {
     case buildTemplate(TemplateJob)
 }
 
+/// Bounds on transactions waiting for a preflight verdict. Local and
+/// restored arrivals are never refused for pending capacity (the shell bounds
+/// them: one per RPC in flight, one per journal row), so a peer flood cannot
+/// crowd them out; peers and returned transactions have their own bounds.
 public struct MiningConfig: Sendable {
-    /// Transactions waiting on a preflight verdict before admission.
-    public var maxPendingAdmissions: Int
+    /// Peer arrivals waiting on a verdict, from all peers together.
+    public var maxPendingPeerAdmissions: Int
+    /// Peer arrivals waiting on a verdict, from any one peer.
+    public var maxPendingPerPeer: Int
+    /// Transactions a tip move returned, waiting on a verdict. The excess of
+    /// a deep reorg is spilled.
+    public var maxPendingReturned: Int
     /// Template requests waiting on a build.
     public var maxWaitingTemplateRequests: Int
     public var mempool: MempoolLimits
@@ -121,13 +166,17 @@ public struct MiningConfig: Sendable {
     public var templateCapacity: Int
 
     public init(
-        maxPendingAdmissions: Int = 1_024,
+        maxPendingPeerAdmissions: Int = 1_024,
+        maxPendingPerPeer: Int = 64,
+        maxPendingReturned: Int = 1_024,
         maxWaitingTemplateRequests: Int = 64,
         mempool: MempoolLimits = MempoolLimits(),
         templateLifetime: Int64 = 30_000,
         templateCapacity: Int = 16
     ) {
-        self.maxPendingAdmissions = maxPendingAdmissions
+        self.maxPendingPeerAdmissions = maxPendingPeerAdmissions
+        self.maxPendingPerPeer = maxPendingPerPeer
+        self.maxPendingReturned = maxPendingReturned
         self.maxWaitingTemplateRequests = maxWaitingTemplateRequests
         self.mempool = mempool
         self.templateLifetime = templateLifetime
@@ -141,7 +190,7 @@ public struct MiningConfig: Sendable {
 /// Jobs replace the leases and fences: a preflight or template job names the
 /// executed tip it ran on, and a result for a tip that has since moved is
 /// dropped. The tip move itself reissues every preflight the pool still
-/// needs, and a stale template build is rebuilt from the current pool.
+/// needs, and every waiting template build, on the new tip.
 public struct Mining: Sendable {
     public private(set) var mempool: Mempool
     public private(set) var templates: TemplateBook
@@ -150,9 +199,19 @@ public struct Mining: Sendable {
     public let spec: ChainSpec
     public let config: MiningConfig
 
+    /// Which bound a pending admission counts against. A local or restored
+    /// origin joining a peer's or a returned admission takes it out of that
+    /// bound.
+    private enum Slot: Equatable {
+        case local
+        case peer(PeerID)
+        case returned
+    }
+
     private struct Admission {
         let transaction: Transaction
         var origins: [TransactionOrigin]
+        var slot: Slot
     }
 
     /// Transactions awaiting a verdict before admission.
@@ -173,6 +232,11 @@ public struct Mining: Sendable {
     }
 
     public var pendingAdmissions: Int { admissions.count }
+    public private(set) var pendingPeerAdmissions = 0
+    public private(set) var pendingReturned = 0
+    private var pendingByPeer: [PeerID: Int] = [:]
+
+    public func pendingAdmissions(from peer: PeerID) -> Int { pendingByPeer[peer] ?? 0 }
     public var waitingTemplateRequests: Int { builds.values.reduce(0) { $0 + $1.replies.count } }
     public var outstandingPreflights: Int { preflighting.count }
 
@@ -194,7 +258,7 @@ public struct Mining: Sendable {
                 let block = try templates.submission(workID: workID, nonce: nonce, now: now)
                 // A grind that clears only child targets leaves the work open,
                 // so the miner keeps searching it toward the root's target.
-                if block.proofOfWorkHash() <= block.target {
+                if ChainTree.rootWork(of: block) != nil {
                     templates.discard(workID: workID)
                 }
                 turn.replies.append(.mined(replyID: replyID, block))
@@ -229,7 +293,9 @@ public struct Mining: Sendable {
         do {
             cid = try mempool.check(transaction, spec: spec)
         } catch {
-            refuse([origin], cid: nil, error as? MempoolError ?? .unresolved, &turn)
+            // A transaction the pool can never hold, on any tip.
+            refuse([origin], cid: try? Mempool.cid(of: transaction),
+                   error as? MempoolError ?? .unresolved, verdict: true, &turn)
             return
         }
         if let pooled = mempool.item(cid) {
@@ -237,16 +303,65 @@ public struct Mining: Sendable {
             admitted(pooled, origins: [origin], &turn)
             return
         }
-        if admissions[cid] != nil {
-            admissions[cid]?.origins.append(origin)
+        let slot = Self.slot(of: origin)
+        if var admission = admissions[cid] {
+            admission.origins.append(origin)
+            if slot == .local, admission.slot != .local {
+                count(admission.slot, -1)
+                admission.slot = .local
+            }
+            admissions[cid] = admission
             return
         }
-        guard admissions.count < config.maxPendingAdmissions else {
-            refuse([origin], cid: cid, .full, &turn)
-            return
-        }
-        admissions[cid] = Admission(transaction: transaction, origins: [origin])
+        // Over its bound, a peer's or a returned arrival is dropped: never
+        // answered, never blamed.
+        guard hasRoom(for: slot) else { return }
+        open(cid, Admission(transaction: transaction, origins: [origin], slot: slot))
         preflight(cid, transaction, &turn)
+    }
+
+    private static func slot(of origin: TransactionOrigin) -> Slot {
+        switch origin {
+        case .local, .restored: .local
+        case .peer(let peer): .peer(peer)
+        case .returned: .returned
+        }
+    }
+
+    private func hasRoom(for slot: Slot) -> Bool {
+        switch slot {
+        case .local:
+            true
+        case .peer(let peer):
+            pendingPeerAdmissions < config.maxPendingPeerAdmissions
+                && pendingAdmissions(from: peer) < config.maxPendingPerPeer
+        case .returned:
+            pendingReturned < config.maxPendingReturned
+        }
+    }
+
+    private mutating func count(_ slot: Slot, _ delta: Int) {
+        switch slot {
+        case .local:
+            break
+        case .peer(let peer):
+            pendingPeerAdmissions += delta
+            let remaining = pendingAdmissions(from: peer) + delta
+            pendingByPeer[peer] = remaining == 0 ? nil : remaining
+        case .returned:
+            pendingReturned += delta
+        }
+    }
+
+    private mutating func open(_ cid: String, _ admission: Admission) {
+        admissions[cid] = admission
+        count(admission.slot, 1)
+    }
+
+    private mutating func close(_ cid: String) -> Admission? {
+        guard let admission = admissions.removeValue(forKey: cid) else { return nil }
+        count(admission.slot, -1)
+        return admission
     }
 
     private mutating func preflight(_ cid: String, _ transaction: Transaction, _ turn: inout Turn) {
@@ -267,7 +382,7 @@ public struct Mining: Sendable {
         // job on the new tip.
         guard job.tipCID == tipCID else { return }
         if preflighting[job.cid] == job.tipCID { preflighting[job.cid] = nil }
-        if let admission = admissions.removeValue(forKey: job.cid) {
+        if let admission = close(job.cid) {
             admit(admission, cid: job.cid, disposition, now: now, &turn)
         } else {
             let mutation = mempool.reclassify(job.cid, as: disposition)
@@ -298,7 +413,10 @@ public struct Mining: Sendable {
             guard let item = mempool.item(cid) else { return }
             admitted(item, origins: admission.origins, &turn)
         } catch {
-            refuse(admission.origins, cid: cid, error as? MempoolError ?? .invalidState, &turn)
+            // Only the verdict makes a refusal final for a journal row; a
+            // capacity or conflict refusal leaves the row for the next boot.
+            refuse(admission.origins, cid: cid, error as? MempoolError ?? .invalidState,
+                   verdict: disposition == .invalid, &turn)
         }
     }
 
@@ -335,6 +453,7 @@ public struct Mining: Sendable {
         _ origins: [TransactionOrigin],
         cid: String?,
         _ error: MempoolError,
+        verdict: Bool,
         _ turn: inout Turn
     ) {
         for origin in origins {
@@ -342,8 +461,8 @@ public struct Mining: Sendable {
             case .local(let replyID):
                 turn.replies.append(.transactionRefused(replyID: replyID, error))
             case .restored:
-                // The journal row goes with the refusal.
-                if let cid { turn.delta.removed.append(cid) }
+                // The journal row goes with a verdict, never with capacity.
+                if verdict, let cid { turn.delta.removed.append(cid) }
             case .peer, .returned:
                 break
             }
@@ -362,11 +481,30 @@ public struct Mining: Sendable {
     private mutating func tipMoved(_ move: TipMove, _ turn: inout Turn) {
         tipCID = move.tipCID
         departed(mempool.remove(move.confirmed.sorted()), &turn)
-        for transaction in move.returned {
+        // A transaction awaiting its verdict that the chain now carries is
+        // done: a local submit is answered as accepted, a restored row goes.
+        for cid in move.confirmed.sorted() {
+            guard let admission = close(cid) else { continue }
+            for origin in admission.origins {
+                switch origin {
+                case .local(let replyID):
+                    turn.replies.append(.transactionAdmitted(
+                        replyID: replyID, cid: cid, count: mempool.count, bytes: mempool.byteCount
+                    ))
+                case .restored:
+                    turn.delta.removed.append(cid)
+                case .peer, .returned:
+                    break
+                }
+            }
+        }
+        // Returned transactions within their bound; a deep reorg spills the
+        // rest.
+        for transaction in move.returned where hasRoom(for: .returned) {
             guard let cid = try? Mempool.cid(of: transaction),
                   !move.confirmed.contains(cid),
                   !mempool.contains(cid), admissions[cid] == nil else { continue }
-            admissions[cid] = Admission(transaction: transaction, origins: [.returned])
+            open(cid, Admission(transaction: transaction, origins: [.returned], slot: .returned))
         }
         // Every verdict the pool holds or awaits was for the old tip: those
         // still out will be dropped, and each is issued again here.
@@ -376,6 +514,12 @@ public struct Mining: Sendable {
         }
         for (cid, admission) in admissions.sorted(by: { $0.key < $1.key }) {
             preflight(cid, admission.transaction, &turn)
+        }
+        // Every waiting build was for the old tip: issue it again on this one.
+        let stale = builds.sorted { $0.key < $1.key }.filter { $0.value.job.tipCID != tipCID }
+        for (id, _) in stale { builds[id] = nil }
+        for (_, waiting) in stale {
+            requestTemplate(waiting.job.request, replyIDs: waiting.replies, &turn)
         }
     }
 
@@ -398,7 +542,9 @@ public struct Mining: Sendable {
             id: nextJobID,
             tipCID: tipCID,
             poolVersion: mempool.version,
-            transactions: mempool.transactions(limit: .max),
+            transactions: request.parentCarrier == nil
+                ? mempool.transactions(limit: .max)
+                : mempool.contextualTransactions(limit: .max),
             request: request
         )
         nextJobID += 1
@@ -407,12 +553,9 @@ public struct Mining: Sendable {
     }
 
     private mutating func built(_ job: TemplateJob, _ build: TemplateBuild?, now: Int64, _ turn: inout Turn) {
+        // A build for a moved tip is no longer waiting: the move issued it
+        // again on the new tip.
         guard let waiting = builds.removeValue(forKey: job.id) else { return }
-        // Built on a tip that has moved: rebuild from the current pool.
-        guard job.tipCID == tipCID else {
-            requestTemplate(job.request, replyIDs: waiting.replies, &turn)
-            return
-        }
         guard let build else {
             for replyID in waiting.replies { turn.replies.append(.templateRefused(replyID: replyID, .buildFailed)) }
             return

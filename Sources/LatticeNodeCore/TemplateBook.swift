@@ -97,7 +97,9 @@ public struct TemplateBook: Sendable {
             throw TemplateError.expired
         }
         let candidate = template.block.replacingNonce(nonce)
-        guard candidate.proofOfWorkHash() <= template.searchTarget else {
+        // Lattice's proof-of-work predicate, against the search target: a
+        // zero target is met by no hash (`Block.validateProofOfWork`).
+        guard template.searchTarget > .zero, candidate.proofOfWorkHash() <= template.searchTarget else {
             throw TemplateError.missesSearchTarget
         }
         return candidate
