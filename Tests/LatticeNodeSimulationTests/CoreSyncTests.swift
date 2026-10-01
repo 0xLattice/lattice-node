@@ -540,4 +540,64 @@ final class CoreSyncTests: XCTestCase {
         XCTAssertTrue(requests(core.step(.tick, now: later - 1)).isEmpty)
         XCTAssertEqual(requests(core.step(.tick, now: later)).count, 1)
     }
+
+    // MARK: - Round 2: hostile cursors, bounded bookkeeping, FindFork
+
+    func testACursorPastAnyHeightServesNothingAndNeverTraps() throws {
+        var core = weighed(Array(chain[0..<3]))
+        ready(&core, other)
+        let effects = core.step(.received(other, .getHeaders(HeadersRequest(
+            requestID: 1, known: [], after: HeaderKey(height: .max, cid: "x")
+        ))), now: Self.now)
+        XCTAssertEqual(served(effects).first?.1, [])
+    }
+
+    func testWeighingLeavesTheBookkeepingProportionalToThePendingQueue() throws {
+        let core = weighed(chain)
+        XCTAssertTrue(core.sync.pending.entries.isEmpty)
+        XCTAssertLessThanOrEqual(core.sync.bookkeeping, 16)
+    }
+
+    func testFutureDatedHeadersBeyondTheDriftAreDroppedNotHeld() throws {
+        var core = core()
+        let early = chain[0].block.timestamp - core.config.maxFutureDrift - 1
+        ready(&core, peer, at: early)
+        let effects = relay(&core, chain[0..<5].map { entry($0) }, from: peer, at: early)
+        XCTAssertTrue(disconnects(effects).isEmpty)
+        XCTAssertTrue(core.sync.pending.entries.isEmpty)
+        XCTAssertEqual(core.sync.bookkeeping, 0)
+    }
+
+    /// A requester on a branch the server holds but does not select: the
+    /// server forks from the highest locator entry on ITS best chain, so the
+    /// requester still gets the server's whole best chain past the fork.
+    func testTheServerForksFromItsOwnBestChainAfterADeepReorg() async throws {
+        let side = try await world.branch(from: chain[9], count: 5)
+        // The side branch is weighed while it is the best chain, then the
+        // main chain overtakes it.
+        var server = weighed(Array(chain[0...9]) + side, antiDoSBlocks: 2)
+        relay(&server, chain[10...].map { entry($0) }, from: peer)
+        var requester = weighed(Array(chain[0...9]) + side)
+        XCTAssertEqual(requester.tree.canonicalTip, side.last?.cid)
+        XCTAssertFalse(server.tree.isCanonical(hash: side.last!.cid))
+        let request = try XCTUnwrap(requests(requester.step(.peerReady(other), now: Self.now)).first)
+        ready(&server, other)
+        let page = try XCTUnwrap(served(server.step(.received(other, .getHeaders(request)), now: Self.now)).first)
+        XCTAssertEqual(page.1.first, chain[10].cid, "from the fork, not from the requester's tip")
+    }
+
+    func testOrphanLeavesAreEvictedBeforeLinkedOnes() async throws {
+        let linked = try await world.branch(from: chain[5], count: 1)[0]
+        let orphan = world.blocks[world.orphan]!
+        let size = { (block: SimBlock) in block.block.toData()!.count + block.children.toData()!.count }
+        var core = core(pendingBudget: size(linked) + size(orphan) - 1, antiDoSBlocks: 2)
+        ready(&core, peer)
+        relay(&core, chain[0..<20].map { entry($0) }, from: peer)
+        // A side block from an old block: linked, under the threshold.
+        relay(&core, [entry(linked)], from: peer)
+        XCTAssertNotNil(core.sync.pending.entries[linked.cid])
+        relay(&core, [entry(orphan)], from: peer)
+        XCTAssertNotNil(core.sync.pending.entries[linked.cid], "the linked header stays")
+        XCTAssertNil(core.sync.pending.entries[orphan.cid], "the orphan goes first")
+    }
 }
