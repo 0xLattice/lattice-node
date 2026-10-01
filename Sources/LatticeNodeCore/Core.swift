@@ -18,6 +18,9 @@ public enum Event: Sendable {
     case bodyFetched(cid: String)
     /// A connect job's verdict.
     case connected(ConnectVerdict)
+    /// A child level: its parent level now holds the facts these blocks'
+    /// connects lacked.
+    case parentFactsPresent([String])
     case tick
     /// A child level: the evidence index's proofs for a block
     /// (`Effect.lookupProofs`).
@@ -312,6 +315,8 @@ public struct Core: Sendable {
             bodyFetched(cid)
         case .connected(let verdict):
             connected(verdict, &turn)
+        case .parentFactsPresent(let blocks):
+            parentFactsPresent(blocks)
         case .tick:
             tick(&turn)
         case .proofsFound(let cid, let proofs):
@@ -331,7 +336,6 @@ public struct Core: Sendable {
         for (peer, after) in turn.continuations {
             requestCatchUp(from: peer, after: after, &turn)
         }
-        scheduleBodies(&turn)
         return finish(turn)
     }
 
@@ -361,7 +365,10 @@ public struct Core: Sendable {
 
     /// Persist first, then publish, then relay, then everything else:
     /// nothing a step makes visible precedes the write that makes it durable.
+    /// Every step ends by scheduling the body window, whatever moved it.
     mutating func finish(_ turn: Turn) -> [Effect] {
+        var turn = turn
+        scheduleBodies(&turn)
         var effects: [Effect] = []
         if !turn.facts.isEmpty {
             effects.append(.persist(PersistBatch(

@@ -12,8 +12,11 @@ import UInt256
 ///   per root) or the parent's attributed run, never more;
 /// - hierarchical GHOST: the head is an independent reference's over those
 ///   grinds; validity selects (no excluded block on the best chain);
-/// - the executed set is a subset of the weighed graph on any branch, closed
-///   under ancestry, never shrinking, outside every excluded subtree;
+/// - the executed set is a subset of the weighed graph, closed under
+///   ancestry, never shrinking, outside every excluded subtree, and holds no
+///   invalid block. A level executes only along its best chain (decision
+///   21), so a side branch it never followed stays unexecuted, and an
+///   invalid block there stays unexcluded;
 /// - continuity: every executed child block's parent state was produced by
 ///   an executed parent block (any branch);
 /// - genesis links: a parent's facts authorize a child genesis exactly when
@@ -135,6 +138,7 @@ public enum LevelInvariants {
                 throw fail("executed block \(hash) has an unexecuted parent")
             }
             if digest.excluded.contains(hash) { throw fail("executed block \(hash) is excluded") }
+            if (world.invalid[path] ?? []).contains(hash) { throw fail("executed block \(hash) is invalid") }
         }
 
         // Continuity against any executed parent state.
@@ -272,10 +276,31 @@ public enum LevelInvariants {
         }
     }
 
+    /// Where a level stopped executing its best chain: at the head, or at
+    /// a child block awaiting a parent fact its parent level still lacks.
+    /// A fact the parent holds there is a lost wake.
+    public static func checkExecutionStop(_ name: String, path: ChainPath, host: HostCore, digest: TreeDigest) throws {
+        let executedPrefix = digest.canonicalPath.prefix { digest.executed.contains($0) }.count
+        if executedPrefix < digest.canonicalPath.count {
+            let next = digest.canonicalPath[executedPrefix]
+            guard let fact = host.levels[path]?.bodies.awaitingParent[next] else {
+                throw Invariants.fail(name, "stopped executing the best chain at \(path) before \(next), which awaits no parent fact")
+            }
+            // A fact its parent level now holds is a lost wake.
+            if host.parentFacts(for: path)?.holds(fact) != false {
+                throw Invariants.fail(name, "lost wake: \(next) at \(path) still awaits \(fact), which its parent level holds")
+            }
+        }
+    }
+
     /// After the quiet point: every honest core hosts every level, and at
-    /// each holds the identical weighed graph (blocks, grinds, subtree work,
-    /// exclusions), the same executed set and head, every block mined
-    /// publicly, and each attributed run in full.
+    /// each holds the identical weighed graph (blocks, grinds, subtree work)
+    /// and head, every block mined publicly, and each attributed run in full.
+    /// Each has executed its best chain to the head, or up to a child block
+    /// awaiting a parent fact its parent level still lacks (decision 21);
+    /// a fact the parent holds means a lost wake.
+    /// Executed sets and exclusions may differ: each core executed the best
+    /// chains it followed.
     public static func checkQuietPoint(
         _ cores: [String: (host: HostCore, digests: [ChainPath: TreeDigest])],
         world: LevelWorld,
@@ -302,7 +327,7 @@ public enum LevelInvariants {
                         + "withheld \(world.isWithheld(path, missing.cid)), level hosts \(host.levels[path] != nil)"
                     throw Invariants.fail(name, "misses \(missing.cid) at \(path) after the quiet point: \(detail)")
                 }
-                guard digest.blocks == reference.blocks, digest.excluded == reference.excluded else {
+                guard digest.blocks == reference.blocks else {
                     let differing = Set(digest.blocks.keys).union(reference.blocks.keys)
                         .filter { digest.blocks[$0] != reference.blocks[$0] }.sorted()
                     let root = differing.filter {
@@ -321,13 +346,10 @@ public enum LevelInvariants {
                     }.joined(separator: "; ")
                     throw Invariants.fail(name, "weighs a different graph at \(path) than \(first) after the quiet point: \(detail)")
                 }
-                guard digest.executed == reference.executed, digest.canonicalTip == reference.canonicalTip else {
-                    throw Invariants.fail(name, "executes or selects differently at \(path) than \(first)")
+                guard digest.canonicalTip == reference.canonicalTip else {
+                    throw Invariants.fail(name, "selects differently at \(path) than \(first)")
                 }
-                let invalid = (world.invalid[path] ?? []).filter { digest.blocks[$0] != nil }
-                guard invalid == digest.excluded else {
-                    throw Invariants.fail(name, "excludes \(digest.excluded.sorted()) at \(path), invalid \(invalid.sorted())")
-                }
+                try checkExecutionStop(name, path: path, host: host, digest: digest)
                 // Every public honest proof of a held block is credited.
                 for (cid, roots) in world.proofs[path] ?? [:] where digest.blocks[cid] != nil {
                     for (root, truth) in roots where truth.releaseAt <= now && digest.blocks[cid]?.grinds[root] == nil {
