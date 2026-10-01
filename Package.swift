@@ -26,7 +26,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/adalinxx/Lattice.git",
-            exact: "40.0.0"
+            exact: "40.0.2"
         ),
         .package(
             url: "https://github.com/adalinxx/cashew.git",
@@ -44,6 +44,8 @@ let package = Package(
             url: "https://github.com/adalinxx/VolumeBroker.git",
             exact: "7.0.1"
         ),
+        // Lattice's own UInt256, declared for the core's and simulator's direct imports.
+        .package(url: "https://github.com/adalinxx/UInt256.git", from: "1.1.0"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
@@ -59,6 +61,21 @@ let package = Package(
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "cashew", package: "cashew"),
                 .product(name: "VolumeBroker", package: "VolumeBroker"),
+            ]),
+        .target(
+            name: "LatticeNodeCore",
+            dependencies: [
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "cashew", package: "cashew"),
+                .product(name: "UInt256", package: "UInt256"),
+            ]),
+        .target(
+            name: "LatticeNodeSim",
+            dependencies: [
+                "LatticeNodeCore",
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "cashew", package: "cashew"),
+                .product(name: "UInt256", package: "UInt256"),
             ]),
         .target(
             name: "LatticeNode",
@@ -149,6 +166,7 @@ let package = Package(
                 "LatticeProcessWait",
                 "LatticeNodeDaemon",
                 "LatticeMinerCore",
+                "LatticeNodeSim",
                 "CSQLite",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "LatticeBlockTree", package: "lattice"),
@@ -163,6 +181,15 @@ let package = Package(
             ],
             path: "Tests/LatticeNodeTests",
             exclude: ["SafetyNet/Goldens"]),
+        .testTarget(
+            name: "LatticeNodeSimulationTests",
+            dependencies: [
+                "LatticeNodeCore",
+                "LatticeNodeSim",
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "cashew", package: "cashew"),
+                .product(name: "UInt256", package: "UInt256"),
+            ]),
         .testTarget(
             name: "LatticeNodeE2ETests",
             dependencies: [

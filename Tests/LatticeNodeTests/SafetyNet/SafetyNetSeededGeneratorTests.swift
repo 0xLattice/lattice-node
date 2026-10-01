@@ -1,3 +1,4 @@
+import LatticeNodeSim
 import XCTest
 
 /// The generator and seed convention every seeded test replays through

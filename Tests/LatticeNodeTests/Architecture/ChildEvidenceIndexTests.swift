@@ -2,6 +2,7 @@ import Ivy
 import Lattice
 import UInt256
 import VolumeBroker
+import LatticeNodeSim
 import XCTest
 import cashew
 @testable import LatticeNode
