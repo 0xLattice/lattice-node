@@ -135,7 +135,7 @@ final class CoreMiningTests: XCTestCase {
         content.put(world.blocks[chain[0].cid]!.body)
         let arrived = host.step(.level(path, .bodyFetched(cid: chain[0].cid)), now: Self.now)
         let job = try XCTUnwrap(arrived.compactMap { effect -> ConnectJob? in
-            if case .level(_, .connect(let job)) = effect { return job }
+            if case .connect(_, let job, _) = effect { return job }
             return nil
         }.first)
         let verdict = await ChainTree.connect(
