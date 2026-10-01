@@ -33,12 +33,12 @@ func bestChain(of blocks: [SimBlock], genesis: SimBlock) -> [SimBlock] {
 }
 
 /// A catch-up page over `graph` (a script's weighed blocks, genesis
-/// excluded): every block above the requested height, in `HeaderKey` order
-/// after the cursor.
+/// excluded): every block dated after the requested time, in `HeaderKey`
+/// order after the cursor.
 func page(of graph: [SimBlock], _ request: HeadersRequest, limit: Int) -> (blocks: [SimBlock], hasMore: Bool) {
     let rest = graph
-        .filter { $0.height > request.aboveHeight }
-        .map { (key: HeaderKey(height: $0.height, cid: $0.cid), block: $0) }
+        .filter { $0.block.timestamp > request.afterTimestamp }
+        .map { (key: HeaderKey(timestamp: $0.block.timestamp, cid: $0.cid), block: $0) }
         .filter { entry in request.after.map { entry.key > $0 } ?? true }
         .sorted { $0.key < $1.key }
         .map(\.block)

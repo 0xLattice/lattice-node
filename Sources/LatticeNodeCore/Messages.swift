@@ -47,34 +47,35 @@ public struct StoredHeader: Sendable {
 }
 
 /// Where a header sits in a catch-up page: pages list a weighed subgraph by
-/// height, then CID, so every parent precedes its children.
+/// timestamp, then CID. Consensus requires a timestamp above the parent's,
+/// so every parent precedes its children on every branch.
 public struct HeaderKey: Sendable, Hashable, Comparable {
-    public let height: UInt64
+    public let timestamp: Int64
     public let cid: String
 
-    public init(height: UInt64, cid: String) {
-        self.height = height
+    public init(timestamp: Int64, cid: String) {
+        self.timestamp = timestamp
         self.cid = cid
     }
 
     public static func < (lhs: HeaderKey, rhs: HeaderKey) -> Bool {
-        lhs.height != rhs.height ? lhs.height < rhs.height : lhs.cid < rhs.cid
+        lhs.timestamp != rhs.timestamp ? lhs.timestamp < rhs.timestamp : lhs.cid < rhs.cid
     }
 }
 
-/// Catch-up: "every header you weighed above this height". The server
-/// answers every weighed header with height > `aboveHeight`, on every
-/// branch, in `HeaderKey` order, after `after` (the last header of the
-/// previous page). No canonicity: the requester picks the height, from its
-/// own highest weighed height less `CoreConfig.catchUpWindow`.
+/// Catch-up: "every header you weighed dated after this". The server answers
+/// every weighed header with timestamp > `afterTimestamp`, on every branch,
+/// in `HeaderKey` order, after `after` (the last header of the previous
+/// page). No canonicity: the requester picks the time, from its last contact
+/// with the peer less `CoreConfig.maxFutureDrift`.
 public struct HeadersRequest: Sendable, Equatable {
     public let requestID: UInt64
-    public let aboveHeight: UInt64
+    public let afterTimestamp: Int64
     public let after: HeaderKey?
 
-    public init(requestID: UInt64, aboveHeight: UInt64, after: HeaderKey?) {
+    public init(requestID: UInt64, afterTimestamp: Int64, after: HeaderKey?) {
         self.requestID = requestID
-        self.aboveHeight = aboveHeight
+        self.afterTimestamp = afterTimestamp
         self.after = after
     }
 }

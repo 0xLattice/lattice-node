@@ -41,12 +41,14 @@ final class SimulationTests: XCTestCase {
         var config = SimConfig.random(seed: 0xD37)
         config.drop = 0.15
         config.duplicate = 0.1
-        // Every repair pass re-sends the window (all branches above the
-        // highest height less `catchUpWindow`, here the whole graph). At
+        // Every repair pass re-sends the margin (all branches dated after
+        // the last contact less `maxFutureDrift`). At
         // 15% loss per message a pass of a dozen tiny pages almost never
         // completes; one page per pass, as in production (2,000 headers),
-        // does.
+        // does. At that loss a header can reach a core long after its date,
+        // so the margin covers the run, as two hours covers production.
         config.pageSize = 64
+        config.maxFutureDrift = 120_000
         var a = try await Simulator.make(config)
         var b = try await Simulator.make(config)
         let first = try a.run()
@@ -254,9 +256,10 @@ final class SimulationTests: XCTestCase {
     }
 
     /// The same partition with no spammer, no loss and no repair pass in
-    /// the run: the heal's own requests. The side each core lacks forks
-    /// more than `catchUpWindow` below its height, so the pages above that
-    /// height leave a gap that only chained `getAncestors` fetches close.
+    /// the run: the heal's own requests. The halves never had contact, so
+    /// each asks the other for headers dated after its last contact with
+    /// its own half less the margin: the far side's fork lies earlier, a gap
+    /// only chained `getAncestors` fetches close.
     func testAPartitionHealsThroughAncestorFetchesWithNoDepthCap() async throws {
         var config = SimConfig(seed: 0x5E1F)
         config.cores = 4
@@ -276,6 +279,55 @@ final class SimulationTests: XCTestCase {
         }
         XCTAssertGreaterThan(report.healParentFetches, 0)
         print("partition heal (clean): \(report.healPages) pages, \(report.healParentFetches) ancestor fetches")
+    }
+
+    /// A core offline for a while (longer than the margin) gets every block
+    /// produced during the outage when it returns, uncles included.
+    func testANodeBackFromAnOutageGetsEveryUncleOfTheOutage() async throws {
+        var config = SimConfig(seed: 0x0FF1)
+        config.cores = 3
+        config.honestSources = 1
+        config.spammer = false
+        config.liar = false
+        config.honestBlocks = 60
+        config.forkProbability = 0.5
+        config.drop = 0
+        config.duplicate = 0
+        // Its last contact is about 20 s in; it asks for headers dated after
+        // about 10 s, not for everything.
+        config.outage = (core: 2, from: 20_000, milliseconds: 25_000)
+        try await assertHoldsEveryHonestBlock(config, during: 20_000..<45_000)
+    }
+
+    /// A fresh node joining after every release gets everything.
+    func testAFreshNodeGetsEverything() async throws {
+        var config = SimConfig(seed: 0xF5E5)
+        config.cores = 3
+        config.honestSources = 1
+        config.spammer = false
+        config.liar = false
+        config.honestBlocks = 30
+        config.forkProbability = 0.4
+        config.drop = 0
+        config.duplicate = 0
+        config.outage = (core: 2, from: 0, milliseconds: 45_000)
+        try await assertHoldsEveryHonestBlock(config, during: 0..<45_000)
+    }
+
+    /// `core2` holds every released honest block (side blocks too) at the
+    /// end, and side blocks were produced within `window` (ms after genesis).
+    private func assertHoldsEveryHonestBlock(_ config: SimConfig, during window: Range<Int64>, line: UInt = #line) async throws {
+        var simulator = try await Simulator.make(config)
+        let world = simulator.world
+        let report = try simulator.run()
+        let best = Set(report.sourceChains["source0"] ?? [])
+        let uncles = world.honest.filter {
+            !best.contains($0) && window.contains((world.blocks[$0]?.block.timestamp ?? 0) - World.genesisTime)
+        }
+        XCTAssertFalse(uncles.isEmpty, "no uncle was produced in the window", line: line)
+        let held = report.coreHeld["core2"] ?? []
+        XCTAssertEqual(Set(world.honest).subtracting(held), [], "core2 misses honest blocks", line: line)
+        assertSynced(report, TestSeed(value: config.seed), line: line)
     }
 
     /// A slow honest link: a page takes longer to transfer than the request

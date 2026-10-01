@@ -34,8 +34,10 @@ public struct PeerSync: Sendable, Equatable {
 
 public struct InFlightPage: Sendable, Equatable {
     public let requestID: UInt64
-    /// The pass's height: its continuations keep it.
-    public let aboveHeight: UInt64
+    /// The pass's time: its continuations keep it.
+    public let afterTimestamp: Int64
+    /// When the pass began: its last contact once it completes.
+    public let started: Int64
     public let after: HeaderKey?
     public let deadline: Int64
 }
@@ -233,73 +235,70 @@ public struct PendingQueue: Sendable {
 }
 
 /// The weighed graph as sync reads it, maintained as headers are weighed:
-/// every header by (height, CID), and its parent.
+/// every header by (timestamp, CID), and its parent.
 public struct WeighedIndex: Sendable {
-    /// CIDs at each height, sorted. Heights are contiguous from genesis.
-    var byHeight: [[String]] = []
+    /// Every weighed header, sorted. Headers arrive mostly in timestamp
+    /// order, so an insert lands at or near the end.
+    var keys: [HeaderKey] = []
     var parent: [String: String] = [:]
-    var height: [String: UInt64] = [:]
+    var timestamp: [String: Int64] = [:]
     /// Leaves: headers with no weighed child.
     public internal(set) var leaves: Set<String> = []
 
-    mutating func add(_ cid: String, parent: String?, height: UInt64) {
-        guard self.height[cid] == nil else { return }
-        while byHeight.count <= Int(height) { byHeight.append([]) }
-        let row = byHeight[Int(height)]
-        byHeight[Int(height)].insert(cid, at: row.firstIndex { $0 > cid } ?? row.count)
-        self.height[cid] = height
-        if let parent {
-            self.parent[cid] = parent
-            leaves.remove(parent)
+    init() {}
+
+    /// An index over `headers` in any order, sorted once.
+    init(_ headers: [(cid: String, parent: String?, timestamp: Int64)]) {
+        for header in headers where timestamp[header.cid] == nil {
+            record(header.cid, parent: header.parent, timestamp: header.timestamp)
+            keys.append(HeaderKey(timestamp: header.timestamp, cid: header.cid))
         }
+        keys.sort()
+        for cid in parent.values { leaves.remove(cid) }
+    }
+
+    mutating func add(_ cid: String, parent: String?, timestamp: Int64) {
+        guard self.timestamp[cid] == nil else { return }
+        let key = HeaderKey(timestamp: timestamp, cid: cid)
+        keys.insert(key, at: position(after: key, inclusive: true))
+        record(cid, parent: parent, timestamp: timestamp)
+        if let parent { leaves.remove(parent) }
+    }
+
+    private mutating func record(_ cid: String, parent: String?, timestamp: Int64) {
+        self.timestamp[cid] = timestamp
+        if let parent { self.parent[cid] = parent }
         leaves.insert(cid)
     }
 
-    func contains(_ cid: String) -> Bool { height[cid] != nil }
-
-    /// The highest weighed height on any branch (not the best tip).
-    public var maxHeight: UInt64 { UInt64(Swift.max(byHeight.count, 1) - 1) }
+    func contains(_ cid: String) -> Bool { timestamp[cid] != nil }
 
     func key(_ cid: String) -> HeaderKey? {
-        height[cid].map { HeaderKey(height: $0, cid: cid) }
+        timestamp[cid].map { HeaderKey(timestamp: $0, cid: cid) }
     }
 
-    /// Headers in `HeaderKey` order from `start` (inclusive of its height,
-    /// after its CID when `strictlyAfter`), as a lazy stream.
-    func keys(from start: HeaderKey, strictlyAfter: Bool) -> AnySequence<HeaderKey> {
-        let rows = byHeight
-        // A peer chooses `start`: a height past the graph streams nothing
-        // (and is never converted to `Int`).
-        guard start.height < UInt64(rows.count) else { return AnySequence([]) }
-        return AnySequence { () -> AnyIterator<HeaderKey> in
-            var height = Int(start.height)
-            var column: Int = {
-                guard height < rows.count else { return 0 }
-                let row = rows[height]
-                // Binary search the first CID at or after the start.
-                var low = 0, high = row.count
-                while low < high {
-                    let middle = (low + high) / 2
-                    if row[middle] < start.cid || (strictlyAfter && row[middle] == start.cid) {
-                        low = middle + 1
-                    } else {
-                        high = middle
-                    }
-                }
-                return low
-            }()
-            return AnyIterator {
-                while height < rows.count {
-                    if column < rows[height].count {
-                        defer { column += 1 }
-                        return HeaderKey(height: UInt64(height), cid: rows[height][column])
-                    }
-                    height += 1
-                    column = 0
-                }
-                return nil
+    /// The first position whose key is above `key` (or at it, when
+    /// `inclusive`): a binary search, so any peer-chosen key is safe.
+    private func position(after key: HeaderKey, inclusive: Bool) -> Int {
+        var low = 0, high = keys.count
+        while low < high {
+            let middle = low + (high - low) / 2
+            if keys[middle] < key || (!inclusive && keys[middle] == key) {
+                low = middle + 1
+            } else {
+                high = middle
             }
         }
+        return low
+    }
+
+    /// Headers dated after `timestamp`, in `HeaderKey` order, after `cursor`
+    /// when given: one seek, then a lazy slice.
+    func keys(after timestamp: Int64, cursor: HeaderKey?) -> ArraySlice<HeaderKey> {
+        // Every CID sorts above "": this key is the first dated after.
+        var start = timestamp == .max ? keys.count : position(after: HeaderKey(timestamp: timestamp + 1, cid: ""), inclusive: true)
+        if let cursor { start = Swift.max(start, position(after: cursor, inclusive: false)) }
+        return keys[start...]
     }
 }
 
@@ -319,6 +318,10 @@ public struct Sync: Sendable {
     var held = Heap<(time: Int64, cid: String)> { $0.time != $1.time ? $0.time < $1.time : $0.cid < $1.cid }
     var nextRequestID: UInt64 = 1
     var nextToken: UInt64 = 1
+    /// The start of the last catch-up pass completed with each peer (by
+    /// key), with nothing it announced left pending: the requester's last
+    /// contact. The shell persists it and hands it back to `Core.init`.
+    public internal(set) var lastContact: [String: Int64] = [:]
     /// How many index entries the last catch-up page examined: serving is
     /// O(page), never O(graph).
     public internal(set) var lastServeScanned = 0

@@ -49,6 +49,15 @@ public struct SimConfig: Sendable {
     public var reconnectDelay: Int64 = 3_000
     /// Each core asks each peer for a repair catch-up this often.
     public var catchUpInterval: Int64 = 20_000
+    /// The catch-up margin (`CoreConfig.maxFutureDrift`): a catch-up asks
+    /// for headers dated after the last contact less this. It must exceed
+    /// how late a header can reach a peer (production: two hours); a header
+    /// a peer weighed later than this after its date, whose relay was lost
+    /// and that gains no child, is never re-sent.
+    public var maxFutureDrift: Int64 = 10_000
+    /// One core loses every link from `from` (ms after genesis) for
+    /// `milliseconds`; from 0, it is a fresh node joining late.
+    public var outage: (core: Int, from: Int64, milliseconds: Int64)?
     /// Simulated time after the last release before the run stops.
     public var settle: Int64 = 60_000
     /// Replay the store and compare trees every this many persists per node.
@@ -126,27 +135,26 @@ public struct Simulator {
     }
 
     /// After the quiet point every honest core selects the same head, and
-    /// above the highest weighed height less `catchUpWindow` holds every
-    /// released honest block and the identical weighed graph (the same
-    /// blocks, grinds, subtree work and exclusions). A side block a core
-    /// missed deeper than that is never re-sent: the catch-up window's
-    /// documented boundary.
+    /// holds every released honest block and the identical weighed graph
+    /// (the same blocks, grinds, subtree work and exclusions) dated after the
+    /// earliest last contact across cores less the margin. A side block
+    /// dated earlier that a core missed is never re-sent: the catch-up
+    /// margin's documented boundary.
     func checkQuietPoint() throws {
         let nodes = cores.sorted { $0.key < $1.key }
         guard let (first, reference) = nodes.first else { return }
-        let top = reference.digest.blocks.values.map(\.height).max() ?? 0
-        let window = coreConfig.catchUpWindow
-        let cutoff = top > window ? top - window : 0
-        let above = { (digest: TreeDigest) in digest.blocks.filter { $0.value.height > cutoff } }
+        let contact = nodes.map { $0.value.core.sync.lastContact.values.max() ?? 0 }.min() ?? 0
+        let cutoff = contact - coreConfig.maxFutureDrift
+        let dated = { (cid: String) in (world.blocks[cid]?.block.timestamp ?? .max) > cutoff }
+        let above = { (digest: TreeDigest) in digest.blocks.filter { dated($0.key) } }
         let honest = Set(world.released(world.honest, at: now)
-            .filter { $0.height > cutoff }.map(\.cid))
+            .filter { $0.block.timestamp > cutoff }.map(\.cid))
         for (name, node) in nodes {
             if let missing = honest.subtracting(node.digest.blocks.keys).first {
                 throw Invariants.fail(name, "misses released honest block \(missing) after the quiet point")
             }
             if above(node.digest) != above(reference.digest)
-                || node.digest.excluded.filter({ (node.digest.blocks[$0]?.height ?? 0) > cutoff })
-                    != reference.digest.excluded.filter({ (reference.digest.blocks[$0]?.height ?? 0) > cutoff }) {
+                || node.digest.excluded.filter(dated) != reference.digest.excluded.filter(dated) {
                 throw Invariants.fail(name, "weighs a different graph than \(first) after the quiet point")
             }
             if node.digest.canonicalTip != reference.digest.canonicalTip {
@@ -176,6 +184,8 @@ public struct Simulator {
         case connect(String, String)
         /// The session ends: both ends learn it, and reconnect later.
         case linkDown(String, String, UInt64)
+        /// The outage begins: every session of the core ends.
+        case isolate(String)
     }
 
     struct Scheduled {
@@ -235,7 +245,8 @@ public struct Simulator {
             headersTimeout: config.headersTimeout,
             maxInlineChildIndexBytes: config.inlineChildIndexBytes,
             pendingBudget: config.pendingBudget,
-            catchUpInterval: config.catchUpInterval
+            catchUpInterval: config.catchUpInterval,
+            maxFutureDrift: config.maxFutureDrift
         )
         self.coreConfig = coreConfig
         for index in 0..<config.cores {
@@ -283,11 +294,19 @@ public struct Simulator {
         for script in scripts.keys.sorted() {
             schedule(at: now, to: script, .scriptTick)
         }
+        if let outage = config.outage, outage.from > 0 {
+            schedule(at: World.genesisTime + outage.from, to: "core\(outage.core)", .isolate("core\(outage.core)"))
+        }
     }
 
-    /// When a link may first come up: a link across the split waits for
-    /// the last release.
+    /// When a link may first come up: a link of a core in its outage waits
+    /// for its end; a link across the split waits for the last release.
     func linkTime(_ a: String, _ b: String) -> Int64 {
+        if let outage = config.outage, [a, b].contains("core\(outage.core)") {
+            let start = World.genesisTime + outage.from
+            let end = start + outage.milliseconds
+            if now >= start, now < end { return end }
+        }
         guard config.split != nil, let x = Int(a.dropFirst(4)), let y = Int(b.dropFirst(4)),
               a.hasPrefix("core"), b.hasPrefix("core") else { return now }
         let half = (config.cores + 1) / 2
@@ -359,6 +378,13 @@ public struct Simulator {
                 try step(end, .peerGone(PeerID(key: other, session: id)))
             }
             schedule(at: now + config.reconnectDelay, to: a, .connect(a, b))
+        case .isolate(let core):
+            for pair in sessions.keys.sorted(by: { ($0.low, $0.high) < ($1.low, $1.high) })
+            where pair.low == core || pair.high == core {
+                if let id = sessions[pair] {
+                    schedule(at: now, to: core, .linkDown(pair.low, pair.high, id))
+                }
+            }
         case .core(let event):
             try step(node, event)
         case .scriptMessage(let peer, let message):
