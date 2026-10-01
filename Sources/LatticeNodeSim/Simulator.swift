@@ -121,18 +121,28 @@ public struct Simulator {
         var persists = 0
     }
 
-    /// After the quiet point every honest core holds the identical weighed
-    /// graph (the same blocks, grinds, subtree work and exclusions), holds
-    /// every released honest block, and selects the same head.
+    /// After the quiet point every honest core selects the same head, and
+    /// above the head's height less `sideBranchWindow` holds every released
+    /// honest block and the identical weighed graph (the same blocks,
+    /// grinds, subtree work and exclusions). A side block forking deeper that
+    /// a core missed while a link was down is never re-sent: the catch-up
+    /// window's documented boundary.
     func checkQuietPoint() throws {
         let nodes = cores.sorted { $0.key < $1.key }
         guard let (first, reference) = nodes.first else { return }
-        let honest = Set(world.released(world.honest, at: now).map(\.cid))
+        let headHeight = reference.digest.blocks[reference.digest.canonicalTip]?.height ?? 0
+        let window = coreConfig.sideBranchWindow
+        let cutoff = headHeight > window ? headHeight - window : 0
+        let above = { (digest: TreeDigest) in digest.blocks.filter { $0.value.height > cutoff } }
+        let honest = Set(world.released(world.honest, at: now)
+            .filter { $0.height > cutoff }.map(\.cid))
         for (name, node) in nodes {
             if let missing = honest.subtracting(node.digest.blocks.keys).first {
                 throw Invariants.fail(name, "misses released honest block \(missing) after the quiet point")
             }
-            if node.digest.blocks != reference.digest.blocks || node.digest.excluded != reference.digest.excluded {
+            if above(node.digest) != above(reference.digest)
+                || node.digest.excluded.filter({ (node.digest.blocks[$0]?.height ?? 0) > cutoff })
+                    != reference.digest.excluded.filter({ (reference.digest.blocks[$0]?.height ?? 0) > cutoff }) {
                 throw Invariants.fail(name, "weighs a different graph than \(first) after the quiet point")
             }
             if node.digest.canonicalTip != reference.digest.canonicalTip {
