@@ -329,7 +329,7 @@ extension Core {
         for peer in waiting.announcers { sync.announced[peer, default: []].insert(cid) }
         if base != nil { linkDescendants(of: cid, &turn) }
         dirty(cid, &turn)
-        sync.pending.evict(to: config.pendingBudget)
+        sync.evict(to: config.pendingBudget)
     }
 
     // MARK: - Each step
@@ -434,7 +434,7 @@ extension Core {
         guard case .applied(let update) = admission else { return [] }
         if !held {
             let waiting = sync.pending.childrenOf[cid] ?? []
-            sync.pending.remove(cid)
+            sync.removePending(cid)
             sync.proofs.awaiting[cid] = nil
             sync.proofs.queued.remove(cid)
             turn.headers.append(StoredHeader(blockCID: cid, block: block, children: children))
