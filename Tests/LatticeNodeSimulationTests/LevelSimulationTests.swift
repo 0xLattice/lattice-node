@@ -42,14 +42,18 @@ final class LevelSimulationTests: XCTestCase {
 
     /// Three levels: every core runs every level, its child levels
     /// bootstrapped from genesis links issued by executed parent blocks, and
-    /// holds the identical weighed graph at each after the quiet point.
+    /// holds the identical weighed graph at each after the quiet point. Each
+    /// level executes only through its body window, its whole best chain.
     func testThreeLevelsConvergeAtEveryLevel() async throws {
         let (simulator, report) = try await simulate(config(0x3_1E7E) { $0.levels = 3 })
         let world = simulator.world
         XCTAssertEqual(world.paths.count, 3)
         for (core, digests) in report.digests {
             XCTAssertEqual(Set(digests.keys), Set(world.paths), core)
-            XCTAssertFalse(digests[LevelWorld.beta]?.executed.isEmpty ?? true, "\(core) executed nothing on Beta")
+            for path in world.paths {
+                let digest = try XCTUnwrap(digests[path])
+                XCTAssertEqual(digest.actOnTip, digest.canonicalTip, "\(core) stopped executing \(path) short of its head")
+            }
         }
         XCTAssertGreaterThan(report.bootstraps, 0)
         XCTAssertGreaterThan(report.executions, 0)
@@ -298,6 +302,9 @@ final class LevelSimulationTests: XCTestCase {
         /// When false, bootstraps are collected here, not answered.
         var answer = true
         var unanswered: [(ChainPath, String, ParentLevelFacts)] = []
+        /// When true, root connect jobs are held here, not run.
+        var holdRoot = false
+        var heldRoot: [ConnectJob] = []
 
         init(pins: [ChainPath: String] = [:]) async throws {
             var rng = SplitMix64(state: 0x914)
@@ -342,6 +349,16 @@ final class LevelSimulationTests: XCTestCase {
                             )
                         }
                         queue.append(.bootstrapped(path, genesisCID: cid, result))
+                    case .level(let path, .fetchBody(let cid)):
+                        queue.append(.level(path, .bodyFetched(cid: cid)))
+                    case .connect(let path, let job, _) where holdRoot && path == LevelWorld.nexus:
+                        heldRoot.append(job)
+                    case .connect(let path, let job, let facts):
+                        let verdict = await ChainTree.connect(
+                            job, fetcher: world.cas, parentFacts: facts,
+                            validationContext: ValidationContext(nowMilliseconds: now)
+                        )
+                        queue.append(.level(path, .connected(verdict)))
                     default:
                         break
                     }
@@ -349,14 +366,10 @@ final class LevelSimulationTests: XCTestCase {
             }
         }
 
+        /// Weigh each block; the body window executes the best chain.
         mutating func weighAndExecute(_ blocks: [SimBlock]) async throws {
             for block in blocks {
                 try await step(.mined(MinedGrind(root: block.block, rootChildren: block.children, carried: [])))
-                let job = try XCTUnwrap(host.connectJob(for: block.cid, at: LevelWorld.nexus))
-                let verdict = await ChainTree.connect(
-                    job, fetcher: world.cas, validationContext: ValidationContext(nowMilliseconds: now)
-                )
-                try await step(.connected(LevelWorld.nexus, verdict))
             }
         }
 
@@ -398,6 +411,41 @@ final class LevelSimulationTests: XCTestCase {
         XCTAssertTrue(restored.pendingBootstraps(now: driver.now).isEmpty)
         let unhosted = try driver.restored(hosted: [])
         XCTAssertEqual(Array(unhosted.levels.keys), [LevelWorld.nexus], "a level no longer hosted is not restored")
+    }
+
+    /// Decision 21: a child block whose parent state its parent level has
+    /// not executed waits, unvalidated and never excluded, with no timer;
+    /// the parent level's execution wakes it, and the child level goes on
+    /// executing its chain.
+    func testAChildConnectLackingAParentFactWaitsForItsParentLevel() async throws {
+        var driver = try await HostDriver()
+        let grinds = driver.world.grinds
+        try await driver.step(.mined(grinds[0].mined))
+        XCTAssertNotNil(driver.hosted)
+        driver.holdRoot = true
+        for grind in grinds.dropFirst() { try await driver.step(.mined(grind.mined)) }
+        // Alpha's first block names the post-state of the held root block.
+        let first = try XCTUnwrap(grinds[2].mined.carried.first).block
+        let firstCID = try BlockHeader(node: first).rawCID
+        var alpha = try XCTUnwrap(driver.host.levels[LevelWorld.alpha])
+        XCTAssertEqual(alpha.bodies.awaitingParent, [firstCID])
+        XCTAssertEqual(alpha.snapshot.actOnHeight, 0)
+        XCTAssertTrue(TreeDigest(alpha.tree).excluded.isEmpty, "a missing parent fact is never invalidity")
+
+        driver.holdRoot = false
+        while !driver.heldRoot.isEmpty {
+            let job = driver.heldRoot.removeFirst()
+            let verdict = await ChainTree.connect(
+                job, fetcher: driver.world.cas, validationContext: ValidationContext(nowMilliseconds: driver.now)
+            )
+            try await driver.step(.level(LevelWorld.nexus, .connected(verdict)))
+        }
+        let nexus = try XCTUnwrap(driver.host.levels[LevelWorld.nexus]).snapshot
+        XCTAssertEqual(nexus.actOnTip, nexus.bestHeaderTip)
+        alpha = try XCTUnwrap(driver.host.levels[LevelWorld.alpha])
+        XCTAssertTrue(alpha.bodies.awaitingParent.isEmpty)
+        XCTAssertEqual(alpha.snapshot.actOnTip, alpha.snapshot.bestHeaderTip, "the woken child level executed its whole chain")
+        XCTAssertGreaterThan(alpha.snapshot.actOnHeight, 1)
     }
 
     /// A bootstrap answer for a genesis no longer asked (a stale failure)
