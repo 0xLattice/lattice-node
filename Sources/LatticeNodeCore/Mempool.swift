@@ -226,7 +226,9 @@ public struct Mempool: Sendable {
         var prospectiveCount = entries.count - (replacedCID == nil ? 0 : 1)
         var prospectiveBytes = byteCount - (replacedCID.flatMap { entries[$0]?.size } ?? 0)
         var evictions: [String] = []
-        let candidates = entries.values
+        // Sorted only when full: admission stays linear in the pool.
+        let full = prospectiveCount >= limits.maxCount || entry.size > limits.maxBytes - prospectiveBytes
+        let candidates = !full ? [] : entries.values
             .filter { $0.cid != replacedCID }
             .sorted { Self.retention($0, $1) < 0 }
         for candidate in candidates
@@ -268,6 +270,12 @@ public struct Mempool: Sendable {
     /// nearly full template (Bitcoin Core's `MAX_CONSECUTIVE_FAILURES`).
     static let maxConsecutiveMisses = 1_000
 
+    /// Bitcoin Core's package limits (`-limitancestorcount`,
+    /// `-limitdescendantcount`), each counting the entry itself. They bound
+    /// every package walk, so selection stays linear in the pool.
+    static let maxPackageAncestors = 25
+    static let maxPackageDescendants = 25
+
     /// Greedy ancestor-package fee-rate selection, as Bitcoin Core's
     /// `addPackageTxs`.
     ///
@@ -275,12 +283,16 @@ public struct Mempool: Sendable {
     /// transactions at consecutive nonces, so an entry's parents are the
     /// pooled entries at `nonce - 1` for each of its signers (a multi-signer
     /// entry joins chains). An entry is a candidate only if it can execute
-    /// once its ancestors have: it is ready (or, contextually, unavailable)
-    /// or it extends a pooled parent, and every ancestor is a candidate. So a
-    /// nonce-gap future entry, and everything behind it, stays out.
+    /// once its ancestors have: it is ready (or, contextually, unavailable),
+    /// or EVERY one of its signers has its nonce predecessor pooled; and
+    /// every ancestor is a candidate. So a nonce-gap entry, and everything
+    /// behind it, stays out. An entry with more than `maxPackageAncestors`
+    /// ancestors or `maxPackageDescendants` descendants is not a candidate.
     ///
     /// A package is an entry plus its unselected ancestors; its score is
-    /// (sum of real fees) / (sum of sizes). The best-scoring package is
+    /// (sum of verified fees) / (sum of sizes). Only a `.ready` entry's
+    /// surplus is funding-checked, so only it counts: an unverified entry can
+    /// never raise its ancestors' score. The best-scoring package is
     /// taken whole, parents first; the packages of its descendants are then
     /// rescored without it. A package that does not fit is skipped. Equal
     /// rates break by the smaller CID, so the order is deterministic.
@@ -301,16 +313,43 @@ public struct Mempool: Sendable {
             for parent in found { childrenOf[parent, default: []].append(entry.cid) }
         }
 
+        /// The entries reachable from `cid` (itself included) along `edges`
+        /// inside `within`, counted up to `cap + 1`.
+        func reach(_ cid: String, _ edges: [String: [String]], within: Set<String>, cap: Int) -> Int {
+            var seen: Set<String> = [cid]
+            var stack = [cid]
+            while seen.count <= cap, let next = stack.popLast() {
+                for other in edges[next] ?? [] where within.contains(other) && seen.insert(other).inserted {
+                    stack.append(other)
+                }
+            }
+            return seen.count
+        }
+
         // Nonces strictly increase along every edge, so ascending nonce is a
         // topological order.
-        var candidates = Set<String>()
-        for entry in entries.values.sorted(by: Self.topological) {
-            let found = parentsOf[entry.cid] ?? []
+        let ordered = entries.values.sorted(by: Self.topological)
+        var executable = Set<String>()
+        for entry in ordered {
             let roots = entry.disposition == .ready
                 || (includesUnavailable && entry.disposition == .unavailable)
-            if (roots || !found.isEmpty) && found.allSatisfy(candidates.contains) {
-                candidates.insert(entry.cid)
+            let extendsEverySigner = entry.conflictKey.nonce > 0 && entry.conflictKey.signers.allSatisfy {
+                signerNonces[SignerNonce(signer: $0, nonce: entry.conflictKey.nonce - 1)] != nil
             }
+            if (roots || extendsEverySigner),
+               (parentsOf[entry.cid] ?? []).allSatisfy(executable.contains),
+               reach(entry.cid, parentsOf, within: executable, cap: Self.maxPackageAncestors)
+                   <= Self.maxPackageAncestors {
+                executable.insert(entry.cid)
+            }
+        }
+        let tooWide = executable.filter {
+            reach($0, childrenOf, within: executable, cap: Self.maxPackageDescendants) > Self.maxPackageDescendants
+        }
+        var candidates = Set<String>()
+        for entry in ordered where executable.contains(entry.cid) && !tooWide.contains(entry.cid)
+            && (parentsOf[entry.cid] ?? []).allSatisfy(candidates.contains) {
+            candidates.insert(entry.cid)
         }
 
         var picked = Set<String>()
@@ -333,7 +372,7 @@ public struct Mempool: Sendable {
             generation[cid] = next
             frontier.push(PackageScore(
                 cid: cid,
-                fee: members.reduce(.zero) { $0 + $1.minerSurplus },
+                fee: members.reduce(.zero) { $1.disposition == .ready ? $0 + $1.minerSurplus : $0 },
                 size: members.reduce(0) { $0 + $1.size },
                 generation: next
             ))
@@ -364,12 +403,11 @@ public struct Mempool: Sendable {
             var affected = Set<String>()
             var stack = members.map(\.cid)
             while let next = stack.popLast() {
-                for child in childrenOf[next] ?? [] where affected.insert(child).inserted {
+                for child in childrenOf[next] ?? [] where candidates.contains(child) && affected.insert(child).inserted {
                     stack.append(child)
                 }
             }
-            for cid in affected.sorted()
-            where candidates.contains(cid) && !picked.contains(cid) && !skipped.contains(cid) {
+            for cid in affected.sorted() where !picked.contains(cid) && !skipped.contains(cid) {
                 score(cid)
             }
         }
