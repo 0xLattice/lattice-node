@@ -173,14 +173,18 @@ final class CoreBodyTests: XCTestCase {
 
     func testAMissingBodyIsAnAvailabilityWaitAndNeverBlame() {
         var (core, _) = weighed(Array(chain.prefix(3)))
+        // Header sync's own catch-up deadlines are not this test's subject:
+        // the peer that relayed the headers is gone, and no body is ever
+        // tied to it.
+        _ = core.step(.peerGone(peer), now: Self.now)
         for later in stride(from: Self.now, through: Self.now + 3_600_000, by: 600_000) {
             let effects = core.step(.tick, now: later)
             XCTAssertFalse(hasDisconnect(effects))
             XCTAssertTrue(bodyFetches(effects).isEmpty, "the content layer retries, not the core")
+            XCTAssertTrue(cancels(effects).isEmpty)
         }
         XCTAssertEqual(core.snapshot.actOnTip, world.genesis.cid)
         XCTAssertEqual(core.bodies.requested.count, 3)
-        XCTAssertNotNil(core.sync.peers[peer])
     }
 
     func testAnInvalidBodyIsExcludedItsWorkStillWeighsAndNoOneIsBlamed() async throws {

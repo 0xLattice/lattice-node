@@ -68,11 +68,20 @@ public struct HonestSource: SimScript {
     public let name: String
     public let isHonest = true
     let config: CoreConfig
+    /// The honest blocks this source mines and serves (all by default).
+    let chain: [String]?
     var relayed = 0
 
-    public init(name: String, config: CoreConfig) {
+    public init(name: String, config: CoreConfig, chain: [String]? = nil) {
         self.name = name
         self.config = config
+        self.chain = chain
+    }
+
+    func mine(_ world: World) -> [String] {
+        guard let chain else { return world.honest }
+        let members = Set(chain)
+        return world.honest.filter(members.contains)
     }
 
     public mutating func connected(_ peer: PeerID, now: Int64, world: World) -> [ScriptAction] { [] }
@@ -80,10 +89,13 @@ public struct HonestSource: SimScript {
     public mutating func received(_ message: SyncMessage, from peer: PeerID, now: Int64, world: World) -> [ScriptAction] {
         switch message {
         case .getHeaders(let request):
-            let served = page(of: world.released(world.honest, at: now), request, world: world, limit: config.maxHeadersPerPage)
-            return [.send(peer, headers(served.blocks, requestID: request.requestID, hasMore: served.hasMore, config))]
+            let served = page(of: world.released(mine(world), at: now), request, world: world, limit: config.maxHeadersPerPage)
+            let capped = config.page(served.blocks.map { config.entry($0.block, children: $0.children) }, hasMore: served.hasMore)
+            return [.send(peer, .headers(HeadersResponse(
+                requestID: request.requestID, entries: capped.entries, hasMore: capped.hasMore
+            )))]
         case .getHeader(let requestID, let cid):
-            let held = world.honest.contains(cid) ? [cid] : []
+            let held = mine(world).contains(cid) ? [cid] : []
             return [.send(peer, headers(world.released(held, at: now), requestID: requestID, config))]
         case .headers:
             return []
@@ -95,11 +107,11 @@ public struct HonestSource: SimScript {
     }
 
     public mutating func tick(peers: [PeerID], now: Int64, world: World) -> [ScriptAction] {
-        let released = world.released(world.honest, at: now)
+        let released = world.released(mine(world), at: now)
         let fresh = Array(released.dropFirst(relayed))
         relayed = released.count
         var actions: [ScriptAction] = fresh.isEmpty ? [] : peers.map { .send($0, headers(fresh, config)) }
-        if let next = world.honest.compactMap({ world.blocks[$0]?.releaseAt }).filter({ $0 > now }).min() {
+        if let next = mine(world).compactMap({ world.blocks[$0]?.releaseAt }).filter({ $0 > now }).min() {
             actions.append(.wakeAt(next))
         }
         return actions
@@ -122,12 +134,22 @@ public struct HeaderSpammer: SimScript {
         self.config = config
     }
 
+    /// The fork, then garbage without child indexes and again with them
+    /// inline however big (growing the queue after admission), then an
+    /// off-schedule header without its child index (it must be blamed before
+    /// a fetch), then a failed proof-of-work.
     func flood(_ peer: PeerID, now: Int64, world: World) -> [ScriptAction] {
         let garbage = world.garbage.compactMap { world.blocks[$0] }
+        let bare = garbage.map { HeaderEntry(block: $0.block, children: nil) }
+        let full = garbage.map { HeaderEntry(block: $0.block, children: $0.children) }
+        let offSchedule = world.released([world.lies[.offScheduleTarget]!], at: now)
+            .map { HeaderEntry(block: $0.block, children: nil) }
         let forged = world.lies[.failedProofOfWork].flatMap { world.blocks[$0] }.map { [$0] } ?? []
         return [
             .send(peer, headers(world.released(world.spam, at: now), config)),
-            .send(peer, headers(garbage, config)),
+            .send(peer, .headers(HeadersResponse(requestID: 0, entries: bare, hasMore: false))),
+            .send(peer, .headers(HeadersResponse(requestID: 0, entries: full, hasMore: false))),
+            .send(peer, .headers(HeadersResponse(requestID: 0, entries: offSchedule, hasMore: false))),
             .send(peer, headers(forged, config)),
         ]
     }
