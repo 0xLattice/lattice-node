@@ -529,15 +529,18 @@ final class LevelSimulationTests: XCTestCase {
     }
 
     /// An operator pin overrides the act-on path once an executed parent
-    /// block authorizes the pinned genesis.
+    /// block authorizes the pinned genesis. A level executes only its best
+    /// chain (decision 21), so the pin is the link of a block executed while
+    /// it was best, and a reorg onto the uncle's branch keeps it.
     func testAnOperatorPinOverridesTheActOnPath() async throws {
         var probe = try await HostDriver()
-        let ground = probe.ground
-        probe = try await HostDriver(pins: [LevelWorld.alpha: ground])
-        try await probe.weighAndExecute([probe.block(issuing: 0)])
-        XCTAssertNil(probe.hosted, "the pinned genesis is not authorized yet")
-        try await probe.weighAndExecute([probe.block(issuing: 1)])
-        XCTAssertEqual(probe.hosted, ground)
-        XCTAssertEqual(probe.asked, [ground])
+        let real = probe.real
+        probe = try await HostDriver(pins: [LevelWorld.alpha: real])
+        try await probe.weighAndExecute([probe.block(issuing: 0), probe.world.grinds[1].root])
+        XCTAssertEqual(probe.hosted, real)
+        try await probe.weighAndExecute([probe.block(issuing: 1)] + probe.world.reorg)
+        XCTAssertEqual(probe.host.levels[LevelWorld.nexus]?.tree.canonicalTip, probe.world.reorg.last?.cid)
+        XCTAssertEqual(probe.hosted, real, "the pin holds across a reorg onto another link")
+        XCTAssertEqual(probe.asked, [real])
     }
 }
