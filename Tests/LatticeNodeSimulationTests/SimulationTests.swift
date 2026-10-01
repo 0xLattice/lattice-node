@@ -39,7 +39,11 @@ final class SimulationTests: XCTestCase {
 
     func testTheSameSeedReplaysTheSameRun() async throws {
         var config = SimConfig.random(seed: 0xD37)
-        config.drop = 0.15
+        // Every loss ends its session. A stream session takes a few round
+        // trips (a page of IDs, the objects, a child index); at 15% loss per
+        // message one rarely survives them, and a core can end the run with
+        // no live session at all.
+        config.drop = 0.05
         config.duplicate = 0.1
         var a = try await Simulator.make(config)
         var b = try await Simulator.make(config)
