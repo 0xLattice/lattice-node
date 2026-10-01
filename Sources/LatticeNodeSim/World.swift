@@ -86,6 +86,9 @@ public struct World: Sendable {
     public let excludedChild: String
     /// Ground truth: the blocks a node must weigh and exclude.
     public let excluded: Set<String>
+    /// For a split world: the honest blocks each side mines while
+    /// partitioned (the common prefix included), lighter side first.
+    public let sides: [[String]]
 
     public static let spec = ChainSpec(
         maxNumberOfTransactionsPerBlock: 100,
@@ -115,7 +118,9 @@ public struct World: Sendable {
         spamBlocks: Int,
         garbage garbageCount: Int = 16,
         honestInterval: Int64 = blockInterval,
-        stall: (afterBlock: Int, milliseconds: Int64)? = nil
+        stall: (afterBlock: Int, milliseconds: Int64)? = nil,
+        sideLeaves: Int = 0,
+        split: (lighter: Int, heavier: Int)? = nil
     ) async throws -> World {
         let cas = SimCAS()
         try await LatticeState.emptyHeader.storeRecursively(storer: cas as any VolumeStorer)
@@ -159,6 +164,43 @@ public struct World: Sendable {
             reference.add(next.cid, parent: parent, work: workForTarget(next.block.target))
         }
 
+        // Side leaves: one honest side block on each of `sideLeaves` honest
+        // blocks, dated half an interval after its parent.
+        let main = honest
+        for index in 0..<min(sideLeaves, main.count) {
+            let parent = blocks[main[index * main.count / max(sideLeaves, 1)]]!
+            let leaf = try await extend(
+                parent, timestamp: parent.block.timestamp + honestInterval / 2,
+                nonce: (UInt64(index) << 32) | 0x1EAF, in: cas
+            )
+            blocks[leaf.cid] = leaf
+            honest.append(leaf.cid)
+        }
+        // A split: from the honest tip, a lighter side on schedule and a
+        // heavier side mined faster over the same span (ASERT hardens it).
+        var sides: [[String]] = []
+        if let split {
+            let fork = blocks[reference.head]!
+            let common = bestChain(of: honest.compactMap { blocks[$0] }, genesis: genesis).map(\.cid)
+            let span = Int64(split.lighter) * honestInterval
+            for (side, count) in [split.lighter, split.heavier].enumerated() {
+                var tip = fork
+                var chain = common
+                for index in 1...count {
+                    tip = try await extend(
+                        tip, timestamp: fork.block.timestamp + span * Int64(index) / Int64(count),
+                        nonce: (UInt64(index) << 32) | UInt64(0x5_1D0 + side), in: cas
+                    )
+                    blocks[tip.cid] = tip
+                    honest.append(tip.cid)
+                    chain.append(tip.cid)
+                }
+                sides.append(chain)
+            }
+        }
+        honest.sort { blocks[$0]!.releaseAt != blocks[$1]!.releaseAt
+            ? blocks[$0]!.releaseAt < blocks[$1]!.releaseAt : $0 < $1 }
+
         var spam: [String] = []
         var spamTip = genesis
         for index in 0..<max(spamBlocks, 2) {
@@ -182,8 +224,13 @@ public struct World: Sendable {
             let unseen = try await extend(
                 genesis, timestamp: genesisTime + 3, nonce: (UInt64(index) << 32) | 0x6A6, in: cas
             )
+            // Every other one commits a child index too big to travel inline.
+            let children = index % 2 == 0 ? [:] : Dictionary(uniqueKeysWithValues: (0..<48).map {
+                ("Junk\(index)-\($0)", genesis.block)
+            })
             let junk = try await extend(
-                unseen, timestamp: genesisTime + 4, nonce: UInt64(index) << 32, target: .max, in: cas
+                unseen, timestamp: genesisTime + 4, nonce: UInt64(index) << 32,
+                children: children, target: .max, in: cas
             )
             blocks[junk.cid] = junk
             garbage.append(junk.cid)
@@ -245,7 +292,8 @@ public struct World: Sendable {
             uncle: uncle.cid,
             lies: lies.mapValues(\.cid),
             excludedChild: excludedChild.cid,
-            excluded: [lies[.wrongSpec]!.cid, lies[.wrongPrevState]!.cid]
+            excluded: [lies[.wrongSpec]!.cid, lies[.wrongPrevState]!.cid],
+            sides: sides
         )
     }
 

@@ -18,18 +18,37 @@ public struct SimConfig: Sendable {
     public var forkProbability = 0.2
     public var spamBlocks = 4
     /// Probability that a message breaks its link (a session ends, as a TCP
-    /// connection does; both ends reconnect later). Within a session every
-    /// message arrives, after a seeded delay.
+    /// connection does). Within a session every message arrives, in order,
+    /// after the link's latency and its bandwidth's transfer time.
     public var drop = 0.02
     public var duplicate = 0.05
+    /// Each session's one-way latency is drawn from this range.
     public var minDelay: Int64 = 5
     public var maxDelay: Int64 = 250
+    /// Bytes per millisecond on every link, unless `slowLinks` names it.
+    public var bandwidth = 1_000.0
+    public var slowLinks: [String: Double] = [:]
+    /// Probability that a reconnect attempt fails (retried later, backing
+    /// off): links do not always come back.
+    public var reconnectFailure = 0.0
+    /// Core-to-core links: every pair, or a ring (multi-hop).
+    public var ring = false
+    /// How many cores each honest source connects to (nil: all).
+    public var sourceFanout: Int?
+    /// Side leaves added beside the honest chain.
+    public var sideLeaves = 0
+    /// A partition: the first half of the cores follows source0 mining the
+    /// lighter side, the rest source1 mining the heavier side, with no link
+    /// between the halves until the last release.
+    public var split: (lighter: Int, heavier: Int)?
     public var pageSize = 8
     public var headersTimeout: Int64 = 2_000
     /// Honest child indexes of one entry travel inline; those of 48 do not.
     public var inlineChildIndexBytes = 1_024
     public var pendingBudget = 256 * 1_024
     public var reconnectDelay: Int64 = 3_000
+    /// Each core asks each peer for a repair catch-up this often.
+    public var catchUpInterval: Int64 = 20_000
     /// Simulated time after the last release before the run stops.
     public var settle: Int64 = 60_000
     /// Replay the store and compare trees every this many persists per node.
@@ -52,6 +71,9 @@ public struct SimConfig: Sendable {
         config.drop = 0.03 * rng.unit()
         config.duplicate = 0.1 * rng.unit()
         config.maxDelay = rng.draw(Int64(20)...500)
+        config.reconnectFailure = 0.3 * rng.unit()
+        config.ring = rng.chance(0.3)
+        config.sourceFanout = rng.chance(0.3) ? 1 : nil
         config.pageSize = rng.draw(3...16)
         return config
     }
@@ -78,6 +100,8 @@ public struct SimReport: Sendable {
     public var coreHeld: [String: Set<String>] = [:]
     /// (by, peer name, reason) for every disconnect an honest node issued.
     public var disconnects: [(by: String, peer: String, reason: DisconnectReason)] = []
+    /// Every leaf count a core reached.
+    public var peakLeaves = 0
     /// Child indexes fetched by CID (too big to travel inline).
     public var fetches = 0
     /// The most bytes any core's pending queue held after a step.
@@ -97,25 +121,48 @@ public struct Simulator {
         var persists = 0
     }
 
-    /// After the quiet point every honest core holds the identical weighed
-    /// graph (the same blocks, grinds, subtree work and exclusions), holds
-    /// every released honest block, and selects the same head.
+    /// After the quiet point every honest core selects the same head, holds
+    /// every released honest block that clears the anti-DoS threshold, and
+    /// holds the identical weighed graph above it (the same blocks, parents,
+    /// grinds, states and exclusions). A branch under the threshold may be
+    /// held by a core that weighed it before the threshold rose, and not by
+    /// one that saw it later: that is the threshold's cost, as in Bitcoin.
     func checkQuietPoint() throws {
         let nodes = cores.sorted { $0.key < $1.key }
         guard let (first, reference) = nodes.first else { return }
-        let honest = Set(world.released(world.honest, at: now).map(\.cid))
+        let core = reference.core
+        let clears = { (cid: String) -> Bool in core.clearsThreshold(self.trueWork(cid)) }
+        let honest = Set(world.released(world.honest, at: now).map(\.cid).filter(clears))
+        func above(_ digest: TreeDigest) -> [String: TreeDigest.Entry] {
+            digest.blocks.filter { clears($0.key) }.mapValues {
+                TreeDigest.Entry(parent: $0.parent, height: $0.height, grinds: $0.grinds,
+                                 prevState: $0.prevState, postState: $0.postState, subtreeWork: nil)
+            }
+        }
+        let graph = above(reference.digest)
         for (name, node) in nodes {
-            let graph = Set(node.digest.blocks.keys)
-            if let missing = honest.subtracting(graph).first {
+            if let missing = honest.subtracting(node.digest.blocks.keys).first {
                 throw Invariants.fail(name, "misses released honest block \(missing) after the quiet point")
             }
-            if node.digest.blocks != reference.digest.blocks || node.digest.excluded != reference.digest.excluded {
+            if above(node.digest) != graph
+                || node.digest.excluded.filter(clears) != reference.digest.excluded.filter(clears) {
                 throw Invariants.fail(name, "weighs a different graph than \(first) after the quiet point")
             }
             if node.digest.canonicalTip != reference.digest.canonicalTip {
                 throw Invariants.fail(name, "head differs from \(first)'s after the quiet point")
             }
         }
+    }
+
+    /// A block's chain work from the generator's ground truth.
+    func trueWork(_ cid: String) -> WorkSum {
+        var total = WorkSum.zero
+        var current: String? = cid
+        while let hash = current, let block = world.blocks[hash] {
+            total = total + workForTarget(block.block.target)
+            current = block.parent
+        }
+        return total
     }
 
     /// DST 7: the store alone rebuilds an equal tree.
@@ -156,6 +203,9 @@ public struct Simulator {
     var cores: [String: CoreNode] = [:]
     var scripts: [String: any SimScript] = [:]
     var sessions: [Pair: UInt64] = [:]
+    var latency: [Pair: Int64] = [:]
+    var connected: Set<Pair> = []
+    var busyUntil: [String: Int64] = [:]
     var nextSession: UInt64 = 1
     var queue = EventQueue()
     public private(set) var report = SimReport()
@@ -179,7 +229,9 @@ public struct Simulator {
             forkProbability: config.forkProbability,
             spamBlocks: config.spamBlocks,
             garbage: config.garbage,
-            stall: config.stall
+            stall: config.stall,
+            sideLeaves: config.sideLeaves,
+            split: config.split
         )
         return Simulator(config: config, world: world, rng: rng)
     }
@@ -192,7 +244,8 @@ public struct Simulator {
             maxHeadersPerPage: config.pageSize,
             headersTimeout: config.headersTimeout,
             maxInlineChildIndexBytes: config.inlineChildIndexBytes,
-            pendingBudget: config.pendingBudget
+            pendingBudget: config.pendingBudget,
+            catchUpInterval: config.catchUpInterval
         )
         self.coreConfig = coreConfig
         for index in 0..<config.cores {
@@ -203,8 +256,10 @@ public struct Simulator {
                 digest: TreeDigest(core.tree)
             )
         }
-        for index in 0..<config.honestSources {
-            let source = HonestSource(name: "source\(index)", config: coreConfig)
+        let sources = config.split == nil ? config.honestSources : 2
+        for index in 0..<sources {
+            let chain = config.split == nil ? nil : world.sides[index]
+            let source = HonestSource(name: "source\(index)", config: coreConfig, chain: chain)
             scripts[source.name] = source
         }
         if config.spammer { scripts["spammer"] = HeaderSpammer(name: "spammer", config: coreConfig) }
@@ -213,18 +268,44 @@ public struct Simulator {
             scripts["uncle"] = UncleShower(name: "uncle", showingTo: "core0", config: coreConfig)
         }
 
-        let coreNames = cores.keys.sorted()
+        let coreNames = (0..<config.cores).map { "core\($0)" }
         for (position, name) in coreNames.enumerated() {
-            for other in coreNames[(position + 1)...] {
-                schedule(at: now, to: name, .connect(name, other))
+            let others = config.ring
+                ? (coreNames.count > 1 ? [coreNames[(position + 1) % coreNames.count]] : [])
+                : Array(coreNames[(position + 1)...])
+            for other in others where other != name {
+                schedule(at: linkTime(name, other), to: name, .connect(name, other))
             }
-            for script in scripts.keys.sorted() {
-                schedule(at: now, to: name, .connect(name, script))
+        }
+        for script in scripts.keys.sorted() {
+            var targets = coreNames
+            if config.split != nil, script.hasPrefix("source") {
+                let half = (coreNames.count + 1) / 2
+                targets = script == "source0" ? Array(coreNames[..<half]) : Array(coreNames[half...])
+            } else if script.hasPrefix("source"), let fanout = config.sourceFanout {
+                let first = Int(script.dropFirst("source".count)) ?? 0
+                targets = (0..<min(fanout, coreNames.count)).map { coreNames[(first + $0) % coreNames.count] }
+            }
+            for core in targets {
+                schedule(at: now, to: core, .connect(core, script))
             }
         }
         for script in scripts.keys.sorted() {
             schedule(at: now, to: script, .scriptTick)
         }
+    }
+
+    /// When a link may first come up: a link across the split waits for
+    /// the last release.
+    func linkTime(_ a: String, _ b: String) -> Int64 {
+        guard config.split != nil, let x = Int(a.dropFirst(4)), let y = Int(b.dropFirst(4)),
+              a.hasPrefix("core"), b.hasPrefix("core") else { return now }
+        let half = (config.cores + 1) / 2
+        return (x < half) == (y < half) ? now : lastRelease
+    }
+
+    var lastRelease: Int64 {
+        world.honest.compactMap { world.blocks[$0]?.releaseAt }.max() ?? now
     }
 
     public var end: Int64 {
@@ -268,9 +349,17 @@ public struct Simulator {
         switch scheduled.delivery {
         case .connect(let a, let b):
             guard session(a, b) == nil else { return }
+            guard now >= linkTime(a, b) else {
+                return schedule(at: linkTime(a, b), to: a, .connect(a, b))
+            }
+            if connected.contains(Pair(a, b)), rng.chance(config.reconnectFailure) {
+                return schedule(at: now + 2 * config.reconnectDelay, to: a, .connect(a, b))
+            }
+            connected.insert(Pair(a, b))
             let id = nextSession
             nextSession += 1
             sessions[Pair(a, b)] = id
+            latency[Pair(a, b)] = rng.draw(config.minDelay...config.maxDelay)
             try arrive(at: a, from: b, session: id)
             try arrive(at: b, from: a, session: id)
         case .linkDown(let a, let b, let id):
@@ -316,16 +405,38 @@ public struct Simulator {
         }
     }
 
-    /// A message leg: delayed or duplicated by the seed, or lost with its
-    /// link.
+    /// A message leg: queued behind the link's earlier messages for its
+    /// transfer time, then its latency; duplicated by the seed, or lost with
+    /// its link.
     mutating func send(_ delivery: Delivery, from: String, to: String) {
-        if rng.chance(config.drop), let id = session(from, to) {
+        guard let id = session(from, to) else { return }
+        if rng.chance(config.drop) {
             schedule(at: now, to: from, .linkDown(from, to, id))
             return
         }
+        let pair = Pair(from, to)
+        let rate = config.slowLinks[pair.low + "-" + pair.high] ?? config.bandwidth
+        let direction = from + ">" + to
+        let transfer = Int64((Double(Self.bytes(of: delivery)) / rate).rounded(.up))
+        let sent = max(now, busyUntil[direction] ?? now) + transfer
+        busyUntil[direction] = sent
         let copies = rng.chance(config.duplicate) ? 2 : 1
         for _ in 0..<copies {
-            schedule(at: now + rng.draw(config.minDelay...config.maxDelay), to: to, delivery)
+            schedule(at: sent + (latency[pair] ?? config.minDelay), to: to, delivery)
+        }
+    }
+
+    static func bytes(of delivery: Delivery) -> Int {
+        switch delivery {
+        case .core(.received(_, let message)), .scriptMessage(_, let message):
+            guard case .headers(let response) = message else { return 64 }
+            return 64 + response.entries.reduce(0) {
+                $0 + ($1.block.toData()?.count ?? 0) + ($1.children?.toData()?.count ?? 0)
+            }
+        case .core(.childIndexFetched(_, _, let index)):
+            return 64 + (index?.toData()?.count ?? 0)
+        default:
+            return 64
         }
     }
 
@@ -379,7 +490,7 @@ public struct Simulator {
                     }
                 }
                 try route(message, from: name, to: peer)
-            case .serveHeaders(let peer, let requestID, let blockCIDs, let hasMore):
+            case .serveHeaders(let peer, let token, let requestID, let blockCIDs, let hasMore):
                 var entries: [HeaderEntry] = []
                 for cid in blockCIDs {
                     guard let stored = node.store.headers[cid] else {
@@ -387,11 +498,12 @@ public struct Simulator {
                     }
                     entries.append(coreConfig.entry(stored.block, children: stored.children))
                 }
+                let page = coreConfig.page(entries, hasMore: hasMore)
                 try route(.headers(HeadersResponse(
-                    requestID: requestID, entries: entries, hasMore: hasMore
+                    requestID: requestID, entries: page.entries, hasMore: page.hasMore
                 )), from: name, to: peer)
-                // The shell reports the page sent; it is local, never lost.
-                schedule(at: now, to: name, .core(.headersServed(peer, requestID: requestID)))
+                // The shell reports the answer sent; it is local, never lost.
+                schedule(at: now, to: name, .core(.headersServed(peer, token: token)))
             case .fetchByCID(let peer, let cid):
                 report.fetches += 1
                 guard session(name, peer.key) == peer.session else { continue }
@@ -438,6 +550,7 @@ public struct Simulator {
         }
         node.digest = digest
         report.pendingPeak = max(report.pendingPeak, node.core.sync.pending.bytes)
+        report.peakLeaves = max(report.peakLeaves, node.core.index.leaves.count)
         cores[name] = node
     }
 

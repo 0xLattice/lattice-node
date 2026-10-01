@@ -8,11 +8,12 @@ public enum Event: Sendable {
     case peerReady(PeerID)
     case peerGone(PeerID)
     case received(PeerID, SyncMessage)
-    /// The answer to `Effect.fetchByCID` for a child index: nil when the peer
-    /// did not have it.
+    /// The answer to `Effect.fetchByCID` for a child index: nil ONLY when the
+    /// peer definitively does not hold it. A transport failure is no event
+    /// (the request's deadline decides).
     case childIndexFetched(PeerID, cid: String, ChildIndex?)
-    /// The shell finished sending the headers a `serveHeaders` effect named.
-    case headersServed(PeerID, requestID: UInt64)
+    /// The shell finished sending the answer a `serveHeaders` effect named.
+    case headersServed(PeerID, token: UInt64)
     case tick
 }
 
@@ -50,9 +51,10 @@ public struct Snapshot: Sendable, Equatable {
 
 public enum Effect: Sendable {
     case send(PeerID, SyncMessage)
-    /// Answer a request with these weighed headers, in order. The shell reads
-    /// their content (`CoreConfig.entry` decides what travels inline).
-    case serveHeaders(PeerID, requestID: UInt64, blockCIDs: [String], hasMore: Bool)
+    /// Answer request `requestID` with these weighed headers, in order, then
+    /// report `headersServed(peer, token:)`. The shell reads their content
+    /// and caps the answer by bytes (`CoreConfig.page`).
+    case serveHeaders(PeerID, token: UInt64, requestID: UInt64, blockCIDs: [String], hasMore: Bool)
     case fetchByCID(PeerID, cid: String)
     case disconnect(PeerID, DisconnectReason)
     case persist(PersistBatch)
@@ -62,33 +64,64 @@ public enum Effect: Sendable {
 
 public struct CoreConfig: Sendable {
     public var maxHeadersPerPage: Int
-    /// How long any request may stay in flight before its peer is
-    /// disconnected as stalled.
+    /// A served page stops before this many bytes (always at least one
+    /// header).
+    public var maxPageBytes: Int
+    /// How long any request may wait for its answer before its peer is
+    /// disconnected as stalled. Each page is its own request, so a catch-up
+    /// that keeps delivering never times out.
     public var headersTimeout: Int64
-    public var maxAwaitingChildIndex: Int
     /// A child index larger than this travels by CID instead of inline.
     public var maxInlineChildIndexBytes: Int
     /// The operator's byte budget for headers not yet weighed.
     public var pendingBudget: Int
+    /// The anti-DoS work threshold: a branch is weighed only once its
+    /// cumulative work reaches `minimumChainWork` and our best tip's work
+    /// less `antiDoSBlocks` of the tip's block work.
+    public var minimumChainWork: UInt256
+    public var antiDoSBlocks: UInt64
+    /// How often each peer is asked for a catch-up again: the repair path
+    /// for anything a relay missed.
+    public var catchUpInterval: Int64
 
     public init(
         maxHeadersPerPage: Int = 2_000,
+        maxPageBytes: Int = 1 << 20,
         headersTimeout: Int64 = 30_000,
-        maxAwaitingChildIndex: Int = 64,
         maxInlineChildIndexBytes: Int = 16 * 1_024,
-        pendingBudget: Int = 16 * 1_024 * 1_024
+        pendingBudget: Int = 16 * 1_024 * 1_024,
+        minimumChainWork: UInt256 = .zero,
+        antiDoSBlocks: UInt64 = 144,
+        catchUpInterval: Int64 = 600_000
     ) {
         self.maxHeadersPerPage = maxHeadersPerPage
+        self.maxPageBytes = maxPageBytes
         self.headersTimeout = headersTimeout
-        self.maxAwaitingChildIndex = maxAwaitingChildIndex
         self.maxInlineChildIndexBytes = maxInlineChildIndexBytes
         self.pendingBudget = pendingBudget
+        self.minimumChainWork = minimumChainWork
+        self.antiDoSBlocks = antiDoSBlocks
+        self.catchUpInterval = catchUpInterval
     }
 
     /// A header as it travels: its child index inline when it fits.
     public func entry(_ block: Block, children: ChildIndex) -> HeaderEntry {
         let fits = (children.toData()?.count ?? .max) <= maxInlineChildIndexBytes
         return HeaderEntry(block: block, children: fits ? children : nil)
+    }
+
+    /// The answer the shell sends: `entries` cut at `maxPageBytes` (at least
+    /// one), with `hasMore` set when cut. The requester continues after the
+    /// last header it receives.
+    public func page(_ entries: [HeaderEntry], hasMore: Bool) -> (entries: [HeaderEntry], hasMore: Bool) {
+        var total = 0
+        for (index, entry) in entries.enumerated() {
+            total += Core.size(of: entry)
+            if index > 0, total > maxPageBytes {
+                return (Array(entries[..<index]), true)
+            }
+        }
+        return (entries, hasMore)
     }
 }
 
@@ -97,35 +130,36 @@ public struct CoreConfig: Sendable {
 /// mutation of a step is atomic, and the effects say what the shell must do.
 ///
 /// Sync replicates the level's weighed subgraph. A header is weighed by
-/// `insertRootHeader`; every newly weighed header — excluded ones too — is
-/// relayed to every other ready peer; an unknown parent is asked by CID of
-/// the peer that sent the header; catch-up asks a peer for its weighed
-/// headers after ours. Only a proof-of-work failure blames a peer.
+/// `insertRootHeader` once its branch clears the anti-DoS work threshold;
+/// every newly weighed header — excluded ones too — is relayed to every other
+/// ready peer; an unknown parent is asked by CID of a peer that sent the
+/// header; catch-up asks a peer for its weighed headers after a locator of
+/// ours. Only a proof-of-work failure blames a peer.
 public struct Core: Sendable {
     public private(set) var tree: ChainTree
     public private(set) var sync = Sync()
     public private(set) var published: Snapshot?
     public let config: CoreConfig
     let genesis: String
-    /// The weighed graph's leaves: what a catch-up request names as known.
-    private var leaves: Set<String>
+    public private(set) var index = WeighedIndex()
 
     /// A core over a bootstrapped or restored root tree.
     public init(tree: ChainTree, config: CoreConfig = CoreConfig()) {
         var tree = tree
         precondition(tree.context?.isRoot == true, "the core runs one root level")
         let genesis = tree.canonicalBlockHash(atHeight: 0) ?? tree.canonicalTip
-        var leaves = Set<String>()
+        var index = WeighedIndex()
         var stack = [genesis]
         while let hash = stack.popLast() {
             guard let meta = tree.getConsensusBlock(hash: hash) else { continue }
-            if meta.childHashes.isEmpty { leaves.insert(hash) }
+            let target = tree.headerSnapshot(of: hash)?.target ?? .max
+            index.add(hash, parent: meta.parentBlockHash, height: meta.blockHeight, work: workForTarget(target))
             stack += meta.childHashes
         }
         self.tree = tree
         self.config = config
         self.genesis = genesis
-        self.leaves = leaves
+        self.index = index
     }
 
     /// Rebuild a core from its durable facts and the chain's genesis spec
@@ -160,25 +194,25 @@ public struct Core: Sendable {
             sync.peers[peer] = PeerSync()
             requestCatchUp(from: peer, after: nil, &turn)
         case .peerGone(let peer):
-            sync.drop(peer)
+            drop(peer, &turn)
         case .received(let peer, let message):
             guard sync.peers[peer] != nil else { break }
             receive(message, from: peer, &turn)
         case .childIndexFetched(let peer, let cid, let index):
             childIndexFetched(index, cid: cid, from: peer, &turn)
-        case .headersServed(let peer, let requestID):
-            guard sync.peers[peer]?.serving == requestID else { break }
+        case .headersServed(let peer, let token):
+            guard sync.peers[peer]?.serving == token else { break }
             sync.peers[peer]?.serving = nil
-            if let queued = sync.peers[peer]?.queued {
-                sync.peers[peer]?.queued = nil
-                serve(queued, to: peer, &turn)
+            if let next = sync.peers[peer]?.queued.first {
+                sync.peers[peer]?.queued.removeFirst()
+                serve(next, to: peer, &turn)
             }
         case .tick:
-            expireDeadlines(&turn)
+            tick(&turn)
         }
-        advance(&turn)
-        // A full page continues once its headers are weighed, so the next
-        // request names them as known.
+        drain(&turn)
+        // A full page continues once its headers are processed, so the next
+        // locator names them.
         for (peer, after) in turn.continuations {
             requestCatchUp(from: peer, after: after, &turn)
         }
@@ -194,9 +228,15 @@ public struct Core: Sendable {
         var facts: [BlockImportBatch] = []
         var effects: [Effect] = []
         /// Headers this step weighed, and the peer each came from.
-        var relays: [(entry: HeaderEntry, from: PeerID)] = []
+        var relays: [(entry: HeaderEntry, from: PeerID?)] = []
         /// Catch-up pages to continue, after the given header.
         var continuations: [(PeerID, HeaderKey)] = []
+        /// Pending headers to look at again, smallest priority first.
+        var dirty = Heap<(priority: UInt256, cid: String)> {
+            $0.priority != $1.priority ? $0.priority < $1.priority : $0.cid < $1.cid
+        }
+
+        init(now: Int64) { self.now = now }
     }
 
     /// Persist first, then publish, then relay, then everything else:
@@ -230,8 +270,25 @@ public struct Core: Sendable {
     }
 
     private mutating func disconnect(_ peer: PeerID, _ reason: DisconnectReason, _ turn: inout Turn) {
-        sync.drop(peer)
+        guard sync.peers[peer] != nil else { return }
+        drop(peer, &turn)
         turn.effects.append(.disconnect(peer, reason))
+    }
+
+    /// Forget `peer`. Each pending header it announced moves to its next
+    /// live announcer.
+    private mutating func drop(_ peer: PeerID, _ turn: inout Turn) {
+        guard sync.peers.removeValue(forKey: peer) != nil else { return }
+        sync.wants[WantSlot(peer: peer, parent: true)] = nil
+        sync.wants[WantSlot(peer: peer, parent: false)] = nil
+        for cid in sync.announced.removeValue(forKey: peer) ?? [] {
+            guard var header = sync.pending.entries[cid],
+                  let position = header.announcers.firstIndex(of: peer) else { continue }
+            header.announcers.remove(at: position)
+            if position == 0 { header.askedParent = false }
+            sync.pending.entries[cid] = header
+            if position == 0 { dirty(cid, &turn) }
+        }
     }
 
     private mutating func nextRequestID() -> UInt64 {
@@ -239,78 +296,134 @@ public struct Core: Sendable {
         return sync.nextRequestID
     }
 
+    private func dirty(_ cid: String, _ turn: inout Turn) {
+        turn.dirty.push((sync.pending.priority[cid] ?? .max, cid))
+    }
+
     // MARK: - Serving
 
     private mutating func receive(_ message: SyncMessage, from peer: PeerID, _ turn: inout Turn) {
         switch message {
-        case .getHeaders(let request):
-            serve(request, to: peer, &turn)
-        case .getHeader(let requestID, let cid):
-            let held = cid != genesis && tree.contains(blockHash: cid)
-            turn.effects.append(.serveHeaders(
-                peer, requestID: requestID, blockCIDs: held ? [cid] : [], hasMore: false
-            ))
+        case .getHeaders, .getHeader:
+            if sync.peers[peer]?.serving == nil {
+                serve(message, to: peer, &turn)
+            } else if (sync.peers[peer]?.queued.count ?? 0) < 2 {
+                sync.peers[peer]?.queued.append(message)
+            }
         case .headers(let response):
             receive(response, from: peer, &turn)
         }
     }
 
-    /// Serve every weighed header that is neither known to the requester nor
-    /// an ancestor of a known one, in `HeaderKey` order after the request's
-    /// cursor, one page at a time per peer (a request that arrives while a
-    /// page is still being sent waits for it).
-    private mutating func serve(_ request: HeadersRequest, to peer: PeerID, _ turn: inout Turn) {
-        guard request.known.count <= HeadersRequest.maximumKnown else { return }
-        guard sync.peers[peer]?.serving == nil else {
-            sync.peers[peer]?.queued = request
+    /// Answer one request through the peer's serving slot.
+    private mutating func serve(_ message: SyncMessage, to peer: PeerID, _ turn: inout Turn) {
+        let requestID: UInt64
+        let page: (cids: [String], hasMore: Bool)
+        switch message {
+        case .getHeader(let id, let cid):
+            requestID = id
+            page = (cid != genesis && index.contains(cid) ? [cid] : [], false)
+        case .getHeaders(let request):
+            guard request.known.count <= HeadersRequest.maximumKnown else { return }
+            requestID = request.requestID
+            page = catchUpPage(request)
+        case .headers:
             return
         }
-        var skip: Set<String> = [genesis]
-        for known in request.known where tree.contains(blockHash: known) {
-            var cursor: String? = known
-            while let hash = cursor, skip.insert(hash).inserted {
-                cursor = tree.getConsensusBlock(hash: hash)?.parentBlockHash
-            }
-        }
-        var keys: [HeaderKey] = []
-        var stack = [genesis]
-        while let hash = stack.popLast() {
-            guard let meta = tree.getConsensusBlock(hash: hash) else { continue }
-            stack += meta.childHashes
-            let key = HeaderKey(height: meta.blockHeight, cid: hash)
-            if !skip.contains(hash), request.after.map({ key > $0 }) ?? true {
-                keys.append(key)
-            }
-        }
-        keys.sort()
-        let page = keys.prefix(config.maxHeadersPerPage)
-        sync.peers[peer]?.serving = request.requestID
+        let token = sync.nextToken
+        sync.nextToken += 1
+        sync.peers[peer]?.serving = token
         turn.effects.append(.serveHeaders(
-            peer,
-            requestID: request.requestID,
-            blockCIDs: page.map(\.cid),
-            hasMore: keys.count > page.count
+            peer, token: token, requestID: requestID, blockCIDs: page.cids, hasMore: page.hasMore
         ))
+    }
+
+    /// The weighed headers after the requester's locator: from the deepest
+    /// locator entry we hold, less `antiDoSBlocks` heights (side branches
+    /// that fork just below it; deeper ones would be under the requester's
+    /// threshold), in `HeaderKey` order after the cursor, skipping every
+    /// ancestor of a held locator entry. The work is O(page + locator ×
+    /// window), never O(graph).
+    mutating func catchUpPage(_ request: HeadersRequest) -> (cids: [String], hasMore: Bool) {
+        let held = request.known.filter(index.contains)
+        let fork = held.compactMap(index.key).max()
+        let startHeight: UInt64
+        if let after = request.after {
+            startHeight = after.height
+        } else {
+            let top = (fork?.height ?? 0) + 1
+            startHeight = max(1, top > config.antiDoSBlocks ? top - config.antiDoSBlocks : 1)
+        }
+        var skip: Set<String> = [genesis]
+        for known in held {
+            var current: String? = known
+            while let hash = current, let height = index.height[hash], height >= startHeight,
+                  skip.insert(hash).inserted {
+                current = index.parent[hash]
+            }
+        }
+        let start = request.after ?? HeaderKey(height: startHeight, cid: "")
+        var cids: [String] = []
+        sync.lastServeScanned = skip.count
+        for key in index.keys(from: start, strictlyAfter: request.after != nil) {
+            sync.lastServeScanned += 1
+            guard !skip.contains(key.cid) else { continue }
+            if cids.count == config.maxHeadersPerPage { return (cids, true) }
+            cids.append(key.cid)
+        }
+        return (cids, false)
     }
 
     // MARK: - Catch-up
 
-    /// Ask `peer` for its weighed headers after our leaves (the highest
-    /// first, up to the request's bound), continuing after `after`.
+    /// A Bitcoin-style locator: the best chain from its tip (ten, then
+    /// doubling steps back to genesis), then our leaves, highest first, each
+    /// with doubling steps back until the best chain; at most
+    /// `HeadersRequest.maximumKnown` entries.
+    func locator() -> [String] {
+        let limit = HeadersRequest.maximumKnown
+        var entries: [String] = []
+        var seen = Set<String>()
+        func add(_ cid: String?) {
+            guard let cid, entries.count < limit, seen.insert(cid).inserted else { return }
+            entries.append(cid)
+        }
+        let tipHeight = index.height[tree.canonicalTip] ?? 0
+        var height = tipHeight
+        var step: UInt64 = 1
+        while true {
+            add(tree.canonicalBlockHash(atHeight: height))
+            if height == 0 { break }
+            if entries.count >= 10 { step *= 2 }
+            height = height > step ? height - step : 0
+        }
+        let leaves = index.leaves.compactMap(index.key).sorted { $0 > $1 }
+        for leaf in leaves where entries.count < limit && !tree.isCanonical(hash: leaf.cid) {
+            add(leaf.cid)
+            var step: UInt64 = 1
+            var height = leaf.height
+            while height > step, entries.count < limit {
+                height -= step
+                step *= 2
+                guard let ancestor = index.ancestor(of: leaf.cid, atHeight: height) else { break }
+                if tree.isCanonical(hash: ancestor) { break }
+                add(ancestor)
+            }
+        }
+        return entries
+    }
+
+    /// Ask `peer` for its weighed headers after our locator, continuing
+    /// after `after`.
     private mutating func requestCatchUp(from peer: PeerID, after: HeaderKey?, _ turn: inout Turn) {
         guard let state = sync.peers[peer], state.catchUp == nil else { return }
-        let tree = self.tree
-        let known = leaves
-            .map { HeaderKey(height: tree.headerSnapshot(of: $0)?.tipHeight ?? 0, cid: $0) }
-            .sorted { $0 > $1 }
-            .prefix(HeadersRequest.maximumKnown)
-            .map(\.cid)
         let requestID = nextRequestID()
         sync.peers[peer]?.catchUp = InFlightPage(
             requestID: requestID, after: after, deadline: turn.now + config.headersTimeout
         )
+        sync.peers[peer]?.nextCatchUp = turn.now + config.catchUpInterval
         turn.effects.append(.send(peer, .getHeaders(HeadersRequest(
-            requestID: requestID, known: known, after: after
+            requestID: requestID, known: locator(), after: after
         ))))
     }
 
@@ -318,12 +431,14 @@ public struct Core: Sendable {
     /// it. All take the same path; only a page continues.
     private mutating func receive(_ response: HeadersResponse, from peer: PeerID, _ turn: inout Turn) {
         var page: InFlightPage?
+        var answeredParent = false
         if response.requestID != 0 {
             if let inFlight = sync.peers[peer]?.catchUp, inFlight.requestID == response.requestID {
                 sync.peers[peer]?.catchUp = nil
                 page = inFlight
             } else if sync.peers[peer]?.parentRequest?.requestID == response.requestID {
                 sync.peers[peer]?.parentRequest = nil
+                answeredParent = true
             } else {
                 return
             }
@@ -333,6 +448,7 @@ public struct Core: Sendable {
             guard let cid = accept(entry, from: peer, &turn) else { return }
             last = HeaderKey(height: entry.block.height, cid: cid)
         }
+        if answeredParent { nextWant(of: peer, parent: true, &turn) }
         // The cursor only climbs, so a page that repeats itself ends here.
         if let page, response.hasMore, let last, page.after.map({ last > $0 }) ?? true {
             turn.continuations.append((peer, last))
@@ -349,99 +465,171 @@ public struct Core: Sendable {
             disconnect(peer, .proofOfWorkInvalid, &turn)
             return nil
         }
-        if tree.contains(blockHash: cid) { return cid }
+        if index.contains(cid) { return cid }
         // Structural, never blame: an inline child index that is not the one
         // the block commits, or a genesis (only bootstrap admits one).
         if let children = entry.children, Self.cid(of: children) != entry.block.children.rawCID {
             return cid
         }
-        guard entry.block.parent != nil else { return cid }
-        if let held = sync.pending.entries[cid] {
-            if let children = entry.children {
+        guard let parent = entry.block.parent?.rawCID else { return cid }
+        if var held = sync.pending.entries[cid] {
+            if !held.announcers.contains(peer) {
+                if held.announcers.isEmpty { held.askedParent = false }
+                held.announcers.append(peer)
+                sync.pending.entries[cid] = held
+                sync.announced[peer, default: []].insert(cid)
+            }
+            if let children = entry.children, held.children == nil {
                 sync.pending.setChildren(children, of: cid, bytes: Self.size(of: children))
+                sync.pending.evict(to: config.pendingBudget)
             }
-            if sync.peers[held.source] == nil {
-                sync.pending.entries[cid]?.source = peer
-                sync.pending.entries[cid]?.askedParent = false
-            }
+            dirty(cid, &turn)
             return cid
         }
         guard ChainTree.rootWork(of: entry.block) != nil else {
             disconnect(peer, .proofOfWorkInvalid, &turn)
             return nil
         }
-        let header = PendingHeader(
+        let work = workForTarget(entry.block.target)
+        let base = index.chainWork[parent] ?? sync.pending.entries[parent]?.chainWork
+        sync.pending.insert(PendingHeader(
             blockCID: cid,
             block: entry.block,
             children: entry.children,
             hash: entry.block.proofOfWorkHash(),
             bytes: Self.size(of: entry.block) + (entry.children.map(Self.size) ?? 0),
-            source: peer
-        )
-        // A header that can be weighed now is, so a page that links never
-        // waits in (or is evicted from) the pending queue.
-        sync.pending.insert(header)
-        if isReady(header, turn.now) {
-            _ = insert(header, &turn)
-        } else {
-            sync.pending.evict(to: config.pendingBudget)
-        }
-        return sync.peers[peer] == nil ? nil : cid
+            announcers: [peer],
+            chainWork: base.map { $0 + work }
+        ))
+        sync.announced[peer, default: []].insert(cid)
+        if base != nil { linkDescendants(of: cid, &turn) }
+        dirty(cid, &turn)
+        sync.pending.evict(to: config.pendingBudget)
+        return cid
     }
 
-    /// Weigh every pending header whose parent is weighed, smallest priority
-    /// first (each weighed header readies its pending children), then ask
-    /// for what the rest lack: a child index of the peer that sent the
-    /// header, or its unknown parent.
-    private mutating func advance(_ turn: inout Turn) {
-        guard !sync.pending.entries.isEmpty else { return }
-        let priority = sync.pending.priorities()
-        let before: (String, String) -> Bool = { a, b in
-            let (pa, pb) = (priority[a] ?? .max, priority[b] ?? .max)
-            return pa != pb ? pa < pb : a < b
+    /// A pending header learned its chain work: pass it down to the pending
+    /// headers that waited on it.
+    private mutating func linkDescendants(of cid: String, _ turn: inout Turn) {
+        var stack = [cid]
+        while let parent = stack.popLast() {
+            guard let base = sync.pending.entries[parent]?.chainWork else { continue }
+            for child in sync.pending.childrenOf[parent] ?? [] {
+                guard let header = sync.pending.entries[child], header.chainWork == nil else { continue }
+                sync.pending.entries[child]?.chainWork = base + header.work
+                dirty(child, &turn)
+                stack.append(child)
+            }
         }
-        var childrenOf: [String: [String]] = [:]
-        for header in sync.pending.entries.values {
-            if let parent = header.parent { childrenOf[parent, default: []].append(header.blockCID) }
+    }
+
+    // MARK: - Processing pending headers
+
+    /// Look at every dirty pending header, smallest priority first; each one
+    /// weighed dirties its pending children.
+    private mutating func drain(_ turn: inout Turn) {
+        while let next = turn.dirty.pop() {
+            evaluate(next.cid, &turn)
         }
-        var ready = sync.pending.entries.values.filter { isReady($0, turn.now) }.map(\.blockCID)
-        while !ready.isEmpty {
-            ready.sort { before($1, $0) }
-            let cid = ready.removeLast()
-            guard let header = sync.pending.entries[cid], isReady(header, turn.now) else { continue }
-            if insert(header, &turn) {
-                ready += (childrenOf[cid] ?? []).filter {
-                    sync.pending.entries[$0].map { isReady($0, turn.now) } ?? false
+    }
+
+    /// Whether a branch of cumulative `work` clears the anti-DoS threshold:
+    /// `minimumChainWork`, and our best tip's work less `antiDoSBlocks` of
+    /// the tip's block work.
+    public func clearsThreshold(_ work: WorkSum) -> Bool {
+        guard work >= WorkSum(config.minimumChainWork) else { return false }
+        guard let tipWork = index.chainWork[tree.canonicalTip],
+              let tipTarget = tree.headerSnapshot(of: tree.canonicalTip)?.target else { return true }
+        let (slack, overflow) = workForTarget(tipTarget)
+            .multipliedReportingOverflow(by: UInt256(config.antiDoSBlocks))
+        return overflow || work + slack >= tipWork
+    }
+
+    private mutating func evaluate(_ cid: String, _ turn: inout Turn) {
+        guard let header = sync.pending.entries[cid], let parent = header.parent else { return }
+        if let time = header.notBefore, time > turn.now { return }
+        if index.contains(parent) {
+            guard header.eligible || header.chainWork.map(clearsThreshold) == true else { return }
+            if header.children == nil {
+                if scheduleCheck(header, turn.now, &turn) {
+                    want(header, parent: false, &turn)
                 }
+            } else {
+                insert(header, &turn)
             }
-        }
-        for cid in sync.pending.entries.keys.sorted(by: before) {
-            guard let header = sync.pending.entries[cid], sync.peers[header.source] != nil,
-                  let parent = header.parent else { continue }
-            if tree.contains(blockHash: parent) {
-                if header.children == nil { awaitChildIndex(of: header, &turn) }
-            } else if sync.pending.entries[parent] == nil, !header.askedParent,
-                      sync.peers[header.source]?.parentRequest == nil {
-                let requestID = nextRequestID()
-                sync.peers[header.source]?.parentRequest = InFlightHeader(
-                    requestID: requestID, cid: parent, deadline: turn.now + config.headersTimeout
-                )
-                sync.pending.entries[cid]?.askedParent = true
-                turn.effects.append(.send(header.source, .getHeader(requestID: requestID, cid: parent)))
+        } else if sync.pending.entries[parent] != nil {
+            if !header.eligible, let work = header.chainWork, clearsThreshold(work) {
+                markEligible(from: cid, &turn)
             }
+        } else if !header.askedParent {
+            want(header, parent: true, &turn)
         }
     }
 
-    private func isReady(_ header: PendingHeader, _ now: Int64) -> Bool {
-        header.children != nil && (header.notBefore ?? .min) <= now
-            && header.parent.map { tree.contains(blockHash: $0) } == true
+    /// A descendant carried the branch over the threshold: mark the pending
+    /// path up to the weighed graph eligible, and look at its top again.
+    private mutating func markEligible(from cid: String, _ turn: inout Turn) {
+        var current = cid
+        while let header = sync.pending.entries[current], !header.eligible {
+            sync.pending.entries[current]?.eligible = true
+            guard let parent = header.parent else { return }
+            if index.contains(parent) {
+                dirty(current, &turn)
+                return
+            }
+            current = parent
+        }
+    }
+
+    /// The schedule half of the proof-of-work check, before a child-index
+    /// fetch may be spent on the header: target, `nextTarget` and timestamp
+    /// against its weighed parent. Returns whether to go on.
+    private mutating func scheduleCheck(_ header: PendingHeader, _ now: Int64, _ turn: inout Turn) -> Bool {
+        guard let parentHash = header.parent, let parent = tree.headerSnapshot(of: parentHash),
+              let spec = tree.spec else { return false }
+        let anchor = tree.difficultyAnchor(forBlockHash: parentHash)
+        do {
+            let admission = try header.block.headerAdmission(
+                parent: HeaderLinkageParent(
+                    height: parent.tipHeight,
+                    timestamp: parent.timestamp,
+                    target: parent.target,
+                    nextTarget: parent.nextTarget,
+                    postStateCID: parent.postStateCID,
+                    specCID: parent.specCID
+                ),
+                spec: spec,
+                inheritedAnchor: { anchor },
+                validationContext: ValidationContext(nowMilliseconds: now)
+            )
+            switch admission {
+            case .linked, .excluded:
+                return true
+            case .offSchedule:
+                sync.pending.remove(header.blockCID)
+                if let source = header.source { disconnect(source, .proofOfWorkInvalid, &turn) }
+            case .malformed:
+                sync.pending.remove(header.blockCID)
+            }
+        } catch BlockValidationError.notYetValid {
+            hold(header, until: header.block.timestamp)
+        } catch {
+            sync.pending.remove(header.blockCID)
+        }
+        return false
+    }
+
+    private mutating func hold(_ header: PendingHeader, until time: Int64) {
+        sync.pending.entries[header.blockCID]?.notBefore = time
+        sync.held.push((time, header.blockCID))
     }
 
     /// Weigh one header. Only `.proofOfWorkInvalid` blames its source; a
     /// header from this node's future waits for its time; anything else is
-    /// dropped. Returns whether the header is now weighed.
-    private mutating func insert(_ header: PendingHeader, _ turn: inout Turn) -> Bool {
-        guard let children = header.children else { return false }
+    /// dropped.
+    private mutating func insert(_ header: PendingHeader, _ turn: inout Turn) {
+        guard let children = header.children else { return }
+        let cid = header.blockCID
         let admission = tree.insertRootHeader(
             header.block,
             childIndex: children,
@@ -449,44 +637,77 @@ public struct Core: Sendable {
         )
         switch admission {
         case .applied(let update):
-            sync.pending.remove(header.blockCID)
-            turn.headers.append(StoredHeader(blockCID: header.blockCID, block: header.block, children: children))
+            let waiting = sync.pending.childrenOf[cid] ?? []
+            sync.pending.remove(cid)
+            turn.headers.append(StoredHeader(blockCID: cid, block: header.block, children: children))
             turn.facts += update.batches
-            if let parent = header.parent { leaves.remove(parent) }
-            leaves.insert(header.blockCID)
+            index.add(cid, parent: header.parent, height: header.block.height, work: header.work)
             turn.relays.append((config.entry(header.block, children: children), from: header.source))
-            return true
+            for child in waiting { dirty(child, &turn) }
         case .duplicate:
-            sync.pending.remove(header.blockCID)
-            return true
+            let waiting = sync.pending.childrenOf[cid] ?? []
+            sync.pending.remove(cid)
+            for child in waiting { dirty(child, &turn) }
         case .rejected(.proofOfWorkInvalid):
-            sync.pending.remove(header.blockCID)
-            if sync.peers[header.source] != nil {
-                disconnect(header.source, .proofOfWorkInvalid, &turn)
-            }
+            sync.pending.remove(cid)
+            if let source = header.source { disconnect(source, .proofOfWorkInvalid, &turn) }
         case .rejected(.notYetValid) where header.block.timestamp > turn.now:
-            sync.pending.entries[header.blockCID]?.notBefore = header.block.timestamp
+            hold(header, until: header.block.timestamp)
         case .rejected:
-            sync.pending.remove(header.blockCID)
+            sync.pending.remove(cid)
         }
-        return false
+    }
+
+    // MARK: - Requests for what a pending header lacks
+
+    /// Ask the header's first announcer for its parent or its child index,
+    /// or queue the ask until that request slot frees. A header no live
+    /// peer announced starts a catch-up from another peer instead.
+    private mutating func want(_ header: PendingHeader, parent: Bool, _ turn: inout Turn) {
+        guard let source = header.source, let state = sync.peers[source] else {
+            if let other = sync.peers.keys.sorted().first(where: { sync.peers[$0]?.catchUp == nil }) {
+                requestCatchUp(from: other, after: nil, &turn)
+            }
+            return
+        }
+        let cid = header.blockCID
+        if parent {
+            guard let parentHash = header.parent else { return }
+            guard state.parentRequest == nil else { return queueWant(cid, of: source, parent: true) }
+            let requestID = nextRequestID()
+            sync.peers[source]?.parentRequest = InFlightHeader(
+                requestID: requestID, cid: parentHash, deadline: turn.now + config.headersTimeout
+            )
+            sync.pending.entries[cid]?.askedParent = true
+            turn.effects.append(.send(source, .getHeader(requestID: requestID, cid: parentHash)))
+        } else {
+            guard state.childIndex == nil else { return queueWant(cid, of: source, parent: false) }
+            let children = header.block.children.rawCID
+            sync.peers[source]?.childIndex = InFlightFetch(
+                cid: children, deadline: turn.now + config.headersTimeout
+            )
+            turn.effects.append(.fetchByCID(source, cid: children))
+        }
+    }
+
+    private mutating func queueWant(_ cid: String, of peer: PeerID, parent: Bool) {
+        let key = WantSlot(peer: peer, parent: parent)
+        sync.wants[key, default: Heap { $0.priority != $1.priority ? $0.priority < $1.priority : $0.cid < $1.cid }]
+            .push((sync.pending.priority[cid] ?? .max, cid))
+    }
+
+    /// A request slot of `peer` freed: look again at the queued header of
+    /// smallest priority that still waits on it.
+    private mutating func nextWant(of peer: PeerID, parent: Bool, _ turn: inout Turn) {
+        let key = WantSlot(peer: peer, parent: parent)
+        while let next = sync.wants[key]?.pop() {
+            guard let header = sync.pending.entries[next.cid], header.source == peer else { continue }
+            evaluate(next.cid, &turn)
+            return
+        }
     }
 
     // MARK: - Child indexes
-
-    /// Fetch a header's child index from the peer that sent the header: one
-    /// wait per peer and per CID, up to `maxAwaitingChildIndex`. A taken slot
-    /// is tried again on a later step.
-    private mutating func awaitChildIndex(of header: PendingHeader, _ turn: inout Turn) {
-        let cid = header.block.children.rawCID
-        guard sync.awaitingChildIndex[cid] == nil,
-              sync.awaitingChildIndex.count < config.maxAwaitingChildIndex,
-              !sync.awaitingChildIndex.values.contains(where: { $0.peer == header.source }) else { return }
-        sync.awaitingChildIndex[cid] = AwaitingChildIndex(
-            peer: header.source, deadline: turn.now + config.headersTimeout
-        )
-        turn.effects.append(.fetchByCID(header.source, cid: cid))
-    }
 
     private mutating func childIndexFetched(
         _ index: ChildIndex?,
@@ -494,15 +715,16 @@ public struct Core: Sendable {
         from peer: PeerID,
         _ turn: inout Turn
     ) {
-        guard let waiting = sync.awaitingChildIndex[cid], waiting.peer == peer else { return }
-        sync.awaitingChildIndex[cid] = nil
-        let committing = sync.pending.entries.values.filter { $0.block.children.rawCID == cid }
+        guard let waiting = sync.peers[peer]?.childIndex, waiting.cid == cid else { return }
+        sync.peers[peer]?.childIndex = nil
+        let committing = sync.pending.committing(cid)
         guard let index else {
-            // The peer lacks what its own header commits: drop that header,
-            // never blame.
+            // The peer definitively lacks what its own header commits: drop
+            // that header, never blame.
             for header in committing where header.source == peer {
                 sync.pending.remove(header.blockCID)
             }
+            nextWant(of: peer, parent: false, &turn)
             return
         }
         guard Self.cid(of: index) == cid else {
@@ -511,23 +733,32 @@ public struct Core: Sendable {
         }
         for header in committing {
             sync.pending.setChildren(index, of: header.blockCID, bytes: Self.size(of: index))
+            dirty(header.blockCID, &turn)
         }
         sync.pending.evict(to: config.pendingBudget)
+        nextWant(of: peer, parent: false, &turn)
     }
 
-    // MARK: - Deadlines
+    // MARK: - Time
 
     /// A peer whose request passed its deadline is stalling: disconnect it
-    /// to free the slot. Never a ban.
-    private mutating func expireDeadlines(_ turn: inout Turn) {
+    /// to free the slot, never a ban. Held headers whose time came are looked
+    /// at again, and each peer due a repair catch-up is asked.
+    private mutating func tick(_ turn: inout Turn) {
         let now = turn.now
-        var stalled = Set(sync.awaitingChildIndex.values.filter { $0.deadline <= now }.map(\.peer))
-        for (peer, state) in sync.peers {
-            let deadlines = [state.catchUp?.deadline, state.parentRequest?.deadline].compactMap { $0 }
-            if deadlines.contains(where: { $0 <= now }) { stalled.insert(peer) }
-        }
-        for peer in stalled.sorted() where sync.peers[peer] != nil {
+        for (peer, state) in sync.peers.sorted(by: { $0.key < $1.key })
+        where state.deadlines.contains(where: { $0 <= now }) {
             disconnect(peer, .stalled, &turn)
+        }
+        while let first = sync.held.first, first.time <= now {
+            _ = sync.held.pop()
+            if sync.pending.entries[first.cid]?.notBefore == first.time {
+                sync.pending.entries[first.cid]?.notBefore = nil
+                dirty(first.cid, &turn)
+            }
+        }
+        for peer in sync.peers.keys.sorted() where (sync.peers[peer]?.nextCatchUp ?? .max) <= now {
+            requestCatchUp(from: peer, after: nil, &turn)
         }
     }
 
@@ -543,5 +774,9 @@ public struct Core: Sendable {
 
     static func size(of index: ChildIndex) -> Int {
         index.toData()?.count ?? 0
+    }
+
+    static func size(of entry: HeaderEntry) -> Int {
+        size(of: entry.block) + (entry.children.map(size) ?? 0)
     }
 }

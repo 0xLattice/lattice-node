@@ -180,17 +180,19 @@ final class SimulationTests: XCTestCase {
         config.liar = false
         config.spamBlocks = 40
         config.garbage = 64
-        config.pendingBudget = 8 * 1_024
+        config.pendingBudget = 64 * 1_024
         config.drop = 0
         config.duplicate = 0
         var simulator = try await Simulator.make(config)
         let world = simulator.world
-        let garbageBytes = world.garbage.compactMap { world.blocks[$0]?.block.toData()?.count }.reduce(0, +)
+        let garbageBytes = world.garbage.compactMap { world.blocks[$0] }
+            .map { ($0.block.toData()?.count ?? 0) + ($0.children.toData()?.count ?? 0) }.reduce(0, +)
         XCTAssertGreaterThan(garbageBytes, config.pendingBudget, "the flood must overrun the budget")
         let report = try simulator.run()
         XCTAssertLessThanOrEqual(report.pendingPeak, config.pendingBudget)
         let spammer = report.disconnects.filter { $0.peer == "spammer" }
         XCTAssertTrue(spammer.contains { $0.reason == .proofOfWorkInvalid })
+        XCTAssertGreaterThan(report.pendingPeak, 0)
         XCTAssertTrue(report.disconnects.allSatisfy { $0.peer == "spammer" })
         for (core, held) in report.coreHeld {
             XCTAssertTrue(Set(world.spam).isSubset(of: held), "\(core) did not weigh the spam fork")
@@ -216,6 +218,71 @@ final class SimulationTests: XCTestCase {
         let report = try simulator.run()
         XCTAssertGreaterThan(report.fetches, 0)
         XCTAssertTrue(report.disconnects.isEmpty, "\(report.disconnects)")
+        assertSynced(report, TestSeed(value: config.seed))
+    }
+
+    /// Two halves mine apart for hundreds of blocks — more than 144 past the
+    /// fork — the heavier side faster, then the partition heals. Every core
+    /// converges on the heavier side within the default pending budget,
+    /// with a spammer flooding throughout.
+    func testAPartitionHealsOntoTheHeavierSideWithinTheDefaultBudget() async throws {
+        var config = SimConfig(seed: 0x5E1F)
+        config.cores = 4
+        config.honestBlocks = 10
+        config.forkProbability = 0
+        config.split = (lighter: 180, heavier: 220)
+        config.spammer = true
+        config.liar = false
+        config.drop = 0
+        config.duplicate = 0
+        config.pendingBudget = CoreConfig().pendingBudget
+        var simulator = try await Simulator.make(config)
+        let world = simulator.world
+        let heavier = try XCTUnwrap(world.sides[1].last)
+        let report = try simulator.run()
+        for (core, tip) in report.coreTips {
+            XCTAssertEqual(tip, heavier, "\(core) did not converge on the heavier side")
+        }
+        XCTAssertLessThanOrEqual(report.pendingPeak, config.pendingBudget)
+    }
+
+    /// A slow honest link: a page takes longer to transfer than the request
+    /// deadline, so the honest source is disconnected as stalled, and the
+    /// invariant catches it.
+    func testASlowHonestLinkThatMissesTheDeadlineIsCaught() async throws {
+        var config = SimConfig(seed: 0x510)
+        config.cores = 2
+        config.honestSources = 1
+        config.spammer = false
+        config.liar = false
+        config.drop = 0
+        config.slowLinks = ["core0-source0": 0.5]
+        config.pageSize = 16
+        var simulator = try await Simulator.make(config)
+        do {
+            _ = try simulator.run()
+            XCTFail("a stalled honest link went unnoticed")
+        } catch let SimulationError.invariant(detail) {
+            XCTAssertTrue(detail.contains("disconnected honest peer"), detail)
+        }
+    }
+
+    /// More leaves than a locator holds, over a ring of cores that sources
+    /// reach through one core each, with links that do not always come back.
+    func testManyLeavesOverARingWithFlakyReconnects() async throws {
+        var config = SimConfig(seed: 0x1EAF)
+        config.cores = 4
+        config.honestSources = 2
+        config.honestBlocks = 90
+        config.sideLeaves = 80
+        config.forkProbability = 0
+        config.ring = true
+        config.sourceFanout = 1
+        config.reconnectFailure = 0.5
+        config.drop = 0.005
+        var simulator = try await Simulator.make(config)
+        let report = try simulator.run()
+        XCTAssertGreaterThan(report.peakLeaves, HeadersRequest.maximumKnown)
         assertSynced(report, TestSeed(value: config.seed))
     }
 }
