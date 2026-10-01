@@ -303,13 +303,12 @@ extension Core {
     }
 
     /// A waiting header has verified work: it enters the pending queue, at
-    /// its root's achieved hash, as `accept` enters a root header.
+    /// its root's achieved hash, as `accept` enters a root header, and is
+    /// weighed at once when its parent is.
     mutating func promote(_ waiting: AwaitingProof, evidence: VerifiedChildEvidence, proof: ChildBlockProof, _ turn: inout Turn) {
         let cid = waiting.blockCID
         sync.proofs.queued.remove(cid)
         guard let parent = waiting.block.parent?.rawCID else { return }
-        let work = workForTarget(waiting.block.target)
-        let base = index.chainWork[parent] ?? sync.pending.entries[parent]?.chainWork
         let proofBytes = ((try? proof.serialize().count) ?? 0)
             + waiting.unverified.reduce(0) { $0 + ((try? $1.proof.serialize().count) ?? 0) }
         var header = PendingHeader(
@@ -319,7 +318,7 @@ extension Core {
             hash: evidence.rootHash,
             bytes: Self.size(of: waiting.block) + (waiting.children.map(Self.size) ?? 0) + proofBytes,
             announcers: waiting.announcers,
-            chainWork: base.map { $0 + work }
+            linked: index.contains(parent)
         )
         header.evidence[evidence.grindID] = evidence
         header.proofs[evidence.grindID] = proof
@@ -327,7 +326,6 @@ extension Core {
         sync.pending.insert(header)
         if !header.unverified.isEmpty { sync.proofs.queued.insert(cid) }
         for peer in waiting.announcers { sync.announced[peer, default: []].insert(cid) }
-        if base != nil { linkDescendants(of: cid, &turn) }
         dirty(cid, &turn)
         sync.evict(to: config.pendingBudget)
     }
@@ -438,8 +436,11 @@ extension Core {
             sync.proofs.awaiting[cid] = nil
             sync.proofs.queued.remove(cid)
             turn.headers.append(StoredHeader(blockCID: cid, block: block, children: children))
-            index.add(cid, parent: block.parent?.rawCID, height: block.height, work: workForTarget(block.target))
-            for child in waiting { dirty(child, &turn) }
+            index.add(cid, parent: block.parent?.rawCID, height: block.height)
+            for child in waiting {
+                sync.pending.entries[child]?.linked = true
+                dirty(child, &turn)
+            }
         }
         turn.facts += update.batches
         if let proof { turn.indexed.append((cid, proof.proof)) }

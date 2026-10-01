@@ -88,19 +88,15 @@ public struct CoreConfig: Sendable {
     public var headersTimeout: Int64
     /// A child index larger than this travels by CID instead of inline.
     public var maxInlineChildIndexBytes: Int
-    /// The operator's byte budget for headers not yet weighed. It is also
-    /// the deepest partition a node heals below the anti-DoS threshold:
-    /// about `pendingBudget / bytesPerHeader` headers of a heavier branch
-    /// can wait for the one that carries it over.
+    /// The operator's byte budget for headers not yet connected.
     public var pendingBudget: Int
+    /// How far below the fork point a catch-up also serves side branches:
+    /// a side block the requester missed while a link was down forks just
+    /// below its tip, where FindFork alone would never reach it.
+    public var sideBranchWindow: UInt64
     /// A header dated more than this beyond now is dropped (never blamed)
     /// instead of held: Bitcoin's two hours.
     public var maxFutureDrift: Int64
-    /// The anti-DoS work threshold: a branch is weighed only once its
-    /// cumulative work reaches `minimumChainWork` and our best tip's work
-    /// less `antiDoSBlocks` of the tip's block work.
-    public var minimumChainWork: UInt256
-    public var antiDoSBlocks: UInt64
     /// How often each peer is asked for a catch-up again: the repair path
     /// for anything a relay missed.
     public var catchUpInterval: Int64
@@ -113,19 +109,17 @@ public struct CoreConfig: Sendable {
         headersTimeout: Int64 = 30_000,
         maxInlineChildIndexBytes: Int = 16 * 1_024,
         pendingBudget: Int = 16 * 1_024 * 1_024,
-        minimumChainWork: UInt256 = .zero,
-        antiDoSBlocks: UInt64 = 144,
+        sideBranchWindow: UInt64 = 144,
         catchUpInterval: Int64 = 600_000,
         maxFutureDrift: Int64 = 2 * 60 * 60 * 1_000
     ) {
         self.maxFutureDrift = maxFutureDrift
+        self.sideBranchWindow = sideBranchWindow
         self.maxHeadersPerPage = maxHeadersPerPage
         self.maxPageBytes = maxPageBytes
         self.headersTimeout = headersTimeout
         self.maxInlineChildIndexBytes = maxInlineChildIndexBytes
         self.pendingBudget = pendingBudget
-        self.minimumChainWork = minimumChainWork
-        self.antiDoSBlocks = antiDoSBlocks
         self.catchUpInterval = catchUpInterval
     }
 
@@ -154,8 +148,8 @@ public struct CoreConfig: Sendable {
 /// sync as values behind one synchronous `step`. No IO, no awaits: every
 /// mutation of a step is atomic, and the effects say what the shell must do.
 ///
-/// Sync replicates the level's weighed subgraph. A header is weighed by
-/// `insertRootHeader` once its branch clears the anti-DoS work threshold;
+/// Sync replicates the level's weighed subgraph. A connected header with
+/// valid proof-of-work is weighed at once by `insertRootHeader`;
 /// every newly weighed header — excluded ones too — is relayed to every other
 /// ready peer; an unknown parent is asked by CID of a peer that sent the
 /// header; catch-up asks a peer for its weighed headers after a locator of
@@ -177,8 +171,7 @@ public struct Core: Sendable {
         var stack = [genesis]
         while let hash = stack.popLast() {
             guard let meta = tree.getConsensusBlock(hash: hash) else { continue }
-            let target = tree.headerSnapshot(of: hash)?.target ?? .max
-            index.add(hash, parent: meta.parentBlockHash, height: meta.blockHeight, work: workForTarget(target))
+            index.add(hash, parent: meta.parentBlockHash, height: meta.blockHeight)
             stack += meta.childHashes
         }
         self.tree = tree
@@ -305,7 +298,7 @@ public struct Core: Sendable {
         return effects
     }
 
-    mutating func disconnect(_ peer: PeerID, _ reason: DisconnectReason, _ turn: inout Turn) {
+    private mutating func disconnect(_ peer: PeerID, _ reason: DisconnectReason, _ turn: inout Turn) {
         guard sync.peers[peer] != nil else { return }
         drop(peer, &turn)
         turn.effects.append(.disconnect(peer, reason))
@@ -375,24 +368,17 @@ public struct Core: Sendable {
         ))
     }
 
-    /// The weighed headers after the requester's locator: from the highest
-    /// locator entry on our best chain (Bitcoin's FindFork), less
-    /// `antiDoSBlocks` heights (side branches
-    /// that fork just below it; deeper ones would be under the requester's
-    /// threshold), in `HeaderKey` order after the cursor, skipping every
-    /// ancestor of a held locator entry. The work is O(page + locator ×
-    /// window), never O(graph).
+    /// The weighed headers after the requester's locator: from Bitcoin's
+    /// FindFork (the highest locator entry on our best chain) less
+    /// `sideBranchWindow` heights, in `HeaderKey` order after the cursor,
+    /// skipping every ancestor of a held locator entry. The work is
+    /// O(page + locator × window), never O(graph).
     mutating func catchUpPage(_ request: HeadersRequest) -> (cids: [String], hasMore: Bool) {
         let held = request.known.filter(index.contains)
-        // Bitcoin's FindFork: the highest held entry on our best chain.
         let fork = held.filter { tree.isCanonical(hash: $0) }.compactMap(index.key).max()
-        let startHeight: UInt64
-        if let after = request.after {
-            startHeight = after.height
-        } else {
-            let top = (fork?.height ?? 0) + 1
-            startHeight = max(1, top > config.antiDoSBlocks ? top - config.antiDoSBlocks : 1)
-        }
+        let top = (fork?.height ?? 0) + 1
+        let startHeight = request.after?.height
+            ?? (top > config.sideBranchWindow ? max(1, top - config.sideBranchWindow) : 1)
         var skip: Set<String> = [genesis]
         for known in held {
             var current: String? = known
@@ -540,8 +526,6 @@ public struct Core: Sendable {
             disconnect(peer, .proofOfWorkInvalid, &turn)
             return nil
         }
-        let work = workForTarget(entry.block.target)
-        let base = index.chainWork[parent] ?? sync.pending.entries[parent]?.chainWork
         sync.pending.insert(PendingHeader(
             blockCID: cid,
             block: entry.block,
@@ -549,28 +533,12 @@ public struct Core: Sendable {
             hash: entry.block.proofOfWorkHash(),
             bytes: Self.size(of: entry.block) + (entry.children.map(Self.size) ?? 0),
             announcers: [peer],
-            chainWork: base.map { $0 + work }
+            linked: index.contains(parent)
         ))
         sync.announced[peer, default: []].insert(cid)
-        if base != nil { linkDescendants(of: cid, &turn) }
         dirty(cid, &turn)
         sync.evict(to: config.pendingBudget)
         return cid
-    }
-
-    /// A pending header learned its chain work: pass it down to the pending
-    /// headers that waited on it.
-    mutating func linkDescendants(of cid: String, _ turn: inout Turn) {
-        var stack = [cid]
-        while let parent = stack.popLast() {
-            guard let base = sync.pending.entries[parent]?.chainWork else { continue }
-            for child in sync.pending.childrenOf[parent] ?? [] {
-                guard let header = sync.pending.entries[child], header.chainWork == nil else { continue }
-                sync.pending.entries[child]?.chainWork = base + header.work
-                dirty(child, &turn)
-                stack.append(child)
-            }
-        }
     }
 
     // MARK: - Processing pending headers
@@ -583,23 +551,10 @@ public struct Core: Sendable {
         }
     }
 
-    /// Whether a branch of cumulative `work` clears the anti-DoS threshold:
-    /// `minimumChainWork`, and our best tip's work less `antiDoSBlocks` of
-    /// the tip's block work.
-    public func clearsThreshold(_ work: WorkSum) -> Bool {
-        guard work >= WorkSum(config.minimumChainWork) else { return false }
-        guard let tipWork = index.chainWork[tree.canonicalTip],
-              let tipTarget = tree.headerSnapshot(of: tree.canonicalTip)?.target else { return true }
-        let (slack, overflow) = workForTarget(tipTarget)
-            .multipliedReportingOverflow(by: UInt256(config.antiDoSBlocks))
-        return overflow || work + slack >= tipWork
-    }
-
     private mutating func evaluate(_ cid: String, _ turn: inout Turn) {
         guard let header = sync.pending.entries[cid], let parent = header.parent else { return }
         if let time = header.notBefore, time > turn.now { return }
         if index.contains(parent) {
-            guard header.eligible || header.chainWork.map(clearsThreshold) == true else { return }
             if header.children == nil {
                 if scheduleCheck(header, turn.now, &turn) {
                     want(header, parent: false, &turn)
@@ -607,27 +562,8 @@ public struct Core: Sendable {
             } else {
                 insert(header, &turn)
             }
-        } else if sync.pending.entries[parent] != nil {
-            if !header.eligible, let work = header.chainWork, clearsThreshold(work) {
-                markEligible(from: cid, &turn)
-            }
-        } else if !header.askedParent {
+        } else if sync.pending.entries[parent] == nil, !header.askedParent {
             want(header, parent: true, &turn)
-        }
-    }
-
-    /// A descendant carried the branch over the threshold: mark the pending
-    /// path up to the weighed graph eligible, and look at its top again.
-    private mutating func markEligible(from cid: String, _ turn: inout Turn) {
-        var current = cid
-        while let header = sync.pending.entries[current], !header.eligible {
-            sync.pending.entries[current]?.eligible = true
-            guard let parent = header.parent else { return }
-            if index.contains(parent) {
-                dirty(current, &turn)
-                return
-            }
-            current = parent
         }
     }
 
@@ -690,10 +626,13 @@ public struct Core: Sendable {
             sync.removePending(cid)
             turn.headers.append(StoredHeader(blockCID: cid, block: header.block, children: children))
             turn.facts += update.batches
-            index.add(cid, parent: header.parent, height: header.block.height, work: header.work)
+            index.add(cid, parent: header.parent, height: header.block.height)
             let proofs = creditRemainingProofs(of: header, &turn)
             turn.relays.append((config.entry(header.block, children: children, proofs: proofs), from: header.source))
-            for child in waiting { dirty(child, &turn) }
+            for child in waiting {
+                sync.pending.entries[child]?.linked = true
+                dirty(child, &turn)
+            }
         case .duplicate:
             let waiting = sync.pending.childrenOf[cid] ?? []
             sync.removePending(cid)
