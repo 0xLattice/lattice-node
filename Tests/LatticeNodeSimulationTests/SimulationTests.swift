@@ -18,7 +18,7 @@ final class SimulationTests: XCTestCase {
             var simulator = try await Simulator.make(.random(seed: seed))
             let report: SimReport
             do {
-                report = try simulator.run()
+                report = try await simulator.run()
             } catch {
                 return XCTFail("\(error) — replay with \(replay)")
             }
@@ -51,8 +51,8 @@ final class SimulationTests: XCTestCase {
         config.maxFutureDrift = 120_000
         var a = try await Simulator.make(config)
         var b = try await Simulator.make(config)
-        let first = try a.run()
-        let second = try b.run()
+        let first = try await a.run()
+        let second = try await b.run()
         XCTAssertEqual(first.trace, second.trace)
         XCTAssertEqual(first.steps, second.steps)
         XCTAssertEqual(first.coreTips, second.coreTips)
@@ -76,7 +76,7 @@ final class SimulationTests: XCTestCase {
             var simulator = try await Simulator.make(config)
             plant(&simulator.faults)
             do {
-                _ = try simulator.run()
+                _ = try await simulator.run()
             } catch let SimulationError.invariant(detail) {
                 XCTAssertTrue(detail.contains(expected), detail, line: line)
                 return
@@ -114,7 +114,7 @@ final class SimulationTests: XCTestCase {
         config.drop = 0
         config.duplicate = 0
         var simulator = try await Simulator.make(config)
-        let report = try simulator.run()
+        let report = try await simulator.run()
         for (core, held) in report.coreHeld {
             XCTAssertTrue(held.contains(simulator.world.uncle), "\(core) never weighed the uncle")
         }
@@ -141,7 +141,7 @@ final class SimulationTests: XCTestCase {
         let resumed = honest[11].block.target
         XCTAssertGreaterThan(resumed, tip.multipliedReportingOverflow(by: 16).partialValue,
                              "the block after the stall is more than 16 times easier than its parent")
-        let report = try simulator.run()
+        let report = try await simulator.run()
         XCTAssertTrue(report.disconnects.isEmpty, "\(report.disconnects)")
         for (core, tip) in report.coreTips {
             XCTAssertEqual(tip, honest.last?.cid, "\(core) did not advance past the stall")
@@ -159,7 +159,7 @@ final class SimulationTests: XCTestCase {
         config.liar = true
         config.honestBlocks = 25
         var simulator = try await Simulator.make(config)
-        let report = try simulator.run()
+        let report = try await simulator.run()
         let world = simulator.world
         let liar = report.disconnects.filter { $0.peer == "liar" }
         XCTAssertFalse(liar.isEmpty)
@@ -196,7 +196,7 @@ final class SimulationTests: XCTestCase {
         let garbageBytes = world.garbage.compactMap { world.blocks[$0] }
             .map { ($0.block.toData()?.count ?? 0) + ($0.children.toData()?.count ?? 0) }.reduce(0, +)
         XCTAssertGreaterThan(garbageBytes, config.pendingBudget, "the flood must overrun the budget")
-        let report = try simulator.run()
+        let report = try await simulator.run()
         XCTAssertLessThanOrEqual(report.pendingPeak, config.pendingBudget)
         let spammer = report.disconnects.filter { $0.peer == "spammer" }
         XCTAssertTrue(spammer.contains { $0.reason == .proofOfWorkInvalid })
@@ -223,7 +223,7 @@ final class SimulationTests: XCTestCase {
         let indexes = world.honest.compactMap { world.blocks[$0]?.children }
         XCTAssertTrue(indexes.contains { ($0.toData()?.count ?? 0) > config.inlineChildIndexBytes })
         XCTAssertTrue(indexes.contains { !$0.entries.isEmpty && ($0.toData()?.count ?? .max) <= config.inlineChildIndexBytes })
-        let report = try simulator.run()
+        let report = try await simulator.run()
         XCTAssertGreaterThan(report.fetches, 0)
         XCTAssertTrue(report.disconnects.isEmpty, "\(report.disconnects)")
         assertSynced(report, TestSeed(value: config.seed))
@@ -247,7 +247,7 @@ final class SimulationTests: XCTestCase {
         var simulator = try await Simulator.make(config)
         let world = simulator.world
         let heavier = try XCTUnwrap(world.sides[1].last)
-        let report = try simulator.run()
+        let report = try await simulator.run()
         for (core, tip) in report.coreTips {
             XCTAssertEqual(tip, heavier, "\(core) did not converge on the heavier side")
         }
@@ -273,7 +273,7 @@ final class SimulationTests: XCTestCase {
         config.catchUpInterval = 10 * config.settle
         var simulator = try await Simulator.make(config)
         let heavier = try XCTUnwrap(simulator.world.sides[1].last)
-        let report = try simulator.run()
+        let report = try await simulator.run()
         for (core, tip) in report.coreTips {
             XCTAssertEqual(tip, heavier, "\(core) did not converge on the heavier side")
         }
@@ -319,7 +319,7 @@ final class SimulationTests: XCTestCase {
     private func assertHoldsEveryHonestBlock(_ config: SimConfig, during window: Range<Int64>, line: UInt = #line) async throws {
         var simulator = try await Simulator.make(config)
         let world = simulator.world
-        let report = try simulator.run()
+        let report = try await simulator.run()
         let best = Set(report.sourceChains["source0"] ?? [])
         let uncles = world.honest.filter {
             !best.contains($0) && window.contains((world.blocks[$0]?.block.timestamp ?? 0) - World.genesisTime)
@@ -344,7 +344,7 @@ final class SimulationTests: XCTestCase {
         config.pageSize = 16
         var simulator = try await Simulator.make(config)
         do {
-            _ = try simulator.run()
+            _ = try await simulator.run()
             XCTFail("a stalled honest link went unnoticed")
         } catch let SimulationError.invariant(detail) {
             XCTAssertTrue(detail.contains("disconnected honest peer"), detail)
@@ -365,7 +365,7 @@ final class SimulationTests: XCTestCase {
         config.reconnectFailure = 0.5
         config.drop = 0.005
         var simulator = try await Simulator.make(config)
-        let report = try simulator.run()
+        let report = try await simulator.run()
         XCTAssertGreaterThan(report.peakLeaves, 64)
         assertSynced(report, TestSeed(value: config.seed))
     }
