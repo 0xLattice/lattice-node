@@ -134,12 +134,10 @@ public struct PendingQueue: Sendable {
     /// Pending headers by the child index CID they commit.
     var byChildIndex: [String: Set<String>] = [:]
     var priority: [String: UInt256] = [:]
-    /// Evictable leaves: headers held for a future timestamp first, then
-    /// by hash, largest first (decision 12). Stale entries are skipped; a
-    /// leaf whose hold changed since it was pushed is pushed again.
-    var leaves = Heap<(held: Bool, hash: UInt256, cid: String)> {
-        $0.held != $1.held ? $0.held
-            : $0.hash != $1.hash ? $0.hash > $1.hash : $0.cid > $1.cid
+    /// Evictable leaves by hash, largest first (decision 12). Stale entries
+    /// are skipped.
+    var leaves = Heap<(hash: UInt256, cid: String)> {
+        $0.hash != $1.hash ? $0.hash > $1.hash : $0.cid > $1.cid
     }
 
     /// Each header's priority: the smallest hash among it and its pending
@@ -159,7 +157,7 @@ public struct PendingQueue: Sendable {
         bytes += header.bytes
         byChildIndex[header.block.children.rawCID, default: []].insert(cid)
         priority[cid] = min(header.hash, childrenOf[cid].map(lowestPriority) ?? .max)
-        if isLeaf(cid) { leaves.push((header.notBefore != nil, header.hash, cid)) }
+        if isLeaf(cid) { leaves.push((header.hash, cid)) }
         if let parent = header.parent {
             childrenOf[parent, default: []].insert(cid)
             lift(from: parent)
@@ -177,7 +175,7 @@ public struct PendingQueue: Sendable {
             childrenOf[parent]?.remove(cid)
             if childrenOf[parent]?.isEmpty == true { childrenOf[parent] = nil }
             if let held = entries[parent] {
-                if isLeaf(parent) { leaves.push((held.notBefore != nil, held.hash, parent)) }
+                if isLeaf(parent) { leaves.push((held.hash, parent)) }
                 lift(from: parent)
             }
         }
@@ -206,17 +204,12 @@ public struct PendingQueue: Sendable {
         }
     }
 
-    /// Evict while over `budget`: held future headers first, then the
-    /// pending leaf with the largest hash, so a parent is never evicted from under a child that
+    /// Evict while over `budget`: the pending leaf with the largest hash, so a parent is never evicted from under a child that
     /// lifts it. Returns the evicted headers.
     mutating func evict(to budget: Int) -> [PendingHeader] {
         var evicted: [PendingHeader] = []
         while bytes > budget, let top = leaves.pop() {
             guard let header = entries[top.cid], isLeaf(top.cid), header.hash == top.hash else { continue }
-            if top.held != (header.notBefore != nil) {
-                leaves.push((header.notBefore != nil, header.hash, top.cid))
-                continue
-            }
             remove(top.cid)
             evicted.append(header)
         }

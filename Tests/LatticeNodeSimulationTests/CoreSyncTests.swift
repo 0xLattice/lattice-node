@@ -581,20 +581,53 @@ final class CoreSyncTests: XCTestCase {
         XCTAssertEqual(page.1.first, chain[10].cid, "from the fork, not from the requester's tip")
     }
 
-    /// Zero-work junk dated in the near future is held, and held headers
-    /// are evicted before anything else: it cannot displace an honest orphan.
-    func testFutureDatedJunkCannotDisplaceHonestOrphans() async throws {
+    /// Zero-work orphan junk dated now floods the budget; eviction takes
+    /// the largest hashes, so an honest real-work orphan survives.
+    func testZeroWorkJunkCannotDisplaceAnHonestOrphan() async throws {
         let orphan = world.blocks[world.orphan]!
-        let junk = try await world.junk(on: chain[29], timestamp: Self.now + 3_600_000, count: 12)
+        let withheld = world.blocks[world.withheld]!
+        let junk = try await world.junk(on: withheld, timestamp: withheld.block.timestamp + 1, count: 24)
         let size = { (block: SimBlock) in block.block.toData()!.count + block.children.toData()!.count }
-        var core = core(pendingBudget: size(orphan) + 2 * size(junk[0]))
+        var core = core(pendingBudget: size(orphan) + 3 * size(junk[0]))
         ready(&core, peer)
         ready(&core, other)
-        relay(&core, chain.map { entry($0) }, from: peer)
         relay(&core, [entry(orphan)], from: peer)
         for block in junk { relay(&core, [entry(block)], from: other) }
         XCTAssertNotNil(core.sync.pending.entries[orphan.cid], "the honest orphan stays")
+        XCTAssertLessThan(core.sync.pending.entries.count, junk.count, "junk was evicted")
         XCTAssertLessThanOrEqual(core.sync.pending.bytes, core.config.pendingBudget)
+    }
+
+    /// A partition heal: the requester's best chain is a side branch the
+    /// server holds but does not select. With no window and small pages, a
+    /// page is never empty with `hasMore`, and catch-up completes.
+    func testCatchUpFromAHeldSideBranchNeverStallsOnAnEmptyPage() async throws {
+        let side = try await world.branch(from: chain[9], count: 6)
+        let config = CoreConfig(maxHeadersPerPage: 4, sideBranchWindow: 0)
+        var server = Core(tree: world.bootstrap.tree, config: config)
+        ready(&server, peer)
+        relay(&server, (chain + side).map { entry($0) }, from: peer)
+        XCTAssertEqual(server.tree.canonicalTip, chain.last?.cid)
+        var client = Core(tree: world.bootstrap.tree, config: config)
+        ready(&client, peer)
+        relay(&client, (Array(chain[0...9]) + side).map { entry($0) }, from: peer)
+        XCTAssertEqual(client.tree.canonicalTip, side.last?.cid)
+        let serverSide = PeerID(key: "client", session: 9)
+        let clientSide = PeerID(key: "server", session: 9)
+        ready(&server, serverSide)
+        var toServer = ready(&client, clientSide)
+        var pages = 0
+        while let request = requests(toServer).first, pages < 40 {
+            pages += 1
+            let effects = server.step(.received(serverSide, .getHeaders(request)), now: Self.now)
+            let page = try XCTUnwrap(served(effects).first)
+            XCTAssertFalse(page.1.isEmpty && page.2, "an empty page with hasMore")
+            _ = server.step(.headersServed(serverSide, token: page.token), now: Self.now)
+            let entries = page.1.map { cid in entry(world.blocks[cid] ?? side.first { $0.cid == cid }!) }
+            toServer = relay(&client, entries, from: clientSide, requestID: page.0, hasMore: page.2)
+        }
+        for block in chain { XCTAssertTrue(client.tree.contains(blockHash: block.cid)) }
+        XCTAssertEqual(client.tree.canonicalTip, chain.last?.cid)
     }
 
     /// A crafted locator of deep side entries, or a cursor far below the
