@@ -579,6 +579,11 @@ public struct LevelSimulator {
         case .indexProof(let cid, let proof):
             node.store.index(proof, for: cid, at: path)
             publish(proof, for: cid, at: path)
+        case .fetchBody, .cancelBody, .connect:
+            // N2's body window: this simulator executes every weighed block
+            // itself (`HostEvent.connected`, parent side branches included),
+            // so the window's requests go unanswered here.
+            break
         case .persist, .disconnect, .wakeAt:
             throw Invariants.fail(name, "a level effect escaped the host")
         }

@@ -83,18 +83,6 @@ public enum HostEffect: Sendable {
     case wakeAt(Int64)
 }
 
-/// A genesis link a parent level's execution issued, and the block that
-/// issued it: durable so replay rebuilds the parent's facts.
-public struct IssuedGenesisLink: Sendable, Hashable {
-    public let link: ParentGenesisLink
-    public let issuer: String
-
-    public init(link: ParentGenesisLink, issuer: String) {
-        self.link = link
-        self.issuer = issuer
-    }
-}
-
 /// A level the host runs: its chain, spec and genesis header. A record for
 /// a path that already has one replaces it: that path's earlier facts are
 /// left unreferenced.
@@ -131,7 +119,12 @@ public struct HostBatch: Sendable {
             return
         }
         let held = levels[index].batch
-        levels[index].batch = PersistBatch(headers: held.headers + batch.headers, facts: held.facts + batch.facts)
+        levels[index].batch = PersistBatch(
+            headers: held.headers + batch.headers,
+            states: held.states + batch.states,
+            facts: held.facts + batch.facts,
+            genesisLinks: held.genesisLinks + batch.genesisLinks
+        )
     }
 }
 

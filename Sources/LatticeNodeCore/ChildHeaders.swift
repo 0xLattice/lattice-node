@@ -469,7 +469,10 @@ extension Core {
     mutating func applyConnect(_ verdict: ConnectVerdict, now: Int64) -> (effects: [Effect], update: ChainTreeUpdate?) {
         var turn = Turn(now: now)
         let update = tree.applyConnect(verdict).update
-        if let update { turn.facts += update.batches }
+        if let update {
+            if let state = update.materializedPostState { turn.states.append(state) }
+            turn.facts += update.batches
+        }
         return (finish(turn), update)
     }
 
