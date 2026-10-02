@@ -127,8 +127,8 @@ func withSpawnLock<T>(
     return try await body()
 }
 
-func health(rpc: UInt16) async -> [String: Any]? {
-    guard let url = URL(string: "http://127.0.0.1:\(rpc)/health") else {
+func health(rpc: UInt16, chain: String = "Nexus") async -> [String: Any]? {
+    guard let url = readURL(rpc: rpc, "health", chain: chain) else {
         return nil
     }
     var request = URLRequest(url: url)
@@ -198,7 +198,7 @@ func spawnHost(layout: HostLayout) throws {
 }
 
 /// Every chain path the one process hosts: Nexus and its listed children.
-private func hostedPaths(_ topology: Topology) -> [String] {
+func hostedPaths(_ topology: Topology) -> [String] {
     (topology.chains.keys + topology.chains.values.flatMap { $0.children ?? [] }).sorted()
 }
 
@@ -337,13 +337,13 @@ struct Status: AsyncParsableCommand {
         let layout = rootOption.layout
         let topology = try Topology.load(root: layout.root).validated()
         let running = runningPid(layout, hostProcessName) != nil
-        for path in topology.chains.keys.sorted() {
-            let chain = topology.chains[path]!
+        let nexusRPC = topology.chains["Nexus"]?.rpc ?? 0
+        for path in hostedPaths(topology) {
             guard running else {
                 print("\(path): down")
                 continue
             }
-            guard let health = await health(rpc: chain.rpc) else {
+            guard let health = await health(rpc: topology.chains[path]?.rpc ?? nexusRPC, chain: path) else {
                 print("\(path): running, rpc unreachable")
                 continue
             }
