@@ -121,6 +121,39 @@ final class MergedMiningTests: XCTestCase {
         }
         let stored = await alphaReads.transaction(cid: admitted.transactionCID)
         XCTAssertNotNil(stored)
+        // A withdrawal on Alpha names a receipt its parent state does not
+        // hold: execution refuses it, so no Alpha block ever carries it. (The
+        // pool may keep it as not ready: the receipt can still appear on a
+        // later parent state.)
+        let withdrawer = CryptoUtils.generateKeyPair()
+        let withdrawerAddress = CryptoUtils.createAddress(from: withdrawer.publicKey)
+        let withdrawalBody = try HeaderImpl(node: TransactionBody(
+            accountActions: [AccountAction(owner: withdrawerAddress, delta: 5)], actions: [], depositActions: [],
+            receiptActions: [],
+            withdrawalActions: [WithdrawalAction(
+                withdrawer: withdrawerAddress, nonce: 7, demander: withdrawerAddress,
+                amountDemanded: 5, amountWithdrawn: 5
+            )],
+            signers: [withdrawerAddress], nonce: 0, chainPath: Self.alpha
+        ))
+        let withdrawal = Transaction(
+            signatures: [withdrawer.publicKey: try XCTUnwrap(TransactionSigning.sign(
+                bodyHeader: withdrawalBody, privateKeyHex: withdrawer.privateKey
+            ))],
+            body: withdrawalBody
+        )
+        let withdrawalCID = try? await driver.submitTransaction(SubmitTransactionRequest(transaction: withdrawal)).transactionCID
+        let heightBefore = await alphaReads.readSnapshot().height ?? 0
+        try await eventually("Alpha advances past the withdrawal") {
+            _ = try await driver.mineBlock()
+            return (await alphaReads.readSnapshot().height ?? 0) >= heightBefore + 2
+        }
+        for height in 0...((await alphaReads.readSnapshot().height) ?? 0) {
+            guard let cid = await alphaReads.explorerCanonicalBlockCID(atHeight: height),
+                  let page = await alphaReads.explorerBlockTransactions(cid: cid, offset: 0, limit: 100) else { continue }
+            XCTAssertFalse(page.transactions.contains { $0.txCID == withdrawalCID }, "block \(height) carries the withdrawal")
+        }
+
         let alphaHeight = await alphaReads.readSnapshot().height ?? 0
         await driver.stop()
         return alphaHeight

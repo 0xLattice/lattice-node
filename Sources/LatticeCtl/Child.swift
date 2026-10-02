@@ -50,7 +50,12 @@ struct Child: AsyncParsableCommand {
                     targetBlockTime: blockTime, initialReward: reward, halvingInterval: 1_000_000, halfLife: 100
                 )
             }
-            nexus.children = (nexus.children ?? []).filter { $0 != path } + [path]
+            // A chain is created once: its spec fixes its genesis.
+            guard !(nexus.children ?? []).contains(path),
+                  !FileManager.default.fileExists(atPath: layout.childSpec(for: path).path) else {
+                throw CtlError("\(path) already exists; a child chain is created once")
+            }
+            nexus.children = (nexus.children ?? []) + [path]
             topology.chains["Nexus"] = nexus
             _ = try topology.validated()
             let encoder = JSONEncoder()

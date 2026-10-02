@@ -324,6 +324,8 @@ final class LatticeCtlE2ETests: XCTestCase {
         let recipient = try await makeKey(scratch, "alpha-recipient")
         let host = try await bringUpMiningHost(miner: nil, recipients: [alpha: miner])
         _ = try await runCtl(["child", "create", alpha, "--block-time", "1000", "--reward", "100"], root: host.root)
+        let again = try await runCtl(["child", "create", alpha], root: host.root, expectFailure: true)
+        XCTAssertTrue(again.contains("already exists"), "a second create is refused: \(again)")
         try await waitFor("Nexus active after the restart") {
             await self.health(host.nexusRPC)?["phase"] as? String == "active"
         }

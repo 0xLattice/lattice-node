@@ -42,8 +42,8 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     let broker: DiskBroker
     let localFetcher: CoalescingFetcher
     let retentionScope: String
-    private let durableMempoolOwner: String
-    private let liveMempoolOwner: String
+    let durableMempoolOwner: String
+    let liveMempoolOwner: String
     private let directoryLock: StorageDirectoryLock
     private var livePinnedMempoolRoots = Set<String>()
 
