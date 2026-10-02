@@ -386,6 +386,7 @@ extension CoreDriver {
             failStop: @escaping @Sendable (any Error) -> Void
         ) {
             self.levelStores = levelStores
+            self.proofs = (try? headers.proofs()) ?? [:]
             self.gate = gate
             self.helloTimeout = helloTimeout
             self.core = core
@@ -615,9 +616,12 @@ extension CoreDriver {
         private mutating func execute(_ effect: HostEffect) async -> Bool {
             switch effect {
             case .persist(let batch):
-                // Root level first, then each child level into its own
-                // journal (PENDING P4: one transaction across levels).
-                for (path, levelBatch) in batch.levels {
+                // Parent level before child, each into its own journal
+                // (PENDING P4: one transaction across levels). A crash
+                // between two writes leaves a child missing facts its parent
+                // has, never the reverse: restore takes it as a child that
+                // has not heard of them yet, and sync brings them again.
+                for (path, levelBatch) in batch.levels.sorted(by: { $0.path.count < $1.path.count }) {
                     // A validated block's body roots are journaled with its
                     // validation, so they stay retained across restarts.
                     let validated = levelBatch.facts.flatMap(\.facts).compactMap { fact -> BodyKey? in
@@ -754,6 +758,12 @@ extension CoreDriver {
                 }
             case .indexProof(let cid, let proof):
                 proofs[path, default: [:]][cid, default: [:]][proof.rootCID] = proof
+                do {
+                    try headers.storeProof(proof, for: cid, at: path)
+                } catch {
+                    failStop(error)
+                    return false
+                }
             case .mining(let effect):
                 return await execute(effect, at: path)
             case .workSubmitted(let replyID, let outcome):

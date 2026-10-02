@@ -35,6 +35,27 @@ final class MergedMiningTests: XCTestCase {
             requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
             mode: .overlay
         )
+        let alphaHeight = try await mineFirstRun(configuration, overlay)
+
+        // A restart serves Alpha's headers with their proofs at once, and
+        // resumes both chains where they were.
+        let storedProofs = try CoreHeaderStore(directory: storage).proofs()
+        XCTAssertFalse((storedProofs[Self.alpha] ?? [:]).isEmpty, "Alpha's credited proofs survive the restart")
+        let reopened = try await ChainProcess.open(configuration: configuration)
+        let restarted = try await CoreDriver.start(process: reopened, configuration: configuration, overlay: overlay)
+        let resumed = await restarted.levelReads[Self.alpha]?.readSnapshot().height
+        XCTAssertEqual(resumed, alphaHeight)
+        _ = try await restarted.mineBlock()
+        try await eventually("Alpha advances after the restart") {
+            (await restarted.levelReads[Self.alpha]?.readSnapshot().height ?? 0) > alphaHeight
+        }
+        await restarted.stop()
+    }
+
+    /// The first run: Nexus hardens, Alpha advances by merged grinds and by
+    /// a share, and a transaction to Alpha is mined. Returns Alpha's height;
+    /// the process closes on return.
+    private func mineFirstRun(_ configuration: NodeConfiguration, _ overlay: IvyConfig) async throws -> UInt64 {
         let process = try await ChainProcess.open(configuration: configuration)
         let driver = try await CoreDriver.start(process: process, configuration: configuration, overlay: overlay)
         let alphaReads = try XCTUnwrap(driver.levelReads[Self.alpha])
@@ -99,6 +120,9 @@ final class MergedMiningTests: XCTestCase {
         }
         let stored = await alphaReads.transaction(cid: admitted.transactionCID)
         XCTAssertNotNil(stored)
+        let alphaHeight = await alphaReads.readSnapshot().height ?? 0
         await driver.stop()
+        return alphaHeight
+
     }
 }

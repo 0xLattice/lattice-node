@@ -50,7 +50,25 @@ final class ChildLevelRestartTests: XCTestCase {
     /// A first run: Alpha's genesis weighed by a mined Nexus block that
     /// carries it, persisted as the driver persists, never executed. The
     /// process closes (its storage lock released) on return.
-    private func weighChildGenesis(_ configuration: NodeConfiguration) async throws -> String {
+    /// A crash between level writes: the parent's facts are durable, the
+    /// child's never written. Restore keeps the parent's block, the child
+    /// level comes back without the genesis, and nothing fails.
+    func testACrashBetweenLevelWritesRestoresTheParentAhead() async throws {
+        let configuration = try configuration()
+        let genesisCID = try await weighChildGenesis(configuration, writing: [["Nexus"]])
+        let reopened = try await ChainProcess.open(configuration: configuration)
+        let restored = try await CoreDriver.boot(
+            process: reopened, configuration: configuration, coreConfig: .init(),
+            headers: try CoreHeaderStore(directory: configuration.storagePath)
+        )
+        XCTAssertEqual(restored.levels[["Nexus"]]?.snapshot.actOnHeight, 0)
+        XCTAssertEqual(restored.levels[["Nexus"]]?.snapshot.bestHeaderHeight, 1, "the parent's write is durable")
+        XCTAssertFalse(restored.levels[alpha]?.tree.contains(blockHash: genesisCID) ?? true, "the child's never was")
+    }
+
+    private func weighChildGenesis(
+        _ configuration: NodeConfiguration, writing written: Set<[String]>? = nil
+    ) async throws -> String {
         let process = try await ChainProcess.open(configuration: configuration)
         let headers = try CoreHeaderStore(directory: configuration.storagePath)
         var host = try await CoreDriver.boot(
@@ -102,7 +120,7 @@ final class ChildLevelRestartTests: XCTestCase {
         ])), now: carrier.timestamp + 1)
         let levels = try CoreDriver.levelStores(configuration)
         for case .persist(let batch) in effects {
-            for (path, level) in batch.levels {
+            for (path, level) in batch.levels where written?.contains(path) ?? true {
                 try await process.persistCoreBatch(level, logID: host.logID, headers: headers, into: levels[path])
             }
         }
