@@ -14,22 +14,6 @@ final class LatticeCtlTopologyTests: XCTestCase {
         TopologyChain(listen: base, rpc: base + 2)
     }
 
-    /// A pending deploy is keyed by chain path, and `-` is a legal directory
-    /// atom: flattening `/` to `-` would let `Nexus/A/B` and `Nexus/A-B` share
-    /// one file, so one deploy's genesis seed could overwrite the other's.
-    func testPendingDeployPathsDoNotCollide() {
-        let layout = HostLayout(root: "/tmp/lattice-collision")
-        XCTAssertNotEqual(
-            layout.pendingDeploy(for: "Nexus/A/B"),
-            layout.pendingDeploy(for: "Nexus/A-B")
-        )
-        // The name operators are told to look for in docs/operator-cli.md.
-        XCTAssertEqual(
-            layout.pendingDeploy(for: "Nexus/Market").lastPathComponent,
-            "Nexus%2FMarket.json"
-        )
-    }
-
     func testValidationRequiresNexusRootedAbsolutePaths() {
         XCTAssertThrowsError(try Topology(
             chains: ["Payments": chain(4001)]
@@ -42,15 +26,11 @@ final class LatticeCtlTopologyTests: XCTestCase {
         ).validated())
     }
 
-    func testValidationRequiresLocalImmediateParent() {
+    /// The node hosts only Nexus: a child chain in the tree is refused.
+    func testValidationRefusesChildChains() {
         XCTAssertThrowsError(try Topology(chains: [
             "Nexus": chain(4001),
-            "Nexus/Payments/Receipts": chain(4101),
-        ]).validated())
-        XCTAssertNoThrow(try Topology(chains: [
-            "Nexus": chain(4001),
             "Nexus/Payments": chain(4101),
-            "Nexus/Payments/Receipts": chain(4201),
         ]).validated())
     }
 
@@ -84,11 +64,9 @@ final class LatticeCtlTopologyTests: XCTestCase {
     }
 
     func testValidationRejectsPortCollisions() {
-        XCTAssertThrowsError(try Topology(chains: [
-            "Nexus": chain(4001),
-            // Its listen port is Nexus's RPC port.
-            "Nexus/Payments": chain(4003),
-        ]).validated())
+        var colliding = chain(4001)
+        colliding.rpc = colliding.listen
+        XCTAssertThrowsError(try Topology(chains: ["Nexus": colliding]).validated())
     }
 
     func testPublicReadPortRoundTripsAndJoinsPortCollisionCheck() throws {
@@ -117,12 +95,9 @@ final class LatticeCtlTopologyTests: XCTestCase {
         XCTAssertEqual(redecoded.chains["Nexus"]?.externalAddress, "node.example.org")
 
         // The public read port participates in the uniqueness check.
-        var colliding = chain(4101)
-        colliding.publicRead = 4001
-        XCTAssertThrowsError(try Topology(chains: [
-            "Nexus": chain(4001),
-            "Nexus/Payments": colliding,
-        ]).validated())
+        var colliding = chain(4001)
+        colliding.publicRead = colliding.listen
+        XCTAssertThrowsError(try Topology(chains: ["Nexus": colliding]).validated())
     }
 
     func testValidationRejectsMiningUnknownChain() {
@@ -130,68 +105,6 @@ final class LatticeCtlTopologyTests: XCTestCase {
             chains: ["Nexus": chain(4001)],
             mine: TopologyMine(chain: "Nexus/Payments")
         ).validated())
-    }
-
-    /// `lattice-node --config` builds each level from its tree entry: ports,
-    /// peers and identity from the file and data root. The host wires the
-    /// parent (`ChainHostTests`).
-    func testDaemonConfiguresEachLevelFromTheTree() async throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ctl-host-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: root) }
-        let layout = HostLayout(root: root.path)
-        let command = try LatticeNodeCommand.parse([
-            "--config", root.appendingPathComponent(Topology.fileName).path,
-        ])
-        var nexus = chain(4001)
-        nexus.peers = []
-        let nexusConfiguration = try command.hostedLevel(
-            path: "Nexus", chain: nexus, layout: layout
-        ).configure()
-        XCTAssertTrue(
-            nexusConfiguration.bootstrapPeers.isEmpty,
-            "an explicit empty list means no peers"
-        )
-
-        let level = try command.hostedLevel(
-            path: "Nexus/Payments", chain: chain(4101), layout: layout
-        )
-        let configuration = try level.configure()
-        XCTAssertEqual(level.address.key, "Nexus/Payments")
-        XCTAssertEqual(configuration.listenPort, 4101)
-        XCTAssertEqual(configuration.rpcPort, 4103)
-        XCTAssertEqual(
-            configuration.storagePath.path,
-            layout.chainDirectory(for: "Nexus/Payments").path
-        )
-        XCTAssertTrue(FileManager.default.fileExists(
-            atPath: layout.identityKey(for: "Nexus/Payments").path
-        ))
-
-        let ports = try LatticeNodeCommand.parse([
-            "--config", "lattice.json", "--listen-port", "5001",
-        ])
-        do {
-            try await ports.runHost(configPath: "lattice.json")
-            XCTFail("--listen-port must be refused with --config")
-        } catch {
-            XCTAssertTrue("\(error)".contains("--listen-port"))
-        }
-    }
-
-    /// A child runs only co-hosted with its ancestry: there is no remote
-    /// parent, and without --config only Nexus runs.
-    func testTheDaemonRunsAChildOnlyInAHostedTree() async throws {
-        XCTAssertThrowsError(try LatticeNodeCommand.parse([
-            "--parent", "\(String(repeating: "ab", count: 32))@127.0.0.1:4002",
-        ]))
-        var child = try LatticeNodeCommand.parse(["--chain-path", "Nexus/Payments"])
-        do {
-            try await child.run()
-            XCTFail("a child chain must be refused without --config")
-        } catch {
-            XCTAssertTrue("\(error)".contains("--config"))
-        }
     }
 
     func testRoundTripThroughDisk() throws {
