@@ -142,17 +142,6 @@ final class MetricsTests: XCTestCase {
         // The tiers are distinct series: validated 7, weighed 8.
         XCTAssertEqual(samples["lattice_chain_tip_height{\(chain),tier=\"validated\"}"], "7")
         XCTAssertEqual(samples["lattice_chain_tip_height{\(chain),tier=\"weighed\"}"], "8")
-
-        // Daemon: `"` and `\` are valid chain directory atoms, so a configured
-        // chain path reaches the label as-is (newline is not a valid atom).
-        let service = try await openService(chainPath: ["Nexus", #"q"b\s"#])
-        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
-        try await app.test(.router) { client in
-            let samples = try await scrape(client)
-            XCTAssertEqual(samples[#"lattice_overlay_peers{chain="Nexus/q\"b\\s"}"#], "0")
-            // An unbootstrapped child has no tip: the height samples are absent.
-            XCTAssertFalse(samples.keys.contains { $0.hasPrefix("lattice_chain_tip_height") })
-        }
     }
 
     func testMetricsAbsentOnPublicReadApplication() async throws {

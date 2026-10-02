@@ -50,7 +50,11 @@ final class ProcessSpawnTests: XCTestCase {
         var original = rlimit()
         XCTAssertEqual(getrlimit(nofile, &original), 0)
         var capped = original
-        capped.rlim_cur = min(original.rlim_max, 128)
+        // 128 above what this test process already holds (earlier tests in
+        // the same process keep their own descriptors), so a per-spawn leak
+        // still exhausts it within the 300 spawns.
+        let open = (try? FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count) ?? 0
+        capped.rlim_cur = min(original.rlim_max, rlim_t(open + 128))
         XCTAssertEqual(setrlimit(nofile, &capped), 0)
         defer { setrlimit(nofile, &original) }
 
