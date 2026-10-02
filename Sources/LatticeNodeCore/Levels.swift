@@ -84,18 +84,21 @@ public enum HostEffect: Sendable {
     case wakeAt(Int64)
 }
 
-/// A level the host runs: its chain, spec and genesis header. A record for
-/// a path that already has one replaces it: that path's earlier facts are
-/// left unreferenced.
+/// A level the host runs: its chain, spec, genesis header and the id of
+/// its weigh log (one per instance: a level bootstrapped again, even on the
+/// same genesis, starts a new log). A record for a path that already has
+/// one replaces it: that path's earlier facts are left unreferenced.
 public struct LevelRecord: Sendable {
     public let path: ChainPath
     public let spec: ChainSpec
     public let genesis: StoredHeader
+    public let logID: String
 
-    public init(path: ChainPath, spec: ChainSpec, genesis: StoredHeader) {
+    public init(path: ChainPath, spec: ChainSpec, genesis: StoredHeader, logID: String = "") {
         self.path = path
         self.spec = spec
         self.genesis = genesis
+        self.logID = logID
     }
 }
 
@@ -181,8 +184,15 @@ public struct HostCore: Sendable {
         levels[rootPath] = core
     }
 
+    /// The root level's log: one per host store.
     static func logID(_ host: String, _ path: ChainPath) -> String {
         host + "/" + path.joined(separator: "/")
+    }
+
+    /// A child level instance's log: its genesis and when it was
+    /// bootstrapped (a nonce per instance).
+    static func logID(_ host: String, genesis: String, at now: Int64) -> String {
+        "\(host)/\(genesis)/\(now)"
     }
 
     /// Rebuild a host from its durable batches: each level's facts over its
@@ -222,7 +232,7 @@ public struct HostCore: Sendable {
                 context: try ChainRuntimeContext(path: record.path),
                 spec: record.spec,
                 config: config,
-                logID: HostCore.logID(logID, record.path),
+                logID: record.logID.isEmpty ? HostCore.logID(logID, record.path) : record.logID,
                 cursors: cursors[record.path] ?? [:]
             )
             host.serve(record.path)
@@ -400,22 +410,30 @@ public struct HostCore: Sendable {
         }
     }
 
-    /// A level this host does not run answers empty at once, so a peer's
-    /// request never waits out its deadline here.
+    /// A level this host does not run answers at once, so a peer's request
+    /// never waits out its deadline here: its log at this level is the empty
+    /// one (id ""), so the asker's cursor for it starts over (only that
+    /// level's), and what it asked of the old log is forgotten, never a
+    /// stall.
     func answerUnhosted(_ message: SyncMessage, at path: ChainPath, from peer: PeerID, _ turn: inout Turn) {
-        let requestID: UInt64
         switch message {
-        case .getStream(let id, _, _):
+        case .getStream(let id, _, _, _):
             turn.effects.append(.level(path, .send(peer, .stream(StreamPage(
                 requestID: id, logID: "", entries: [], hasMore: false
             )))))
+        case .getData, .getAncestors:
+            turn.effects.append(.level(path, .send(peer, .stream(StreamPage(
+                requestID: 0, logID: "", entries: [], hasMore: false
+            )))))
+            // An ancestors request is answered "not held".
+            if case .getAncestors(let id, _, _) = message {
+                turn.effects.append(.level(path, .send(peer, .headers(HeadersResponse(
+                    requestID: id, entries: [], hasMore: false
+                )))))
+            }
+        case .stream, .headers:
             return
-        case .getData(let id, _), .getAncestors(let id, _, _): requestID = id
-        case .stream, .headers: return
         }
-        turn.effects.append(.level(path, .send(peer, .headers(HeadersResponse(
-            requestID: requestID, entries: [], hasMore: false
-        )))))
     }
 
     // MARK: - Genesis links
@@ -506,11 +524,12 @@ public struct HostCore: Sendable {
             if case .failure = result { failed[path, default: []].insert(asked) }
             return
         }
-        levels[path] = Core(tree: level.bootstrap.tree, config: config, log: WeighLog(id: Self.logID(logID, path)))
+        let instance = Self.logID(logID, genesis: level.genesis.blockCID, at: turn.now)
+        levels[path] = Core(tree: level.bootstrap.tree, config: config, log: WeighLog(id: instance))
         turn.batch.removed.removeAll { $0 == path }
         turn.batch.levels.removeAll { $0.path == path }
         turn.batch.append(PersistBatch(headers: [level.genesis], facts: [level.bootstrap.facts]), at: path)
-        turn.batch.added.append(LevelRecord(path: path, spec: level.spec, genesis: level.genesis))
+        turn.batch.added.append(LevelRecord(path: path, spec: level.spec, genesis: level.genesis, logID: instance))
         serve(path)
         turn.reports[path, default: []].formUnion(committers[path]?.values.flatMap { $0 } ?? [])
         for peer in peers.sorted() { run(path, .peerReady(peer), &turn) }

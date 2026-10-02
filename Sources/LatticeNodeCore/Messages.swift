@@ -100,13 +100,21 @@ public struct WeighLog: Sendable {
         return true
     }
 
-    /// Entries after position `after`, at most `limit`, with their positions.
-    func page(after: UInt64, limit: Int) -> (entries: [StreamEntry], hasMore: Bool) {
+    /// Entries after position `after`, at most `limit` and (beyond the
+    /// first) `bytes` of IDs, with their positions.
+    func page(after: UInt64, limit: Int, bytes: Int = .max) -> (entries: [StreamEntry], hasMore: Bool) {
         guard after < count else { return ([], false) }
-        let start = Int(after)
-        let end = start + Swift.min(limit, entries.count - start)
-        let page = (start..<end).map { StreamEntry(position: UInt64($0 + 1), entry: entries[$0]) }
-        return (page, end < entries.count)
+        var page: [StreamEntry] = []
+        var total = 0
+        var next = Int(after)
+        while next < entries.count, page.count < limit {
+            let entry = entries[next]
+            total += entry.cid.utf8.count + entry.block.utf8.count + 16
+            if !page.isEmpty, total > bytes { break }
+            page.append(StreamEntry(position: UInt64(next + 1), entry: entry))
+            next += 1
+        }
+        return (page, next < entries.count)
     }
 }
 
@@ -169,9 +177,10 @@ public struct HeadersResponse: Sendable {
 /// The sync messages the core reads and writes, decoded. The wire encoding
 /// belongs to the shell.
 public enum SyncMessage: Sendable {
-    /// The sender's weigh log after position `after`, if the receiver's log
-    /// is still `logID`; otherwise from position 0.
-    case getStream(requestID: UInt64, logID: String?, after: UInt64)
+    /// The receiver's weigh log after position `after`, if its log is still
+    /// `logID`; otherwise from position 0. `own` names the sender's own log
+    /// at this level, so the receiver reads it again when it changed.
+    case getStream(requestID: UInt64, logID: String?, after: UInt64, own: String)
     case stream(StreamPage)
     /// These weighed headers, by CID, with their proofs.
     case getData(requestID: UInt64, cids: [String])

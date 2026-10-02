@@ -101,9 +101,7 @@ actor NodeStore {
                 nexusGenesisCID: nexusGenesisCID,
                 chainPath: pathData
             )
-            // `core_meta` (the core driver's weigh log id) is created with
-            // the first core fact, so a store may or may not have it yet.
-            guard tableNames.subtracting(["core_meta"]) == Self.expectedTables else {
+            guard tableNames == Self.expectedTables else {
                 throw NodeStoreError.wipeRequired("schema tables are missing or unexpected")
             }
         }

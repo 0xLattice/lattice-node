@@ -262,7 +262,8 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
                 chainPath: self.randomChainPath(&g, minimumCount: 1),
                 requestID: self.nonZeroID(&g),
                 logID: self.randomBool(&g) ? self.randomCID(&g) : nil,
-                after: UInt64(self.randomInt(&g, 0...1_000_000))
+                after: UInt64(self.randomInt(&g, 0...1_000_000)),
+                own: self.randomCID(&g)
             )
         }
     }

@@ -30,7 +30,7 @@ final class CoreBodyTests: XCTestCase {
     private func weighed(_ blocks: [SimBlock], window: Int = 4) -> (Core, [BlockImportBatch]) {
         var core = Core(tree: world.bootstrap.tree, config: CoreConfig(bodyWindow: window))
         let asked = core.step(.peerReady(peer), now: Self.now).compactMap { effect -> UInt64? in
-            if case .send(_, .getStream(let id, _, _)) = effect { return id }
+            if case .send(_, .getStream(let id, _, _, _)) = effect { return id }
             return nil
         }
         _ = asked

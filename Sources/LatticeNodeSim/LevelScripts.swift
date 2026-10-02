@@ -48,7 +48,7 @@ struct LevelStream: Sendable {
         world: LevelWorld, _ config: CoreConfig, _ make: (SimBlock) -> HeaderEntry
     ) -> SyncMessage? {
         switch message {
-        case .getStream(let requestID, let asked, let after):
+        case .getStream(let requestID, let asked, let after, _):
             let from = asked == logID ? Int(min(after, UInt64(log.count))) : 0
             let end = min(log.count, from + config.maxHeadersPerPage)
             return .stream(StreamPage(requestID: requestID, logID: logID, entries: Self.entries(log, from..<end), hasMore: end < log.count))

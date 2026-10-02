@@ -13,10 +13,8 @@ public struct PeerSync: Sendable, Equatable {
     /// first of them.
     public internal(set) var taken: UInt64 = 0
     public internal(set) var holes: [StreamEntry] = []
-    /// The last position whose object was asked for, and whether the holes
-    /// were asked again since the cursor last moved.
+    /// The last position whose object was asked for.
     public internal(set) var requested: UInt64 = 0
-    public internal(set) var retried = false
     /// The objects asked of this peer (`getData`).
     public internal(set) var data: InFlightData?
     /// This peer read our log to its end: we push what we append.
@@ -36,7 +34,7 @@ public struct PeerSync: Sendable, Equatable {
 
     public static func == (lhs: PeerSync, rhs: PeerSync) -> Bool {
         lhs.stream == rhs.stream && lhs.more == rhs.more && lhs.taken == rhs.taken
-            && lhs.holes == rhs.holes && lhs.requested == rhs.requested && lhs.retried == rhs.retried
+            && lhs.holes == rhs.holes && lhs.requested == rhs.requested
             && lhs.data == rhs.data && lhs.subscribed == rhs.subscribed
             && lhs.parentRequest == rhs.parentRequest
             && lhs.childIndex == rhs.childIndex && lhs.serving == rhs.serving

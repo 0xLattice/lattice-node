@@ -23,9 +23,11 @@ struct StreamRequestMessage: NodeJSONMessage, Equatable, Sendable {
     let requestID: UInt64
     let logID: String?
     let after: UInt64
+    /// The asker's own log at this level.
+    let own: String
 
     func validate() throws {
-        guard _isAbsoluteChainPath(chainPath), logID.map(_isWireLogID) ?? true else {
+        guard _isAbsoluteChainPath(chainPath), logID.map(_isWireLogID) ?? true, own.isEmpty || _isWireLogID(own) else {
             throw NodeNetworkWireError.malformed
         }
     }
@@ -142,9 +144,9 @@ struct HeadersResponseMessage: NodeJSONMessage, Equatable, Sendable {
 enum CoreWire {
     static func encode(_ message: SyncMessage, at chainPath: [String]) throws -> (topic: String, payload: Data) {
         switch message {
-        case .getStream(let requestID, let logID, let after):
+        case .getStream(let requestID, let logID, let after, let own):
             return (CoreDriverTopic.streamRequest, try StreamRequestMessage(
-                chainPath: chainPath, requestID: requestID, logID: logID, after: after
+                chainPath: chainPath, requestID: requestID, logID: logID, after: after, own: own
             ).encoded())
         case .stream(let page):
             return (CoreDriverTopic.streamPage, try StreamPageMessage(
@@ -188,7 +190,9 @@ enum CoreWire {
         switch topic {
         case CoreDriverTopic.streamRequest:
             let message = try StreamRequestMessage.decoded(payload)
-            return (message.chainPath, .getStream(requestID: message.requestID, logID: message.logID, after: message.after))
+            return (message.chainPath, .getStream(
+                requestID: message.requestID, logID: message.logID, after: message.after, own: message.own
+            ))
         case CoreDriverTopic.streamPage:
             let message = try StreamPageMessage.decoded(payload)
             return (message.chainPath, .stream(StreamPage(

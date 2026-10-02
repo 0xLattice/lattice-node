@@ -22,7 +22,6 @@ extension NodeStore {
         }
         try database.transaction {
             if !rows.isEmpty {
-                try database.execute("CREATE TABLE IF NOT EXISTS core_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
                 try database.execute(
                     "INSERT OR IGNORE INTO core_meta (key, value) VALUES ('log_id', ?1)", params: [.text(logID)]
                 )
@@ -72,9 +71,6 @@ extension NodeStore {
 
     /// The weigh log id recorded with the first core fact, if any.
     func coreLogID() throws -> String? {
-        guard try database.row(
-            CoreMetaRow.self, "SELECT name AS value FROM sqlite_master WHERE type = 'table' AND name = 'core_meta'"
-        ) != nil else { return nil }
         return try database.row(CoreMetaRow.self, "SELECT value FROM core_meta WHERE key = 'log_id'")?.value
     }
 }

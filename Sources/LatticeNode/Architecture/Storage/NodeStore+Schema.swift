@@ -29,9 +29,10 @@ extension NodeStore {
     /// drops the parent-to-child proof pipeline: the issuance ordinals and
     /// the outgoing proofs, routes, prepared proofs, the parent-evidence scan
     /// cursor and inbox, candidate handoffs, and the source identifier.
+    /// Epoch 42 adds `core_meta`, the core driver's weigh log id.
     /// Older stores must be
     /// wiped; Nexus deterministically recreates the configured exact genesis.
-    static let currentSchemaEpoch: Int64 = 41
+    static let currentSchemaEpoch: Int64 = 42
 
     static func validateMetadata(
         in database: NodeSQLite,
@@ -84,6 +85,7 @@ extension NodeStore {
         "local_mempool_transactions",
         "contextual_candidates",
         "contextual_candidate_roots",
+        "core_meta",
     ]
 
     /// Owner: NodeStore.init — runs before the store exists, on an empty database.
@@ -231,6 +233,13 @@ extension NodeStore {
                 candidate_cid TEXT NOT NULL,
                 root_cid TEXT NOT NULL,
                 PRIMARY KEY (candidate_cid, root_cid)
+            ) WITHOUT ROWID
+            """)
+        // The core driver's weigh log id: written with the first core fact.
+        try database.execute("""
+            CREATE TABLE IF NOT EXISTS core_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             ) WITHOUT ROWID
             """)
     }

@@ -51,7 +51,7 @@ struct ScriptStream: Sendable {
     ) -> SyncMessage? {
         let make = entry ?? { config.entry($0.block, children: $0.children) }
         switch message {
-        case .getStream(let requestID, let asked, let after):
+        case .getStream(let requestID, let asked, let after, _):
             let from = asked == logID ? Int(min(after, UInt64(log.count))) : 0
             let end = min(log.count, from + config.maxHeadersPerPage)
             return .stream(StreamPage(
