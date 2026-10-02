@@ -239,7 +239,7 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
                 owner: randomCID(&generator),
                 delta: Int64(randomInt(&generator, 1...1_000_000))
             )],
-            actions: [], depositActions: [], genesisActions: [],
+            actions: [], depositActions: [],
             receiptActions: [], withdrawalActions: [],
             signers: [randomCID(&generator)],
             nonce: UInt64.random(in: 0...UInt64.max, using: &generator),
