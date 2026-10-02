@@ -120,7 +120,7 @@ Nexus starts from one deterministic local bootstrap block. Its sole unsigned
 transaction credits the premine; the node recomputes the block CID locally and
 requires the exact configured value:
 
-`bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24`
+`bafyreigsvcxa7kveg7ywaykwqqwvakgtcujds634k4cc6mejyh43pmoqny`
 
 | Parameter | Value |
 |---|---:|

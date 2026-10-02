@@ -31,7 +31,7 @@ final class WireProtocolFuzzTests: XCTestCase {
     /// Real CIDs from this network, because several validators demand a
     /// canonically encoded one and a CID-shaped string will not do.
     private let cids = [
-        "bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24",
+        "bafyreigsvcxa7kveg7ywaykwqqwvakgtcujds634k4cc6mejyh43pmoqny",
         "bafyreibdhxo7e76c3szbi7i7qwzzgbhgliweuz7ewqba4ybk5h7itegjva",
         "bafyreif4a3a4rgpuhapiellfgmycngfyukrbajjuqkvcrslm43py5y6ixu",
         "bafyreifqhvjsjikap3cj5n6piiq7bh56r6evy5l4x76oyzq74lpy3fjw2q",

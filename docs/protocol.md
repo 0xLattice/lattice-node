@@ -22,7 +22,7 @@ process validates its own sparse route and chooses its own canonical projection.
 The pinned Nexus genesis CID is:
 
 ```text
-bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24
+bafyreigsvcxa7kveg7ywaykwqqwvakgtcujds634k4cc6mejyh43pmoqny
 ```
 
 It contains the deterministic premine transaction for public key

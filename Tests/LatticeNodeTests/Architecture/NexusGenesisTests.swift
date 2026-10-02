@@ -44,7 +44,7 @@ final class NexusGenesisArchitectureTests: XCTestCase {
         XCTAssertTrue(strict.0)
 
         let bootstrap = try await ChainLevel.bootstrap(
-            context: try ChainRuntimeContext(path: ["Nexus"]),
+            context: try ChainRuntimeContext(path: ["Nexus"], genesisCID: header.rawCID),
             genesisHeader: header,
             fetcher: store,
             validationContentStorer: store,

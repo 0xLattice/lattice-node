@@ -11,7 +11,8 @@ public struct ChainAddress: Hashable, Sendable, CustomStringConvertible {
 
     public init?(_ components: [String]) {
         guard (try? ChainRuntimeContext(
-            path: components
+            path: components,
+            genesisCID: components.count == 1 ? NexusGenesis.expectedBlockHash : nil
         )) != nil else {
             return nil
         }

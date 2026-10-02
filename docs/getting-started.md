@@ -30,7 +30,7 @@ The default storage path is `~/.lattice/chains/Nexus`. On its first start the
 node creates a mode-0600 `process.key`, constructs the deterministic Nexus
 genesis, and verifies its CID:
 
-`bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24`
+`bafyreigsvcxa7kveg7ywaykwqqwvakgtcujds634k4cc6mejyh43pmoqny`
 
 The RPC server listens on loopback. Non-loopback `--rpc-bind` values are
 rejected because the current HTTP surface is unauthenticated.

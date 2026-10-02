@@ -30,7 +30,7 @@ were removed because those roles do not exist in Lattice.
    separate processes from the node.
 5. Treat `state.db` and `volumes.db` as one backup and recovery unit.
 6. Use the single pinned Nexus genesis CID:
-   `bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24`.
+   `bafyreigsvcxa7kveg7ywaykwqqwvakgtcujds634k4cc6mejyh43pmoqny`.
 
 Deploy a child chain with testing-oriented parameters when an application needs
 a testing network. Nexus keeps the same pinned genesis in every deployment.

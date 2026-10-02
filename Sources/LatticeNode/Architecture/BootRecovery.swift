@@ -167,15 +167,18 @@ enum BootRecovery {
             throw ChainProcessError.invalidNexusGenesis
         }
         let header = try BlockHeader(node: genesis.block)
-        guard case .success(let boot) = await ChainTree.bootstrap(
+        // Content first: bootstrap resolves the genesis's spec, children and
+        // body from the store.
+        let storage = NodeImportStorage(storage: stores.broker)
+        try await header.storeBlock(fetcher: stores.localFetcher, storer: storage)
+        let booted = await ChainTree.bootstrap(
             genesis: header,
             fetcher: stores.localFetcher,
             context: try configuration.runtimeContext
-        ) else {
+        )
+        guard case .success(let boot) = booted else {
             throw ChainProcessError.invalidNexusGenesis
         }
-        let storage = NodeImportStorage(storage: stores.broker)
-        try await header.storeBlock(fetcher: stores.localFetcher, storer: storage)
         if let state = boot.materializedPostState {
             try await ChainProcess.storeExecutedState(state, in: storage)
         }
