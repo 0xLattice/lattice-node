@@ -59,7 +59,7 @@ final class CoreDriverJobOrderTests: XCTestCase {
                         case .preflight, .buildTemplate, .returnTransactions:
                             jobs.append(CoreDriver.miningJob(
                                 mining, at: path,
-                                level: CoreDriver.jobLevel(host.levels[path]!.tree),
+                                level: await CoreDriver.jobLevel(context: host.levels[path]!.tree.context!, process: process),
                                 process: process
                             ))
                         case .poolChanged:

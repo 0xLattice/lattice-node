@@ -11,7 +11,10 @@ final class MetricsTests: XCTestCase {
     func testMetricsScrapeIsParseableExposition() async throws {
         let service = try await openService(chainPath: ["Nexus"])
         let app = makeApplication(
-            service: service,
+            reads: service.reads,
+            writes: service,
+            status: { await service.status() },
+            metrics: { service.metricsExposition(peers: $0, processStartTime: $1) },
             host: "127.0.0.1",
             port: 8080,
             peers: { ExplorerPeersResponse(count: 3, peers: []) },
