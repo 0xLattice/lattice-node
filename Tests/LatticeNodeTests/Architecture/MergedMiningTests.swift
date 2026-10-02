@@ -77,6 +77,28 @@ final class MergedMiningTests: XCTestCase {
         try await eventually("a Nexus hit advances both") {
             (driver.published.value?.actOnHeight ?? 0) > nexusBefore
         }
+
+        // A transaction naming Alpha goes to Alpha's pool and is mined into
+        // an Alpha block a merged grind carries.
+        let key = CryptoUtils.generateKeyPair()
+        let body = try HeaderImpl(node: TransactionBody(
+            accountActions: [], actions: [], depositActions: [], receiptActions: [], withdrawalActions: [],
+            signers: [CryptoUtils.createAddress(from: key.publicKey)], nonce: 0, chainPath: Self.alpha
+        ))
+        let transaction = Transaction(
+            signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(bodyHeader: body, privateKeyHex: key.privateKey))],
+            body: body
+        )
+        let admitted = try await driver.submitTransaction(SubmitTransactionRequest(transaction: transaction))
+        let pooled = await alphaReads.readSnapshot().mempoolCount
+        XCTAssertEqual(pooled, 1)
+        XCTAssertEqual(driver.published.value?.mempoolCount, 0, "Nexus's pool never holds it")
+        try await eventually("Alpha confirms the transaction") {
+            _ = try await driver.mineBlock()
+            return await alphaReads.readSnapshot().mempoolCount == 0
+        }
+        let stored = await alphaReads.transaction(cid: admitted.transactionCID)
+        XCTAssertNotNil(stored)
         await driver.stop()
     }
 }
