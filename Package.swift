@@ -26,7 +26,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/adalinxx/Lattice.git",
-            exact: "43.0.0"
+            exact: "43.1.0"
         ),
         .package(
             url: "https://github.com/adalinxx/cashew.git",
@@ -40,7 +40,10 @@ let package = Package(
             url: "https://github.com/adalinxx/Tally.git",
             exact: "3.0.1"
         ),
-        .package(path: "/private/tmp/claude-501/-Users-anonymous-src-lattice-node/b5196944-3a79-4992-bc77-61763431bac4/scratchpad/work/localdeps/VolumeBroker"), // LOCALOVERRIDE
+        .package(
+            url: "https://github.com/adalinxx/VolumeBroker.git",
+            exact: "8.0.1"
+        ),
         // Lattice's own UInt256, declared for the core's and simulator's direct imports.
         .package(url: "https://github.com/adalinxx/UInt256.git", from: "1.1.0"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),

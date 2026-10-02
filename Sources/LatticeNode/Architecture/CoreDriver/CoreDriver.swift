@@ -782,12 +782,8 @@ extension CoreDriver {
         /// and the template's difficulty anchor, over a copy of the level's
         /// tree made once per epoch.
         private mutating func epochLevel(at path: ChainPath, epoch: UInt64) async -> ChainLevel? {
-            // Child levels admit no transactions yet: only the root's facts
-            // are journaled where a job reads them.
-            guard path == core.rootPath else { return nil }
             if let cached = preflightLevels[path], cached.epoch == epoch { return cached.level }
-            guard let context = core.levels[path]?.tree.context,
-                  let level = await CoreDriver.jobLevel(context: context, process: process) else { return nil }
+            guard let tree = core.levels[path]?.tree, let level = CoreDriver.jobLevel(tree) else { return nil }
             preflightLevels[path] = (epoch, level)
             return level
         }

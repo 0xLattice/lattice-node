@@ -206,12 +206,8 @@ extension CoreDriver {
         }
     }
 
-    /// The chain a tip epoch's jobs read, replayed from the durable facts:
-    /// Lattice builds a level only from facts (`ChainLevel.restore`).
-    static func jobLevel(context: ChainRuntimeContext, process: ChainProcess) async -> ChainLevel? {
-        guard let facts = try? await process.coreFacts() else { return nil }
-        return try? await ChainLevel.restore(replaying: facts, context: context)
-    }
+    /// The chain a tip epoch's jobs read: a copy of the level's tree.
+    static func jobLevel(_ tree: ChainTree) -> ChainLevel? { ChainLevel(tree: tree) }
 
     /// The worker job for a mining effect that needs one: Lattice preflight
     /// and the template assembly over the job's epoch `level`, and the read

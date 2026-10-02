@@ -1,5 +1,5 @@
 {
-  "originHash" : "a60d51a293ca78bcfb2d1a3a02d91d4ceea9279ca91d44ebabb8f2df014e6f36",
+  "originHash" : "836df35a13d5b860ef1665af3f8164d0cd2cc016ff0080f3c3d1f99407113f1f",
   "pins" : [
     {
       "identity" : "arraytrie",
@@ -69,8 +69,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adalinxx/Lattice.git",
       "state" : {
-        "revision" : "56d3c66a6af6a368b5b99bc7946f1f9dec38cf7f",
-        "version" : "43.0.0"
+        "revision" : "21e21b1b491da67ca9c3a973dbfa0f636925ba2e",
+        "version" : "43.1.0"
       }
     },
     {
@@ -368,6 +368,15 @@
       "state" : {
         "revision" : "19e20ada50f87beb33f1f073f9c3fba786a4564e",
         "version" : "1.1.0"
+      }
+    },
+    {
+      "identity" : "volumebroker",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/adalinxx/VolumeBroker.git",
+      "state" : {
+        "revision" : "0455f6d28019938914ee804d639a288f46ff2ac0",
+        "version" : "8.0.1"
       }
     },
     {
