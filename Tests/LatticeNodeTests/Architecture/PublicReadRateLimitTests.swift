@@ -117,12 +117,11 @@ final class PublicReadRateLimitTests: XCTestCase {
     }
 
     /// Every route's budget, one-for-one with the nginx `zone=expensive`
-    /// locations. `/v1/blocks/<cid>` is block DETAIL and stays general.
+    /// locations.
     func testRouteClassificationMatchesTheExpensiveAllowlist() {
         // Paths only: `URI.path` never carries the query string, so a
         // query-bearing spelling is not an input this ever sees.
         for path in [
-            "/v1/blocks",
             "/api/chain/endpoints",
             "/api/block/bafy",
             "/api/block/bafy/transactions",
@@ -133,7 +132,6 @@ final class PublicReadRateLimitTests: XCTestCase {
             )
         }
         for path in [
-            "/v1/blocks/bafy",
             "/v1/transactions/bafy",
             "/v1/accounts/bafy",
             "/api/block/latest",

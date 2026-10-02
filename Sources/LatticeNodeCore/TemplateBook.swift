@@ -17,6 +17,8 @@ public struct WorkTemplate: Sendable {
     public let poolVersion: UInt64
     /// Milliseconds since the epoch.
     public let expiresAt: Int64
+    /// What the build read (its tip and pool): see `TemplateBuild.digest`.
+    public let digest: String
 
     public init(
         workID: String,
@@ -25,7 +27,8 @@ public struct WorkTemplate: Sendable {
         targets: [UInt256],
         tipCID: String,
         poolVersion: UInt64,
-        expiresAt: Int64
+        expiresAt: Int64,
+        digest: String = ""
     ) {
         self.workID = workID
         self.block = block
@@ -34,6 +37,7 @@ public struct WorkTemplate: Sendable {
         self.tipCID = tipCID
         self.poolVersion = poolVersion
         self.expiresAt = expiresAt
+        self.digest = digest
     }
 }
 

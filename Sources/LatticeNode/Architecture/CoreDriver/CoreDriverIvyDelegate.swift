@@ -9,6 +9,8 @@ enum CoreDriverNetworkInput: Sendable {
     case disconnected(peerKey: String)
     case hello(AuthenticatedPeer, payload: Data)
     case sync(AuthenticatedPeer, chainPath: [String], CoreSyncMessage)
+    /// A peer announced a transaction by CID.
+    case transactionAvailable(AuthenticatedPeer, cid: String)
 }
 
 /// Bounded room for overlay messages between the delegate and the loop. A
@@ -74,6 +76,9 @@ final class CoreDriverIvyDelegate: IvyDelegate {
         let input: CoreDriverNetworkInput
         if message.topic == NodeNetworkTopic.overlayHello {
             input = .hello(peer, payload: message.payload)
+        } else if message.topic == NodeNetworkTopic.transactionAvailable,
+                  let announced = try? TransactionAvailableMessage.decoded(message.payload) {
+            input = .transactionAvailable(peer, cid: announced.volumeRootCID)
         } else if let decoded = try? CoreWire.decode(topic: message.topic, payload: message.payload) {
             input = .sync(peer, chainPath: decoded.chainPath, decoded.message)
         } else {

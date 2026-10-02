@@ -612,6 +612,15 @@ public struct Simulator {
                 if time > now, !queue.hasTick(for: name, at: time) {
                     schedule(at: time, to: name, .core(.tick))
                 }
+            case .readTransactions(let blocks):
+                // The simulated chains carry no transactions.
+                schedule(at: now, to: name, .core(.transactionsRead(
+                    Dictionary(uniqueKeysWithValues: blocks.map { ($0, [String]()) })
+                )))
+            case .mining, .workSubmitted:
+                // The transaction workload drives `Mining` on its own
+                // (`TxWorkload`); this simulator submits no transactions.
+                break
             case .cancelBody(let cid):
                 node.fetching.remove(cid)
             case .fetchBody(let cid):

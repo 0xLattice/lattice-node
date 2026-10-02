@@ -39,6 +39,49 @@ final class MiningStepTests: XCTestCase {
         XCTAssertEqual(mining.journaled, [cid])
     }
 
+    func testAMoveThatLeavesBlocksAsksForTheirTransactions() {
+        var mining = Mining(tipCID: "A1", spec: testSpec())
+        let moved = mining.step(.tipMoved(TipMove(tipCID: "B2", confirmed: ["t"], left: ["A1"])), now: 1)
+        XCTAssertTrue(moved.contains {
+            if case .returnTransactions(["A1"], ["t"]) = $0 { true } else { false }
+        }, "\(moved)")
+        // A forward move leaves nothing to read.
+        let forward = mining.step(.tipMoved(TipMove(tipCID: "B3", confirmed: ["u"])), now: 2)
+        XCTAssertFalse(forward.contains { if case .returnTransactions = $0 { true } else { false } })
+    }
+
+    func testAWaitingSubmitTheMoveConfirmsIsAdmittedBeforeAnyVerdict() throws {
+        var mining = Mining(tipCID: "A", spec: testSpec())
+        let tx = try transfer(nonce: 0)
+        let cid = try Mempool.cid(of: tx)
+        _ = mining.step(.transactionReceived(tx, origin: .local(replyID: 9)), now: 0)
+        let moved = mining.step(.tipMoved(TipMove(tipCID: "B", confirmed: [cid])), now: 1)
+        XCTAssertTrue(moved.contains {
+            if case .transactionAdmitted(9, cid, _, _) = $0 { true } else { false }
+        }, "\(moved)")
+        XCTAssertFalse(moved.contains {
+            if case .preflight(let job) = $0 { job.cid == cid } else { false }
+        }, "no verdict on the new tip for what it confirms")
+        XCTAssertEqual(mining.pendingAdmissions, 0)
+    }
+
+    func testAPeerTransactionIsRelayedOnceWhenItIsNewlyPooled() throws {
+        var mining = Mining(tipCID: "A", spec: testSpec())
+        let tx = try transfer(nonce: 0)
+        let cid = try Mempool.cid(of: tx)
+        let peer = PeerID(key: "p", session: 1)
+        guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .peer(peer)), now: 0).first else {
+            return XCTFail()
+        }
+        let admitted = mining.step(.preflighted(job, .ready), now: 1)
+        XCTAssertTrue(admitted.contains { if case .announceTransaction(cid) = $0 { true } else { false } })
+        XCTAssertFalse(admitted.contains { if case .transactionAdmitted = $0 { true } else { false } },
+                       "a peer is never answered")
+        let resent = mining.step(.transactionReceived(tx, origin: .peer(PeerID(key: "q", session: 1))), now: 2)
+        XCTAssertFalse(resent.contains { if case .announceTransaction = $0 { true } else { false } },
+                       "a resend of a pooled transaction is not relayed again")
+    }
+
     func testAVerdictOnAMovedTipIsDroppedAndTheMoveReissuesIt() throws {
         var mining = Mining(tipCID: "A", spec: testSpec())
         let tx = try transfer(nonce: 0)

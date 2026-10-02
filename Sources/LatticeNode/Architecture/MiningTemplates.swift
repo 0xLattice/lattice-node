@@ -186,7 +186,9 @@ public actor MiningTemplateBook {
         difficultyAnchor: DifficultyAnchor? = nil,
         fetcher: any Fetcher
     ) async throws -> MiningTemplate {
-        let template = try await assemble(
+        let template = try await MiningTemplateAssembly.assemble(
+            chainPath: chainPath,
+            lifetime: lifetime,
             previous: previous,
             transactions: transactions,
             children: children,
@@ -244,7 +246,9 @@ public actor MiningTemplateBook {
         difficultyAnchor: DifficultyAnchor? = nil,
         fetcher: any Fetcher
     ) async throws -> MiningTemplate {
-        try await assemble(
+        try await MiningTemplateAssembly.assemble(
+            chainPath: chainPath,
+            lifetime: lifetime,
             previous: previous,
             transactions: transactions,
             children: children,
@@ -258,13 +262,54 @@ public actor MiningTemplateBook {
         )
     }
 
-    private func assemble(
+    public func candidate(workID: String, nonce: UInt64) throws -> Block {
+        try submission(workID: workID, nonce: nonce).block
+    }
+
+    func submission(
+        workID: String,
+        nonce: UInt64
+    ) throws -> (block: Block, children: [DirectChildCandidate]) {
+        guard let template = templates[workID] else {
+            throw MiningTemplateError.unknownWork
+        }
+        guard ContinuousClock.now < template.expiresAt else {
+            templates.removeValue(forKey: workID)
+            order.removeAll { $0 == workID }
+            throw MiningTemplateError.expired
+        }
+        let candidate = template.block.replacingNonce(nonce)
+        let rootHash = candidate.proofOfWorkHash()
+        guard rootHash <= template.searchTarget else {
+            throw MiningTemplateError.missesSearchTarget
+        }
+        return (candidate, template.childCandidates)
+    }
+
+    public func invalidateAll() {
+        templates.removeAll(keepingCapacity: true)
+        order.removeAll(keepingCapacity: true)
+    }
+}
+
+struct FittingMiningTemplate {
+    let template: MiningTemplate
+}
+
+/// Template assembly, apart from the book that issues it: the bisecting
+/// transaction fit, the child candidates and the minimum-work search target.
+/// The actor path's `MiningTemplateBook` and the core driver's template job
+/// both build with it.
+enum MiningTemplateAssembly {
+    static func assemble(
+        chainPath: [String],
+        lifetime: Duration,
         previous: Block,
         transactions: [Transaction],
         children: [DirectChildCandidate],
         parentCarrier: Block?,
         timestamp: Int64,
-        transactionLimit: Int,
+        transactionLimit: Int = .max,
         rewardRecipient: String?,
         minimumWork: [[String]: UInt256],
         difficultyAnchor: DifficultyAnchor?,
@@ -383,7 +428,7 @@ public actor MiningTemplateBook {
     /// let two search policies share one cached work item, each judged against
     /// the other's search target. A request carrying a plan gets the CID plus a
     /// digest of it; one without keeps the CID.
-    private nonisolated static func workID(
+    private static func workID(
         blockCID: String,
         minimumWork: [[String]: UInt256]
     ) -> String {
@@ -411,7 +456,7 @@ public actor MiningTemplateBook {
     /// here. A child candidate carries its own subtree's bound the same way:
     /// its witness names the block that sets its search target, which this
     /// level re-derives from the proof and the miner's minimum work.
-    private nonisolated static func scheduling(
+    private static func scheduling(
         root: Block,
         children: [DirectChildCandidate],
         targets: [String: (target: UInt256, path: [String])],
@@ -505,7 +550,7 @@ public actor MiningTemplateBook {
         return (searchTarget, bound == nil ? easiestWitness : boundWitness, thresholds)
     }
 
-    private nonisolated static func makeCandidate(
+    private static func makeCandidate(
         previous: Block,
         transactions: [Transaction],
         children: [String: Block],
@@ -544,38 +589,243 @@ public actor MiningTemplateBook {
     /// A chunk whose transactions together break the fee rule is left out
     /// like any other chunk the state transform refuses, so one bad pool
     /// entry never suppresses the template.
-    private nonisolated static func breaksCoinbaseRule(_ error: any Error) -> Bool {
+    private static func breaksCoinbaseRule(_ error: any Error) -> Bool {
         if case BlockBuilderError.invalidCoinbase = error { return true }
         return false
     }
 
-    public func candidate(workID: String, nonce: UInt64) throws -> Block {
-        try submission(workID: workID, nonce: nonce).block
+    /// The largest template on `previous` that fits the block size: the
+    /// pool's transactions (`pooled`, in order) bisected by count, then as
+    /// many of the `provided` child candidates as still fit. Assembly only:
+    /// nothing is issued.
+    static func fit(
+        chainPath: [String],
+        lifetime: Duration,
+        previous: Block,
+        pooled: [Transaction],
+        provided: [DirectChildCandidate],
+        parentCarrier: Block?,
+        timestamp: Int64,
+        rewardRecipient: String?,
+        minimumWork: [[String]: UInt256],
+        difficultyAnchor: DifficultyAnchor?,
+        spec: ChainSpec,
+        fetcher: any Fetcher
+    ) async throws -> MiningTemplate {
+        var poolLimit = Int(clamping: spec.maxNumberOfTransactionsPerBlock)
+        var largestFittingPoolLimit = -1
+        var largestFittingTemplate: FittingMiningTemplate?
+        var maximumPoolLimit = poolLimit
+        while true {
+            let provisional = try await assemble(
+                chainPath: chainPath,
+                lifetime: lifetime,
+                previous: previous,
+                transactions: pooled,
+                children: [],
+                parentCarrier: parentCarrier,
+                timestamp: timestamp,
+                transactionLimit: poolLimit,
+                rewardRecipient: rewardRecipient,
+                minimumWork: minimumWork,
+                difficultyAnchor: difficultyAnchor,
+                fetcher: fetcher
+            )
+            if try await !blockFits(
+                provisional.block,
+                spec: spec,
+                fetcher: fetcher
+            ) {
+                maximumPoolLimit = poolLimit - 1
+                if maximumPoolLimit <= largestFittingPoolLimit {
+                    guard let largestFittingTemplate else {
+                        throw ChainServiceError.templateTooLarge
+                    }
+                    return largestFittingTemplate.template
+                }
+                poolLimit = largestFittingPoolLimit
+                    + (maximumPoolLimit - largestFittingPoolLimit + 1) / 2
+                continue
+            }
+
+            let selectedTransactions = try await blockTransactions(
+                in: provisional.block,
+                fetcher: fetcher
+            )
+            var optionalChildren = provided
+            if !optionalChildren.isEmpty {
+                let offset = Int(
+                    previous.height % UInt64(optionalChildren.count)
+                )
+                optionalChildren = Array(optionalChildren[offset...])
+                    + optionalChildren[..<offset]
+            }
+
+            let selectedChildCount = optionalChildren.count
+            var template = try await assemble(
+                chainPath: chainPath,
+                lifetime: lifetime,
+                previous: previous,
+                transactions: selectedTransactions,
+                children: optionalChildren.prefix(selectedChildCount)
+                    .sorted { $0.directory < $1.directory },
+                parentCarrier: parentCarrier,
+                timestamp: timestamp,
+                rewardRecipient: rewardRecipient,
+                minimumWork: minimumWork,
+                difficultyAnchor: difficultyAnchor,
+                fetcher: fetcher
+            )
+            try requireSameTemplateContext(
+                provisional.block,
+                final: template.block
+            )
+            if try await !blockFits(
+                template.block,
+                spec: spec,
+                fetcher: fetcher
+            ), !optionalChildren.isEmpty {
+                let minimumChildCount = poolLimit == 0 ? 0 : 1
+                let minimumTemplate = try await assemble(
+                chainPath: chainPath,
+                lifetime: lifetime,
+                    previous: previous,
+                    transactions: selectedTransactions,
+                    children: optionalChildren.prefix(minimumChildCount)
+                        .sorted { $0.directory < $1.directory },
+                    parentCarrier: parentCarrier,
+                    timestamp: timestamp,
+                    rewardRecipient: rewardRecipient,
+                    minimumWork: minimumWork,
+                    difficultyAnchor: difficultyAnchor,
+                    fetcher: fetcher
+                )
+                if try await blockFits(
+                    minimumTemplate.block,
+                    spec: spec,
+                    fetcher: fetcher
+                ) {
+                    var fittingLimit = minimumChildCount
+                    var failingLimit = optionalChildren.count
+                    template = minimumTemplate
+                    while fittingLimit + 1 < failingLimit {
+                        let probeLimit = fittingLimit
+                            + (failingLimit - fittingLimit) / 2
+                        let probe = try await assemble(
+                chainPath: chainPath,
+                lifetime: lifetime,
+                            previous: previous,
+                            transactions: selectedTransactions,
+                            children: optionalChildren.prefix(probeLimit)
+                                .sorted { $0.directory < $1.directory },
+                            parentCarrier: parentCarrier,
+                            timestamp: timestamp,
+                            rewardRecipient: rewardRecipient,
+                            minimumWork: minimumWork,
+                            difficultyAnchor: difficultyAnchor,
+                            fetcher: fetcher
+                        )
+                        if try await blockFits(
+                            probe.block,
+                            spec: spec,
+                            fetcher: fetcher
+                        ) {
+                            fittingLimit = probeLimit
+                            template = probe
+                        } else {
+                            failingLimit = probeLimit
+                        }
+                    }
+                }
+            }
+
+            if try await blockFits(
+                template.block,
+                spec: spec,
+                fetcher: fetcher
+            ) {
+                largestFittingPoolLimit = poolLimit
+                let fittingTemplate = FittingMiningTemplate(template: template)
+                largestFittingTemplate = fittingTemplate
+                if poolLimit < maximumPoolLimit {
+                    poolLimit += (maximumPoolLimit - poolLimit + 1) / 2
+                    continue
+                }
+                return fittingTemplate.template
+            }
+            maximumPoolLimit = poolLimit - 1
+            if maximumPoolLimit <= largestFittingPoolLimit {
+                guard let largestFittingTemplate else {
+                    throw ChainServiceError.templateTooLarge
+                }
+                return largestFittingTemplate.template
+            }
+            poolLimit = largestFittingPoolLimit
+                + (maximumPoolLimit - largestFittingPoolLimit + 1) / 2
+        }
     }
 
-    func submission(
-        workID: String,
-        nonce: UInt64
-    ) throws -> (block: Block, children: [DirectChildCandidate]) {
-        guard let template = templates[workID] else {
-            throw MiningTemplateError.unknownWork
-        }
-        guard ContinuousClock.now < template.expiresAt else {
-            templates.removeValue(forKey: workID)
-            order.removeAll { $0 == workID }
-            throw MiningTemplateError.expired
-        }
-        let candidate = template.block.replacingNonce(nonce)
-        let rootHash = candidate.proofOfWorkHash()
-        guard rootHash <= template.searchTarget else {
-            throw MiningTemplateError.missesSearchTarget
-        }
-        return (candidate, template.childCandidates)
+    static func blockFits(
+        _ block: Block,
+        spec: ChainSpec,
+        fetcher: any Fetcher
+    ) async throws -> Bool {
+        try await block.logicalContentByteSize(fetcher: fetcher)
+            <= spec.maxBlockSize
     }
 
-    public func invalidateAll() {
-        templates.removeAll(keepingCapacity: true)
-        order.removeAll(keepingCapacity: true)
+    static func requireSameTemplateContext(
+        _ provisional: Block,
+        final: Block
+    ) throws {
+        guard provisional.version == final.version,
+              provisional.parent?.rawCID == final.parent?.rawCID,
+              provisional.transactions.rawCID == final.transactions.rawCID,
+              provisional.target == final.target,
+              provisional.nextTarget == final.nextTarget,
+              provisional.spec.rawCID == final.spec.rawCID,
+              provisional.parentState.rawCID == final.parentState.rawCID,
+              provisional.prevState.rawCID == final.prevState.rawCID,
+              provisional.postState.rawCID == final.postState.rawCID,
+              provisional.height == final.height,
+              provisional.timestamp == final.timestamp,
+              provisional.rewardRecipient == final.rewardRecipient,
+              provisional.nonce == final.nonce else {
+            throw ChainServiceError.templateContextChanged
+        }
+    }
+
+    /// A block's transactions in index order, resolved through `fetcher`.
+    static func blockTransactions(
+        in block: Block,
+        fetcher: any Fetcher
+    ) async throws -> [Transaction] {
+        let transactionsHeader = try await block.transactions.resolve(
+            fetcher: fetcher
+        )
+        guard let dictionary = transactionsHeader.node else {
+            throw ChainServiceError.unresolvedTransactionContent
+        }
+        let entries = try await dictionary.boundedKeysAndValues(
+            limit: dictionary.count,
+            fetcher: fetcher
+        )
+        guard entries.count == dictionary.count else {
+            throw ChainServiceError.unresolvedTransactionContent
+        }
+        let headers = Dictionary(uniqueKeysWithValues: entries)
+        var transactions: [Transaction] = []
+        for index in 0..<headers.count {
+            guard let transactionHeader = headers[String(index)] else {
+                throw ChainServiceError.unresolvedTransactionContent
+            }
+            let resolved = try await transactionHeader.resolve(fetcher: fetcher)
+            guard let transaction = resolved.node else {
+                throw ChainServiceError.unresolvedTransactionContent
+            }
+            transactions.append(transaction)
+        }
+        return transactions
     }
 }
 

@@ -53,6 +53,40 @@ extension ChainProcess {
         }
     }
 
+    /// `MiningEffect.mined`: the mined block's content, stored and retained
+    /// before its header is weighed (content first). Returns its child
+    /// index, which the root header is inserted with.
+    nonisolated func storeMinedBlock(_ block: Block) async throws -> ChildIndex {
+        let storage = NodeImportStorage(storage: broker)
+        try await BlockHeader(node: block).storeBlock(fetcher: localFetcher, storer: storage)
+        try await broker.mergeRetainedRoots(
+            scope: retentionScope, roots: await storage.takeStoredVolumeRoots()
+        )
+        guard let children = try await block.children.resolve(fetcher: localFetcher).node else {
+            throw ChainProcessError.missingMaterializedVolume(block.children.rawCID)
+        }
+        return children
+    }
+
+    /// `MiningEffect.poolChanged`, before any later effect of its step: each
+    /// added transaction's Volume stored and pinned for this process, each
+    /// journaled one written to the local journal, and every removed one
+    /// unpinned and dropped from the journal. The journal keeps seconds.
+    nonisolated func persistPoolDelta(_ delta: PoolDelta) async throws {
+        for item in delta.added {
+            _ = try await persistPeerTransaction(item.transaction)
+        }
+        for item in delta.journaled {
+            _ = try await persistLocalTransaction(item.transaction, addedAt: item.addedAt / 1_000)
+        }
+        guard !delta.removed.isEmpty else { return }
+        try await updateLiveMempoolRoots(adding: [], removing: Set(delta.removed))
+        let journal = try await localTransactionTimestamps()
+        for cid in delta.removed where journal[cid] != nil {
+            try await removeLocalTransaction(cid)
+        }
+    }
+
     /// A header's content for serving: the driver's header store, or the
     /// block boundary the actor path stored before the driver ran.
     nonisolated func coreHeader(_ cid: String, headers: CoreHeaderStore) async -> (block: Block, children: ChildIndex)? {

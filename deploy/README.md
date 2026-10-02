@@ -156,7 +156,7 @@ Nexus recreates the exact pinned genesis; child processes return to
 `read-replica/` is the public read surface for the explorer (lattice.build).
 It is a normal lattice-node — dialing the backbones and syncing — with an nginx
 **allowlist** proxy in front: the node's HTTP API stays loopback-only (rule 3),
-and nginx exposes ONLY the bounded GET read routes (`/health`, `/v1/blocks*`,
+and nginx exposes ONLY the bounded GET read routes (`/health`,
 `/v1/transactions/:cid`, `/v1/accounts/:owner`, `/api/*`), returning 403 for
 everything else — crucially `/v1/status` (gated + mutating) and every write POST.
 

@@ -14,17 +14,28 @@ public enum TransactionOrigin: Sendable, Equatable {
     case restored(addedAt: Int64)
 }
 
-/// The executed tip moved: the transactions the new chain carries that the
-/// old one did not, and those the old chain carried that the new one does not.
+/// The executed tip moved: the transactions the blocks the act-on chain
+/// entered carry (`confirmed`, from their executions, as Bitcoin Core's
+/// `removeForBlock`), and the blocks it left, parent first, whose
+/// transactions the shell reads from content and returns
+/// (`MiningEffect.returnTransactions`). A caller that holds the returned
+/// transactions passes them as `returned` instead.
 public struct TipMove: Sendable {
     public let tipCID: String
     public let confirmed: Set<String>
     public let returned: [Transaction]
+    public let left: [String]
 
-    public init(tipCID: String, confirmed: Set<String>, returned: [Transaction]) {
+    public init(
+        tipCID: String,
+        confirmed: Set<String> = [],
+        returned: [Transaction] = [],
+        left: [String] = []
+    ) {
         self.tipCID = tipCID
         self.confirmed = confirmed
         self.returned = returned
+        self.left = left
     }
 }
 
@@ -106,12 +117,16 @@ public struct TemplateBuild: Sendable {
     public let block: Block
     public let searchTarget: UInt256
     public let targets: [UInt256]
+    /// What the template was built from (its tip and pool), for a miner to
+    /// compare with the node's current digest.
+    public let digest: String
 
-    public init(workID: String, block: Block, searchTarget: UInt256, targets: [UInt256]) {
+    public init(workID: String, block: Block, searchTarget: UInt256, targets: [UInt256], digest: String = "") {
         self.workID = workID
         self.block = block
         self.searchTarget = searchTarget
         self.targets = targets
+        self.digest = digest
     }
 }
 
@@ -150,6 +165,11 @@ public enum MiningEffect: Sendable {
     case workRefused(replyID: UInt64, TemplateError)
     case preflight(PreflightJob)
     case buildTemplate(TemplateJob)
+    /// Read the transactions of the `left` blocks from content and hand each
+    /// one the new act-on chain does not carry (`carried`) back as
+    /// `.transactionReceived(_, origin: .returned)`. A body no longer held
+    /// returns nothing.
+    case returnTransactions(left: [String], carried: Set<String>)
 }
 
 /// Bounds on transactions waiting for a preflight verdict. Local and
@@ -262,6 +282,8 @@ public struct Mining: Sendable {
     private var pendingByPeer: [PeerID: Int] = [:]
 
     public func pendingAdmissions(from peer: PeerID) -> Int { pendingByPeer[peer] ?? 0 }
+    /// Whether `cid` awaits its preflight verdict.
+    public func isPending(_ cid: String) -> Bool { admissions[cid] != nil }
     public var waitingTemplateRequests: Int { builds.values.reduce(0) { $0 + $1.replies.count } }
     public var outstandingPreflights: Int { preflighting.count }
 
@@ -442,7 +464,7 @@ public struct Mining: Sendable {
             departed(mutation, &turn)
             if let inserted = mutation.inserted { turn.delta.added.append(inserted) }
             guard let item = mempool.item(cid) else { return }
-            admitted(item, origins: admission.origins, &turn)
+            admitted(item, origins: admission.origins, inserted: mutation.inserted != nil, &turn)
         } catch {
             // Only the verdict makes a refusal final for a journal row; a
             // capacity or conflict refusal leaves the row for the next boot.
@@ -452,8 +474,15 @@ public struct Mining: Sendable {
     }
 
     /// `item` is pooled: journal and answer each local origin, and announce
-    /// it for a local or returned one.
-    private mutating func admitted(_ item: MempoolItem, origins: [TransactionOrigin], _ turn: inout Turn) {
+    /// it for a local or returned one, or for a peer's when this admission
+    /// newly pooled it (relayed once, as the actor path relays: a resend of a
+    /// pooled transaction is never announced again).
+    private mutating func admitted(
+        _ item: MempoolItem,
+        origins: [TransactionOrigin],
+        inserted: Bool = false,
+        _ turn: inout Turn
+    ) {
         var announce = false
         for origin in origins {
             switch origin {
@@ -469,7 +498,7 @@ public struct Mining: Sendable {
             case .returned:
                 announce = true
             case .peer:
-                break
+                announce = announce || inserted
             }
         }
         if announce { turn.replies.append(.announceTransaction(item.cid)) }
@@ -509,13 +538,12 @@ public struct Mining: Sendable {
         }
     }
 
-    private mutating func tipMoved(_ move: TipMove, _ turn: inout Turn) {
-        tipCID = move.tipCID
-        tipEpoch &+= 1
-        departed(mempool.remove(move.confirmed.sorted()), &turn)
-        // A transaction awaiting its verdict that the chain now carries is
-        // done: a local submit is answered as accepted, a restored row goes.
-        for cid in move.confirmed.sorted() {
+    /// Transactions the act-on chain now carries leave the pool. One still
+    /// awaiting its verdict is done: a local submit is answered as admitted,
+    /// a restored row goes.
+    private mutating func confirm(_ confirmed: Set<String>, _ turn: inout Turn) {
+        departed(mempool.remove(confirmed.sorted()), &turn)
+        for cid in confirmed.sorted() {
             guard let admission = close(cid) else { continue }
             for origin in admission.origins {
                 switch origin {
@@ -530,6 +558,12 @@ public struct Mining: Sendable {
                 }
             }
         }
+    }
+
+    private mutating func tipMoved(_ move: TipMove, _ turn: inout Turn) {
+        tipCID = move.tipCID
+        tipEpoch &+= 1
+        confirm(move.confirmed, &turn)
         // A local submit that has waited through too many moves is answered
         // with a retriable refusal; the admission goes on for any other origin.
         for cid in admissions.keys.sorted() {
@@ -553,13 +587,17 @@ public struct Mining: Sendable {
             open(cid, Admission(transaction: transaction, origins: [.returned], slot: .returned))
         }
         // Every verdict the pool holds or awaits was for the old tip: those
-        // still out will be dropped, and each is issued again here.
+        // still out will be dropped, and each is issued again here. The
+        // move confirmed first, so no verdict refuses what it carries.
         preflighting.removeAll()
         for item in mempool.items {
             preflight(item.cid, item.transaction, &turn)
         }
         for (cid, admission) in admissions.sorted(by: { $0.key < $1.key }) {
             preflight(cid, admission.transaction, &turn)
+        }
+        if !move.left.isEmpty {
+            turn.jobs.append(.returnTransactions(left: move.left, carried: move.confirmed))
         }
         // Every waiting build was for the old tip: issue it again on this
         // one, or refuse a request that has waited through too many moves.
@@ -637,7 +675,8 @@ public struct Mining: Sendable {
             targets: build.targets,
             tipCID: job.tipCID,
             poolVersion: job.poolVersion,
-            expiresAt: now + templates.lifetime
+            expiresAt: now + templates.lifetime,
+            digest: build.digest
         ), now: now)
         for entry in waiting.replies {
             turn.replies.append(.templateIssued(replyID: entry.replyID, issued))

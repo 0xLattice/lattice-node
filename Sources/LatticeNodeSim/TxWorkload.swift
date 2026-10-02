@@ -501,6 +501,9 @@ public struct TxWorkload {
             try await mined(block)
         case .preflight(let job):
             schedule(at: now + delay(), .runPreflight(job))
+        case .returnTransactions:
+            // The workload passes its tip moves' transactions directly.
+            break
         case .buildTemplate(let job):
             schedule(at: now + delay(), .runTemplate(job))
         }

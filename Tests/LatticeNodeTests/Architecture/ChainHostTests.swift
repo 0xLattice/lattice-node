@@ -71,7 +71,7 @@ final class ChainHostTests: XCTestCase {
         ))
         try await eventually("Nexus records the anchor", within: .seconds(60)) {
             _ = try? await self.mine(parent)
-            return await parent.explorerChildGenesisCID(
+            return await parent.reads.explorerChildGenesisCID(
                 directory: self.child.directory
             ) == genesisCID
         }
@@ -419,7 +419,7 @@ final class ChainHostTests: XCTestCase {
         ))
         try await eventually("Payments records the anchor", within: .seconds(120)) {
             _ = try? await self.mine(parent)
-            return await payments.explorerChildGenesisCID(
+            return await payments.reads.explorerChildGenesisCID(
                 directory: self.grandchild.directory
             ) == grandchildGenesis
         }

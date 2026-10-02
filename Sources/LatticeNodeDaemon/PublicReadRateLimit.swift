@@ -111,7 +111,7 @@ enum PublicReadRouteClass: Sendable, Equatable {
     /// would still admit `--public-read-max-rate` walks per second.
     case exempt
     case general
-    /// A recent-block walk, a peer fan-out, or hundreds of content fetches.
+    /// A peer fan-out, or hundreds of content fetches.
     case expensive
 
     /// Classified by splitting the path EXACTLY as the router resolves it.
@@ -131,10 +131,6 @@ enum PublicReadRouteClass: Sendable, Equatable {
             // method-insensitive would hand a caller a free, unmetered path to
             // the router — a `POST /health` 404 that no bucket ever sees.
             self = (method == .get || method == .head) ? .exempt : .general
-        case 2 where components[0] == "v1" && components[1] == "blocks":
-            // The recent-block list. `/v1/blocks/<cid>` is block DETAIL and
-            // stays general, exactly as in nginx.
-            self = .expensive
         case 3 where components[0] == "api"
             && components[1] == "chain" && components[2] == "endpoints":
             self = .expensive
