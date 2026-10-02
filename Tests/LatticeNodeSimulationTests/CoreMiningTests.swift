@@ -41,7 +41,7 @@ final class CoreMiningTests: XCTestCase {
     }
 
     /// Deliver the first block's body and run its connect.
-    private func executeFirst(_ core: inout Core) async throws -> [Effect] {
+    private func executeFirst(_ core: inout Core, transactions: [String] = []) async throws -> [Effect] {
         content.put(world.blocks[chain[0].cid]!.body)
         let arrived = core.step(.bodyFetched(cid: chain[0].cid), now: Self.now)
         let job = try XCTUnwrap(arrived.compactMap { effect -> ConnectJob? in
@@ -51,7 +51,7 @@ final class CoreMiningTests: XCTestCase {
         let verdict = await ChainTree.connect(
             job, fetcher: content, validationContext: ValidationContext(nowMilliseconds: Self.now)
         )
-        return core.step(.connected(verdict), now: Self.now)
+        return core.step(.connected(verdict, transactions: transactions), now: Self.now)
     }
 
     private func mining(_ effects: [Effect]) -> [MiningEffect] {
@@ -72,22 +72,18 @@ final class CoreMiningTests: XCTestCase {
         guard case .preflight(let preflight)? = submitted.first else { return XCTFail("\(submitted)") }
         XCTAssertEqual(preflight.tipCID, world.genesis.cid)
 
-        let applied = try await executeFirst(&core)
+        let applied = try await executeFirst(&core, transactions: [cid])
         XCTAssertEqual(core.snapshot.actOnTip, chain[0].cid)
         XCTAssertEqual(core.mining.tipCID, chain[0].cid)
         XCTAssertEqual(core.snapshot.miningEpoch, 1)
-        // A submit still awaits its verdict, so the move asks for the entered
-        // block's transactions; it left no block.
+        // The connect result named its transactions: the move confirms the
+        // waiting submit in the same step, before any verdict on the new tip.
         XCTAssertTrue(mining(applied).contains {
-            if case .returnTransactions([], [chain[0].cid], _) = $0 { true } else { false }
-        }, "\(mining(applied))")
-        // The block carried it: the waiting submit is answered as admitted.
-        let confirmed = mining(core.step(
-            .mining(.confirmed([cid], epoch: core.mining.tipEpoch)), now: Self.now
-        ))
-        XCTAssertTrue(confirmed.contains {
             if case .transactionAdmitted(7, cid, _, _) = $0 { true } else { false }
-        }, "\(confirmed)")
+        }, "\(mining(applied))")
+        XCTAssertFalse(mining(applied).contains {
+            if case .preflight(let job) = $0 { job.cid == cid } else { false }
+        })
         XCTAssertEqual(core.mining.pendingAdmissions, 0)
         // Persist and publish precede every mining effect of the step.
         let firstMining = try XCTUnwrap(applied.firstIndex { if case .mining = $0 { true } else { false } })

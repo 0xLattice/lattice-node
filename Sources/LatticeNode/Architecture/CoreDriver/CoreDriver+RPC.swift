@@ -239,52 +239,70 @@ extension CoreDriver {
                     job, difficultyAnchor: anchor, process: process, chainPath: path
                 ))))]
             }
-        case .returnTransactions(let left, let entered, let epoch):
+        case .returnTransactions(let left, let carried):
             return CoreJob(path: path, epoch: nil) {
-                let moved = await movedTransactions(left: left, entered: entered, fetcher: fetcher)
-                return [.level(path, .mining(.confirmed(moved.confirmed, epoch: epoch)))]
-                    + moved.returned.map { .level(path, .mining(.transactionReceived($0, origin: .returned))) }
+                var returned: [HostEvent] = []
+                for cid in left {
+                    for transaction in await transactions(ofBlock: cid, fetcher: fetcher)
+                    where (try? Mempool.cid(of: transaction)).map({ !carried.contains($0) }) ?? false {
+                        returned.append(.level(path, .mining(.transactionReceived(transaction, origin: .returned))))
+                    }
+                }
+                return returned
             }
         default:
             preconditionFailure("\(effect) is not a job")
         }
     }
 
-    /// `MiningEffect.returnTransactions`: the CIDs the blocks the act-on
-    /// chain entered carry, and every transaction of the blocks it left whose
-    /// bodies are still held, parent first, less the confirmed ones.
-    static func movedTransactions(
-        left: [String],
-        entered: [String],
-        fetcher: any Fetcher
-    ) async -> (confirmed: Set<String>, returned: [Transaction]) {
-        /// A block's transactions with their bodies resolved: the pool takes
-        /// resolved content only.
-        func transactions(of cid: String) async -> [Transaction] {
-            guard let block = try? await BlockHeader(rawCID: cid).resolve(fetcher: fetcher).node,
-                  let carried = try? await MiningTemplateAssembly.blockTransactions(in: block, fetcher: fetcher)
-            else { return [] }
-            var resolved: [Transaction] = []
-            for transaction in carried {
-                guard let body = try? await transaction.body.resolve(fetcher: fetcher), body.node != nil else { continue }
-                resolved.append(Transaction(signatures: transaction.signatures, body: body))
-            }
-            return resolved
+    /// A block's transactions with their bodies resolved (the pool takes
+    /// resolved content only); none when its body is not held.
+    static func transactions(ofBlock cid: String, fetcher: any Fetcher) async -> [Transaction] {
+        guard let block = try? await BlockHeader(rawCID: cid).resolve(fetcher: fetcher).node,
+              let carried = try? await MiningTemplateAssembly.blockTransactions(in: block, fetcher: fetcher)
+        else { return [] }
+        var resolved: [Transaction] = []
+        for transaction in carried {
+            guard let body = try? await transaction.body.resolve(fetcher: fetcher), body.node != nil else { continue }
+            resolved.append(Transaction(signatures: transaction.signatures, body: body))
         }
-        var carried: Set<String> = []
-        for cid in entered {
-            for transaction in await transactions(of: cid) {
-                if let id = try? Mempool.cid(of: transaction) { carried.insert(id) }
-            }
+        return resolved
+    }
+
+    static func transactionIDs(ofBlock cid: String, fetcher: any Fetcher) async -> [String] {
+        await transactions(ofBlock: cid, fetcher: fetcher).compactMap { try? Mempool.cid(of: $0) }
+    }
+
+    /// A level's connect job: `ChainTree.connect`, and for a valid block the
+    /// IDs of the transactions it carries, read from the body it executed.
+    static func connectJob(
+        _ job: ConnectJob,
+        at path: ChainPath,
+        parentFacts: ParentLevelFacts?,
+        process: ChainProcess
+    ) -> CoreJob {
+        let fetcher = process.localFetcher
+        return CoreJob(path: path, epoch: nil) {
+            let verdict = await ChainTree.connect(
+                job,
+                fetcher: fetcher,
+                parentFacts: parentFacts,
+                validationContext: ValidationContext(nowMilliseconds: now())
+            )
+            let valid = verdict.retryFailure == nil && !verdict.provesInvalid
+            let transactions = valid ? await transactionIDs(ofBlock: job.blockHash, fetcher: fetcher) : []
+            return [.level(path, .connected(verdict, transactions: transactions))]
         }
-        var returned: [Transaction] = []
-        for cid in left {
-            for transaction in await transactions(of: cid)
-            where (try? Mempool.cid(of: transaction)).map({ !carried.contains($0) }) ?? false {
-                returned.append(transaction)
-            }
+    }
+
+    /// `Effect.readTransactions`: each block's transaction IDs.
+    static func readJob(_ blocks: [String], at path: ChainPath, process: ChainProcess) -> CoreJob {
+        let fetcher = process.localFetcher
+        return CoreJob(path: path, epoch: nil) {
+            var read: [String: [String]] = [:]
+            for cid in blocks { read[cid] = await transactionIDs(ofBlock: cid, fetcher: fetcher) }
+            return [.level(path, .transactionsRead(read))]
         }
-        return (carried, returned)
     }
 
     /// `MiningEffect.buildTemplate`: today's assembly (the bisecting fit, the

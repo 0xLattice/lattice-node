@@ -530,6 +530,11 @@ public struct LevelSimulator {
         case .indexProof(let cid, let proof):
             node.store.index(proof, for: cid, at: path)
             publish(proof, for: cid, at: path)
+        case .readTransactions(let blocks):
+            // The simulated chains carry no transactions.
+            schedule(at: delay(), to: name, .host(.level(path, .transactionsRead(
+                Dictionary(uniqueKeysWithValues: blocks.map { ($0, [String]()) })
+            ))))
         case .mining, .workSubmitted:
             // The transaction workload drives `Mining` on its own
             // (`TxWorkload`); the level simulator submits no transactions,

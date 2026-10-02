@@ -16,8 +16,13 @@ public enum Event: Sendable {
     case headersServed(PeerID, token: UInt64)
     /// The content layer holds the body Volume of this block locally.
     case bodyFetched(cid: String)
-    /// A connect job's verdict.
-    case connected(ConnectVerdict)
+    /// A connect job's verdict, with the CIDs of the transactions the block
+    /// carries (the job read them from the body it executed): what the act-on
+    /// chain confirms when it enters the block.
+    case connected(ConnectVerdict, transactions: [String] = [])
+    /// The answer to `readTransactions`: each block's transaction CIDs (a
+    /// body no longer held reads as none).
+    case transactionsRead([String: [String]])
     /// A child level: its parent level now holds the facts these blocks'
     /// connects lacked.
     case parentFactsPresent([String])
@@ -130,6 +135,10 @@ public enum Effect: Sendable {
     /// The answer to a mined grind (`HostEvent.mined` with a reply ID): at
     /// once unless its root waits to execute, then from its verdict.
     case workSubmitted(replyID: UInt64, MinedOutcome)
+    /// Read these executed blocks' transaction CIDs from content and answer
+    /// `transactionsRead`: the act-on chain entered them, and their IDs were
+    /// not held (executed before a restart, or below the body window).
+    case readTransactions([String])
     /// The level's mempool and miner work (see `MiningEffect`), after the
     /// step's `persist` and `publish`. A `poolChanged` is durable state: the
     /// shell executes it, in order, before any later effect.
@@ -265,6 +274,12 @@ public struct Core: Sendable {
     public internal(set) var index = WeighedIndex()
     /// The level's mempool and template book, on the act-on tip.
     public internal(set) var mining: Mining
+    /// The transaction CIDs of executed blocks within `bodyWindow` heights of
+    /// the act-on tip, from their connects: what the act-on chain confirms
+    /// when it enters them, without a read. Bounded like the bodies kept.
+    var executedTransactions: [String: [String]] = [:]
+    /// Blocks whose transaction CIDs are being read.
+    var readingTransactions: Set<String> = []
     /// This host's mined blocks awaiting their answer, by block: answered
     /// once executed (or proven invalid), or at once when the block is
     /// weighed off the best chain, which the body window never executes.
@@ -340,8 +355,13 @@ public struct Core: Sendable {
             }
         case .bodyFetched(let cid):
             bodyFetched(cid)
-        case .connected(let verdict):
-            connected(verdict, &turn)
+        case .connected(let verdict, let transactions):
+            connected(verdict, transactions: transactions, &turn)
+        case .transactionsRead(let blocks):
+            readingTransactions.subtract(blocks.keys)
+            for (cid, transactions) in blocks where index.contains(cid) {
+                executedTransactions[cid] = transactions
+            }
         case .parentFactsPresent(let blocks):
             parentFactsPresent(blocks)
         case .tick:
@@ -915,13 +935,14 @@ public struct Core: Sendable {
 
     // MARK: - Mining tip
 
-    /// When the act-on tip moved, tell the mempool, naming the blocks the
-    /// act-on chain left and entered: the shell reads them from content,
-    /// confirms what the entered blocks carry (`MiningEvent.confirmed`) and
-    /// returns every transaction of the left ones whose body is still held
-    /// (Bitcoin's rule, bounded by `maxPendingReturned`). A pooled
-    /// transaction a forward move confirms without a read leaves through its
-    /// next preflight.
+    /// When the act-on tip moved, tell the mempool in the same step: the
+    /// transactions of the blocks the act-on chain entered are confirmed
+    /// (Bitcoin Core's `removeForBlock`), before any verdict on the new tip,
+    /// and those of the blocks it left are read from content and returned
+    /// (bounded by `maxPendingReturned`). An entered block whose IDs are not
+    /// held is read first (`readTransactions`): the mempool stays on the
+    /// old tip until the read answers, since a verdict on the new tip could
+    /// not tell a used nonce from a confirmation.
     mutating func moveMiningTip(_ turn: inout Turn) {
         let tip = tree.actOnTip()
         guard tip.hash != mining.tipCID else { return }
@@ -939,10 +960,24 @@ public struct Core: Sendable {
                 new = parent
             }
         }
+        let unread = entered.filter { executedTransactions[$0] == nil }
+        guard unread.isEmpty else {
+            let ask = unread.filter { !readingTransactions.contains($0) }.sorted()
+            if !ask.isEmpty {
+                readingTransactions.formUnion(ask)
+                turn.effects.append(.readTransactions(ask))
+            }
+            return
+        }
+        let confirmed = Set(entered.flatMap { executedTransactions[$0] ?? [] })
         turn.mining += mining.step(
-            .tipMoved(TipMove(tipCID: tip.hash, left: left.reversed(), entered: entered.reversed())),
+            .tipMoved(TipMove(tipCID: tip.hash, confirmed: confirmed, left: left.reversed())),
             now: turn.now
         )
+        let window = UInt64(max(config.bodyWindow, 0))
+        executedTransactions = executedTransactions.filter {
+            (index.height[$0.key] ?? 0) + window >= tip.height
+        }
     }
 
     /// Answer each mined block awaiting execution that is not on the best

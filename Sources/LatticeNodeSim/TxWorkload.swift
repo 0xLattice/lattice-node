@@ -743,8 +743,6 @@ public struct TxWorkload {
             "built \(job.id) \(build?.workID ?? "-")"
         case .submitWork(let replyID, let workID, let nonce):
             "work \(replyID) \(workID) \(nonce)"
-        case .confirmed(let cids, _):
-            "confirmed \(cids.sorted())"
         }
     }
 }

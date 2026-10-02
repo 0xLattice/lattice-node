@@ -18,6 +18,8 @@ final class CoreDriverJobOrderTests: NetworkTrustTestCase {
         var jobs: [CoreDriver.CoreJob] = []
         /// Every reply and announce the mining effects gave.
         var replies: [MiningEffect] = []
+        /// Every `readTransactions` the core asked.
+        var reads: [[String]] = []
 
         var mining: Mining { host.levels[host.rootPath]!.mining }
         var actOnTip: String { host.levels[host.rootPath]!.snapshot.actOnTip }
@@ -37,10 +39,10 @@ final class CoreDriverJobOrderTests: NetworkTrustTestCase {
                 for effect in effects {
                     switch effect {
                     case .connect(let path, let job, let facts):
-                        pending.append(.level(path, .connected(await ChainTree.connect(
-                            job, fetcher: process.localFetcher, parentFacts: facts,
-                            validationContext: ValidationContext(nowMilliseconds: CoreDriver.now())
-                        ))))
+                        pending += await CoreDriver.connectJob(job, at: path, parentFacts: facts, process: process).run()
+                    case .level(let path, .readTransactions(let blocks)):
+                        reads.append(blocks)
+                        pending += await CoreDriver.readJob(blocks, at: path, process: process).run()
                     case .level(let path, .fetchBody(let cid)):
                         pending.append(.level(path, .bodyFetched(cid: cid)))
                     case .level(let path, .mining(let mining)):
@@ -83,7 +85,7 @@ final class CoreDriverJobOrderTests: NetworkTrustTestCase {
         }
     }
 
-    private func harness(keyByte: UInt8) async throws -> Harness {
+    private func harness(keyByte: UInt8, bodyWindow: Int = 64) async throws -> Harness {
         let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-core-job-order-\(UUID().uuidString)", isDirectory: true
         )
@@ -96,7 +98,7 @@ final class CoreDriverJobOrderTests: NetworkTrustTestCase {
         let process = try await ChainProcess.open(configuration: configuration)
         // The submit waits through every move here; none is refused as
         // retriable for waiting too long.
-        var config = CoreConfig()
+        var config = CoreConfig(bodyWindow: bodyWindow)
         config.mining.maxReissues = 16
         return Harness(
             host: try await CoreDriver.boot(process: process, configuration: configuration, coreConfig: config),
@@ -166,10 +168,28 @@ final class CoreDriverJobOrderTests: NetworkTrustTestCase {
         XCTAssertFalse(harness.mining.mempool.contains(try Mempool.cid(of: tx)))
     }
 
-    /// Move 1 enters B; move 2 leaves it. The second read answers first and
-    /// returns B's transaction; the first read's late confirmation is stale
-    /// and undoes nothing.
-    func testALateConfirmationNeverUndoesAReorgReturn() async throws {
+    /// Two forward moves back to back, one worker: both blocks execute
+    /// before any mining job runs, and the submit the first one carries is
+    /// still admitted (each connect result names its transactions).
+    func testTwoForwardMovesBackToBackConfirmTheWaitingSubmit() async throws {
+        var harness = try await harness(keyByte: 0x43)
+        let clock = TestBlockClock()
+        let genesis = try await harness.process.canonicalTipBlock()
+        let tx = try transaction()
+        try await harness.step(.level(harness.host.rootPath, .mining(
+            .transactionReceived(tx, origin: .local(replyID: 1))
+        )))
+        let b = try await mine(&harness, on: genesis, [tx], timestamp: clock.next())
+        let c = try await mine(&harness, on: b, timestamp: clock.next())
+        XCTAssertEqual(harness.actOnTip, try BlockHeader(node: c).rawCID)
+        try await harness.runJobs()
+        XCTAssertTrue(harness.admitted(1), "\(harness.replies)")
+        XCTAssertFalse(harness.refused(1), "\(harness.replies)")
+        XCTAssertTrue(harness.reads.isEmpty)
+    }
+
+    /// A reorg returns the transaction a left block carried to the pool.
+    func testAReorgReturnsTheLeftBlocksTransaction() async throws {
         var harness = try await harness(keyByte: 0x42)
         let clock = TestBlockClock()
         let genesis = try await harness.process.canonicalTipBlock()
@@ -178,26 +198,47 @@ final class CoreDriverJobOrderTests: NetworkTrustTestCase {
         try await harness.step(.level(harness.host.rootPath, .mining(
             .transactionReceived(tx, origin: .local(replyID: 1))
         )))
-        let b = try await mine(&harness, on: genesis, [tx], timestamp: clock.next())
-        let bCID = try BlockHeader(node: b).rawCID
-        XCTAssertEqual(harness.actOnTip, bCID)
-        // The read of B is the last job the move queued; hold it back.
-        let firstRead = harness.jobs.removeLast()
-
-        // A heavier empty branch from genesis.
+        try await mine(&harness, on: genesis, [tx], timestamp: clock.next())
+        XCTAssertTrue(harness.admitted(1), "\(harness.replies)")
         let c1 = try await mine(&harness, on: genesis, timestamp: clock.next())
         let c2 = try await mine(&harness, on: c1, timestamp: clock.next())
         XCTAssertEqual(harness.actOnTip, try BlockHeader(node: c2).rawCID)
-        XCTAssertNotEqual(harness.actOnTip, bCID)
+        try await harness.runJobs()
+        XCTAssertTrue(harness.mining.mempool.contains(cid), "the left block's transaction is back in the pool")
+    }
 
-        // Every later job first, then the read of B.
-        try await harness.runJobs()
-        XCTAssertTrue(harness.mining.mempool.contains(cid), "B's transaction is back in the pool")
-        harness.jobs.append(firstRead)
-        try await harness.runJobs()
-        XCTAssertTrue(harness.mining.mempool.contains(cid), "B's transaction is back in the pool")
-        // Admitted by the pool on the new tip, never confirmed by B.
-        XCTAssertTrue(harness.admitted(1), "\(harness.replies)")
-        XCTAssertEqual(harness.mining.pendingAdmissions, 0)
+    /// A reorg back onto a branch executed earlier: within the body window
+    /// its blocks' transaction IDs are held, so it confirms in the move with
+    /// no read; below it, the entered block is read first and the mempool
+    /// follows once the read answers.
+    func testAReorgOntoAnEarlierExecutedBranchConfirmsInsideAndOutsideTheWindow() async throws {
+        for (window, sideLength) in [(64, 2), (1, 3)] {
+            var harness = try await harness(keyByte: 0x44, bodyWindow: window)
+            let clock = TestBlockClock()
+            let genesis = try await harness.process.canonicalTipBlock()
+            let tx = try transaction()
+            let cid = try Mempool.cid(of: tx)
+            let b1 = try await mine(&harness, on: genesis, [tx], timestamp: clock.next())
+            let b1CID = try BlockHeader(node: b1).rawCID
+            // A heavier side branch; B1's transaction returns to the pool.
+            var side = genesis
+            for _ in 0..<sideLength { side = try await mine(&harness, on: side, timestamp: clock.next()) }
+            XCTAssertEqual(harness.actOnTip, try BlockHeader(node: side).rawCID)
+            try await harness.runJobs()
+            XCTAssertTrue(harness.mining.mempool.contains(cid), "window \(window)")
+            // Back onto B1's branch, heavier again.
+            var tip = b1
+            for _ in 0..<sideLength { tip = try await mine(&harness, on: tip, timestamp: clock.next()) }
+            XCTAssertEqual(harness.actOnTip, try BlockHeader(node: tip).rawCID, "window \(window)")
+            XCTAssertEqual(harness.mining.tipCID, harness.actOnTip, "window \(window)")
+            XCTAssertFalse(harness.mining.mempool.contains(cid), "B1 confirms it again: window \(window)")
+            if window == 64 {
+                XCTAssertTrue(harness.reads.isEmpty, "held within the window: \(harness.reads)")
+            } else {
+                XCTAssertTrue(harness.reads.contains { $0.contains(b1CID) }, "read below the window: \(harness.reads)")
+            }
+            try await harness.runJobs()
+            XCTAssertFalse(harness.mining.mempool.contains(cid), "window \(window)")
+        }
     }
 }

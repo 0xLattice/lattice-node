@@ -14,30 +14,28 @@ public enum TransactionOrigin: Sendable, Equatable {
     case restored(addedAt: Int64)
 }
 
-/// The executed tip moved. `left` and `entered` name the blocks the act-on
-/// chain left and entered, parent first: the shell reads the left blocks'
-/// transactions from content (`MiningEffect.returnTransactions`). A caller
-/// that already holds the transactions passes them as `confirmed` and
-/// `returned` instead.
+/// The executed tip moved: the transactions the blocks the act-on chain
+/// entered carry (`confirmed`, from their executions, as Bitcoin Core's
+/// `removeForBlock`), and the blocks it left, parent first, whose
+/// transactions the shell reads from content and returns
+/// (`MiningEffect.returnTransactions`). A caller that holds the returned
+/// transactions passes them as `returned` instead.
 public struct TipMove: Sendable {
     public let tipCID: String
     public let confirmed: Set<String>
     public let returned: [Transaction]
     public let left: [String]
-    public let entered: [String]
 
     public init(
         tipCID: String,
         confirmed: Set<String> = [],
         returned: [Transaction] = [],
-        left: [String] = [],
-        entered: [String] = []
+        left: [String] = []
     ) {
         self.tipCID = tipCID
         self.confirmed = confirmed
         self.returned = returned
         self.left = left
-        self.entered = entered
     }
 }
 
@@ -141,13 +139,6 @@ public enum MiningEvent: Sendable {
     /// nil: the job could not build a block on its tip.
     case templateBuilt(TemplateJob, TemplateBuild?)
     case submitWork(replyID: UInt64, workID: String, nonce: UInt64)
-    /// The answer to `returnTransactions` of the move at `epoch`: the CIDs
-    /// the entered blocks carry. Each leaves the pool, and a submit still
-    /// awaiting its verdict is answered as admitted (a restored row goes);
-    /// then every admission still pending is preflighted. A later move made
-    /// the answer stale: it is dropped (that move reads its own blocks). The
-    /// returned transactions arrive separately, as `.returned` origins.
-    case confirmed(Set<String>, epoch: UInt64)
 }
 
 /// The pool's durable side of one step. The shell applies it before any later
@@ -174,13 +165,11 @@ public enum MiningEffect: Sendable {
     case workRefused(replyID: UInt64, TemplateError)
     case preflight(PreflightJob)
     case buildTemplate(TemplateJob)
-    /// Read the transactions of the `left` and `entered` blocks from
-    /// content: answer `.confirmed` with the entered blocks' CIDs, then hand
-    /// each left-block transaction the entered blocks do not carry back as
+    /// Read the transactions of the `left` blocks from content and hand each
+    /// one the new act-on chain does not carry (`carried`) back as
     /// `.transactionReceived(_, origin: .returned)`. A body no longer held
-    /// contributes nothing. `epoch` is the move's tip epoch, which the
-    /// answer carries back.
-    case returnTransactions(left: [String], entered: [String], epoch: UInt64)
+    /// returns nothing.
+    case returnTransactions(left: [String], carried: Set<String>)
 }
 
 /// Bounds on transactions waiting for a preflight verdict. Local and
@@ -311,14 +300,6 @@ public struct Mining: Sendable {
             requestTemplate(request, waiting: [Waiting(replyID: replyID)], &turn)
         case .templateBuilt(let job, let build):
             built(job, build, now: now, &turn)
-        case .confirmed(let cids, let epoch):
-            // A later move left or re-read these blocks: never confirm a
-            // block the act-on chain no longer carries.
-            guard epoch == tipEpoch else { break }
-            confirm(cids, &turn)
-            for (cid, admission) in admissions.sorted(by: { $0.key < $1.key }) {
-                preflight(cid, admission.transaction, &turn)
-            }
         case .submitWork(let replyID, let workID, let nonce):
             do {
                 let block = try templates.submission(workID: workID, nonce: nonce, now: now)
@@ -564,7 +545,6 @@ public struct Mining: Sendable {
         departed(mempool.remove(confirmed.sorted()), &turn)
         for cid in confirmed.sorted() {
             guard let admission = close(cid) else { continue }
-            preflighting.remove(cid)
             for origin in admission.origins {
                 switch origin {
                 case .local(let replyID):
@@ -606,25 +586,18 @@ public struct Mining: Sendable {
                   !mempool.contains(cid), admissions[cid] == nil else { continue }
             open(cid, Admission(transaction: transaction, origins: [.returned], slot: .returned))
         }
-        // Read the moved blocks when something left the act-on chain, or
-        // when a submit still awaits its verdict (the entered blocks may
-        // confirm it).
-        let waitingLocal = admissions.values.contains { $0.slot == .local }
-        let reads = !move.left.isEmpty || (!move.entered.isEmpty && waitingLocal)
         // Every verdict the pool holds or awaits was for the old tip: those
-        // still out will be dropped, and each is issued again here. A
-        // pending admission waits for the read's `.confirmed` instead: its
-        // block may carry it, and a verdict first would refuse it.
+        // still out will be dropped, and each is issued again here. The
+        // move confirmed first, so no verdict refuses what it carries.
         preflighting.removeAll()
         for item in mempool.items {
             preflight(item.cid, item.transaction, &turn)
         }
-        if reads {
-            turn.jobs.append(.returnTransactions(left: move.left, entered: move.entered, epoch: tipEpoch))
-        } else {
-            for (cid, admission) in admissions.sorted(by: { $0.key < $1.key }) {
-                preflight(cid, admission.transaction, &turn)
-            }
+        for (cid, admission) in admissions.sorted(by: { $0.key < $1.key }) {
+            preflight(cid, admission.transaction, &turn)
+        }
+        if !move.left.isEmpty {
+            turn.jobs.append(.returnTransactions(left: move.left, carried: move.confirmed))
         }
         // Every waiting build was for the old tip: issue it again on this
         // one, or refuse a request that has waited through too many moves.

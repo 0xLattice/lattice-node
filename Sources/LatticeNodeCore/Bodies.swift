@@ -75,7 +75,7 @@ extension Core {
     /// without a decision (content that was not resolvable after all) is an
     /// availability wait: the block parks, and its body is asked for again
     /// after a backoff.
-    mutating func connected(_ verdict: ConnectVerdict, _ turn: inout Turn) {
+    mutating func connected(_ verdict: ConnectVerdict, transactions: [String], _ turn: inout Turn) {
         let cid = verdict.blockHash
         if bodies.connecting == cid { bodies.connecting = nil }
         switch verdict.retryFailure {
@@ -100,6 +100,7 @@ extension Core {
             turn.genesisLinks += update.parentGenesisLinks.map {
                 IssuedGenesisLink(link: $0, issuer: update.blockHash)
             }
+            if !update.excluded { executedTransactions[cid] = transactions }
             if let replyID = minedReplies.removeValue(forKey: cid) {
                 turn.effects.append(.workSubmitted(
                     replyID: replyID,

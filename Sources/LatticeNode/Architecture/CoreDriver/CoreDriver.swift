@@ -565,15 +565,7 @@ extension CoreDriver {
                 sessions[peer.key] = nil
                 _ = await ivy.disconnectSession(ifCurrent: session.peer)
             case .connect(let path, let job, let parentFacts):
-                let fetcher = process.localFetcher
-                executionJobs.append(CoreJob(path: path, epoch: nil) {
-                    [.level(path, .connected(await ChainTree.connect(
-                        job,
-                        fetcher: fetcher,
-                        parentFacts: parentFacts,
-                        validationContext: ValidationContext(nowMilliseconds: CoreDriver.now())
-                    )))]
-                })
+                executionJobs.append(CoreDriver.connectJob(job, at: path, parentFacts: parentFacts, process: process))
                 startJobs()
             case .bootstrap:
                 // PENDING (child levels): never emitted while `hosted` is empty.
@@ -663,6 +655,9 @@ extension CoreDriver {
                 executionJobs.append(CoreJob(path: path, epoch: nil) {
                     [.level(path, .proofVerified(job, await job.run(block)))]
                 })
+                startJobs()
+            case .readTransactions(let blocks):
+                executionJobs.append(CoreDriver.readJob(blocks, at: path, process: process))
                 startJobs()
             case .lookupProofs, .indexProof:
                 // PENDING (child levels): the child-evidence index (#253).
