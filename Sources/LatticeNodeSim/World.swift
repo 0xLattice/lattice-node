@@ -52,7 +52,7 @@ public final class SimCAS: Fetcher, Storer, VolumeStorer, Sendable {
 public struct SimBlock: Sendable {
     public let cid: String
     public let block: Block
-    public let children: ChildIndex
+    public let children: FlatDictionary<BlockHeader>
     public let parent: String?
     public let height: UInt64
     /// When a source may first show it (its own timestamp).
@@ -165,7 +165,7 @@ public struct World: Sendable {
             fetcher: cas
         ))
         let genesis = try await record(genesisBlock, releaseAt: genesisTime, anchor: nil, in: cas)
-        let context = try ChainRuntimeContext(path: [DEFAULT_ROOT_DIRECTORY])
+        let context = try ChainRuntimeContext(path: [DEFAULT_ROOT_DIRECTORY], genesisCID: genesis.cid)
         let bootstrap = try await ChainTree.bootstrap(
             genesis: BlockHeader(node: genesisBlock),
             fetcher: cas,
@@ -191,15 +191,10 @@ public struct World: Sendable {
                 ("Child\(index)-\($0)", genesis.block)
             })
             // Every honest block pays its reward, so each execution produces
-            // a new state. With `genesisActions`, every other block also
-            // authorizes a child genesis and issues a link (signatures are
-            // not deterministic on every platform, so the simulator's worlds
-            // leave them out).
-            let transactions = genesisActions && index % 2 == 0
-                ? [try genesisAction(index: index, childGenesis: genesis.cid)] : []
+            // a new state.
             let next = try await extend(
                 blocks[parent]!, timestamp: time, nonce: UInt64(index) << 32, children: children,
-                transactions: transactions, rewardRecipient: try miner(index), in: cas
+                transactions: [], rewardRecipient: try miner(index), in: cas
             )
             blocks[next.cid] = next
             honest.append(next.cid)
@@ -454,27 +449,6 @@ public struct World: Sendable {
         let key = try Curve25519.Signing.PrivateKey(rawRepresentation: seed)
         let hex = { (bytes: Data) in bytes.map { String(format: "%02x", $0) }.joined() }
         return (hex(key.rawRepresentation), "ed01" + hex(key.publicKey.rawRepresentation))
-    }
-
-    /// A signed transaction whose one `GenesisAction` authorizes a child
-    /// chain, from a signer derived from `index` (the same world, the same
-    /// bytes).
-    static func genesisAction(index: Int, childGenesis: String) throws -> Transaction {
-        let (privateKey, publicKey) = try signer(index)
-        let body = TransactionBody(
-            accountActions: [], actions: [], depositActions: [],
-            genesisActions: [GenesisAction(directory: "Kid\(index)", blockCID: childGenesis)],
-            receiptActions: [], withdrawalActions: [],
-            signers: [CryptoUtils.createAddress(from: publicKey)], nonce: 0,
-            chainPath: [DEFAULT_ROOT_DIRECTORY]
-        )
-        let bodyHeader = try HeaderImpl<TransactionBody>(node: body)
-        guard let signature = TransactionSigning.sign(bodyHeader: bodyHeader, privateKeyHex: privateKey),
-              let preimage = TransactionSigning.preimage(bodyHeader: bodyHeader),
-              CryptoUtils.verify(message: preimage, signature: signature, publicKeyHex: publicKey) else {
-            throw SimulationError.malformedWorld("genesis action \(index) does not sign")
-        }
-        return Transaction(signatures: [publicKey: signature], body: bodyHeader)
     }
 
     /// The first nonce at or above the block's own that meets its target.

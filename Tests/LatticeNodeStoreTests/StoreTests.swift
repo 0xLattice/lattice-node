@@ -46,7 +46,7 @@ final class StoreTests: StoreTestCase {
     // MARK: - Log
 
     /// A Lattice batch is one weight row (block and work together) plus one
-    /// row per verdict; attributed runs are their own kind.
+    /// row per verdict.
     func testRowsKeepWeightTogetherAndSplitVerdicts() async throws {
         let fixture = try await Self.fixture.value
         let rootFacts = try XCTUnwrap(fixture.batch.levels.first { $0.path == LevelWorld.nexus }).facts
@@ -76,7 +76,7 @@ final class StoreTests: StoreTestCase {
         let path = dbPath(try directory())
         try Store(path: path, rootGenesis: fixture.rootGenesis).apply(fixture.batch)
         let restored = try Store(path: path, rootGenesis: fixture.rootGenesis).restore()
-        XCTAssertEqual(restored.records.map(\.path), fixture.paths)
+        XCTAssertEqual(restored.records.map(\.path), [LevelWorld.nexus])
         let host = try restored.host(hosted: fixture.hosted, config: fixture.coreConfig)
         XCTAssertEqual(Set(host.levels.keys), Set(fixture.digests.keys))
         for (chain, digest) in fixture.digests {
@@ -84,68 +84,14 @@ final class StoreTests: StoreTestCase {
         }
     }
 
-    /// PENDING Lattice 41: a restored host keeps its child levels across the
-    /// first tick. On Lattice 40 the host re-derives child levels from
-    /// genesis links, which the store does not keep (18d), so they drop; this
-    /// skips until the node runs Lattice 41's multi-root genesis.
+    /// A restored host keeps its child levels across the first tick.
     func testRestoredHostKeepsChildLevelsAcrossATick() async throws {
         let fixture = try await Self.fixture.value
         let store = try Store(path: dbPath(try directory()), rootGenesis: fixture.rootGenesis)
         try store.apply(fixture.batch)
         var host = try store.restore().host(hosted: fixture.hosted, config: fixture.coreConfig)
         _ = host.step(.tick, now: Int64.max / 2)
-        guard Set(host.levels.keys) == Set(fixture.paths) else {
-            throw XCTSkip("PENDING Lattice 41: child levels drop on the first tick after restore")
-        }
-    }
-
-    /// The stream follows the level's current run: nothing after a drop,
-    /// only rows after the latest record once it is added again.
-    func testWeightFactStreamFollowsLevelRecords() async throws {
-        let fixture = try await Self.fixture.value
-        let store = try Store(path: dbPath(try directory()), rootGenesis: fixture.rootGenesis)
-        try store.apply(fixture.batch)
-        let child = LevelWorld.alpha
-        let original = try store.weightFacts(child, after: 0, limit: .max)
-        XCTAssertFalse(original.isEmpty)
-
-        var drop = StoreBatch()
-        drop.removed = [child]
-        try store.apply(drop)
-        XCTAssertEqual(try store.weightFacts(child, after: 0, limit: .max), [])
-
-        var again = StoreBatch()
-        try again.add(try XCTUnwrap(fixture.batch.added.first { $0.path == child }))
-        try store.apply(again)
-        XCTAssertEqual(try store.weightFacts(child, after: 0, limit: .max), [])
-        var facts = StoreBatch()
-        facts.levels = fixture.batch.levels.filter { $0.path == child }
-        try store.apply(facts)
-        let replayed = try store.weightFacts(child, after: 0, limit: .max)
-        XCTAssertEqual(replayed.map(\.block), original.map(\.block))
-        XCTAssertTrue(replayed.allSatisfy { $0.seq > original.last!.seq })
-        XCTAssertEqual(try store.weightFacts(child, after: replayed[0].seq, limit: .max), Array(replayed.dropFirst()))
-    }
-
-    /// A level added again replays from its new record; a dropped level is
-    /// not restored.
-    func testLevelRecordsReplaceAndDrop() async throws {
-        let fixture = try await Self.fixture.value
-        let store = try Store(path: dbPath(try directory()), rootGenesis: fixture.rootGenesis)
-        try store.apply(fixture.batch)
-        let child = LevelWorld.alpha
-        var drop = StoreBatch()
-        drop.removed = [child]
-        try store.apply(drop)
-        XCTAssertEqual(try store.restore().records.map(\.path), [LevelWorld.nexus])
-        XCTAssertNil(try store.restore().facts[child])
-
-        var again = StoreBatch()
-        try again.add(try XCTUnwrap(fixture.batch.added.first { $0.path == child }))
-        try store.apply(again)
-        let restored = try store.restore()
-        XCTAssertEqual(restored.records.map(\.path), [LevelWorld.nexus, child])
-        XCTAssertEqual(restored.facts[child]?.count, 0)
+        XCTAssertEqual(Set(host.levels.keys), Set(fixture.paths))
     }
 
     /// The weight-fact stream: header and proof entries only, in log order,

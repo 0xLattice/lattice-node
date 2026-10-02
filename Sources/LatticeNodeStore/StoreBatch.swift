@@ -11,12 +11,8 @@ public struct StoreBatch: Sendable {
     public var content: [String: Data] = [:]
     /// Each level's facts, in the order the core emitted them.
     public var levels: [(path: ChainPath, facts: [BlockImportBatch])] = []
-    /// Levels this host starts running (the root's record at first boot).
-    /// A record for a path that already has one replaces it: replay starts
-    /// that path's facts again from this record.
+    /// The root level's record, at first boot.
     public var added: [LevelRecord] = []
-    /// Levels this host stops running: replay drops them.
-    public var removed: [ChainPath] = []
 
     public init() {}
 
@@ -25,19 +21,16 @@ public struct StoreBatch: Sendable {
         try add(batch, at: path)
     }
 
-    /// The host core's persist effect. Its genesis links are not stored:
-    /// Lattice 41 deletes them (decision 18d).
-    // LATTICE 41: `issued` and `PersistBatch.genesisLinks` disappear.
+    /// The host core's persist effect.
     public init(_ batch: HostBatch) throws {
-        removed = batch.removed
-        for record in batch.added { try add(record) }
         for (path, level) in batch.levels { try add(level, at: path) }
     }
 
     public mutating func add(_ batch: PersistBatch, at path: ChainPath) throws {
         for header in batch.headers {
             try Self.materialized(BlockHeader(node: header.block), into: &content)
-            try Self.materialized(HeaderImpl<ChildIndex>(node: header.children), into: &content)
+            try Self.materialized(HeaderImpl(node: header.children), into: &content)
+            if let spec = header.spec { try Self.materialized(VolumeImpl(node: spec), into: &content) }
         }
         for state in batch.states {
             try Self.materialized(LatticeStateHeader(node: state), into: &content)
@@ -47,7 +40,7 @@ public struct StoreBatch: Sendable {
 
     public mutating func add(_ record: LevelRecord) throws {
         try Self.materialized(BlockHeader(node: record.genesis.block), into: &content)
-        try Self.materialized(HeaderImpl<ChildIndex>(node: record.genesis.children), into: &content)
+        try Self.materialized(HeaderImpl(node: record.genesis.children), into: &content)
         try Self.materialized(VolumeImpl<ChainSpec>(node: record.spec), into: &content)
         added.append(record)
     }

@@ -8,8 +8,7 @@ extension Store {
     /// mempool, and `keeping`: content the caller holds in flight that no
     /// durable row names yet (a fetched body awaiting its verdict, an
     /// evidence index root). Everything reachable from a root by content
-    /// links is kept; the rest is deleted. A dropped or replaced level's
-    /// earlier rows are no roots.
+    /// links is kept; the rest is deleted.
     ///
     /// Weighed facts are never collected: only content is. Every weighed
     /// block is a root, so this reclaims only content no log row ever named
@@ -24,10 +23,8 @@ extension Store {
                 let chain = row.text(0)
                 switch LogKind(rawValue: row.text(1)) {
                 case .level:
-                    levels[chain] = [row.text(2)]
-                case .drop:
-                    levels[chain] = nil
-                case .block, .work, .run:
+                    levels[chain, default: []].insert(row.text(2))
+                case .block, .work:
                     levels[chain, default: []].insert(row.text(2))
                     for fact in try Self.decode(row.blob(3) ?? Data()).facts {
                         if case .work(let work) = fact { levels[chain, default: []].insert(work.contribution.id) }

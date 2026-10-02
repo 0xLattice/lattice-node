@@ -12,16 +12,11 @@ public enum LogKind: String, Sendable, CaseIterable {
     /// A further grind on a weighed block: on a child chain, another proof.
     /// Shared on the weight-fact stream.
     case work
-    /// A parent's attributed run: derived work, never shared.
-    case run
     /// Local verdicts, recomputed by every node, never shared.
     case validation
     case exclusion
-    /// The host started running a level (`cid` = its genesis); replay
-    /// starts the level's facts here.
+    /// The host's root level record (`cid` = its configured genesis).
     case level
-    /// The host stopped running a level.
-    case drop
 }
 
 /// One entry of the weight-fact stream: a header or a proof, by position.
@@ -35,28 +30,25 @@ public struct WeightEntry: Sendable, Equatable {
 
 /// What a restart reads back: one linear scan of the log.
 public struct Restored: Sendable {
-    /// The levels the host runs, root first.
+    /// The root level's record.
     public let records: [LevelRecord]
-    /// Each level's facts since its record, in log order.
+    /// Each level's facts, in log order.
     public let facts: [ChainPath: [BlockImportBatch]]
+    /// Each level's genesis specs, read from its genesis block facts.
+    public let specs: [ChainPath: [ChainSpec]]
     /// The local mempool journal per level, oldest first.
     public let mempool: [ChainPath: [String]]
 
     /// The host core these facts rebuild.
-    ///
-    /// REQUIRES the node on Lattice 41. On Lattice 40 the host re-derives its
-    /// child levels from genesis links, which this store does not keep
-    /// (decision 18d), so the first `.tick` after restore drops every child
-    /// level. Lattice 41's multi-root genesis deletes that selection
-    /// (`issuers`, `wantedGenesis`, `reconcileChildren`).
-    // LATTICE 41: `ChainTree.restore` takes `specs` and a context carrying
-    // the root genesis CID; `HostCore.restore` loses `issued`.
     public func host(
         hosted: Set<ChainPath>,
         pins: [ChainPath: String] = [:],
         config: CoreConfig = CoreConfig()
     ) throws -> HostCore {
-        try HostCore.restore(records: records, facts: facts, issued: [], hosted: hosted, pins: pins, config: config)
+        guard let root = records.first else { throw StoreError.corrupt("no root level record") }
+        return try HostCore.restore(
+            root: root, facts: facts, specs: specs, hosted: hosted, pins: pins, config: config
+        )
     }
 }
 
@@ -202,17 +194,10 @@ public final class Store: Sendable {
     /// after position `seq`, in log order.
     public func weightFacts(_ path: ChainPath, after seq: Int64, limit: Int) throws -> [WeightEntry] {
         try locked { db in
-            // Only the level's current run counts: nothing after a drop,
-            // nothing before its latest record.
-            let start = try db.first(
-                "SELECT seq, kind FROM log WHERE chain = ? AND kind IN ('level', 'drop') ORDER BY seq DESC LIMIT 1",
-                [.text(Self.key(path))]
-            ) { (seq: $0.int(0), dropped: $0.text(1) == LogKind.drop.rawValue) }
-            if start?.dropped == true { return [] }
             var entries: [WeightEntry] = []
             try db.each(
                 "SELECT seq, kind, cid, fact FROM log WHERE chain = ? AND seq > ? AND kind IN ('block', 'work') ORDER BY seq LIMIT ?",
-                [.text(Self.key(path)), .int(max(seq, start?.seq ?? 0)), .int(Int64(limit))]
+                [.text(Self.key(path)), .int(seq), .int(Int64(limit))]
             ) { row in
                 let batch = try Self.decode(row.blob(3) ?? Data())
                 let grind = batch.facts.lazy.compactMap { fact -> String? in
@@ -228,22 +213,24 @@ public final class Store: Sendable {
     }
 
     /// Everything a restart needs, from one scan of the log in `seq` order;
-    /// content is read only for each level's record (its genesis and spec).
+    /// content is read only for the root record and each genesis's spec.
     public func restore() throws -> Restored {
         try locked { db in
             var genesis: [ChainPath: String] = [:]
             var facts: [ChainPath: [BlockImportBatch]] = [:]
+            var specs: [ChainPath: [ChainSpec]] = [:]
             try db.each("SELECT chain, kind, cid, fact FROM log ORDER BY seq") { row in
                 let path = Self.path(row.text(0))
                 switch LogKind(rawValue: row.text(1)) {
                 case .level:
                     genesis[path] = row.text(2)
-                    facts[path] = []
-                case .drop:
-                    genesis[path] = nil
-                    facts[path] = nil
                 case .some:
-                    facts[path, default: []].append(try Self.decode(row.blob(3) ?? Data()))
+                    let batch = try Self.decode(row.blob(3) ?? Data())
+                    facts[path, default: []].append(batch)
+                    for case .block(let block) in batch.facts where block.parentBlockHash == nil {
+                        let node = try Self.node(block.blockHash, as: Block.self, path, db)
+                        specs[path, default: []].append(try Self.node(node.spec.rawCID, as: ChainSpec.self, path, db))
+                    }
                 case nil:
                     throw StoreError.corrupt("log kind \(row.text(1))")
                 }
@@ -258,25 +245,30 @@ public final class Store: Sendable {
             }
             return Restored(
                 records: records.sorted { $0.path.count != $1.path.count ? $0.path.count < $1.path.count : Self.key($0.path) < Self.key($1.path) },
-                facts: facts.filter { genesis[$0.key] != nil },
+                facts: facts,
+                specs: specs,
                 mempool: mempool
             )
         }
     }
 
-    private static func record(_ path: ChainPath, genesis cid: String, _ db: SQLite) throws -> LevelRecord {
-        func node<N: Node>(_ cid: String, as type: N.Type) throws -> N {
-            guard let bytes = try db.first("SELECT bytes FROM content WHERE cid = ?", [.text(cid)], { $0.blob(0) }),
-                  let bytes, let node = N(data: bytes) else {
-                throw StoreError.corrupt("level \(Self.key(path)) is missing \(cid)")
-            }
-            return node
+    private static func node<N: Node>(_ cid: String, as type: N.Type, _ path: ChainPath, _ db: SQLite) throws -> N {
+        guard let bytes = try db.first("SELECT bytes FROM content WHERE cid = ?", [.text(cid)], { $0.blob(0) }),
+              let bytes, let node = N(data: bytes) else {
+            throw StoreError.corrupt("level \(Self.key(path)) is missing \(cid)")
         }
-        let block = try node(cid, as: Block.self)
+        return node
+    }
+
+    private static func record(_ path: ChainPath, genesis cid: String, _ db: SQLite) throws -> LevelRecord {
+        let block = try node(cid, as: Block.self, path, db)
         return LevelRecord(
             path: path,
-            spec: try node(block.spec.rawCID, as: ChainSpec.self),
-            genesis: StoredHeader(blockCID: cid, block: block, children: try node(block.children.rawCID, as: ChildIndex.self))
+            spec: try node(block.spec.rawCID, as: ChainSpec.self, path, db),
+            genesis: StoredHeader(
+                blockCID: cid, block: block,
+                children: try node(block.children.rawCID, as: FlatDictionary<BlockHeader>.self, path, db)
+            )
         )
     }
 
@@ -295,9 +287,6 @@ public final class Store: Sendable {
     /// one batch), each validation or exclusion is its own.
     static func rows(_ batch: StoreBatch) throws -> [Row] {
         var rows: [Row] = []
-        for path in batch.removed {
-            rows.append(Row(chain: key(path), kind: .drop, cid: "", fact: Data()))
-        }
         for record in batch.added {
             rows.append(Row(chain: key(record.path), kind: .level, cid: record.genesis.blockCID, fact: Data()))
         }
@@ -331,7 +320,6 @@ public final class Store: Sendable {
                 kind = .block
                 cid = block.blockHash
             case .work(let work):
-                if kind != .block, work.attributedRun != nil { kind = .run }
                 cid = cid ?? work.blockHash
             case .validation, .exclusion:
                 break

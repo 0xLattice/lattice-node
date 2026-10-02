@@ -409,7 +409,7 @@ public struct TxWorkload {
                 floodCount += 1
                 let body = TransactionBody(
                     accountActions: [AccountAction(owner: sender, delta: -floodCount)],
-                    actions: [], depositActions: [], genesisActions: [], receiptActions: [],
+                    actions: [], depositActions: [], receiptActions: [],
                     withdrawalActions: [],
                     signers: [sender],
                     nonce: rng.chance(0.5) ? 0 : UInt64(rng.draw(1...8)),
@@ -579,7 +579,6 @@ public struct TxWorkload {
                 allAccountActions: body.accountActions,
                 allActions: body.actions,
                 allDepositActions: body.depositActions,
-                allGenesisActions: body.genesisActions,
                 allReceiptActions: body.receiptActions,
                 allWithdrawalActions: body.withdrawalActions,
                 transactionBodies: [body],
@@ -811,8 +810,7 @@ public enum SimTransactions {
             accountActions: accountActions,
             actions: [],
             depositActions: [],
-            genesisActions: [],
-            receiptActions: [],
+                        receiptActions: [],
             withdrawalActions: [],
             signers: keys.map { CryptoUtils.createAddress(from: $0.publicKey) },
             nonce: nonce,

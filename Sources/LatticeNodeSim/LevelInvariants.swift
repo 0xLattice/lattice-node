@@ -1,4 +1,5 @@
 import Lattice
+import cashew
 import LatticeNodeCore
 import UInt256
 
@@ -19,11 +20,8 @@ import UInt256
 ///   invalid block there stays unexcluded;
 /// - continuity: every executed child block's parent state was produced by
 ///   an executed parent block (any branch);
-/// - genesis links: a parent's facts authorize a child genesis exactly when
-///   the block carrying its `GenesisAction` is executed, and a child level
-///   exists only then;
 /// - weighed-only blocks issue no facts: validations only for executed
-///   blocks, genesis links only from executed ones;
+///   blocks;
 /// - the root-exclusion rule;
 /// - durability precedes visibility, and sync state stays bounded.
 public enum LevelInvariants {
@@ -44,7 +42,6 @@ public enum LevelInvariants {
             try checkLevel(name, path: path, host: host, core: core, digest: digest,
                            previous: previous[path], store: level, digests: digests, world: world)
         }
-        try checkGenesisLinks(node, host: host, digests: digests, store: store, world: world)
     }
 
     static func checkLevel(
@@ -76,14 +73,14 @@ public enum LevelInvariants {
         }
 
         // Grinds: one location each, and each explained.
-        let attributed = attributedRuns(at: path, host: host, digests: digests)
+        let attributed = attributedRuns(at: path, host: host, digests: digests, world: world)
         var located: [String: String] = [:]
         for (hash, entry) in digest.blocks {
             for (grind, work) in entry.grinds {
                 if let other = located.updateValue(hash, forKey: grind) {
                     throw fail("grind \(grind) is credited at \(other) and \(hash)")
                 }
-                if path.count == 1 || entry.height == 0 {
+                if path.count == 1 {
                     guard grind == hash, work == workForTarget(truth[hash]!.block.target) else {
                         throw fail("block \(hash) weighs \(grind): \(work), not its own proof-of-work")
                     }
@@ -108,7 +105,8 @@ public enum LevelInvariants {
             reference.add(hash, parent: entry.parent, grinds: entry.grinds)
         }
         let descent = reference.descent()
-        guard descent.head == digest.canonicalTip, descent.path == digest.canonicalPath else {
+        // A level with no root weighed yet has no head.
+        guard digest.blocks.isEmpty || (descent.head == digest.canonicalTip && descent.path == digest.canonicalPath) else {
             throw fail("head \(digest.canonicalTip) is not the GHOST reference's \(descent.head)")
         }
         let work = reference.subtreeWork()
@@ -219,61 +217,41 @@ public enum LevelInvariants {
     }
 
     /// Per child block: each attributed-run identity its parent's committers
-    /// would credit it under, and the parent's run beyond the committer's
-    /// own grinds (the most it may credit).
-    static func attributedRuns(at path: ChainPath, host: HostCore, digests: [ChainPath: TreeDigest]) -> [String: [String: UInt256]] {
-        guard path.count > 1, let parent = host.levels[Array(path.dropLast())],
-              let parentDigest = digests[Array(path.dropLast())] else { return [:] }
+    /// credit it under, and the parent's run beyond the committer's own
+    /// grinds, recomputed from the parent's digest: a parent block's run is
+    /// that of its nearest ancestor (itself included) committing into the
+    /// directory, and a run is its blocks' total credited work.
+    static func attributedRuns(
+        at path: ChainPath, host: HostCore, digests: [ChainPath: TreeDigest], world: LevelWorld
+    ) -> [String: [String: UInt256]] {
+        let parentPath = Array(path.dropLast())
+        guard path.count > 1, let parent = host.levels[parentPath],
+              let parentDigest = digests[parentPath] else { return [:] }
         let directory = path[path.count - 1]
+        var commits: [String: String] = [:]
+        for hash in parentDigest.blocks.keys {
+            if let child = parent.tree.recordedChildCommitments(of: hash)?[directory] {
+                commits[hash] = CIDIdentity.canonicalString(child) ?? child
+            }
+        }
+        var run: [String: UInt256] = [:]
+        for (hash, entry) in parentDigest.blocks {
+            var current: String? = hash
+            while let block = current, commits[block] == nil { current = parentDigest.blocks[block]?.parent }
+            guard let committer = current else { continue }
+            run[committer, default: UInt256.zero] += entry.grinds.values.reduce(UInt256.zero, +)
+        }
         var runs: [String: [String: UInt256]] = [:]
-        for committer in parentDigest.blocks.keys {
-            guard let report = parent.tree.parentRunReport(at: committer, directory: directory),
-                  let id = AttributedRunIdentity(carrierBlockHash: committer, directory: directory).contributionID,
-                  let run = report.runWork.subtracting(report.ownWork)?.uint256Value else { continue }
-            runs[report.childBlock, default: [:]][id] = run
+        for (committer, total) in run {
+            let own = parentDigest.blocks[committer]?.grinds.filter {
+                $0.key == committer || world.proofs[parentPath]?[committer]?[$0.key] != nil
+            }.values.reduce(UInt256.zero, +) ?? UInt256.zero
+            guard let child = commits[committer], total > own,
+                  let id = AttributedRunIdentity(carrierBlockHash: committer, directory: directory).contributionID
+            else { continue }
+            runs[child, default: [:]][id] = total - own
         }
         return runs
-    }
-
-    /// Genesis links come from executed parent blocks only; a child level
-    /// exists only while one authorizes its genesis, and it is the genesis
-    /// resolved from the parent's best executed chain (never the failing
-    /// one, never the uncle's ground CID).
-    static func checkGenesisLinks(
-        _ node: String,
-        host: HostCore,
-        digests: [ChainPath: TreeDigest],
-        store: HostStore,
-        world: LevelWorld
-    ) throws {
-        for anchor in world.anchors {
-            guard let facts = host.parentFacts(for: anchor.child),
-                  let parentDigest = digests[anchor.link.parentPath] else { continue }
-            let executed = parentDigest.executed.contains(anchor.issuer)
-            guard facts.recordsGenesis(anchor.link) == executed else {
-                throw Invariants.fail(node, "the genesis link to \(anchor.link.childGenesisCID) is \(executed ? "missing" : "honoured") though its issuer is \(executed ? "" : "not ")executed")
-            }
-        }
-        // Decision 15c: a hosted child runs on the link issued by the
-        // executed parent block on the path to the parent's act-on tip.
-        for child in world.links.keys {
-            guard let level = host.levels[child], let parentDigest = digests[Array(child.dropLast())] else { continue }
-            let actOnPath = Set(parentDigest.canonicalPath.prefix { parentDigest.executed.contains($0) })
-            let wanted = world.anchors.first { $0.child == child && actOnPath.contains($0.issuer) }
-            guard level.genesis == wanted?.link.childGenesisCID else {
-                throw Invariants.fail(node, "hosts \(child) on genesis \(level.genesis), not the act-on path's \(String(describing: wanted?.link.childGenesisCID))")
-            }
-        }
-        for (parent, links) in host.issuers {
-            for (link, issuers) in links {
-                for issuer in issuers {
-                    let known = world.anchors.contains { $0.link == link && $0.issuer == issuer && $0.link.parentPath == parent }
-                    guard known, store.levels[parent]?.validations.contains(issuer) == true else {
-                        throw Invariants.fail(node, "\(issuer) issued a genesis link without executing it")
-                    }
-                }
-            }
-        }
     }
 
     /// Where a level stopped executing its best chain: at the head, or at
@@ -356,7 +334,7 @@ public enum LevelInvariants {
                         throw Invariants.fail(name, "never credited the grind \(root) at \(cid) at \(path)")
                     }
                 }
-                let runs = attributedRuns(at: path, host: host, digests: digests)
+                let runs = attributedRuns(at: path, host: host, digests: digests, world: world)
                 for (hash, entry) in digest.blocks {
                     for (id, run) in runs[hash] ?? [:] where run > .zero && entry.grinds[id] != run {
                         throw Invariants.fail(name, "credits \(String(describing: entry.grinds[id])) of the attributed run \(run) at \(hash)")

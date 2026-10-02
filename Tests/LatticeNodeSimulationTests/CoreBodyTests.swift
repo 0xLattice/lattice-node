@@ -19,7 +19,7 @@ final class CoreBodyTests: XCTestCase {
     override func setUp() async throws {
         var rng = SplitMix64(state: 0x5_1C)
         world = try await World.generate(
-            rng: &rng, honestBlocks: 12, forkProbability: 0, spamBlocks: 2, genesisActions: true
+            rng: &rng, honestBlocks: 12, forkProbability: 0, spamBlocks: 2
         )
         chain = world.honest.compactMap { world.blocks[$0] }
         content = SimCAS(world.genesisContent)
@@ -270,7 +270,7 @@ final class CoreBodyTests: XCTestCase {
         XCTAssertEqual(core.snapshot.actOnTip, chain[1].cid)
 
         var restored = try Core.restore(
-            replaying: log, context: world.context, spec: world.spec, config: CoreConfig(bodyWindow: 4)
+            replaying: log, context: world.context, specs: [world.spec], config: CoreConfig(bodyWindow: 4)
         )
         XCTAssertEqual(restored.snapshot.actOnTip, chain[1].cid)
         let effects = restored.step(.tick, now: Self.now)
@@ -311,19 +311,15 @@ final class CoreBodyTests: XCTestCase {
         XCTAssertFalse(core.bodies.requested.contains(child.cid))
     }
 
-    func testAnExecutionPersistsItsPostStateAndGenesisLinksBeforeItsFacts() async throws {
+    func testAnExecutionPersistsItsPostStateBeforeItsFacts() async throws {
         var (core, _) = weighed(Array(chain.prefix(3)))
         _ = try await deliver(chain[0].cid, to: &core)
-        // Honest block 2 carries a `GenesisAction`: its execution changes the
-        // state and issues a link.
+        // Honest block 2 pays its reward: its execution changes the state.
         let effects = try await deliver(chain[1].cid, to: &core)
         let batch = try XCTUnwrap(batches(effects).first)
         let state = try XCTUnwrap(batch.states.first)
         XCTAssertEqual(try LatticeStateHeader(node: state).rawCID, chain[1].block.postState.rawCID)
         XCTAssertNotEqual(chain[1].block.postState.rawCID, chain[1].block.prevState.rawCID)
-        XCTAssertEqual(batch.genesisLinks.count, 1)
-        XCTAssertEqual(batch.genesisLinks.first?.issuer, chain[1].cid)
-        XCTAssertEqual(batch.genesisLinks.first?.link.parentPath, world.context.path)
         XCTAssertTrue(content.contains(chain[1].block.postState.rawCID))
     }
 

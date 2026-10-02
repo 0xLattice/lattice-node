@@ -169,7 +169,7 @@ public struct HostCore: Sendable {
         self.logID = logID
         levels[rootPath] = core
         for path in hosted.sorted(by: Self.order) {
-            guard let context = try? ChainRuntimeContext(path: path, genesisCID: pins[path]), serve(path) else { continue }
+            guard let context = try? ChainRuntimeContext(path: path), serve(path) else { continue }
             levels[path] = Core(
                 tree: ChainTree.empty(context: context), config: config,
                 log: WeighLog(id: Self.logID(logID, path))
@@ -215,7 +215,7 @@ public struct HostCore: Sendable {
             guard let parent = host.levels[Array(path.dropLast())] else { continue }
             host.levels[path] = try Core.restore(
                 replaying: facts[path] ?? [],
-                context: try ChainRuntimeContext(path: path, genesisCID: pins[path]),
+                context: try ChainRuntimeContext(path: path),
                 specs: specs[path] ?? [],
                 parent: parent.tree,
                 config: config,

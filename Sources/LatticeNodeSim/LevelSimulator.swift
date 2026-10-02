@@ -1,4 +1,5 @@
 import Lattice
+import cashew
 import LatticeNodeCore
 import UInt256
 
@@ -69,7 +70,6 @@ public struct LevelSimReport: Sendable {
     public var lookups = 0
     public var verifications = 0
     public var executions = 0
-    public var bootstraps = 0
     /// The longest any core took to credit a public honest proof of a
     /// child block it holds, from the proof's release.
     public var creditLatency: Int64 = 0
@@ -79,7 +79,6 @@ public struct LevelSimReport: Sendable {
 public struct HostStore: Sendable {
     public private(set) var levels: [ChainPath: SimStore] = [:]
     public private(set) var records: [ChainPath: LevelRecord] = [:]
-    public private(set) var issued: [IssuedGenesisLink] = []
     /// The local evidence index: verified proofs per level, block and root.
     public private(set) var proofs: [ChainPath: [String: [String: ChildBlockProof]]] = [:]
 
@@ -91,21 +90,14 @@ public struct HostStore: Sendable {
             genesis: StoredHeader(blockCID: genesis.cid, block: genesis.block, children: genesis.children)
         )
         levels[LevelWorld.nexus] = SimStore(genesis: genesis, facts: world.rootBootstrap.facts)
+        // Every hosted child level runs from the start, with no facts yet.
+        for path in world.hosted { levels[path] = SimStore() }
     }
 
     mutating func append(_ batch: HostBatch) {
-        for path in batch.removed {
-            records[path] = nil
-            levels[path] = nil
-        }
-        for record in batch.added {
-            records[record.path] = record
-            levels[record.path] = SimStore()
-        }
         for (path, level) in batch.levels {
             levels[path, default: SimStore()].append(level)
         }
-        issued += batch.issued
     }
 
     mutating func index(_ proof: ChildBlockProof, for cid: String, at path: ChainPath) {
@@ -389,23 +381,6 @@ public struct LevelSimulator {
                     throw Invariants.fail(name, "disconnected honest peer \(peer) as \(reason)")
                 }
                 schedule(at: now, to: name, .linkDown(name, peer.key, peer.session))
-            case .bootstrap(let path, let genesisCID, let facts):
-                report.bootstraps += 1
-                let result = await ChainTree.bootstrap(
-                    genesis: BlockHeader(rawCID: genesisCID),
-                    fetcher: world.cas,
-                    context: try ChainRuntimeContext(path: path),
-                    parentFacts: facts,
-                    validationContext: ValidationContext(nowMilliseconds: now)
-                ).map { bootstrap -> BootstrappedLevel in
-                    let genesis = world.geneses[path]!
-                    return BootstrappedLevel(
-                        genesis: StoredHeader(blockCID: genesis.cid, block: genesis.block, children: genesis.children),
-                        spec: world.specs[path]!,
-                        bootstrap: bootstrap
-                    )
-                }
-                schedule(at: delay(), to: name, .host(.bootstrapped(path, genesisCID: genesisCID, result)))
             case .connect(let path, let job, let facts):
                 report.executions += 1
                 let verdict = await ChainTree.connect(
@@ -469,7 +444,9 @@ public struct LevelSimulator {
                 guard let stored = node.store.levels[path]?.headers[cid] else {
                     throw Invariants.fail(name, "served \(cid) at \(path) before it was durable")
                 }
-                entries.append(coreConfig.entry(stored.block, children: stored.children, proofs: node.store.proofs(path, cid)))
+                entries.append(coreConfig.entry(
+                    stored.block, children: stored.children, proofs: node.store.proofs(path, cid), spec: stored.spec
+                ))
             }
             let page = coreConfig.page(entries, hasMore: hasMore)
             route(.headers(HeadersResponse(requestID: requestID, entries: page.entries, hasMore: page.hasMore)), at: path, from: name, to: peer)
@@ -483,8 +460,9 @@ public struct LevelSimulator {
                 send(.scriptFetch(from: name, session: peer.session, path: path, cid: cid), from: name, to: peer.key)
             }
         case .publish(let snapshot):
+            // An empty tip: a level with no root executed (or weighed) yet.
             for tip in [snapshot.bestHeaderTip, snapshot.actOnTip]
-            where node.store.levels[path]?.blockFacts.contains(tip) != true {
+            where !tip.isEmpty && node.store.levels[path]?.blockFacts.contains(tip) != true {
                 throw Invariants.fail(name, "published tip \(tip) at \(path) is not durable")
             }
         case .lookupProofs(let cids):
@@ -528,9 +506,9 @@ public struct LevelSimulator {
     /// DST 7 across levels: the store alone rebuilds equal trees and facts.
     func checkReplay(_ name: String, _ node: HostNode) throws {
         let restored = try HostCore.restore(
-            records: Array(node.store.records.values),
+            root: node.store.records[LevelWorld.nexus]!,
             facts: node.store.levels.mapValues(\.facts),
-            issued: node.store.issued,
+            specs: node.store.levels.mapValues { $0.headers.values.compactMap(\.spec) },
             hosted: world.hosted,
             config: coreConfig,
             logID: name,
@@ -541,13 +519,6 @@ public struct LevelSimulator {
         }
         for (path, level) in restored.levels where TreeDigest(level.tree) != node.digests[path] {
             throw Invariants.fail(name, "replaying the store gives a different tree at \(path)")
-        }
-        guard restored.issuers == node.core.issuers else {
-            throw Invariants.fail(name, "replaying the store gives different genesis links")
-        }
-        var resumed = restored
-        for case .bootstrap(let path, _, _) in resumed.pendingBootstraps(now: now) where node.core.levels[path] != nil {
-            throw Invariants.fail(name, "a restored host bootstraps \(path) again, though it pinned its genesis")
         }
     }
 }

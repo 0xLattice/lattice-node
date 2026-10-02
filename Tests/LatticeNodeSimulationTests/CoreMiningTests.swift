@@ -19,7 +19,7 @@ final class CoreMiningTests: XCTestCase {
     override func setUp() async throws {
         var rng = SplitMix64(state: 0x317)
         world = try await World.generate(
-            rng: &rng, honestBlocks: 4, forkProbability: 0, spamBlocks: 0, genesisActions: false
+            rng: &rng, honestBlocks: 4, forkProbability: 0, spamBlocks: 0
         )
         chain = world.honest.compactMap { world.blocks[$0] }
         content = SimCAS(world.genesisContent)

@@ -71,7 +71,7 @@ public struct InvalidBodyMiner: SimScript {
         return [.send(peer, reply)]
     }
 
-    public func fetch(_ cid: String, now: Int64, world: World) -> ChildIndex? {
+    public func fetch(_ cid: String, now: Int64, world: World) -> FlatDictionary<BlockHeader>? {
         world.blocks.values.first { $0.block.children.rawCID == cid && $0.releaseAt <= now }?.children
     }
 
@@ -183,7 +183,7 @@ extension Simulator {
         let restored = try Core.restore(
             replaying: node.store.facts,
             context: world.context,
-            spec: world.spec,
+            specs: [world.spec],
             config: node.core.config,
             logID: name,
             cursors: node.store.cursors

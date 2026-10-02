@@ -27,13 +27,6 @@ public struct LevelGrind: Sendable {
     public let proofsAt: Int64
 }
 
-/// A genesis link a parent block anchors.
-public struct GenesisAnchor: Sendable {
-    public let child: ChainPath
-    public let link: ParentGenesisLink
-    public let issuer: String
-}
-
 /// A child header an adversary shows: a block and one proof.
 public struct LevelHeader: Sendable {
     public let path: ChainPath
@@ -44,8 +37,8 @@ public struct LevelHeader: Sendable {
 
 /// The generator's ground truth for two or three levels merge-mined from one
 /// root chain: Nexus, Alpha under it, and Beta under Alpha. Each child
-/// chain's genesis is authorized by a `GenesisAction` in one of its parent's
-/// blocks. Every grind is one root: a Nexus block when its hash meets the
+/// chain's genesis commits its carrier's entering state, a state its parent
+/// level executes, and weighs by the grind that carries it. Every grind is one root: a Nexus block when its hash meets the
 /// Nexus target, otherwise a share that clears only the child targets
 /// (child-only history). Some child blocks are carried by a second root (two
 /// grinds, deduped by root); one Alpha block has a forged post-state (it
@@ -71,22 +64,6 @@ public struct LevelWorld: Sendable {
     public let proofs: [ChainPath: [String: [String: ProofTruth]]]
     /// Blocks whose execution proves them invalid.
     public let invalid: [ChainPath: Set<String>]
-    /// Each child chain's genesis link, and the parent block that issues it.
-    public let links: [ChainPath: ParentGenesisLink]
-    public let issuers: [ChainPath: String]
-    /// Every genesis link a parent block anchors (one per directory per
-    /// branch): Alpha's real one in Nexus block 1, a competing genesis whose
-    /// CID is ground below it on an uncle off the best chain, and a failing
-    /// one (its genesis is never stored) on another branch.
-    public let anchors: [GenesisAnchor]
-    /// Three Nexus blocks on the uncle, heavier than Nexus block 1: a reorg
-    /// onto the competing genesis's issuer. Not shown in simulations.
-    public let reorg: [SimBlock]
-    /// The failing anchor's block and one on it, on genesis: heavier than
-    /// the uncle alone. Not shown in simulations.
-    public let failingBranch: [SimBlock]
-    /// The competing Alpha genesis (its CID ground below the real one).
-    public let groundGenesis: SimBlock?
     public let zeroWork: LevelHeader?
     public let offSchedule: LevelHeader?
 
@@ -169,12 +146,6 @@ public struct LevelWorld: Sendable {
         var grinds: [LevelGrind] = []
         var proofs: [ChainPath: [String: [String: ProofTruth]]] = [:]
         var invalid: [ChainPath: Set<String>] = [:]
-        var links: [ChainPath: ParentGenesisLink] = [:]
-        var issuers: [ChainPath: String] = [:]
-        var anchors: [GenesisAnchor] = []
-        var reorg: [SimBlock] = []
-        var failingBranch: [SimBlock] = []
-        var groundGenesis: SimBlock?
         var nexusNonce: UInt64 = 0
         var zeroWork: LevelHeader?
         var offSchedule: LevelHeader?
@@ -196,35 +167,24 @@ public struct LevelWorld: Sendable {
             key = (privateKey, publicKey)
             address = CryptoUtils.createAddress(from: publicKey)
             try await LatticeState.emptyHeader.storeRecursively(storer: cas as any VolumeStorer)
-            for path in paths {
-                let spec = LevelWorld.specFor(path)
-                specs[path] = spec
-                let genesis = World.mined(try await BlockBuilder.buildGenesis(
-                    spec: spec,
-                    timestamp: World.genesisTime,
-                    target: LevelWorld.genesisTarget(path),
-                    fetcher: cas
-                ))
-                let stored = try await store(genesis, releaseAt: World.genesisTime, anchor: nil)
-                geneses[path] = stored
-                blocks[path, default: [:]][stored.cid] = stored
-                var reference = GhostReference(genesis: stored.cid)
-                reference.add(stored.cid, parent: nil, work: workForTarget(genesis.target))
-                references[path] = reference
-                recent[path] = [stored.cid]
-                if path.count > 1 {
-                    links[path] = ParentGenesisLink(
-                        parentPath: Array(path.dropLast()),
-                        directory: path[path.count - 1],
-                        childGenesisCID: stored.cid,
-                        parentStateCID: genesis.parentState.rawCID
-                    )
-                }
-            }
+            for path in paths { specs[path] = LevelWorld.specFor(path) }
+            let genesis = World.mined(try await BlockBuilder.buildGenesis(
+                spec: specs[LevelWorld.nexus]!,
+                timestamp: World.genesisTime,
+                target: LevelWorld.genesisTarget(LevelWorld.nexus),
+                fetcher: cas
+            ))
+            let stored = try await store(genesis, releaseAt: World.genesisTime, anchor: nil)
+            geneses[LevelWorld.nexus] = stored
+            blocks[LevelWorld.nexus, default: [:]][stored.cid] = stored
+            var reference = GhostReference(genesis: stored.cid)
+            reference.add(stored.cid, parent: nil, work: workForTarget(genesis.target))
+            references[LevelWorld.nexus] = reference
+            recent[LevelWorld.nexus] = [stored.cid]
             rootBootstrap = try await ChainTree.bootstrap(
-                genesis: BlockHeader(node: geneses[LevelWorld.nexus]!.block),
+                genesis: BlockHeader(node: stored.block),
                 fetcher: cas,
-                context: try ChainRuntimeContext(path: LevelWorld.nexus),
+                context: try ChainRuntimeContext(path: LevelWorld.nexus, genesisCID: stored.cid),
                 validationContext: ValidationContext(nowMilliseconds: World.genesisTime)
             ).get()
         }
@@ -232,25 +192,23 @@ public struct LevelWorld: Sendable {
         func world() -> LevelWorld {
             LevelWorld(
                 paths: paths, cas: cas, specs: specs, geneses: geneses, rootBootstrap: rootBootstrap,
-                blocks: blocks, grinds: grinds, proofs: proofs, invalid: invalid, links: links,
-                issuers: issuers, anchors: anchors, reorg: reorg, failingBranch: failingBranch, groundGenesis: groundGenesis, zeroWork: zeroWork, offSchedule: offSchedule
+                blocks: blocks, grinds: grinds, proofs: proofs, invalid: invalid, zeroWork: zeroWork, offSchedule: offSchedule
             )
         }
 
-        /// A transaction anchoring a child chain's genesis, signed by the
-        /// world's key.
-        func genesisAnchor(for child: ChainPath, genesis: String? = nil, nonce: UInt64 = 0) throws -> Transaction {
-            let body = TransactionBody(
-                accountActions: [], actions: [], depositActions: [],
-                genesisActions: [GenesisAction(directory: child[child.count - 1], blockCID: genesis ?? geneses[child]!.cid)],
-                receiptActions: [], withdrawalActions: [],
-                signers: [address], nonce: nonce, chainPath: Array(child.dropLast())
+        /// A child chain's genesis committing `parentState` (its carrier's
+        /// entering state), dated `time`: its reference starts with it, and
+        /// the grind that carries it weighs it.
+        mutating func childGenesis(_ path: ChainPath, parentState: String, at time: Int64) async throws -> SimBlock {
+            let genesis = try await BlockBuilder.buildChildGenesis(
+                spec: specs[path]!, parentState: LatticeStateHeader(rawCID: parentState),
+                timestamp: time, target: LevelWorld.genesisTarget(path), fetcher: cas
             )
-            let header = try HeaderImpl(node: body)
-            guard let signature = TransactionSigning.sign(bodyHeader: header, privateKeyHex: key.privateKey) else {
-                throw SimulationError.malformedWorld("could not sign a genesis anchor")
-            }
-            return Transaction(signatures: [key.publicKey: signature], body: header)
+            let stored = try await store(genesis, releaseAt: time, anchor: nil)
+            geneses[path] = stored
+            references[path] = GhostReference(genesis: stored.cid)
+            recent[path] = []
+            return stored
         }
 
         func store(_ block: Block, releaseAt: Int64, anchor: DifficultyAnchor?) async throws -> SimBlock {
@@ -413,9 +371,7 @@ public struct LevelWorld: Sendable {
             let lieAt = count / 3
             for index in 1...count {
                 let time = World.genesisTime + Int64(index) * LevelWorld.interval
-                let nexusParent = parent(LevelWorld.nexus, rng: &rng, forkProbability: index <= 2 ? 0 : forkProbability)
-                var transactions: [Transaction] = []
-                if index == 1 { transactions = [try genesisAnchor(for: LevelWorld.alpha)] }
+                let nexusParent = parent(LevelWorld.nexus, rng: &rng, forkProbability: index <= alphaStart ? 0 : forkProbability)
                 var carried: [(path: ChainPath, block: SimBlock)] = []
                 if index >= alphaStart {
                     carried = try await carriedBlocks(
@@ -424,16 +380,7 @@ public struct LevelWorld: Sendable {
                     )
                 }
                 let outcome: Outcome = !carried.isEmpty && rng.chance(shareProbability) ? .share : .block
-                let (root, _, _) = try await grind(
-                    on: nexusParent, carrying: carried, transactions: transactions, at: time, outcome: outcome
-                )
-                if index == 1 {
-                    anchors.append(GenesisAnchor(
-                        child: LevelWorld.alpha, link: alphaLink(geneses[LevelWorld.alpha]!.cid), issuer: root.cid
-                    ))
-                    issuers[LevelWorld.alpha] = root.cid
-                    try await competingAlphaGenesis()
-                }
+                _ = try await grind(on: nexusParent, carrying: carried, at: time, outcome: outcome)
                 if !carried.isEmpty, rng.chance(doubleProbability) {
                     _ = try await grind(on: nexusParent, carrying: carried, at: time + 1, outcome: .share)
                 }
@@ -443,75 +390,10 @@ public struct LevelWorld: Sendable {
             }
         }
 
-        func alphaLink(_ genesis: String) -> ParentGenesisLink {
-            ParentGenesisLink(
-                parentPath: LevelWorld.nexus, directory: LevelWorld.alpha[1],
-                childGenesisCID: genesis, parentStateCID: LatticeState.emptyHeader.rawCID
-            )
-        }
-
-        /// An Alpha genesis that is never stored: its bootstrap fails.
-        func failingAlphaGenesis() async throws -> String {
-            let block = World.mined(try await BlockBuilder.buildGenesis(
-                spec: specs[LevelWorld.alpha]!, timestamp: World.genesisTime + 7,
-                target: LevelWorld.genesisTarget(LevelWorld.alpha), fetcher: cas
-            ))
-            return try BlockHeader(node: block).rawCID
-        }
-
-        /// A stored Alpha genesis whose CID is ground below the real one,
-        /// anchored by a Nexus uncle (on genesis, beside block 1) that honest
-        /// miners never build on; and three blocks on that uncle, heavier
-        /// than Nexus blocks 1-2, for a reorg.
-        mutating func competingAlphaGenesis() async throws {
-            let real = geneses[LevelWorld.alpha]!.cid
-            let unmined = try await BlockBuilder.buildGenesis(
-                spec: specs[LevelWorld.alpha]!, timestamp: World.genesisTime + 3,
-                target: LevelWorld.genesisTarget(LevelWorld.alpha), fetcher: cas
-            )
-            var ground = World.mined(unmined)
-            while try BlockHeader(node: ground).rawCID >= real {
-                ground = World.mined(ground.with(nonce: ground.nonce &+ 1))
-            }
-            let stored = try await store(ground, releaseAt: World.genesisTime, anchor: nil)
-            groundGenesis = stored
-            let rootGenesis = geneses[LevelWorld.nexus]!
-            let uncle = try await build(
-                on: rootGenesis, carrierPrevState: nil,
-                transactions: [try genesisAnchor(for: LevelWorld.alpha, genesis: stored.cid)],
-                timestamp: World.genesisTime + 1_500, nonce: 0
-            )
-            let minedUncle = try await store(mine(uncle.block) { uncle.block.target >= $0 }, releaseAt: uncle.releaseAt, anchor: uncle.anchor)
-            avoided.insert(minedUncle.cid)
-            admit(minedUncle, at: LevelWorld.nexus, grind: minedUncle.cid, work: workForTarget(minedUncle.block.target))
-            anchors.append(GenesisAnchor(child: LevelWorld.alpha, link: alphaLink(stored.cid), issuer: minedUncle.cid))
-            let failing = try await failingAlphaGenesis()
-            var branchTip = rootGenesis
-            for step in 0...1 {
-                let next = try await build(
-                    on: branchTip, carrierPrevState: nil,
-                    transactions: step == 0 ? [try genesisAnchor(for: LevelWorld.alpha, genesis: failing)] : [],
-                    timestamp: World.genesisTime + 1_100 + Int64(step) * 400, nonce: 0
-                )
-                branchTip = try await store(mine(next.block) { next.block.target >= $0 }, releaseAt: next.releaseAt, anchor: next.anchor)
-                if step == 0 {
-                    anchors.append(GenesisAnchor(child: LevelWorld.alpha, link: alphaLink(failing), issuer: branchTip.cid))
-                }
-                failingBranch.append(branchTip)
-            }
-            var tip = minedUncle
-            for step in 1...3 {
-                let next = try await build(
-                    on: tip, carrierPrevState: nil,
-                    timestamp: World.genesisTime + 1_500 + Int64(step) * 400, nonce: 0
-                )
-                tip = try await store(mine(next.block) { next.block.target >= $0 }, releaseAt: next.releaseAt, anchor: next.anchor)
-                reorg.append(tip)
-            }
-        }
-
-        /// The blocks one honest grind carries: an Alpha block (the first
-        /// anchors Beta's genesis) and, once Beta runs, a Beta block in it.
+        /// The blocks one honest grind carries: an Alpha block (the first is
+        /// Alpha's genesis) and, once Beta runs, a Beta block in it (the
+        /// first is Beta's genesis). A genesis commits its carrier's
+        /// entering state.
         mutating func carriedBlocks(
             nexusParent: SimBlock,
             index: Int,
@@ -520,28 +402,34 @@ public struct LevelWorld: Sendable {
             rng: inout SplitMix64,
             forkProbability: Double
         ) async throws -> [(path: ChainPath, block: SimBlock)] {
-            let alphaParent = parent(LevelWorld.alpha, rng: &rng, forkProbability: forkProbability)
+            guard geneses[LevelWorld.alpha] != nil else {
+                let genesis = try await childGenesis(
+                    LevelWorld.alpha, parentState: nexusParent.block.postState.rawCID, at: time
+                )
+                return [(LevelWorld.alpha, genesis)]
+            }
+            let alphaParent = parent(LevelWorld.alpha, rng: &rng, forkProbability: index <= betaStart ? 0 : forkProbability)
             var betaBlock: SimBlock?
             if paths.count > 2, index >= betaStart {
-                let betaParent = parent(LevelWorld.beta, rng: &rng, forkProbability: forkProbability)
-                betaBlock = try await build(
-                    on: betaParent, carrierPrevState: alphaParent.block.postState.rawCID,
-                    timestamp: time, nonce: UInt64(index)
-                )
+                if geneses[LevelWorld.beta] == nil {
+                    betaBlock = try await childGenesis(
+                        LevelWorld.beta, parentState: alphaParent.block.postState.rawCID, at: time
+                    )
+                } else {
+                    let betaParent = parent(LevelWorld.beta, rng: &rng, forkProbability: forkProbability)
+                    betaBlock = try await build(
+                        on: betaParent, carrierPrevState: alphaParent.block.postState.rawCID,
+                        timestamp: time, nonce: UInt64(index)
+                    )
+                }
             }
-            let anchorsBeta = paths.count > 2 && issuers[LevelWorld.beta] == nil
             let alphaBlock = try await build(
                 on: alphaParent,
                 carrierPrevState: nexusParent.block.postState.rawCID,
-                transactions: anchorsBeta ? [try genesisAnchor(for: LevelWorld.beta)] : [],
                 children: betaBlock.map { [LevelWorld.beta[2]: $0.block] } ?? [:],
                 timestamp: time,
                 nonce: UInt64(index)
             )
-            if anchorsBeta {
-                issuers[LevelWorld.beta] = alphaBlock.cid
-                anchors.append(GenesisAnchor(child: LevelWorld.beta, link: links[LevelWorld.beta]!, issuer: alphaBlock.cid))
-            }
             return [(LevelWorld.alpha, alphaBlock)] + (betaBlock.map { [(LevelWorld.beta, $0)] } ?? [])
         }
 
