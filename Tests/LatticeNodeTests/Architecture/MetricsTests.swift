@@ -77,7 +77,6 @@ final class MetricsTests: XCTestCase {
                 accountActions: [],
                 actions: [],
                 depositActions: [],
-                genesisActions: [],
                 receiptActions: [],
                 withdrawalActions: [],
                 signers: [CryptoUtils.createAddress(from: key.publicKey)],
@@ -106,7 +105,7 @@ final class MetricsTests: XCTestCase {
         }
     }
 
-    func testMetricsExposeParentReportAndExecutionWalkCounters() throws {
+    func testMetricsExposeExecutionWalkCounters() throws {
         let rendered = renderNodeMetrics(NodeMetricsSample(
             chainPath: ["Nexus", "Payments"],
             validatedTipHeight: 1,
@@ -114,19 +113,13 @@ final class MetricsTests: XCTestCase {
             overlayPeers: 0,
             mempoolTransactions: 0,
             processStartTime: Date(timeIntervalSince1970: 0),
-            parentReportsApplied: 3,
-            parentReportRefusals: ["notStronger": 2, "locationConflict": 1],
             executionWalkParked: 4,
             candidateSessionReads: 5
         ))
         let samples = try parseExposition(rendered)
         let chain = "chain=\"Nexus/Payments\""
-        XCTAssertEqual(samples["lattice_parent_run_reports_applied_total{\(chain)}"], "3")
-        XCTAssertEqual(samples["lattice_parent_run_reports_refused_total{\(chain),reason=\"notStronger\"}"], "2")
-        XCTAssertEqual(samples["lattice_parent_run_reports_refused_total{\(chain),reason=\"locationConflict\"}"], "1")
         XCTAssertEqual(samples["lattice_validate_walk_parked_total{\(chain)}"], "4")
         XCTAssertEqual(samples["lattice_candidate_session_reads_total{\(chain)}"], "5")
-        XCTAssertTrue(rendered.contains("# TYPE lattice_parent_run_reports_applied_total counter"))
     }
 
     func testMetricsEscapeOperatorSuppliedChainPath() async throws {
@@ -159,31 +152,6 @@ final class MetricsTests: XCTestCase {
         }
     }
 
-    func testMetricsSeparateWeighedTierFromValidated() async throws {
-        // A block admitted on the weighed tier leads fork choice before it
-        // executes: the weighed tier reads 1 while the validated tier stays at
-        // genesis, so each tier is wired to its own read.
-        let producer = try await openProcess(chainPath: ["Nexus"])
-        let template = try await service(for: producer)
-            .miningTemplate(MiningTemplateRequest())
-        let produced = try await producer.importBlock(BlockHeader(node: template.block))
-        XCTAssertTrue(produced.decision.isAccepted)
-
-        let consumer = try await openProcess(chainPath: ["Nexus"])
-        let weighed = try await consumer.importBlock(
-            BlockHeader(node: template.block),
-            remoteSource: FetcherContentSource(producer),
-            mode: .header
-        )
-        XCTAssertTrue(weighed.decision.isAccepted)
-
-        let samples = try parseExposition(
-            await service(for: consumer).metricsExposition(peers: 0, processStartTime: Date())
-        )
-        XCTAssertEqual(samples[#"lattice_chain_tip_height{chain="Nexus",tier="validated"}"#], "0")
-        XCTAssertEqual(samples[#"lattice_chain_tip_height{chain="Nexus",tier="weighed"}"#], "1")
-    }
-
     func testMetricsAbsentOnPublicReadApplication() async throws {
         let service = try await openService(chainPath: ["Nexus"])
         let publicApp = makePublicReadApplication(service: service, host: "127.0.0.1", port: 8081)
@@ -210,17 +178,8 @@ final class MetricsTests: XCTestCase {
         ))
     }
 
-    private func openService(chainPath: [String]) async throws -> ChainService {
-        service(for: try await openProcess(chainPath: chainPath))
-    }
-
-    private func service(for process: ChainProcess) -> ChainService {
-        ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
+    private func openService(chainPath: [String]) async throws -> CoreDriver {
+        try await startDriver(try await openProcess(chainPath: chainPath))
     }
 }
 

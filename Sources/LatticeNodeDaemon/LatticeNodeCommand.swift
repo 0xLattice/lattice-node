@@ -51,7 +51,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Per-client arrival-rate ceiling for the general public read routes, in requests per second. The client is the PEER SOCKET ADDRESS (no forwarded-for header is trusted), so behind a proxy that presents one address for every client this throttles the whole internet as one user — set it to 0 there. 0 disables this ceiling.")
     var publicReadRate = PublicReadRateLimits.defaultGeneralRate
 
-    @Option(help: "Per-client arrival-rate ceiling, in requests per second, for the expensive public reads: /api/chain/endpoints (a peer fan-out), and a block's /transactions or /children (hundreds of content fetches). Keyed like --public-read-rate; 0 disables it.")
+    @Option(help: "Per-client arrival-rate ceiling, in requests per second, for the expensive public reads: a block's detail, /transactions or /children (hundreds of content fetches). Keyed like --public-read-rate; 0 disables it.")
     var publicReadExpensiveRate = PublicReadRateLimits.defaultExpensiveRate
 
     @Option(help: "Listener-wide arrival-rate ceiling for the public read port, in requests per second. Address-agnostic, so it remains correct behind a proxy that collapses every client onto one address. 0 disables it; all three rates 0 is no rate limiting at all.")

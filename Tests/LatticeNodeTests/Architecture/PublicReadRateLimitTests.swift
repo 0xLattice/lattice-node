@@ -18,7 +18,7 @@ import XCTest
 final class PublicReadRateLimitTests: XCTestCase {
     private func makeService(
         _ name: String
-    ) async throws -> (ChainService, NodeConfiguration) {
+    ) async throws -> (CoreDriver, NodeConfiguration) {
         let storage = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-\(name)-\(UUID().uuidString)")
         addTeardownBlock { try? FileManager.default.removeItem(at: storage) }
@@ -29,12 +29,7 @@ final class PublicReadRateLimitTests: XCTestCase {
         )
         let process = try await ChainProcess.open(configuration: configuration)
         return (
-            ChainService(
-                process: process,
-                network: ClosureNetworkInterface(
-                    acceptedBlockPublisher: { _ in },
-                )
-            ),
+            try await startDriver(process),
             configuration
         )
     }
@@ -122,7 +117,6 @@ final class PublicReadRateLimitTests: XCTestCase {
         // Paths only: `URI.path` never carries the query string, so a
         // query-bearing spelling is not an input this ever sees.
         for path in [
-            "/api/chain/endpoints",
             "/api/block/bafy",
             "/api/block/bafy/transactions",
             "/api/block/bafy/children",
@@ -173,14 +167,14 @@ final class PublicReadRateLimitTests: XCTestCase {
             var statuses: [Int] = []
             for _ in 0..<12 {
                 try await client.execute(
-                    uri: "/api/chain/endpoints?chainPath=Nexus/toy", method: .get
+                    uri: "/api/block/bafy/transactions?offset=1", method: .get
                 ) { response in
                     statuses.append(response.status.code)
                 }
             }
             XCTAssertTrue(
                 statuses.contains(429),
-                "a query must not move /api/chain/endpoints onto the general budget, got \(statuses)"
+                "a query must not move /api/block/:id/transactions onto the general budget, got \(statuses)"
             )
         }
     }

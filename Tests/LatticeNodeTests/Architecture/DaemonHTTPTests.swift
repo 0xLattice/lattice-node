@@ -9,41 +9,6 @@ import cashew
 @testable import LatticeNodeDaemon
 
 final class DaemonHTTPTests: XCTestCase {
-    func testVolumeMaintenanceInvokesEviction() async {
-        let invoked = expectation(description: "volume eviction invoked")
-        let counter = MaintenanceInvocationCounter()
-        let task = Task {
-            await runVolumeMaintenance(everyNanoseconds: 1_000_000) {
-                if await counter.record() == 1 {
-                    invoked.fulfill()
-                }
-            }
-        }
-
-        await fulfillment(of: [invoked], timeout: 1)
-        task.cancel()
-        await task.value
-
-        let invocationCount = await counter.value
-        XCTAssertGreaterThanOrEqual(invocationCount, 1)
-    }
-
-    func testVolumeMaintenanceCancellationStopsBeforeEviction() async {
-        let counter = MaintenanceInvocationCounter()
-        let task = Task {
-            await runVolumeMaintenance(everyNanoseconds: 60_000_000_000) {
-                _ = await counter.record()
-            }
-        }
-
-        await Task.yield()
-        task.cancel()
-        await task.value
-
-        let invocationCount = await counter.value
-        XCTAssertEqual(invocationCount, 0)
-    }
-
     func testNexusTemplateDoesNotRequireParentReadiness() async throws {
         let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-http-parent-unavailable-\(UUID().uuidString)"
@@ -54,12 +19,7 @@ final class DaemonHTTPTests: XCTestCase {
             storagePath: storage,
             privateKeyHex: String(repeating: "01", count: 32)
         ))
-        let service = ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
+        let service = try await startDriver(process)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         let body = try JSONEncoder().encode(MiningTemplateRequest())
 
@@ -88,12 +48,7 @@ final class DaemonHTTPTests: XCTestCase {
             storagePath: storage,
             privateKeyHex: String(repeating: "01", count: 32)
         ))
-        let service = ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
+        let service = try await startDriver(process)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         let body = try JSONEncoder().encode(MiningTemplateRequest())
 
@@ -155,12 +110,7 @@ final class DaemonHTTPTests: XCTestCase {
             privateKeyHex: String(repeating: "01", count: 32)
         )
         let process = try await ChainProcess.open(configuration: configuration)
-        let service = ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
+        let service = try await startDriver(process)
         let app = makeApplication(
             service: service,
             host: "127.0.0.1",
@@ -219,12 +169,7 @@ final class DaemonHTTPTests: XCTestCase {
             privateKeyHex: String(repeating: "01", count: 32)
         )
         let process = try await ChainProcess.open(configuration: configuration)
-        let service = ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
+        let service = try await startDriver(process)
 
         let publicApp = makePublicReadApplication(
             service: service,
@@ -309,19 +254,13 @@ final class DaemonHTTPTests: XCTestCase {
             privateKeyHex: String(repeating: "01", count: 32)
         )
         let process = try await ChainProcess.open(configuration: configuration)
-        let service = ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
+        let service = try await startDriver(process)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         let key = CryptoUtils.generateKeyPair()
         let body = TransactionBody(
             accountActions: [],
             actions: [],
             depositActions: [],
-            genesisActions: [],
             receiptActions: [],
             withdrawalActions: [],
             signers: [CryptoUtils.createAddress(from: key.publicKey)],
@@ -366,7 +305,6 @@ final class DaemonHTTPTests: XCTestCase {
                 ],
                 actions: [],
                 depositActions: [],
-                genesisActions: [],
                 receiptActions: [],
                 withdrawalActions: [],
                 signers: [CryptoUtils.createAddress(from: key.publicKey)],
@@ -437,12 +375,7 @@ final class DaemonHTTPTests: XCTestCase {
             privateKeyHex: String(repeating: "01", count: 32)
         )
         let process = try await ChainProcess.open(configuration: configuration)
-        let service = ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
+        let service = try await startDriver(process)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
 
         try await app.test(.router) { client in
@@ -466,12 +399,7 @@ final class DaemonHTTPTests: XCTestCase {
             privateKeyHex: String(repeating: "01", count: 32)
         )
         let process = try await ChainProcess.open(configuration: configuration)
-        let service = ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
+        let service = try await startDriver(process)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         // Nexus genesis premines to this fixed owner address — a known funded
         // account at an accepted block (genesis) with no code needed to mine.
@@ -485,7 +413,6 @@ final class DaemonHTTPTests: XCTestCase {
                 accountActions: [],
                 actions: [],
                 depositActions: [],
-                genesisActions: [],
                 receiptActions: [],
                 withdrawalActions: [],
                 signers: [],
@@ -565,12 +492,7 @@ final class DaemonHTTPTests: XCTestCase {
             privateKeyHex: String(repeating: "01", count: 32)
         )
         let process = try await ChainProcess.open(configuration: configuration)
-        let service = ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
+        let service = try await startDriver(process)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         // Genesis carries the premine transaction, so a transactions page on
         // it has a non-zero total and really reaches the offset arithmetic.
@@ -641,7 +563,6 @@ final class DaemonHTTPTests: XCTestCase {
                 "/api/block/\(genesis)/transactions?limit=\(query)",
                 "/api/block/\(genesis)/transactions?offset=\(query)&limit=\(query)",
                 "/v1/accounts/\(genesis)?block=\(query)",
-                "/api/chain/children?limit=\(query)",
                 "/api/block/latest?chainPath=\(query)",
             ]
         }
@@ -688,79 +609,6 @@ final class DaemonHTTPTests: XCTestCase {
         }
     }
 
-    func testReadSnapshotMatchesStatusAndNeverBlocksBehindTheOperationGate() async throws {
-        let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-http-readsnapshot-test-\(UUID().uuidString)"
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: storage) }
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: storage,
-            privateKeyHex: String(repeating: "01", count: 32)
-        )
-        let process = try await ChainProcess.open(configuration: configuration)
-        let providerEntered = Latch()
-        let releaseProvider = Latch()
-        let service = ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
-        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
-
-        // Holds the operation gate, as a gated operation in flight does, for
-        // a controlled duration.
-        let blockedTemplate = Task {
-            await service.withOperationForTesting {
-                await providerEntered.open()
-                await releaseProvider.wait()
-            }
-        }
-        await providerEntered.wait()
-
-        // A concurrent call to the GATED status() must queue behind the
-        // in-flight operation.
-        let statusCompleted = CompletionFlag()
-        let blockedStatus = Task { () -> ChainServiceStatusResponse in
-            let result = await service.status()
-            await statusCompleted.markDone()
-            return result
-        }
-        // Give the queued status() call a chance to actually reach (and
-        // block on) the gate before we check it hasn't finished.
-        try await alwaysDuring("status() stays queued behind the held gate", .milliseconds(100)) { !(await statusCompleted.isDone) }
-        let finishedEarly = await statusCompleted.isDone
-        XCTAssertFalse(finishedEarly, "status() must still be queued behind the held operation gate")
-
-        // The UNGATED read must return promptly regardless — over HTTP, the
-        // very surface under test — while the gate is still fully held. /health
-        // is the public non-mutating status endpoint (readSnapshot); /v1/status
-        // stays on the gated, reconciling status().
-        try await app.test(.router) { client in
-            try await client.execute(uri: "/health", method: .get) { response in
-                XCTAssertEqual(response.status, .ok)
-                XCTAssertEqual(response.headers[.cacheControl], statusCacheControl)
-                let snapshot = try JSONDecoder().decode(
-                    ChainServiceStatusResponse.self,
-                    from: Data(response.body.readableBytesView)
-                )
-                XCTAssertEqual(snapshot.phase, .active)
-            }
-        }
-
-        let directSnapshot = await service.reads.readSnapshot()
-        XCTAssertEqual(directSnapshot.phase, .active)
-
-        // Release the held gate and confirm both blocked operations then
-        // complete, proving the earlier non-completion was real contention.
-        await releaseProvider.open()
-        _ = await blockedTemplate.value
-        let gatedStatus = await blockedStatus.value
-        XCTAssertEqual(directSnapshot.tipCID, gatedStatus.tipCID)
-        XCTAssertEqual(directSnapshot.height, gatedStatus.height)
-    }
-
     func testTransactionRoutePreservesConcreteBody() async throws {
         let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-http-test-\(UUID().uuidString)"
@@ -772,12 +620,7 @@ final class DaemonHTTPTests: XCTestCase {
             privateKeyHex: String(repeating: "01", count: 32)
         )
         let process = try await ChainProcess.open(configuration: configuration)
-        let service = ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
+        let service = try await startDriver(process)
         let app = makeApplication(
             service: service,
             host: "127.0.0.1",
@@ -788,7 +631,6 @@ final class DaemonHTTPTests: XCTestCase {
             accountActions: [],
             actions: [],
             depositActions: [],
-            genesisActions: [],
             receiptActions: [],
             withdrawalActions: [],
             signers: [CryptoUtils.createAddress(from: key.publicKey)],
@@ -862,17 +704,6 @@ private func mineOneBlock(client: some TestClientProtocol) async throws -> Strin
         tipCID = submitted.tipCID
     }
     return try XCTUnwrap(tipCID)
-}
-
-private actor MaintenanceInvocationCounter {
-    private var count = 0
-
-    var value: Int { count }
-
-    func record() -> Int {
-        count += 1
-        return count
-    }
 }
 
 private actor CompletionFlag {
