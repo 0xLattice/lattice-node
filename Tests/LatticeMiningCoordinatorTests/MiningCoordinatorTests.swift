@@ -767,7 +767,7 @@ final class MiningCoordinatorTests: XCTestCase {
 
     func testHTTPSubmitDecodesProtocolRejectionDespiteHTTPConflict() throws {
         let response = try XCTUnwrap(HTTPURLResponse(
-            url: URL(string: "http://127.0.0.1/v1/mining/work")!,
+            url: URL(string: "http://127.0.0.1/mining/work")!,
             statusCode: 409,
             httpVersion: nil,
             headerFields: nil
@@ -784,7 +784,7 @@ final class MiningCoordinatorTests: XCTestCase {
 
     func testHTTPSubmitRejectsNonJSONTransportFailure() throws {
         let response = try XCTUnwrap(HTTPURLResponse(
-            url: URL(string: "http://127.0.0.1/v1/mining/work")!,
+            url: URL(string: "http://127.0.0.1/mining/work")!,
             statusCode: 502,
             httpVersion: nil,
             headerFields: nil
@@ -805,7 +805,7 @@ final class MiningCoordinatorTests: XCTestCase {
     /// answer, not a transport failure to retry.
     func testHTTPSubmitTreatsDaemonRefusalAsFinalAnswer() throws {
         let response = try XCTUnwrap(HTTPURLResponse(
-            url: URL(string: "http://127.0.0.1/v1/mining/work")!,
+            url: URL(string: "http://127.0.0.1/mining/work")!,
             statusCode: 400,
             httpVersion: nil,
             headerFields: nil
@@ -860,7 +860,7 @@ final class MiningCoordinatorTests: XCTestCase {
 
     func testHTTPSubmitTreatsJSONServerFailureAsRetryableTransportFailure() throws {
         let response = try XCTUnwrap(HTTPURLResponse(
-            url: URL(string: "http://127.0.0.1/v1/mining/work")!,
+            url: URL(string: "http://127.0.0.1/mining/work")!,
             statusCode: 503,
             httpVersion: nil,
             headerFields: nil
@@ -881,7 +881,7 @@ final class MiningCoordinatorTests: XCTestCase {
 
     func testHTTPSubmitUsesCurrentWorkRouteAndPayload() async throws {
         StubTemplateURLProtocol.responder = { request in
-            XCTAssertEqual(request.url?.path, "/api/v1/mining/work")
+            XCTAssertEqual(request.url?.path, "/api/mining/work")
             XCTAssertEqual(request.httpMethod, "POST")
             let payload = requestBodyData(request).flatMap {
                 try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
@@ -914,7 +914,7 @@ final class MiningCoordinatorTests: XCTestCase {
 
     func testHTTPSubmitClassifiesUnauthorizedAsFatalAuthError() throws {
         let response = try XCTUnwrap(HTTPURLResponse(
-            url: URL(string: "http://127.0.0.1/v1/mining/work")!,
+            url: URL(string: "http://127.0.0.1/mining/work")!,
             statusCode: 401,
             httpVersion: nil,
             headerFields: nil
@@ -1207,7 +1207,7 @@ final class MiningCoordinatorTests: XCTestCase {
     /// that stops the mining loop. Driven through the real HTTP client.
     func testHTTPFetchWorkTreats503AsTransientBackoffNotFatal() async throws {
         StubTemplateURLProtocol.responder = { request in
-            XCTAssertEqual(request.url?.path, "/api/v1/mining/templates")
+            XCTAssertEqual(request.url?.path, "/api/mining/templates")
             XCTAssertEqual(request.httpMethod, "POST")
             let payload = requestBodyData(request).flatMap {
                 try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
@@ -1453,7 +1453,7 @@ final class MiningCoordinatorTests: XCTestCase {
 
     func testHTTPFetchStaleTokenUsesChainInfoTipWithoutTemplateFetch() async throws {
         StubTemplateURLProtocol.responder = { request in
-            guard request.url?.path == "/api/v1/status" else {
+            guard request.url?.path == "/api/status" else {
                 return (500, Data(#"{"error":"template should not be fetched for stale token"}"#.utf8))
             }
             return (200, Data(#"{"tipCID":"child-tip"}"#.utf8))

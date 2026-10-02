@@ -581,7 +581,7 @@ public actor MiningCoordinator {
     }
 }
 
-/// The `POST /v1/mining/templates` body a coordinator sends: the operator's
+/// The `POST /mining/templates` body a coordinator sends: the operator's
 /// recipients and mining options.
 public enum MiningTemplateRequestBody {
     public struct Refusal: Error, CustomStringConvertible {
@@ -629,7 +629,7 @@ public final class HTTPMiningCoordinatorNodeClient: MiningCoordinatorNodeClient 
 
     public func fetchWork() async throws -> MiningCoordinatorWork? {
         var request = URLRequest(
-            url: apiBaseURL.appendingPathComponent("v1/mining/templates")
+            url: apiBaseURL.appendingPathComponent("mining/templates")
         )
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -653,7 +653,7 @@ public final class HTTPMiningCoordinatorNodeClient: MiningCoordinatorNodeClient 
     }
 
     public func fetchStaleToken() async throws -> String? {
-        var request = URLRequest(url: apiBaseURL.appendingPathComponent("v1/status"))
+        var request = URLRequest(url: apiBaseURL.appendingPathComponent("status"))
         request.httpMethod = "GET"
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
@@ -683,7 +683,7 @@ public final class HTTPMiningCoordinatorNodeClient: MiningCoordinatorNodeClient 
         nonce: UInt64
     ) async throws -> MiningSolutionSubmission {
         var request = URLRequest(
-            url: apiBaseURL.appendingPathComponent("v1/mining/work")
+            url: apiBaseURL.appendingPathComponent("mining/work")
         )
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

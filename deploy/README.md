@@ -126,8 +126,8 @@ Nexus recreates the exact pinned genesis; child processes return to
 It is a normal lattice-node — dialing the backbones and syncing — with an nginx
 **allowlist** proxy in front: the node's HTTP API stays loopback-only (rule 3),
 and nginx exposes ONLY the bounded GET read routes (`/health`,
-`/v1/transactions/:cid`, `/v1/accounts/:owner`, `/api/*`), returning 403 for
-everything else — crucially `/v1/status` (gated + mutating) and every write POST.
+`/transactions/:cid`, `/accounts/:owner`, `/api/*`), returning 403 for
+everything else — crucially `/status` (gated + mutating) and every write POST.
 
 - `Dockerfile` — `FROM ghcr.io/adalinxx/lattice-node:sha-<...>` + nginx. Bump the
   pinned sha on each read-RPC release so the allowlist matches the node's routes.

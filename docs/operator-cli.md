@@ -110,7 +110,7 @@ lattice mine status  # running or not, and who each chain pays
   BUILD a template, which is a different quantity from the template lifetime
   the answer reports and is not bounded by it — a node can spend longer
   assembling a template than the template is then valid for. **Set it above
-  what `POST /v1/mining/templates` actually costs on this host.** Below that,
+  what `POST /mining/templates` actually costs on this host.** Below that,
   no round deadline can be derived and the miner does not mine at all, logging
   `NOT MINING` and retrying; a compiled-in 15s sitting under a 16.6s build is
   exactly how that happened once.

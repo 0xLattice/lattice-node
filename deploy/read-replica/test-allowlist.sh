@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Asserts the read-replica nginx allowlist boundary: only the bounded GET read
-# routes reach the (loopback) node; /v1/status, every write POST, and unknown
+# routes reach the (loopback) node; /status, every write POST, and unknown
 # paths get 403. This is the auditor-required public/internal boundary — a
 # TESTED part of the config, not prose.
 #
@@ -74,8 +74,8 @@ check() {
 
 echo "== allowed: bounded GET reads reach the node (200) =="
 check GET  /health                 200 "health"
-check GET  "/v1/transactions/$CID" 200 "tx by cid"
-check GET  "/v1/accounts/$CID"     200 "account"
+check GET  "/transactions/$CID" 200 "tx by cid"
+check GET  "/accounts/$CID"     200 "account"
 check GET  /api/chain/children     200 "explorer api"
 check GET  /api/block/latest       200 "explorer api"
 check GET  "/api/chain/endpoints?chainPath=Nexus/Child" 200 "endpoint discovery"
@@ -83,14 +83,14 @@ check GET  /api/block/1/transactions 200 "block transactions"
 check GET  /api/block/1/children   200 "block children"
 
 echo "== denied: gated/mutating + writes + unknown get 403 =="
-check GET  /v1/status              403 "gated status off the public surface"
+check GET  /status                 403 "gated status off the public surface"
 check GET  /metrics                403 "operator metrics off the public surface"
 check GET  /random                 403 "unknown path"
-check GET  /v1/blocks              403 "removed recent-blocks route"
-check GET  "/v1/blocks/$CID"       403 "removed block-by-cid route"
+check GET  /blocks                 403 "removed recent-blocks route"
+check GET  "/blocks/$CID"          403 "removed block-by-cid route"
 check GET  /                       403 "root"
-check POST /v1/transactions        403 "write POST"
-check POST "/v1/transactions/$CID" 403 "POST to an allowlisted read route"
+check POST /transactions           403 "write POST"
+check POST "/transactions/$CID"    403 "POST to an allowlisted read route"
 check POST /api/block/latest       403 "POST to /api"
 check POST /api/chain/endpoints    403 "POST to endpoint discovery"
 check POST /api/block/1/transactions 403 "POST to block transactions"

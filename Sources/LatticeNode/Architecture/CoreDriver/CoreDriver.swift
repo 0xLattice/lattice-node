@@ -481,7 +481,13 @@ extension CoreDriver {
             let tip = (hash: snapshot.actOnTip, height: snapshot.actOnHeight)
             let peers = sessions.values.filter(\.ready).count
             let pool = level.mining.mempool
-            guard view.actOnTip != tip.hash || view.poolVersion != pool.version || view.peers != peers else { return }
+            let digest = path == core.rootPath
+                ? CoreDriver.templateDigest(tip: tip.hash, mempool: pool, levels: core.ordered.dropFirst().compactMap {
+                    core.levels[$0].map { ($0.snapshot.actOnTip, $0.snapshot.bestHeaderTip, $0.mining.mempool) }
+                })
+                : CoreDriver.templateDigest(tip: tip.hash, mempool: pool)
+            guard view.actOnTip != tip.hash || view.poolVersion != pool.version
+                    || view.templateDigest != digest || view.peers != peers else { return }
             if view.actOnTip != tip.hash {
                 view.actOnTip = tip.hash
                 let tree = level.tree
@@ -502,11 +508,7 @@ extension CoreDriver {
             )
             // The root's digest covers every hosted level: a child's tip or
             // pool moving changes the template a miner should fetch.
-            view.templateDigest = path == core.rootPath
-                ? CoreDriver.templateDigest(tip: tip.hash, mempool: pool, levels: core.ordered.dropFirst().compactMap {
-                    core.levels[$0].map { ($0.snapshot.actOnTip, $0.snapshot.bestHeaderTip, $0.mining.mempool) }
-                })
-                : CoreDriver.templateDigest(tip: tip.hash, mempool: pool)
+            view.templateDigest = digest
             view.peers = peers
             views[path] = view
             output.view.publish(view)
@@ -865,15 +867,15 @@ extension CoreDriver {
                 guard let level = core.levels[child] else { return nil }
                 let snapshot = level.snapshot
                 let executed = !snapshot.actOnTip.isEmpty
-                // A root weighed but not executed yet: carry nothing until
-                // it executes, rather than a rival genesis.
-                if !executed, !snapshot.bestHeaderTip.isEmpty { return nil }
                 return ChildTemplateInput(
                     path: child,
                     tipCID: executed ? snapshot.actOnTip : nil,
+                    bestHeaderTip: snapshot.bestHeaderTip,
                     transactions: level.mining.mempool.transactions(limit: .max),
                     anchor: executed ? anchor(level.tree, snapshot.actOnTip) : nil,
-                    genesisSpec: configuration.childSpecs[child],
+                    // A weighed root that has not executed carries nothing
+                    // until it executes, rather than a rival genesis.
+                    genesisSpec: snapshot.bestHeaderTip.isEmpty ? configuration.childSpecs[child] : nil,
                     genesisTarget: .max
                 )
             }

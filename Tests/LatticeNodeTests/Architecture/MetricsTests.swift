@@ -49,7 +49,7 @@ final class MetricsTests: XCTestCase {
             XCTAssertEqual(samples[mempool], "0")
 
             let templateResponse = try await client.execute(
-                uri: "/v1/mining/templates",
+                uri: "/mining/templates",
                 method: .post,
                 headers: [.contentType: "application/json"],
                 body: ByteBuffer(bytes: try JSONEncoder().encode(MiningTemplateRequest()))
@@ -59,7 +59,7 @@ final class MetricsTests: XCTestCase {
                 from: Data(templateResponse.body.readableBytesView)
             )
             let workResponse = try await client.execute(
-                uri: "/v1/mining/work",
+                uri: "/mining/work",
                 method: .post,
                 headers: [.contentType: "application/json"],
                 body: ByteBuffer(bytes: try JSONEncoder().encode(
@@ -94,7 +94,7 @@ final class MetricsTests: XCTestCase {
                 body: bodyHeader
             )
             let submitted = try await client.execute(
-                uri: "/v1/transactions",
+                uri: "/transactions",
                 method: .post,
                 headers: [.contentType: "application/json"],
                 body: ByteBuffer(bytes: try JSONEncoder().encode(

@@ -93,7 +93,7 @@ public struct TopologyMine: Codable {
     /// How long to wait for the node to ANSWER a template request, in seconds.
     /// This bounds how long the node takes to BUILD a template, which is a
     /// different quantity from the template lifetime the answer reports and is
-    /// not bounded by it. Set it above what `POST /v1/mining/templates` costs
+    /// not bounded by it. Set it above what `POST /mining/templates` costs
     /// on this host: if it is lower, no round deadline can be derived and the
     /// miner will not mine at all (#153, where a 15s compiled-in value sat
     /// under a 16.6s build). Keep it at or below the coordinator's own request

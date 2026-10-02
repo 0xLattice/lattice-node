@@ -125,7 +125,10 @@ enum BootRecovery {
         var staged = try await stores.store.stagedImports()
         try await stores.store.auditNormalizedIndexes()
         // Hosted child levels share the scope: their journals' roots too.
-        for level in levels { staged += try await level.stagedImports() }
+        for level in levels {
+            staged += try await level.stagedImports()
+            try await level.auditNormalizedIndexes()
+        }
         let roots = Set(staged.flatMap(\.volumeRoots)).union(constantRoots).sorted()
         for root in roots {
             guard await stores.broker.fetchVolumeLocal(root: root) != nil else {

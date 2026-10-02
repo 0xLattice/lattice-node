@@ -194,7 +194,7 @@ struct Mine: AsyncParsableCommand {
                         // exists to carry.
                         let downFor = (unusableTemplateSince ?? ContinuousClock.now)
                             .duration(to: ContinuousClock.now)
-                        log("NOT MINING: no usable template answer from the node (no reply within \(templateTimeout)s, a non-200, or a reply with no expiry), so no round deadline can be derived. Stopped for \(downFor.components.seconds)s so far; check `POST /v1/mining/templates` on this node.")
+                        log("NOT MINING: no usable template answer from the node (no reply within \(templateTimeout)s, a non-200, or a reply with no expiry), so no round deadline can be derived. Stopped for \(downFor.components.seconds)s so far; check `POST /mining/templates` on this node.")
                         try? await Task.sleep(for: .seconds(5))
                         continue
                     }
@@ -430,7 +430,7 @@ func observedTemplateExpiry(
     _ rpc: UInt16, body: Data, timeoutSeconds: UInt64
 ) async -> Duration? {
     guard let url = URL(
-        string: "http://127.0.0.1:\(rpc)/v1/mining/templates"
+        string: "http://127.0.0.1:\(rpc)/mining/templates"
     ) else { return nil }
     var request = URLRequest(url: url)
     request.httpMethod = "POST"

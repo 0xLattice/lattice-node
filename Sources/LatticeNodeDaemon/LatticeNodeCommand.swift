@@ -244,11 +244,11 @@ func makeApplication(
         healthSnapshot: { await reads.readSnapshot() }
     )
     // Operator surface below: registered ONLY on this loopback application.
-    // /v1/status stays on the reconciling status() (expires the mempool, prunes
+    // /status stays on the reconciling status() (expires the mempool, prunes
     // stale child-intents) — existing operational clients poll it to observe
     // mempool drain, and depend on that reconciliation. It is an internal
     // endpoint; the public status surface is /health.
-    router.get("v1/status") { request, context in
+    router.get("status") { request, context in
         try json(await status(), request: request, context: context)
     }
     // Prometheus exposition: operator surface only, never the public read app.
@@ -270,7 +270,7 @@ func makeApplication(
 
 /// The public read application: exactly the bounded, non-mutating GET routes
 /// the read-replica nginx allowlist exposes (/health,
-/// /v1/transactions/:cid, /v1/accounts/:owner, /api/*), enforced in code.
+/// /transactions/:cid, /accounts/:owner, /api/*), enforced in code.
 /// Registered from the same function as the loopback application's read
 /// surface so the two cannot drift apart.
 func makePublicReadApplication(
@@ -365,7 +365,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
     router.head("health") { request, context in
         try await health(request, context).createHeadResponse()
     }
-    router.get("v1/transactions/:cid") { request, context in
+    router.get("transactions/:cid") { request, context in
         let service = try byPath(request)
         guard let cid = context.parameters.get("cid"), isPlausibleCID(cid) else {
             throw HTTPError(.badRequest)
@@ -380,7 +380,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
             context: context
         )
     }
-    router.get("v1/accounts/:owner") { request, context in
+    router.get("accounts/:owner") { request, context in
         let service = try byPath(request)
         guard let owner = context.parameters.get("owner"), isPlausibleCID(owner) else {
             throw HTTPError(.badRequest)
@@ -407,7 +407,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
     // MARK: - Explorer read API (/api/*)
     //
     // Ungated, read-only surface for the static browser explorer. Every handler
-    // mirrors a `/v1/*` read: content-verified, size-bounded, never touching the
+    // mirrors the public CID read routes: content-verified, size-bounded, never touching the
     // operation gate (no status()/transactionInventoryRoots()). Served to the
     // public internet via a read-replica.
 
@@ -617,19 +617,19 @@ private func addOperatorWriteRoutes(
     to router: Router<BasicRequestContext>,
     writes service: any OperatorWrites
 ) {
-    router.post("v1/transactions") { request, context in
+    router.post("transactions") { request, context in
         let input: SubmitTransactionRequest = try await decode(request, context: context)
         return try await serviceCall(request: request, context: context) {
             try await service.submitTransaction(input)
         }
     }
-    router.post("v1/mining/templates") { request, context in
+    router.post("mining/templates") { request, context in
         let input: MiningTemplateRequest = try await decode(request, context: context)
         return try await serviceCall(request: request, context: context) {
             try await service.miningTemplate(input)
         }
     }
-    router.post("v1/mining/work") { request, context in
+    router.post("mining/work") { request, context in
         let input: SubmitWorkRequest = try await decode(request, context: context)
         return try await serviceCall(request: request, context: context) {
             try await service.submitWork(input)
@@ -804,14 +804,14 @@ private func jsonCached<Value: Encodable, Context: RequestContext>(
     return response
 }
 
-/// GET /v1/transactions/:cid response: the decoded, content-verified
+/// GET /transactions/:cid response: the decoded, content-verified
 /// transaction, echoing the requested CID.
 struct TransactionResponse: Codable {
     let cid: String
     let transaction: Transaction
 }
 
-/// GET /v1/accounts/:owner?block=:cid response: the balance and next-expected
+/// GET /accounts/:owner?block=:cid response: the balance and next-expected
 /// nonce as of `block`'s post-state, echoing the requested owner/block CIDs.
 ///
 /// NODE-ATTESTED, not proof-backed: unlike by-CID block/tx bytes (which a

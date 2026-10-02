@@ -74,9 +74,11 @@ extension NodeStore {
         for admission in staged {
             for (id, payload) in try Self.normalizedFacts(in: admission.batch) {
                 if let existing = expectedFacts[id], existing != payload {
-                    throw NodeStoreError.corrupt(
-                        "admission batches disagree about an immutable fact"
-                    )
+                    guard try Self.restatesWeighedBlock(existing, as: payload) else {
+                        throw NodeStoreError.corrupt(
+                            "admission batches disagree about an immutable fact"
+                        )
+                    }
                 }
                 expectedFacts[id] = payload
             }

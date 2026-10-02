@@ -151,7 +151,7 @@ miner's work within one status probe.
    seed always yields the same CID.
 2. Construct and sign an ordinary parent transaction containing
    `GenesisAction(directory, genesisCID)`, then submit it to
-   `POST /v1/transactions`.
+   `POST /transactions`.
 3. External mining includes that transaction in a parent block like any other.
    The accepted block records `directory -> genesisCID` in the parent's
    committed genesis state.
@@ -223,7 +223,7 @@ genesis is accepted.
 
 ```text
 lattice-mining-coordinator
-  │ POST /v1/mining/templates
+  │ POST /mining/templates
   ▼
 lattice-node (Nexus)
   │ complete nonce-zero candidate + effective search target
@@ -232,7 +232,7 @@ lattice-miner workers
   │ nonce results
   ▼
 lattice-mining-coordinator
-  │ POST /v1/mining/work
+  │ POST /mining/work
   ▼
 lattice-node import → durability → overlay publication
 ```

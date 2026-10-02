@@ -126,8 +126,8 @@ final class PublicReadRateLimitTests: XCTestCase {
             )
         }
         for path in [
-            "/v1/transactions/bafy",
-            "/v1/accounts/bafy",
+            "/transactions/bafy",
+            "/accounts/bafy",
             "/api/block/latest",
             "/api/peers",
             "/api/mempool",
@@ -509,7 +509,7 @@ private func healthHeight(_ client: some TestClientProtocol) async throws -> UIn
 private func mineOneBlock(client: some TestClientProtocol) async throws -> String {
     var template: MiningTemplateResponse?
     try await client.execute(
-        uri: "/v1/mining/templates",
+        uri: "/mining/templates",
         method: .post,
         headers: [.contentType: "application/json"],
         body: ByteBuffer(bytes: try JSONEncoder().encode(MiningTemplateRequest()))
@@ -522,7 +522,7 @@ private func mineOneBlock(client: some TestClientProtocol) async throws -> Strin
     let issued = try XCTUnwrap(template)
     var tipCID: String?
     try await client.execute(
-        uri: "/v1/mining/work",
+        uri: "/mining/work",
         method: .post,
         headers: [.contentType: "application/json"],
         body: ByteBuffer(bytes: try JSONEncoder().encode(

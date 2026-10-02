@@ -42,7 +42,9 @@ final class CoreHeaderStore: Sendable {
     func proofs() throws -> [[String]: [String: [String: ChildBlockProof]]] {
         var proofs: [[String]: [String: [String: ChildBlockProof]]] = [:]
         for row in try database.rows(from: "child_proofs", "SELECT chain, child, root, bytes FROM child_proofs") {
-            guard let proof = ChildBlockProof.deserialize(try row.blob("bytes")) else { continue }
+            guard let proof = ChildBlockProof.deserialize(try row.blob("bytes")) else {
+                throw NodeStoreError.corrupt("a saved child proof does not deserialize")
+            }
             let path = try row.text("chain").split(separator: "/").map(String.init)
             proofs[path, default: [:]][try row.text("child"), default: [:]][try row.text("root")] = proof
         }
@@ -113,4 +115,3 @@ struct CoreChildIndexRow: NodeStoreRecord {
 
     var bytes: Data { get throws { try row.blob("bytes") } }
 }
-

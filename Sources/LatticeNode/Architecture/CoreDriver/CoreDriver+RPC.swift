@@ -50,6 +50,7 @@ struct HeightIndex: Sendable {
 struct ChildTemplateInput: Sendable {
     let path: ChainPath
     let tipCID: String?
+    let bestHeaderTip: String
     let transactions: [Transaction]
     let anchor: DifficultyAnchor?
     let genesisSpec: ChainSpec?
@@ -183,7 +184,7 @@ extension CoreDriver {
         )
     }
 
-    /// `/v1/status`: the read snapshot with the template digest.
+    /// `/status`: the read snapshot with the template digest.
     public func status() async -> ChainServiceStatusResponse {
         let read = await reads.readSnapshot()
         return ChainServiceStatusResponse(
@@ -372,7 +373,17 @@ extension CoreDriver {
             block: template.block,
             searchTarget: template.searchTarget,
             targets: template.targets,
-            digest: templateDigest(tip: job.tipCID, transactions: job.transactions.compactMap { try? Mempool.cid(of: $0) })
+            digest: templateDigest(
+                tip: job.tipCID,
+                transactions: job.transactions.compactMap { try? Mempool.cid(of: $0) },
+                levels: children.map {
+                    (
+                        $0.tipCID ?? "",
+                        $0.bestHeaderTip,
+                        $0.transactions.compactMap { try? Mempool.cid(of: $0) }
+                    )
+                }
+            )
         )
     }
 
@@ -447,10 +458,24 @@ extension CoreDriver {
     static func templateDigest(
         tip: String, mempool: Mempool, levels: [(actOn: String, best: String, pool: Mempool)] = []
     ) -> String {
-        let own = templateDigest(tip: tip, transactions: mempool.items.filter { $0.disposition != .unavailable }.map(\.cid))
+        templateDigest(
+            tip: tip,
+            transactions: mempool.items.filter { $0.disposition != .unavailable }.map(\.cid),
+            levels: levels.map {
+                ($0.actOn, $0.best, $0.pool.items.filter { $0.disposition != .unavailable }.map(\.cid))
+            }
+        )
+    }
+
+    static func templateDigest(
+        tip: String,
+        transactions: [String],
+        levels: [(actOn: String, best: String, transactions: [String])]
+    ) -> String {
+        let own = templateDigest(tip: tip, transactions: transactions)
         guard !levels.isEmpty else { return own }
         let lines = [own] + levels.map {
-            "\($0.actOn)/\($0.best)/" + templateDigest(tip: $0.actOn, mempool: $0.pool)
+            "\($0.actOn)/\($0.best)/" + templateDigest(tip: $0.actOn, transactions: $0.transactions)
         }
         return SHA256.hash(data: Data(lines.joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
     }

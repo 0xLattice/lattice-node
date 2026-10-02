@@ -3,7 +3,7 @@ import Hummingbird
 import LatticeNode
 import LatticeNodeCore
 
-/// What `GET /v1/core/snapshot` answers: the driver's last published
+/// What `GET /core/snapshot` answers: the driver's last published
 /// snapshot.
 struct CoreSnapshotResponse: Codable, Equatable {
     let bestHeaderTip: String
@@ -39,7 +39,7 @@ extension LatticeNodeCommand {
             peers: peers,
             processStartTime: processStartTime
         ) { router in
-            router.get("v1/core/snapshot") { _, _ -> Response in
+            router.get("core/snapshot") { _, _ -> Response in
                 guard let snapshot = driver.published.value else { return Response(status: .serviceUnavailable) }
                 let body = try JSONEncoder().encode(CoreSnapshotResponse(
                     bestHeaderTip: snapshot.bestHeaderTip,

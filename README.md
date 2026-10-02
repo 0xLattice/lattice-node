@@ -107,10 +107,10 @@ cannot select a second chain at runtime.
 | Endpoint | Method | Purpose |
 |---|---|---|
 | `/health` | GET | Process and chain status |
-| `/v1/status` | GET | Same structured status response |
-| `/v1/transactions` | POST | Submit a content-bound signed transaction |
-| `/v1/mining/templates` | POST | Create Nexus work and gather direct-child candidates |
-| `/v1/mining/work` | POST | Submit a nonce for issued work |
+| `/status` | GET | Same structured status response |
+| `/transactions` | POST | Submit a content-bound signed transaction |
+| `/mining/templates` | POST | Create Nexus work and gather direct-child candidates |
+| `/mining/work` | POST | Submit a nonce for issued work |
 
 See [docs/rpc-api.md](docs/rpc-api.md) for request and response shapes.
 

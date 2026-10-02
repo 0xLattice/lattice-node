@@ -2,7 +2,7 @@ import Foundation
 import Lattice
 import UInt256
 
-/// Exact miner-facing template returned by `POST /v1/mining/templates`.
+/// Exact miner-facing template returned by `POST /mining/templates`.
 /// The coordinator keeps canonical block bytes internally because workers are
 /// deliberately transport-agnostic nonce searchers.
 public struct TemplateResponse: Decodable, Sendable, Equatable {
@@ -142,7 +142,7 @@ public enum MinerLoopLogic {
         return work
     }
 
-    /// The `recipients` field of `POST /v1/mining/templates` for `--recipient`
+    /// The `recipients` field of `POST /mining/templates` for `--recipient`
     /// entries of the form `<chain path>=<address>` (e.g. `Nexus=bafy...`).
     /// Nil when any entry is malformed or names a chain twice. The node checks
     /// each address; a chain with no entry mines to no one.
@@ -169,7 +169,7 @@ public enum MinerLoopLogic {
         return field
     }
 
-    /// The `minimumWork` field of `POST /v1/mining/templates` for `--min-work`
+    /// The `minimumWork` field of `POST /mining/templates` for `--min-work`
     /// entries of the form `<chain path>=<work>` (e.g. `Nexus/Payments=2^32`).
     /// Nil when any entry is malformed or names a chain twice.
     public static func minimumWorkField(_ entries: [String]) -> [[String: Any]]? {

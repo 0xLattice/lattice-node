@@ -94,4 +94,47 @@ final class NodeStoreBootTests: XCTestCase {
         )
         await expectCorrupt(store)
     }
+
+    func testBootAuditsHostedChildNormalizedIndexes() async throws {
+        let storage = temporaryDirectory(create: true)
+        let alpha = ["Nexus", "Alpha"]
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"], storagePath: storage,
+            privateKeyHex: String(repeating: "01", count: 32),
+            hostedChildren: [alpha]
+        )
+        let child = try XCTUnwrap(CoreDriver.levelStores(configuration)[alpha])
+        try await child.stageCoreFacts([blockBatch("accepted")], volumeRoots: [], logID: "log")
+        let database = try NodeSQLite(
+            path: storage.appendingPathComponent("levels/Nexus.Alpha/state.db").path
+        )
+        _ = try database.execute(
+            "DELETE FROM accepted_blocks WHERE block_cid = ?1", params: [.text("accepted")]
+        )
+
+        do {
+            _ = try await ChainProcess.open(configuration: configuration)
+            XCTFail("expected child index corruption to fail boot")
+        } catch NodeStoreError.corrupt {
+        } catch {
+            XCTFail("expected corruption, got \(error)")
+        }
+    }
+
+    func testCorruptSavedChildProofFailsToLoad() throws {
+        let directory = temporaryDirectory(create: true)
+        let headers = try CoreHeaderStore(directory: directory)
+        let database = try NodeSQLite(path: directory.appendingPathComponent(CoreHeaderStore.fileName).path)
+        _ = try database.execute(
+            "INSERT INTO child_proofs (chain, child, root, bytes) VALUES (?1, ?2, ?3, ?4)",
+            params: [
+                .text("Nexus/Alpha"), .text("child"), .text("root"),
+                .blob(Data("not a proof".utf8)),
+            ]
+        )
+
+        XCTAssertThrowsError(try headers.proofs()) { error in
+            guard case NodeStoreError.corrupt = error else { return XCTFail("got \(error)") }
+        }
+    }
 }

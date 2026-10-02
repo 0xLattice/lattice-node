@@ -358,8 +358,8 @@ immutable serialized block/range assignment.
 The miner-facing API is:
 
 ```text
-POST /v1/mining/templates
-POST /v1/mining/work
+POST /mining/templates
+POST /mining/work
 ```
 
 Template requests may name one reward recipient per absolute chain path. The
@@ -379,11 +379,11 @@ loopback only and refuses any other bind address; it carries the writes and
 the operator-only reads:
 
 ```text
-GET  /v1/status              (with the template digest; reconciling)
+GET  /status              (with the template digest; reconciling)
 GET  /metrics
-POST /v1/transactions
-POST /v1/mining/templates
-POST /v1/mining/work
+POST /transactions
+POST /mining/templates
+POST /mining/work
 ```
 
 The public read listener (`--public-read-port`) binds all interfaces and
@@ -393,7 +393,7 @@ is served from an ungated snapshot and omits the template digest.
 
 ```text
 GET|HEAD /health
-GET /v1/transactions/:cid, /v1/accounts/:owner
+GET /transactions/:cid, /accounts/:owner
 GET /api/block/latest, /api/block/:id, /api/block/:id/transactions,
     /api/block/:id/children, /api/transaction/:cid, /api/state/account/:addr,
     /api/mempool, /api/peers, /api/chain/info, /api/chain/spec,

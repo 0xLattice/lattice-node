@@ -285,7 +285,7 @@ final class LatticeCtlTopologyTests: XCTestCase {
     /// explicit named constant first — #156.
     func testTemplateTimeoutCeilingDoesNotExceedTheCoordinatorsOwnLimit() {
         let coordinatorLimit = URLRequest(
-            url: URL(string: "http://127.0.0.1:8080/v1/mining/templates")!
+            url: URL(string: "http://127.0.0.1:8080/mining/templates")!
         ).timeoutInterval
         XCTAssertLessThanOrEqual(
             TimeInterval(TopologyMine.maximumTemplateTimeoutSeconds),

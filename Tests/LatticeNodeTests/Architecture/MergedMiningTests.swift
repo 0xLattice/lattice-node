@@ -97,6 +97,8 @@ final class MergedMiningTests: XCTestCase {
 
         let first = try await driver.miningTemplate(MiningTemplateRequest())
         XCTAssertNotNil(first.block.children.node?.entries["Alpha"], "the template carries Alpha's genesis")
+        let initialStatusDigest = await driver.status().templateDigest
+        XCTAssertEqual(first.templateDigest, initialStatusDigest)
 
         // Fast blocks harden Nexus's scheduled target below the maximum.
         var template = first
@@ -145,10 +147,15 @@ final class MergedMiningTests: XCTestCase {
             signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(bodyHeader: body, privateKeyHex: key.privateKey))],
             body: body
         )
+        let digestBeforeChildTransaction = await driver.status().templateDigest
         let admitted = try await driver.submitTransaction(SubmitTransactionRequest(transaction: transaction))
         let pooled = await alphaReads.readSnapshot().mempoolCount
         XCTAssertEqual(pooled, 1)
         XCTAssertEqual(driver.published.value?.mempoolCount, 0, "Nexus's pool never holds it")
+        let digestWithChildTransaction = await driver.status().templateDigest
+        XCTAssertNotEqual(digestWithChildTransaction, digestBeforeChildTransaction)
+        let refreshedTemplate = try await driver.miningTemplate(MiningTemplateRequest())
+        XCTAssertEqual(refreshedTemplate.templateDigest, digestWithChildTransaction)
         try await eventually("Alpha confirms the transaction") {
             _ = try await driver.mineBlock()
             return await alphaReads.readSnapshot().mempoolCount == 0

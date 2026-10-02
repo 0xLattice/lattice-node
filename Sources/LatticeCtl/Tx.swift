@@ -249,7 +249,7 @@ struct TxOptions: ParsableArguments {
             throw CtlError("signing failed; check the key file")
         }
         let response: SubmitTransactionResponse = try await post(
-            rpc: target.rpc, path: "v1/transactions",
+            rpc: target.rpc, path: "transactions",
             body: SubmitTransactionRequest(transaction: Transaction(
                 signatures: [signer.publicKey: signature], body: header
             ))
