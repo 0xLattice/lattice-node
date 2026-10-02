@@ -53,10 +53,12 @@ extension Core {
     /// next blocks to execute, in parent order.
     public var bodyWindow: [String] {
         let actOn = tree.actOnTip()
-        let tipHeight = tree.headerSnapshot(of: tree.canonicalTip)?.tipHeight ?? 0
-        guard tipHeight > actOn.height, config.bodyWindow > 0 else { return [] }
-        let last = min(tipHeight, actOn.height + UInt64(config.bodyWindow))
-        return ((actOn.height + 1)...last).compactMap { tree.canonicalBlockHash(atHeight: $0) }
+        guard let tipHeight = tree.headerSnapshot(of: tree.canonicalTip)?.tipHeight, config.bodyWindow > 0 else { return [] }
+        // A best chain whose genesis root is not executed yet starts there.
+        let first = actOn.hash.isEmpty ? 0 : actOn.height + 1
+        guard tipHeight >= first else { return [] }
+        let last = min(tipHeight, first + UInt64(config.bodyWindow) - 1)
+        return (first...last).compactMap { tree.canonicalBlockHash(atHeight: $0) }
     }
 
     /// The content layer has the body of `cid` locally. Only a body the
@@ -68,8 +70,7 @@ extension Core {
 
     /// Apply a connect verdict. Execution depends only on content, so a
     /// verdict is never stale: a valid block joins the executed set, its
-    /// post-state and the genesis links it issued persisted with its
-    /// validation; a block execution proved invalid is excluded while its
+    /// post-state persisted with its validation; a block execution proved invalid is excluded while its
     /// work still weighs. A verdict lacking a parent fact waits for the
     /// parent level to execute more (`awaitingParent`). Any other verdict
     /// without a decision (content that was not resolvable after all) is an
@@ -81,7 +82,7 @@ extension Core {
         switch verdict.retryFailure {
         case .crossChainEvidenceRequired(let fact)?:
             switch fact {
-            case .parentStateContinuity, .parentGenesis:
+            case .parentStateContinuity:
                 bodies.awaitingParent[cid] = fact
                 return
             case .childProof:
@@ -95,11 +96,7 @@ extension Core {
         case .applied(let update):
             if let state = update.materializedPostState { turn.states.append(state) }
             turn.facts += update.batches
-            // Genesis links: deleted in Lattice 41 (decision 18d); removed
-            // with it.
-            turn.genesisLinks += update.parentGenesisLinks.map {
-                IssuedGenesisLink(link: $0, issuer: update.blockHash)
-            }
+            weighed += update.weighed
             if !update.excluded { executedTransactions[cid] = transactions }
             if let replyID = minedReplies.removeValue(forKey: cid) {
                 turn.effects.append(.workSubmitted(

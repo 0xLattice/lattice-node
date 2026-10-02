@@ -1,4 +1,5 @@
 import Lattice
+import cashew
 
 /// A peer as the core sees it: its key and the session it arrived on. An
 /// event from a session the core no longer holds misses the `Sync.peers`
@@ -19,33 +20,38 @@ public struct PeerID: Hashable, Comparable, Sendable, CustomStringConvertible {
     public var description: String { "\(key)#\(session)" }
 }
 
-/// One header on the wire: the block node and, when it fits, the root
-/// `ChildIndex` its `children` link commits. An omitted child index is
-/// fetched by CID. A child chain's header adds the proofs that weigh it: a
-/// `ChildBlockProof` per root that carries it.
+/// One header on the wire: the block node and, when it fits, the children
+/// map its `children` link commits. An omitted children map is fetched by
+/// CID. A child chain's header adds the proofs that weigh it: a
+/// `ChildBlockProof` per root that carries it. A child genesis carries its
+/// spec, which every root holds as its own.
 public struct HeaderEntry: Sendable {
     public let block: Block
-    public let children: ChildIndex?
+    public let children: FlatDictionary<BlockHeader>?
     public let proofs: [ChildBlockProof]
+    public let spec: ChainSpec?
 
-    public init(block: Block, children: ChildIndex?, proofs: [ChildBlockProof] = []) {
+    public init(block: Block, children: FlatDictionary<BlockHeader>?, proofs: [ChildBlockProof] = [], spec: ChainSpec? = nil) {
         self.block = block
         self.children = children
         self.proofs = proofs
+        self.spec = spec
     }
 }
 
 /// A header the core inserted, with the content that must be durable beside
-/// its facts: the block node and its child index.
+/// its facts: the block node, its children map, and a genesis's spec.
 public struct StoredHeader: Sendable {
     public let blockCID: String
     public let block: Block
-    public let children: ChildIndex
+    public let children: FlatDictionary<BlockHeader>
+    public let spec: ChainSpec?
 
-    public init(blockCID: String, block: Block, children: ChildIndex) {
+    public init(blockCID: String, block: Block, children: FlatDictionary<BlockHeader>, spec: ChainSpec? = nil) {
         self.blockCID = blockCID
         self.block = block
         self.children = children
+        self.spec = spec
     }
 }
 

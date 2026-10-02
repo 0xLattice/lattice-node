@@ -20,14 +20,17 @@ public struct Snapshot: Sendable, Equatable {
 }
 
 extension Core {
-    /// The tree's genesis: its best chain's block at height 0.
-    static func genesis(of tree: ChainTree) -> String {
-        tree.canonicalBlockHash(atHeight: 0) ?? tree.canonicalTip
-    }
-
     /// The mempool's starting tip: the act-on tip.
     static func miningTip(of tree: ChainTree) -> String {
         tree.actOnTip().hash
+    }
+
+    /// The spec of the act-on tip's genesis root: what the mempool measures
+    /// transactions by. Nil while no root is executed.
+    static func actOnSpec(of tree: ChainTree) -> ChainSpec? {
+        tree.canonicalBlockHash(atHeight: 0)
+            .flatMap { tree.isExecuted(blockHash: $0) ? tree.headerSnapshot(of: $0)?.specCID : nil }
+            .flatMap { tree.specs[$0] }
     }
 
     public var snapshot: Snapshot {
@@ -82,6 +85,7 @@ extension Core {
             return
         }
         let confirmed = Set(entered.flatMap { executedTransactions[$0] ?? [] })
+        mining.spec = Self.actOnSpec(of: tree)
         turn.mining += mining.step(
             .tipMoved(TipMove(tipCID: tip.hash, confirmed: confirmed, left: left.reversed())),
             now: turn.now
@@ -107,8 +111,10 @@ extension Core {
 extension ChainTree {
     /// The deepest block on the best header chain whose ancestry is executed
     /// from genesis: the tip a node acts on. The executed blocks on one path
-    /// are a prefix of it, so this is a binary search over heights.
+    /// are a prefix of it, so this is a binary search over heights. None
+    /// (an empty hash) while the best chain's genesis root is not executed.
     func actOnTip() -> (hash: String, height: UInt64) {
+        guard let genesis = canonicalBlockHash(atHeight: 0), isExecuted(blockHash: genesis) else { return ("", 0) }
         let tipHeight = headerSnapshot(of: canonicalTip)?.tipHeight ?? 0
         var low: UInt64 = 0
         var high = tipHeight

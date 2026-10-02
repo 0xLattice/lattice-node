@@ -1,4 +1,5 @@
 import Lattice
+import cashew
 import UInt256
 
 /// Per-peer sync state: at most one request of each kind in flight, each
@@ -124,7 +125,9 @@ struct Heap<Element: Sendable>: Sendable {
 public struct PendingHeader: Sendable {
     public let blockCID: String
     public let block: Block
-    public internal(set) var children: ChildIndex?
+    public internal(set) var children: FlatDictionary<BlockHeader>?
+    /// A child genesis's spec, as it arrived.
+    public internal(set) var spec: ChainSpec? = nil
     /// Its achieved proof-of-work hash: small means real work.
     public let hash: UInt256
     public internal(set) var bytes: Int
@@ -204,7 +207,7 @@ public struct PendingQueue: Sendable {
         }
     }
 
-    mutating func setChildren(_ children: ChildIndex, of cid: String, bytes size: Int) {
+    mutating func setChildren(_ children: FlatDictionary<BlockHeader>, of cid: String, bytes size: Int) {
         guard entries[cid] != nil, entries[cid]?.children == nil else { return }
         entries[cid]?.children = children
         entries[cid]?.bytes += size
