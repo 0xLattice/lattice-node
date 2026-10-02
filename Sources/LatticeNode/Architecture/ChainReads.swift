@@ -40,14 +40,26 @@ public struct ChainReads: Sendable {
     /// The pool's size, and its CIDs only when `listing` (status reads
     /// never build the listing).
     let mempool: @Sendable (_ listing: Bool) async -> MempoolListing
+    /// The chain these reads serve: the root, or a hosted child level.
+    public let chainPath: [String]
+    /// Whether this chain durably accepted a block (its own journal).
+    let accepted: @Sendable (String) async -> Bool
 
     init(
         process: ChainProcess,
+        chainPath: [String]? = nil,
+        accepted: (@Sendable (String) async -> Bool)? = nil,
         tip: @escaping @Sendable () async -> ChainProcessStatus,
         canonicalCID: @escaping @Sendable (UInt64) async -> String?,
         mempool: @escaping @Sendable (_ listing: Bool) async -> MempoolListing
     ) {
         self.process = process
+        self.chainPath = chainPath ?? process.configuration.chainPath
+        if let accepted {
+            self.accepted = accepted
+        } else {
+            self.accepted = { await process.hasAcceptedBlock($0) }
+        }
         self.tip = tip
         self.canonicalCID = canonicalCID
         self.mempool = mempool
@@ -79,7 +91,7 @@ public struct ChainReads: Sendable {
     /// durably accepted. Never takes the operation gate — reads only
     /// ChainProcess's ungated CAS path.
     func block(cid: String) async -> Block? {
-        guard await process.hasAcceptedBlock(cid) else { return nil }
+        guard await accepted(cid) else { return nil }
         guard let data = await process.content([cid])[cid],
               data.count <= Self.maximumReadResponseBytes else {
             return nil
@@ -108,7 +120,7 @@ public struct ChainReads: Sendable {
         owner: String,
         blockCID: String
     ) async -> (balance: UInt64, nonce: UInt64)? {
-        guard await process.hasAcceptedBlock(blockCID) else { return nil }
+        guard await accepted(blockCID) else { return nil }
         guard let data = await process.content([blockCID])[blockCID],
               data.count <= Self.maximumReadResponseBytes,
               let block = _contentBoundBlock(cid: blockCID, data: data) else {
@@ -140,7 +152,7 @@ public struct ChainReads: Sendable {
     /// This node's own absolute chain path — the single chain it serves. Used
     /// by the daemon to answer the explorer's optional `?chainPath=` filter.
     public func explorerChainPath() -> [String] {
-        process.configuration.chainPath
+        chainPath
     }
 
     /// Main-chain block CID at `height` (ungated height-index lookup), so the
@@ -192,7 +204,7 @@ public struct ChainReads: Sendable {
             nextTarget: block.nextTarget,
             transactionsCID: block.transactions.rawCID,
             postStateCID: block.postState.rawCID,
-            chain: process.configuration.chainPath,
+            chain: chainPath,
             rewardRecipient: block.rewardRecipient,
             rewardAmount: await rewardAmount(of: block)
         )
@@ -387,7 +399,7 @@ public struct ChainReads: Sendable {
             genesisHash: await canonicalCID(0),
             height: snapshot.height,
             tipCID: snapshot.tipCID,
-            chain: process.configuration.chainPath
+            chain: chainPath
         )
     }
 

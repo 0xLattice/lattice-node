@@ -208,6 +208,7 @@ extension CoreDriver: OperatorWrites {}
 
 func makeApplication(
     reads: ChainReads,
+    levelReads: [ChainReads] = [],
     writes: any OperatorWrites,
     status: @Sendable @escaping () async -> ChainServiceStatusResponse,
     metrics: @Sendable @escaping (_ peers: Int, _ processStartTime: Date) async -> String,
@@ -220,7 +221,7 @@ func makeApplication(
     let router = Router()
     addPublicReadRoutes(
         to: router,
-        reads: reads,
+        reads: ChainReadsByPath(root: reads, levels: levelReads),
         peers: peers,
         // Loopback reads the live snapshot: `lattice status` and the E2E
         // suites poll this to watch height advance, and the public listener's
@@ -260,6 +261,7 @@ func makeApplication(
 /// surface so the two cannot drift apart.
 func makePublicReadApplication(
     reads: ChainReads,
+    levelReads: [ChainReads] = [],
     host: String,
     port: Int,
     peers: @Sendable @escaping () async -> ExplorerPeersResponse = {
@@ -293,7 +295,7 @@ func makePublicReadApplication(
     }
     addPublicReadRoutes(
         to: router,
-        reads: reads,
+        reads: ChainReadsByPath(root: reads, levels: levelReads),
         peers: peers,
         healthSnapshot: { await health.value() }
     )
@@ -308,7 +310,7 @@ func makePublicReadApplication(
 /// one registration function, so the two surfaces cannot drift apart.
 private func addPublicReadRoutes<Context: RequestContext>(
     to router: Router<Context>,
-    reads service: ChainReads,
+    reads byPath: ChainReadsByPath,
     peers: @Sendable @escaping () async -> ExplorerPeersResponse,
     healthSnapshot: @Sendable @escaping () async -> ChainServiceStatusResponse
 ) {
@@ -329,8 +331,9 @@ private func addPublicReadRoutes<Context: RequestContext>(
     // can never head-of-line-block or mutate consensus/mempool state.
     let health: @Sendable (Request, Context) async throws -> Response = {
         request, context in
-        try jsonCached(
-            await healthSnapshot(),
+        let service = try byPath(request)
+        return try jsonCached(
+            service.chainPath == byPath.root.chainPath ? await healthSnapshot() : await service.readSnapshot(),
             cacheControl: statusCacheControl,
             request: request,
             context: context
@@ -349,6 +352,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
         try await health(request, context).createHeadResponse()
     }
     router.get("v1/transactions/:cid") { request, context in
+        let service = try byPath(request)
         guard let cid = context.parameters.get("cid"), isPlausibleCID(cid) else {
             throw HTTPError(.badRequest)
         }
@@ -363,6 +367,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
         )
     }
     router.get("v1/accounts/:owner") { request, context in
+        let service = try byPath(request)
         guard let owner = context.parameters.get("owner"), isPlausibleCID(owner) else {
             throw HTTPError(.badRequest)
         }
@@ -393,6 +398,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
     // public internet via a read-replica.
 
     router.get("api/block/latest") { request, context in
+        let service = try byPath(request)
         guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
             throw HTTPError(.notFound)
         }
@@ -407,6 +413,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
         )
     }
     router.get("api/block/:id") { request, context in
+        let service = try byPath(request)
         guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
             throw HTTPError(.notFound)
         }
@@ -441,6 +448,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
         )
     }
     router.get("api/block/:id/transactions") { request, context in
+        let service = try byPath(request)
         guard let id = context.parameters.get("id"), isPlausibleCID(id) else {
             throw HTTPError(.badRequest)
         }
@@ -461,6 +469,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
         )
     }
     router.get("api/block/:id/children") { request, context in
+        let service = try byPath(request)
         guard let id = context.parameters.get("id"), isPlausibleCID(id) else {
             throw HTTPError(.badRequest)
         }
@@ -479,6 +488,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
         )
     }
     router.get("api/transaction/:cid") { request, context in
+        let service = try byPath(request)
         guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
             throw HTTPError(.notFound)
         }
@@ -496,6 +506,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
         )
     }
     router.get("api/state/account/:addr") { request, context in
+        let service = try byPath(request)
         guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
             throw HTTPError(.notFound)
         }
@@ -513,7 +524,8 @@ private func addPublicReadRoutes<Context: RequestContext>(
         )
     }
     router.get("api/mempool") { request, context in
-        try jsonCached(
+        let service = try byPath(request)
+        return try jsonCached(
             await service.explorerMempool(),
             cacheControl: statusCacheControl,
             request: request,
@@ -529,6 +541,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
         )
     }
     router.get("api/chain/info") { request, context in
+        let service = try byPath(request)
         guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
             throw HTTPError(.notFound)
         }
@@ -540,6 +553,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
         )
     }
     router.get("api/chain/spec") { request, context in
+        let service = try byPath(request)
         guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
             throw HTTPError(.notFound)
         }
@@ -554,12 +568,32 @@ private func addPublicReadRoutes<Context: RequestContext>(
         )
     }
     router.get("api/chain/genesis") { request, context in
-        try jsonCached(
+        let service = try byPath(request)
+        return try jsonCached(
             await service.explorerChainGenesis(),
             cacheControl: immutableCacheControl,
             request: request,
             context: context
         )
+    }
+}
+
+/// The read surface a request names with `?chainPath=Nexus/Alpha`: the
+/// root's when it names none, a hosted child level's, or 404.
+struct ChainReadsByPath: Sendable {
+    let root: ChainReads
+    let levels: [String: ChainReads]
+
+    init(root: ChainReads, levels: [ChainReads]) {
+        self.root = root
+        self.levels = Dictionary(uniqueKeysWithValues: levels.map { ($0.chainPath.joined(separator: "/"), $0) })
+    }
+
+    func callAsFunction(_ request: Request) throws -> ChainReads {
+        guard let key = request.uri.queryParameters["chainPath"].map(String.init),
+              key != root.chainPath.joined(separator: "/") else { return root }
+        guard let level = levels[key] else { throw HTTPError(.notFound) }
+        return level
     }
 }
 

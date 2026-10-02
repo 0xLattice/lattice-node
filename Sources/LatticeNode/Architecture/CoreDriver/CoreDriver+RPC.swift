@@ -61,7 +61,9 @@ extension CoreDriver {
             throw ChainServiceError.requestTooLarge
         }
         let transaction = request.transaction
-        guard case .admitted(let cid, let count, let bytes) = try await ask({
+        // A transaction names its chain: it goes to that level's pool.
+        let path = transaction.body.node?.chainPath ?? configuration.chainPath
+        guard case .admitted(let cid, let count, let bytes) = try await ask(at: path, {
             .transactionReceived(transaction, origin: .local(replyID: $0))
         }) else { throw CoreDriverError.stopped }
         return SubmitTransactionResponse(transactionCID: cid, mempoolCount: count, mempoolBytes: bytes)
@@ -121,9 +123,12 @@ extension CoreDriver {
     }
 
     /// Post a mining event under a fresh reply ID and wait for its answer.
-    private func ask(_ event: @escaping @Sendable (UInt64) -> MiningEvent) async throws -> CoreReply {
-        try await withCheckedThrowingContinuation { continuation in
-            if case .terminated = inputs.yield(.request(event, continuation)) {
+    private func ask(
+        at path: ChainPath? = nil, _ event: @escaping @Sendable (UInt64) -> MiningEvent
+    ) async throws -> CoreReply {
+        let path = path ?? configuration.chainPath
+        return try await withCheckedThrowingContinuation { continuation in
+            if case .terminated = inputs.yield(.request(path, event, continuation)) {
                 continuation.resume(throwing: CoreDriverError.stopped)
             }
         }
@@ -135,18 +140,22 @@ extension CoreDriver {
         process: ChainProcess,
         configuration: NodeConfiguration,
         published: PublishedValue<Snapshot>,
-        view: PublishedValue<CoreReadView>
+        view: PublishedValue<CoreReadView>,
+        chainPath: ChainPath? = nil,
+        accepted: (@Sendable (String) async -> Bool)? = nil
     ) -> ChainReads {
         ChainReads(
             process: process,
+            chainPath: chainPath,
+            accepted: accepted,
             tip: {
                 let snapshot = published.value
                 return ChainProcessStatus(
-                    phase: snapshot == nil ? .awaitingGenesis : .active,
-                    chainPath: configuration.chainPath,
+                    phase: snapshot == nil || snapshot?.actOnTip.isEmpty == true ? .awaitingGenesis : .active,
+                    chainPath: chainPath ?? configuration.chainPath,
                     nexusGenesisCID: configuration.nexusGenesisCID,
-                    tipCID: snapshot?.actOnTip,
-                    height: snapshot?.actOnHeight,
+                    tipCID: snapshot?.actOnTip.isEmpty == false ? snapshot?.actOnTip : nil,
+                    height: snapshot?.actOnTip.isEmpty == false ? snapshot?.actOnHeight : nil,
                     revision: nil
                 )
             },

@@ -30,6 +30,7 @@ extension LatticeNodeCommand {
         }
         let app = makeApplication(
             reads: driver.reads,
+            levelReads: Array(driver.levelReads.values),
             writes: driver,
             status: { await driver.status() },
             metrics: { driver.metricsExposition(peers: $0, processStartTime: $1) },
@@ -56,6 +57,7 @@ extension LatticeNodeCommand {
         let publicReadApp = publicReadPort.map { port in
             makePublicReadApplication(
                 reads: driver.reads,
+            levelReads: Array(driver.levelReads.values),
                 host: "0.0.0.0",
                 port: Int(port),
                 peers: peers,

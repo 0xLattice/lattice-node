@@ -9,6 +9,8 @@ public enum CoreDriverError: Error, Equatable, Sendable {
     case notNexus
     /// The driver stopped before answering.
     case stopped
+    /// A request names a chain this node does not host.
+    case unknownChain
 }
 
 /// The production shell around the sans-IO `LatticeNodeCore.HostCore`
@@ -47,6 +49,16 @@ public final class CoreDriver: Sendable {
     let readView: PublishedValue<CoreReadView>
     /// The RPC read surface, over `published` and the view.
     public let reads: ChainReads
+    /// Each hosted child level's read surface, over its own published
+    /// snapshot and view.
+    public let levelReads: [ChainPath: ChainReads]
+    /// Each level's published snapshot and view, the root's included.
+    let outputs: [ChainPath: LevelOutput]
+
+    struct LevelOutput: Sendable {
+        let published: PublishedValue<Snapshot>
+        let view: PublishedValue<CoreReadView>
+    }
     let configuration: NodeConfiguration
     let inputs: AsyncStream<Input>.Continuation
     private let loop: Task<Void, Never>
@@ -70,7 +82,7 @@ public final class CoreDriver: Sendable {
         /// A worker finished: its slot frees, then its results step.
         case jobDone([HostEvent])
         /// An RPC: its mining event under a fresh reply ID.
-        case request(@Sendable (UInt64) -> MiningEvent, CheckedContinuation<CoreReply, any Error>)
+        case request(ChainPath, @Sendable (UInt64) -> MiningEvent, CheckedContinuation<CoreReply, any Error>)
         /// An RPC answered outside a step (the shell could not run its part).
         case answer(UInt64, Result<CoreReply, any Error>)
         /// An announced transaction's fetch ended: the transaction, or nil.
@@ -107,9 +119,12 @@ public final class CoreDriver: Sendable {
                 headers.childIndexBytes(root).map { SerializedVolume(root: root, entries: [root: $0]) }
             }
         )
-        // Boot replay of the local journal, each row with its arrival time.
+        // Boot replay of the local journal, each row with its arrival time,
+        // into the pool of the chain it names.
         for item in try await process.localTransactions() {
-            driver.inputs.yield(.event(.level(core.rootPath, .mining(.transactionReceived(
+            let path = item.transaction.body.node?.chainPath ?? core.rootPath
+            guard core.levels[path] != nil else { continue }
+            driver.inputs.yield(.event(.level(path, .mining(.transactionReceived(
                 item.transaction, origin: .restored(addedAt: item.addedAt * 1_000)
             )))))
         }
@@ -200,6 +215,19 @@ public final class CoreDriver: Sendable {
         self.readView = readView
         self.configuration = configuration
         reads = Self.reads(process: process, configuration: configuration, published: published, view: readView)
+        let levelStores = (try? Self.levelStores(configuration)) ?? [:]
+        var outputs: [ChainPath: LevelOutput] = [core.rootPath: LevelOutput(published: published, view: readView)]
+        var levelReads: [ChainPath: ChainReads] = [:]
+        for (path, store) in levelStores {
+            let output = LevelOutput(published: PublishedValue(core.levels[path]?.snapshot), view: PublishedValue())
+            outputs[path] = output
+            levelReads[path] = Self.reads(
+                process: process, configuration: configuration, published: output.published, view: output.view,
+                chainPath: path, accepted: { (try? await store.hasAcceptedBlock($0)) ?? false }
+            )
+        }
+        self.outputs = outputs
+        self.levelReads = levelReads
         self.inputs = inputs
         self.ivy = ivy
         let gate = CoreDriverInputGate(capacity: Self.networkCapacity)
@@ -215,13 +243,12 @@ public final class CoreDriver: Sendable {
                 chainPath: configuration.chainPath
             ).encode(),
             configuration: configuration,
-            published: published,
-            readView: readView,
+            outputs: outputs,
             inputs: inputs,
             gate: gate,
             helloTimeout: helloTimeout,
             remote: IvyRootContentSource(ivy: ivy, policy: configuration.resourcePolicy),
-            levelStores: (try? Self.levelStores(configuration)) ?? [:],
+            levelStores: levelStores,
             workers: max(1, workers),
             failStop: failStop
         )
@@ -234,7 +261,7 @@ public final class CoreDriver: Sendable {
             for await input in stream {
                 if running {
                     running = await state.handle(input)
-                } else if case .request(_, let reply) = input {
+                } else if case .request(_, _, let reply) = input {
                     reply.resume(throwing: CoreDriverError.stopped)
                 }
             }
@@ -268,8 +295,7 @@ extension CoreDriver {
         let ivy: Ivy
         let hello: Data?
         let configuration: NodeConfiguration
-        let published: PublishedValue<Snapshot>
-        let readView: PublishedValue<CoreReadView>
+        let outputs: [ChainPath: LevelOutput]
         let inputs: AsyncStream<Input>.Continuation
         let gate: CoreDriverInputGate
         let helloTimeout: Duration
@@ -303,7 +329,7 @@ extension CoreDriver {
         /// Per level, the chain a tip epoch's jobs read, made once per epoch
         /// that has a job.
         var preflightLevels: [ChainPath: (epoch: UInt64, level: ChainLevel)] = [:]
-        var view = CoreReadView()
+        var views: [ChainPath: CoreReadView] = [:]
 
 
         /// A bounded set, oldest out.
@@ -350,8 +376,7 @@ extension CoreDriver {
             ivy: Ivy,
             hello: Data?,
             configuration: NodeConfiguration,
-            published: PublishedValue<Snapshot>,
-            readView: PublishedValue<CoreReadView>,
+            outputs: [ChainPath: LevelOutput],
             inputs: AsyncStream<Input>.Continuation,
             gate: CoreDriverInputGate,
             helloTimeout: Duration,
@@ -369,8 +394,7 @@ extension CoreDriver {
             self.ivy = ivy
             self.hello = hello
             self.configuration = configuration
-            self.published = published
-            self.readView = readView
+            self.outputs = outputs
             self.inputs = inputs
             self.remote = remote
             self.workers = workers
@@ -410,11 +434,15 @@ extension CoreDriver {
                 case .connected, .disconnected: break
                 }
                 return result
-            case .request(let event, let reply):
+            case .request(let path, let event, let reply):
+                guard core.levels[path] != nil else {
+                    reply.resume(throwing: CoreDriverError.unknownChain)
+                    return true
+                }
                 let id = nextReply
                 nextReply += 1
                 replies[id] = reply
-                return await step(.level(core.rootPath, .mining(event(id))))
+                return await step(.level(path, .mining(event(id))))
             case .answer(let id, let result):
                 answer(id, result)
                 return true
@@ -434,7 +462,14 @@ extension CoreDriver {
         /// peers changed: the act-on chain by height (walked down from its
         /// top only as far as it changed), the pool listing and the digest.
         mutating func refreshView() {
-            guard let level = core.levels[core.rootPath] else { return }
+            for path in core.levels.keys { refreshView(path) }
+        }
+
+        /// One level's read view: its act-on chain by height, pool listing
+        /// and template digest.
+        mutating func refreshView(_ path: ChainPath) {
+            guard let level = core.levels[path], let output = outputs[path] else { return }
+            var view = views[path] ?? CoreReadView()
             let snapshot = level.snapshot
             let tip = (hash: snapshot.actOnTip, height: snapshot.actOnHeight)
             let peers = sessions.values.filter(\.ready).count
@@ -443,13 +478,13 @@ extension CoreDriver {
             if view.actOnTip != tip.hash {
                 view.actOnTip = tip.hash
                 let tree = level.tree
-                var keep = min(view.heights.count, Int(tip.height) + 1)
+                var keep = min(view.heights.count, tip.hash.isEmpty ? 0 : Int(tip.height) + 1)
                 while keep > 0, view.heights[keep - 1] != tree.canonicalBlockHash(atHeight: UInt64(keep - 1)) {
                     keep -= 1
                 }
                 view.heights.truncate(to: keep)
                 var height = UInt64(keep)
-                while height <= tip.height, let cid = tree.canonicalBlockHash(atHeight: height) {
+                while !tip.hash.isEmpty, height <= tip.height, let cid = tree.canonicalBlockHash(atHeight: height) {
                     view.heights.append(cid)
                     height += 1
                 }
@@ -460,7 +495,8 @@ extension CoreDriver {
             )
             view.templateDigest = CoreDriver.templateDigest(tip: tip.hash, mempool: pool)
             view.peers = peers
-            readView.publish(view)
+            views[path] = view
+            output.view.publish(view)
         }
 
         // MARK: - Network → events
@@ -631,10 +667,8 @@ extension CoreDriver {
                 // The host merges these into its own effects.
                 break
             case .publish(let snapshot):
-                if path == core.rootPath {
-                    refreshView()
-                    published.publish(snapshot)
-                }
+                refreshView()
+                outputs[path]?.published.publish(snapshot)
             case .send(let peer, let message):
                 guard let session = session(peer), let frame = try? CoreWire.encode(message, at: path) else { break }
                 _ = await ivy.sendMessage(to: session.peer, topic: frame.topic, payload: frame.payload)
