@@ -81,60 +81,6 @@ extension NodeStore {
     static let frontierLeafPageSQL =
         "SELECT block_cid FROM accepted_blocks AS block WHERE block.leaf = 1 AND block.admission_seq <= ?1 ORDER BY block.admission_seq DESC, block.block_cid DESC LIMIT ?2"
 
-    /// Pagination over the accepted forest's leaves. The cursor-less page is
-    /// the MOST RECENTLY ADMITTED leaves (newest first): the leaf set only
-    /// ever grows (accepted rows are never deleted) and only recent forks can
-    /// still contend in fork choice, so a bounded frontier page must be the
-    /// recent end, never a lexicographic sample. A cursored page keeps the
-    /// legacy contract — leaves lexicographically after `afterCID`, in CID
-    /// order — which is what the wire's cursor rule and older peers' descent
-    /// expect; the frontier pull never cursors. The first call captures the
-    /// current admission sequence; later calls reuse it so newly admitted
-    /// descendants cannot reshuffle an in-progress page walk.
-    func acceptedLeafPage(
-        afterCID: String?,
-        snapshotSequence: Int64?,
-        limit: Int
-    ) throws -> AcceptedLeafPage {
-        guard limit > 0, let sqlLimit = Int64(exactly: limit) else {
-            throw NodeStoreError.invalidConfiguration(
-                "accepted-leaf page limit must be positive"
-            )
-        }
-        let currentSequence = try database.row(
-            from: ImportBatchRow.table,
-            "SELECT COALESCE(MAX(seq), 0) AS sequence FROM admission_batches"
-        )?.int("sequence") ?? 0
-        let snapshot = snapshotSequence ?? currentSequence
-        guard snapshot >= 0, snapshot <= currentSequence else {
-            throw NodeStoreError.invalidConfiguration(
-                "accepted-leaf snapshot is outside durable admission history"
-            )
-        }
-
-        let rows: [AcceptedBlockRow]
-        if let afterCID {
-            // Legacy cursored descent (older peers only; dead after the
-            // flag-day roll — delete with the cursored request handling).
-            rows = try database.rows(
-                AcceptedBlockRow.self,
-                "SELECT block_cid FROM accepted_blocks AS block WHERE block.admission_seq <= ?1 AND block.block_cid > ?2 AND NOT EXISTS (SELECT 1 FROM accepted_blocks AS child WHERE child.parent_cid = block.block_cid AND child.admission_seq <= ?1) ORDER BY block.block_cid LIMIT ?3",
-                params: [.int(snapshot), .text(afterCID), .int(sqlLimit)]
-            )
-        } else {
-            rows = try database.rows(
-                AcceptedBlockRow.self,
-                Self.frontierLeafPageSQL,
-                params: [.int(snapshot), .int(sqlLimit)]
-            )
-        }
-        let blockCIDs = try rows.map { try $0.blockCID }
-        return AcceptedLeafPage(
-            snapshotSequence: snapshot,
-            blockCIDs: blockCIDs
-        )
-    }
-
     func hasAcceptedBlock(_ blockCID: String) throws -> Bool {
         guard CIDIdentity.isCanonical(blockCID) else {
             throw NodeStoreError.corrupt("invalid accepted block lookup")
@@ -143,21 +89,6 @@ extension NodeStore {
             "SELECT 1 FROM accepted_blocks WHERE block_cid = ?1 LIMIT 1",
             params: [.text(blockCID)]
         ).isEmpty
-    }
-
-    /// The durable parent edge of an accepted block, or nil when the block is
-    /// unknown or a root. Serves the predecessor descent: locating the deepest
-    /// missing ancestor of an accepted-but-disconnected segment with point
-    /// lookups instead of block materialization.
-    func acceptedBlockParent(_ blockCID: String) throws -> String? {
-        guard CIDIdentity.isCanonical(blockCID) else {
-            throw NodeStoreError.corrupt("invalid accepted block lookup")
-        }
-        return try database.row(
-            AcceptedBlockRow.self,
-            "SELECT parent_cid FROM accepted_blocks WHERE block_cid = ?1 LIMIT 1",
-            params: [.text(blockCID)]
-        )?.parentCID
     }
 
     static func acceptedBlocks(
@@ -176,30 +107,6 @@ extension NodeStore {
             blocks[record.blockCID] = record
         }
         return blocks.values.sorted { $0.blockCID < $1.blockCID }
-    }
-
-    /// Owner: ImportJournal.stage — caller holds the transaction.
-    func validateAcceptedBlockRows(
-        _ blocks: [AcceptedBlockRecord],
-        admissionSequence: Int64
-    ) throws {
-        for block in blocks {
-            let row = try database.row(
-                AcceptedBlockRow.self,
-                "SELECT block_cid, parent_cid, admission_seq FROM accepted_blocks WHERE block_cid = ?1",
-                params: [.text(block.blockCID)]
-            )
-            guard let row else {
-                throw NodeStoreError.corrupt(
-                    "an admission batch is missing its accepted-block index"
-                )
-            }
-            let persisted = try PersistedAcceptedBlock(row)
-            guard persisted.parentCID == block.parentCID,
-                  persisted.admissionSequence <= admissionSequence else {
-                throw NodeStoreError.corrupt("malformed accepted-block index")
-            }
-        }
     }
 
     /// Owner: ImportJournal.stage — caller holds the transaction.
@@ -241,97 +148,6 @@ extension NodeStore {
                     params: [.text(parentCID)]
                 )
             }
-        }
-    }
-
-    /// Whether `blockCID` was admitted at the durable *validated* tier (its
-    /// state transition executed and post-state materialized), as opposed to
-    /// merely *weighed*. `false` for an unknown block or one recorded weighed.
-    /// The tier is a node-side recovery fact, not derivable from the consensus
-    /// batch, so it is read straight from the durable accepted-block index.
-    ///
-    /// Tier values: `0` weighed (boundary only, in the batch scope), `1` eager
-    /// (body + state inside `admission_batches.volume_roots`), `2` walk-
-    /// validated (body + state under the block's owner pin). A downgrade that
-    /// only knows `1` reads `2` as "not validated" — the safe direction.
-    func blockValidated(_ blockCID: String) throws -> Bool {
-        try database.row(
-            AcceptedBlockRow.self,
-            "SELECT validated FROM accepted_blocks WHERE block_cid = ?1 LIMIT 1",
-            params: [.text(blockCID)]
-        )?.status.isExecuted ?? false
-    }
-
-    /// Flip an already-weighed accepted block's durable marker to the walk-
-    /// validated tier. Marker ONLY: the caller pins the materialized body and
-    /// post-state roots under the block's owner FIRST, so a crash between the
-    /// two leaves an orphan pin (reclaimed at boot), never a marker without
-    /// its state.
-    ///
-    /// The weighed block fact (empty `stateDiff`) is immutable and keyed by
-    /// blockHash ONLY, so re-staging the validated fact (its real `stateDiff`)
-    /// would collide (`conflictingImportFact`). Deferred execution therefore
-    /// never rewrites `admission_facts` on validation: the weighed fact REMAINS
-    /// the state-blind consensus-replay record, and the materialized state is a
-    /// node-side availability artifact keyed by this marker plus the owner pin.
-    /// Idempotent, so a re-validation (reorg re-projection, crash-retry) is a
-    /// no-op.
-    func promoteValidated(blockCID: String) throws {
-        try database.transaction {
-            _ = try database.execute(
-                "UPDATE accepted_blocks SET validated = ?2 WHERE block_cid = ?1",
-                params: [.text(blockCID), BlockStatus.executedAndPinned.sqlValue]
-            )
-        }
-    }
-
-    /// Every block marked `executedAndPinned` (tier `2`): the set whose body and
-    /// post-state must be held by a per-block owner pin.
-    func executedAndPinnedBlockCIDs() throws -> Set<String> {
-        Set(try database.rows(
-            AcceptedBlockRow.self,
-            "SELECT block_cid FROM accepted_blocks WHERE validated = ?1",
-            params: [BlockStatus.executedAndPinned.sqlValue]
-        ).map { try $0.blockCID })
-    }
-
-    /// Every block this store has executed, at either tier (`1` executed, `2`
-    /// executed and pinned). Used once per boot to carry pre-existing history across
-    /// the introduction of durable validation facts: rows written before that
-    /// fact existed carry no fact, and without them a chain would come back
-    /// having forgotten every execution and would attest nothing.
-    ///
-    /// "Not header" and not "executed" so the executed-and-pinned tier counts
-    /// too. The column's DEFAULT (executed) is not what makes legacy rows qualify —
-    /// every row is inserted with an explicit `BlockStatus`, and the schema
-    /// epoch wipes any store old enough to predate the column, so the default
-    /// never fires. What makes them qualify is that they were written eager or
-    /// walk-validated by an image that really did execute them. A tier outside
-    /// `BlockStatus` never reaches here: the boot audit refuses it.
-    func executedBlockCIDs() throws -> Set<String> {
-        Set(try database.rows(
-            AcceptedBlockRow.self,
-            "SELECT block_cid FROM accepted_blocks WHERE validated != ?1",
-            params: [BlockStatus.header.sqlValue]
-        ).map { try $0.blockCID })
-    }
-
-    /// Return an executed-and-pinned block to the header tier (its owner pin is
-    /// gone, so its state may be evicted); the walk re-validates it on
-    /// candidacy.
-    ///
-    /// Retention bookkeeping ONLY. It does not retract the durable validation
-    /// fact, and must not: execution is a judgment about immutable bytes, so
-    /// evicting a cached post-state does not unmake it. Being unable to SERVE a
-    /// state is availability, never a verdict (spec §9.9), whereas retracting
-    /// the fact would make a restarted node disagree with a live one about what
-    /// its own chain produced.
-    func demoteValidated(blockCID: String) throws {
-        try database.transaction {
-            _ = try database.execute(
-                "UPDATE accepted_blocks SET validated = ?2 WHERE block_cid = ?1",
-                params: [.text(blockCID), BlockStatus.header.sqlValue]
-            )
         }
     }
 

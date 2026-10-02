@@ -664,10 +664,6 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.serviceUnavailable, message: reason(error))
     } catch let error as ChainServiceError {
         throw HTTPError(.badRequest, message: reason(error))
-    } catch TransactionPoolError.full {
-        throw HTTPError(.tooManyRequests, message: "full")
-    } catch let error as TransactionPoolError {
-        throw HTTPError(.badRequest, message: reason(error))
     } catch let error as MiningTemplateError {
         throw HTTPError(.badRequest, message: reason(error))
     } catch MempoolError.full {
@@ -682,8 +678,6 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.badRequest, message: reason(error))
     } catch CoreDriverError.stopped {
         throw HTTPError(.serviceUnavailable, message: "shuttingDown")
-    } catch ChainProcessError.chainNotBootstrapped {
-        throw HTTPError(.conflict, message: "chainNotBootstrapped")
     }
 }
 

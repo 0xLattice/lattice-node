@@ -66,10 +66,6 @@ public enum NexusGenesis {
         )
     }
 
-    public static func computedBlockHash(fetcher: any Fetcher) async throws -> String {
-        try await create(fetcher: fetcher).blockHash
-    }
-
     public static func verifyGenesis(_ result: GenesisResult) throws -> Bool {
         guard try BlockHeader(node: result.block).rawCID == result.blockHash else {
             return false
