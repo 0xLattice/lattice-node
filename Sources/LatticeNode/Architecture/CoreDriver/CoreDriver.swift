@@ -246,8 +246,8 @@ extension CoreDriver {
         var runningJobs = 0
         /// Two FIFOs: execution (connect, proof verification) runs before
         /// mining jobs.
-        var executionJobs: [QueuedJob] = []
-        var miningJobs: [QueuedJob] = []
+        var executionJobs: [CoreJob] = []
+        var miningJobs: [CoreJob] = []
         /// RPCs waiting on their answer, by reply ID.
         var replies: [UInt64: CheckedContinuation<CoreReply, any Error>] = [:]
         var nextReply: UInt64 = 1
@@ -263,13 +263,6 @@ extension CoreDriver {
         var preflightLevels: [ChainPath: (epoch: UInt64, level: ChainLevel)] = [:]
         var view = CoreReadView()
 
-        /// A worker job. One with a tip epoch is skipped at dequeue when its
-        /// level's mining tip epoch has moved: it runs nothing, posts nothing.
-        struct QueuedJob {
-            let path: ChainPath
-            let epoch: UInt64?
-            let run: @Sendable () async -> [HostEvent]
-        }
 
         /// A bounded set, oldest out.
         struct RecentSet {
@@ -573,7 +566,7 @@ extension CoreDriver {
                 _ = await ivy.disconnectSession(ifCurrent: session.peer)
             case .connect(let path, let job, let parentFacts):
                 let fetcher = process.localFetcher
-                executionJobs.append(QueuedJob(path: path, epoch: nil) {
+                executionJobs.append(CoreJob(path: path, epoch: nil) {
                     [.level(path, .connected(await ChainTree.connect(
                         job,
                         fetcher: fetcher,
@@ -667,7 +660,7 @@ extension CoreDriver {
             case .verifyProof(let job):
                 // A job without its block reads it from the header store.
                 guard let block = job.block ?? headers.header(job.childCID)?.block else { break }
-                executionJobs.append(QueuedJob(path: path, epoch: nil) {
+                executionJobs.append(CoreJob(path: path, epoch: nil) {
                     [.level(path, .proofVerified(job, await job.run(block)))]
                 })
                 startJobs()
@@ -725,31 +718,14 @@ extension CoreDriver {
                 }
             case .preflight(let job):
                 guard let level = epochLevel(at: path, epoch: job.tipEpoch) else { break }
-                let fetcher = process.localFetcher
-                miningJobs.append(QueuedJob(path: path, epoch: job.tipEpoch) {
-                    let result = await level.preflightTransaction(job.transaction, at: job.tipCID, fetcher: fetcher)
-                    return [.level(path, .mining(.preflighted(job, CoreDriver.disposition(result.disposition))))]
-                })
+                miningJobs.append(CoreDriver.miningJob(effect, at: path, level: level, process: process))
                 startJobs()
             case .buildTemplate(let job):
                 guard let level = epochLevel(at: path, epoch: job.tipEpoch) else { break }
-                let (process, chainPath) = (process, path)
-                miningJobs.append(QueuedJob(path: path, epoch: job.tipEpoch) {
-                    let anchor = await level.chain.difficultyAnchor(forBlockHash: job.tipCID)
-                    return [.level(path, .mining(.templateBuilt(job, await CoreDriver.buildTemplate(
-                        job, difficultyAnchor: anchor, process: process, chainPath: chainPath
-                    ))))]
-                })
+                miningJobs.append(CoreDriver.miningJob(effect, at: path, level: level, process: process))
                 startJobs()
-            case .returnTransactions(let left, let entered):
-                // Not tied to an epoch: a returned transaction is a candidate
-                // on any tip, and its preflight decides.
-                let fetcher = process.localFetcher
-                miningJobs.append(QueuedJob(path: path, epoch: nil) {
-                    let moved = await CoreDriver.movedTransactions(left: left, entered: entered, fetcher: fetcher)
-                    return [.level(path, .mining(.confirmed(moved.confirmed)))]
-                        + moved.returned.map { .level(path, .mining(.transactionReceived($0, origin: .returned))) }
-                })
+            case .returnTransactions:
+                miningJobs.append(CoreDriver.miningJob(effect, at: path, level: nil, process: process))
                 startJobs()
             }
             return true
@@ -760,8 +736,7 @@ extension CoreDriver {
         /// tree made once per epoch.
         private mutating func epochLevel(at path: ChainPath, epoch: UInt64) -> ChainLevel? {
             if let cached = preflightLevels[path], cached.epoch == epoch { return cached.level }
-            guard let tree = core.levels[path]?.tree, let context = tree.context else { return nil }
-            let level = ChainLevel(chain: ChainState(tree: tree), context: context)
+            guard let tree = core.levels[path]?.tree, let level = CoreDriver.jobLevel(tree) else { return nil }
             preflightLevels[path] = (epoch, level)
             return level
         }
@@ -777,7 +752,7 @@ extension CoreDriver {
         private mutating func startJobs() {
             while runningJobs < workers, !executionJobs.isEmpty || !miningJobs.isEmpty {
                 let job = executionJobs.isEmpty ? miningJobs.removeFirst() : executionJobs.removeFirst()
-                if let epoch = job.epoch, core.levels[job.path]?.mining.tipEpoch != epoch { continue }
+                guard job.isCurrent(in: core) else { continue }
                 runningJobs += 1
                 let inputs = inputs
                 spawn { inputs.yield(.jobDone(await job.run())) }

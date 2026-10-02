@@ -916,10 +916,12 @@ public struct Core: Sendable {
     // MARK: - Mining tip
 
     /// When the act-on tip moved, tell the mempool, naming the blocks the
-    /// act-on chain left and entered: the shell reads the left blocks'
-    /// transactions from content and returns them (Bitcoin's rule, every
-    /// one whose body is still held, bounded by `maxPendingReturned`). A
-    /// confirmed transaction leaves the pool through its next preflight.
+    /// act-on chain left and entered: the shell reads them from content,
+    /// confirms what the entered blocks carry (`MiningEvent.confirmed`) and
+    /// returns every transaction of the left ones whose body is still held
+    /// (Bitcoin's rule, bounded by `maxPendingReturned`). A pooled
+    /// transaction a forward move confirms without a read leaves through its
+    /// next preflight.
     mutating func moveMiningTip(_ turn: inout Turn) {
         let tip = tree.actOnTip()
         guard tip.hash != mining.tipCID else { return }

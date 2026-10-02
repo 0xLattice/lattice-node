@@ -141,11 +141,13 @@ public enum MiningEvent: Sendable {
     /// nil: the job could not build a block on its tip.
     case templateBuilt(TemplateJob, TemplateBuild?)
     case submitWork(replyID: UInt64, workID: String, nonce: UInt64)
-    /// The answer to `returnTransactions`: the CIDs the entered blocks
-    /// carry. Each leaves the pool, and a submit still awaiting its verdict
-    /// is answered as admitted (a restored row goes). The returned
-    /// transactions arrive separately, as `.returned` origins.
-    case confirmed(Set<String>)
+    /// The answer to `returnTransactions` of the move at `epoch`: the CIDs
+    /// the entered blocks carry. Each leaves the pool, and a submit still
+    /// awaiting its verdict is answered as admitted (a restored row goes);
+    /// then every admission still pending is preflighted. A later move made
+    /// the answer stale: it is dropped (that move reads its own blocks). The
+    /// returned transactions arrive separately, as `.returned` origins.
+    case confirmed(Set<String>, epoch: UInt64)
 }
 
 /// The pool's durable side of one step. The shell applies it before any later
@@ -176,8 +178,9 @@ public enum MiningEffect: Sendable {
     /// content: answer `.confirmed` with the entered blocks' CIDs, then hand
     /// each left-block transaction the entered blocks do not carry back as
     /// `.transactionReceived(_, origin: .returned)`. A body no longer held
-    /// contributes nothing.
-    case returnTransactions(left: [String], entered: [String])
+    /// contributes nothing. `epoch` is the move's tip epoch, which the
+    /// answer carries back.
+    case returnTransactions(left: [String], entered: [String], epoch: UInt64)
 }
 
 /// Bounds on transactions waiting for a preflight verdict. Local and
@@ -308,8 +311,14 @@ public struct Mining: Sendable {
             requestTemplate(request, waiting: [Waiting(replyID: replyID)], &turn)
         case .templateBuilt(let job, let build):
             built(job, build, now: now, &turn)
-        case .confirmed(let cids):
+        case .confirmed(let cids, let epoch):
+            // A later move left or re-read these blocks: never confirm a
+            // block the act-on chain no longer carries.
+            guard epoch == tipEpoch else { break }
             confirm(cids, &turn)
+            for (cid, admission) in admissions.sorted(by: { $0.key < $1.key }) {
+                preflight(cid, admission.transaction, &turn)
+            }
         case .submitWork(let replyID, let workID, let nonce):
             do {
                 let block = try templates.submission(workID: workID, nonce: nonce, now: now)
@@ -597,21 +606,25 @@ public struct Mining: Sendable {
                   !mempool.contains(cid), admissions[cid] == nil else { continue }
             open(cid, Admission(transaction: transaction, origins: [.returned], slot: .returned))
         }
-        // Every verdict the pool holds or awaits was for the old tip: those
-        // still out will be dropped, and each is issued again here.
-        preflighting.removeAll()
-        for item in mempool.items {
-            preflight(item.cid, item.transaction, &turn)
-        }
-        for (cid, admission) in admissions.sorted(by: { $0.key < $1.key }) {
-            preflight(cid, admission.transaction, &turn)
-        }
         // Read the moved blocks when something left the act-on chain, or
         // when a submit still awaits its verdict (the entered blocks may
         // confirm it).
         let waitingLocal = admissions.values.contains { $0.slot == .local }
-        if !move.left.isEmpty || (!move.entered.isEmpty && waitingLocal) {
-            turn.jobs.append(.returnTransactions(left: move.left, entered: move.entered))
+        let reads = !move.left.isEmpty || (!move.entered.isEmpty && waitingLocal)
+        // Every verdict the pool holds or awaits was for the old tip: those
+        // still out will be dropped, and each is issued again here. A
+        // pending admission waits for the read's `.confirmed` instead: its
+        // block may carry it, and a verdict first would refuse it.
+        preflighting.removeAll()
+        for item in mempool.items {
+            preflight(item.cid, item.transaction, &turn)
+        }
+        if reads {
+            turn.jobs.append(.returnTransactions(left: move.left, entered: move.entered, epoch: tipEpoch))
+        } else {
+            for (cid, admission) in admissions.sorted(by: { $0.key < $1.key }) {
+                preflight(cid, admission.transaction, &turn)
+            }
         }
         // Every waiting build was for the old tip: issue it again on this
         // one, or refuse a request that has waited through too many moves.

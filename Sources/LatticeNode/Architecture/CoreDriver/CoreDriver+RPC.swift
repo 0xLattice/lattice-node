@@ -197,6 +197,59 @@ extension CoreDriver {
 
     // MARK: - Jobs
 
+    /// A worker job. One with a tip epoch is skipped at dequeue when its
+    /// level's mining tip epoch has moved: it runs nothing, posts nothing.
+    struct CoreJob: Sendable {
+        let path: ChainPath
+        let epoch: UInt64?
+        let run: @Sendable () async -> [HostEvent]
+
+        func isCurrent(in core: HostCore) -> Bool {
+            epoch.map { core.levels[path]?.mining.tipEpoch == $0 } ?? true
+        }
+    }
+
+    /// The chain a tip epoch's jobs read: a copy of the level's tree.
+    static func jobLevel(_ tree: ChainTree) -> ChainLevel? {
+        tree.context.map { ChainLevel(chain: ChainState(tree: tree), context: $0) }
+    }
+
+    /// The worker job for a mining effect that needs one: Lattice preflight
+    /// and the template assembly over the job's epoch `level`, and the read
+    /// of a tip move's blocks, which is tied to no epoch (a returned
+    /// transaction is a candidate on any tip, and its preflight decides).
+    static func miningJob(
+        _ effect: MiningEffect,
+        at path: ChainPath,
+        level: ChainLevel?,
+        process: ChainProcess
+    ) -> CoreJob {
+        let fetcher = process.localFetcher
+        switch effect {
+        case .preflight(let job):
+            return CoreJob(path: path, epoch: job.tipEpoch) {
+                guard let level else { return [] }
+                let result = await level.preflightTransaction(job.transaction, at: job.tipCID, fetcher: fetcher)
+                return [.level(path, .mining(.preflighted(job, disposition(result.disposition))))]
+            }
+        case .buildTemplate(let job):
+            return CoreJob(path: path, epoch: job.tipEpoch) {
+                let anchor = await level?.chain.difficultyAnchor(forBlockHash: job.tipCID)
+                return [.level(path, .mining(.templateBuilt(job, await buildTemplate(
+                    job, difficultyAnchor: anchor, process: process, chainPath: path
+                ))))]
+            }
+        case .returnTransactions(let left, let entered, let epoch):
+            return CoreJob(path: path, epoch: nil) {
+                let moved = await movedTransactions(left: left, entered: entered, fetcher: fetcher)
+                return [.level(path, .mining(.confirmed(moved.confirmed, epoch: epoch)))]
+                    + moved.returned.map { .level(path, .mining(.transactionReceived($0, origin: .returned))) }
+            }
+        default:
+            preconditionFailure("\(effect) is not a job")
+        }
+    }
+
     /// `MiningEffect.returnTransactions`: the CIDs the blocks the act-on
     /// chain entered carry, and every transaction of the blocks it left whose
     /// bodies are still held, parent first, less the confirmed ones.

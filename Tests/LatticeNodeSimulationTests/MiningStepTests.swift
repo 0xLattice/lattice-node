@@ -43,7 +43,7 @@ final class MiningStepTests: XCTestCase {
         var mining = Mining(tipCID: "A1", spec: testSpec())
         let moved = mining.step(.tipMoved(TipMove(tipCID: "B2", left: ["A1"], entered: ["B1", "B2"])), now: 1)
         XCTAssertTrue(moved.contains {
-            if case .returnTransactions(["A1"], ["B1", "B2"]) = $0 { true } else { false }
+            if case .returnTransactions(["A1"], ["B1", "B2"], _) = $0 { true } else { false }
         }, "\(moved)")
         // A forward move with no submit waiting reads nothing.
         let forward = mining.step(.tipMoved(TipMove(tipCID: "B3", entered: ["B3"])), now: 2)
@@ -57,15 +57,36 @@ final class MiningStepTests: XCTestCase {
         _ = mining.step(.transactionReceived(tx, origin: .local(replyID: 9)), now: 0)
         let moved = mining.step(.tipMoved(TipMove(tipCID: "B", entered: ["B"])), now: 1)
         XCTAssertTrue(moved.contains {
-            if case .returnTransactions([], ["B"]) = $0 { true } else { false }
+            if case .returnTransactions([], ["B"], _) = $0 { true } else { false }
         }, "a waiting submit makes a forward move read the entered block: \(moved)")
-        let confirmed = mining.step(.confirmed([cid]), now: 2)
+        XCTAssertFalse(moved.contains { if case .preflight = $0 { true } else { false } },
+                       "the waiting admission's verdict waits for the read")
+        let confirmed = mining.step(.confirmed([cid], epoch: mining.tipEpoch), now: 2)
         XCTAssertTrue(confirmed.contains {
             if case .transactionAdmitted(9, cid, _, _) = $0 { true } else { false }
         }, "\(confirmed)")
         XCTAssertFalse(confirmed.contains { if case .transactionRefused = $0 { true } else { false } })
         XCTAssertEqual(mining.pendingAdmissions, 0)
         XCTAssertEqual(mining.outstandingPreflights, 0)
+    }
+
+    func testAConfirmationFromAnEarlierMoveIsDroppedAndTheReadPreflightsWhatIsPending() throws {
+        var mining = Mining(tipCID: "A", spec: testSpec())
+        let tx = try transfer(nonce: 0)
+        let cid = try Mempool.cid(of: tx)
+        _ = mining.step(.transactionReceived(tx, origin: .local(replyID: 9)), now: 0)
+        _ = mining.step(.tipMoved(TipMove(tipCID: "B", entered: ["B"])), now: 1)
+        let first = mining.tipEpoch
+        // B leaves before the first read answers.
+        _ = mining.step(.tipMoved(TipMove(tipCID: "A", left: ["B"])), now: 2)
+        let stale = mining.step(.confirmed([cid], epoch: first), now: 3)
+        XCTAssertTrue(stale.isEmpty, "a block that left confirms nothing: \(stale)")
+        XCTAssertEqual(mining.pendingAdmissions, 1)
+        // The current read confirms nothing of it, so it is preflighted.
+        let current = mining.step(.confirmed([], epoch: mining.tipEpoch), now: 4)
+        XCTAssertTrue(current.contains {
+            if case .preflight(let job) = $0 { job.cid == cid && job.tipCID == "A" } else { false }
+        }, "\(current)")
     }
 
     func testAPeerTransactionIsRelayedOnceWhenItIsNewlyPooled() throws {

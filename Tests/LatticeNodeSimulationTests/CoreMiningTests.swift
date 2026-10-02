@@ -79,10 +79,12 @@ final class CoreMiningTests: XCTestCase {
         // A submit still awaits its verdict, so the move asks for the entered
         // block's transactions; it left no block.
         XCTAssertTrue(mining(applied).contains {
-            if case .returnTransactions([], [chain[0].cid]) = $0 { true } else { false }
+            if case .returnTransactions([], [chain[0].cid], _) = $0 { true } else { false }
         }, "\(mining(applied))")
         // The block carried it: the waiting submit is answered as admitted.
-        let confirmed = mining(core.step(.mining(.confirmed([cid])), now: Self.now))
+        let confirmed = mining(core.step(
+            .mining(.confirmed([cid], epoch: core.mining.tipEpoch)), now: Self.now
+        ))
         XCTAssertTrue(confirmed.contains {
             if case .transactionAdmitted(7, cid, _, _) = $0 { true } else { false }
         }, "\(confirmed)")
