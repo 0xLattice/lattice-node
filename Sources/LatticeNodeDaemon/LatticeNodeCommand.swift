@@ -21,6 +21,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Process identity key file; created with mode 0600 when absent")
     var identityKey: String?
 
+    @Option(name: .customLong("host-chain"), help: "A child chain to host as a level of this process, e.g. Nexus/Alpha (repeatable; a parent before its children)")
+    var hostChain: [String] = []
+
     @Option(help: "Same-chain overlay listen port")
     var listenPort: UInt16 = 4001
 
@@ -104,7 +107,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             overlayMaxConnectionsPerNetgroup: overlayMaxConnectionsPerNetgroup,
             externalAddress: externalAddress,
             publicReadURL: publicReadUrl,
-            peerSearchInterval: peerSearchInterval
+            peerSearchInterval: peerSearchInterval,
+            hostedChildren: hostChain.map { $0.split(separator: "/").map(String.init) }
         )
         try await runCoreDriver(
             configuration: configuration,

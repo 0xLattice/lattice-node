@@ -155,7 +155,7 @@ func spawnHost(layout: HostLayout) throws {
             at: directory, withIntermediateDirectories: true
         )
     }
-    let chains = try Topology.load(root: layout.root).chains.keys.sorted()
+    let chains = try hostedPaths(Topology.load(root: layout.root))
     try Data(chains.joined(separator: "\n").utf8).write(
         to: hostedChainsFile(layout), options: .atomic
     )
@@ -179,6 +179,7 @@ func spawnHost(layout: HostLayout) throws {
     if let rate = nexus.publicReadRate { arguments += ["--public-read-rate", String(rate)] }
     if let rate = nexus.publicReadExpensiveRate { arguments += ["--public-read-expensive-rate", String(rate)] }
     if let rate = nexus.publicReadMaxRate { arguments += ["--public-read-max-rate", String(rate)] }
+    for child in nexus.children ?? [] { arguments += ["--host-chain", child] }
     process.arguments = arguments
     let log = layout.logFile(for: hostProcessName)
     _ = manager.createFile(atPath: log.path, contents: nil)
@@ -191,6 +192,11 @@ func spawnHost(layout: HostLayout) throws {
         layout, hostProcessName, pid: process.processIdentifier,
         name: "lattice-node"
     )
+}
+
+/// Every chain path the one process hosts: Nexus and its listed children.
+private func hostedPaths(_ topology: Topology) -> [String] {
+    (topology.chains.keys + topology.chains.values.flatMap { $0.children ?? [] }).sorted()
 }
 
 private func hostedChainsFile(_ layout: HostLayout) -> URL {
@@ -267,7 +273,7 @@ struct Up: AsyncParsableCommand {
         let topology = try Topology.load(root: layout.root).validated()
         try await withSpawnLock(layout) {
             if let pid = runningPid(layout, hostProcessName) {
-                guard hostedChains(layout) != Set(topology.chains.keys) else {
+                guard hostedChains(layout) != Set(hostedPaths(topology)) else {
                     print("already running (pid \(pid))")
                     return
                 }
@@ -275,7 +281,7 @@ struct Up: AsyncParsableCommand {
                 try await stopProcess(layout, hostProcessName)
             }
             try spawnHost(layout: layout)
-            print("started \(topology.chains.count) chain(s) (pid \(runningPid(layout, hostProcessName) ?? -1))")
+            print("started \(hostedPaths(topology).count) chain(s) (pid \(runningPid(layout, hostProcessName) ?? -1))")
         }
         guard foreground else { return }
         while true {

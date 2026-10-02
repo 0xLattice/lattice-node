@@ -39,9 +39,9 @@ public enum CoreDriverError: Error, Equatable, Sendable {
 ///
 /// Network and fetch effects spawn tasks that only post events back, so no
 /// suspension ever interleaves two steps.
-// PENDING (child levels): `hosted` is empty, so no `bootstrap` effect and no
-// child level arise yet. Hosting children needs per-level stores (P4) and
-// the evidence index behind `lookupProofs` / `indexProof`.
+// Child levels: the operator's `hostedChildren`, each journaling its facts in
+// its own state.db under `levels/` (until the P4 fact store); their verified
+// proofs are kept in memory for `lookupProofs` and serving.
 public final class CoreDriver: Sendable {
     public let published: PublishedValue<Snapshot>
     let readView: PublishedValue<CoreReadView>
@@ -147,7 +147,39 @@ public final class CoreDriver: Sendable {
             specs: [NexusGenesis.spec],
             config: coreConfig
         )
-        return HostCore(root: root.tree, hosted: [], config: coreConfig, logID: logID, rootLog: root.sync.log.entries)
+        let stores = try levelStores(configuration)
+        var facts: [ChainPath: [BlockImportBatch]] = [:]
+        var specs: [ChainPath: [ChainSpec]] = [:]
+        for (path, store) in stores {
+            let batches = try await store.stagedImports().map(\.batch)
+            facts[path] = batches
+            for case .block(let block) in batches.flatMap(\.facts) where block.parentBlockHash == nil {
+                guard let spec = try await process.coreGenesisSpec(block.blockHash) else {
+                    throw ChainProcessError.missingMaterializedVolume(block.blockHash)
+                }
+                specs[path, default: []].append(spec)
+            }
+        }
+        return try HostCore.restore(
+            root: root,
+            facts: facts, specs: specs, hosted: Set(stores.keys), config: coreConfig, logID: logID
+        )
+    }
+
+    /// Each hosted child level's own journal, under `levels/`.
+    static func levelStores(_ configuration: NodeConfiguration) throws -> [ChainPath: NodeStore] {
+        var stores: [ChainPath: NodeStore] = [:]
+        for path in configuration.hostedChildren {
+            let directory = configuration.storagePath.appendingPathComponent("levels")
+                .appendingPathComponent(path.joined(separator: "."))
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            stores[path] = try NodeStore(
+                databasePath: directory.appendingPathComponent("state.db"),
+                nexusGenesisCID: configuration.nexusGenesisCID,
+                chainPath: path
+            )
+        }
+        return stores
     }
 
     private init(
@@ -188,6 +220,7 @@ public final class CoreDriver: Sendable {
             gate: gate,
             helloTimeout: helloTimeout,
             remote: IvyRootContentSource(ivy: ivy, policy: configuration.resourcePolicy),
+            levelStores: (try? Self.levelStores(configuration)) ?? [:],
             workers: max(1, workers),
             failStop: failStop
         )
@@ -242,6 +275,11 @@ extension CoreDriver {
         let remote: IvyRootContentSource
         let workers: Int
         let failStop: @Sendable (any Error) -> Void
+        /// Each hosted child level's journal.
+        let levelStores: [ChainPath: NodeStore]
+        /// Each child level's verified proofs, by block and root: what
+        /// `lookupProofs` answers and a served child header carries.
+        var proofs: [ChainPath: [String: [String: ChildBlockProof]]] = [:]
 
         /// One overlay session per peer key; the core sees `(key, id)`.
         var sessions: [String: Session] = [:]
@@ -317,9 +355,11 @@ extension CoreDriver {
             gate: CoreDriverInputGate,
             helloTimeout: Duration,
             remote: IvyRootContentSource,
+            levelStores: [ChainPath: NodeStore],
             workers: Int,
             failStop: @escaping @Sendable (any Error) -> Void
         ) {
+            self.levelStores = levelStores
             self.gate = gate
             self.helloTimeout = helloTimeout
             self.core = core
@@ -538,10 +578,9 @@ extension CoreDriver {
         private mutating func execute(_ effect: HostEffect) async -> Bool {
             switch effect {
             case .persist(let batch):
-                // PENDING (child levels, P4): one transaction across levels,
-                // with `added` / `removed` level records and `issued` links.
-                // The Nexus-only host writes its root level's batch.
-                for (path, levelBatch) in batch.levels where path == core.rootPath {
+                // Root level first, then each child level into its own
+                // journal (PENDING P4: one transaction across levels).
+                for (path, levelBatch) in batch.levels {
                     // A validated block's body roots are journaled with its
                     // validation, so they stay retained across restarts.
                     let validated = levelBatch.facts.flatMap(\.facts).compactMap { fact -> BodyKey? in
@@ -553,7 +592,8 @@ extension CoreDriver {
                             levelBatch,
                             logID: core.logID,
                             headers: headers,
-                            bodyRoots: validated.flatMap { bodyRoots[$0] ?? [] }
+                            bodyRoots: validated.flatMap { bodyRoots[$0] ?? [] },
+                            into: path == core.rootPath ? nil : levelStores[path]
                         )
                         for key in validated { bodyRoots[key] = nil }
                     } catch {
@@ -600,13 +640,17 @@ extension CoreDriver {
             case .serveHeaders(let peer, let token, let requestID, let blockCIDs, let hasMore):
                 guard let session = session(peer) else { break }
                 let (process, headers, ivy, inputs, config) = (process, headers, ivy, inputs, core.config)
-                // PENDING (child levels): a child header's proofs are served
-                // from the evidence index.
+                let proofs = proofs[path] ?? [:]
                 spawn {
                     var entries: [HeaderEntry] = []
                     for cid in blockCIDs {
                         guard let stored = await process.coreHeader(cid, headers: headers) else { continue }
-                        entries.append(config.entry(stored.block, children: stored.children))
+                        let spec = stored.block.parent == nil
+                            ? try? await process.coreGenesisSpec(cid) : nil
+                        entries.append(config.entry(
+                            stored.block, children: stored.children,
+                            proofs: (proofs[cid] ?? [:]).sorted { $0.key < $1.key }.map(\.value), spec: spec ?? nil
+                        ))
                     }
                     let page = config.page(entries, hasMore: hasMore)
                     if let frame = try? CoreWire.encode(.headers(HeadersResponse(
@@ -660,10 +704,17 @@ extension CoreDriver {
             case .readTransactions(let blocks):
                 executionJobs.append(CoreDriver.readJob(blocks, at: path, process: process))
                 startJobs()
-            case .lookupProofs, .indexProof:
-                // PENDING (child levels): the child-evidence index (#253).
-                // A root level never emits these.
-                break
+            case .lookupProofs(let cids):
+                let found = cids.compactMap { cid in
+                    (proofs[path]?[cid]).map { ($0, cid) }
+                }
+                for (roots, cid) in found {
+                    inputs.yield(.event(.level(path, .proofsFound(
+                        childCID: cid, roots.sorted { $0.key < $1.key }.map(\.value)
+                    ))))
+                }
+            case .indexProof(let cid, let proof):
+                proofs[path, default: [:]][cid, default: [:]][proof.rootCID] = proof
             case .mining(let effect):
                 return await execute(effect, at: path)
             case .workSubmitted(let replyID, let outcome):
@@ -731,6 +782,9 @@ extension CoreDriver {
         /// and the template's difficulty anchor, over a copy of the level's
         /// tree made once per epoch.
         private mutating func epochLevel(at path: ChainPath, epoch: UInt64) async -> ChainLevel? {
+            // Child levels admit no transactions yet: only the root's facts
+            // are journaled where a job reads them.
+            guard path == core.rootPath else { return nil }
             if let cached = preflightLevels[path], cached.epoch == epoch { return cached.level }
             guard let context = core.levels[path]?.tree.context,
                   let level = await CoreDriver.jobLevel(context: context, process: process) else { return nil }

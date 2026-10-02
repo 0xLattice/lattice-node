@@ -29,18 +29,23 @@ extension ChainProcess {
         _ batch: PersistBatch,
         logID: String,
         headers: CoreHeaderStore,
-        bodyRoots: [String] = []
+        bodyRoots: [String] = [],
+        into levelStore: NodeStore? = nil
     ) async throws {
         let storage = NodeImportStorage(storage: broker)
         for state in batch.states {
             try await Self.storeExecutedState(state, in: storage)
+        }
+        // A child genesis's spec: what a restore holds as its root's.
+        for spec in batch.headers.compactMap(\.spec) {
+            try await VolumeImpl<ChainSpec>(node: spec).store(storer: storage)
         }
         try headers.store(batch.headers)
         let roots = await storage.takeStoredVolumeRoots() + bodyRoots
         try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
         // PENDING #72 / decision 18d: genesis links are deleted; a Nexus-only
         // driver issues none it would need to keep.
-        try await store.stageCoreFacts(batch.facts, volumeRoots: roots, logID: logID)
+        try await (levelStore ?? store).stageCoreFacts(batch.facts, volumeRoots: roots, logID: logID)
     }
 
     /// `Effect.fetchBody`: the block's Volume and the nested Volumes its
@@ -95,6 +100,12 @@ extension ChainProcess {
 
     /// A header's content for serving: the driver's header store, or the
     /// block boundary the actor path stored before the driver ran.
+    /// The spec a stored genesis header names, from local content.
+    nonisolated func coreGenesisSpec(_ cid: String) async throws -> ChainSpec? {
+        guard let bytes = try? await localFetcher.fetch(rawCid: cid), let block = Block(data: bytes) else { return nil }
+        return try await block.spec.resolve(fetcher: localFetcher).node
+    }
+
     nonisolated func coreHeader(_ cid: String, headers: CoreHeaderStore) async -> (block: Block, children: FlatDictionary<BlockHeader>)? {
         if let stored = headers.header(cid) { return stored }
         guard let blockBytes = try? await localFetcher.fetch(rawCid: cid),

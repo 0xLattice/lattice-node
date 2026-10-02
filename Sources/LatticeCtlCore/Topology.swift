@@ -42,6 +42,10 @@ public struct TopologyChain: Codable, Sendable {
     /// requests per second. Address-agnostic, so it stays correct behind such
     /// a proxy. Absent = the node's default; `0` disables it.
     public var publicReadMaxRate: Double?
+    /// On the Nexus entry: the child chains the one process hosts as levels,
+    /// by path (e.g. `["Nexus/Alpha"]`), a parent before its children. A
+    /// child has no process, ports or peers of its own.
+    public var children: [String]?
 
     public init(
         listen: UInt16, rpc: UInt16, peers: [String]? = nil,
@@ -268,7 +272,15 @@ public struct Topology: Codable {
                 throw CtlError("chain path is not absolute and Nexus-rooted: \(path)")
             }
             guard address.isNexus else {
-                throw CtlError("\(path): the node hosts only Nexus; child chains are not supported yet")
+                throw CtlError("\(path): list a child chain under the Nexus entry's children, not as a chain of its own")
+            }
+            var listed: Set<String> = [path]
+            for child in chain.children ?? [] {
+                guard let childAddress = ChainAddress(string: child), childAddress.key == child,
+                      !childAddress.isNexus, let parent = childAddress.parent, listed.contains(parent.key),
+                      listed.insert(child).inserted else {
+                    throw CtlError("\(path): child \(child) is not a new Nexus-rooted path listed after its parent")
+                }
             }
             for port in [chain.listen, chain.rpc]
                 + (chain.publicRead.map { [$0] } ?? []) {

@@ -104,19 +104,22 @@ struct AncestorsRequestMessage: NodeJSONMessage, Equatable, Sendable {
 }
 
 /// One header: the block node's bytes, its child index's when it fits, and
-/// a child header's `ChildBlockProof`s (a root header carries none).
+/// a child header's `ChildBlockProof`s (a root header carries none), and a
+/// child genesis's spec.
 struct WireHeaderEntry: Codable, Equatable, Sendable {
     static let maximumProofs = 16
 
     let block: Data
     let children: Data?
     let proofs: [Data]
+    var spec: Data? = nil
 
     var isCanonical: Bool {
         Block(data: block)?.toData() == block
             && (children.map { FlatDictionary<BlockHeader>(data: $0)?.toData() == $0 } ?? true)
             && proofs.count <= Self.maximumProofs
             && proofs.allSatisfy { (try? ChildBlockProof.deserialize($0)?.serialize()) == $0 }
+            && (spec.map { ChainSpec(data: $0)?.toData() == $0 } ?? true)
     }
 }
 
@@ -177,7 +180,8 @@ enum CoreWire {
                     return WireHeaderEntry(
                         block: block,
                         children: entry.children?.toData(),
-                        proofs: try entry.proofs.map { try $0.serialize() }
+                        proofs: try entry.proofs.map { try $0.serialize() },
+                        spec: entry.spec?.toData()
                     )
                 },
                 hasMore: response.hasMore
@@ -227,6 +231,10 @@ enum CoreWire {
                         proofs: try entry.proofs.map {
                             guard let proof = ChildBlockProof.deserialize($0) else { throw NodeNetworkWireError.malformed }
                             return proof
+                        },
+                        spec: try entry.spec.map {
+                            guard let spec = ChainSpec(data: $0) else { throw NodeNetworkWireError.malformed }
+                            return spec
                         }
                     )
                 },

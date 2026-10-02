@@ -249,7 +249,7 @@ public struct Core: Sendable {
         precondition(tree.context != nil, "the core runs one chain's level")
         mining = Mining(tipCID: Self.miningTip(of: tree), spec: Self.actOnSpec(of: tree), config: config.mining)
         var index = WeighedIndex()
-        var stack = roots ?? tree.canonicalBlockHash(atHeight: 0).map { [$0] } ?? []
+        var stack = roots ?? Self.bestRoot(of: tree)
         while let hash = stack.popLast() {
             guard let meta = tree.getConsensusBlock(hash: hash) else { continue }
             index.add(hash, parent: meta.parentBlockHash, height: meta.blockHeight)

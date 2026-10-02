@@ -98,6 +98,9 @@ public struct NodeConfiguration: Sendable {
     /// peer, and it has no bearing on validation or fork choice. `0` disables.
     public let peerSearchInterval: TimeInterval
     public let resourcePolicy: NodeResourcePolicy
+    /// The child chains this process hosts as levels under Nexus (operator
+    /// choice), parent before child; every parent is Nexus or listed.
+    public let hostedChildren: [[String]]
 
     /// Overlay slots kept in reserve for outbound dials so a burst of inbound
     /// connections (from one source, especially behind a proxy where the
@@ -117,8 +120,16 @@ public struct NodeConfiguration: Sendable {
         externalAddress: String? = nil,
         publicReadURL: String? = nil,
         peerSearchInterval: TimeInterval = 600,
-        resourcePolicy: NodeResourcePolicy = .default
+        resourcePolicy: NodeResourcePolicy = .default,
+        hostedChildren: [[String]] = []
     ) throws {
+        for child in hostedChildren {
+            guard child.count > 1, (try? ChainRuntimeContext(path: child)) != nil,
+                  child.dropLast().count == 1 || hostedChildren.contains(Array(child.dropLast())),
+                  child.first == chainPath.first else {
+                throw NodeConfigurationError.invalidChainPath
+            }
+        }
         guard let address = ChainAddress(chainPath) else {
             throw NodeConfigurationError.invalidChainPath
         }
@@ -164,6 +175,7 @@ public struct NodeConfiguration: Sendable {
         self.publicReadURL = declaredReadURL
         self.peerSearchInterval = max(0, peerSearchInterval)
         self.resourcePolicy = resourcePolicy
+        self.hostedChildren = hostedChildren.sorted { $0.count != $1.count ? $0.count < $1.count : $0.joined(separator: "/") < $1.joined(separator: "/") }
     }
 
     public var chainPath: [String] { address.components }

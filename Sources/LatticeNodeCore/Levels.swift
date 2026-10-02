@@ -201,6 +201,24 @@ public struct HostCore: Sendable {
             context: try ChainRuntimeContext(path: record.path, genesisCID: record.genesis.blockCID),
             specs: [record.spec]
         )
+        return try restore(
+            root: restoredRoot, facts: facts, specs: specs, hosted: hosted, pins: pins,
+            config: config, logID: logID, cursors: cursors
+        )
+    }
+
+    /// Rebuild a host over its already restored root level: each hosted
+    /// child level, parent before child, over its facts and specs.
+    public static func restore(
+        root restoredRoot: Core,
+        facts: [ChainPath: [BlockImportBatch]],
+        specs: [ChainPath: [ChainSpec]] = [:],
+        hosted: Set<ChainPath>,
+        pins: [ChainPath: String] = [:],
+        config: CoreConfig = CoreConfig(),
+        logID: String = "",
+        cursors: [ChainPath: [String: StreamCursor]] = [:]
+    ) throws -> HostCore {
         var host = HostCore(
             root: restoredRoot.tree,
             hosted: hosted,
@@ -208,11 +226,13 @@ public struct HostCore: Sendable {
             config: config,
             logID: logID,
             rootLog: restoredRoot.sync.log.entries,
-            rootCursors: cursors[record.path] ?? [:]
+            rootCursors: cursors[restoredRoot.chainPath] ?? [:]
         )
         // Parent before child: each restores over its restored parent.
         for path in host.ordered where path != host.rootPath {
-            guard let parent = host.levels[Array(path.dropLast())] else { continue }
+            // The restored parent serves this level's runs (the empty one
+            // `init` served is gone).
+            guard host.serve(path), let parent = host.levels[Array(path.dropLast())] else { continue }
             host.levels[path] = try Core.restore(
                 replaying: facts[path] ?? [],
                 context: try ChainRuntimeContext(path: path),

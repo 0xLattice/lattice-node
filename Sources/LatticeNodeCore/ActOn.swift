@@ -20,6 +20,11 @@ public struct Snapshot: Sendable, Equatable {
 }
 
 extension Core {
+    /// The best chain's genesis root, if any.
+    static func bestRoot(of tree: ChainTree) -> [String] {
+        tree.canonicalBlockHash(atHeight: 0).map { [$0] } ?? []
+    }
+
     /// The mempool's starting tip: the act-on tip.
     static func miningTip(of tree: ChainTree) -> String {
         tree.actOnTip().hash
