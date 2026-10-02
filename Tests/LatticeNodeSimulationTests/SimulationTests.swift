@@ -305,10 +305,10 @@ final class SimulationTests: XCTestCase {
 
     /// A slow honest link: a page takes longer to transfer than the request
     /// deadline, so the honest source is disconnected as stalled, and the
-    /// invariant catches it.
+    /// invariant catches it. One core, so nothing reaches it any other way.
     func testASlowHonestLinkThatMissesTheDeadlineIsCaught() async throws {
         var config = SimConfig(seed: 0x510)
-        config.cores = 2
+        config.cores = 1
         config.honestSources = 1
         config.spammer = false
         config.liar = false
