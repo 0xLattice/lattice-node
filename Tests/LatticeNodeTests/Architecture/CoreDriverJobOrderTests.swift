@@ -110,7 +110,10 @@ final class CoreDriverJobOrderTests: XCTestCase {
         var config = CoreConfig(bodyWindow: bodyWindow)
         config.mining.maxReissues = 16
         return Harness(
-            host: try await CoreDriver.boot(process: process, configuration: configuration, coreConfig: config),
+            host: try await CoreDriver.boot(
+                process: process, configuration: configuration, coreConfig: config,
+                headers: try CoreHeaderStore(directory: configuration.storagePath)
+            ),
             process: process,
             headers: try CoreHeaderStore(directory: storage)
         )

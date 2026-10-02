@@ -88,7 +88,7 @@ public final class CoreDriver: Sendable {
         failStop: @escaping @Sendable (any Error) -> Void = { fatalError("core driver: persist failed: \($0)") }
     ) async throws -> CoreDriver {
         let headers = try CoreHeaderStore(directory: configuration.storagePath)
-        let core = try await boot(process: process, configuration: configuration, coreConfig: coreConfig)
+        let core = try await boot(process: process, configuration: configuration, coreConfig: coreConfig, headers: headers)
         let overlay = try overlay ?? NodeNetworkPlaneConfigurations(configuration).overlay
         let driver = CoreDriver(
             core: core,
@@ -135,7 +135,8 @@ public final class CoreDriver: Sendable {
     static func boot(
         process: ChainProcess,
         configuration: NodeConfiguration,
-        coreConfig: CoreConfig
+        coreConfig: CoreConfig,
+        headers: CoreHeaderStore
     ) async throws -> HostCore {
         guard configuration.address.isNexus else { throw CoreDriverError.notNexus }
         let logID = try await process.coreLogID() ?? UUID().uuidString.lowercased()
@@ -154,7 +155,7 @@ public final class CoreDriver: Sendable {
             let batches = try await store.stagedImports().map(\.batch)
             facts[path] = batches
             for case .block(let block) in batches.flatMap(\.facts) where block.parentBlockHash == nil {
-                guard let spec = try await process.coreGenesisSpec(block.blockHash) else {
+                guard let spec = try await process.coreGenesisSpec(block.blockHash, headers: headers) else {
                     throw ChainProcessError.missingMaterializedVolume(block.blockHash)
                 }
                 specs[path, default: []].append(spec)
@@ -646,7 +647,7 @@ extension CoreDriver {
                     for cid in blockCIDs {
                         guard let stored = await process.coreHeader(cid, headers: headers) else { continue }
                         let spec = stored.block.parent == nil
-                            ? try? await process.coreGenesisSpec(cid) : nil
+                            ? try? await process.coreGenesisSpec(cid, headers: headers) : nil
                         entries.append(config.entry(
                             stored.block, children: stored.children,
                             proofs: (proofs[cid] ?? [:]).sorted { $0.key < $1.key }.map(\.value), spec: spec ?? nil
@@ -696,7 +697,11 @@ extension CoreDriver {
                 bodyRoots[BodyKey(path: path, cid: cid)] = nil
             case .verifyProof(let job):
                 // A job without its block reads it from the header store.
-                guard let block = job.block ?? headers.header(job.childCID)?.block else { break }
+                guard let block = job.block ?? headers.header(job.childCID)?.block else {
+                    // Its block is gone: the check frees its slot, blaming no one.
+                    inputs.yield(.event(.level(path, .proofDropped(job))))
+                    break
+                }
                 executionJobs.append(CoreJob(path: path, epoch: nil) {
                     [.level(path, .proofVerified(job, await job.run(block)))]
                 })

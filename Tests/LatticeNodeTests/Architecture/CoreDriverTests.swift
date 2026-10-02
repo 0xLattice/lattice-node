@@ -75,7 +75,8 @@ final class CoreDriverTests: XCTestCase {
         // Restart: the joiner's own journal replays to the same tip.
         let reopened = try await ChainProcess.open(configuration: joiner.configuration)
         let host = try await CoreDriver.boot(
-            process: reopened, configuration: joiner.configuration, coreConfig: .init()
+            process: reopened, configuration: joiner.configuration, coreConfig: .init(),
+            headers: try CoreHeaderStore(directory: joiner.configuration.storagePath)
         )
         let snapshot = try XCTUnwrap(host.levels[host.rootPath]?.snapshot)
         XCTAssertEqual(snapshot.actOnTip, tipCID)

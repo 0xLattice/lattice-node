@@ -179,6 +179,13 @@ extension Core {
 
     var proofConfig: ProofConfig { config.proofs }
 
+    /// A genesis's spec only when it is the one the block names: a wrong
+    /// one from a peer is dropped, so the next announcer's can be held.
+    static func bound(_ spec: ChainSpec?, by block: Block) -> ChainSpec? {
+        guard let spec, block.parent == nil, (try? VolumeImpl<ChainSpec>(node: spec).rawCID) == block.spec.rawCID else { return nil }
+        return spec
+    }
+
     // MARK: - Taking proofs
 
     /// A child header nobody weighed yet: it waits for a proof. A header with
@@ -189,7 +196,7 @@ extension Core {
         if var held = sync.proofs.awaiting[cid] {
             if !held.announcers.contains(peer) { held.announcers.append(peer) }
             if held.children == nil, let children = entry.children { held.children = children }
-            if held.spec == nil { held.spec = entry.spec }
+            if held.spec == nil { held.spec = Self.bound(entry.spec, by: entry.block) }
             sync.proofs.awaiting[cid] = held
             offer(entry.proofs, cid: cid, from: peer)
             return
@@ -201,7 +208,7 @@ extension Core {
         guard fromPeer < proofConfig.maxAwaitingPerPeer, makeRoomToAwait() else { return }
         sync.proofs.sequence += 1
         sync.proofs.awaiting[cid] = AwaitingProof(
-            blockCID: cid, block: entry.block, children: entry.children, spec: entry.spec,
+            blockCID: cid, block: entry.block, children: entry.children, spec: Self.bound(entry.spec, by: entry.block),
             announcers: [peer], sequence: sync.proofs.sequence
         )
         sync.proofs.wanted.remove(cid)

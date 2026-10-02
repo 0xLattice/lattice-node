@@ -34,7 +34,9 @@ enum BootRecovery {
         let directoryLock = try lockStorageDirectory(configuration: configuration)
         let stores = try openStores(configuration: configuration)
         let constantRoots = try await materializeConstantRoots(stores)
-        try await reconcileRetainedRoots(stores, constantRoots: constantRoots)
+        try await reconcileRetainedRoots(
+            stores, constantRoots: constantRoots, levels: Array(CoreDriver.levelStores(configuration).values)
+        )
         try await pinMempool(stores)
         try await seedNexusGenesis(stores, configuration: configuration)
         return Result(
@@ -117,10 +119,13 @@ enum BootRecovery {
     /// exactly what its facts name.
     private static func reconcileRetainedRoots(
         _ stores: Stores,
-        constantRoots: [String]
+        constantRoots: [String],
+        levels: [NodeStore]
     ) async throws {
-        let staged = try await stores.store.stagedImports()
+        var staged = try await stores.store.stagedImports()
         try await stores.store.auditNormalizedIndexes()
+        // Hosted child levels share the scope: their journals' roots too.
+        for level in levels { staged += try await level.stagedImports() }
         let roots = Set(staged.flatMap(\.volumeRoots)).union(constantRoots).sorted()
         for root in roots {
             guard await stores.broker.fetchVolumeLocal(root: root) != nil else {

@@ -30,6 +30,9 @@ public enum Event: Sendable {
     /// A child level: the evidence index's proofs for a block
     /// (`Effect.lookupProofs`).
     case proofsFound(childCID: String, [ChildBlockProof])
+    /// A child level: a `verifyProof` job the shell could not run (its block
+    /// is not held): its slot frees, blaming no one.
+    case proofDropped(ProofJob)
     /// A child level: a `verifyProof` job finished.
     case proofVerified(ProofJob, Result<VerifiedChildEvidence, ChildProofVerificationFailure>)
     /// A child level: the evidence index's proofs changed for these blocks.
@@ -355,6 +358,11 @@ public struct Core: Sendable {
             tick(&turn)
         case .proofsFound(let cid, let proofs):
             proofsFound(proofs, for: cid, &turn)
+        case .proofDropped(let job):
+            if let checked = sync.proofs.verifying.removeValue(forKey: job.key) {
+                sync.proofs.charge(checked, -1)
+                skipped(job.childCID)
+            }
         case .proofVerified(let job, let result):
             proofVerified(job, result, &turn)
         case .evidenceChanged(let cids):
@@ -776,6 +784,9 @@ public struct Core: Sendable {
             announce(cid, by: peer, &turn)
             if let children = entry.children, held.children == nil {
                 sync.pending.setChildren(children, of: cid, bytes: Self.size(of: children))
+            }
+            if held.spec == nil, let spec = Self.bound(entry.spec, by: entry.block) {
+                sync.pending.entries[cid]?.spec = spec
             }
             if !isRoot { offer(entry.proofs, cid: cid, from: peer) }
             dirty(cid, &turn)

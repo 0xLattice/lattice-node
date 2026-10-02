@@ -101,8 +101,10 @@ extension ChainProcess {
     /// A header's content for serving: the driver's header store, or the
     /// block boundary the actor path stored before the driver ran.
     /// The spec a stored genesis header names, from local content.
-    nonisolated func coreGenesisSpec(_ cid: String) async throws -> ChainSpec? {
-        guard let bytes = try? await localFetcher.fetch(rawCid: cid), let block = Block(data: bytes) else { return nil }
+    /// A child genesis header lives in the header store (its body may not be
+    /// fetched yet); its spec Volume was stored with it.
+    nonisolated func coreGenesisSpec(_ cid: String, headers: CoreHeaderStore) async throws -> ChainSpec? {
+        guard let block = await coreHeader(cid, headers: headers)?.block else { return nil }
         return try await block.spec.resolve(fetcher: localFetcher).node
     }
 
