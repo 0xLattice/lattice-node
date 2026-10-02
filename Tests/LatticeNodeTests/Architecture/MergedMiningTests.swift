@@ -53,6 +53,40 @@ final class MergedMiningTests: XCTestCase {
         await restarted.stop()
     }
 
+    /// A nested child (Nexus/Alpha/Beta) created with its parent: its
+    /// genesis waits until Alpha executes a block, then both advance by
+    /// merged mining.
+    func testANestedChildGenesisIsMinedOnceItsParentExecutes() async throws {
+        let beta = Self.alpha + ["Beta"]
+        let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-nested-\(UUID().uuidString)", isDirectory: true
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storage) }
+        let port = NetworkTransportTestPorts.allocate()
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"], storagePath: storage, privateKeyHex: String(repeating: "4e", count: 32),
+            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
+            hostedChildren: [Self.alpha, beta], childSpecs: [Self.alpha: Self.alphaSpec, beta: Self.alphaSpec]
+        )
+        let overlay = IvyConfig(
+            signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
+            requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        )
+        let process = try await ChainProcess.open(configuration: configuration)
+        let driver = try await CoreDriver.start(process: process, configuration: configuration, overlay: overlay)
+        let betaReads = try XCTUnwrap(driver.levelReads[beta])
+        try await eventually("Beta's genesis is mined after Alpha executes") {
+            // Alpha pays a recipient, so its states change: Beta's genesis
+            // must commit a non-empty parent state.
+            _ = try await driver.mineBlock(MiningTemplateRequest(recipients: [
+                MiningRecipient(chainPath: Self.alpha, address: CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)),
+            ]))
+            return (await betaReads.readSnapshot().height ?? 0) >= 1
+        }
+        await driver.stop()
+    }
+
     /// The first run: Nexus hardens, Alpha advances by merged grinds and by
     /// a share, and a transaction to Alpha is mined. Returns Alpha's height;
     /// the process closes on return.

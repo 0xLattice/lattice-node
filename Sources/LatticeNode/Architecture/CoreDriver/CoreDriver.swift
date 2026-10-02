@@ -110,6 +110,9 @@ public final class CoreDriver: Sendable {
             ivy: Ivy(config: overlay),
             helloTimeout: overlay.requestTimeout,
             workers: workers,
+            // A store that cannot read its proofs fails the boot: it would
+            // serve child headers without them.
+            proofs: try headers.proofs(),
             failStop: failStop
         )
         await driver.ivy.installCoreDriver(
@@ -206,6 +209,7 @@ public final class CoreDriver: Sendable {
         ivy: Ivy,
         helloTimeout: Duration,
         workers: Int,
+        proofs: [ChainPath: [String: [String: ChildBlockProof]]],
         failStop: @escaping @Sendable (any Error) -> Void
     ) {
         let (stream, inputs) = AsyncStream<Input>.makeStream()
@@ -249,6 +253,7 @@ public final class CoreDriver: Sendable {
             helloTimeout: helloTimeout,
             remote: IvyRootContentSource(ivy: ivy, policy: configuration.resourcePolicy),
             levelStores: levelStores,
+            proofs: proofs,
             workers: max(1, workers),
             failStop: failStop
         )
@@ -382,11 +387,12 @@ extension CoreDriver {
             helloTimeout: Duration,
             remote: IvyRootContentSource,
             levelStores: [ChainPath: NodeStore],
+            proofs: [ChainPath: [String: [String: ChildBlockProof]]],
             workers: Int,
             failStop: @escaping @Sendable (any Error) -> Void
         ) {
             self.levelStores = levelStores
-            self.proofs = (try? headers.proofs()) ?? [:]
+            self.proofs = proofs
             self.gate = gate
             self.helloTimeout = helloTimeout
             self.core = core
@@ -494,7 +500,13 @@ extension CoreDriver {
             view.mempool = ChainReads.MempoolListing(
                 count: pool.count, bytes: pool.byteCount, cids: pool.items.prefix(200).map(\.cid)
             )
-            view.templateDigest = CoreDriver.templateDigest(tip: tip.hash, mempool: pool)
+            // The root's digest covers every hosted level: a child's tip or
+            // pool moving changes the template a miner should fetch.
+            view.templateDigest = path == core.rootPath
+                ? CoreDriver.templateDigest(tip: tip.hash, mempool: pool, levels: core.ordered.dropFirst().compactMap {
+                    core.levels[$0].map { ($0.snapshot.actOnTip, $0.snapshot.bestHeaderTip, $0.mining.mempool) }
+                })
+                : CoreDriver.templateDigest(tip: tip.hash, mempool: pool)
             view.peers = peers
             views[path] = view
             output.view.publish(view)

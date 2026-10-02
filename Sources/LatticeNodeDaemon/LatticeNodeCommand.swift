@@ -107,6 +107,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             configured: explicitPeers.isEmpty && !noDefaultPeers ? nil : explicitPeers
         )
 
+        // Each spec file read once: the paths and specs agree.
+        let hosted = try hostedChains()
         let configuration = try NodeConfiguration(
             chainPath: address.components,
             storagePath: storage,
@@ -119,8 +121,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             externalAddress: externalAddress,
             publicReadURL: publicReadUrl,
             peerSearchInterval: peerSearchInterval,
-            hostedChildren: try hostedChains().map(\.path),
-            childSpecs: Dictionary(try hostedChains().compactMap { entry in entry.spec.map { (entry.path, $0) } }) { first, _ in first }
+            hostedChildren: hosted.map(\.path),
+            childSpecs: Dictionary(hosted.compactMap { entry in entry.spec.map { (entry.path, $0) } }) { first, _ in first }
         )
         try await runCoreDriver(
             configuration: configuration,
@@ -728,6 +730,8 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.badRequest, message: reason(error))
     } catch CoreDriverError.stopped {
         throw HTTPError(.serviceUnavailable, message: "shuttingDown")
+    } catch CoreDriverError.unknownChain {
+        throw HTTPError(.notFound, message: "unknownChain")
     }
 }
 

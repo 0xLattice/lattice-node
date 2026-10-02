@@ -415,13 +415,12 @@ extension CoreDriver {
                     minimumWork: request.minimumWork, difficultyAnchor: input.anchor, spec: spec, fetcher: fetcher
                 ).block
             } else if let spec = input.genesisSpec {
-                let grandchildren = await childCandidates(
-                    of: input.path, among: inputs, entering: LatticeState.emptyHeader, timestamp: timestamp,
-                    request: request, fetcher: fetcher
-                )
+                // A genesis carries no children: a nested genesis commits its
+                // carrier's entering state, and a genesis enters the empty
+                // one, which no child genesis may name. Its children wait
+                // until it executes.
                 block = try? await BlockBuilder.buildChildGenesis(
                     spec: spec, parentState: entering,
-                    children: Dictionary(uniqueKeysWithValues: grandchildren.map { ($0.directory, $0.block) }),
                     timestamp: timestamp, target: input.genesisTarget, fetcher: fetcher
                 )
             } else {
@@ -445,8 +444,15 @@ extension CoreDriver {
     /// tip and the transactions a template selects from (the pool's ready
     /// and future entries). A template carries the digest of the inputs its
     /// job read; status serves the current one.
-    static func templateDigest(tip: String, mempool: Mempool) -> String {
-        templateDigest(tip: tip, transactions: mempool.items.filter { $0.disposition != .unavailable }.map(\.cid))
+    static func templateDigest(
+        tip: String, mempool: Mempool, levels: [(actOn: String, best: String, pool: Mempool)] = []
+    ) -> String {
+        let own = templateDigest(tip: tip, transactions: mempool.items.filter { $0.disposition != .unavailable }.map(\.cid))
+        guard !levels.isEmpty else { return own }
+        let lines = [own] + levels.map {
+            "\($0.actOn)/\($0.best)/" + templateDigest(tip: $0.actOn, mempool: $0.pool)
+        }
+        return SHA256.hash(data: Data(lines.joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     static func templateDigest(tip: String, transactions: [String]) -> String {

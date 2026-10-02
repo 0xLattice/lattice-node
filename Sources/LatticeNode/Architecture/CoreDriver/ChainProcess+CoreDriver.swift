@@ -91,18 +91,18 @@ extension ChainProcess {
             for (directory, child) in children.entries.sorted(by: { $0.key < $1.key }) {
                 let childPath = path + [directory]
                 guard hosted.contains(childPath), let block = child.node else { continue }
-                let storage = NodeImportStorage(storage: broker)
-                try await child.storeBlock(fetcher: localFetcher, storer: storage)
-                try await broker.mergeRetainedRoots(scope: retentionScope, roots: await storage.takeStoredVolumeRoots())
                 let hop = try await ChildBlockProof.generate(
                     rootHeader: BlockHeader(node: carrier), childDirectory: directory, fetcher: localFetcher
                 )
                 let proof = proofToCarrier.map { $0.composing(hop: hop) } ?? hop
-                frontier.append((block, childPath, proof))
+                // Only a block the grind's work meets is stored and walked.
                 guard case .success(let evidence) = await proof.verifySecuringWork(child: block, chainPath: childPath),
-                      evidence.contribution != nil,
-                      let grandchildren = try await block.children.resolve(fetcher: localFetcher).node
-                else { continue }
+                      evidence.contribution != nil else { continue }
+                let storage = NodeImportStorage(storage: broker)
+                try await child.storeBlock(fetcher: localFetcher, storer: storage)
+                try await broker.mergeRetainedRoots(scope: retentionScope, roots: await storage.takeStoredVolumeRoots())
+                frontier.append((block, childPath, proof))
+                guard let grandchildren = try await block.children.resolve(fetcher: localFetcher).node else { continue }
                 carried.append(MinedGrind.Carried(
                     path: childPath, block: block, children: grandchildren, proof: proof, evidence: evidence
                 ))

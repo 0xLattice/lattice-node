@@ -21,8 +21,8 @@ final class TestBlockClock {
 extension CoreDriver {
     /// Mine one block through the RPC surface: a template on the act-on tip,
     /// its nonce ground, the work submitted. Returns the mined block.
-    func mineBlock() async throws -> Block {
-        let template = try await miningTemplate(MiningTemplateRequest())
+    func mineBlock(_ request: MiningTemplateRequest = MiningTemplateRequest()) async throws -> Block {
+        let template = try await miningTemplate(request)
         var nonce: UInt64 = 0
         // The hardest threshold: the root's own, which every carried
         // child's easier target also meets.

@@ -22,7 +22,7 @@ struct Child: AsyncParsableCommand {
 
         @OptionGroup var rootOption: RootOption
 
-        @Argument(help: "The child chain's path, e.g. Nexus/Alpha (its parent is Nexus or a hosted child).")
+        @Argument(help: "The child chain's path, e.g. Nexus/Alpha (its parent is Nexus or a hosted child; a nested genesis is mined once its parent has executed a block).")
         var path: String
 
         @Option(help: "A ChainSpec JSON file (every field, maxBlockSize and wasmPolicies included); flags below build one otherwise.")
