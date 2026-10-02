@@ -261,7 +261,7 @@ final class MempoolRetentionTests: XCTestCase {
                 expected.entries,
                 "pooled peer submission \(index) is no longer served whole"
             )
-            let read = await node.service.transaction(cid: root)
+            let read = await node.service.reads.transaction(cid: root)
             XCTAssertNotNil(read, "pooled peer submission \(index) cannot be read")
         }
     }

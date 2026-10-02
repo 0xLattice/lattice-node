@@ -257,12 +257,12 @@ public struct PendingQueue: Sendable {
 /// every header and its parent.
 public struct WeighedIndex: Sendable {
     var parent: [String: String] = [:]
-    var members: Set<String> = []
+    var height: [String: UInt64] = [:]
     /// Leaves: headers with no weighed child.
     public internal(set) var leaves: Set<String> = []
 
-    mutating func add(_ cid: String, parent: String?) {
-        guard members.insert(cid).inserted else { return }
+    mutating func add(_ cid: String, parent: String?, height: UInt64) {
+        guard self.height.updateValue(height, forKey: cid) == nil else { return }
         if let parent {
             self.parent[cid] = parent
             leaves.remove(parent)
@@ -270,7 +270,7 @@ public struct WeighedIndex: Sendable {
         leaves.insert(cid)
     }
 
-    func contains(_ cid: String) -> Bool { members.contains(cid) }
+    func contains(_ cid: String) -> Bool { height[cid] != nil }
 }
 
 /// Header sync for one level: which peers are asked for what, and the

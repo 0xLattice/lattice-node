@@ -356,9 +356,9 @@ final class ChainServiceTests: XCTestCase {
         let status = await service.status()
         XCTAssertEqual(status.height, 1)
         let reward = NexusGenesis.spec.rewardAtBlock(1)
-        let account = await service.explorerAccount(owner: recipient)
+        let account = await service.reads.explorerAccount(owner: recipient)
         XCTAssertEqual(account?.balance, reward)
-        let block = await service.explorerBlock(cid: try XCTUnwrap(submitted.tipCID))
+        let block = await service.reads.explorerBlock(cid: try XCTUnwrap(submitted.tipCID))
         XCTAssertEqual(block?.rewardRecipient, recipient)
         XCTAssertEqual(block?.rewardAmount, reward)
     }
@@ -404,9 +404,9 @@ final class ChainServiceTests: XCTestCase {
         ))
         XCTAssertTrue(paid.accepted)
         let reward = NexusGenesis.spec.rewardAtBlock(2)
-        let account = await service.explorerAccount(owner: recipient)
+        let account = await service.reads.explorerAccount(owner: recipient)
         XCTAssertEqual(account?.balance, reward + 7)
-        let paidBlock = await service.explorerBlock(cid: try XCTUnwrap(paid.tipCID))
+        let paidBlock = await service.reads.explorerBlock(cid: try XCTUnwrap(paid.tipCID))
         XCTAssertEqual(paidBlock?.rewardAmount, reward + 7)
 
         // Block 3 names no recipient: nothing is credited to anyone.
@@ -416,12 +416,12 @@ final class ChainServiceTests: XCTestCase {
             workID: burning.workID, nonce: 0
         ))
         XCTAssertTrue(burned.accepted)
-        let burnedBlock = await service.explorerBlock(
+        let burnedBlock = await service.reads.explorerBlock(
             cid: try XCTUnwrap(burned.tipCID)
         )
         XCTAssertNil(burnedBlock?.rewardRecipient)
         XCTAssertNil(burnedBlock?.rewardAmount)
-        let unchanged = await service.explorerAccount(owner: recipient)
+        let unchanged = await service.reads.explorerAccount(owner: recipient)
         XCTAssertEqual(unchanged?.balance, reward + 7)
     }
 

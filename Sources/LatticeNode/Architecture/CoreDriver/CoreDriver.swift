@@ -10,6 +10,8 @@ public enum CoreDriverError: Error, Equatable, Sendable {
     case wrongGenesis(String?)
     /// The driver hosts the Nexus level only.
     case notNexus
+    /// The driver stopped before answering.
+    case stopped
 }
 
 /// The production shell around the sans-IO `LatticeNodeCore.HostCore`
@@ -29,6 +31,14 @@ public enum CoreDriverError: Error, Equatable, Sendable {
 /// - `connect` / `verifyProof` → a bounded worker pool; the result comes
 ///   back as an event.
 /// - `wakeAt` → one timer that posts `tick`.
+/// - `mining` → the pool delta persisted like `persist` (fail-stop), RPC
+///   replies answered by reply ID, announces to every ready peer, and the
+///   preflight and template jobs on the worker pool (a job whose tip epoch
+///   moved before it starts runs nothing).
+///
+/// RPC writes (`submitTransaction`, `miningTemplate`, `submitWork`) are
+/// mining events with reply IDs, one per RPC in flight; RPC reads
+/// (`reads`) come from the published snapshot and view, never the loop.
 ///
 /// Network and fetch effects spawn tasks that only post events back, so no
 /// suspension ever interleaves two steps.
@@ -37,7 +47,11 @@ public enum CoreDriverError: Error, Equatable, Sendable {
 // the evidence index behind `lookupProofs` / `indexProof`.
 public final class CoreDriver: Sendable {
     public let published: PublishedValue<Snapshot>
-    private let inputs: AsyncStream<Input>.Continuation
+    let readView: PublishedValue<CoreReadView>
+    /// The RPC read surface, over `published` and the view.
+    public let reads: ChainReads
+    let configuration: NodeConfiguration
+    let inputs: AsyncStream<Input>.Continuation
     private let loop: Task<Void, Never>
     private let ivy: Ivy
     private let delegate: CoreDriverIvyDelegate
@@ -56,8 +70,14 @@ public final class CoreDriver: Sendable {
         case bodyStored(ChainPath, cid: String, roots: [String])
         /// A session's hello deadline passed.
         case helloDeadline(peerKey: String, session: UInt64)
-        /// A worker finished: its slot frees, then its result steps.
-        case jobDone(HostEvent)
+        /// A worker finished: its slot frees, then its results step.
+        case jobDone([HostEvent])
+        /// An RPC: its mining event under a fresh reply ID.
+        case request(@Sendable (UInt64) -> MiningEvent, CheckedContinuation<CoreReply, any Error>)
+        /// An RPC answered outside a step (the shell could not run its part).
+        case answer(UInt64, Result<CoreReply, any Error>)
+        /// An announced transaction's fetch ended: the transaction, or nil.
+        case transactionFetched(cid: String, HostEvent?)
         case stop
     }
 
@@ -90,6 +110,12 @@ public final class CoreDriver: Sendable {
                 headers.childIndexBytes(root).map { SerializedVolume(root: root, entries: [root: $0]) }
             }
         )
+        // Boot replay of the local journal, each row with its arrival time.
+        for item in try await process.localTransactions() {
+            driver.inputs.yield(.event(.level(core.rootPath, .mining(.transactionReceived(
+                item.transaction, origin: .restored(addedAt: item.addedAt * 1_000)
+            )))))
+        }
         do {
             try await driver.ivy.start()
         } catch {
@@ -140,7 +166,11 @@ public final class CoreDriver: Sendable {
     ) {
         let (stream, inputs) = AsyncStream<Input>.makeStream()
         let published = PublishedValue(core.levels[core.rootPath]?.snapshot)
+        let readView = PublishedValue<CoreReadView>()
         self.published = published
+        self.readView = readView
+        self.configuration = configuration
+        reads = Self.reads(process: process, configuration: configuration, published: published, view: readView)
         self.inputs = inputs
         self.ivy = ivy
         let gate = CoreDriverInputGate(capacity: Self.networkCapacity)
@@ -157,6 +187,7 @@ public final class CoreDriver: Sendable {
             ).encode(),
             configuration: configuration,
             published: published,
+            readView: readView,
             inputs: inputs,
             gate: gate,
             helloTimeout: helloTimeout,
@@ -166,8 +197,16 @@ public final class CoreDriver: Sendable {
         )
         loop = Task {
             var state = initial
+            state.refreshView()
+            // After the loop ends, inputs are only drained until the stream
+            // finishes, so no RPC waits forever.
+            var running = true
             for await input in stream {
-                guard await state.handle(input) else { break }
+                if running {
+                    running = await state.handle(input)
+                } else if case .request(_, let reply) = input {
+                    reply.resume(throwing: CoreDriverError.stopped)
+                }
             }
             state.cancelAll()
         }
@@ -200,6 +239,7 @@ extension CoreDriver {
         let hello: Data?
         let configuration: NodeConfiguration
         let published: PublishedValue<Snapshot>
+        let readView: PublishedValue<CoreReadView>
         let inputs: AsyncStream<Input>.Continuation
         let gate: CoreDriverInputGate
         let helloTimeout: Duration
@@ -211,7 +251,45 @@ extension CoreDriver {
         var sessions: [String: Session] = [:]
         var nextSession: UInt64 = 1
         var runningJobs = 0
-        var queuedJobs: [@Sendable () async -> HostEvent] = []
+        /// Two FIFOs: execution (connect, proof verification) runs before
+        /// mining jobs.
+        var executionJobs: [CoreJob] = []
+        var miningJobs: [CoreJob] = []
+        /// RPCs waiting on their answer, by reply ID.
+        var replies: [UInt64: CheckedContinuation<CoreReply, any Error>] = [:]
+        var nextReply: UInt64 = 1
+        /// Announced transactions being fetched, by CID.
+        var transactionFetches: Set<String> = []
+        /// Transactions recently fetched, not refetched until the act-on tip
+        /// moves (Bitcoin's recent rejects): a refused one is not fetched
+        /// again in a loop. Bounded, oldest out.
+        var recentlyFetched = RecentSet(capacity: 4_096)
+        var recentlyFetchedTip: String?
+        /// Per level, the chain a tip epoch's jobs read, made once per epoch
+        /// that has a job.
+        var preflightLevels: [ChainPath: (epoch: UInt64, level: ChainLevel)] = [:]
+        var view = CoreReadView()
+
+
+        /// A bounded set, oldest out.
+        struct RecentSet {
+            let capacity: Int
+            private(set) var members: Set<String> = []
+            private var order: [String] = []
+
+            init(capacity: Int) { self.capacity = capacity }
+
+            mutating func insert(_ cid: String) {
+                guard members.insert(cid).inserted else { return }
+                order.append(cid)
+                if order.count > capacity { members.remove(order.removeFirst()) }
+            }
+
+            mutating func removeAll() {
+                members.removeAll()
+                order.removeAll()
+            }
+        }
         var wake: (time: Int64, task: Task<Void, Never>)?
         var bodies: [BodyKey: Task<Void, Never>] = [:]
         /// The Volume roots each fetched body was stored in, until the
@@ -238,6 +316,7 @@ extension CoreDriver {
             hello: Data?,
             configuration: NodeConfiguration,
             published: PublishedValue<Snapshot>,
+            readView: PublishedValue<CoreReadView>,
             inputs: AsyncStream<Input>.Continuation,
             gate: CoreDriverInputGate,
             helloTimeout: Duration,
@@ -254,6 +333,7 @@ extension CoreDriver {
             self.hello = hello
             self.configuration = configuration
             self.published = published
+            self.readView = readView
             self.inputs = inputs
             self.remote = remote
             self.workers = workers
@@ -278,18 +358,72 @@ extension CoreDriver {
                 sessions[key] = nil
                 _ = await ivy.disconnectSession(ifCurrent: session.peer)
                 return true
-            case .jobDone(let event):
+            case .jobDone(let events):
                 runningJobs -= 1
                 startJobs()
-                return await step(event)
+                for event in events {
+                    guard await step(event) else { return false }
+                }
+                return true
             case .network(let network):
+                defer { refreshView() }
                 let result = await receive(network)
                 switch network {
-                case .hello, .sync: await gate.release()
+                case .hello, .sync, .transactionAvailable: await gate.release()
                 case .connected, .disconnected: break
                 }
                 return result
+            case .request(let event, let reply):
+                let id = nextReply
+                nextReply += 1
+                replies[id] = reply
+                return await step(.level(core.rootPath, .mining(event(id))))
+            case .answer(let id, let result):
+                answer(id, result)
+                return true
+            case .transactionFetched(let cid, let event):
+                transactionFetches.remove(cid)
+                recentlyFetched.insert(cid)
+                guard let event else { return true }
+                return await step(event)
             }
+        }
+
+        private mutating func answer(_ id: UInt64, _ result: Result<CoreReply, any Error>) {
+            replies.removeValue(forKey: id)?.resume(with: result)
+        }
+
+        /// Republish the read view when the act-on chain, the pool or the
+        /// peers changed: the act-on chain by height (walked down from its
+        /// top only as far as it changed), the pool listing and the digest.
+        mutating func refreshView() {
+            guard let level = core.levels[core.rootPath] else { return }
+            let snapshot = level.snapshot
+            let tip = (hash: snapshot.actOnTip, height: snapshot.actOnHeight)
+            let peers = sessions.values.filter(\.ready).count
+            let pool = level.mining.mempool
+            guard view.actOnTip != tip.hash || view.poolVersion != pool.version || view.peers != peers else { return }
+            if view.actOnTip != tip.hash {
+                view.actOnTip = tip.hash
+                let tree = level.tree
+                var keep = min(view.heights.count, Int(tip.height) + 1)
+                while keep > 0, view.heights[keep - 1] != tree.canonicalBlockHash(atHeight: UInt64(keep - 1)) {
+                    keep -= 1
+                }
+                view.heights.truncate(to: keep)
+                var height = UInt64(keep)
+                while height <= tip.height, let cid = tree.canonicalBlockHash(atHeight: height) {
+                    view.heights.append(cid)
+                    height += 1
+                }
+            }
+            view.poolVersion = pool.version
+            view.mempool = ChainReads.MempoolListing(
+                count: pool.count, bytes: pool.byteCount, cids: pool.items.prefix(200).map(\.cid)
+            )
+            view.templateDigest = CoreDriver.templateDigest(tip: tip.hash, mempool: pool)
+            view.peers = peers
+            readView.publish(view)
         }
 
         // MARK: - Network → events
@@ -343,8 +477,41 @@ extension CoreDriver {
                     return true
                 }
                 return await step(.received(session.coreID, chainPath, message))
+            case .transactionAvailable(let peer, let cid):
+                guard let session = sessions[peer.key.hex], session.peer.sessionID == peer.sessionID,
+                      session.ready else {
+                    return true
+                }
+                fetchAnnounced(cid, from: session)
             }
             return true
+        }
+
+        /// A peer announced a transaction: fetch it from that peer, and hand
+        /// it to the pool as the peer's. Only one not pooled, not awaiting
+        /// its verdict, not being fetched and not recently fetched, within
+        /// the cap on concurrent fetches; anything else is dropped, never
+        /// blamed.
+        private mutating func fetchAnnounced(_ cid: String, from session: Session) {
+            guard let mining = core.levels[core.rootPath]?.mining else { return }
+            if recentlyFetchedTip != mining.tipCID {
+                recentlyFetchedTip = mining.tipCID
+                recentlyFetched.removeAll()
+            }
+            guard !mining.mempool.contains(cid), !mining.isPending(cid),
+                  !transactionFetches.contains(cid), !recentlyFetched.members.contains(cid),
+                  transactionFetches.count < NodeNetworkRuntime.maximumConcurrentTransactionVolumes
+            else { return }
+            transactionFetches.insert(cid)
+            let (ivy, inputs, path, peer) = (ivy, inputs, core.rootPath, session.coreID)
+            spawn {
+                let response = await ivy.fetchVolume(rootCID: cid, from: session.peer)
+                let transaction = try? await VolumeImpl<Transaction>(rawCID: cid, node: nil, encryptionInfo: nil)
+                    .resolveRecursive(source: InMemoryContentSource(response.entries)).node
+                inputs.yield(.transactionFetched(cid: cid, transaction.map {
+                    .level(path, .mining(.transactionReceived($0, origin: .peer(peer))))
+                }))
+            }
         }
 
         // MARK: - Step and effects
@@ -355,7 +522,7 @@ extension CoreDriver {
             // Persist, then publish, then everything else, each in order.
             func rank(_ effect: HostEffect) -> Int {
                 switch effect {
-                case .persist: 0
+                case .persist, .level(_, .mining(.poolChanged)): 0
                 case .level(_, .publish): 1
                 default: 2
                 }
@@ -366,6 +533,9 @@ extension CoreDriver {
             for effect in ordered {
                 guard await execute(effect) else { return false }
             }
+            // A tree copy is kept only for the current epoch's jobs.
+            preflightLevels = preflightLevels.filter { core.levels[$0.key]?.mining.tipEpoch == $0.value.epoch }
+            refreshView()
             return true
         }
 
@@ -403,15 +573,7 @@ extension CoreDriver {
                 sessions[peer.key] = nil
                 _ = await ivy.disconnectSession(ifCurrent: session.peer)
             case .connect(let path, let job, let parentFacts):
-                let fetcher = process.localFetcher
-                queuedJobs.append {
-                    .level(path, .connected(await ChainTree.connect(
-                        job,
-                        fetcher: fetcher,
-                        parentFacts: parentFacts,
-                        validationContext: ValidationContext(nowMilliseconds: CoreDriver.now())
-                    )))
-                }
+                executionJobs.append(CoreDriver.connectJob(job, at: path, parentFacts: parentFacts, process: process))
                 startJobs()
             case .bootstrap:
                 // PENDING (child levels): never emitted while `hosted` is empty.
@@ -435,7 +597,10 @@ extension CoreDriver {
                 // The host merges these into its own effects.
                 break
             case .publish(let snapshot):
-                if path == core.rootPath { published.publish(snapshot) }
+                if path == core.rootPath {
+                    refreshView()
+                    published.publish(snapshot)
+                }
             case .send(let peer, let message):
                 guard let session = session(peer), let frame = try? CoreWire.encode(message, at: path) else { break }
                 _ = await ivy.sendMessage(to: session.peer, topic: frame.topic, payload: frame.payload)
@@ -495,14 +660,88 @@ extension CoreDriver {
             case .verifyProof(let job):
                 // A job without its block reads it from the header store.
                 guard let block = job.block ?? headers.header(job.childCID)?.block else { break }
-                queuedJobs.append { .level(path, .proofVerified(job, await job.run(block))) }
+                executionJobs.append(CoreJob(path: path, epoch: nil) {
+                    [.level(path, .proofVerified(job, await job.run(block)))]
+                })
+                startJobs()
+            case .readTransactions(let blocks):
+                executionJobs.append(CoreDriver.readJob(blocks, at: path, process: process))
                 startJobs()
             case .lookupProofs, .indexProof:
                 // PENDING (child levels): the child-evidence index (#253).
                 // A root level never emits these.
                 break
+            case .mining(let effect):
+                return await execute(effect, at: path)
+            case .workSubmitted(let replyID, let outcome):
+                answer(replyID, .success(.work(outcome)))
             }
             return true
+        }
+
+        private mutating func execute(_ effect: MiningEffect, at path: ChainPath) async -> Bool {
+            switch effect {
+            case .poolChanged(let delta):
+                do {
+                    try await process.persistPoolDelta(delta)
+                } catch {
+                    failStop(error)
+                    return false
+                }
+            case .transactionAdmitted(let replyID, let cid, let count, let bytes):
+                answer(replyID, .success(.admitted(cid: cid, count: count, bytes: bytes)))
+            case .transactionRefused(let replyID, let error):
+                answer(replyID, .failure(error))
+            case .templateIssued(let replyID, let template):
+                answer(replyID, .success(.template(template)))
+            case .templateRefused(let replyID, let error), .workRefused(let replyID, let error):
+                answer(replyID, .failure(error))
+            case .announceTransaction(let cid):
+                guard let payload = try? TransactionAvailableMessage(volumeRootCID: cid).encoded() else { break }
+                for session in sessions.values.sorted(by: { $0.id < $1.id }) where session.ready {
+                    _ = await ivy.sendMessage(
+                        to: session.peer, topic: NodeNetworkTopic.transactionAvailable, payload: payload
+                    )
+                }
+            case .mined(let replyID, let block):
+                // Content first: the block is stored before the grind's one
+                // step weighs it.
+                // PENDING (child levels): the carried blocks of hosted
+                // levels, each with its proof verified, join the grind.
+                let (process, inputs) = (process, inputs)
+                spawn {
+                    do {
+                        let children = try await process.storeMinedBlock(block)
+                        inputs.yield(.event(.mined(
+                            MinedGrind(root: block, rootChildren: children, carried: []), replyID: replyID
+                        )))
+                    } catch {
+                        inputs.yield(.answer(replyID, .failure(error)))
+                    }
+                }
+            case .preflight(let job):
+                guard let level = epochLevel(at: path, epoch: job.tipEpoch) else { break }
+                miningJobs.append(CoreDriver.miningJob(effect, at: path, level: level, process: process))
+                startJobs()
+            case .buildTemplate(let job):
+                guard let level = epochLevel(at: path, epoch: job.tipEpoch) else { break }
+                miningJobs.append(CoreDriver.miningJob(effect, at: path, level: level, process: process))
+                startJobs()
+            case .returnTransactions:
+                miningJobs.append(CoreDriver.miningJob(effect, at: path, level: nil, process: process))
+                startJobs()
+            }
+            return true
+        }
+
+        /// The chain a tip epoch's jobs read: Lattice's `preflightTransaction`
+        /// and the template's difficulty anchor, over a copy of the level's
+        /// tree made once per epoch.
+        private mutating func epochLevel(at path: ChainPath, epoch: UInt64) -> ChainLevel? {
+            if let cached = preflightLevels[path], cached.epoch == epoch { return cached.level }
+            guard let tree = core.levels[path]?.tree, let level = CoreDriver.jobLevel(tree) else { return nil }
+            preflightLevels[path] = (epoch, level)
+            return level
         }
 
         /// The live, ready session the core's peer names.
@@ -514,11 +753,12 @@ extension CoreDriver {
         /// The worker pool: at most `workers` jobs run; each result posts
         /// back as an event that frees its slot.
         private mutating func startJobs() {
-            while runningJobs < workers, !queuedJobs.isEmpty {
-                let job = queuedJobs.removeFirst()
+            while runningJobs < workers, !executionJobs.isEmpty || !miningJobs.isEmpty {
+                let job = executionJobs.isEmpty ? miningJobs.removeFirst() : executionJobs.removeFirst()
+                guard job.isCurrent(in: core) else { continue }
                 runningJobs += 1
                 let inputs = inputs
-                spawn { inputs.yield(.jobDone(await job())) }
+                spawn { inputs.yield(.jobDone(await job.run())) }
             }
         }
 
@@ -529,6 +769,8 @@ extension CoreDriver {
         }
 
         mutating func cancelAll() {
+            for reply in replies.values { reply.resume(throwing: CoreDriverError.stopped) }
+            replies.removeAll()
             wake?.task.cancel()
             for task in bodies.values { task.cancel() }
             bodies.removeAll()

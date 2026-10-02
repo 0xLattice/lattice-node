@@ -505,6 +505,16 @@ public struct LevelSimulator {
             schedule(at: delay(), to: name, .host(.level(path, .proofVerified(job, result))))
         case .indexProof(let cid, let proof):
             node.store.index(proof, for: cid, at: path)
+        case .readTransactions(let blocks):
+            // The simulated chains carry no transactions.
+            schedule(at: delay(), to: name, .host(.level(path, .transactionsRead(
+                Dictionary(uniqueKeysWithValues: blocks.map { ($0, [String]()) })
+            ))))
+        case .mining, .workSubmitted:
+            // The transaction workload drives `Mining` on its own
+            // (`TxWorkload`); the level simulator submits no transactions,
+            // and its grinds carry no reply.
+            break
         case .fetchBody(let cid):
             // The content layer holds every body.
             schedule(at: delay(), to: name, .host(.level(path, .bodyFetched(cid: cid))))

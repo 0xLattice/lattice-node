@@ -5,6 +5,7 @@ import Hummingbird
 import Ivy
 import Lattice
 import LatticeNode
+import LatticeNodeCore
 import UInt256
 
 /// Match DiskBroker's default storage-age grace: a newly stored orphan that
@@ -79,7 +80,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Per-client arrival-rate ceiling for the general public read routes, in requests per second. The client is the PEER SOCKET ADDRESS (no forwarded-for header is trusted), so behind a proxy that presents one address for every client this throttles the whole internet as one user — set it to 0 there. 0 disables this ceiling.")
     var publicReadRate = PublicReadRateLimits.defaultGeneralRate
 
-    @Option(help: "Per-client arrival-rate ceiling, in requests per second, for the expensive public reads: /v1/blocks (a recent-block walk), /api/chain/endpoints (a peer fan-out), and a block's /transactions or /children (hundreds of content fetches). Keyed like --public-read-rate; 0 disables it.")
+    @Option(help: "Per-client arrival-rate ceiling, in requests per second, for the expensive public reads: /api/chain/endpoints (a peer fan-out), and a block's /transactions or /children (hundreds of content fetches). Keyed like --public-read-rate; 0 disables it.")
     var publicReadExpensiveRate = PublicReadRateLimits.defaultExpensiveRate
 
     @Option(help: "Listener-wide arrival-rate ceiling for the public read port, in requests per second. Address-agnostic, so it remains correct behind a proxy that collapses every client onto one address. 0 disables it; all three rates 0 is no rate limiting at all.")
@@ -156,7 +157,11 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             peerSearchInterval: peerSearchInterval
         )
         if coreDriver {
-            try await runCoreDriver(configuration: configuration)
+            try await runCoreDriver(
+                configuration: configuration,
+                publicReadLimits: publicReadLimits,
+                processStartTime: processStartTime
+            )
             return
         }
 
@@ -332,6 +337,17 @@ private func parseEndpoint(_ value: String) throws -> (key: String, host: String
     return (key, host, port)
 }
 
+/// The loopback operator writes: the actor path's `ChainService`, or the
+/// core driver's RPC events (`--core-driver`).
+protocol OperatorWrites: Sendable {
+    func submitTransaction(_ request: SubmitTransactionRequest) async throws -> SubmitTransactionResponse
+    func miningTemplate(_ request: MiningTemplateRequest) async throws -> MiningTemplateResponse
+    func submitWork(_ request: SubmitWorkRequest) async throws -> SubmitWorkResponse
+}
+
+extension ChainService: OperatorWrites {}
+extension CoreDriver: OperatorWrites {}
+
 func makeApplication(
     service: ChainService,
     host: String,
@@ -342,17 +358,42 @@ func makeApplication(
     discoverProviders: @Sendable @escaping (String) async -> [String] = { _ in [] },
     processStartTime: Date = Date()
 ) -> Application<RouterResponder<BasicRequestContext>> {
+    makeApplication(
+        reads: service.reads,
+        writes: service,
+        status: { await service.status() },
+        metrics: { await service.metricsExposition(peers: $0, processStartTime: $1) },
+        host: host,
+        port: port,
+        peers: peers,
+        discoverProviders: discoverProviders,
+        processStartTime: processStartTime
+    )
+}
+
+func makeApplication(
+    reads: ChainReads,
+    writes: any OperatorWrites,
+    status: @Sendable @escaping () async -> ChainServiceStatusResponse,
+    metrics: @Sendable @escaping (_ peers: Int, _ processStartTime: Date) async -> String,
+    host: String,
+    port: Int,
+    peers: @Sendable @escaping () async -> ExplorerPeersResponse,
+    discoverProviders: @Sendable @escaping (String) async -> [String],
+    processStartTime: Date,
+    configure: (Router<BasicRequestContext>) -> Void = { _ in }
+) -> Application<RouterResponder<BasicRequestContext>> {
     let router = Router()
     addPublicReadRoutes(
         to: router,
-        service: service,
+        reads: reads,
         peers: peers,
         discoverProviders: discoverProviders,
         // Loopback reads the live snapshot: `lattice status` and the E2E
         // suites poll this to watch height advance, and the public listener's
         // staleness window is a defence against public load that does not
         // apply here.
-        healthSnapshot: { await service.readSnapshot() }
+        healthSnapshot: { await reads.readSnapshot() }
     )
     // Operator surface below: registered ONLY on this loopback application.
     // /v1/status stays on the reconciling status() (expires the mempool, prunes
@@ -360,21 +401,19 @@ func makeApplication(
     // mempool drain, and depend on that reconciliation. It is an internal
     // endpoint; the public status surface is /health.
     router.get("v1/status") { request, context in
-        try json(await service.status(), request: request, context: context)
+        try json(await status(), request: request, context: context)
     }
     // Prometheus exposition: operator surface only, never the public read app.
     router.get("metrics") { _, _ in
-        let body = await service.metricsExposition(
-            peers: await peers().count,
-            processStartTime: processStartTime
-        )
+        let body = await metrics(await peers().count, processStartTime)
         return Response(
             status: .ok,
             headers: [.contentType: nodeMetricsContentType],
             body: ResponseBody(byteBuffer: ByteBuffer(string: body))
         )
     }
-    addOperatorWriteRoutes(to: router, service: service)
+    addOperatorWriteRoutes(to: router, writes: writes)
+    configure(router)
     return Application(
         responder: router.buildResponder(),
         configuration: .init(address: .hostname(host, port: port))
@@ -382,12 +421,34 @@ func makeApplication(
 }
 
 /// The public read application: exactly the bounded, non-mutating GET routes
-/// the read-replica nginx allowlist exposes (/health, /v1/blocks*,
+/// the read-replica nginx allowlist exposes (/health,
 /// /v1/transactions/:cid, /v1/accounts/:owner, /api/*), enforced in code.
 /// Registered from the same function as the loopback application's read
 /// surface so the two cannot drift apart.
 func makePublicReadApplication(
     service: ChainService,
+    host: String,
+    port: Int,
+    peers: @Sendable @escaping () async -> ExplorerPeersResponse = {
+        ExplorerPeersResponse(count: 0, peers: [])
+    },
+    discoverProviders: @Sendable @escaping (String) async -> [String] = { _ in [] },
+    limits: PublicReadRateLimits = .default,
+    healthClock: @escaping @Sendable () -> Double = PublicReadRateLimiter.monotonicSeconds
+) -> Application<RouterResponder<PublicReadRequestContext>> {
+    makePublicReadApplication(
+        reads: service.reads,
+        host: host,
+        port: port,
+        peers: peers,
+        discoverProviders: discoverProviders,
+        limits: limits,
+        healthClock: healthClock
+    )
+}
+
+func makePublicReadApplication(
+    reads: ChainReads,
     host: String,
     port: Int,
     peers: @Sendable @escaping () async -> ExplorerPeersResponse = {
@@ -418,11 +479,11 @@ func makePublicReadApplication(
     let health = ShortTTLSnapshotCache(
         ttl: statusCacheMaxAgeSeconds, clock: healthClock
     ) {
-        await service.readSnapshot()
+        await reads.readSnapshot()
     }
     addPublicReadRoutes(
         to: router,
-        service: service,
+        reads: reads,
         peers: peers,
         discoverProviders: discoverProviders,
         healthSnapshot: { await health.value() }
@@ -438,7 +499,7 @@ func makePublicReadApplication(
 /// one registration function, so the two surfaces cannot drift apart.
 private func addPublicReadRoutes<Context: RequestContext>(
     to router: Router<Context>,
-    service: ChainService,
+    reads service: ChainReads,
     peers: @Sendable @escaping () async -> ExplorerPeersResponse,
     discoverProviders: @Sendable @escaping (String) async -> [String],
     healthSnapshot: @Sendable @escaping () async -> ChainServiceStatusResponse
@@ -479,20 +540,6 @@ private func addPublicReadRoutes<Context: RequestContext>(
     router.head("health") { request, context in
         try await health(request, context).createHeadResponse()
     }
-    router.get("v1/blocks/:cid") { request, context in
-        guard let cid = context.parameters.get("cid"), isPlausibleCID(cid) else {
-            throw HTTPError(.badRequest)
-        }
-        guard let block = await service.block(cid: cid) else {
-            throw HTTPError(.notFound)
-        }
-        return try jsonCached(
-            BlockResponse(cid: cid, block: block),
-            cacheControl: immutableCacheControl,
-            request: request,
-            context: context
-        )
-    }
     router.get("v1/transactions/:cid") { request, context in
         guard let cid = context.parameters.get("cid"), isPlausibleCID(cid) else {
             throw HTTPError(.badRequest)
@@ -526,40 +573,6 @@ private func addPublicReadRoutes<Context: RequestContext>(
                 nonce: account.nonce
             ),
             cacheControl: immutableCacheControl,
-            request: request,
-            context: context
-        )
-    }
-    router.get("v1/blocks") { request, context in
-        let query = request.uri.queryParameters
-        var before: String?
-        if let cid = query["before"] {
-            let value = String(cid)
-            guard isPlausibleCID(value) else { throw HTTPError(.badRequest) }
-            before = value
-        }
-        let limit: Int
-        if let requested = query["limit"] {
-            guard let parsed = Int(requested), parsed > 0 else {
-                throw HTTPError(.badRequest)
-            }
-            limit = parsed
-        } else {
-            limit = 20
-        }
-        guard let blocks = await service.recentBlocks(before: before, limit: limit) else {
-            throw HTTPError(.notFound)
-        }
-        // A `before` walk is immutable ONLY when it is complete — it returned
-        // the full (capped) limit or reached genesis. If it truncated early
-        // because a parent body was pruned/temporarily unavailable, the list
-        // can grow later, so it must not be cached as immutable for a year.
-        let cappedLimit = min(limit, ChainService.maximumRecentBlocksLimit)
-        let complete = blocks.count >= cappedLimit || blocks.last?.parentCID == nil
-        return try jsonCached(
-            blocks,
-            cacheControl: (before != nil && complete)
-                ? immutableCacheControl : statusCacheControl,
             request: request,
             context: context
         )
@@ -797,7 +810,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
 /// on the public read application.
 private func addOperatorWriteRoutes(
     to router: Router<BasicRequestContext>,
-    service: ChainService
+    writes service: any OperatorWrites
 ) {
     router.post("v1/transactions") { request, context in
         let input: SubmitTransactionRequest = try await decode(request, context: context)
@@ -904,6 +917,18 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.badRequest, message: reason(error))
     } catch let error as MiningTemplateError {
         throw HTTPError(.badRequest, message: reason(error))
+    } catch MempoolError.full {
+        throw HTTPError(.tooManyRequests, message: "full")
+    } catch let error as MempoolError where error == .contextChanged {
+        throw HTTPError(.serviceUnavailable, message: reason(error))
+    } catch let error as MempoolError {
+        throw HTTPError(.badRequest, message: reason(error))
+    } catch let error as TemplateError where error == .busy || error == .contextChanged {
+        throw HTTPError(.serviceUnavailable, message: reason(error))
+    } catch let error as TemplateError {
+        throw HTTPError(.badRequest, message: reason(error))
+    } catch CoreDriverError.stopped {
+        throw HTTPError(.serviceUnavailable, message: "shuttingDown")
     } catch ChainProcessError.chainNotBootstrapped {
         throw HTTPError(.conflict, message: "chainNotBootstrapped")
     }
@@ -976,13 +1001,6 @@ private func jsonCached<Value: Encodable, Context: RequestContext>(
     var response = try json(value, request: request, context: context)
     response.headers[.cacheControl] = cacheControl
     return response
-}
-
-/// GET /v1/blocks/:cid response: the decoded, content-verified block, echoing
-/// the requested CID (Codable, never raw CBOR).
-struct BlockResponse: Codable {
-    let cid: String
-    let block: Block
 }
 
 /// GET /v1/transactions/:cid response: the decoded, content-verified

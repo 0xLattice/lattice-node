@@ -32,14 +32,24 @@ extension NodeStore {
                     "SELECT seq FROM admission_batches WHERE payload = ?1",
                     params: [.blob(row.payload)]
                 ) != nil { continue }
+                var restated: [(id: Data, payload: Data)] = []
                 for fact in row.facts {
                     if let existing = try database.row(
                         ImportFactRow.self,
                         "SELECT payload FROM admission_facts WHERE fact_id = ?1",
                         params: [.blob(fact.id)]
                     ), try existing.payload != fact.payload {
-                        throw NodeStoreError.conflictingImportFact
+                        guard try Self.restatesWeighedBlock(existing.payload, as: fact.payload) else {
+                            throw NodeStoreError.conflictingImportFact
+                        }
+                        restated.append(fact)
                     }
+                }
+                for fact in restated {
+                    try database.execute(
+                        "UPDATE admission_facts SET payload = ?2 WHERE fact_id = ?1",
+                        params: [.blob(fact.id), .blob(fact.payload)]
+                    )
                 }
                 try database.execute(
                     "INSERT INTO admission_batches (payload, volume_roots) VALUES (?1, ?2)",
@@ -73,7 +83,31 @@ extension NodeStore {
     func coreLogID() throws -> String? {
         return try database.row(CoreMetaRow.self, "SELECT value FROM core_meta WHERE key = 'log_id'")?.value
     }
+
+    /// A block's execution re-states its block fact with the state diff it
+    /// produced (`ChainTree.connect`), where the weighed tier stated an empty
+    /// one. Only that change is a re-statement; any other difference is a
+    /// conflict.
+    static func restatesWeighedBlock(_ existing: Data, as new: Data) throws -> Bool {
+        guard case .block(let weighed) = try decode(ChainFact.self, from: existing),
+              case .block(let executed) = try decode(ChainFact.self, from: new),
+              weighed.stateDiff.isEmpty else { return false }
+        return weighed == ChainBlockFact(
+            blockHash: executed.blockHash,
+            parentBlockHash: executed.parentBlockHash,
+            blockHeight: executed.blockHeight,
+            postStateCID: executed.postStateCID,
+            prevStateCID: executed.prevStateCID,
+            specCID: executed.specCID,
+            target: executed.target,
+            nextTarget: executed.nextTarget,
+            timestamp: executed.timestamp,
+            stateDiff: .empty,
+            childCommitments: executed.childCommitments
+        )
+    }
 }
+
 
 /// `core_meta`: one value by key (the weigh log id).
 struct CoreMetaRow: NodeStoreRecord {

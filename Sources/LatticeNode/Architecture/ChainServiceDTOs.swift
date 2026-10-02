@@ -132,6 +132,24 @@ public struct MiningTemplateResponse: Codable, Sendable {
     public let templateDigest: String
 
     init(
+        workID: String,
+        block: Block,
+        searchTarget: UInt256,
+        targets: [UInt256],
+        chainPath: [String],
+        expiresInMilliseconds: UInt64,
+        templateDigest: String
+    ) {
+        self.workID = workID
+        self.block = block
+        self.searchTarget = searchTarget
+        self.targets = targets
+        self.chainPath = chainPath
+        self.expiresInMilliseconds = expiresInMilliseconds
+        self.templateDigest = templateDigest
+    }
+
+    init(
         template: MiningTemplate,
         maximumLifetimeMilliseconds: UInt64,
         templateDigest: String
@@ -209,18 +227,6 @@ public struct ChainServiceStatusResponse: Codable, Sendable, Equatable {
     /// See `ChainService.templateDigestLocked`; nil before the node serves
     /// templates (no validated tip).
     public let templateDigest: String?
-}
-
-/// One accepted block's header/summary: enough to build a recent-blocks index
-/// without serving the full body (whose transactions could each be up to
-/// `ChainServiceLimits.maximumPayloadBytes` — an N-block walk that fetched full
-/// bodies would amplify to N × maxBlockSize).
-public struct BlockSummary: Codable, Sendable, Equatable {
-    public let cid: String
-    public let height: UInt64
-    public let parentCID: String?
-    public let timestamp: Int64
-    public let transactionCount: Int
 }
 
 public enum ChainServiceError: Error, Equatable, Sendable {

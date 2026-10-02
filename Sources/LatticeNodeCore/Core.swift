@@ -16,8 +16,13 @@ public enum Event: Sendable {
     case headersServed(PeerID, token: UInt64)
     /// The content layer holds the body Volume of this block locally.
     case bodyFetched(cid: String)
-    /// A connect job's verdict.
-    case connected(ConnectVerdict)
+    /// A connect job's verdict, with the CIDs of the transactions the block
+    /// carries (the job read them from the body it executed): what the act-on
+    /// chain confirms when it enters the block.
+    case connected(ConnectVerdict, transactions: [String] = [])
+    /// The answer to `readTransactions`: each block's transaction CIDs (a
+    /// body no longer held reads as none).
+    case transactionsRead([String: [String]])
     /// A child level: its parent level now holds the facts these blocks'
     /// connects lacked.
     case parentFactsPresent([String])
@@ -29,6 +34,9 @@ public enum Event: Sendable {
     case proofVerified(ProofJob, Result<VerifiedChildEvidence, ChildProofVerificationFailure>)
     /// A child level: the evidence index's proofs changed for these blocks.
     case evidenceChanged(childCIDs: [String])
+    /// The level's mempool and miner work: transactions, preflight and
+    /// template results, template requests and submitted work.
+    case mining(MiningEvent)
 }
 
 public enum DisconnectReason: Sendable, Equatable {
@@ -116,6 +124,17 @@ public enum Effect: Sendable {
     /// A child level: write a credited proof to the local evidence index, so
     /// this node serves it. Emitted after the step's `persist`.
     case indexProof(childCID: String, ChildBlockProof)
+    /// The answer to a mined grind (`HostEvent.mined` with a reply ID): at
+    /// once unless its root waits to execute, then from its verdict.
+    case workSubmitted(replyID: UInt64, MinedOutcome)
+    /// Read these executed blocks' transaction CIDs from content and answer
+    /// `transactionsRead`: the act-on chain entered them, and their IDs were
+    /// not held (executed before a restart, or below the body window).
+    case readTransactions([String])
+    /// The level's mempool and miner work (see `MiningEffect`), after the
+    /// step's `persist` and `publish`. A `poolChanged` is durable state: the
+    /// shell executes it, in order, before any later effect.
+    case mining(MiningEffect)
 }
 
 public struct CoreConfig: Sendable {
@@ -145,6 +164,8 @@ public struct CoreConfig: Sendable {
     /// window changes.
     public var bodyRetryBase: Int64
     public var bodyRetryCap: Int64
+    /// The level's mempool and template bounds.
+    public var mining = MiningConfig()
 
     public init(
         maxHeadersPerPage: Int = 2_000,
@@ -213,6 +234,18 @@ public struct Core: Sendable {
     public let config: CoreConfig
     public let genesis: String
     public internal(set) var index = WeighedIndex()
+    /// The level's mempool and template book, on the act-on tip.
+    public internal(set) var mining: Mining
+    /// The transaction CIDs of executed blocks within `bodyWindow` heights of
+    /// the act-on tip, from their connects: what the act-on chain confirms
+    /// when it enters them, without a read. Bounded like the bodies kept.
+    var executedTransactions: [String: [String]] = [:]
+    /// Blocks whose transaction CIDs are being read.
+    var readingTransactions: Set<String> = []
+    /// This host's mined blocks awaiting their answer, by block: answered
+    /// once executed (or proven invalid), or at once when the block is
+    /// weighed off the best chain, which the body window never executes.
+    var minedReplies: [String: UInt64] = [:]
 
     /// A core over a bootstrapped or restored tree, with its weigh log and
     /// the per-peer stream cursors the shell persisted. A node whose store
@@ -225,12 +258,14 @@ public struct Core: Sendable {
     ) {
         var tree = tree
         precondition(tree.context != nil, "the core runs one chain's level")
+        guard let spec = tree.spec else { preconditionFailure("the core runs a chain bound to its genesis spec") }
+        mining = Mining(tipCID: Self.miningTip(of: tree), spec: spec, config: config.mining)
         let genesis = Self.genesis(of: tree)
         var index = WeighedIndex()
         var stack = [genesis]
         while let hash = stack.popLast() {
             guard let meta = tree.getConsensusBlock(hash: hash) else { continue }
-            index.add(hash, parent: meta.parentBlockHash)
+            index.add(hash, parent: meta.parentBlockHash, height: meta.blockHeight)
             stack += meta.childHashes
         }
         self.tree = tree
@@ -305,8 +340,13 @@ public struct Core: Sendable {
             }
         case .bodyFetched(let cid):
             bodyFetched(cid)
-        case .connected(let verdict):
-            connected(verdict, &turn)
+        case .connected(let verdict, let transactions):
+            connected(verdict, transactions: transactions, &turn)
+        case .transactionsRead(let blocks):
+            readingTransactions.subtract(blocks.keys)
+            for (cid, transactions) in blocks where index.contains(cid) {
+                executedTransactions[cid] = transactions
+            }
         case .parentFactsPresent(let blocks):
             parentFactsPresent(blocks)
         case .tick:
@@ -317,6 +357,8 @@ public struct Core: Sendable {
             proofVerified(job, result, &turn)
         case .evidenceChanged(let cids):
             evidenceChanged(cids)
+        case .mining(let event):
+            turn.mining += mining.step(event, now: turn.now)
         }
         drain(&turn)
         if !isRoot { proofWork(&turn) }
@@ -344,6 +386,7 @@ public struct Core: Sendable {
         var indexed: [(childCID: String, proof: ChildBlockProof)] = []
         /// Stream cursors this step moved.
         var cursors: [String: StreamCursor] = [:]
+        var mining: [MiningEffect] = []
         /// Pending headers to look at again, smallest priority first.
         var dirty = Heap<(priority: UInt256, cid: String)> {
             $0.priority != $1.priority ? $0.priority < $1.priority : $0.cid < $1.cid
@@ -352,12 +395,16 @@ public struct Core: Sendable {
         init(now: Int64) { self.now = now }
     }
 
-    /// Persist first, then publish, then push, then everything else:
-    /// nothing a step makes visible precedes the write that makes it durable.
-    /// Every step ends by scheduling the body window, whatever moved it.
+    /// Persist first, then publish, then push, then everything else, the
+    /// mining effects last: nothing a step makes visible precedes the write
+    /// that makes it durable. Every step ends by scheduling the body window,
+    /// whatever moved it, and a move of the act-on tip reaches the mempool
+    /// in the same step.
     mutating func finish(_ turn: Turn) -> [Effect] {
         var turn = turn
         scheduleBodies(&turn)
+        moveMiningTip(&turn)
+        answerSideMined(&turn)
         var effects: [Effect] = []
         // The weigh log follows the fact log: a header precedes its proofs,
         // a parent its children.
@@ -389,6 +436,7 @@ public struct Core: Sendable {
             }
         }
         effects += turn.effects
+        effects += turn.mining.map { .mining($0) }
         sync.compact()
         // Holes left unasked are asked again on a tick.
         let holes = sync.peers.values.contains { !$0.holes.isEmpty && $0.data == nil }
@@ -859,7 +907,7 @@ public struct Core: Sendable {
             sync.removePending(cid)
             turn.headers.append(StoredHeader(blockCID: cid, block: header.block, children: children))
             turn.facts += update.batches
-            index.add(cid, parent: header.parent)
+            index.add(cid, parent: header.parent, height: header.block.height)
             creditRemainingProofs(of: header, &turn)
             for child in waiting { dirty(child, &turn) }
         case .duplicate:

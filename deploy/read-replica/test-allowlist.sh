@@ -5,8 +5,7 @@
 # TESTED part of the config, not prose.
 #
 # Also asserts the limits: bursts and excess in-flight requests get 429, the
-# expensive routes trip before the general budget while block detail stays on
-# it, one client's burst does not throttle another, a Fly-Client-IP header from
+# expensive routes trip before the general budget, one client's burst does not throttle another, a Fly-Client-IP header from
 # a source that is not fly-proxy cannot split one client into many, enough
 # distinct clients still hit the server-wide ceiling, and fly's health check is
 # never throttled.
@@ -75,8 +74,6 @@ check() {
 
 echo "== allowed: bounded GET reads reach the node (200) =="
 check GET  /health                 200 "health"
-check GET  /v1/blocks              200 "recent blocks"
-check GET  "/v1/blocks/$CID"       200 "block by cid"
 check GET  "/v1/transactions/$CID" 200 "tx by cid"
 check GET  "/v1/accounts/$CID"     200 "account"
 check GET  /api/chain/children     200 "explorer api"
@@ -89,9 +86,11 @@ echo "== denied: gated/mutating + writes + unknown get 403 =="
 check GET  /v1/status              403 "gated status off the public surface"
 check GET  /metrics                403 "operator metrics off the public surface"
 check GET  /random                 403 "unknown path"
+check GET  /v1/blocks              403 "removed recent-blocks route"
+check GET  "/v1/blocks/$CID"       403 "removed block-by-cid route"
 check GET  /                       403 "root"
 check POST /v1/transactions        403 "write POST"
-check POST /v1/blocks              403 "POST to an allowlisted read route"
+check POST "/v1/transactions/$CID" 403 "POST to an allowlisted read route"
 check POST /api/block/latest       403 "POST to /api"
 check POST /api/chain/endpoints    403 "POST to endpoint discovery"
 check POST /api/block/1/transactions 403 "POST to block transactions"
@@ -133,7 +132,7 @@ fire() {
 
 # Each block below uses its own client addresses, so none spends another's budget.
 echo "== rate limits: per client, keyed on Fly-Client-IP from a trusted source =="
-got=$(fire inside 198.51.100.1 /api/block/latest 1 198.51.100.1 /v1/blocks 1)
+got=$(fire inside 198.51.100.1 /api/block/latest 1 198.51.100.1 "/api/chain/endpoints?chainPath=Nexus/Child" 1)
 if [ "$(count "$got" 200)" -eq 2 ]; then
   ok "one request succeeds on a general route and on an expensive route"
 else
@@ -150,30 +149,25 @@ fi
 drain
 
 got=$(fire inside \
-  198.51.100.3 /v1/blocks 30 \
   198.51.100.4 "/api/chain/endpoints?chainPath=Nexus/Child" 30 \
   198.51.100.10 "/api/block/1/transactions?limit=100" 30 \
-  198.51.100.11 "/v1/blocks/$CID" 30 \
   198.51.100.5 /api/block/latest 30)
-list=$(count "$(lines "$got" 1,30)" 429)
-endpoints=$(count "$(lines "$got" 31,60)" 429)
-blocktxs=$(count "$(lines "$got" 61,90)" 429)
-detail=$(count "$(lines "$got" 91,120)" 429)
-general=$(count "$(lines "$got" 121,150)" 429)
-if [ "$list" -gt 0 ] && [ "$endpoints" -gt 0 ] && [ "$blocktxs" -gt 0 ] \
-   && [ "$detail" -eq 0 ] && [ "$general" -eq 0 ]; then
-  ok "30 requests trip the expensive routes (429s: list $list, endpoints $endpoints, block txs $blocktxs) but not block detail or a general route"
+endpoints=$(count "$(lines "$got" 1,30)" 429)
+blocktxs=$(count "$(lines "$got" 31,60)" 429)
+general=$(count "$(lines "$got" 61,90)" 429)
+if [ "$endpoints" -gt 0 ] && [ "$blocktxs" -gt 0 ] && [ "$general" -eq 0 ]; then
+  ok "30 requests trip the expensive routes (429s: endpoints $endpoints, block txs $blocktxs) but not a general route"
 else
-  bad "30 requests should trip only the expensive routes (429s: list $list, endpoints $endpoints, block txs $blocktxs, detail $detail, general $general)"
+  bad "30 requests should trip only the expensive routes (429s: endpoints $endpoints, block txs $blocktxs, general $general)"
 fi
 drain
 
 # A bursts, B sends one, A sends two more: B must pass while A is still limited
 # (two, because at most one of A's can land on a refill).
 got=$(fire inside \
-  198.51.100.6 /v1/blocks 30 \
-  198.51.100.7 /v1/blocks 1 \
-  198.51.100.6 /v1/blocks 2)
+  198.51.100.6 "/api/chain/endpoints?chainPath=Nexus/Child" 30 \
+  198.51.100.7 "/api/chain/endpoints?chainPath=Nexus/Child" 1 \
+  198.51.100.6 "/api/chain/endpoints?chainPath=Nexus/Child" 2)
 a=$(count "$(lines "$got" 1,30)" 429)
 b=$(lines "$got" 31)
 a_after=$(count "$(lines "$got" 32,33)" 429)

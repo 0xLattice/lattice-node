@@ -452,7 +452,7 @@ extension Core {
             sync.removePending(cid)
             sync.proofs.awaiting[cid] = nil
             turn.headers.append(StoredHeader(blockCID: cid, block: block, children: children))
-            index.add(cid, parent: block.parent?.rawCID)
+            index.add(cid, parent: block.parent?.rawCID, height: block.height)
             for child in waiting { dirty(child, &turn) }
         }
         turn.facts += update.batches

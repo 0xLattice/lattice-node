@@ -18,8 +18,28 @@ public enum HostEvent: Sendable {
     /// The answer to a `bootstrap` effect.
     /// Answers for a genesis no longer being asked are ignored.
     case bootstrapped(ChainPath, genesisCID: String, Result<BootstrappedLevel, BlockImportError>)
-    /// This host's own grind.
-    case mined(MinedGrind)
+    /// This host's own grind: a level's `MiningEffect.mined`, its content
+    /// stored and its carried blocks' proofs verified by the shell. With a
+    /// reply ID, the step answers `workSubmitted`.
+    case mined(MinedGrind, replyID: UInt64? = nil)
+}
+
+/// What a submitted grind did at the root level.
+public enum MinedOutcome: Sendable, Equatable {
+    /// The root met its own target, was weighed on the best chain and
+    /// executed; `tipCID` is the act-on tip after its execution.
+    case executed(tipCID: String)
+    /// The root was weighed off the best chain: it is not executed.
+    case side
+    /// The root was weighed and its execution proved it invalid.
+    case invalid
+    /// The root was already weighed.
+    case duplicate
+    /// The grind missed the root's own target: only the blocks it carries
+    /// weigh, and the work stays open.
+    case childOnly
+    /// The root header was refused.
+    case refused
 }
 
 /// A hosted child chain's genesis, bootstrapped by the shell.
@@ -310,8 +330,8 @@ public struct HostCore: Sendable {
             for path in ordered { run(path, .tick, &turn) }
         case .bootstrapped(let path, let genesisCID, let result):
             bootstrapped(result, genesisCID: genesisCID, at: path, &turn)
-        case .mined(let grind):
-            mined(grind, &turn)
+        case .mined(let grind, let replyID):
+            mined(grind, replyID: replyID, &turn)
         }
         dropDisconnected(&turn)
         if case .tick = event {
@@ -541,9 +561,24 @@ public struct HostCore: Sendable {
     /// step: the root block when its hash meets its own target (a share that
     /// misses it weighs only the child blocks it carries), then each carried
     /// block, parent level before child.
-    mutating func mined(_ grind: MinedGrind, _ turn: inout Turn) {
-        if ChainTree.rootWork(of: grind.root) != nil, var core = levels[rootPath] {
+    /// With a reply ID, the root's answer: at once for a share, a duplicate
+    /// or a refusal; for a weighed root, once it executes (or is weighed
+    /// off the best chain), as the root level's `workSubmitted`.
+    mutating func mined(_ grind: MinedGrind, replyID: UInt64?, _ turn: inout Turn) {
+        var outcome: MinedOutcome? = .childOnly
+        if ChainTree.rootWork(of: grind.root) != nil, var core = levels[rootPath],
+           let cid = try? BlockHeader(node: grind.root).rawCID {
+            let held = core.index.contains(cid)
+            if !held, let replyID { core.minedReplies[cid] = replyID }
             let effects = core.weighOwn(grind.root, children: grind.rootChildren, proof: nil, now: turn.now)
+            if held {
+                outcome = .duplicate
+            } else if core.index.contains(cid) {
+                outcome = nil
+            } else {
+                core.minedReplies[cid] = nil
+                outcome = .refused
+            }
             levels[rootPath] = core
             absorb(effects, at: rootPath, &turn)
         }
@@ -555,6 +590,9 @@ public struct HostCore: Sendable {
             )
             levels[carried.path] = core
             absorb(effects, at: carried.path, &turn)
+        }
+        if let replyID, let outcome {
+            turn.effects.append(.level(rootPath, .workSubmitted(replyID: replyID, outcome)))
         }
     }
 
