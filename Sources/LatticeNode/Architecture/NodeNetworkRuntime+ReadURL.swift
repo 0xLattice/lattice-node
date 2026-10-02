@@ -55,7 +55,7 @@ extension NodeNetworkRuntime {
         // Same cheap precheck as serving an ask: the state walk runs only
         // when this node has anything to declare.
         if let process,
-           configuration.publicReadURL != nil || anyChildDeclaredReadURL {
+           configuration.publicReadURL != nil {
             own = await declaredReadURLs(
                 genesisCID: genesisCID,
                 process: process
@@ -170,15 +170,8 @@ extension NodeNetworkRuntime {
         pending.continuation.resume(returning: [])
     }
 
-    /// Seam: whether any hosted child declared a public read URL.
-    var anyChildDeclaredReadURL: Bool {
-        !configuration.hostedChildReadURLs.isEmpty
-    }
-
     /// Seam: this node's own self-description for `genesisCID`: its configured
-    /// public read URL when that is its own chain's genesis, plus the URLs its
-    /// co-hosted children are configured with when the CID is one this node
-    /// anchored for that child directory. Deduped, bounded.
+    /// public read URL when that is its own chain's genesis.
     func declaredReadURLs(
         genesisCID: String,
         process: ChainProcess
@@ -188,14 +181,6 @@ extension NodeNetworkRuntime {
            await process.canonicalBlockCID(atHeight: 0) == genesisCID {
             urls.append(own)
         }
-        let children = configuration.hostedChildReadURLs
-        let anchored = await process.anchoredChildGenesisCIDs(
-            directories: Set(children.keys)
-        )
-        for (directory, url) in children.sorted(by: { $0.key < $1.key })
-        where anchored[directory] == genesisCID && !urls.contains(url) {
-            urls.append(url)
-        }
-        return Array(urls.prefix(ReadEndpointResponseMessage.maximumURLs))
+        return urls
     }
 }

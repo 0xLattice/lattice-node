@@ -7,10 +7,6 @@ import UInt256
 import VolumeBroker
 import cashew
 
-private struct ImportEffects: Sendable {
-    let parentGenesisLinks: [ParentGenesisLink]
-}
-
 /// Wraps a network candidate's session so admission's reads of it are
 /// counted: the CIDs network block admission requests from the session after
 /// local storage misses. The session answers some from its per-attempt cache
@@ -30,11 +26,6 @@ private struct CountedContentSource: ContentSource {
 /// Transport-independent operations for one path. A future HTTP layer only
 /// decodes a bounded DTO, calls this actor, and encodes the response.
 public actor ChainService {
-    private struct Anchor: Hashable {
-        let directory: String
-        let genesisCID: String
-    }
-
     struct ValidatedRecipientPlan {
         let current: String?
         let descendants: [MiningRecipient]
@@ -113,7 +104,7 @@ public actor ChainService {
     /// This child level's mailbox from its co-hosted parent level, and the one
     /// task that drains it in order (`openParentMailbox`). Nil on Nexus and
     /// until the host opens it.
-    private var parentMailbox: AsyncStream<ParentMailboxItem>.Continuation?
+    private var parentMailbox: AsyncStream<Void>.Continuation?
     private var parentMailboxDrain: Task<Void, Never>?
     /// The parent's tip changes, coalesced to one pending signal and drained
     /// by their own task: never queued behind a gate-bound run credit or the
@@ -373,7 +364,6 @@ public actor ChainService {
     /// `/health` does (one validated-tip walk plus the live pool count).
     public func metricsExposition(peers: Int, processStartTime: Date) async -> String {
         let tips = await process.metricsTipHeights()
-        let reports = await process.parentReportCounters()
         return renderNodeMetrics(NodeMetricsSample(
             chainPath: process.configuration.chainPath,
             validatedTipHeight: tips.validated,
@@ -381,8 +371,6 @@ public actor ChainService {
             overlayPeers: peers,
             mempoolTransactions: await pool.count,
             processStartTime: processStartTime,
-            parentReportsApplied: reports.applied,
-            parentReportRefusals: reports.refusals,
             executionWalkParked: executionWalkParkedCount,
             candidateSessionReads: candidateSessionReadCount
         ))
@@ -431,7 +419,7 @@ public actor ChainService {
             // A refused block is intentionally not local chain state.
             return outcome
         }
-        _ = await handleImport(
+        await handleImport(
             block: block,
             header: header,
             outcome: outcome
@@ -1053,7 +1041,6 @@ public actor ChainService {
                 accepted: false,
                 disposition: .childOnly,
                 tipCID: await process.status().tipCID,
-                parentGenesisLinks: [],
                 durableChildProofs: admittedChildren
             )
         }
@@ -1069,7 +1056,7 @@ public actor ChainService {
                 await enqueueCanonicalCommit(commit)
             }
         )
-        let effects = await applyImportEffects(
+        await applyImportEffects(
             block: candidate,
             header: header,
             outcome: outcome
@@ -1097,7 +1084,6 @@ public actor ChainService {
             accepted: accepted,
             disposition: WorkDisposition(outcome.decision),
             tipCID: status.tipCID,
-            parentGenesisLinks: effects.parentGenesisLinks,
             durableChildProofs: admittedChildren
         )
     }
@@ -1177,15 +1163,14 @@ public actor ChainService {
     /// Reconciles service-owned state after a candidate was admitted through
     /// gossip, sync, or a co-hosted parent's handoff.
     /// Consensus admission itself remains exclusively in `ChainProcess`.
-    @discardableResult
     private func handleImport(
         block: Block,
         header: BlockHeader,
         outcome: NodeImportOutcome
-    ) async -> ImportEffects {
+    ) async {
         await acquireOperation()
         defer { releaseOperation() }
-        return await applyImportEffects(
+        await applyImportEffects(
             block: block,
             header: header,
             outcome: outcome
@@ -1447,85 +1432,25 @@ public actor ChainService {
         await process.serveRuns(for: directory)
     }
 
-    /// Credit a parent's run report at the child block it names. The commit,
-    /// if the canonical chain moved, is published like any admission's.
-    func applyParentRunReport(
-        _ report: ParentRunReport
-    ) async throws -> ChainProcess.ParentReportApplication {
-        try enterIngress()
+    /// Derive this level's attributed runs from its co-hosted parent level
+    /// (§9.10): derived, never persisted. When a run rose, this level's own
+    /// children derive theirs again.
+    private func deriveParentRuns() async {
+        guard let parentLevel, let parent = await parentLevel.runTree(),
+              (try? enterIngress()) != nil else { return }
         defer { exitIngress() }
-        // A canonical change is reconciled exactly once, on the queued
-        // worker under the service gate — the same path every admission's
-        // commit takes.
-        let application = try await process.applyParentRunReport(
-            report,
+        let raised = (try? await process.applyParentRuns(
+            from: parent,
             canonicalCommitPublisher: { [self] commit in
                 await enqueueCanonicalCommit(commit)
             }
-        )
-        // §9.10: a strengthening credits one run per served directory
-        // exactly as an admission does, so this chain's own children are
-        // pushed the runs it changed — the credit reaches the next level
-        // without waiting for a re-read.
-        let traced: String
-        switch application {
-        case .credited(let commit, let childBlock):
-            traced = "credited at \(childBlock.prefix(16)) tip=\(commit?.tipHash.prefix(16) ?? "unchanged")"
-        case .refused(let outcome):
-            traced = "refused \(ChainProcess.refusalName(outcome))"
-        }
-        syncTrace("run-report applied: \(traced)")
-        if case .credited(_, let childBlock) = application {
-            await pushChangedRuns(of: childBlock)
-        }
-        return application
+        )) ?? false
+        if raised { notifyChildrenOfRuns() }
     }
 
-    /// The run value last pushed per (directory, committer), so a run is
-    /// pushed once per value it reaches: an admission's push and a credit's
-    /// push of the same run can race, and the loser would only be refused as
-    /// not stronger. One small entry per committer ever pushed — the same
-    /// order as the run table itself. It records that a value was SENT, not
-    /// credited: a child that could not yet bind it (it had not admitted the
-    /// carried block) or that starts later recovers it by its own read — on
-    /// admitting a block that committer carried, and when it starts.
-    private var pushedRunWork: [String: WorkSum] = [:]
-
-    /// §9.10: every admitted block or strengthening with verifiable work
-    /// credits one run per served directory; push each changed run to the
-    /// children of its directory. A run that is only its committer has
-    /// nothing a child could credit (`runWork − ownWork` is zero) and is not
-    /// pushed: a carrier's own admission would otherwise announce a run to a
-    /// child that has not yet admitted the block it carries.
-    private func pushChangedRuns(of blockHash: String) async {
-        for report in await process.runReports(changedBy: blockHash) {
-            syncTrace("run changed by \(blockHash.prefix(16)): dir=\(report.directory) committer=\(report.blockHash.prefix(16)) run=\(report.runWork) own=\(report.ownWork)")
-            guard report.runWork > report.ownWork else { continue }
-            let key = "\(report.directory)/\(report.blockHash)"
-            if let last = pushedRunWork[key], last >= report.runWork { continue }
-            pushedRunWork[key] = report.runWork
-            childLevels[report.directory]?.parentChanged(.runs([report]))
-        }
-    }
-
-    /// Credits, from the co-hosted parent level, the run of each of
-    /// `carriers` — parent blocks that carried a block this chain accepted.
-    /// Called only from the mailbox drain, after the parent serves this
-    /// directory (`.serveParentRuns` runs first): a read made while the
-    /// parent's serve walk runs would find nothing and lose the credit.
-    /// Each read is gate-free (`ParentLevel.runReport`); each credit takes
-    /// only this level's own process gate. A run already credited as
-    /// strongly changes nothing.
-    private func creditParentRuns(carriers: [String]) async {
-        guard let parentLevel,
-              let directory = process.configuration.chainPath.last
-        else { return }
-        for carrier in carriers {
-            guard let report = await parentLevel.runReport(
-                carrier: carrier, directory: directory
-            ) else { continue }
-            _ = try? await applyParentRunReport(report)
-        }
+    /// This level's weight moved: each hosted child derives its runs again.
+    private func notifyChildrenOfRuns() {
+        for level in childLevels.values { level.parentChanged(.runs) }
     }
 
     private func reconcileCanonicalCommitOrResetLocked(
@@ -1548,7 +1473,7 @@ public actor ChainService {
         block: Block,
         header: BlockHeader,
         outcome: NodeImportOutcome
-    ) async -> ImportEffects {
+    ) async {
         // Visibility of accepted work is independent from optional child
         // materialization. A missing child payload must not suppress the
         // canonical announcement.
@@ -1564,54 +1489,15 @@ public actor ChainService {
             break
         }
 
-        var genesisLinks: [ParentGenesisLink] = []
-
-        switch outcome.decision {
-        case .canonicalized, .acceptedSide, .duplicate:
-            let transactions = (try? await blockTransactions(in: block)) ?? []
-            let blockAnchors = anchors(in: transactions).sorted {
-                ($0.directory, $0.genesisCID) < ($1.directory, $1.genesisCID)
-            }
-            for anchor in blockAnchors {
-                // A self-contained child genesis commits to the empty parent
-                // state, so its recorded authorization binds to emptyHeader —
-                // never the recording block's prevState.
-                if let link = try? await process.store.issuedParentGenesisLink(
-                    directory: anchor.directory,
-                    childGenesisCID: anchor.genesisCID,
-                    parentStateCID: LatticeState.emptyHeader.rawCID
-                ) {
-                    genesisLinks.append(link)
-                }
-            }
-        default:
-            break
-        }
-
-        // §9.10: push the runs this admission changed (see `pushChangedRuns`),
-        // and — this chain being the child — have the mailbox read from the
-        // parent level the run of the block that carried what was just
-        // admitted: a push the parent made before this block was held here
-        // was refused. Queued, not read here: the drain reads it once the
-        // parent serves this directory, and this lease is not held across
-        // the parent reads.
+        // §9.10: this level's weight moved, so its children's runs and its
+        // own (as a child) are derived again.
         if outcome.decision.isAccepted {
-            await pushChangedRuns(of: header.rawCID)
-            if !process.configuration.address.isNexus,
-               let carriers = try? await process.incomingCarriers(
-                   of: header.rawCID
-               ), !carriers.isEmpty {
-                parentMailbox?.yield(.rereadCarriers(carriers))
-            }
+            notifyChildrenOfRuns()
+            parentMailbox?.yield()
         }
         if outcome.decision.isAccepted {
             publishChainStateChange()
         }
-        return ImportEffects(
-            parentGenesisLinks: genesisLinks.sorted {
-                $0.directory < $1.directory
-            }
-        )
     }
 
     private func locallyStoredBlock(_ header: BlockHeader) async -> Block? {
@@ -1712,17 +1598,6 @@ public actor ChainService {
             for level in childLevels.values { level.parentChanged(.tipChanged) }
             scheduleCandidateRebuild()
         }
-    }
-
-    /// This chain's genesis activated outside candidate admission (seeded or
-    /// adopted): its tip moved from nothing, so its hosted children and its
-    /// network hear it like any other tip change.
-    func genesisActivatedOutOfBand() {
-        guard !stopped else { return }
-        publishChainStateChange()
-        // The parent may have anchored this genesis after this level started,
-        // so it serves this directory's runs only from now.
-        parentMailbox?.yield(.serveParentRuns)
     }
 
     /// The host attaches a hosted child level: told each time this level's
@@ -1831,23 +1706,11 @@ public actor ChainService {
         return candidate.flatMap { ReadyCandidate($0, plan: plan) }
     }
 
-    /// One entry of a child level's parent mailbox, drained in order.
-    enum ParentMailboxItem: Sendable {
-        /// Runs the parent sent, credited in the order sent.
-        case runs([ParentRunReport])
-        /// Have the parent serve this directory's runs, then re-read the
-        /// runs of this level's recent carriers: at start and when this
-        /// level's genesis activates.
-        case serveParentRuns
-        /// Read the runs of carriers of a block this level just accepted.
-        case rereadCarriers([String])
-    }
-
     /// A hosted child's inbox from its parent level. `send` enqueues and
     /// returns: the parent never waits on the child. Runs are queued in
     /// order; tip changes are coalesced into one pending signal.
     struct ParentMailbox: Sendable {
-        fileprivate let continuation: AsyncStream<ParentMailboxItem>.Continuation
+        fileprivate let continuation: AsyncStream<Void>.Continuation
         fileprivate let tipSignal: AsyncStream<Void>.Continuation
         fileprivate let plan: Published<DescendantPlan>
         fileprivate let planSignal: AsyncStream<Void>.Continuation
@@ -1855,7 +1718,7 @@ public actor ChainService {
         func send(_ change: ParentChange) {
             switch change {
             case .tipChanged: tipSignal.yield()
-            case .runs(let reports): continuation.yield(.runs(reports))
+            case .runs: continuation.yield()
             case .plan(let plan):
                 self.plan.swap(plan)
                 planSignal.yield()
@@ -1864,24 +1727,16 @@ public actor ChainService {
     }
 
     /// Opens this child level's parent mailbox; the host calls it once, when
-    /// the level starts. One task drains the runs in order: each run report
-    /// is credited under this level's own process gate
-    /// (`applyParentRunReport`, whose credit re-pushes to this level's own
-    /// children). First, and again when this level's genesis activates, it
-    /// runs `serveParentRuns` (the parent serves this directory's runs) and
-    /// then re-reads the runs this level already holds blocks for
-    /// (`ChainProcess.recentCarriers`): the credit a push delivered before a
-    /// restart, or one the parent served only after a push was refused. The
-    /// carriers of each block this level accepts are read in the same order,
-    /// each after `serveParentRuns` again, so never before the parent serves
-    /// the directory — however this level's genesis activated. The drain holds no
-    /// lease of this level, so `serveParentRuns` may take the parent's gate
-    /// (§2.4). Tip changes run `tipChanged` on a second task, coalesced, so
-    /// a parked candidate's wake never waits behind a credit or the serve,
-    /// and then rebuild this level's snapshot; a plan change, kept newest
-    /// only, rebuilds it from a third. `candidateChanged` tells the parent level
-    /// this level's snapshot changed. `shutdown` finishes all three and
-    /// joins them.
+    /// the level starts. One task drains the run signals, coalesced: each runs
+    /// `serveParentRuns` (the parent serves this directory's runs;
+    /// idempotent) and then derives this level's attributed runs from the
+    /// parent's tree, never persisted, so a restart re-derives them. The
+    /// drain holds no lease of this level, so `serveParentRuns` may take the
+    /// parent's gate (§2.4). Tip changes run `tipChanged` on a second task,
+    /// coalesced, and then rebuild this level's snapshot; a plan change,
+    /// kept newest only, rebuilds it from a third. `candidateChanged` tells
+    /// the parent level this level's snapshot changed. `shutdown` finishes
+    /// all three and joins them.
     func openParentMailbox(
         tipChanged: @escaping @Sendable () async -> Void,
         serveParentRuns: @escaping @Sendable () async -> Void,
@@ -1889,7 +1744,7 @@ public actor ChainService {
     ) -> ParentMailbox {
         precondition(parentMailbox == nil, "one parent mailbox per level")
         let (stream, continuation) = AsyncStream.makeStream(
-            of: ParentMailboxItem.self
+            of: Void.self, bufferingPolicy: .bufferingNewest(1)
         )
         let (tips, tipSignal) = AsyncStream.makeStream(
             of: Void.self, bufferingPolicy: .bufferingNewest(1)
@@ -1907,26 +1762,12 @@ public actor ChainService {
             parentTipSignal = tipSignal
             parentPlanSignal = planSignal
             parentMailboxDrain = Task { [weak self] in
-                for await item in stream {
+                for await _ in stream {
                     guard let self else { return }
-                    switch item {
-                    case .runs(let reports):
-                        for report in reports {
-                            _ = try? await self.applyParentRunReport(report)
-                        }
-                    case .serveParentRuns:
-                        await serveParentRuns()
-                        if let carriers = try? await self.process.recentCarriers() {
-                            await self.creditParentRuns(carriers: carriers)
-                        }
-                    case .rereadCarriers(let carriers):
-                        // The open-time serve may have run before the parent
-                        // anchored this genesis (it serves nothing then), and
-                        // a genesis admitted in-band queues no second serve:
-                        // serve first. Idempotent, and O(1) once served.
-                        await serveParentRuns()
-                        await self.creditParentRuns(carriers: carriers)
-                    }
+                    // Idempotent, and O(1) once served: the parent may have
+                    // started after this level opened.
+                    await serveParentRuns()
+                    await self.deriveParentRuns()
                 }
             }
             parentTipDrain = Task { [weak self] in
@@ -1938,7 +1779,7 @@ public actor ChainService {
             parentPlanDrain = Task { [weak self] in
                 for await _ in plans { await self?.scheduleCandidateRebuild() }
             }
-            continuation.yield(.serveParentRuns)
+            continuation.yield()
             scheduleCandidateRebuild()
         }
         return ParentMailbox(
@@ -2130,7 +1971,7 @@ public actor ChainService {
         guard let emptyTransactions = try? HeaderImpl<
                   MerkleDictionaryImpl<VolumeImpl<Transaction>>
               >(node: MerkleDictionaryImpl<VolumeImpl<Transaction>>()),
-              let emptyChildren = try? HeaderImpl<ChildIndex>(node: ChildIndex()),
+              let emptyChildren = try? HeaderImpl<FlatDictionary<BlockHeader>>(node: FlatDictionary<BlockHeader>()),
               tip.height < UInt64.max else { return nil }
         return Block(
             version: tip.version,
@@ -2160,17 +2001,6 @@ public actor ChainService {
         let leftCID = try? BlockHeader(node: left.block).rawCID
         let rightCID = try? BlockHeader(node: right.block).rawCID
         return (leftCID ?? "") < (rightCID ?? "")
-    }
-
-    private func anchors(in transactions: [Transaction]) -> Set<Anchor> {
-        Set(transactions.flatMap { transaction in
-            transaction.body.node?.genesisActions.map {
-                Anchor(
-                    directory: $0.directory,
-                    genesisCID: $0.blockCID
-                )
-            } ?? []
-        })
     }
 
     private func blockTransactions(in block: Block) async throws -> [Transaction] {

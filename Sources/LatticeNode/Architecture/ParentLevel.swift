@@ -17,19 +17,10 @@ public protocol ParentLevel: AnyObject, Sendable {
     /// genesis: the executed-from-genesis frontier, never a state it only
     /// weighed.
     func hasProducedState(_ stateCID: String) async -> Bool
-    /// The genesis link the parent recorded for this child genesis in
-    /// `directory`, bound to the empty parent state a self-contained genesis
-    /// commits to. Nil when the parent recorded no such genesis.
-    func recordedGenesisLink(
-        directory: String, childGenesisCID: String
-    ) async -> ParentGenesisLink?
-    /// The genesis CID the parent committed for `directory` in its
-    /// validated tip's state. Nil while no anchor is committed there.
-    func anchoredGenesisCID(directory: String) async -> String?
-    /// The run the parent credits to `carrier`, one of its blocks committing
-    /// into `directory` (§9.10). Nil while the parent does not serve runs for
-    /// `directory` or `carrier` commits nothing there.
-    func runReport(carrier: String, directory: String) async -> ParentRunReport?
+    /// The parent's tree, which serves the child's directory, for the child
+    /// to derive its attributed runs from (§9.10). Nil before the parent is
+    /// active.
+    func runTree() async -> ChainTree?
     /// The parent's validated tip and its CID: what a child's candidate
     /// binds (its provisional carrier's `prevState` is the tip's post-state).
     /// Nil before the parent's genesis activates.
@@ -113,16 +104,14 @@ public struct DescendantPlan: Sendable {
 }
 
 /// What the parent level tells a hosted child (`ChainService.ParentMailbox`):
-/// runs in the order sent, tip and plan changes coalesced. Delivery never
-/// blocks the parent.
+/// run, tip and plan changes, coalesced. Delivery never blocks the parent.
 public enum ParentChange: Sendable {
     /// The parent's validated tip or executed frontier moved: a parent fact
     /// a child block waited on may hold now.
     case tipChanged
-    /// Runs the parent credits to its blocks committing into the child's
-    /// directory changed (§9.10): the child credits each at the child block
-    /// the committer carried.
-    case runs([ParentRunReport])
+    /// The parent's weight moved, so a run into the child's directory may
+    /// have (§9.10): the child derives its attributed runs again.
+    case runs
     /// The miner's plan for the child's subtree changed: the child rebuilds
     /// its candidate against it.
     case plan(DescendantPlan)
@@ -133,20 +122,12 @@ public enum ParentChange: Sendable {
 enum ParentFact: Hashable, Sendable {
     /// The parent executed a block producing `toStateCID`, from genesis.
     case continuity(toStateCID: String)
-    /// The parent recorded `childGenesisCID` for `directory`.
-    case genesis(directory: String, childGenesisCID: String)
 
     /// The fact `requirement` names, or nil when the requirement is not a
     /// fact `child`'s immediate parent level can answer.
     init?(_ requirement: CrossChainEvidenceRequirement, child: ChainAddress) {
         let parentPath = Array(child.components.dropLast())
         switch requirement {
-        case .parentGenesis(
-            let requiredPath, let directory, let childGenesisCID, let parentStateCID
-        ) where requiredPath == parentPath && directory == child.directory
-            // A self-contained genesis commits to the empty parent state.
-            && parentStateCID == LatticeState.emptyHeader.rawCID:
-            self = .genesis(directory: directory, childGenesisCID: childGenesisCID)
         case .parentStateContinuity(let requiredPath, let fromStateCID, let toStateCID)
             where requiredPath == parentPath
             // Every child block anchors its `parentState` at the parent
@@ -169,10 +150,6 @@ extension ParentLevel {
         switch fact {
         case .continuity(let toStateCID):
             await hasProducedState(toStateCID)
-        case .genesis(let directory, let childGenesisCID):
-            await recordedGenesisLink(
-                directory: directory, childGenesisCID: childGenesisCID
-            )?.parentStateCID == LatticeState.emptyHeader.rawCID
         }
     }
 
@@ -189,14 +166,6 @@ extension ParentLevel {
         }
         let fact: ChildValidationPackage
         switch parentFact {
-        case .genesis(let directory, let childGenesisCID):
-            guard let link = await recordedGenesisLink(
-                directory: directory, childGenesisCID: childGenesisCID
-            ), link.parentStateCID == LatticeState.emptyHeader.rawCID
-            else { return nil }
-            fact = ChildValidationPackage(
-                proof: package.package.proof, parentGenesisLink: link
-            )
         case .continuity(let toStateCID):
             guard await hasProducedState(toStateCID) else { return nil }
             fact = ChildValidationPackage(
@@ -227,25 +196,8 @@ final class LocalParentLevel: @unchecked Sendable, ParentLevel, ContentSource {
         await process?.hasProducedParentState(stateCID) ?? false
     }
 
-    func recordedGenesisLink(
-        directory: String, childGenesisCID: String
-    ) async -> ParentGenesisLink? {
-        guard let process else { return nil }
-        return try? await process.store.issuedParentGenesisLink(
-            directory: directory,
-            childGenesisCID: childGenesisCID,
-            parentStateCID: LatticeState.emptyHeader.rawCID
-        )
-    }
-
-    func anchoredGenesisCID(directory: String) async -> String? {
-        await process?.anchoredChildGenesisCIDs(
-            directories: [directory]
-        )[directory]
-    }
-
-    func runReport(carrier: String, directory: String) async -> ParentRunReport? {
-        await process?.runReport(carrier: carrier, directory: directory)
+    func runTree() async -> ChainTree? {
+        await process?.runTree()
     }
 
     func validatedTip() async -> (cid: String, block: Block)? {

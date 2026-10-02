@@ -5,9 +5,6 @@ import LatticeNodeCore
 import cashew
 
 public enum CoreDriverError: Error, Equatable, Sendable {
-    /// The durable facts are rooted at another genesis than the configured
-    /// Nexus genesis CID.
-    case wrongGenesis(String?)
     /// The driver hosts the Nexus level only.
     case notNexus
     /// The driver stopped before answering.
@@ -142,15 +139,14 @@ public final class CoreDriver: Sendable {
     ) async throws -> HostCore {
         guard configuration.address.isNexus else { throw CoreDriverError.notNexus }
         let logID = try await process.coreLogID() ?? UUID().uuidString.lowercased()
+        // The context pins the Nexus genesis: a store holding another root
+        // fails the restore.
         let root = try Core.restore(
             replaying: try await process.coreFacts(),
             context: try configuration.runtimeContext,
-            spec: NexusGenesis.spec,
+            specs: [NexusGenesis.spec],
             config: coreConfig
         )
-        guard root.genesis == configuration.nexusGenesisCID else {
-            throw CoreDriverError.wrongGenesis(root.genesis)
-        }
         return HostCore(root: root.tree, hosted: [], config: coreConfig, logID: logID, rootLog: root.sync.log.entries)
     }
 
@@ -575,9 +571,6 @@ extension CoreDriver {
             case .connect(let path, let job, let parentFacts):
                 executionJobs.append(CoreDriver.connectJob(job, at: path, parentFacts: parentFacts, process: process))
                 startJobs()
-            case .bootstrap:
-                // PENDING (child levels): never emitted while `hosted` is empty.
-                break
             case .wakeAt(let time):
                 if let wake, wake.time <= time { break }
                 wake?.task.cancel()
@@ -634,7 +627,7 @@ extension CoreDriver {
                         bytes = await ivy.fetchVolume(rootCID: cid, from: session.peer).entries[cid]
                     }
                     // No answer is no event: the request's deadline decides.
-                    guard let bytes, let index = ChildIndex(data: bytes) else { return }
+                    guard let bytes, let index = FlatDictionary<BlockHeader>(data: bytes) else { return }
                     inputs.yield(.event(.level(path, .childIndexFetched(peer, cid: cid, index))))
                 }
             case .fetchBody(let cid):
@@ -720,11 +713,11 @@ extension CoreDriver {
                     }
                 }
             case .preflight(let job):
-                guard let level = epochLevel(at: path, epoch: job.tipEpoch) else { break }
+                guard let level = await epochLevel(at: path, epoch: job.tipEpoch) else { break }
                 miningJobs.append(CoreDriver.miningJob(effect, at: path, level: level, process: process))
                 startJobs()
             case .buildTemplate(let job):
-                guard let level = epochLevel(at: path, epoch: job.tipEpoch) else { break }
+                guard let level = await epochLevel(at: path, epoch: job.tipEpoch) else { break }
                 miningJobs.append(CoreDriver.miningJob(effect, at: path, level: level, process: process))
                 startJobs()
             case .returnTransactions:
@@ -737,9 +730,10 @@ extension CoreDriver {
         /// The chain a tip epoch's jobs read: Lattice's `preflightTransaction`
         /// and the template's difficulty anchor, over a copy of the level's
         /// tree made once per epoch.
-        private mutating func epochLevel(at path: ChainPath, epoch: UInt64) -> ChainLevel? {
+        private mutating func epochLevel(at path: ChainPath, epoch: UInt64) async -> ChainLevel? {
             if let cached = preflightLevels[path], cached.epoch == epoch { return cached.level }
-            guard let tree = core.levels[path]?.tree, let level = CoreDriver.jobLevel(tree) else { return nil }
+            guard let context = core.levels[path]?.tree.context,
+                  let level = await CoreDriver.jobLevel(context: context, process: process) else { return nil }
             preflightLevels[path] = (epoch, level)
             return level
         }

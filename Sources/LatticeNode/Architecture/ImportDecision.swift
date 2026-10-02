@@ -44,7 +44,7 @@ public enum NodeImportDecision: Sendable, Equatable {
         case .providerMalformedEvidence, .protocolInvalid,
              .notAcceptedAtCurrentChain:
             self = .invalid
-        case .localVerificationFailure, .revisionExhausted:
+        case .localVerificationFailure, .revisionExhausted, .executedVerdictContradiction:
             self = .localFailure
         }
     }

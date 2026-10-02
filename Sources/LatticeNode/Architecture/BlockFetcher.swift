@@ -909,9 +909,6 @@ struct BlockFetcher {
         guard let leftProof = try? left.proof.serialize(),
               let rightProof = try? right.proof.serialize(),
               leftProof == rightProof,
-              left.parentGenesisLink == nil
-                || right.parentGenesisLink == nil
-                || left.parentGenesisLink == right.parentGenesisLink,
               left.parentStateContinuityLink == nil
                 || right.parentStateContinuityLink == nil
                 || left.parentStateContinuityLink
@@ -921,8 +918,6 @@ struct BlockFetcher {
         return AuthenticatedChildPackage(
             package: ChildValidationPackage(
                 proof: left.proof,
-                parentGenesisLink:
-                    left.parentGenesisLink ?? right.parentGenesisLink,
                 parentStateContinuityLink:
                     left.parentStateContinuityLink
                         ?? right.parentStateContinuityLink
@@ -939,8 +934,6 @@ struct BlockFetcher {
             return false
         }
         return leftProof == rightProof
-            && left.package.parentGenesisLink
-                == right.package.parentGenesisLink
             && left.package.parentStateContinuityLink
                 == right.package.parentStateContinuityLink
     }

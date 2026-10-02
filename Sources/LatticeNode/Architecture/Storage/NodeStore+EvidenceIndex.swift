@@ -41,7 +41,6 @@ struct ImportHierarchyArtifacts: Sendable {
     /// The admitted block that issues these facts.
     let blockCID: String
     let carrierEvidence: ImportCarrierEvidence?
-    let parentGenesisLinks: [ParentGenesisLink]
 }
 
 struct PreparedImportCarrierEvidence {
@@ -73,48 +72,10 @@ struct ChildEvidencePinsDirtyRow: NodeStoreRecord {
 struct PreparedImportHierarchyArtifacts {
     let blockCID: String
     let carrierEvidence: PreparedImportCarrierEvidence?
-    let parentGenesisLinks: [(link: ParentGenesisLink, payload: Data)]
-}
-
-/// The accepted block whose admission issued `parentGenesisLinks`.
-private struct PersistedParentFactSource: Codable {
-    let blockCID: String
-    let parentGenesisLinks: [ParentGenesisLink]
-}
-
-private struct IssuedParentFactKey: Hashable {
-    let kind: String
-    let keyA: String
-    let keyB: String
 }
 
 enum IssuedChildProofScope: String, Sendable {
     case incomingCarrier = "incoming_carrier"
-}
-
-/// `issued_parent_fact_sources`: the JSON source each issued parent fact
-/// derives from; decoded by the audit so a decode failure stays `corrupt`.
-struct IssuedParentFactSourceRow: NodeStoreRecord {
-    static let table = "issued_parent_fact_sources"
-    private let row: Row
-
-    init(_ row: Row) { self.row = row }
-
-    var payload: Data { get throws { try row.blob("payload") } }
-}
-
-/// `issued_parent_facts`: one locally issued genesis fact. The
-/// keys are opaque text (a genesis key is a length-prefixed composite).
-struct IssuedParentFactRow: NodeStoreRecord {
-    static let table = "issued_parent_facts"
-    private let row: Row
-
-    init(_ row: Row) { self.row = row }
-
-    var kind: String { get throws { try row.text("kind") } }
-    var keyA: String { get throws { try row.text("key_a") } }
-    var keyB: String { get throws { try row.text("key_b") } }
-    var payload: Data { get throws { try row.blob("payload") } }
 }
 
 /// `issued_child_edges`: one content-derived direct-child edge. Every CID
@@ -177,22 +138,6 @@ extension NodeStore {
     static let proofEdgeJoinSQL =
         "FROM issued_child_proofs AS p INNER JOIN issued_child_edges AS e ON e.edge_cid = p.edge_cid"
 
-    private static func parentGenesisFactKey(
-        _ link: ParentGenesisLink
-    ) -> String {
-        parentGenesisFactKey(
-            childGenesisCID: link.childGenesisCID,
-            parentStateCID: link.parentStateCID
-        )
-    }
-
-    private static func parentGenesisFactKey(
-        childGenesisCID: String,
-        parentStateCID: String
-    ) -> String {
-        "\(parentStateCID.utf8.count):\(parentStateCID)\(childGenesisCID)"
-    }
-
     func incomingParentCarrierBlockCIDs(
         forChildBlockCID childBlockCID: String
     ) throws -> Set<String> {
@@ -228,10 +173,6 @@ extension NodeStore {
             )
         }
 
-        let parentGenesisLinks = try prepareParentGenesisLinks(
-            artifacts.parentGenesisLinks
-        )
-
         let carrierEvidence: PreparedImportCarrierEvidence?
         if let evidence = artifacts.carrierEvidence {
             carrierEvidence = try await prepareCarrierEvidence(
@@ -245,8 +186,7 @@ extension NodeStore {
 
         return PreparedImportHierarchyArtifacts(
             blockCID: blockCID,
-            carrierEvidence: carrierEvidence,
-            parentGenesisLinks: parentGenesisLinks
+            carrierEvidence: carrierEvidence
         )
     }
 
@@ -332,8 +272,7 @@ extension NodeStore {
         update.markerWasSet = try childEvidencePinsDirty()
         try setChildEvidencePinsDirty(true)
         if !update.added.isEmpty {
-            try await recoveryVolumeBroker.pinBatch(
-                roots: update.added,
+            try await recoveryVolumeBroker.retain(update.added,
                 owner: childEvidenceOwner
             )
         }
@@ -375,9 +314,7 @@ extension NodeStore {
     private func releaseChildEvidencePins(_ roots: [String], markerWasSet: Bool) async {
         do {
             if !roots.isEmpty {
-                try await recoveryVolumeBroker.unpinBatch(items: roots.map {
-                    (root: $0, owner: childEvidenceOwner, count: 1)
-                })
+                try await recoveryVolumeBroker.release(Set(roots), owner: childEvidenceOwner)
             }
             if !markerWasSet { try setChildEvidencePinsDirty(false) }
         } catch {}
@@ -398,26 +335,6 @@ extension NodeStore {
             : "DELETE FROM child_evidence_pins_dirty")
     }
 
-    private func prepareParentGenesisLinks(
-        _ links: [ParentGenesisLink]
-    ) throws -> [(link: ParentGenesisLink, payload: Data)] {
-        let links = Array(Set(links)).sorted {
-            ($0.directory, $0.childGenesisCID, $0.parentStateCID)
-                < ($1.directory, $1.childGenesisCID, $1.parentStateCID)
-        }
-        guard links.allSatisfy({ link in
-            link.parentPath == chainPath
-                && !link.directory.isEmpty
-                && !link.childGenesisCID.isEmpty
-                && !link.parentStateCID.isEmpty
-        }) else {
-            throw NodeStoreError.invalidConfiguration(
-                "issued genesis link belongs to a different chain path"
-            )
-        }
-        return try links.map { (link: $0, payload: try Self.encode($0)) }
-    }
-
     /// Owner: ImportJournal.stage / EvidenceIndex.persistIssuedHierarchyArtifacts — caller holds the transaction.
     func persistHierarchyArtifacts(
         _ artifacts: PreparedImportHierarchyArtifacts
@@ -425,10 +342,6 @@ extension NodeStore {
         if let evidence = artifacts.carrierEvidence {
             try persistCarrierEvidence(evidence)
         }
-        try persistParentFacts(
-            blockCID: artifacts.blockCID,
-            parentGenesisLinks: artifacts.parentGenesisLinks
-        )
     }
 
     /// Owner: ImportJournal.stage / EvidenceIndex.persistHierarchyArtifacts — caller holds the transaction.
@@ -447,41 +360,10 @@ extension NodeStore {
         )
     }
 
-    /// Only genesis facts are issued: a block with no genesis links leaves
-    /// no fact and no source.
-    private func persistParentFacts(
-        blockCID: String,
-        parentGenesisLinks: [(link: ParentGenesisLink, payload: Data)]
-    ) throws {
-        guard !parentGenesisLinks.isEmpty else { return }
-        let source = PersistedParentFactSource(
-            blockCID: blockCID,
-            parentGenesisLinks: parentGenesisLinks.map(\.link)
-        )
-        try database.execute(
-            "INSERT OR IGNORE INTO issued_parent_fact_sources (payload) VALUES (?1)",
-            params: [.blob(try Self.encode(source))]
-        )
-        for genesis in parentGenesisLinks {
-            try persistIssuedParentFact(
-                kind: "genesis",
-                keyA: genesis.link.directory,
-                keyB: Self.parentGenesisFactKey(genesis.link),
-                payload: genesis.payload
-            )
-        }
-    }
-
     func persistIssuedHierarchyArtifacts(
         _ artifacts: ImportHierarchyArtifacts
     ) async throws {
         let blockCID = artifacts.blockCID
-        if !artifacts.parentGenesisLinks.isEmpty,
-           try !hasConnectedAcceptedBlock(blockCID) {
-            throw NodeStoreError.invalidConfiguration(
-                "genesis authority requires a connected parent block"
-            )
-        }
         guard let prepared = try await prepareHierarchyArtifacts(
             artifacts,
             carrierCIDs: [blockCID]
@@ -510,29 +392,6 @@ extension NodeStore {
             throw error
         }
         await finishChildEvidenceIndex(indexUpdate)
-    }
-
-    func issuedParentGenesisLink(
-        directory: String,
-        childGenesisCID: String,
-        parentStateCID: String
-    ) async throws -> ParentGenesisLink? {
-        guard let payload = try issuedParentFact(
-            kind: "genesis",
-            keyA: directory,
-            keyB: Self.parentGenesisFactKey(
-                childGenesisCID: childGenesisCID,
-                parentStateCID: parentStateCID
-            )
-        ) else { return nil }
-        let link = try Self.decode(ParentGenesisLink.self, from: payload)
-        guard link.parentPath == chainPath,
-              link.directory == directory,
-              link.childGenesisCID == childGenesisCID,
-              link.parentStateCID == parentStateCID else {
-            throw NodeStoreError.corrupt("malformed locally issued genesis link")
-        }
-        return link
     }
 
     private func persistIssuedChildEdgeRow(_ edge: DirectChildEdge) throws {
@@ -763,61 +622,6 @@ extension NodeStore {
         return try rows.map { try $0.rootCID }
     }
 
-    private func persistIssuedParentFact(
-        kind: String,
-        keyA: String,
-        keyB: String,
-        payload: Data
-    ) throws {
-        guard !keyA.isEmpty, !keyB.isEmpty else {
-            throw NodeStoreError.invalidConfiguration(
-                "issued parent fact keys must be nonempty"
-            )
-        }
-        let existing = try database.row(
-            IssuedParentFactRow.self,
-            "SELECT payload FROM issued_parent_facts WHERE kind = ?1 AND key_a = ?2 AND key_b = ?3",
-            params: [.text(kind), .text(keyA), .text(keyB)]
-        )
-        if let existing {
-            guard try existing.payload == payload else {
-                throw NodeStoreError.conflictingIssuedParentFact
-            }
-            return
-        }
-        try database.execute(
-            "INSERT INTO issued_parent_facts (kind, key_a, key_b, payload) VALUES (?1, ?2, ?3, ?4)",
-            params: [
-                .text(kind), .text(keyA), .text(keyB), .blob(payload),
-            ]
-        )
-    }
-
-    private func issuedParentFact(
-        kind: String,
-        keyA: String,
-        keyB: String
-    ) throws -> Data? {
-        try database.row(
-            IssuedParentFactRow.self,
-            "SELECT payload FROM issued_parent_facts WHERE kind = ?1 AND key_a = ?2 AND key_b = ?3",
-            params: [.text(kind), .text(keyA), .text(keyB)]
-        )?.payload
-    }
-
-    private static func addExpectedParentFact(
-        key: IssuedParentFactKey,
-        payload: Data,
-        to facts: inout [IssuedParentFactKey: Data]
-    ) throws {
-        if let existing = facts[key], existing != payload {
-            throw NodeStoreError.corrupt(
-                "parent-fact sources disagree about an immutable fact"
-            )
-        }
-        facts[key] = payload
-    }
-
     /// Checks only the content-addressed root-to-leaf association and path
     /// scope. Consensus work and transition validity remain Lattice's job.
     static func proves(
@@ -835,66 +639,6 @@ extension NodeStore {
             return false
         }
         return await proof.directHop()?.childCID == childCID
-    }
-
-    func auditIssuedParentFacts(connected connectedAcceptedBlocks: Set<String>) throws {
-        var expectedParentFacts: [IssuedParentFactKey: Data] = [:]
-        for row in try database.rows(
-            IssuedParentFactSourceRow.self,
-            "SELECT payload FROM issued_parent_fact_sources ORDER BY payload"
-        ) {
-            let payload = try row.payload
-            let source = try Self.decode(
-                PersistedParentFactSource.self,
-                from: payload
-            )
-            guard try Self.encode(source) == payload,
-                  !source.blockCID.isEmpty else {
-                throw NodeStoreError.corrupt("invalid parent-fact source")
-            }
-            let sortedGenesis = Array(Set(source.parentGenesisLinks)).sorted {
-                ($0.directory, $0.childGenesisCID, $0.parentStateCID)
-                    < ($1.directory, $1.childGenesisCID, $1.parentStateCID)
-            }
-            guard source.parentGenesisLinks == sortedGenesis,
-                  source.parentGenesisLinks.allSatisfy({
-                      $0.parentPath == chainPath
-                          && !$0.directory.isEmpty
-                          && !$0.childGenesisCID.isEmpty
-                          && !$0.parentStateCID.isEmpty
-                  }),
-                  !source.parentGenesisLinks.isEmpty,
-                  connectedAcceptedBlocks.contains(source.blockCID) else {
-                throw NodeStoreError.corrupt("invalid genesis-fact source")
-            }
-            for link in source.parentGenesisLinks {
-                try Self.addExpectedParentFact(
-                    key: IssuedParentFactKey(
-                        kind: "genesis",
-                        keyA: link.directory,
-                        keyB: Self.parentGenesisFactKey(link)
-                    ),
-                    payload: try Self.encode(link),
-                    to: &expectedParentFacts
-                )
-            }
-        }
-        var actualParentFacts: [IssuedParentFactKey: Data] = [:]
-        for row in try database.rows(
-            IssuedParentFactRow.self,
-            "SELECT kind, key_a, key_b, payload FROM issued_parent_facts"
-        ) {
-            actualParentFacts[IssuedParentFactKey(
-                kind: try row.kind,
-                keyA: try row.keyA,
-                keyB: try row.keyB
-            )] = try row.payload
-        }
-        guard actualParentFacts == expectedParentFacts else {
-            throw NodeStoreError.corrupt(
-                "issued parent facts do not match immutable sources"
-            )
-        }
     }
 
     func auditIssuedChildAttachments() async throws {

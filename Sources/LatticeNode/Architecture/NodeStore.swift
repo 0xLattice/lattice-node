@@ -10,7 +10,6 @@ enum NodeStoreError: Error, Equatable, LocalizedError {
     case wipeRequired(String)
     case conflictingImportFact
     case conflictingImportBatch
-    case conflictingIssuedParentFact
     case conflictingIssuedChildProof
     case invalidIssuedChildProof(String)
     case corrupt(String)
@@ -31,8 +30,6 @@ enum NodeStoreError: Error, Equatable, LocalizedError {
             "Conflicting bytes for an immutable chain fact."
         case .conflictingImportBatch:
             "An admission batch was replayed with different Volume roots."
-        case .conflictingIssuedParentFact:
-            "A locally issued parent fact was replayed with different bytes."
         case .conflictingIssuedChildProof:
             "A locally issued child proof was replayed with different bytes."
         case .invalidIssuedChildProof(let childCID):
@@ -180,3 +177,19 @@ actor NodeImportStorage: VolumeStorer {
     }
 }
 
+
+/// The legacy owner pins as VolumeBroker retained roots: one scope per owner
+/// name. Merges and advances on one scope are serialized by their callers
+/// (the process mutation gate, or boot's storage-directory lock). Sets, not
+/// counts: a root retained twice under one owner is released by one release.
+extension RetainedRootMergeBroker {
+    func retain(_ roots: [String], owner: String) async throws {
+        guard !roots.isEmpty else { return }
+        try await mergeRetainedRoots(scope: owner, roots: roots)
+    }
+
+    func release(_ roots: Set<String>, owner: String) async throws {
+        let kept = try await retainedRoots(scope: owner).filter { !roots.contains($0) }
+        try await advanceRetainedRoots(scope: owner, roots: kept)
+    }
+}

@@ -60,18 +60,6 @@ public actor ChainHost {
                 running: nil
             )
         }
-        // Each parent announces the genesis and serves the public read URL
-        // of each child it hosts.
-        for address in levels.keys {
-            guard let parent = address.parent,
-                  let child = levels[address]?.configuration,
-                  let hosting = levels[parent]?.configuration
-            else { continue }
-            levels[parent]?.configuration = hosting.withHostedChild(
-                directory: address.directory,
-                publicReadURL: child.publicReadURL
-            )
-        }
     }
 
     public var paths: [ChainAddress] {

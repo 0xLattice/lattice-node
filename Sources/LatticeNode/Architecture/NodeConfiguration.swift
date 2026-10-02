@@ -57,13 +57,6 @@ public struct NodeConfiguration: Sendable {
     public let listenPort: UInt16
     public let rpcPort: UInt16
     public let bootstrapPeers: [PeerEndpoint]
-    /// The directories of the co-hosted child levels, which `ChainHost`
-    /// wires: this level announces their anchored geneses on its overlay.
-    private(set) var hostedChildDirectories: Set<String> = []
-    /// The public read URLs those child levels are configured with, by
-    /// directory: this level serves them to a read-endpoint ask for the
-    /// child genesis it anchored.
-    private(set) var hostedChildReadURLs: [String: String] = [:]
     public let minPeerKeyBits: Int
     /// Per-netgroup inbound/outbound overlay connection cap. Ivy buckets peers by
     /// the connection's observed remote host (/16), an anti-eclipse defense that
@@ -173,15 +166,6 @@ public struct NodeConfiguration: Sendable {
         self.resourcePolicy = resourcePolicy
     }
 
-    /// This configuration hosting the child level `directory`, configured
-    /// with the public read URL `publicReadURL`, if any.
-    func withHostedChild(directory: String, publicReadURL: String?) -> NodeConfiguration {
-        var configuration = self
-        configuration.hostedChildDirectories.insert(directory)
-        configuration.hostedChildReadURLs[directory] = publicReadURL
-        return configuration
-    }
-
     public var chainPath: [String] { address.components }
     public var nexusGenesisCID: String { NexusGenesis.expectedBlockHash }
     public var signingKey: Curve25519.Signing.PrivateKey {
@@ -189,7 +173,10 @@ public struct NodeConfiguration: Sendable {
     }
     public var runtimeContext: ChainRuntimeContext {
         get throws {
-            try ChainRuntimeContext(path: chainPath)
+            // Only the root chain pins its genesis (Lattice §5.1).
+            try ChainRuntimeContext(
+                path: chainPath, genesisCID: address.isNexus ? nexusGenesisCID : nil
+            )
         }
     }
 

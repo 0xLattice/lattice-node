@@ -192,151 +192,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         )
     }
 
-    /// Self-admit this child's self-contained genesis, `anchoredCID`: the
-    /// CID the parent committed for this chain's directory. The parent only
-    /// RECORDS the CID; the genesis bytes come from `source`:
-    /// - `.seed`: the deployer seeded this node, which rebuilds the identical
-    ///   genesis. A seed that does not build, or builds another CID than
-    ///   `anchoredCID` (a corrected re-deploy, a stale seed), is logged and
-    ///   answers `.notAnchoredGenesis`.
-    /// - `.fetch`: this node adopted the child and fetches the genesis by
-    ///   `anchoredCID` (content-addressed and self-verifying) through a
-    ///   child-overlay provider. A miss yields `false` for the next trigger.
-    ///
-    /// Before activating, `confirmParentRecordedGenesis` must confirm the
-    /// parent recorded THIS CID (a read of the co-hosted parent level's
-    /// record). Fail-closed: a genesis the parent never recorded yields
-    /// `false` and the chain stays `awaitingGenesis`, so no honest node
-    /// self-admits an unrecorded fork. Idempotent: `.notAwaiting` once the
-    /// chain is past `awaitingGenesis`.
-    public func activateChildGenesis(
-        anchoredCID: String,
-        from source: ChildGenesisSource,
-        confirmParentRecordedGenesis: (_ childGenesisCID: String) async -> Bool
-    ) async throws -> ChildGenesisActivation {
-        try await acquireMutationOperation()
-        defer { releaseOperation() }
-        guard case .awaitingGenesis = runtimePhase,
-              !configuration.address.isNexus else {
-            return .notAwaiting
-        }
-        let context = try configuration.runtimeContext
-        guard let directory = context.path.last else { return .notAwaiting }
-        let fetcher: CoalescingFetcher
-        let node: Block
-        switch source {
-        case .seed(let seed):
-            fetcher = localFetcher
-            // A seed that does not build is no more the anchored genesis
-            // than one that builds another CID.
-            do {
-                node = try await ChildGenesisBuilder.build(
-                    seed: seed,
-                    chainPath: context.path,
-                    fetcher: localFetcher
-                )
-            } catch {
-                syncTrace(
-                    "child-genesis seed does not build directory=\(directory)"
-                        + " error=\(error)"
-                )
-                return .notAnchoredGenesis
-            }
-        case .fetch(let remoteSource):
-            fetcher = try Self.attemptFetcher(
-                package: nil,
-                fallback: CompositeContentSource([broker, remoteSource])
-            )
-            guard let fetched = try? await BlockHeader(
-                rawCID: anchoredCID, node: nil, encryptionInfo: nil
-            ).resolve(fetcher: fetcher).node else {
-                return .notAnchoredGenesis
-            }
-            node = fetched
-        }
-        let header = try BlockHeader(node: node)
-        // A seed rebuilt to another genesis, or fetched content that does not
-        // hash back to the requested CID, is not the anchored genesis.
-        guard header.rawCID == anchoredCID else {
-            syncTrace(
-                "child-genesis mismatch directory=\(directory)"
-                    + " anchored=\(anchoredCID) built=\(header.rawCID)"
-            )
-            return .notAnchoredGenesis
-        }
-        return try await bootstrapSelfContainedGenesis(
-            header: header,
-            context: context,
-            directory: directory,
-            fetcher: fetcher,
-            confirmParentRecordedGenesis: confirmParentRecordedGenesis
-        ) ? .activated : .unconfirmed
-    }
-
-    /// Whether this chain still waits for its genesis. Ungated: the phase
-    /// only ever moves forward, so a stale `true` costs one gated no-op.
-    var awaitsGenesis: Bool {
-        if case .awaitingGenesis = runtimePhase { return true }
-        return false
-    }
-
-    /// Bootstrap a resolved self-contained child genesis (seed-built or
-    /// adopted-by-fetch). Fail-closed gate: only admits a genesis the parent
-    /// actually recorded for this directory — this node holds no copy of the
-    /// parent's committed genesisState, so it asks the co-hosted parent level
-    /// whether it recorded exactly this CID, bound to the empty parent state a
-    /// self-contained genesis commits to. A negative answer leaves the chain
-    /// awaiting the next trigger. The caller holds the mutation operation and
-    /// has confirmed `.awaitingGenesis`.
-    private func bootstrapSelfContainedGenesis(
-        header: BlockHeader,
-        context: ChainRuntimeContext,
-        directory: String,
-        fetcher: any Fetcher,
-        confirmParentRecordedGenesis: (_ childGenesisCID: String) async -> Bool
-    ) async throws -> Bool {
-        guard await confirmParentRecordedGenesis(header.rawCID) else {
-            return false
-        }
-        let parentGenesisLink = ParentGenesisLink(
-            parentPath: Array(context.path.dropLast()),
-            directory: directory,
-            childGenesisCID: header.rawCID,
-            parentStateCID: LatticeState.emptyHeader.rawCID
-        )
-        let importStorage = NodeImportStorage(storage: broker)
-        let result = try await ChainLevel.bootstrap(
-            context: context,
-            genesisHeader: header,
-            fetcher: fetcher,
-            parentGenesisLink: parentGenesisLink,
-            validationContentStorer: importStorage,
-            materializedVolumeStorer: importStorage,
-            stage: { context in
-                let hierarchyArtifacts = context.issuesHierarchyFacts
-                    ? ImportHierarchyArtifacts(
-                        blockCID: header.rawCID,
-                        carrierEvidence: nil,
-                        parentGenesisLinks: context.parentGenesisLinks
-                    )
-                    : nil
-                try await Self.persist(
-                    context.batch,
-                    importStorage: importStorage,
-                    store: self.store,
-                    broker: self.broker,
-                    retentionScope: self.retentionScope,
-                    persistence: ImportPersistence(
-                        hierarchyArtifacts: hierarchyArtifacts
-                    )
-                )
-            }
-        )
-        guard case .accepted(let acceptance) = result else { return false }
-        runtimePhase = .active(acceptance.level)
-        return true
-    }
-
     func importBlock(
         _ blockHeader: BlockHeader,
         authenticatedChildPackage suppliedAuthenticatedChildPackage:
@@ -434,15 +289,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         )
         let stage: @Sendable (BlockImportStagingContext) async throws -> Void = {
             context in
-            // A self-contained genesis is its own root: the facts it issues
-            // carry no parent evidence.
-            let hierarchyArtifacts = context.issuesHierarchyFacts
-                ? ImportHierarchyArtifacts(
-                    blockCID: blockHeader.rawCID,
-                    carrierEvidence: nil,
-                    parentGenesisLinks: context.parentGenesisLinks
-                )
-                : nil
             try Task.checkCancellation()
             try await Self.persist(
                 context.batch,
@@ -450,34 +296,16 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 store: self.store,
                 broker: self.broker,
                 retentionScope: self.retentionScope,
-                persistence: ImportPersistence(
-                    hierarchyArtifacts: hierarchyArtifacts,
-                    incomingCarrierEvidence: hierarchyArtifacts == nil
-                        ? carrierEvidence
-                        : nil
-                )
+                persistence: ImportPersistence(incomingCarrierEvidence: carrierEvidence)
             )
         }
-        // A self-contained child genesis is authorized solely by the parent
-        // RECORDING its CID (a GenesisAction -> genesisState). The authenticated
-        // package carries the parent-issued ParentGenesisLink; without it the
-        // parent has not yet recorded this genesis, so defer (retriable).
-        guard let parentGenesisLink = package.parentGenesisLink else {
-            return NodeImportOutcome(
-                decision: .unavailable(.parentGenesis(
-                    parentPath: Array(configuration.chainPath.dropLast()),
-                    directory: configuration.chainPath.last ?? "",
-                    childGenesisCID: blockHeader.rawCID,
-                    parentStateCID: LatticeState.emptyHeader.rawCID
-                )),
-                sameChainPredecessor: nil
-            )
-        }
+        // A child genesis weighs by its proof and executes like any child
+        // block, its continuity included; no parent record authorizes it.
         let result = try await ChainLevel.bootstrap(
             context: configuration.runtimeContext,
             genesisHeader: blockHeader,
             fetcher: attemptFetcher,
-            parentGenesisLink: parentGenesisLink,
+            childPackage: package,
             validationContentStorer: importStorage,
             materializedVolumeStorer: importStorage,
             stage: stage
@@ -600,7 +428,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         switch preflight {
         case .ready, .duplicate:
             mayRecordEvidence = true
-        case .terminal(let result, _):
+        case .terminal(let result):
             mayRecordEvidence = result.failure == nil
         }
         let carrierEvidence: ImportCarrierEvidence?
@@ -613,10 +441,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             )
         } else {
             carrierEvidence = nil
-        }
-        var directParentGenesisLinks: [ParentGenesisLink] = []
-        if case .terminal(_, let parentGenesisLinks) = preflight {
-            directParentGenesisLinks = parentGenesisLinks
         }
         let stage: @Sendable (BlockImportStagingContext) async throws -> Void = {
             context in
@@ -680,29 +504,11 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                     // state. The owner pin (not the batch-rebuilt retention
                     // scope) is what survives a restart.
                     let roots = await importStorage.takeStoredVolumeRoots()
-                    try await self.broker.pinBatch(
-                        roots: roots,
+                    try await self.broker.retain(roots,
                         owner: Self.validatedOwner(
                             self.retentionScope, blockHeader.rawCID
                         )
                     )
-                    // The weighed tier suppressed hierarchy issuance; validation
-                    // re-derives it, and Lattice says so in the staging
-                    // context. Persist it exactly as the eager path does.
-                    // Persisted BEFORE the marker flips: a crash (or a throw)
-                    // between the two leaves a weighed block the walk simply
-                    // re-validates (the artifact rows are INSERT OR IGNORE), never
-                    // a validated block whose issued facts are lost for good —
-                    // boot reconciliation checks the pin, not the facts.
-                    if context.issuesHierarchyFacts {
-                        try await self.store.persistIssuedHierarchyArtifacts(
-                            ImportHierarchyArtifacts(
-                                blockCID: blockHeader.rawCID,
-                                carrierEvidence: carrierEvidence,
-                                parentGenesisLinks: context.parentGenesisLinks
-                            )
-                        )
-                    }
                     // Appended BEFORE the marker flips, for the same reason the
                     // pin goes first: a crash between leaves a block the walk
                     // simply re-validates (the fact is idempotent by id), never
@@ -726,13 +532,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                 }
                 return
             }
-            let hierarchyArtifacts = context.issuesHierarchyFacts
-                ? ImportHierarchyArtifacts(
-                    blockCID: blockHeader.rawCID,
-                    carrierEvidence: carrierEvidence,
-                    parentGenesisLinks: context.parentGenesisLinks
-                )
-                : nil
             try await Self.persist(
                 context.batch,
                 importStorage: importStorage,
@@ -748,10 +547,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
                         if case .header = mode { return .header }
                         return .executed
                     }(),
-                    hierarchyArtifacts: hierarchyArtifacts,
-                    incomingCarrierEvidence: hierarchyArtifacts == nil
-                        ? carrierEvidence
-                        : nil,
+                    incomingCarrierEvidence: carrierEvidence,
                     consensusRevisionFloor: try Self.nextConsensusRevision(
                         await level.chain.currentRevision()
                     )
@@ -768,12 +564,10 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         }
         let result: BlockImportResult
         switch preflight {
-        case .terminal(let terminal, _):
+        case .terminal(let terminal):
             result = terminal
         case .duplicate(let token):
-            let resolved = try await level.resolveDuplicatePreflight(token)
-            result = resolved.result
-            directParentGenesisLinks = resolved.parentGenesisLinks
+            result = try await level.resolveDuplicatePreflight(token)
         case .ready(let token):
             result = try await level.commitPreflight(
                 token,
@@ -787,20 +581,11 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         // Only an ACCEPTED block records its carrier evidence: a block this
         // chain refused has no reader here, so it writes no edge, proof, fact
         // or pin. A staged acceptance already wrote its evidence in `stage`.
-        // A disconnected accepted block is not yet a parent-fact issuer: its
-        // evidence goes here with no genesis facts, and a later duplicate
-        // retry promotes the exact genesis facts after the predecessor
-        // connects.
-        if !admissionStaged || result.sameChainPredecessor != nil,
-           decision.isAccepted {
+        if !admissionStaged, decision.isAccepted, carrierEvidence != nil {
             try await store.persistIssuedHierarchyArtifacts(
                 ImportHierarchyArtifacts(
                     blockCID: blockHeader.rawCID,
-                    carrierEvidence: carrierEvidence,
-                    parentGenesisLinks: decision.isAccepted
-                        && result.sameChainPredecessor == nil
-                        ? directParentGenesisLinks
-                        : []
+                    carrierEvidence: carrierEvidence
                 )
             )
         }
@@ -965,51 +750,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         return (tip, height)
     }
 
-    /// Anchored `directory -> genesisCID` for exactly `directories`, read from
-    /// the committed `genesisState` subtrie of the tip's post-state by one
-    /// targeted, ungated resolve of just those keys. Cost follows the
-    /// directories asked, not the number of anchored children, so a child is
-    /// found wherever its directory sorts. Unanchored directories (fake
-    /// `.child` peers) just miss the map.
-    func anchoredChildGenesisCIDs(
-        directories: Set<String>
-    ) async -> [String: String] {
-        guard case .active(let level) = runtimePhase, !directories.isEmpty,
-              let tip = await deepestValidatedCanonicalTip(level: level)?.cid
-        else { return [:] }
-        let header = BlockHeader(rawCID: tip, node: nil, encryptionInfo: nil)
-        guard let block = try? await header.resolve(fetcher: localFetcher).node,
-              let state = try? await block.postState.resolve(
-                  fetcher: localFetcher
-              ).node,
-              let genesis = (try? await state.genesisState.resolve(
-                  paths: Dictionary(uniqueKeysWithValues: directories.map {
-                      ([$0], ResolutionStrategy.targeted)
-                  }),
-                  fetcher: localFetcher
-              ))?.node else {
-            return [:]
-        }
-        var anchored: [String: String] = [:]
-        for directory in directories {
-            do {
-                if let genesisCID = try genesis.get(key: directory) {
-                    anchored[directory] = genesisCID
-                }
-            } catch {
-                // A throw here is unloaded content, NOT "no such child". Both
-                // answer the caller with silence, so trace the difference:
-                // an unreadable anchor is exactly the miss this lookup exists
-                // to rule out.
-                syncTrace(
-                    "anchored-child genesis unreadable"
-                        + " directory=\(directory) error=\(error)"
-                )
-            }
-        }
-        return anchored
-    }
-
     /// Same-chain content serving reads only this process's durable local tiers.
     public func content(_ cids: Set<String>) async -> [String: Data] {
         await fetch(cids)
@@ -1100,16 +840,14 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         await localTransactionVolumeStoredForTesting?(volume.rawCID)
         #endif
         try Task.checkCancellation()
-        try await broker.pin(root: volume.rawCID, owner: durableMempoolOwner)
+        try await broker.retain([volume.rawCID], owner: durableMempoolOwner)
         do {
             try await store.persistLocalMempoolTransaction(
                 transactionCID: volume.rawCID,
                 addedAt: addedAt
             )
         } catch {
-            try await broker.unpin(
-                root: volume.rawCID,
-                owner: durableMempoolOwner
+            try await broker.release([volume.rawCID], owner: durableMempoolOwner
             )
             throw error
         }
@@ -1127,7 +865,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         // Eviction uses the same process mutation gate, so publishing the
         // complete Volume and its live owner pin is atomic at the node boundary.
         if !livePinnedMempoolRoots.contains(volume.rawCID) {
-            try await broker.pin(root: volume.rawCID, owner: liveMempoolOwner)
+            try await broker.retain([volume.rawCID], owner: liveMempoolOwner)
             livePinnedMempoolRoots.insert(volume.rawCID)
         }
         return volume.rawCID
@@ -1144,16 +882,13 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         let added = adding.subtracting(livePinnedMempoolRoots)
         let removed = removing.intersection(livePinnedMempoolRoots)
         if !added.isEmpty {
-            try await broker.pinBatch(
-                roots: added.sorted(),
+            try await broker.retain(added.sorted(),
                 owner: liveMempoolOwner
             )
             livePinnedMempoolRoots.formUnion(added)
         }
         if !removed.isEmpty {
-            try await broker.unpinBatch(items: removed.sorted().map {
-                (root: $0, owner: liveMempoolOwner, count: 1)
-            })
+            try await broker.release(Set(removed.sorted()), owner: liveMempoolOwner)
             livePinnedMempoolRoots.subtract(removed)
         }
     }
@@ -1197,9 +932,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         try await store.removeLocalMempoolTransaction(
             transactionCID: transactionCID
         )
-        try await broker.unpin(
-            root: transactionCID,
-            owner: durableMempoolOwner
+        try await broker.release([transactionCID], owner: durableMempoolOwner
         )
     }
 
@@ -1278,8 +1011,6 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// validated when re-read, falls back to the full walk.
     private var validatedTipCache: (cid: String, height: UInt64)?
     private var servedRunDirectories: Set<String> = []
-    private var parentReportsAppliedCount: UInt64 = 0
-    private var parentReportRefusalCounts: [String: UInt64] = [:]
     /// The prefix assumption has one hole: a demoted block (eviction of an
     /// off-main-chain block; boot reconciliation of a marker whose owner pin
     /// is gone) can sit on the main chain BENEATH still-validated blocks —
@@ -1308,7 +1039,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
     /// Test seam: drop a walk-validated block's owner pin, the state boot
     /// reconciliation demotes at the next open.
     func unpinValidatedOwnerForTesting(_ cid: String) async throws {
-        try await broker.unpinAll(owner: Self.validatedOwner(retentionScope, cid))
+        try await broker.advanceRetainedRoots(scope: Self.validatedOwner(retentionScope, cid), roots: [])
     }
     /// Test seam: awaited in `persistLocalTransaction` once the transaction
     /// Volume is stored, before its pin and its SQLite reference.
@@ -1534,23 +1265,16 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
 
     // MARK: - Parent-attributed run work (§9.10)
 
-    /// Start serving run reports for `directory`: this process hosts a child
-    /// chain there. The directory must be one THIS chain has anchored a child
-    /// genesis for — the host names a co-hosted child's directory, and a
-    /// prepare request names one, but a name this chain never committed into
-    /// is refused, so this node never walks its graph for directories it does
-    /// not host (Lattice §9.10: which directories a node serves is its own
+    /// Start keeping runs for `directory`: this process hosts a child chain
+    /// there (Lattice §9.10: which directories a node serves is its own
     /// choice). Idempotent; the served set is NOT persisted (Lattice's lives
     /// in memory), so the host re-serves after every restart. One whole-graph
-    /// walk per directory, on the consensus actor; the node-side set is
-    /// updated only after the walk, so a report read meanwhile finds the
-    /// directory unserved and is nil. Takes no operation gate, but callers
-    /// treat it as one that may: never call it from inside a child level's
-    /// lease (`ChainHost`).
+    /// walk per directory, on the consensus actor. Takes no operation gate,
+    /// but callers treat it as one that may: never call it from inside a
+    /// child level's lease (`ChainHost`).
     func serveRuns(for directory: String) async {
         guard case .active(let level) = runtimePhase,
-              !servedRunDirectories.contains(directory),
-              await anchoredChildGenesisCIDs(directories: [directory])[directory] != nil
+              !servedRunDirectories.contains(directory)
         else { return }
         await level.chain.serveRuns(for: directory)
         servedRunDirectories.insert(directory)
@@ -1560,39 +1284,11 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         servedRunDirectories.sorted()
     }
 
-    /// The run reports an admission of `blockHash` changed: for each served
-    /// directory, the run of the block's nearest committer into it. Every
-    /// admitted block or strengthening with verifiable work credits exactly
-    /// one run per served directory, so this is O(#served) and complete for
-    /// a leaf; the descendants a graft brought in that start their own runs
-    /// are read by the child when it admits the blocks they carry.
-    func runReports(changedBy blockHash: String) async -> [ParentRunReport] {
-        guard case .active(let level) = runtimePhase,
-              !servedRunDirectories.isEmpty,
-              await level.chain.getConsensusBlock(hash: blockHash) != nil
-        else { return [] }
-        var reports: [ParentRunReport] = []
-        for directory in servedRunDirectories.sorted() {
-            guard let carrier = await level.chain.nearestCarrier(
-                      of: blockHash, directory: directory
-                  ),
-                  let report = await level.chain.parentRunReport(
-                      at: carrier, directory: directory
-                  ) else { continue }
-            reports.append(report)
-        }
-        return reports
-    }
-
-    /// One committer's run report, read by a co-hosted child level
-    /// (`ParentLevel.runReport`). Gate-free: it reads the served set and the
-    /// consensus actor, never the operation gate. Nil when
-    /// the directory is not served here or the block is not a committer into
-    /// it — silence, never a claim.
-    func runReport(carrier: String, directory: String) async -> ParentRunReport? {
-        guard case .active(let level) = runtimePhase,
-              servedRunDirectories.contains(directory) else { return nil }
-        return await level.chain.parentRunReport(at: carrier, directory: directory)
+    /// This chain's tree, for a co-hosted child level to derive its parent
+    /// runs from (`ParentLevel.runTree`). Gate-free. Nil until active.
+    func runTree() async -> ChainTree? {
+        guard case .active(let level) = runtimePhase else { return nil }
+        return await level.chain.tree
     }
 
     /// Per directory, the child block the branch through `tipCID` last
@@ -1616,117 +1312,32 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             if carriers[carrier] == nil {
                 carriers[carrier] = await level.chain.getConsensusBlock(hash: carrier)
             }
-            if let child = carriers[carrier]??.childCommitments?[directory] {
+            if let child = carriers[carrier]??.childCommitments[directory] {
                 carried[directory] = child
             }
         }
         return carried
     }
 
-    /// The committing parent blocks of the blocks this chain ACCEPTED with a
-    /// carrier proof, distinct, newest first, bounded to
-    /// `recentCarrierCapacity` — the runs it re-reads from its co-hosted
-    /// parent level when it starts. Durable: read from the carrier edges
-    /// verified at admission, joined on acceptance (a carrier of a block this
-    /// chain refused commits nothing here), so a restarted child re-reads the
-    /// credit a push delivered before the restart, and only for its own blocks.
-    func recentCarriers() async throws -> [String] {
-        try await store.incomingCarriers(limit: Self.recentCarrierCapacity)
-    }
-
-    /// The committing parent blocks behind one block accepted here with a
-    /// carrier proof (§9.10) — whose runs to read from the parent level on its
-    /// admission. From this chain's own verified edges; a malformed edge fails
-    /// the whole read closed. Bounded like `recentCarriers`, so a block carried
-    /// by many parent forks costs a bounded number of reads.
-    func incomingCarriers(of childBlock: String) async throws -> [String] {
-        Array(
-            try await store.incomingParentCarrierBlockCIDs(forChildBlockCID: childBlock)
-                .sorted().prefix(Self.recentCarrierCapacity)
-        )
-    }
-
-    /// The most carriers one re-read names: each costs one O(1) parent read
-    /// and at most one credit.
-    static let recentCarrierCapacity = 256
-
-    public enum ParentReportApplication: Sendable {
-        /// The attributed batch is durable and applied; the commit, if the
-        /// canonical chain moved.
-        /// Credited at `childBlock`: the block this chain's own carrier
-        /// proof says the reported committer commits.
-        case credited(ChainCommit?, childBlock: String)
-        /// Refused by Lattice — typed, so the node can make it visible.
-        case refused(ParentReportStrengthening)
-    }
-
-    /// Credit a parent's run report at the child block it names (§9.10).
-    /// Derived UNDER the mutation lease, staged durably, then replayed — the
-    /// lease is held from the derive through the write and the replay, so a
-    /// report that loses a write-once location (`.locationConflict`) is a
-    /// refusal and never a fact: staged anyway it would be a corrupt graph on
-    /// every restart.
-    func applyParentRunReport(
-        _ report: ParentRunReport,
+    /// Credit this chain with its co-hosted parent's attributed runs (§9.10),
+    /// derived from the parent's tree (which serves this directory) and never
+    /// persisted: every run is derived again, so neither arrival order nor a
+    /// restart loses a credit. Returns whether any block's weight rose; a
+    /// canonical change is published like any admission's.
+    func applyParentRuns(
+        from parent: ChainTree,
         canonicalCommitPublisher: CanonicalCommitPublisher? = nil
-    ) async throws -> ParentReportApplication {
+    ) async throws -> Bool {
         guard case .active(let level) = runtimePhase,
-              let directory = configuration.chainPath.last else {
-            return .refused(.wrongDirectory)
-        }
+              let directory = configuration.chainPath.last,
+              !configuration.address.isNexus else { return false }
         try await acquireMutationOperation()
         defer { releaseOperation() }
-        // The LOCATION is this chain's own knowledge, never the report's: the
-        // block this committer commits comes from the carrier proof verified
-        // at that block's admission. A committer this chain never admitted a
-        // block from names nothing here.
-        guard let childBlock = try await store.incomingCarrierChildBlock(
-            carrier: report.blockHash
-        ) else {
-            // The label predates the carrier naming; dashboards read it.
-            parentReportRefusalCounts["unknownCommitter", default: 0] += 1
-            return .refused(.notCarrierOfChild)
-        }
-        let outcome = await level.chain.strengthenFromParentReport(
-            child: childBlock, directory: directory, report: report
-        )
-        guard case .strengthened(let batch) = outcome else {
-            parentReportRefusalCounts[Self.refusalName(outcome), default: 0] += 1
-            return .refused(outcome)
-        }
-        // No consensus-revision floor: live apply and restore both reach this
-        // batch through `chain.replay`, so the generation it produces is the
-        // same on both paths, and a floor would only push replay past it.
-        try await store.stage(batch, volumeRoots: [])
-        let commit = try await level.chain.replay(batch)
-        parentReportsAppliedCount += 1
-        if let commit, commit.canonicalChanged, let canonicalCommitPublisher {
+        let applied = await level.chain.applyParentRun(from: parent, directory: directory)
+        if let commit = applied.commit, commit.canonicalChanged, let canonicalCommitPublisher {
             _ = await canonicalCommitPublisher(commit)
         }
-        return .credited(commit, childBlock: childBlock)
-    }
-
-    /// Refusal counts by case, for `/metrics`. `notStronger` is routine — a
-    /// re-read of a run already credited, or a push that lost a race to a
-    /// stronger one; the others are the likeliest symptom of a parent-side accounting bug, and
-    /// `locationConflict` is the one that is permanent.
-    func parentReportCounters() -> (applied: UInt64, refusals: [String: UInt64]) {
-        (parentReportsAppliedCount, parentReportRefusalCounts)
-    }
-
-    /// The `/metrics` refusal label. Spelled out rather than derived from the
-    /// Lattice case name, so a rename there cannot silently change a label a
-    /// dashboard reads.
-    static func refusalName(_ outcome: ParentReportStrengthening) -> String {
-        switch outcome {
-        case .strengthened: "strengthened"
-        case .notCarrierOfChild: "notCarrierOfChild"
-        case .wrongDirectory: "wrongDirectory"
-        case .locationConflict: "locationConflict"
-        case .malformedReport: "malformedReport"
-        case .unrepresentable: "unrepresentable"
-        case .notStronger: "notStronger"
-        }
+        return !applied.raised.isEmpty
     }
 
     /// Ungated tip heights for `/metrics`, from ONE validated-tip walk: the
@@ -1753,7 +1364,7 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
         defer { releaseOperation() }
         try Task.checkCancellation()
         try await evictDemotableValidatedBlocks()
-        return try await broker.evictUnpinned()
+        return try await broker.sweep()
     }
 
     /// Budgeted eviction-by-demotion of walk-validated state (fork loss = cache
@@ -1796,8 +1407,8 @@ public actor ChainProcess: ContentSource, Fetcher, VolumeStorer {
             demotedHoleCeiling = max(
                 demotedHoleCeiling ?? candidate.height, candidate.height
             )
-            try await broker.unpinAll(
-                owner: Self.validatedOwner(retentionScope, candidate.cid)
+            try await broker.advanceRetainedRoots(
+                scope: Self.validatedOwner(retentionScope, candidate.cid), roots: []
             )
         }
     }

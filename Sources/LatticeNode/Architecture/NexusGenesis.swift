@@ -37,7 +37,6 @@ public enum NexusGenesis {
             )],
             actions: [],
             depositActions: [],
-            genesisActions: [],
             receiptActions: [],
             withdrawalActions: [],
             signers: [],

@@ -51,14 +51,14 @@ final class CoreHeaderStore: Sendable {
     }
 
     /// A stored header's block node and child index.
-    func header(_ cid: String) -> (block: Block, children: ChildIndex)? {
+    func header(_ cid: String) -> (block: Block, children: FlatDictionary<BlockHeader>)? {
         guard let row = try? database.row(
             CoreHeaderRow.self,
             "SELECT h.block AS block, c.bytes AS children FROM headers h JOIN child_indexes c ON c.cid = h.children_cid WHERE h.cid = ?1",
             params: [.text(cid)]
         ),
               let block = (try? row.block).flatMap(Block.init(data:)),
-              let children = (try? row.children).flatMap(ChildIndex.init(data:))
+              let children = (try? row.children).flatMap(FlatDictionary<BlockHeader>.init(data:))
         else { return nil }
         return (block, children)
     }

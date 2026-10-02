@@ -77,9 +77,6 @@ public protocol ChainInterface: AnyObject, Sendable {
     ) async throws -> NodeImportOutcome
     func submitNetworkTransaction(_ transaction: Transaction) async throws -> Bool
     func transactionInventoryRoots() async -> [String]
-    /// This chain's genesis activated outside candidate admission (adopted
-    /// from the parent's record): its tip moved from nothing.
-    func genesisActivatedOutOfBand() async
 }
 
 /// The service's view of the runtime. Holds the runtime weakly, so the
@@ -157,9 +154,5 @@ final class WeakChain: @unchecked Sendable, ChainInterface {
     func transactionInventoryRoots() async -> [String] {
         guard let service else { return [] }
         return await service.transactionInventoryRoots()
-    }
-
-    func genesisActivatedOutOfBand() async {
-        await service?.genesisActivatedOutOfBand()
     }
 }

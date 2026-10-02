@@ -85,7 +85,6 @@ extension NodeNetworkRuntime {
                 generation: runtimeGeneration,
                 process: process
             )
-            triggerGenesisActivation()
             schedulePeerSearch(
                 generation: runtimeGeneration,
                 process: process
@@ -141,7 +140,6 @@ extension NodeNetworkRuntime {
         overlayState.pendingTransactionInventories.removeAll()
         sessionLeases.activeTransactionVolumes.removeAll()
         genesisAnnounceTask.cancel()
-        genesisActivationRequested = false
         // Joined, not just cancelled: `Task.sleep` unwinds on cancellation but
         // an in-flight dial does not, and the search holds the ChainProcess
         // strongly, so an unjoined task can outlive stop() still holding the
@@ -150,14 +148,6 @@ extension NodeNetworkRuntime {
         let peerSearch = overlayState.peerSearchTask.take()
         peerSearch?.cancel()
         await peerSearch?.value
-        // Joined for the same reason: a genesis activation attempt holds
-        // the ChainProcess and could persist the genesis after stop.
-        let genesisActivation = genesisActivationTask.take()
-        let genesisRetry = genesisRetryTask.take()
-        genesisActivation?.cancel()
-        genesisRetry?.cancel()
-        await genesisActivation?.value
-        await genesisRetry?.value
         sessionLeases.servingAcceptedLeaves.removeAll()
         sessionLeases.servingAncestorRange.removeAll()
         clearRangeSync()

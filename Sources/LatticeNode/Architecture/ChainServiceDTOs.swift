@@ -195,7 +195,6 @@ public struct SubmitWorkResponse: Codable, Sendable {
     public let accepted: Bool
     public let disposition: WorkDisposition
     public let tipCID: String?
-    public let parentGenesisLinks: [ParentGenesisLink]
     public let durableChildProofs: [DirectChildProofSummary]
 }
 

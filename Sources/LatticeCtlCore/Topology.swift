@@ -324,7 +324,7 @@ public struct HostLayout: Sendable {
             ?? FileManager.default.currentDirectoryPath)
     }
 
-    /// Percent-encoded like `pendingDeploy`: `-` is a legal directory atom,
+    /// Percent-encoded: `-` is a legal directory atom,
     /// so flattening `/` to `-` gave `Nexus/A/B` and `Nexus/A-B` one key,
     /// and one process cannot host two levels with one key.
     public func identityKey(for path: String) -> URL {
@@ -362,17 +362,6 @@ public struct HostLayout: Sendable {
 
     public func chainDirectory(for path: String) -> URL {
         root.appendingPathComponent("chains").appendingPathComponent(path)
-    }
-
-    /// An in-flight `child deploy` (genesis seed + signed anchor). Outside the
-    /// wipeable chain directories: the anchor may land on the parent at any
-    /// time, and without this file its genesis could never be rebuilt.
-    public func pendingDeploy(for path: String) -> URL {
-        // Percent-encoded, not `/`-flattened: `-` is a legal directory atom,
-        // so flattening would give `Nexus/A/B` and `Nexus/A-B` one file, and
-        // one child's genesis seed would overwrite the other's.
-        return root.appendingPathComponent("pending-deploy")
-            .appendingPathComponent(Self.encoded(path) + ".json")
     }
 
     private static func encoded(_ path: String) -> String {

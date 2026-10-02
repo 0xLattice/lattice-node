@@ -294,9 +294,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
     static let maximumExactContentSources = 8
     /// Owner: constant; read by +Candidates.
     static let futureCandidateRetryInterval: Duration = .seconds(1)
-    /// How long an anchored genesis that could not be fetched or confirmed
-    /// waits before it is tried again without a trigger.
-    static let genesisRetryNanoseconds: UInt64 = 30_000_000_000
     private static let maximumConcurrentParentStateQueries = 64
     /// Owner: constant; read by +Overlay.
     static let maximumConcurrentTransactionVolumes = 64
@@ -380,20 +377,6 @@ public actor NodeNetworkRuntime: IvyDelegate {
         var childEvidenceAnnounceDirty = false
         var announcedChildEvidenceRoot: String?
     }
-
-    /// The one genesis activation attempt in flight, and whether a trigger
-    /// asked for another since it started.
-    /// Owner: Genesis.triggerGenesisActivation /
-    ///     Genesis.runGenesisActivation / Lifecycle.clearRuntimeState.
-    var genesisActivationTask = TaskSlot()
-    /// Owner: Genesis.triggerGenesisActivation /
-    ///     Genesis.runGenesisActivation / Lifecycle.clearRuntimeState.
-    var genesisActivationRequested = false
-    /// The one slow retry armed after an anchored genesis could not be
-    /// fetched or confirmed.
-    /// Owner: Genesis.armGenesisRetry / Genesis.genesisRetryFired /
-    ///     Genesis.activateGenesisIfRecorded / Lifecycle.clearRuntimeState.
-    var genesisRetryTask = TaskSlot()
 
     /// Owner: overlay code (+Overlay, +RangeSync, overlay +ReadURL).
     var overlayState = OverlayState()
@@ -876,31 +859,11 @@ public actor NodeNetworkRuntime: IvyDelegate {
         expiresAt: UInt64,
         process: ChainProcess
     ) async {
-        // (1) This node's own chain genesis, on its own overlay — peers of
-        // this chain can find providers of it.
+        // This node's own chain genesis, on its own overlay — peers of this
+        // chain can find providers of it.
         if let ownGenesis = await process.canonicalBlockCID(atHeight: 0) {
             await overlay.announceProvider(
                 rootCID: ownGenesis,
-                expiresAt: expiresAt
-            )
-        }
-        // (2) Parent rendezvous: for every child this node hosts, announce
-        // that child's genesis on THIS parent overlay. Any node on the parent
-        // chain can then discoverProviders(childGenesis) and reach a node
-        // serving the child — permissionless, no registry, and discovery is
-        // the global overlay DHT (not this node's connected-peer list).
-        let directories = configuration.hostedChildDirectories
-        let anchored = await process.anchoredChildGenesisCIDs(
-            directories: directories
-        )
-        var announcedChildren: Set<String> = []
-        for directory in directories {
-            guard let childGenesis = anchored[directory],
-                  announcedChildren.insert(childGenesis).inserted else {
-                continue
-            }
-            await overlay.announceProvider(
-                rootCID: childGenesis,
                 expiresAt: expiresAt
             )
         }

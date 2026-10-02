@@ -62,7 +62,7 @@ extension ChainProcess {
     /// `MiningEffect.mined`: the mined block's content, stored and retained
     /// before its header is weighed (content first). Returns its child
     /// index, which the root header is inserted with.
-    nonisolated func storeMinedBlock(_ block: Block) async throws -> ChildIndex {
+    nonisolated func storeMinedBlock(_ block: Block) async throws -> FlatDictionary<BlockHeader> {
         let storage = NodeImportStorage(storage: broker)
         try await BlockHeader(node: block).storeBlock(fetcher: localFetcher, storer: storage)
         try await broker.mergeRetainedRoots(
@@ -95,12 +95,12 @@ extension ChainProcess {
 
     /// A header's content for serving: the driver's header store, or the
     /// block boundary the actor path stored before the driver ran.
-    nonisolated func coreHeader(_ cid: String, headers: CoreHeaderStore) async -> (block: Block, children: ChildIndex)? {
+    nonisolated func coreHeader(_ cid: String, headers: CoreHeaderStore) async -> (block: Block, children: FlatDictionary<BlockHeader>)? {
         if let stored = headers.header(cid) { return stored }
         guard let blockBytes = try? await localFetcher.fetch(rawCid: cid),
               let block = Block(data: blockBytes),
               let childBytes = try? await localFetcher.fetch(rawCid: block.children.rawCID),
-              let children = ChildIndex(data: childBytes) else { return nil }
+              let children = FlatDictionary<BlockHeader>(data: childBytes) else { return nil }
         return (block, children)
     }
 

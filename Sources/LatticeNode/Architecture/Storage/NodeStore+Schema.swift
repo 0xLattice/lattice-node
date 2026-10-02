@@ -30,9 +30,11 @@ extension NodeStore {
     /// the outgoing proofs, routes, prepared proofs, the parent-evidence scan
     /// cursor and inbox, candidate handoffs, and the source identifier.
     /// Epoch 42 adds `core_meta`, the core driver's weigh log id.
+    /// Epoch 43 drops the issued genesis links (`issued_parent_facts` and
+    /// their sources): Lattice 41 deleted child-genesis authorization.
     /// Older stores must be
     /// wiped; Nexus deterministically recreates the configured exact genesis.
-    static let currentSchemaEpoch: Int64 = 42
+    static let currentSchemaEpoch: Int64 = 43
 
     static func validateMetadata(
         in database: NodeSQLite,
@@ -76,8 +78,6 @@ extension NodeStore {
         "admission_batches",
         "admission_facts",
         "accepted_blocks",
-        "issued_parent_fact_sources",
-        "issued_parent_facts",
         "issued_child_edges",
         "issued_child_proofs",
         "child_evidence_root",
@@ -164,20 +164,6 @@ extension NodeStore {
             ) WITHOUT ROWID
             """)
         try database.execute("""
-            CREATE TABLE IF NOT EXISTS issued_parent_fact_sources (
-                payload BLOB PRIMARY KEY
-            ) WITHOUT ROWID
-            """)
-        try database.execute("""
-            CREATE TABLE IF NOT EXISTS issued_parent_facts (
-                kind TEXT NOT NULL,
-                key_a TEXT NOT NULL,
-                key_b TEXT NOT NULL,
-                payload BLOB NOT NULL,
-                PRIMARY KEY (kind, key_a, key_b)
-            ) WITHOUT ROWID
-            """)
-        try database.execute("""
             CREATE TABLE IF NOT EXISTS issued_child_edges (
                 edge_cid TEXT PRIMARY KEY,
                 parent_carrier_cid TEXT NOT NULL,
@@ -249,8 +235,7 @@ extension NodeStore {
     func auditNormalizedIndexes() async throws {
         let staged = try loadStagedImports()
         try auditAdmissionFacts(staged: staged)
-        let connectedAcceptedBlocks = try auditAcceptedBlocks(staged: staged)
-        try auditIssuedParentFacts(connected: connectedAcceptedBlocks)
+        try auditAcceptedBlocks(staged: staged)
         try await auditIssuedChildAttachments()
         try auditContextualCandidates()
     }

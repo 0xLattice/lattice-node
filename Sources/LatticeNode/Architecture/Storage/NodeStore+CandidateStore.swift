@@ -66,8 +66,7 @@ extension NodeStore {
             try touchContextualCandidateOfferLocked(candidateCID)
             return
         }
-        try await recoveryVolumeBroker.pinBatch(
-            roots: canonicalRoots,
+        try await recoveryVolumeBroker.retain(canonicalRoots,
             owner: contextualCandidateOwner
         )
         var evictedRoots: [String] = []

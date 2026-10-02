@@ -753,57 +753,6 @@ private func addPublicReadRoutes<Context: RequestContext>(
             context: context
         )
     }
-    router.get("api/chain/children") { request, context in
-        guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
-            throw HTTPError(.notFound)
-        }
-        let limit = try explorerParseLimit(request, defaultValue: 100, cap: 100)
-        return try jsonCached(
-            await service.explorerChainChildren(limit: limit),
-            cacheControl: statusCacheControl,
-            request: request,
-            context: context
-        )
-    }
-    // Permissionless child discovery: `?chainPath=<parent>/<dir>` names a DIRECT
-    // child of this node's chain. We resolve that child's anchored genesisCID
-    // from our own genesisState, then return the read URLs declared for it: our
-    // own (a wired child's hello declaration) and those of the nodes DHT
-    // discovery finds providing that CID. No registry: a child node becomes
-    // discoverable purely by announcing itself as a provider of its genesis.
-    router.get("api/chain/endpoints") { request, context in
-        guard let requested = request.uri.queryParameters["chainPath"]
-            .map(String.init) else {
-            throw HTTPError(.badRequest)
-        }
-        let own = service.explorerChainPath()
-        let parts = requested.split(separator: "/").map(String.init)
-        guard parts.count == own.count + 1,
-              Array(parts.prefix(own.count)) == own else {
-            // Only direct children of THIS node's chain are resolvable here.
-            throw HTTPError(.notFound)
-        }
-        let directory = parts[own.count]
-        guard let genesisCID = await service.explorerChildGenesisCID(
-            directory: directory
-        ) else {
-            // Not anchored (yet): no error — the explorer treats empty as offline.
-            return try jsonCached(
-                ExplorerEndpoints(endpoints: []),
-                cacheControl: statusCacheControl,
-                request: request,
-                context: context
-            )
-        }
-        let urls = await discoverProviders(genesisCID)
-        return try jsonCached(
-            ExplorerEndpoints(endpoints: urls.map { ExplorerEndpoint(rpcUrl: $0) }),
-            cacheControl: statusCacheControl,
-            request: request,
-            context: context
-        )
-    }
-
 }
 
 /// Unauthenticated writes: registered only on the loopback application, never

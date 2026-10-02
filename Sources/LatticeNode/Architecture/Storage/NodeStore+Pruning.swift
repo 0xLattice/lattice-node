@@ -86,10 +86,6 @@ extension NodeStore {
 
     /// Owner: CandidateStore.persistContextualCandidateRoots / CandidateStore.removeContextualCandidateIfAdmitted — recovery-broker retention write, outside any database transaction.
     func releaseContextualCandidatePins(_ roots: [String]) async {
-        try? await recoveryVolumeBroker.unpinBatch(
-            items: roots.map {
-                (root: $0, owner: contextualCandidateOwner, count: 1)
-            }
-        )
+        try? await recoveryVolumeBroker.release(Set(roots), owner: contextualCandidateOwner)
     }
 }

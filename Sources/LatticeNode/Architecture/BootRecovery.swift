@@ -179,30 +179,28 @@ enum BootRecovery {
             roots: issuedRecoveryRoots
         )
         // Startup is quiescent under the storage-directory lock, so stale
-        // counts can be replaced before any local garbage-collection pass.
-        try await broker.unpinAll(owner: contextualCandidateOwner)
-        try await broker.pinBatch(
-            roots: contextualCandidateRoots,
-            owner: contextualCandidateOwner
+        // roots can be replaced before any local garbage-collection pass.
+        try await broker.advanceRetainedRoots(
+            scope: contextualCandidateOwner, roots: contextualCandidateRoots
         )
         // Pins stand in for the reachability GC planned in P4, which
         // replaces them. Only an index update a crash interrupted leaves
         // them out of step: re-pin what the committed root reaches.
         if try await store.childEvidencePinsDirty() {
             let childEvidenceOwner = await store.childEvidenceOwner
-            try await broker.unpinAll(owner: childEvidenceOwner)
             var missing: [String] = []
+            var reachable: [String] = []
             if let childEvidenceRoot = try await store.childEvidenceRoot() {
                 let volumes = await ChildEvidenceIndex.volumes(
                     root: childEvidenceRoot,
                     fetcher: broker
                 )
-                try await broker.pinBatch(
-                    roots: volumes.reachable,
-                    owner: childEvidenceOwner
-                )
+                reachable = volumes.reachable
                 missing = volumes.missing
             }
+            try await broker.advanceRetainedRoots(
+                scope: childEvidenceOwner, roots: reachable
+            )
             if missing.isEmpty {
                 try await store.setChildEvidencePinsDirty(false)
             } else {
@@ -231,10 +229,9 @@ enum BootRecovery {
         let store = stores.store
         let retentionScope = stores.retentionScope
         // Walk-validated tier invariant: a block is marked `2` iff its body +
-        // post-state are pinned under its owner. Owner pins persist in
-        // volumes.db (unlike the batch-rebuilt scope above). A marker whose
-        // pin is gone is demoted to weighed so the walk re-validates it; a pin
-        // whose marker never flipped (crash between pin and flip) is released.
+        // post-state are retained under its owner's scope. Those scopes persist
+        // in volumes.db (unlike the batch-rebuilt scope above). A marker whose
+        // scope is empty is demoted to weighed so the walk re-validates it.
         // Read BEFORE the demotion below rewrites this column. Demotion is
         // retention bookkeeping — it says a cached post-state may be evicted,
         // not that the transition never ran — so an execution demoted on this
@@ -287,23 +284,12 @@ enum BootRecovery {
             try await store.stage(batch, volumeRoots: [])
         }
         let walkValidated = try await store.executedAndPinnedBlockCIDs()
-        let validatedOwnerPrefix = ChainProcess.validatedOwnerPrefix(retentionScope)
-        let pinnedOwners = Set(
-            await broker.pinnedOwners(prefix: validatedOwnerPrefix)
-        )
         var bootDemoted: [String] = []
-        for blockCID in walkValidated.sorted()
-        where !pinnedOwners.contains(
-            ChainProcess.validatedOwner(retentionScope, blockCID)
-        ) {
+        for blockCID in walkValidated.sorted() where try await broker.retainedRoots(
+            scope: ChainProcess.validatedOwner(retentionScope, blockCID)
+        ).isEmpty {
             try await store.demoteValidated(blockCID: blockCID)
             bootDemoted.append(blockCID)
-        }
-        for owner in pinnedOwners.sorted()
-        where !walkValidated.contains(
-            String(owner.dropFirst(validatedOwnerPrefix.count))
-        ) {
-            try await broker.unpinAll(owner: owner)
         }
         return (migrated, bootDemoted)
     }
@@ -325,14 +311,12 @@ enum BootRecovery {
                 throw ChainProcessError.missingMaterializedVolume(root)
             }
         }
-        try await broker.unpinAll(owner: durableMempoolOwner)
-        try await broker.pinBatch(
-            roots: localMempoolRoots,
-            owner: durableMempoolOwner
+        try await broker.advanceRetainedRoots(
+            scope: durableMempoolOwner, roots: localMempoolRoots
         )
         // The live pool is operational cache, not restart authority. Owner
         // pins support O(changes) updates and are cleared for each process.
-        try await broker.unpinAll(owner: liveMempoolOwner)
+        try await broker.advanceRetainedRoots(scope: liveMempoolOwner, roots: [])
     }
 
     /// Stage 7: the runtime phase — Nexus genesis bootstrapped on an empty
@@ -367,22 +351,13 @@ enum BootRecovery {
                     validationContentStorer: importStorage,
                     materializedVolumeStorer: importStorage,
                     stage: { context in
-                        let hierarchyArtifacts = context.issuesHierarchyFacts
-                            ? ImportHierarchyArtifacts(
-                                blockCID: genesisHeader.rawCID,
-                                carrierEvidence: nil,
-                                parentGenesisLinks: context.parentGenesisLinks
-                            )
-                            : nil
                         try await ChainProcess.persist(
                             context.batch,
                             importStorage: importStorage,
                             store: store,
                             broker: broker,
                             retentionScope: retentionScope,
-                            persistence: ImportPersistence(
-                                hierarchyArtifacts: hierarchyArtifacts
-                            )
+                            persistence: .factsOnly
                         )
                     }
                 )
@@ -407,12 +382,11 @@ enum BootRecovery {
             // The legacy-execution migration was staged before the boot
             // demotion above; replay it alongside the durable log.
             let batches = staged.map(\.batch) + migrated
-            let chain = try await ChainState.restore(
+            runtimePhase = .active(try await ChainLevel.restore(
                 replaying: batches,
-                revisionFloor: try await store.consensusRevisionFloor()
-            )
-            let level = ChainLevel(chain: chain, context: context)
-            runtimePhase = .active(level)
+                revisionFloor: try await store.consensusRevisionFloor(),
+                context: context
+            ))
         }
         return runtimePhase
     }

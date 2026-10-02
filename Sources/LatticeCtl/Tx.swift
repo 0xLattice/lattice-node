@@ -233,7 +233,6 @@ struct TxOptions: ParsableArguments {
             accountActions: actions,
             actions: [],
             depositActions: depositActions,
-            genesisActions: [],
             receiptActions: receiptActions,
             withdrawalActions: withdrawalActions,
             signers: [signer.address],

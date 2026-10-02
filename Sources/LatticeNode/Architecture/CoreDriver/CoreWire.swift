@@ -114,7 +114,7 @@ struct WireHeaderEntry: Codable, Equatable, Sendable {
 
     var isCanonical: Bool {
         Block(data: block)?.toData() == block
-            && (children.map { ChildIndex(data: $0)?.toData() == $0 } ?? true)
+            && (children.map { FlatDictionary<BlockHeader>(data: $0)?.toData() == $0 } ?? true)
             && proofs.count <= Self.maximumProofs
             && proofs.allSatisfy { (try? ChildBlockProof.deserialize($0)?.serialize()) == $0 }
     }
@@ -221,7 +221,7 @@ enum CoreWire {
                     return HeaderEntry(
                         block: block,
                         children: try entry.children.map {
-                            guard let index = ChildIndex(data: $0) else { throw NodeNetworkWireError.malformed }
+                            guard let index = FlatDictionary<BlockHeader>(data: $0) else { throw NodeNetworkWireError.malformed }
                             return index
                         },
                         proofs: try entry.proofs.map {

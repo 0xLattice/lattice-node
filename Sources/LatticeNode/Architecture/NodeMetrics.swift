@@ -12,11 +12,6 @@ struct NodeMetricsSample: Sendable {
     let overlayPeers: Int
     let mempoolTransactions: Int
     let processStartTime: Date
-    /// Parent run reports credited at a child block (§9.10).
-    let parentReportsApplied: UInt64
-    /// Parent run reports refused, by Lattice's typed reason; `locationConflict`
-    /// is the permanent one.
-    let parentReportRefusals: [String: UInt64]
     /// Validate-walk passes parked on a non-verdict (§9.9): a stall the
     /// operator must be able to see, since nothing re-arms it on its own.
     let executionWalkParked: UInt64
@@ -33,8 +28,6 @@ struct NodeMetricsSample: Sendable {
         overlayPeers: Int,
         mempoolTransactions: Int,
         processStartTime: Date,
-        parentReportsApplied: UInt64 = 0,
-        parentReportRefusals: [String: UInt64] = [:],
         executionWalkParked: UInt64 = 0,
         candidateSessionReads: UInt64 = 0
     ) {
@@ -44,8 +37,6 @@ struct NodeMetricsSample: Sendable {
         self.overlayPeers = overlayPeers
         self.mempoolTransactions = mempoolTransactions
         self.processStartTime = processStartTime
-        self.parentReportsApplied = parentReportsApplied
-        self.parentReportRefusals = parentReportRefusals
         self.executionWalkParked = executionWalkParked
         self.candidateSessionReads = candidateSessionReads
     }
@@ -77,20 +68,6 @@ func renderNodeMetrics(_ sample: NodeMetricsSample) -> String {
         "lattice_mempool_transactions",
         "Transactions in the mempool.",
         [(chain, String(sample.mempoolTransactions))]
-    )
-    family(
-        "lattice_parent_run_reports_applied_total",
-        "Parent run reports credited at a child block (Lattice spec 9.10).",
-        [(chain, String(sample.parentReportsApplied))],
-        type: "counter"
-    )
-    family(
-        "lattice_parent_run_reports_refused_total",
-        "Parent run reports refused, by reason; locationConflict is permanent.",
-        sample.parentReportRefusals.sorted { $0.key < $1.key }.map { reason, count in
-            ("\(chain),reason=\"\(escapeMetricLabelValue(reason))\"", String(count))
-        },
-        type: "counter"
     )
     family(
         "lattice_validate_walk_parked_total",

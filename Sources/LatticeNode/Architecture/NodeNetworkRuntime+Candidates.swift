@@ -35,13 +35,11 @@ extension NodeNetworkRuntime {
     }
 
     /// The co-hosted parent level changed. Delivered off the parent's lease;
-    /// it wakes the candidates parked on a parent fact that now holds, and a
-    /// chain still awaiting its genesis looks for the parent's anchor.
+    /// it wakes the candidates parked on a parent fact that now holds.
     func parentChanged(_ change: ParentChange) async {
         switch change {
         case .tipChanged:
             parentTipChanges &+= 1
-            triggerGenesisActivation()
             await retryHeldParentFacts()
         case .runs, .plan:
             // The service's mailbox drains these, never the network.
@@ -542,9 +540,6 @@ extension NodeNetworkRuntime {
         if decision.isAccepted { return .connected }
         if decision == .unavailable(nil), contentShortfall {
             return .wait(.content)
-        }
-        if case .unavailable(.parentGenesis?) = decision {
-            return .wait(.parentFact)
         }
         if case .unavailable(.parentStateContinuity?) = decision {
             return .wait(.parentFact)

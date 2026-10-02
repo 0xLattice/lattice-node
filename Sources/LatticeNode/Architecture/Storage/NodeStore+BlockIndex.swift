@@ -160,31 +160,6 @@ extension NodeStore {
         )?.parentCID
     }
 
-    func hasConnectedAcceptedBlock(_ blockCID: String) throws -> Bool {
-        guard CIDIdentity.isCanonical(blockCID) else {
-            throw NodeStoreError.corrupt("invalid connected block lookup")
-        }
-        return try !database.query(
-            """
-            WITH RECURSIVE connected(block_cid) AS (
-                SELECT block_cid
-                FROM accepted_blocks
-                WHERE parent_cid IS NULL
-                UNION
-                SELECT child.block_cid
-                FROM accepted_blocks AS child
-                JOIN connected AS parent
-                  ON child.parent_cid = parent.block_cid
-            )
-            SELECT 1
-            FROM connected
-            WHERE block_cid = ?1
-            LIMIT 1
-            """,
-            params: [.text(blockCID)]
-        ).isEmpty
-    }
-
     static func acceptedBlocks(
         in batch: BlockImportBatch
     ) throws -> [AcceptedBlockRecord] {
@@ -360,7 +335,7 @@ extension NodeStore {
         }
     }
 
-    func auditAcceptedBlocks(staged: [StagedImport]) throws -> Set<String> {
+    func auditAcceptedBlocks(staged: [StagedImport]) throws {
         var expectedAcceptedBlocks: [String: PersistedAcceptedBlock] = [:]
         for admission in staged {
             for block in try Self.acceptedBlocks(in: admission.batch) {
@@ -396,11 +371,6 @@ extension NodeStore {
                 "accepted-block index does not match immutable batches"
             )
         }
-        var connectedAcceptedBlocks = Set(
-            actualAcceptedBlocks.values.compactMap {
-                $0.parentCID == nil ? $0.blockCID : nil
-            }
-        )
         var childrenByParent: [String: [String]] = [:]
         for block in actualAcceptedBlocks.values {
             if let parentCID = block.parentCID {
@@ -418,13 +388,5 @@ extension NodeStore {
                 params: [.int(childrenByParent[cid] == nil ? 1 : 0), .text(cid)]
             )
         }
-        var connectedQueue = Array(connectedAcceptedBlocks)
-        while let parentCID = connectedQueue.popLast() {
-            for childCID in childrenByParent[parentCID] ?? []
-            where connectedAcceptedBlocks.insert(childCID).inserted {
-                connectedQueue.append(childCID)
-            }
-        }
-        return connectedAcceptedBlocks
     }
 }

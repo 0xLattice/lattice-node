@@ -83,7 +83,6 @@ public struct ChildValidationPackageEnvelope: Sendable {
     }
 
     func makeValidationPackage(
-        parentGenesisLink: ParentGenesisLink? = nil,
         parentStateContinuityLink: ParentStateContinuityLink? = nil
     ) throws -> ChildValidationPackage {
         guard let proof = ChildBlockProof.deserialize(proofBytes) else {
@@ -91,7 +90,6 @@ public struct ChildValidationPackageEnvelope: Sendable {
         }
         return ChildValidationPackage(
             proof: proof,
-            parentGenesisLink: parentGenesisLink,
             parentStateContinuityLink: parentStateContinuityLink
         )
     }
