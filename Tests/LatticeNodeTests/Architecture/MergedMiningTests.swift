@@ -43,11 +43,12 @@ final class MergedMiningTests: XCTestCase {
         XCTAssertFalse((storedProofs[Self.alpha] ?? [:]).isEmpty, "Alpha's credited proofs survive the restart")
         let reopened = try await ChainProcess.open(configuration: configuration)
         let restarted = try await CoreDriver.start(process: reopened, configuration: configuration, overlay: overlay)
-        let resumed = await restarted.levelReads[Self.alpha]?.readSnapshot().height
-        XCTAssertEqual(resumed, alphaHeight)
+        // A block weighed before the stop may execute only now: never lower.
+        let resumed = await restarted.levelReads[Self.alpha]?.readSnapshot().height ?? 0
+        XCTAssertGreaterThanOrEqual(resumed, alphaHeight)
         _ = try await restarted.mineBlock()
         try await eventually("Alpha advances after the restart") {
-            (await restarted.levelReads[Self.alpha]?.readSnapshot().height ?? 0) > alphaHeight
+            (await restarted.levelReads[Self.alpha]?.readSnapshot().height ?? 0) > resumed
         }
         await restarted.stop()
     }
