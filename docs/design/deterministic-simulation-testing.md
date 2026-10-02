@@ -307,8 +307,7 @@ node's observable behaviour against it; it does not restate it.
 4. **Durability precedes visibility.** No graph mutation, canonical publication
    or served reference is observable before the batch behind it is durable. A
    storage failure leaves the accepted graph unchanged. Sources: spec §9.3 and
-   §9.8; NODE-STORAGE-002 in [correctness invariants](../correctness-invariants.md);
-   the atomic mutation section of the composable node architecture.
+   §9.8; the atomic mutation section of the composable node architecture.
 5. **A reference never outlives its bytes.** After any crash, including one
    during eviction, no index, cursor or advertisement promises content the node
    no longer holds. Sources: NODE-STORAGE-002; the recovery invariant in
