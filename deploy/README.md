@@ -6,10 +6,9 @@ were removed because those roles do not exist in Lattice.
 
 ## Rules that every deployment must preserve
 
-1. Supply one absolute `--chain-path` beginning with `Nexus`.
-2. Run every child in the same `lattice-node` process as its ancestry, listed
-   in one `lattice.json` and hosted with `--config`.
-3. Keep the unauthenticated HTTP API on loopback. To serve public reads
+1. `lattice-node` runs Nexus on the core driver; it hosts no child chain
+   yet.
+2. Keep the unauthenticated HTTP API on loopback. To serve public reads
    directly, use `--public-read-port`: a second listener on all interfaces
    carrying ONLY the bounded GET read routes (the read-replica allowlist,
    enforced in code) — chain data is public; the operator/write surface
@@ -26,11 +25,11 @@ were removed because those roles do not exist in Lattice.
    three, so public load can never throttle a platform health check into
    depooling the machine; its cost is bounded instead by serving it from a
    short-TTL cached snapshot, so a flood costs one read per interval.
-4. Expose the same-chain overlay port of each chain.
-5. Run `lattice-mining-coordinator` and external `lattice-miner` workers as
+3. Expose the same-chain overlay port of each chain.
+4. Run `lattice-mining-coordinator` and external `lattice-miner` workers as
    separate processes from the node.
-6. Treat `state.db` and `volumes.db` as one backup and recovery unit.
-7. Use the single pinned Nexus genesis CID:
+5. Treat `state.db` and `volumes.db` as one backup and recovery unit.
+6. Use the single pinned Nexus genesis CID:
    `bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24`.
 
 Deploy a child chain with testing-oriented parameters when an application needs
@@ -88,7 +87,6 @@ docker run --network host \
   -v lattice-data:/home/lattice/.lattice \
   ghcr.io/adalinxx/lattice-node:2.0.0 \
   lattice-node \
-  --chain-path Nexus \
   --data-directory /home/lattice/.lattice/chains/Nexus \
   --identity-key /home/lattice/.lattice/identity/nexus.key \
   --listen-port 4001 \
@@ -106,35 +104,6 @@ docker run --network host \
   --worker-executable /usr/local/bin/lattice-miner \
   --workers 2
 ```
-
-## Child process
-
-A child runs in the same process as its ancestry. Give each chain its own ports
-in `lattice.json`; the host keeps each chain's storage in `chains/<path>` and
-its identity in `identity/<path>.key` under the data root:
-
-```json
-{
-  "chains": {
-    "Nexus": {"listen": 4001, "rpc": 8080},
-    "Nexus/Payments": {"listen": 4101, "rpc": 8180}
-  }
-}
-```
-
-```bash
-lattice-node \
-  --config /var/lib/lattice/lattice.json
-```
-
-The child waits until a separately signed parent `GenesisAction` transaction
-has recorded its self-contained genesis CID. On its start, each parent tip
-change, each child-overlay peer hello, and a slow retry after a failed fetch,
-it reads that CID from its co-hosted parent level, rebuilds the genesis from a
-`child-genesis.json` seed in its data directory (re-read each time) when the
-seed builds that CID, and otherwise fetches it by CID from child-overlay peers.
-It activates once its co-hosted parent confirms the record. It never boots from
-an opaque serialized genesis field.
 
 ## Destructive migration
 
