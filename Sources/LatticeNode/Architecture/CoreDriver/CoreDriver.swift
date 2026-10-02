@@ -496,7 +496,7 @@ extension CoreDriver {
             }
             guard !mining.mempool.contains(cid), !mining.isPending(cid),
                   !transactionFetches.contains(cid), !recentlyFetched.members.contains(cid),
-                  transactionFetches.count < NodeNetworkRuntime.maximumConcurrentTransactionVolumes
+                  transactionFetches.count < 64
             else { return }
             transactionFetches.insert(cid)
             let (ivy, inputs, path, peer) = (ivy, inputs, core.rootPath, session.coreID)

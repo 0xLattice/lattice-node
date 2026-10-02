@@ -44,12 +44,6 @@ extension ChainProcess {
     }
 }
 
-extension NodeNetworkRuntime {
-    nonisolated func syncTrace(_ message: @autoclosure () -> String) {
-        SyncTrace.log(chain: configuration.chainPath, message())
-    }
-}
-
 extension NodeStore {
     nonisolated func syncTrace(_ message: @autoclosure () -> String) {
         SyncTrace.log(chain: chainPath, message())

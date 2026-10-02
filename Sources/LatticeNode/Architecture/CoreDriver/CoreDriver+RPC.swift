@@ -74,10 +74,10 @@ extension CoreDriver {
         // The driver hosts no child level, so only this chain's part of the
         // plan is used.
         let plan = TemplateRequest(
-            rewardRecipient: try ChainService.validatedRecipientPlan(
+            rewardRecipient: try MiningPlan.validatedRecipientPlan(
                 request.recipients, chainPath: chainPath
             ).current,
-            minimumWork: try ChainService.validatedMinimumWorkPlan(
+            minimumWork: try MiningPlan.validatedMinimumWorkPlan(
                 request.minimumWork, chainPath: chainPath
             ).works
         )
@@ -317,9 +317,9 @@ extension CoreDriver {
         guard job.request.parentCarrier == nil,
               let previous = try? await BlockHeader(rawCID: job.tipCID).resolve(fetcher: fetcher).node,
               let spec = try? await previous.spec.resolve(fetcher: fetcher).node,
-              let timestamp = try? ChainService.nextTimestamp(after: previous.timestamp, parentCarrier: nil)
+              let timestamp = try? MiningPlan.nextTimestamp(after: previous.timestamp, parentCarrier: nil)
         else { return nil }
-        let pooled = await ChainService.policyAcceptedTransactions(
+        let pooled = await MiningPlan.policyAcceptedTransactions(
             job.transactions,
             chainPath: chainPath,
             previous: previous,

@@ -106,7 +106,7 @@ extension ChainProcess {
 
     /// Store an execution's materialized post-state: every Volume the
     /// execution loaded, each as its own boundary.
-    private static func storeExecutedState(_ state: LatticeState, in storer: any VolumeStorer) async throws {
+    static func storeExecutedState(_ state: LatticeState, in storer: any VolumeStorer) async throws {
         try await storeLoaded(LatticeStateHeader(node: state), in: storer)
     }
 

@@ -18,22 +18,10 @@ struct NodeMetadataRow: NodeStoreRecord {
 }
 
 extension NodeStore {
-    /// Epoch 38 makes issued and handed-off contextual candidates mutually
-    /// exclusive and gives each handoff an age for budgeted eviction.
-    /// Epoch 39 records the deferred-execution tier (weighed vs validated) on
-    /// each accepted block so recovery reconstructs the validated set.
-    /// Epoch 40 records leaf-ness on each accepted block so the frontier page
-    /// is an index read, not a per-row scan of the accepted history.
-    /// Epoch 41 records the root of the child-evidence index
-    /// (`child_evidence_root`), built fresh from the first admission, and
-    /// drops the parent-to-child proof pipeline: the issuance ordinals and
-    /// the outgoing proofs, routes, prepared proofs, the parent-evidence scan
-    /// cursor and inbox, candidate handoffs, and the source identifier.
-    /// Epoch 42 adds `core_meta`, the core driver's weigh log id.
-    /// Epoch 43 drops the issued genesis links (`issued_parent_facts` and
-    /// their sources): Lattice 41 deleted child-genesis authorization.
-    /// Older stores must be
-    /// wiped; Nexus deterministically recreates the configured exact genesis.
+    /// Epoch 43: the core driver's journal alone (admission batches and
+    /// facts, accepted blocks, the local mempool, the weigh log id). Older
+    /// stores must be wiped; Nexus deterministically recreates the
+    /// configured exact genesis.
     static let currentSchemaEpoch: Int64 = 43
 
     static func validateMetadata(
@@ -74,17 +62,10 @@ extension NodeStore {
 
     static let expectedTables: Set<String> = [
         "node_metadata",
-        "consensus_revision",
         "admission_batches",
         "admission_facts",
         "accepted_blocks",
-        "issued_child_edges",
-        "issued_child_proofs",
-        "child_evidence_root",
-        "child_evidence_pins_dirty",
         "local_mempool_transactions",
-        "contextual_candidates",
-        "contextual_candidate_roots",
         "core_meta",
     ]
 
@@ -133,15 +114,6 @@ extension NodeStore {
 
     private static func createDataTables(in database: NodeSQLite) throws {
         try database.execute("""
-            CREATE TABLE IF NOT EXISTS consensus_revision (
-                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                revision TEXT NOT NULL
-            ) WITHOUT ROWID
-            """)
-        try database.execute(
-            "INSERT OR IGNORE INTO consensus_revision (singleton, revision) VALUES (1, '0')"
-        )
-        try database.execute("""
             CREATE TABLE IF NOT EXISTS admission_batches (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
                 payload BLOB NOT NULL UNIQUE,
@@ -164,61 +136,9 @@ extension NodeStore {
             ) WITHOUT ROWID
             """)
         try database.execute("""
-            CREATE TABLE IF NOT EXISTS issued_child_edges (
-                edge_cid TEXT PRIMARY KEY,
-                parent_carrier_cid TEXT NOT NULL,
-                directory TEXT NOT NULL,
-                child_cid TEXT NOT NULL,
-                UNIQUE (parent_carrier_cid, directory, child_cid)
-            ) WITHOUT ROWID
-            """)
-        try database.execute("""
-            CREATE TABLE IF NOT EXISTS issued_child_proofs (
-                scope TEXT NOT NULL,
-                edge_cid TEXT NOT NULL,
-                root_cid TEXT NOT NULL,
-                attachment_cid TEXT NOT NULL,
-                CHECK (scope = 'incoming_carrier'),
-                PRIMARY KEY (scope, edge_cid, root_cid)
-            )
-            """)
-        try database.execute("""
-            CREATE TABLE IF NOT EXISTS child_evidence_root (
-                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                root_cid TEXT NOT NULL
-            ) WITHOUT ROWID
-            """)
-        try database.execute("""
-            CREATE TABLE IF NOT EXISTS child_evidence_pins_dirty (
-                singleton INTEGER PRIMARY KEY CHECK (singleton = 1)
-            ) WITHOUT ROWID
-            """)
-        try database.execute(
-            "CREATE INDEX IF NOT EXISTS issued_child_edges_by_directory ON issued_child_edges (directory, child_cid, edge_cid)"
-        )
-        try database.execute(
-            "CREATE INDEX IF NOT EXISTS issued_child_edges_by_child ON issued_child_edges (child_cid, parent_carrier_cid, edge_cid)"
-        )
-        try database.execute("""
             CREATE TABLE IF NOT EXISTS local_mempool_transactions (
                 transaction_cid TEXT PRIMARY KEY,
                 added_at INTEGER NOT NULL CHECK (added_at >= 0)
-            ) WITHOUT ROWID
-            """)
-        try database.execute("""
-            CREATE TABLE IF NOT EXISTS contextual_candidates (
-                candidate_cid TEXT PRIMARY KEY,
-                offer_seq INTEGER UNIQUE,
-                issued INTEGER NOT NULL CHECK (issued IN (0, 1)),
-                CHECK (offer_seq IS NULL OR offer_seq > 0),
-                CHECK (issued = 1 OR offer_seq IS NOT NULL)
-            ) WITHOUT ROWID
-            """)
-        try database.execute("""
-            CREATE TABLE IF NOT EXISTS contextual_candidate_roots (
-                candidate_cid TEXT NOT NULL,
-                root_cid TEXT NOT NULL,
-                PRIMARY KEY (candidate_cid, root_cid)
             ) WITHOUT ROWID
             """)
         // The core driver's weigh log id: written with the first core fact.
@@ -232,11 +152,9 @@ extension NodeStore {
 
     /// Boot-time audit of every normalized index against the immutable
     /// admission batches: one audit per table owner, in a fixed order.
-    func auditNormalizedIndexes() async throws {
+    func auditNormalizedIndexes() throws {
         let staged = try loadStagedImports()
         try auditAdmissionFacts(staged: staged)
         try auditAcceptedBlocks(staged: staged)
-        try await auditIssuedChildAttachments()
-        try auditContextualCandidates()
     }
 }

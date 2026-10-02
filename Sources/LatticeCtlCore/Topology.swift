@@ -267,11 +267,8 @@ public struct Topology: Codable {
                   }) else {
                 throw CtlError("chain path is not absolute and Nexus-rooted: \(path)")
             }
-            if address.components.count > 1 {
-                let parent = address.components.dropLast().joined(separator: "/")
-                guard chains[parent] != nil else {
-                    throw CtlError("\(path) has no local parent \(parent); every child needs its immediate parent in the tree")
-                }
+            guard address.isNexus else {
+                throw CtlError("\(path): the node hosts only Nexus; child chains are not supported yet")
             }
             for port in [chain.listen, chain.rpc]
                 + (chain.publicRead.map { [$0] } ?? []) {

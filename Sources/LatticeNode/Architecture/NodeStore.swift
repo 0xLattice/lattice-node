@@ -47,34 +47,17 @@ actor NodeStore {
     let database: NodeSQLite
     let nexusGenesisCID: String
     let chainPath: [String]
-    let recoveryVolumeBroker: any RetainedRootMergeBroker
-    let blockRetentionScope: String
-    let issuedRecoveryRetentionScope: String
-    let contextualCandidateOwner: String
-    private var preparedMutationInFlight = false
-    private var preparedMutationWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(
         databasePath: URL,
         nexusGenesisCID: String,
-        chainPath: [String],
-        recoveryVolumeBroker: any RetainedRootMergeBroker,
-        blockRetentionScope: String,
-        issuedRecoveryRetentionScope: String,
-        contextualCandidateOwner: String
+        chainPath: [String]
     ) throws {
         guard !nexusGenesisCID.isEmpty else {
             throw NodeStoreError.invalidConfiguration("Nexus genesis CID is empty")
         }
         guard chainPath.first == "Nexus", chainPath.allSatisfy({ !$0.isEmpty }) else {
             throw NodeStoreError.invalidConfiguration("chainPath must be absolute and begin with Nexus")
-        }
-        guard !blockRetentionScope.isEmpty,
-              !issuedRecoveryRetentionScope.isEmpty,
-              !contextualCandidateOwner.isEmpty else {
-            throw NodeStoreError.invalidConfiguration(
-                "retention scopes must be nonempty"
-            )
         }
         let database = try NodeSQLite(path: databasePath.path)
         let pathData = try Self.encode(chainPath)
@@ -110,36 +93,8 @@ actor NodeStore {
         self.database = database
         self.nexusGenesisCID = nexusGenesisCID
         self.chainPath = chainPath
-        self.recoveryVolumeBroker = recoveryVolumeBroker
-        self.blockRetentionScope = blockRetentionScope
-        self.issuedRecoveryRetentionScope = issuedRecoveryRetentionScope
-        self.contextualCandidateOwner = contextualCandidateOwner
     }
 
-    func acquirePreparedMutation() async {
-        guard preparedMutationInFlight else {
-            preparedMutationInFlight = true
-            return
-        }
-        await withCheckedContinuation { continuation in
-            preparedMutationWaiters.append(continuation)
-        }
-    }
-
-    func releasePreparedMutation() {
-        guard !preparedMutationWaiters.isEmpty else {
-            preparedMutationInFlight = false
-            return
-        }
-        preparedMutationWaiters.removeFirst().resume()
-    }
-
-    #if DEBUG
-    /// Test seam: the mutations parked at the prepared-mutation gate.
-    func preparedMutationWaiterCountForTesting() -> Int {
-        preparedMutationWaiters.count
-    }
-    #endif
 
     static func encode<T: Encodable>(_ value: T) throws -> Data {
         let encoder = JSONEncoder()
