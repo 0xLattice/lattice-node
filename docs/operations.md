@@ -81,7 +81,7 @@ Important fields:
   no tip-dependent intermediate phase.
 - `chainPath`: the complete path owned by this process.
 - `nexusGenesisCID`: must be
-  `bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24`.
+  `bafyreigsvcxa7kveg7ywaykwqqwvakgtcujds634k4cc6mejyh43pmoqny`.
 - `tipCID` and `height`: null only while a child awaits genesis.
 - `revision`: the local consensus mutation watermark.
 - `mempoolCount` and `mempoolBytes`: bounded service pressure indicators.

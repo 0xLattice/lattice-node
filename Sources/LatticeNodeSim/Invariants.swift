@@ -1,4 +1,5 @@
 import Lattice
+import cashew
 import LatticeNodeCore
 import UInt256
 
@@ -6,7 +7,7 @@ import UInt256
 /// order the core's `persist` effects name them.
 public struct SimStore: Sendable {
     public private(set) var headers: [String: StoredHeader] = [:]
-    public private(set) var childIndexes: [String: ChildIndex] = [:]
+    public private(set) var childIndexes: [String: FlatDictionary<BlockHeader>] = [:]
     /// Each stored header's own proof-of-work, verified once from its bytes.
     public private(set) var ownWork: [String: VerifiedWorkContribution] = [:]
     public private(set) var facts: [BlockImportBatch] = []
@@ -106,9 +107,10 @@ public struct TreeDigest: Equatable, Sendable {
         self.excluded = excluded
     }
 
-    /// The deepest executed block on the best chain, walked from genesis.
+    /// The deepest executed block on the best chain, walked from genesis;
+    /// empty while the genesis root is not executed.
     public var actOnTip: String {
-        canonicalPath.prefix { executed.contains($0) }.last ?? genesis
+        canonicalPath.prefix { executed.contains($0) }.last ?? ""
     }
 }
 

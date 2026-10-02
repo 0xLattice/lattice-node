@@ -39,7 +39,7 @@ receiver can reconstruct and verify the transaction body CID:
 
 ### `GET /health`
 
-### `GET /v1/status`
+### `GET /status`
 
 Both routes return the same chain-process status:
 
@@ -47,7 +47,7 @@ Both routes return the same chain-process status:
 {
   "phase": "active",
   "chainPath": ["Nexus"],
-  "nexusGenesisCID": "bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24",
+  "nexusGenesisCID": "bafyreigsvcxa7kveg7ywaykwqqwvakgtcujds634k4cc6mejyh43pmoqny",
   "tipCID": "<cid>",
   "height": 42,
   "revision": 57,
@@ -61,7 +61,7 @@ Both routes return the same chain-process status:
 validated tip, the transactions a template selects from, and the child
 candidates built on that tip — and is the same value the template response
 carries, so a miner comparing the two learns its work is stale for a change
-at any level of the hierarchy. `/v1/status` serves it; `/health`, the
+at any level of the hierarchy. `/status` serves it; `/health`, the
 non-mutating public read, omits it. Absent before the chain has a tip.
 
 A child reports `phase: "awaitingGenesis"`, with null tip and height, until its
@@ -74,7 +74,7 @@ parent connectivity does not change the meaning of proof-derived work.
 
 ## Transactions
 
-### `POST /v1/transactions`
+### `POST /transactions`
 
 Submit one signed transaction whose body path exactly matches this process.
 
@@ -107,7 +107,7 @@ Mining is an external pipeline: the node issues and later validates work,
 `lattice-mining-coordinator` schedules ranges, and `lattice-miner` workers
 search those ranges.
 
-### `POST /v1/mining/templates`
+### `POST /mining/templates`
 
 Issue bounded, expiring work. This public route is Nexus-only; the template
 reads each co-hosted child level's pre-built candidate in-process while it is
@@ -197,11 +197,11 @@ Response fields:
   it is `searchTarget` alone.
 - `chainPath`: always `["Nexus"]` on this route.
 - `expiresInMilliseconds`: template lifetime.
-- `templateDigest`: the digest described under `/v1/status`; the miner's
+- `templateDigest`: the digest described under `/status`; the miner's
   stale token. A node predating it serves none, and the miner falls back to
   the template's parent CID.
 
-### `POST /v1/mining/work`
+### `POST /mining/work`
 
 ```json
 {"workID": "<workID from the template>", "nonce": 123456}
@@ -231,7 +231,7 @@ target, so it is built offline and deterministically from a seed (the child
 `ChainSpec`, an optional premine recipient, and a timestamp). The parent only
 records its CID. The deployer constructs and signs an ordinary parent
 transaction containing `GenesisAction(directory, blockCID)` and submits it
-through `POST /v1/transactions`. Mining templates select it like any other
+through `POST /transactions`. Mining templates select it like any other
 transaction; the accepted parent block records `directory -> genesisCID` in the
 parent's committed genesis state. The parent's `GET /api/chain/children`
 returns at most 100 of those entries with no offset, so on a parent with more

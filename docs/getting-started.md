@@ -30,7 +30,7 @@ The default storage path is `~/.lattice/chains/Nexus`. On its first start the
 node creates a mode-0600 `process.key`, constructs the deterministic Nexus
 genesis, and verifies its CID:
 
-`bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24`
+`bafyreigsvcxa7kveg7ywaykwqqwvakgtcujds634k4cc6mejyh43pmoqny`
 
 The RPC server listens on loopback. Non-loopback `--rpc-bind` values are
 rejected because the current HTTP surface is unauthenticated.
@@ -74,7 +74,7 @@ peer that must connect has deliberately generated a qualifying identity.
 
 ```bash
 curl http://127.0.0.1:8080/health
-curl http://127.0.0.1:8080/v1/status
+curl http://127.0.0.1:8080/status
 ```
 
 Both endpoints return the process phase, absolute chain path, pinned Nexus
@@ -132,7 +132,7 @@ Each chain keeps its storage in `chains/<path>` and its identity in
    child that was already running must be restarted after the file is written.
 3. Construct and sign a parent transaction carrying the genesis CID in a
    `GenesisAction` for directory `Payments`.
-4. `POST /v1/transactions` on the parent with that transaction.
+4. `POST /transactions` on the parent with that transaction.
 5. Mine the parent with `lattice-mining-coordinator` as usual; the transaction
    is selected like any other.
 

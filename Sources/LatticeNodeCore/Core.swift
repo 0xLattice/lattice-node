@@ -11,7 +11,7 @@ public enum Event: Sendable {
     /// The answer to `Effect.fetchByCID` for a child index: nil ONLY when the
     /// peer definitively does not hold it. A transport failure is no event
     /// (the request's deadline decides).
-    case childIndexFetched(PeerID, cid: String, ChildIndex?)
+    case childIndexFetched(PeerID, cid: String, FlatDictionary<BlockHeader>?)
     /// The shell finished sending the answer a `serveHeaders` effect named.
     case headersServed(PeerID, token: UInt64)
     /// The content layer holds the body Volume of this block locally.
@@ -30,6 +30,9 @@ public enum Event: Sendable {
     /// A child level: the evidence index's proofs for a block
     /// (`Effect.lookupProofs`).
     case proofsFound(childCID: String, [ChildBlockProof])
+    /// A child level: a `verifyProof` job the shell could not run (its block
+    /// is not held): its slot frees, blaming no one.
+    case proofDropped(ProofJob)
     /// A child level: a `verifyProof` job finished.
     case proofVerified(ProofJob, Result<VerifiedChildEvidence, ChildProofVerificationFailure>)
     /// A child level: the evidence index's proofs changed for these blocks.
@@ -51,8 +54,7 @@ public enum DisconnectReason: Sendable, Equatable {
 
 /// The durable form of one step: content first — header content and the
 /// post-states its executions produced, stored, pinned and fsynced — then
-/// the facts that reference it, with the child-genesis links those
-/// executions issued, committed. The shell writes it before executing any
+/// the facts that reference it, committed. The shell writes it before executing any
 /// later effect of the same step. Facts durable without their content is an
 /// ordering violation the shell must prevent: a crash may lose the facts of
 /// durable content, never the reverse.
@@ -63,9 +65,6 @@ public struct PersistBatch: Sendable {
     /// references it.
     public let states: [LatticeState]
     public let facts: [BlockImportBatch]
-    /// The child-genesis links this step's executions issued, each with the
-    /// block that issued it.
-    public let genesisLinks: [IssuedGenesisLink]
     /// The stream cursors this step moved, per peer key: written with the
     /// facts that applied the entries they pass, never separately.
     public let cursors: [String: StreamCursor]
@@ -74,26 +73,12 @@ public struct PersistBatch: Sendable {
         headers: [StoredHeader],
         states: [LatticeState] = [],
         facts: [BlockImportBatch],
-        genesisLinks: [IssuedGenesisLink] = [],
         cursors: [String: StreamCursor] = [:]
     ) {
         self.headers = headers
         self.states = states
         self.facts = facts
-        self.genesisLinks = genesisLinks
         self.cursors = cursors
-    }
-}
-
-/// A child-genesis link and the executed block whose `GenesisAction`
-/// authorized it: the link authorizes only while that block is executed.
-public struct IssuedGenesisLink: Sendable, Equatable {
-    public let link: ParentGenesisLink
-    public let issuer: String
-
-    public init(link: ParentGenesisLink, issuer: String) {
-        self.link = link
-        self.issuer = issuer
     }
 }
 
@@ -189,10 +174,13 @@ public struct CoreConfig: Sendable {
         self.bodyRetryCap = bodyRetryCap
     }
 
-    /// A header as it travels: its child index inline when it fits.
-    public func entry(_ block: Block, children: ChildIndex, proofs: [ChildBlockProof] = []) -> HeaderEntry {
+    /// A header as it travels: its children map inline when it fits, and a
+    /// genesis's spec.
+    public func entry(
+        _ block: Block, children: FlatDictionary<BlockHeader>, proofs: [ChildBlockProof] = [], spec: ChainSpec? = nil
+    ) -> HeaderEntry {
         let fits = (children.toData()?.count ?? .max) <= maxInlineChildIndexBytes
-        return HeaderEntry(block: block, children: fits ? children : nil, proofs: proofs)
+        return HeaderEntry(block: block, children: fits ? children : nil, proofs: proofs, spec: spec)
     }
 
     /// The answer the shell sends: `entries` cut at `maxPageBytes` (at least
@@ -232,7 +220,6 @@ public struct Core: Sendable {
     public internal(set) var bodies = Bodies()
     public private(set) var published: Snapshot?
     public let config: CoreConfig
-    public let genesis: String
     public internal(set) var index = WeighedIndex()
     /// The level's mempool and template book, on the act-on tip.
     public internal(set) var mining: Mining
@@ -246,23 +233,26 @@ public struct Core: Sendable {
     /// once executed (or proven invalid), or at once when the block is
     /// weighed off the best chain, which the body window never executes.
     var minedReplies: [String: UInt64] = [:]
+    /// The blocks this step's admissions weighed (`ChainTreeUpdate.weighed`),
+    /// for the host to forward to run attribution. Reset by every step.
+    public internal(set) var weighed: [String] = []
 
-    /// A core over a bootstrapped or restored tree, with its weigh log and
-    /// the per-peer stream cursors the shell persisted. A node whose store
-    /// resets passes a new log id.
+    /// A core over a bootstrapped, restored or empty tree, with its weigh
+    /// log and the per-peer stream cursors the shell persisted. `roots` are
+    /// the tree's genesis roots (default: its best chain's). A node whose
+    /// store resets passes a new log id.
     public init(
         tree: ChainTree,
+        roots: [String]? = nil,
         config: CoreConfig = CoreConfig(),
         log: WeighLog = WeighLog(),
         cursors: [String: StreamCursor] = [:]
     ) {
         var tree = tree
         precondition(tree.context != nil, "the core runs one chain's level")
-        guard let spec = tree.spec else { preconditionFailure("the core runs a chain bound to its genesis spec") }
-        mining = Mining(tipCID: Self.miningTip(of: tree), spec: spec, config: config.mining)
-        let genesis = Self.genesis(of: tree)
+        mining = Mining(tipCID: Self.miningTip(of: tree), spec: Self.actOnSpec(of: tree), config: config.mining)
         var index = WeighedIndex()
-        var stack = [genesis]
+        var stack = roots ?? Self.bestRoot(of: tree)
         while let hash = stack.popLast() {
             guard let meta = tree.getConsensusBlock(hash: hash) else { continue }
             index.add(hash, parent: meta.parentBlockHash, height: meta.blockHeight)
@@ -270,7 +260,6 @@ public struct Core: Sendable {
         }
         self.tree = tree
         self.config = config
-        self.genesis = genesis
         self.index = index
         self.sync.log = log
         self.sync.cursors = cursors
@@ -279,14 +268,21 @@ public struct Core: Sendable {
 
     /// The weigh log the fact log implies, in fact order: each block fact a
     /// header, and at a child level each grind's work fact a proof (keyed by
-    /// its root). The fact log is the one source of truth; attributed runs
-    /// are derived and never logged.
-    static func logEntries(of batches: [BlockImportBatch], isRoot: Bool, genesis: String) -> [LogEntry] {
-        batches.flatMap(\.facts).compactMap { fact in
+    /// its root). A root chain's genesis is configured, never streamed; a
+    /// child genesis weighs by its proofs like any child header. The fact
+    /// log is the one source of truth; attributed runs are derived and never
+    /// facts.
+    static func logEntries(of batches: [BlockImportBatch], isRoot: Bool) -> [LogEntry] {
+        let facts = batches.flatMap(\.facts)
+        let rootGenesis: Set<String> = isRoot ? Set(facts.compactMap {
+            guard case .block(let block) = $0, block.parentBlockHash == nil else { return nil }
+            return block.blockHash
+        }) : []
+        return facts.compactMap { fact in
             switch fact {
-            case .block(let block) where block.blockHash != genesis:
+            case .block(let block) where !rootGenesis.contains(block.blockHash):
                 return .header(block.blockHash)
-            case .work(let work) where !isRoot && work.attributedRun == nil && work.blockHash != genesis:
+            case .work(let work) where !isRoot:
                 return .proof(work.contribution.id, of: work.blockHash)
             default:
                 return nil
@@ -294,29 +290,38 @@ public struct Core: Sendable {
         }
     }
 
-    /// Rebuild a core from its durable facts and the chain's genesis spec
-    /// (the tree binds it to the genesis and holds it from then on).
+    /// Rebuild a core from its durable facts and the specs its genesis roots
+    /// name (the tree binds each to its root). A level with no facts yet is
+    /// an empty tree. A child level passes its restored `parent`, serving
+    /// its directory, so its attributed runs are derived.
     public static func restore(
         replaying facts: [BlockImportBatch],
         context: ChainRuntimeContext,
-        spec: ChainSpec,
+        specs: [ChainSpec],
+        parent: ChainTree? = nil,
         config: CoreConfig = CoreConfig(),
         logID: String = "",
         cursors: [String: StreamCursor] = [:]
     ) throws -> Core {
-        let tree = try ChainTree.restore(replaying: facts, context: context, spec: spec)
+        let tree = facts.isEmpty
+            ? ChainTree.empty(context: context)
+            : try ChainTree.restore(replaying: facts, context: context, specs: specs, parent: parent)
+        let roots = facts.flatMap(\.facts).compactMap { fact -> String? in
+            guard case .block(let block) = fact, block.parentBlockHash == nil else { return nil }
+            return block.blockHash
+        }
         return Core(
             tree: tree,
+            roots: roots,
             config: config,
-            log: WeighLog(id: logID, entries: logEntries(
-                of: facts, isRoot: context.isRoot, genesis: Self.genesis(of: tree)
-            )),
+            log: WeighLog(id: logID, entries: logEntries(of: facts, isRoot: context.isRoot)),
             cursors: cursors
         )
     }
 
     public mutating func step(_ event: Event, now: Int64) -> [Effect] {
         var turn = Turn(now: now)
+        weighed = []
         switch event {
         case .peerReady(let peer):
             guard sync.peers[peer] == nil else { break }
@@ -353,6 +358,11 @@ public struct Core: Sendable {
             tick(&turn)
         case .proofsFound(let cid, let proofs):
             proofsFound(proofs, for: cid, &turn)
+        case .proofDropped(let job):
+            if let checked = sync.proofs.verifying.removeValue(forKey: job.key) {
+                sync.proofs.charge(checked, -1)
+                skipped(job.childCID)
+            }
         case .proofVerified(let job, let result):
             proofVerified(job, result, &turn)
         case .evidenceChanged(let cids):
@@ -380,7 +390,6 @@ public struct Core: Sendable {
         var headers: [StoredHeader] = []
         var states: [LatticeState] = []
         var facts: [BlockImportBatch] = []
-        var genesisLinks: [IssuedGenesisLink] = []
         var effects: [Effect] = []
         /// Child proofs this step credited, to index.
         var indexed: [(childCID: String, proof: ChildBlockProof)] = []
@@ -409,13 +418,12 @@ public struct Core: Sendable {
         // The weigh log follows the fact log: a header precedes its proofs,
         // a parent its children.
         let start = sync.log.count
-        for entry in Self.logEntries(of: turn.facts, isRoot: isRoot, genesis: genesis) { sync.log.append(entry) }
+        for entry in Self.logEntries(of: turn.facts, isRoot: isRoot) { sync.log.append(entry) }
         // At most a page is pushed; `hasMore` has the peer pull the rest.
         let appended = sync.log.page(after: start, limit: config.maxHeadersPerPage, bytes: config.maxPageBytes)
         if !turn.facts.isEmpty || !turn.cursors.isEmpty {
             effects.append(.persist(PersistBatch(
-                headers: turn.headers, states: turn.states, facts: turn.facts, genesisLinks: turn.genesisLinks,
-                cursors: turn.cursors
+                headers: turn.headers, states: turn.states, facts: turn.facts, cursors: turn.cursors
             )))
         }
         effects += turn.indexed.map { .indexProof(childCID: $0.childCID, $0.proof) }
@@ -540,7 +548,7 @@ public struct Core: Sendable {
             requestID = id
             var seen = Set<String>()
             cids = asked.prefix(config.maxHeadersPerPage)
-                .filter { $0 != genesis && index.contains($0) && seen.insert($0).inserted }
+                .filter { !isRootGenesis($0) && index.contains($0) && seen.insert($0).inserted }
         case .stream, .headers:
             return
         }
@@ -552,15 +560,21 @@ public struct Core: Sendable {
         ))
     }
 
+    /// Whether `cid` is a root chain's genesis: configured on every node,
+    /// so never served.
+    func isRootGenesis(_ cid: String) -> Bool {
+        isRoot && index.contains(cid) && index.parent[cid] == nil
+    }
+
     /// The weighed header `cid` and up to `max` of its ancestors (capped by
-    /// the page), child to parent, stopping above genesis: one parent step
-    /// each.
+    /// the page), child to parent, stopping above a root chain's genesis: one
+    /// parent step each.
     func ancestors(of cid: String, max: Int) -> [String] {
-        guard cid != genesis, index.contains(cid) else { return [] }
+        guard !isRootGenesis(cid), index.contains(cid) else { return [] }
         var cids = [cid]
         var current = cid
         let limit = Swift.min(Swift.max(max, 0), config.maxHeadersPerPage)
-        while cids.count <= limit, let parent = index.parent[current], parent != genesis {
+        while cids.count <= limit, let parent = index.parent[current], !isRootGenesis(parent) {
             cids.append(parent)
             current = parent
         }
@@ -757,18 +771,22 @@ public struct Core: Sendable {
             disconnect(peer, .proofOfWorkInvalid, &turn)
             return nil
         }
-        // Structural, never blame: an inline child index that is not the one
-        // the block commits, or a genesis (only bootstrap admits one).
+        // Structural, never blame: an inline children map that is not the
+        // one the block commits, or a root chain's genesis (configured, never
+        // synced).
         if let children = entry.children, Self.cid(of: children) != entry.block.children.rawCID {
             return cid
         }
-        guard entry.block.parent != nil else { return cid }
+        guard entry.block.parent != nil || !isRoot else { return cid }
         let (horizon, overflow) = turn.now.addingReportingOverflow(config.maxFutureDrift)
         if !overflow, entry.block.timestamp > horizon { return cid }
         if let held = sync.pending.entries[cid] {
             announce(cid, by: peer, &turn)
             if let children = entry.children, held.children == nil {
                 sync.pending.setChildren(children, of: cid, bytes: Self.size(of: children))
+            }
+            if held.spec == nil, let spec = Self.bound(entry.spec, by: entry.block) {
+                sync.pending.entries[cid]?.spec = spec
             }
             if !isRoot { offer(entry.proofs, cid: cid, from: peer) }
             dirty(cid, &turn)
@@ -833,8 +851,13 @@ public struct Core: Sendable {
     }
 
     private mutating func evaluate(_ cid: String, _ turn: inout Turn) {
-        guard let header = sync.pending.entries[cid], let parent = header.parent else { return }
+        guard let header = sync.pending.entries[cid] else { return }
         if let time = header.notBefore, time > turn.now { return }
+        guard let parent = header.parent else {
+            // A child genesis: no parent, no schedule.
+            if header.children == nil { want(header, parent: false, &turn) } else { insert(header, &turn) }
+            return
+        }
         if index.contains(parent) {
             if header.children == nil {
                 if scheduleCheck(header, turn.now, &turn) {
@@ -852,8 +875,10 @@ public struct Core: Sendable {
     /// fetch may be spent on the header: target, `nextTarget` and timestamp
     /// against its weighed parent. Returns whether to go on.
     private mutating func scheduleCheck(_ header: PendingHeader, _ now: Int64, _ turn: inout Turn) -> Bool {
-        guard let parentHash = header.parent, let parent = tree.headerSnapshot(of: parentHash),
-              let spec = tree.spec else { return false }
+        guard let parentHash = header.parent, let parent = tree.headerSnapshot(of: parentHash) else { return false }
+        // The schedule is the root's spec's; a parent under a spec mismatch
+        // (whose root spec is not its own) is left to admission.
+        guard let spec = tree.specs[parent.specCID] else { return true }
         let anchor = tree.difficultyAnchor(forBlockHash: parentHash)
         do {
             let admission = try header.block.headerAdmission(
@@ -905,8 +930,12 @@ public struct Core: Sendable {
         case .applied(let update):
             let waiting = sync.pending.childrenOf[cid] ?? []
             sync.removePending(cid)
-            turn.headers.append(StoredHeader(blockCID: cid, block: header.block, children: children))
+            turn.headers.append(StoredHeader(
+                blockCID: cid, block: header.block, children: children,
+                spec: header.parent == nil ? header.spec : nil
+            ))
             turn.facts += update.batches
+            weighed += update.weighed
             index.add(cid, parent: header.parent, height: header.block.height)
             creditRemainingProofs(of: header, &turn)
             for child in waiting { dirty(child, &turn) }
@@ -980,7 +1009,7 @@ public struct Core: Sendable {
     // MARK: - Child indexes
 
     private mutating func childIndexFetched(
-        _ index: ChildIndex?,
+        _ index: FlatDictionary<BlockHeader>?,
         cid: String,
         from peer: PeerID,
         _ turn: inout Turn
@@ -1031,15 +1060,15 @@ public struct Core: Sendable {
 
     // MARK: - Content
 
-    static func cid(of index: ChildIndex) -> String? {
-        try? HeaderImpl<ChildIndex>(node: index).rawCID
+    static func cid(of index: FlatDictionary<BlockHeader>) -> String? {
+        try? HeaderImpl<FlatDictionary<BlockHeader>>(node: index).rawCID
     }
 
     static func size(of block: Block) -> Int {
         block.toData()?.count ?? 0
     }
 
-    static func size(of index: ChildIndex) -> Int {
+    static func size(of index: FlatDictionary<BlockHeader>) -> Int {
         index.toData()?.count ?? 0
     }
 

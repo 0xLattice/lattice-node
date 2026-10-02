@@ -50,50 +50,6 @@ final class TimersTests: XCTestCase {
         XCTAssertEqual(Timers.nanoseconds(.seconds(Int64.max)), UInt64.max)
     }
 
-    func testRetryReturnsTheFirstValueWithCapacity() async {
-        let recorder = Recorder()
-        let result = await Timers.retryWhileCapacityUnavailable(
-            every: .milliseconds(1),
-            attempt: { await recorder.bump() },
-            capacityUnavailable: { $0 < 3 },
-            stillCurrent: { true }
-        )
-        guard case .value(let value) = result else {
-            return XCTFail("expected a value, got \(result)")
-        }
-        XCTAssertEqual(value, 3)
-    }
-
-    func testRetryReportsStaleAfterTheSleep() async {
-        let recorder = Recorder()
-        let result = await Timers.retryWhileCapacityUnavailable(
-            every: .milliseconds(1),
-            attempt: { await recorder.bump() },
-            capacityUnavailable: { _ in true },
-            stillCurrent: { false }
-        )
-        guard case .stale = result else {
-            return XCTFail("expected stale, got \(result)")
-        }
-        let attempts = await recorder.count
-        XCTAssertEqual(attempts, 1)
-    }
-
-    func testRetryReportsCancellation() async {
-        let task = Task { () -> String in
-            let result = await Timers.retryWhileCapacityUnavailable(
-                every: .seconds(10),
-                attempt: { 0 },
-                capacityUnavailable: { _ in true },
-                stillCurrent: { true }
-            )
-            return "\(result)"
-        }
-        task.cancel()
-        let result = await task.value
-        XCTAssertEqual(result, "cancelled")
-    }
-
     func testPollReturnsDoneValue() async {
         let recorder = Recorder()
         let result = await Timers.poll(every: .milliseconds(1), onCancel: -1) {

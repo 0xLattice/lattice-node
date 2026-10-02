@@ -9,41 +9,6 @@ import cashew
 @testable import LatticeNodeDaemon
 
 final class DaemonHTTPTests: XCTestCase {
-    func testVolumeMaintenanceInvokesEviction() async {
-        let invoked = expectation(description: "volume eviction invoked")
-        let counter = MaintenanceInvocationCounter()
-        let task = Task {
-            await runVolumeMaintenance(everyNanoseconds: 1_000_000) {
-                if await counter.record() == 1 {
-                    invoked.fulfill()
-                }
-            }
-        }
-
-        await fulfillment(of: [invoked], timeout: 1)
-        task.cancel()
-        await task.value
-
-        let invocationCount = await counter.value
-        XCTAssertGreaterThanOrEqual(invocationCount, 1)
-    }
-
-    func testVolumeMaintenanceCancellationStopsBeforeEviction() async {
-        let counter = MaintenanceInvocationCounter()
-        let task = Task {
-            await runVolumeMaintenance(everyNanoseconds: 60_000_000_000) {
-                _ = await counter.record()
-            }
-        }
-
-        await Task.yield()
-        task.cancel()
-        await task.value
-
-        let invocationCount = await counter.value
-        XCTAssertEqual(invocationCount, 0)
-    }
-
     func testNexusTemplateDoesNotRequireParentReadiness() async throws {
         let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-http-parent-unavailable-\(UUID().uuidString)"
@@ -54,18 +19,13 @@ final class DaemonHTTPTests: XCTestCase {
             storagePath: storage,
             privateKeyHex: String(repeating: "01", count: 32)
         ))
-        let service = ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
+        let service = try await startDriver(process)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         let body = try JSONEncoder().encode(MiningTemplateRequest())
 
         try await app.test(.router) { client in
             try await client.execute(
-                uri: "/v1/mining/templates",
+                uri: "/mining/templates",
                 method: .post,
                 headers: [.contentType: "application/json"],
                 body: ByteBuffer(bytes: body)
@@ -88,19 +48,14 @@ final class DaemonHTTPTests: XCTestCase {
             storagePath: storage,
             privateKeyHex: String(repeating: "01", count: 32)
         ))
-        let service = ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
+        let service = try await startDriver(process)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         let body = try JSONEncoder().encode(MiningTemplateRequest())
 
         try await app.test(.router) { client in
             for contentType in ["text/plain", "application/x-www-form-urlencoded"] {
                 try await client.execute(
-                    uri: "/v1/mining/templates",
+                    uri: "/mining/templates",
                     method: .post,
                     headers: [.contentType: contentType],
                     body: ByteBuffer(bytes: body)
@@ -112,7 +67,7 @@ final class DaemonHTTPTests: XCTestCase {
             foreign[.contentType] = "application/json"
             foreign.append(.init(name: .init("Host")!, value: "rebound.example:8080"))
             try await client.execute(
-                uri: "/v1/mining/templates",
+                uri: "/mining/templates",
                 method: .post,
                 headers: foreign,
                 body: ByteBuffer(bytes: body)
@@ -120,7 +75,7 @@ final class DaemonHTTPTests: XCTestCase {
                 XCTAssertEqual(response.status, .forbidden)
             }
             try await client.execute(
-                uri: "/v1/mining/templates",
+                uri: "/mining/templates",
                 method: .post,
                 headers: [.contentType: "application/json; charset=utf-8"],
                 body: ByteBuffer(bytes: body)
@@ -155,12 +110,7 @@ final class DaemonHTTPTests: XCTestCase {
             privateKeyHex: String(repeating: "01", count: 32)
         )
         let process = try await ChainProcess.open(configuration: configuration)
-        let service = ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
+        let service = try await startDriver(process)
         let app = makeApplication(
             service: service,
             host: "127.0.0.1",
@@ -171,7 +121,7 @@ final class DaemonHTTPTests: XCTestCase {
         try await app.test(.router) { client in
             var template: MiningTemplateResponse?
             try await client.execute(
-                uri: "/v1/mining/templates",
+                uri: "/mining/templates",
                 method: .post,
                 headers: [.contentType: "application/json"],
                 body: ByteBuffer(bytes: templateRequest)
@@ -191,7 +141,7 @@ final class DaemonHTTPTests: XCTestCase {
                 nonce: 0
             ))
             try await client.execute(
-                uri: "/v1/mining/work",
+                uri: "/mining/work",
                 method: .post,
                 headers: [.contentType: "application/json"],
                 body: ByteBuffer(bytes: workRequest)
@@ -219,12 +169,7 @@ final class DaemonHTTPTests: XCTestCase {
             privateKeyHex: String(repeating: "01", count: 32)
         )
         let process = try await ChainProcess.open(configuration: configuration)
-        let service = ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
+        let service = try await startDriver(process)
 
         let publicApp = makePublicReadApplication(
             service: service,
@@ -242,16 +187,16 @@ final class DaemonHTTPTests: XCTestCase {
                 }
             }
             // The operator surface does not exist here — not merely forbidden.
-            try await client.execute(uri: "/v1/status", method: .get) { response in
+            try await client.execute(uri: "/status", method: .get) { response in
                 XCTAssertEqual(response.status, .notFound)
             }
             // Nor do the removed block routes: blocks are read through /api/block.
-            for uri in ["/v1/blocks", "/v1/blocks/\(configuration.nexusGenesisCID)"] {
+            for uri in ["/blocks", "/blocks/\(configuration.nexusGenesisCID)"] {
                 try await client.execute(uri: uri, method: .get) { response in
                     XCTAssertEqual(response.status, .notFound, uri)
                 }
             }
-            for uri in ["/v1/transactions", "/v1/mining/templates", "/v1/mining/work"] {
+            for uri in ["/transactions", "/mining/templates", "/mining/work"] {
                 try await client.execute(
                     uri: uri,
                     method: .post,
@@ -266,11 +211,14 @@ final class DaemonHTTPTests: XCTestCase {
         // The loopback application still serves the full operator surface.
         let loopback = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         try await loopback.test(.router) { client in
-            try await client.execute(uri: "/v1/status", method: .get) { response in
+            try await client.execute(uri: "/status", method: .get) { response in
                 XCTAssertEqual(response.status, .ok)
             }
+            try await client.execute(uri: "/v1/status", method: .get) { response in
+                XCTAssertEqual(response.status, .notFound)
+            }
             try await client.execute(
-                uri: "/v1/mining/templates",
+                uri: "/mining/templates",
                 method: .post,
                 headers: [.contentType: "application/json"],
                 body: ByteBuffer(bytes: try JSONEncoder().encode(MiningTemplateRequest()))
@@ -309,19 +257,13 @@ final class DaemonHTTPTests: XCTestCase {
             privateKeyHex: String(repeating: "01", count: 32)
         )
         let process = try await ChainProcess.open(configuration: configuration)
-        let service = ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
+        let service = try await startDriver(process)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         let key = CryptoUtils.generateKeyPair()
         let body = TransactionBody(
             accountActions: [],
             actions: [],
             depositActions: [],
-            genesisActions: [],
             receiptActions: [],
             withdrawalActions: [],
             signers: [CryptoUtils.createAddress(from: key.publicKey)],
@@ -341,7 +283,7 @@ final class DaemonHTTPTests: XCTestCase {
 
         try await app.test(.router) { client in
             try await client.execute(
-                uri: "/v1/transactions",
+                uri: "/transactions",
                 method: .post,
                 headers: [.contentType: "application/json"],
                 body: ByteBuffer(bytes: try JSONEncoder().encode(
@@ -366,7 +308,6 @@ final class DaemonHTTPTests: XCTestCase {
                 ],
                 actions: [],
                 depositActions: [],
-                genesisActions: [],
                 receiptActions: [],
                 withdrawalActions: [],
                 signers: [CryptoUtils.createAddress(from: key.publicKey)],
@@ -385,7 +326,7 @@ final class DaemonHTTPTests: XCTestCase {
             )
             XCTAssertNotEqual(rivalHeader.rawCID, bodyHeader.rawCID)
             try await client.execute(
-                uri: "/v1/transactions",
+                uri: "/transactions",
                 method: .post,
                 headers: [.contentType: "application/json"],
                 body: ByteBuffer(bytes: try JSONEncoder().encode(
@@ -402,7 +343,7 @@ final class DaemonHTTPTests: XCTestCase {
             }
 
             try await client.execute(
-                uri: "/v1/transactions/\(transactionCID)",
+                uri: "/transactions/\(transactionCID)",
                 method: .get
             ) { response in
                 XCTAssertEqual(response.status, .ok)
@@ -418,7 +359,7 @@ final class DaemonHTTPTests: XCTestCase {
             // The Nexus genesis CID resolves to content, but not to a
             // Transaction — the type gate must reject it, not serve it.
             try await client.execute(
-                uri: "/v1/transactions/\(configuration.nexusGenesisCID)",
+                uri: "/transactions/\(configuration.nexusGenesisCID)",
                 method: .get
             ) { response in
                 XCTAssertEqual(response.status, .notFound)
@@ -437,17 +378,12 @@ final class DaemonHTTPTests: XCTestCase {
             privateKeyHex: String(repeating: "01", count: 32)
         )
         let process = try await ChainProcess.open(configuration: configuration)
-        let service = ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
+        let service = try await startDriver(process)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
 
         try await app.test(.router) { client in
             try await client.execute(
-                uri: "/v1/transactions/not-a-real-cid",
+                uri: "/transactions/not-a-real-cid",
                 method: .get
             ) { response in
                 XCTAssertEqual(response.status, .badRequest)
@@ -466,12 +402,7 @@ final class DaemonHTTPTests: XCTestCase {
             privateKeyHex: String(repeating: "01", count: 32)
         )
         let process = try await ChainProcess.open(configuration: configuration)
-        let service = ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
+        let service = try await startDriver(process)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         // Nexus genesis premines to this fixed owner address — a known funded
         // account at an accepted block (genesis) with no code needed to mine.
@@ -485,7 +416,6 @@ final class DaemonHTTPTests: XCTestCase {
                 accountActions: [],
                 actions: [],
                 depositActions: [],
-                genesisActions: [],
                 receiptActions: [],
                 withdrawalActions: [],
                 signers: [],
@@ -496,7 +426,7 @@ final class DaemonHTTPTests: XCTestCase {
 
         try await app.test(.router) { client in
             try await client.execute(
-                uri: "/v1/accounts/\(owner)?block=\(genesisCID)",
+                uri: "/accounts/\(owner)?block=\(genesisCID)",
                 method: .get
             ) { response in
                 XCTAssertEqual(response.status, .ok)
@@ -512,13 +442,13 @@ final class DaemonHTTPTests: XCTestCase {
             }
 
             // `block` is required.
-            try await client.execute(uri: "/v1/accounts/\(owner)", method: .get) { response in
+            try await client.execute(uri: "/accounts/\(owner)", method: .get) { response in
                 XCTAssertEqual(response.status, .badRequest)
             }
 
             // Well-formed CID, never accepted as a block.
             try await client.execute(
-                uri: "/v1/accounts/\(owner)?block=\(unknownCID)",
+                uri: "/accounts/\(owner)?block=\(unknownCID)",
                 method: .get
             ) { response in
                 XCTAssertEqual(response.status, .notFound)
@@ -526,13 +456,13 @@ final class DaemonHTTPTests: XCTestCase {
 
             // Malformed owner / block.
             try await client.execute(
-                uri: "/v1/accounts/not-a-real-cid?block=\(genesisCID)",
+                uri: "/accounts/not-a-real-cid?block=\(genesisCID)",
                 method: .get
             ) { response in
                 XCTAssertEqual(response.status, .badRequest)
             }
             try await client.execute(
-                uri: "/v1/accounts/\(owner)?block=not-a-real-cid",
+                uri: "/accounts/\(owner)?block=not-a-real-cid",
                 method: .get
             ) { response in
                 XCTAssertEqual(response.status, .badRequest)
@@ -565,12 +495,7 @@ final class DaemonHTTPTests: XCTestCase {
             privateKeyHex: String(repeating: "01", count: 32)
         )
         let process = try await ChainProcess.open(configuration: configuration)
-        let service = ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
+        let service = try await startDriver(process)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         // Genesis carries the premine transaction, so a transactions page on
         // it has a non-zero total and really reaches the offset arithmetic.
@@ -630,8 +555,8 @@ final class DaemonHTTPTests: XCTestCase {
                 "/api/block/\(segment)/children",
                 "/api/transaction/\(segment)",
                 "/api/state/account/\(segment)",
-                "/v1/transactions/\(segment)",
-                "/v1/accounts/\(segment)?block=\(genesis)",
+                "/transactions/\(segment)",
+                "/accounts/\(segment)?block=\(genesis)",
             ]
         }
         for value in integerEdges {
@@ -640,8 +565,7 @@ final class DaemonHTTPTests: XCTestCase {
                 "/api/block/\(genesis)/transactions?offset=\(query)",
                 "/api/block/\(genesis)/transactions?limit=\(query)",
                 "/api/block/\(genesis)/transactions?offset=\(query)&limit=\(query)",
-                "/v1/accounts/\(genesis)?block=\(query)",
-                "/api/chain/children?limit=\(query)",
+                "/accounts/\(genesis)?block=\(query)",
                 "/api/block/latest?chainPath=\(query)",
             ]
         }
@@ -688,79 +612,6 @@ final class DaemonHTTPTests: XCTestCase {
         }
     }
 
-    func testReadSnapshotMatchesStatusAndNeverBlocksBehindTheOperationGate() async throws {
-        let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-http-readsnapshot-test-\(UUID().uuidString)"
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: storage) }
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: storage,
-            privateKeyHex: String(repeating: "01", count: 32)
-        )
-        let process = try await ChainProcess.open(configuration: configuration)
-        let providerEntered = Latch()
-        let releaseProvider = Latch()
-        let service = ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
-        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
-
-        // Holds the operation gate, as a gated operation in flight does, for
-        // a controlled duration.
-        let blockedTemplate = Task {
-            await service.withOperationForTesting {
-                await providerEntered.open()
-                await releaseProvider.wait()
-            }
-        }
-        await providerEntered.wait()
-
-        // A concurrent call to the GATED status() must queue behind the
-        // in-flight operation.
-        let statusCompleted = CompletionFlag()
-        let blockedStatus = Task { () -> ChainServiceStatusResponse in
-            let result = await service.status()
-            await statusCompleted.markDone()
-            return result
-        }
-        // Give the queued status() call a chance to actually reach (and
-        // block on) the gate before we check it hasn't finished.
-        try await alwaysDuring("status() stays queued behind the held gate", .milliseconds(100)) { !(await statusCompleted.isDone) }
-        let finishedEarly = await statusCompleted.isDone
-        XCTAssertFalse(finishedEarly, "status() must still be queued behind the held operation gate")
-
-        // The UNGATED read must return promptly regardless — over HTTP, the
-        // very surface under test — while the gate is still fully held. /health
-        // is the public non-mutating status endpoint (readSnapshot); /v1/status
-        // stays on the gated, reconciling status().
-        try await app.test(.router) { client in
-            try await client.execute(uri: "/health", method: .get) { response in
-                XCTAssertEqual(response.status, .ok)
-                XCTAssertEqual(response.headers[.cacheControl], statusCacheControl)
-                let snapshot = try JSONDecoder().decode(
-                    ChainServiceStatusResponse.self,
-                    from: Data(response.body.readableBytesView)
-                )
-                XCTAssertEqual(snapshot.phase, .active)
-            }
-        }
-
-        let directSnapshot = await service.reads.readSnapshot()
-        XCTAssertEqual(directSnapshot.phase, .active)
-
-        // Release the held gate and confirm both blocked operations then
-        // complete, proving the earlier non-completion was real contention.
-        await releaseProvider.open()
-        _ = await blockedTemplate.value
-        let gatedStatus = await blockedStatus.value
-        XCTAssertEqual(directSnapshot.tipCID, gatedStatus.tipCID)
-        XCTAssertEqual(directSnapshot.height, gatedStatus.height)
-    }
-
     func testTransactionRoutePreservesConcreteBody() async throws {
         let storage = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-http-test-\(UUID().uuidString)"
@@ -772,12 +623,7 @@ final class DaemonHTTPTests: XCTestCase {
             privateKeyHex: String(repeating: "01", count: 32)
         )
         let process = try await ChainProcess.open(configuration: configuration)
-        let service = ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
+        let service = try await startDriver(process)
         let app = makeApplication(
             service: service,
             host: "127.0.0.1",
@@ -788,7 +634,6 @@ final class DaemonHTTPTests: XCTestCase {
             accountActions: [],
             actions: [],
             depositActions: [],
-            genesisActions: [],
             receiptActions: [],
             withdrawalActions: [],
             signers: [CryptoUtils.createAddress(from: key.publicKey)],
@@ -810,7 +655,7 @@ final class DaemonHTTPTests: XCTestCase {
 
         try await app.test(.router) { client in
             try await client.execute(
-                uri: "/v1/transactions",
+                uri: "/transactions",
                 method: .post,
                 headers: [.contentType: "application/json"],
                 body: ByteBuffer(bytes: requestData)
@@ -834,7 +679,7 @@ final class DaemonHTTPTests: XCTestCase {
 private func mineOneBlock(client: some TestClientProtocol) async throws -> String {
     var template: MiningTemplateResponse?
     try await client.execute(
-        uri: "/v1/mining/templates",
+        uri: "/mining/templates",
         method: .post,
         headers: [.contentType: "application/json"],
         body: ByteBuffer(bytes: try JSONEncoder().encode(MiningTemplateRequest()))
@@ -847,7 +692,7 @@ private func mineOneBlock(client: some TestClientProtocol) async throws -> Strin
     let issued = try XCTUnwrap(template)
     var tipCID: String?
     try await client.execute(
-        uri: "/v1/mining/work",
+        uri: "/mining/work",
         method: .post,
         headers: [.contentType: "application/json"],
         body: ByteBuffer(bytes: try JSONEncoder().encode(
@@ -862,17 +707,6 @@ private func mineOneBlock(client: some TestClientProtocol) async throws -> Strin
         tipCID = submitted.tipCID
     }
     return try XCTUnwrap(tipCID)
-}
-
-private actor MaintenanceInvocationCounter {
-    private var count = 0
-
-    var value: Int { count }
-
-    func record() -> Int {
-        count += 1
-        return count
-    }
 }
 
 private actor CompletionFlag {

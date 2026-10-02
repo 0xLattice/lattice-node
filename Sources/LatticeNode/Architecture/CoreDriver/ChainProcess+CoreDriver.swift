@@ -29,18 +29,23 @@ extension ChainProcess {
         _ batch: PersistBatch,
         logID: String,
         headers: CoreHeaderStore,
-        bodyRoots: [String] = []
+        bodyRoots: [String] = [],
+        into levelStore: NodeStore? = nil
     ) async throws {
         let storage = NodeImportStorage(storage: broker)
         for state in batch.states {
             try await Self.storeExecutedState(state, in: storage)
+        }
+        // A child genesis's spec: what a restore holds as its root's.
+        for spec in batch.headers.compactMap(\.spec) {
+            try await VolumeImpl<ChainSpec>(node: spec).store(storer: storage)
         }
         try headers.store(batch.headers)
         let roots = await storage.takeStoredVolumeRoots() + bodyRoots
         try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
         // PENDING #72 / decision 18d: genesis links are deleted; a Nexus-only
         // driver issues none it would need to keep.
-        try await store.stageCoreFacts(batch.facts, volumeRoots: roots, logID: logID)
+        try await (levelStore ?? store).stageCoreFacts(batch.facts, volumeRoots: roots, logID: logID)
     }
 
     /// `Effect.fetchBody`: the block's Volume and the nested Volumes its
@@ -62,7 +67,7 @@ extension ChainProcess {
     /// `MiningEffect.mined`: the mined block's content, stored and retained
     /// before its header is weighed (content first). Returns its child
     /// index, which the root header is inserted with.
-    nonisolated func storeMinedBlock(_ block: Block) async throws -> ChildIndex {
+    nonisolated func storeMinedBlock(_ block: Block) async throws -> FlatDictionary<BlockHeader> {
         let storage = NodeImportStorage(storage: broker)
         try await BlockHeader(node: block).storeBlock(fetcher: localFetcher, storer: storage)
         try await broker.mergeRetainedRoots(
@@ -72,6 +77,38 @@ extension ChainProcess {
             throw ChainProcessError.missingMaterializedVolume(block.children.rawCID)
         }
         return children
+    }
+
+    /// The child blocks a mined root carries at hosted levels, outermost
+    /// first, each stored and with its proof from this root: only those the
+    /// grind's work meets (a verified contribution).
+    nonisolated func carriedGrinds(of root: Block, hosted: Set<ChainPath>) async throws -> [MinedGrind.Carried] {
+        var carried: [MinedGrind.Carried] = []
+        // (carrier block, its path, the proof from the root to it)
+        var frontier: [(block: Block, path: ChainPath, proof: ChildBlockProof?)] = [(root, configuration.chainPath, nil)]
+        while let (carrier, path, proofToCarrier) = frontier.popLast() {
+            guard let children = carrier.children.node else { continue }
+            for (directory, child) in children.entries.sorted(by: { $0.key < $1.key }) {
+                let childPath = path + [directory]
+                guard hosted.contains(childPath), let block = child.node else { continue }
+                let hop = try await ChildBlockProof.generate(
+                    rootHeader: BlockHeader(node: carrier), childDirectory: directory, fetcher: localFetcher
+                )
+                let proof = proofToCarrier.map { $0.composing(hop: hop) } ?? hop
+                // Only a block the grind's work meets is stored and walked.
+                guard case .success(let evidence) = await proof.verifySecuringWork(child: block, chainPath: childPath),
+                      evidence.contribution != nil else { continue }
+                let storage = NodeImportStorage(storage: broker)
+                try await child.storeBlock(fetcher: localFetcher, storer: storage)
+                try await broker.mergeRetainedRoots(scope: retentionScope, roots: await storage.takeStoredVolumeRoots())
+                frontier.append((block, childPath, proof))
+                guard let grandchildren = try await block.children.resolve(fetcher: localFetcher).node else { continue }
+                carried.append(MinedGrind.Carried(
+                    path: childPath, block: block, children: grandchildren, proof: proof, evidence: evidence
+                ))
+            }
+        }
+        return carried.sorted { $0.path.count < $1.path.count }
     }
 
     /// `MiningEffect.poolChanged`, before any later effect of its step: each
@@ -95,18 +132,26 @@ extension ChainProcess {
 
     /// A header's content for serving: the driver's header store, or the
     /// block boundary the actor path stored before the driver ran.
-    nonisolated func coreHeader(_ cid: String, headers: CoreHeaderStore) async -> (block: Block, children: ChildIndex)? {
+    /// The spec a stored genesis header names, from local content.
+    /// A child genesis header lives in the header store (its body may not be
+    /// fetched yet); its spec Volume was stored with it.
+    nonisolated func coreGenesisSpec(_ cid: String, headers: CoreHeaderStore) async throws -> ChainSpec? {
+        guard let block = await coreHeader(cid, headers: headers)?.block else { return nil }
+        return try await block.spec.resolve(fetcher: localFetcher).node
+    }
+
+    nonisolated func coreHeader(_ cid: String, headers: CoreHeaderStore) async -> (block: Block, children: FlatDictionary<BlockHeader>)? {
         if let stored = headers.header(cid) { return stored }
         guard let blockBytes = try? await localFetcher.fetch(rawCid: cid),
               let block = Block(data: blockBytes),
               let childBytes = try? await localFetcher.fetch(rawCid: block.children.rawCID),
-              let children = ChildIndex(data: childBytes) else { return nil }
+              let children = FlatDictionary<BlockHeader>(data: childBytes) else { return nil }
         return (block, children)
     }
 
     /// Store an execution's materialized post-state: every Volume the
     /// execution loaded, each as its own boundary.
-    private static func storeExecutedState(_ state: LatticeState, in storer: any VolumeStorer) async throws {
+    static func storeExecutedState(_ state: LatticeState, in storer: any VolumeStorer) async throws {
         try await storeLoaded(LatticeStateHeader(node: state), in: storer)
     }
 

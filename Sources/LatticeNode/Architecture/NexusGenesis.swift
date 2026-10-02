@@ -27,7 +27,7 @@ public enum NexusGenesis {
 
     /// Canonical identity of the Nexus bootstrap block.
     public static let expectedBlockHash =
-        "bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24"
+        "bafyreigsvcxa7kveg7ywaykwqqwvakgtcujds634k4cc6mejyh43pmoqny"
 
     public static func buildGenesisBlock(fetcher: any Fetcher) async throws -> Block {
         let body = TransactionBody(
@@ -37,7 +37,6 @@ public enum NexusGenesis {
             )],
             actions: [],
             depositActions: [],
-            genesisActions: [],
             receiptActions: [],
             withdrawalActions: [],
             signers: [],
@@ -65,10 +64,6 @@ public enum NexusGenesis {
             block: block,
             blockHash: try BlockHeader(node: block).rawCID
         )
-    }
-
-    public static func computedBlockHash(fetcher: any Fetcher) async throws -> String {
-        try await create(fetcher: fetcher).blockHash
     }
 
     public static func verifyGenesis(_ result: GenesisResult) throws -> Bool {

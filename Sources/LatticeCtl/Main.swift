@@ -21,7 +21,7 @@ struct LatticeCtl: AsyncParsableCommand {
         abstract: "Bring up and operate a multi-chain Lattice host.",
         subcommands: [
             Init.self, Up.self, Down.self, Status.self,
-            Identity.self, Key.self, Wipe.self, Mine.self, Child.self, Tx.self,
+            Identity.self, Key.self, Wipe.self, Mine.self, Tx.self, Child.self,
             EmitSystemd.self,
         ]
     )

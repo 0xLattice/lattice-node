@@ -381,21 +381,6 @@ struct ChainProcessIvyContentSource: IvyContentSource {
         self.transientRootVolume = transientRootVolume
     }
 
-    func authorizesContentRequest(
-        from peer: AuthenticatedPeer,
-        rootCID: String,
-        cids: [String]
-    ) async -> Bool {
-        false
-    }
-
-    func authorizesVolumeRequest(
-        from peer: AuthenticatedPeer,
-        rootCID: String
-    ) async -> Bool {
-        true
-    }
-
     func content(
         rootCID: String,
         cids: [String],

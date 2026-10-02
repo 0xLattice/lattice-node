@@ -1,536 +1,74 @@
-// Chain-tree evolution: the only two legitimate ways a child exists.
-//
-// `deploy` runs the full arc against the LOCAL parent process: build the
-// self-contained child genesis OFFLINE (empty parentState) → submit ONE signed
-// GenesisAction anchor recording its CID in the parent's genesisState → wait for
-// the parent to record it → record the child in the topology and restart the
-// running host so it hosts the child → child active. The seed and signed
-// anchor are durable before submission, so an interrupted deploy resumes on
-// re-run instead of orphaning a recorded CID.
-// `adopt` joins an EXISTING child permissionlessly: the child level
-// re-derives its genesis through the authenticated parent link, never from "a
-// node that tracks it".
-
-import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 import ArgumentParser
+import Foundation
 import Lattice
 import LatticeCtlCore
-import LatticeMiningCoordinator
-import LatticeProcessWait
 import LatticeNode
-import UInt256
-import VolumeBroker
-import cashew
 
+/// Child chains this host runs as levels of its one process.
 struct Child: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Deploy a new child chain or adopt an existing one.",
-        subcommands: [Deploy.self, Adopt.self]
+        abstract: "Create and host child chains.",
+        subcommands: [Create.self]
     )
 
-    struct Deploy: AsyncParsableCommand {
+    /// Write a child chain's spec and host it. Its genesis is built from the
+    /// spec in the next template that carries it, committing that carrier's
+    /// entering parent state, and weighs by the grind that mines it: no
+    /// deploy record and no authorization on the parent.
+    struct Create: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Deploy a new child of a running local parent."
+            abstract: "Write a child chain's spec and host it; its genesis is mined by merged mining."
         )
 
         @OptionGroup var rootOption: RootOption
 
-        @Argument(help: "Child directory name (e.g. Payments).")
-        var directory: String
-
-        @Option(name: .long, help: "Parent chain path (default: Nexus).")
-        var parent: String = "Nexus"
-
-        @Option(name: .long, help: "ChainSpec JSON file for the child.")
-        var spec: String
-
-        @Option(name: .long, help: "Funded key file (from `lattice key generate`) signing the anchor transaction.")
-        var fund: String
-
-        @Option(name: .long, help: "The funding key's next expected nonce.")
-        var nonce: UInt64 = 0
-
-        @Option(name: .long, help: "Anchor transaction fee.")
-        var fee: UInt64 = 0
-
-        @Option(name: .long, help: "Credit the child spec's premine to this address in the child genesis.")
-        var premineTo: String?
-
-        @Option(name: .long, help: "Wait this many seconds for EXTERNAL mining (a coordinator already running against the parent) to record the anchor, instead of driving local CPU mining rounds. Use on a real-difficulty network where ad-hoc CPU rounds cannot mine a block.")
-        var externalMiningWaitSeconds: UInt64 = 0
-
-        func run() async throws {
-            let layout = rootOption.layout
-            let topology = try Topology.load(root: layout.root).validated()
-            guard let parentChain = topology.chains[parent] else {
-                throw CtlError("parent \(parent) is not in the tree")
-            }
-            let childPath = "\(parent)/\(directory)"
-            guard topology.chains[childPath] == nil else {
-                throw CtlError("\(childPath) is already in the tree")
-            }
-            let chainSpec = try JSONDecoder().decode(
-                ChainSpec.self,
-                from: Data(contentsOf: URL(fileURLWithPath: spec))
-            )
-
-            // Build the self-contained child genesis OFFLINE: empty parentState,
-            // like a root genesis. The parent only RECORDS its CID; it never
-            // carries the genesis. The genesisCID is deterministic in the seed
-            // (spec + premine + timestamp + max target); the child node rebuilds
-            // the identical genesis from the same seed and self-admits it.
-            let childComponents = parent.components(separatedBy: "/") + [directory]
-            // Once the anchor is submitted the parent may record its CID for
-            // good, whether or not this process survives — and the seed (its
-            // millisecond timestamp above all) is the only way back to the
-            // genesis bytes. So the seed and the exact signed anchor are made
-            // durable BEFORE submission, and a re-run for the same child
-            // resumes them instead of minting a new genesis.
-            let pendingURL = layout.pendingDeploy(for: childPath)
-            var resumable: PendingChildDeploy?
-            if FileManager.default.fileExists(atPath: pendingURL.path) {
-                let loaded: PendingChildDeploy
-                do {
-                    loaded = try JSONDecoder().decode(
-                        PendingChildDeploy.self,
-                        from: Data(contentsOf: pendingURL)
-                    )
-                } catch {
-                    throw CtlError("the pending deploy at \(pendingURL.path) could not be read (\(error.localizedDescription)); its genesis CID may already be anchored on the parent while this file is the only copy of the seed behind it, so restore the file rather than deleting it")
-                }
-                guard try HeaderImpl(node: loaded.seed.spec).rawCID
-                        == HeaderImpl(node: chainSpec).rawCID,
-                      loaded.seed.premineTo == premineTo else {
-                    throw CtlError("\(childPath) has a pending deploy with a different --spec or --premine-to (\(pendingURL.path)); its anchor may already be on the parent, so re-run with the original arguments to resume it")
-                }
-                print("resuming pending deploy \(pendingURL.path)")
-                resumable = loaded
-            }
-            let resumed = resumable != nil
-            let seed = resumable?.seed ?? ChildGenesisSeed(
-                spec: chainSpec,
-                premineTo: premineTo,
-                timestamp: Int64(Date().timeIntervalSince1970 * 1000)
-            )
-            let genesisFetcher = CoalescingFetcher(
-                CompositeContentSource([MemoryBroker()])
-            )
-            let genesis = try await ChildGenesisBuilder.build(
-                seed: seed,
-                chainPath: childComponents,
-                fetcher: genesisFetcher
-            )
-            let genesisCID = try BlockHeader(node: genesis).rawCID
-
-            struct KeyFile: Decodable {
-                let privateKey: String
-                let publicKey: String
-            }
-            // Optional: a resume that only resubmits a stored anchor must not
-            // depend on the funding key file still being present.
-            let key = try? JSONDecoder().decode(
-                KeyFile.self,
-                from: Data(contentsOf: URL(fileURLWithPath: fund))
-            )
-            var requested: HeaderImpl<TransactionBody>?
-            if let key {
-                let address = CryptoUtils.createAddress(from: key.publicKey)
-                requested = try HeaderImpl(node: TransactionBody(
-                    accountActions: fee == 0 ? [] : [AccountAction(
-                        owner: address, delta: -Int64(fee)
-                    )],
-                    actions: [],
-                    depositActions: [],
-                    genesisActions: [GenesisAction(
-                        directory: directory, blockCID: genesisCID
-                    )],
-                    receiptActions: [],
-                    withdrawalActions: [],
-                    signers: [address],
-                    nonce: nonce,
-                    chainPath: [parent].flatMap {
-                        $0 == "Nexus" ? ["Nexus"]
-                            : $0.components(separatedBy: "/")
-                    }
-                ))
-            }
-
-            // Anchors accumulate. A run whose --fund, --nonce and --fee match
-            // one already signed resubmits that exact transaction, which the
-            // pool already knows; a re-signed copy would be a same-nonce rival
-            // it refuses. Anything else is signed and APPENDED, so correcting
-            // a nonce never strands the anchor it corrected: that one may
-            // still be pooled, and returning to the original arguments
-            // resubmits it. Only one can ever be recorded — the parent's
-            // genesis insertion proof rejects a second anchor for the
-            // directory — so the seed kept here activates whichever lands.
-            let pending: PendingChildDeploy
-            let anchor: SubmitTransactionRequest
-            var created: Data?
-            let matching = resumable?.anchors.first {
-                $0.transaction.body.rawCID == requested?.rawCID
-            }
-            if let resumable, let matching {
-                pending = resumable
-                anchor = matching
-            } else if let resumable, requested == nil,
-                      let latest = resumable.anchors.last {
-                print("could not read --fund \(fund); resubmitting the stored anchor unchanged")
-                pending = resumable
-                anchor = latest
-            } else {
-                guard let key, let requested else {
-                    throw CtlError("cannot read the funding key \(fund), which signs the genesis anchor")
-                }
-                guard let signature = TransactionSigning.sign(
-                    bodyHeader: requested, privateKeyHex: key.privateKey
-                ) else {
-                    throw CtlError("anchor signing failed; check the fund key")
-                }
-                anchor = SubmitTransactionRequest(transaction: Transaction(
-                    signatures: [key.publicKey: signature], body: requested
-                ))
-                pending = PendingChildDeploy(
-                    seed: seed, anchors: (resumable?.anchors ?? []) + [anchor]
-                )
-                let encoded = try JSONEncoder().encode(pending)
-                if resumed {
-                    try writeDurably(encoded, to: pendingURL)
-                    print("signed another anchor for this genesis: --fund, --nonce or --fee changed")
-                } else {
-                    // Exclusive: a concurrent deploy of this child may have
-                    // written its own seed since the check above.
-                    guard try createDurably(encoded, at: pendingURL) else {
-                        throw CtlError("another deploy of \(childPath) started at the same time and holds \(pendingURL.path); this run submitted nothing, so re-run to resume that deploy")
-                    }
-                    created = encoded
-                }
-            }
-            print("genesis \(genesisCID)")
-            print("seed \(String(decoding: try JSONEncoder().encode(seed), as: UTF8.self))")
-            // Flushed: a killed process never flushes buffered stdout.
-            fflush(nil)
-
-            // A resumed anchor may already be recorded (skip submission), or
-            // still pooled, or never accepted: resubmitting the identical
-            // transaction covers both — the pool already holds it, or takes it.
-            var recorded = false
-            if resumed {
-                recorded = await parentRecordedGenesis(
-                    rpc: parentChain.rpc,
-                    directory: directory,
-                    genesisCID: genesisCID
-                )
-            }
-            if !recorded {
-                struct SubmitResponse: Decodable { let transactionCID: String }
-                do {
-                    let submitted: SubmitResponse = try await post(
-                        rpc: parentChain.rpc, path: "v1/transactions",
-                        body: anchor
-                    )
-                    print("anchor \(submitted.transactionCID)")
-                    fflush(nil)
-                } catch let refusal as CtlError {
-                    // The parent answered and refused. A fresh anchor never
-                    // left this process, so nothing can ever record it. A
-                    // resumed one may have been refused only because it just
-                    // landed; otherwise it stays pending for the operator.
-                    if let created {
-                        // Only if the file is still this run's own seed.
-                        removeIfUnchanged(pendingURL, expected: created)
-                        throw CtlError("the parent refused the genesis anchor; nothing was recorded: \(refusal)")
-                    }
-                    guard await parentRecordedGenesis(
-                        rpc: parentChain.rpc,
-                        directory: directory,
-                        genesisCID: genesisCID
-                    ) else {
-                        throw CtlError("the parent refused the pending genesis anchor (\(refusal)); it stays pending at \(pendingURL.path). Re-run with a corrected --nonce, a higher --fee or another --fund to sign another anchor for the same genesis, or with the values an earlier run used to resubmit that anchor")
-                    }
-                    recorded = true
-                } catch {
-                    throw CtlError("submitting the genesis anchor failed (\(error.localizedDescription)) and it may still have reached the parent; it stays pending at \(pendingURL.path), so re-run the same command to resume it")
-                }
-            }
-
-            // The anchor is now an ordinary mempool transaction: a NORMAL
-            // parent block writes `directory -> genesisCID` into the parent's
-            // committed genesisState. Nothing else mines it here, so the CLI
-            // drives that mining itself — one NORMAL-mode `--once` round per
-            // iteration (no `--deployment`: a self-contained genesis is not a
-            // deployment subtree) — until the parent has durably recorded the
-            // CID. The child is recorded only then.
-            //
-            // Mine the TREE ROOT, not the immediate parent: a child chain's
-            // block is co-mined from the root, whose round cascades carriers
-            // down to the immediate parent (where the anchor mempool and the
-            // genesisState record live). For a direct child root == parent;
-            // for a grandchild they differ, so mining the parent would never
-            // advance it. The gate below still checks the immediate parent.
-            let rootPath = parent.components(separatedBy: "/")[0]
-            guard let rootChain = topology.chains[rootPath] else {
-                throw CtlError("the tree has no \(rootPath) root to mine from")
-            }
-            let worker = try nodeBinary().deletingLastPathComponent()
-                .appendingPathComponent("lattice-miner")
-            if !recorded, externalMiningWaitSeconds > 0 {
-                // The anchor is an ordinary mempool transaction; on a network
-                // with real miners the next parent block records it. Poll only.
-                let deadline = Date().addingTimeInterval(
-                    TimeInterval(externalMiningWaitSeconds)
-                )
-                while Date() < deadline {
-                    if await parentRecordedGenesis(
-                        rpc: parentChain.rpc,
-                        directory: directory,
-                        genesisCID: genesisCID
-                    ) {
-                        recorded = true
-                        break
-                    }
-                    try await Task.sleep(for: .seconds(10))
-                }
-            } else if !recorded {
-                let multiplier = topology.mine?.roundDeadlineMultiplier
-                    ?? MiningRoundDeadline.defaultMultiplier
-                for _ in 0..<20 {
-                    // Observed per attempt, from the ROOT chain's node --
-                    // the one these rounds mine against, which for a
-                    // grandchild is not the parent. Per attempt, because a
-                    // transient RPC failure must not abort a deploy that
-                    // used to retry; this loop's own budget bounds it.
-                    guard let expiry = await observedTemplateExpiry(
-                        rootChain.rpc,
-                        // The body the deploy coordinator below sends.
-                        body: try MiningTemplateRequestBody.make(
-                            recipients: [], deployment: false, minimumWork: []
-                        ),
-                        timeoutSeconds: topology.mine?
-                            .resolvedTemplateTimeoutSeconds
-                            ?? TopologyMine.defaultTemplateTimeoutSeconds
-                    ) else {
-                        try await Task.sleep(for: .seconds(2))
-                        continue
-                    }
-                    let deployRoundDeadline = MiningRoundDeadline.deadline(
-                        templateExpiry: expiry,
-                        longestCompletedRound: .zero,
-                        multiplier: multiplier
-                    )
-                    let coordinator = Process()
-                    coordinator.executableURL = try nodeBinary()
-                        .deletingLastPathComponent()
-                        .appendingPathComponent("lattice-mining-coordinator")
-                    coordinator.arguments = [
-                        "--node", "http://127.0.0.1:\(rootChain.rpc)",
-                        "--worker-executable", worker.path,
-                        "--workers", "1", "--once",
-                    ]
-                    // Fresh /dev/null per spawn: corelibs closes the shared
-                    // nullDevice singleton's fd after a process exits, so
-                    // reusing it across the loop throws EBADF.
-                    let devNull = FileHandle(forWritingAtPath: "/dev/null")
-                    coordinator.standardOutput = devNull ?? FileHandle.nullDevice
-                    coordinator.standardError = devNull ?? FileHandle.nullDevice
-                    // Bounded like every other coordinator round (#62):
-                    // a deploy that parks forever on an exited coordinator
-                    // strands a recorded genesis CID.
-                    let round = try runBounded(
-                        coordinator, deadline: deployRoundDeadline
-                    )
-                    if await round.wait() == .deadlineExceeded {
-                        print("mining round exceeded \(deployRoundDeadline) and its process group was killed; retrying")
-                    }
-                    try? devNull?.close()
-                    if await parentRecordedGenesis(
-                        rpc: parentChain.rpc,
-                        directory: directory,
-                        genesisCID: genesisCID
-                    ) {
-                        recorded = true
-                        break
-                    }
-                    try await Task.sleep(for: .seconds(2))
-                }
-            }
-            guard recorded else {
-                throw CtlError("the genesis anchor was not recorded yet; the child was NOT added. It stays pending at \(pendingURL.path): re-run the same command to keep waiting, with a corrected --nonce or a higher --fee to sign another anchor for the same genesis, or with the values an earlier run used to resubmit that anchor")
-            }
-            // Seed the child's data directory with the genesis inputs so its node
-            // rebuilds the identical self-contained genesis and self-admits it on
-            // startup (the parent has already recorded the CID above). This
-            // precedes the topology entry: a re-run refuses a child already in
-            // the tree, so the tree must never list a child without its seed.
-            let childData = layout.chainDirectory(for: childPath)
-            try writeDurably(
-                JSONEncoder().encode(seed),
-                to: childData.appendingPathComponent("child-genesis.json")
-            )
-            // Re-read, add and save under the spawn lock, so a concurrent
-            // deploy or adopt cannot lose this entry, and restart the host
-            // on the file just saved.
-            let (ports, restarted) = try await withSpawnLock(layout) {
-                var current = try Topology.load(root: layout.root).validated()
-                guard current.chains[childPath] == nil else {
-                    throw CtlError("\(childPath) is already in the tree")
-                }
-                let ports = nextFreePorts(current)
-                current.chains[childPath] = TopologyChain(
-                    listen: ports.0, rpc: ports.1, peers: nil
-                )
-                try current.validated().save(root: layout.root)
-                // The child's own directory now carries the seed.
-                try? FileManager.default.removeItem(at: pendingURL)
-                return (ports, try await restartHostIfRunningLocked(layout))
-            }
-            guard restarted else {
-                print("\(childPath): added; `lattice up` starts it")
-                return
-            }
-            try await waitActive(childPath, rpc: ports.1)
-            print("\(childPath): active")
-        }
-    }
-
-    struct Adopt: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(
-            abstract: "Join an existing child chain through the local parent."
-        )
-
-        @OptionGroup var rootOption: RootOption
-
-        @Argument(help: "Absolute child path (e.g. Nexus/Payments).")
+        @Argument(help: "The child chain's path, e.g. Nexus/Alpha (its parent is Nexus or a hosted child; a nested genesis is mined once its parent has executed a block).")
         var path: String
 
+        @Option(help: "A ChainSpec JSON file (every field, maxBlockSize and wasmPolicies included); flags below build one otherwise.")
+        var spec: String?
+
+        @Option(help: "Target block time, milliseconds.")
+        var blockTime: UInt64 = 10_000
+
+        @Option(help: "Initial block reward.")
+        var reward: UInt64 = 1_000
+
+        @Option(help: "Premine to the genesis's reward recipient.")
+        var premine: UInt64 = 0
+
         func run() async throws {
             let layout = rootOption.layout
-            // Load, add, save and restart under the spawn lock, so a
-            // concurrent deploy or adopt cannot lose this entry.
-            let restarted = try await withSpawnLock(layout) {
-                var topology = try Topology.load(root: layout.root).validated()
-                guard topology.chains[path] == nil else {
-                    throw CtlError("\(path) is already in the tree")
-                }
-                let ports = nextFreePorts(topology)
-                topology.chains[path] = TopologyChain(
-                    listen: ports.0, rpc: ports.1, peers: nil
+            var topology = try Topology.load(root: layout.root)
+            guard var nexus = topology.chains["Nexus"] else { throw CtlError("the tree has no Nexus chain") }
+            let chainSpec: ChainSpec
+            if let spec {
+                chainSpec = try JSONDecoder().decode(ChainSpec.self, from: Data(contentsOf: URL(fileURLWithPath: spec)))
+            } else {
+                chainSpec = ChainSpec(
+                    maxNumberOfTransactionsPerBlock: 1_000, maxStateGrowth: 1_000_000, premine: premine,
+                    targetBlockTime: blockTime, initialReward: reward, halvingInterval: 1_000_000, halfLife: 100
                 )
-                _ = try topology.validated()
-                try topology.save(root: layout.root)
-                return try await restartHostIfRunningLocked(layout)
             }
-            guard restarted else {
-                print("\(path): added; `lattice up` starts it")
-                return
+            // A chain is created once: its spec fixes its genesis.
+            guard !(nexus.children ?? []).contains(path),
+                  !FileManager.default.fileExists(atPath: layout.childSpec(for: path).path) else {
+                throw CtlError("\(path) already exists; a child chain is created once")
             }
-            print("\(path): started; awaiting authenticated genesis from the parent")
-        }
-    }
-}
-
-/// What a deploy cannot re-derive once its anchors may be on the parent: the
-/// genesis seed, and every anchor signed for it. They accumulate rather than
-/// replace each other, so a run that matches one resubmits that exact
-/// transaction (a re-signed copy is a same-nonce rival the pool refuses),
-/// and a correction leaves the anchor it corrected reachable.
-struct PendingChildDeploy: Codable {
-    let seed: ChildGenesisSeed
-    let anchors: [SubmitTransactionRequest]
-}
-
-/// Free means free on this HOST, not merely absent from the file: another
-/// root's tree (or a lingering process) may hold a port the topology has
-/// never heard of, and a child that cannot bind dies at launch while health
-/// probes silently hit the squatter.
-func nextFreePorts(_ topology: Topology) -> (UInt16, UInt16) {
-    let used = topology.chains.values.flatMap { [$0.listen, $0.rpc] }
-    var base: UInt16 = 4101
-    while used.contains(base) || used.contains(base + 2)
-        || !portIsBindable(base) || !portIsBindable(base + 2) {
-        base += 100
-    }
-    return (base, base + 2)
-}
-
-func portIsBindable(_ port: UInt16) -> Bool {
-    #if canImport(Darwin)
-    let descriptor = socket(AF_INET, SOCK_STREAM, 0)
-    #else
-    let descriptor = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
-    #endif
-    guard descriptor >= 0 else { return false }
-    defer { close(descriptor) }
-    var address = sockaddr_in()
-    address.sin_family = sa_family_t(AF_INET)
-    address.sin_port = port.bigEndian
-    address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
-    return withUnsafePointer(to: &address) { pointer in
-        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-            Foundation.bind(
-                descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size)
+            nexus.children = (nexus.children ?? []) + [path]
+            topology.chains["Nexus"] = nexus
+            _ = try topology.validated()
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+            let file = layout.childSpec(for: path)
+            try FileManager.default.createDirectory(
+                at: file.deletingLastPathComponent(), withIntermediateDirectories: true
             )
+            try encoder.encode(chainSpec).write(to: file, options: .atomic)
+            try topology.save(root: layout.root)
+            let restarted = try await withSpawnLock(layout) { try await restartHostIfRunningLocked(layout) }
+            print("\(path): spec \(file.path); genesis mined from it in the next template that carries it")
+            if restarted { print("restarted the host to run \(path)") }
         }
-    } == 0
-}
-
-/// True once the parent has committed `directory -> genesisCID` into its
-/// genesisState, exposed through the `api/chain/children` explorer listing.
-func parentRecordedGenesis(
-    rpc: UInt16, directory: String, genesisCID: String
-) async -> Bool {
-    guard let url = URL(
-        string: "http://127.0.0.1:\(rpc)/api/chain/children?limit=100"
-    ) else { return false }
-    var request = URLRequest(url: url)
-    request.timeoutInterval = 5
-    // The listing is `max-age=3`: a cached "not yet" must not answer the
-    // re-check right after a refused resubmission.
-    request.cachePolicy = .reloadIgnoringLocalCacheData
-    guard let (data, response) = try? await URLSession.shared.data(for: request),
-          let http = response as? HTTPURLResponse,
-          (200..<300).contains(http.statusCode),
-          let listing = try? JSONDecoder().decode(
-              ExplorerChainChildren.self, from: data
-          ) else {
-        return false
     }
-    return listing.children.contains {
-        $0.chainPath.last == directory && $0.genesisHash == genesisCID
-    }
-}
-
-func waitActive(_ path: String, rpc: UInt16) async throws {
-    for _ in 0..<120 {
-        if let health = await health(rpc: rpc),
-           health["phase"] as? String == "active" {
-            return
-        }
-        try await Task.sleep(for: .seconds(1))
-    }
-    throw CtlError("\(path) did not reach active; check its log")
-}
-
-func post<Body: Encodable, Response: Decodable>(
-    rpc: UInt16, path: String, body: Body
-) async throws -> Response {
-    guard let url = URL(string: "http://127.0.0.1:\(rpc)/\(path)") else {
-        throw CtlError("bad RPC URL")
-    }
-    var request = URLRequest(url: url)
-    request.httpMethod = "POST"
-    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.httpBody = try JSONEncoder().encode(body)
-    request.timeoutInterval = 30
-    let (data, response) = try await URLSession.shared.data(for: request)
-    guard let http = response as? HTTPURLResponse,
-          (200..<300).contains(http.statusCode) else {
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        let detail = String(decoding: data.prefix(512), as: UTF8.self)
-        throw CtlError("\(path) failed: HTTP \(status) \(detail)")
-    }
-    return try JSONDecoder().decode(Response.self, from: data)
 }

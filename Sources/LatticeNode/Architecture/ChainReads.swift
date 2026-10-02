@@ -40,14 +40,26 @@ public struct ChainReads: Sendable {
     /// The pool's size, and its CIDs only when `listing` (status reads
     /// never build the listing).
     let mempool: @Sendable (_ listing: Bool) async -> MempoolListing
+    /// The chain these reads serve: the root, or a hosted child level.
+    public let chainPath: [String]
+    /// Whether this chain durably accepted a block (its own journal).
+    let accepted: @Sendable (String) async -> Bool
 
     init(
         process: ChainProcess,
+        chainPath: [String]? = nil,
+        accepted: (@Sendable (String) async -> Bool)? = nil,
         tip: @escaping @Sendable () async -> ChainProcessStatus,
         canonicalCID: @escaping @Sendable (UInt64) async -> String?,
         mempool: @escaping @Sendable (_ listing: Bool) async -> MempoolListing
     ) {
         self.process = process
+        self.chainPath = chainPath ?? process.configuration.chainPath
+        if let accepted {
+            self.accepted = accepted
+        } else {
+            self.accepted = { await process.hasAcceptedBlock($0) }
+        }
         self.tip = tip
         self.canonicalCID = canonicalCID
         self.mempool = mempool
@@ -79,7 +91,7 @@ public struct ChainReads: Sendable {
     /// durably accepted. Never takes the operation gate — reads only
     /// ChainProcess's ungated CAS path.
     func block(cid: String) async -> Block? {
-        guard await process.hasAcceptedBlock(cid) else { return nil }
+        guard await accepted(cid) else { return nil }
         guard let data = await process.content([cid])[cid],
               data.count <= Self.maximumReadResponseBytes else {
             return nil
@@ -108,7 +120,7 @@ public struct ChainReads: Sendable {
         owner: String,
         blockCID: String
     ) async -> (balance: UInt64, nonce: UInt64)? {
-        guard await process.hasAcceptedBlock(blockCID) else { return nil }
+        guard await accepted(blockCID) else { return nil }
         guard let data = await process.content([blockCID])[blockCID],
               data.count <= Self.maximumReadResponseBytes,
               let block = _contentBoundBlock(cid: blockCID, data: data) else {
@@ -140,7 +152,7 @@ public struct ChainReads: Sendable {
     /// This node's own absolute chain path — the single chain it serves. Used
     /// by the daemon to answer the explorer's optional `?chainPath=` filter.
     public func explorerChainPath() -> [String] {
-        process.configuration.chainPath
+        chainPath
     }
 
     /// Main-chain block CID at `height` (ungated height-index lookup), so the
@@ -192,7 +204,7 @@ public struct ChainReads: Sendable {
             nextTarget: block.nextTarget,
             transactionsCID: block.transactions.rawCID,
             postStateCID: block.postState.rawCID,
-            chain: process.configuration.chainPath,
+            chain: chainPath,
             rewardRecipient: block.rewardRecipient,
             rewardAmount: await rewardAmount(of: block)
         )
@@ -387,7 +399,7 @@ public struct ChainReads: Sendable {
             genesisHash: await canonicalCID(0),
             height: snapshot.height,
             tipCID: snapshot.tipCID,
-            chain: process.configuration.chainPath
+            chain: chainPath
         )
     }
 
@@ -412,65 +424,5 @@ public struct ChainReads: Sendable {
         ExplorerChainGenesis(
             genesisHash: await tip().nexusGenesisCID
         )
-    }
-
-    /// Best-effort child directory listing from the tip block's committed
-    /// `genesisState` subtrie, capped at 100. Each entry maps a child directory
-    /// to its anchored genesisCID.
-    public func explorerChainChildren(limit: Int) async -> ExplorerChainChildren {
-        let boundedLimit = Self.boundedExplorerLimit(limit)
-        guard boundedLimit > 0 else { return ExplorerChainChildren(children: []) }
-        let base = process.configuration.chainPath
-        var seen = Set<String>()
-        var children: [ExplorerChainChild] = []
-        // Canonical source: the committed `genesisState` subtrie of the tip's
-        // post-state maps every anchored child's directory -> its genesisCID.
-        // Anchoring a child (a GenesisAction in a parent block) writes this
-        // entry, so this trie IS the permissionless child index — no registry.
-        // The genesisCID is what a client uses to (a) genesis-verify any node it
-        // later discovers as a DHT provider of that CID and (b) resolve the
-        // child's spec; walk it in one bounded enumeration.
-        if let tip = await tip().tipCID,
-           let block = await block(cid: tip),
-           let state = try? await block.postState.resolve(
-               fetcher: process
-           ).node,
-           let genesis = (try? await state.genesisState.resolve(
-               fetcher: process
-           ))?.node,
-           let entries = try? await genesis.boundedKeysAndValues(
-               limit: boundedLimit,
-               fetcher: process
-           ) {
-            for (directory, genesisCID) in entries {
-                guard children.count < boundedLimit else { break }
-                guard seen.insert(directory).inserted else { continue }
-                children.append(ExplorerChainChild(
-                    chainPath: base + [directory],
-                    genesisHash: genesisCID
-                ))
-            }
-        }
-        return ExplorerChainChildren(children: Array(children.prefix(boundedLimit)))
-    }
-
-    /// The anchored genesisCID of a direct child `directory` of this chain, read
-    /// from the committed `genesisState` subtrie (targeted, single-key). nil if
-    /// no such child is anchored. The daemon uses this to turn a `?chainPath=`
-    /// into the CID it then runs a DHT provider discovery on for /api/chain/endpoints.
-    public func explorerChildGenesisCID(directory: String) async -> String? {
-        guard let tip = await tip().tipCID,
-              let block = await block(cid: tip),
-              let state = try? await block.postState.resolve(
-                  fetcher: process
-              ).node,
-              let resolved = try? await state.genesisState.resolve(
-                  paths: [[directory]: .targeted],
-                  fetcher: process
-              ),
-              let node = resolved.node else {
-            return nil
-        }
-        return (try? node.get(key: directory)) ?? nil
     }
 }

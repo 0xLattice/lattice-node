@@ -201,7 +201,7 @@ public struct Simulator {
         let restored = try Core.restore(
             replaying: node.store.facts,
             context: world.context,
-            spec: world.spec,
+            specs: [world.spec],
             config: node.core.config,
             logID: name
         )
@@ -567,8 +567,7 @@ public struct Simulator {
                     batch = PersistBatch(
                         headers: batch.headers,
                         states: batch.states,
-                        facts: batch.facts.filter { $0 != dropped },
-                        genesisLinks: batch.genesisLinks
+                        facts: batch.facts.filter { $0 != dropped }
                     )
                 }
                 // Content first: the post-states are stored before the facts

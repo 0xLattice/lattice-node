@@ -3,7 +3,7 @@ import Hummingbird
 import LatticeNode
 import LatticeNodeCore
 
-/// What `GET /v1/core/snapshot` answers: the driver's last published
+/// What `GET /core/snapshot` answers: the driver's last published
 /// snapshot.
 struct CoreSnapshotResponse: Codable, Equatable {
     let bestHeaderTip: String
@@ -13,13 +13,11 @@ struct CoreSnapshotResponse: Codable, Equatable {
 }
 
 extension LatticeNodeCommand {
-    /// `--core-driver`: Nexus on the core driver until SIGTERM/SIGINT. The
-    /// loopback API is the same surface as the network runtime's: reads
+    /// Nexus on the core driver until SIGTERM/SIGINT. The loopback API reads
     /// from the driver's published snapshot, writes as core events, plus a
     /// loopback read of the snapshot itself; the public read listener serves
     /// the same read routes.
-    // PENDING: `api/chain/endpoints` provider discovery (no DHT discovery on
-    // the driver yet) and per-peer summaries in `api/peers` (count only).
+    // PENDING: per-peer summaries in `api/peers` (count only).
     func runCoreDriver(
         configuration: NodeConfiguration,
         publicReadLimits: PublicReadRateLimits,
@@ -32,16 +30,16 @@ extension LatticeNodeCommand {
         }
         let app = makeApplication(
             reads: driver.reads,
+            levelReads: Array(driver.levelReads.values),
             writes: driver,
             status: { await driver.status() },
             metrics: { driver.metricsExposition(peers: $0, processStartTime: $1) },
             host: rpcBind,
             port: Int(rpcPort),
             peers: peers,
-            discoverProviders: { _ in [] },
             processStartTime: processStartTime
         ) { router in
-            router.get("v1/core/snapshot") { _, _ -> Response in
+            router.get("core/snapshot") { _, _ -> Response in
                 guard let snapshot = driver.published.value else { return Response(status: .serviceUnavailable) }
                 let body = try JSONEncoder().encode(CoreSnapshotResponse(
                     bestHeaderTip: snapshot.bestHeaderTip,
@@ -59,11 +57,11 @@ extension LatticeNodeCommand {
         let publicReadApp = publicReadPort.map { port in
             makePublicReadApplication(
                 reads: driver.reads,
+            levelReads: Array(driver.levelReads.values),
                 host: "0.0.0.0",
                 port: Int(port),
                 peers: peers,
-                discoverProviders: { _ in [] },
-                limits: publicReadLimits
+                    limits: publicReadLimits
             )
         }
         print("lattice-node Nexus (core driver)")

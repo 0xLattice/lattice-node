@@ -3,6 +3,7 @@ import LatticeNodeCore
 import LatticeNodeSim
 import UInt256
 import XCTest
+import cashew
 
 /// `Core.step` weighed-subgraph replication, one event at a time.
 final class CoreSyncTests: XCTestCase {
@@ -322,7 +323,7 @@ final class CoreSyncTests: XCTestCase {
     func testStructuralProblemsAreDroppedWithoutBlame() throws {
         var core = core()
         ready(&core, peer)
-        let fake = ChildIndex(entries: ["Liar": try BlockHeader(node: world.genesis.block)])
+        let fake = FlatDictionary<BlockHeader>(["Liar": try BlockHeader(node: world.genesis.block)])
         let effects = relay(&core, [
             HeaderEntry(block: chain[0].block, children: fake),
             HeaderEntry(block: world.genesis.block, children: world.genesis.children),
@@ -408,9 +409,9 @@ final class CoreSyncTests: XCTestCase {
             let effects = relay(&core, [entry(carrier, inline: false)], from: other)
             XCTAssertEqual(fetches(effects), [cid])
             XCTAssertEqual(core.sync.peers[other]?.childIndex?.cid, cid)
-            let bytes: ChildIndex? = switch answer {
+            let bytes: FlatDictionary<BlockHeader>? = switch answer {
             case "honest": carrier.children
-            case "mismatched": ChildIndex(entries: ["Liar": try BlockHeader(node: world.genesis.block)])
+            case "mismatched": FlatDictionary<BlockHeader>(["Liar": try BlockHeader(node: world.genesis.block)])
             default: nil
             }
             let fetched = core.step(.childIndexFetched(other, cid: cid, bytes), now: Self.now)

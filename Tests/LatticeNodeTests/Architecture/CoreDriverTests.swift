@@ -10,7 +10,7 @@ import cashew
 /// `CoreDriver` over its own `ChainProcess`. The producer's history is
 /// boot-replayed into its core; the joiner syncs the headers, fetches the
 /// bodies by CID, executes them, and boot-replays its own journal.
-final class CoreDriverTests: NetworkTrustTestCase {
+final class CoreDriverTests: XCTestCase {
     private struct Host {
         let configuration: NodeConfiguration
         let overlay: IvyConfig
@@ -48,17 +48,14 @@ final class CoreDriverTests: NetworkTrustTestCase {
     func testJoinerSyncsHeadersAndExecutesBodiesOverLoopbackIvy() async throws {
         let producer = try host(keyByte: 0x31)
         let producerProcess = try await ChainProcess.open(configuration: producer.configuration)
-        let clock = TestBlockClock()
-        var tip = try await producerProcess.canonicalTipBlock()
-        var blockCIDs: [String] = []
-        for _ in 0..<4 {
-            tip = try await acceptNexusBlock(on: tip, process: producerProcess, timestamp: clock.next())
-            blockCIDs.append(try BlockHeader(node: tip).rawCID)
-        }
-        let tipCID = try BlockHeader(node: tip).rawCID
         let producerDriver = try await CoreDriver.start(
             process: producerProcess, configuration: producer.configuration, overlay: producer.overlay
         )
+        var blockCIDs: [String] = []
+        for _ in 0..<4 {
+            blockCIDs.append(try BlockHeader(node: try await producerDriver.mineBlock()).rawCID)
+        }
+        let tipCID = try XCTUnwrap(blockCIDs.last)
         XCTAssertEqual(producerDriver.published.value?.actOnTip, tipCID)
 
         let joiner = try host(keyByte: 0x32, peers: [producer.endpoint])
@@ -78,16 +75,16 @@ final class CoreDriverTests: NetworkTrustTestCase {
         // Restart: the joiner's own journal replays to the same tip.
         let reopened = try await ChainProcess.open(configuration: joiner.configuration)
         let host = try await CoreDriver.boot(
-            process: reopened, configuration: joiner.configuration, coreConfig: .init()
+            process: reopened, configuration: joiner.configuration, coreConfig: .init(),
+            headers: try CoreHeaderStore(directory: joiner.configuration.storagePath)
         )
         let snapshot = try XCTUnwrap(host.levels[host.rootPath]?.snapshot)
         XCTAssertEqual(snapshot.actOnTip, tipCID)
         XCTAssertEqual(snapshot.bestHeaderTip, tipCID)
 
-        // The executed bodies stay retained across the restart: the node's
-        // eviction pass, with no storage-age grace, keeps every one.
-        _ = try await reopened.pruneUnpinnedVolumes()
-        _ = try await reopened.broker.evictUnpinned(graceSeconds: 0)
+        // The executed bodies stay retained across the restart: a sweep
+        // keeps every one.
+        _ = try await reopened.broker.sweep()
         for cid in blockCIDs {
             let volume = await reopened.volume(cid)
             XCTAssertNotNil(volume, "body \(cid) was evicted after restart")
@@ -158,7 +155,7 @@ final class CoreDriverTests: NetworkTrustTestCase {
         )
         let key = CryptoUtils.generateKeyPair()
         let bodyHeader = try HeaderImpl(node: TransactionBody(
-            accountActions: [], actions: [], depositActions: [], genesisActions: [],
+            accountActions: [], actions: [], depositActions: [],
             receiptActions: [], withdrawalActions: [],
             signers: [CryptoUtils.createAddress(from: key.publicKey)],
             nonce: 0, chainPath: ["Nexus"]
@@ -185,15 +182,11 @@ final class CoreDriverTests: NetworkTrustTestCase {
         // A producer with a heavier two-block branch from genesis.
         let producer = try host(keyByte: 0x35)
         let producerProcess = try await ChainProcess.open(configuration: producer.configuration)
-        let clock = TestBlockClock()
-        var tip = try await producerProcess.canonicalTipBlock()
-        for _ in 0..<2 {
-            tip = try await acceptNexusBlock(on: tip, process: producerProcess, timestamp: clock.next())
-        }
-        let producerTip = try BlockHeader(node: tip).rawCID
         let producerDriver = try await CoreDriver.start(
             process: producerProcess, configuration: producer.configuration, overlay: producer.overlay
         )
+        _ = try await producerDriver.mineBlock()
+        let producerTip = try BlockHeader(node: try await producerDriver.mineBlock()).rawCID
 
         // Restart, then reorg onto the producer's branch.
         let restarted = try host(keyByte: 0x34, peers: [producer.endpoint], storage: node.configuration.storagePath)

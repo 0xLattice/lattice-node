@@ -9,7 +9,7 @@ import cashew
 /// worker, execution first, mining jobs in the order the core emitted them,
 /// each built by `CoreDriver.miningJob` and skipped at dequeue when its
 /// epoch moved, over a real `ChainProcess` and Lattice preflight.
-final class CoreDriverJobOrderTests: NetworkTrustTestCase {
+final class CoreDriverJobOrderTests: XCTestCase {
     private struct Harness {
         var host: HostCore
         let process: ChainProcess
@@ -23,6 +23,15 @@ final class CoreDriverJobOrderTests: NetworkTrustTestCase {
 
         var mining: Mining { host.levels[host.rootPath]!.mining }
         var actOnTip: String { host.levels[host.rootPath]!.snapshot.actOnTip }
+
+        /// The act-on tip's block, read from content.
+        func tipBlock() async throws -> Block {
+            let cid = actOnTip
+            guard let data = await process.content([cid])[cid], let block = Block(data: data) else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            return block
+        }
 
         /// Step `event` and execute its effects as the driver does: persist
         /// first, execution at once (bodies are held locally), mining jobs
@@ -101,7 +110,10 @@ final class CoreDriverJobOrderTests: NetworkTrustTestCase {
         var config = CoreConfig(bodyWindow: bodyWindow)
         config.mining.maxReissues = 16
         return Harness(
-            host: try await CoreDriver.boot(process: process, configuration: configuration, coreConfig: config),
+            host: try await CoreDriver.boot(
+                process: process, configuration: configuration, coreConfig: config,
+                headers: try CoreHeaderStore(directory: configuration.storagePath)
+            ),
             process: process,
             headers: try CoreHeaderStore(directory: storage)
         )
@@ -110,7 +122,7 @@ final class CoreDriverJobOrderTests: NetworkTrustTestCase {
     private func transaction() throws -> Transaction {
         let key = CryptoUtils.generateKeyPair()
         let bodyHeader = try HeaderImpl(node: TransactionBody(
-            accountActions: [], actions: [], depositActions: [], genesisActions: [],
+            accountActions: [], actions: [], depositActions: [],
             receiptActions: [], withdrawalActions: [],
             signers: [CryptoUtils.createAddress(from: key.publicKey)],
             nonce: 0, chainPath: ["Nexus"]
@@ -152,7 +164,7 @@ final class CoreDriverJobOrderTests: NetworkTrustTestCase {
     func testASubmitTheEnteredBlockConfirmsIsAdmittedThroughTheDriverJobOrder() async throws {
         var harness = try await harness(keyByte: 0x41)
         let clock = TestBlockClock()
-        let genesis = try await harness.process.canonicalTipBlock()
+        let genesis = try await harness.tipBlock()
         let tx = try transaction()
         // The submit waits on its verdict while the block carrying it lands.
         try await harness.step(.level(harness.host.rootPath, .mining(
@@ -174,7 +186,7 @@ final class CoreDriverJobOrderTests: NetworkTrustTestCase {
     func testTwoForwardMovesBackToBackConfirmTheWaitingSubmit() async throws {
         var harness = try await harness(keyByte: 0x43)
         let clock = TestBlockClock()
-        let genesis = try await harness.process.canonicalTipBlock()
+        let genesis = try await harness.tipBlock()
         let tx = try transaction()
         try await harness.step(.level(harness.host.rootPath, .mining(
             .transactionReceived(tx, origin: .local(replyID: 1))
@@ -192,7 +204,7 @@ final class CoreDriverJobOrderTests: NetworkTrustTestCase {
     func testAReorgReturnsTheLeftBlocksTransaction() async throws {
         var harness = try await harness(keyByte: 0x42)
         let clock = TestBlockClock()
-        let genesis = try await harness.process.canonicalTipBlock()
+        let genesis = try await harness.tipBlock()
         let tx = try transaction()
         let cid = try Mempool.cid(of: tx)
         try await harness.step(.level(harness.host.rootPath, .mining(
@@ -215,7 +227,7 @@ final class CoreDriverJobOrderTests: NetworkTrustTestCase {
         for (window, sideLength) in [(64, 2), (1, 3)] {
             var harness = try await harness(keyByte: 0x44, bodyWindow: window)
             let clock = TestBlockClock()
-            let genesis = try await harness.process.canonicalTipBlock()
+            let genesis = try await harness.tipBlock()
             let tx = try transaction()
             let cid = try Mempool.cid(of: tx)
             let b1 = try await mine(&harness, on: genesis, [tx], timestamp: clock.next())

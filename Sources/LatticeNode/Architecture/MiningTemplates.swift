@@ -127,8 +127,8 @@ public struct MiningTemplate: Sendable {
     /// The canonical empty index. A candidate whose index bytes are not
     /// canonical has a different CID and is treated as carrying children,
     /// which only makes its work advertise the search target alone.
-    private static let emptyChildrenCID = try? HeaderImpl<ChildIndex>(
-        node: ChildIndex()
+    private static let emptyChildrenCID = try? HeaderImpl<FlatDictionary<BlockHeader>>(
+        node: FlatDictionary<BlockHeader>()
     ).rawCID
 
     var remainingLifetimeMilliseconds: UInt64 {
@@ -153,143 +153,6 @@ public enum MiningTemplateError: Error, Equatable {
     case unknownWork
     case expired
     case missesSearchTarget
-}
-
-/// Bounded work cache for external miners. It never searches a nonce.
-public actor MiningTemplateBook {
-    private let chainPath: [String]
-    private let lifetime: Duration
-    private let capacity: Int
-    private var templates: [String: MiningTemplate] = [:]
-    private var order: [String] = []
-
-    public init(
-        chainPath: [String],
-        lifetime: Duration = .seconds(30),
-        capacity: Int = 16
-    ) {
-        precondition(capacity > 0 && lifetime > .zero)
-        self.chainPath = chainPath
-        self.lifetime = lifetime
-        self.capacity = capacity
-    }
-
-    public func build(
-        previous: Block,
-        transactions: [Transaction],
-        children: [DirectChildCandidate],
-        parentCarrier: Block? = nil,
-        timestamp: Int64,
-        transactionLimit: Int = .max,
-        rewardRecipient: String?,
-        minimumWork: [[String]: UInt256] = [:],
-        difficultyAnchor: DifficultyAnchor? = nil,
-        fetcher: any Fetcher
-    ) async throws -> MiningTemplate {
-        let template = try await MiningTemplateAssembly.assemble(
-            chainPath: chainPath,
-            lifetime: lifetime,
-            previous: previous,
-            transactions: transactions,
-            children: children,
-            parentCarrier: parentCarrier,
-            timestamp: timestamp,
-            transactionLimit: transactionLimit,
-            rewardRecipient: rewardRecipient,
-            minimumWork: minimumWork,
-            difficultyAnchor: difficultyAnchor,
-            fetcher: fetcher
-        )
-        return issue(template)
-    }
-
-    func issue(_ template: MiningTemplate) -> MiningTemplate {
-        issueTrackingInsertion(template).template
-    }
-
-    func issueTrackingInsertion(
-        _ template: MiningTemplate
-    ) -> (template: MiningTemplate, inserted: Bool) {
-        precondition(template.chainPath == chainPath)
-        if let existing = templates[template.workID],
-           ContinuousClock.now < existing.expiresAt {
-            order.removeAll { $0 == template.workID }
-            order.append(template.workID)
-            return (existing, false)
-        }
-        templates[template.workID] = template
-        order.removeAll { $0 == template.workID }
-        order.append(template.workID)
-        while order.count > capacity {
-            templates.removeValue(forKey: order.removeFirst())
-        }
-        return (template, true)
-    }
-
-    func discard(workID: String) {
-        templates.removeValue(forKey: workID)
-        order.removeAll { $0 == workID }
-    }
-
-    /// Assembles candidate context without issuing miner work or consuming cache
-    /// capacity. Used for contextual child requests before the final child set is
-    /// known.
-    func preview(
-        previous: Block,
-        transactions: [Transaction],
-        children: [DirectChildCandidate],
-        parentCarrier: Block? = nil,
-        timestamp: Int64,
-        transactionLimit: Int = .max,
-        rewardRecipient: String?,
-        minimumWork: [[String]: UInt256] = [:],
-        difficultyAnchor: DifficultyAnchor? = nil,
-        fetcher: any Fetcher
-    ) async throws -> MiningTemplate {
-        try await MiningTemplateAssembly.assemble(
-            chainPath: chainPath,
-            lifetime: lifetime,
-            previous: previous,
-            transactions: transactions,
-            children: children,
-            parentCarrier: parentCarrier,
-            timestamp: timestamp,
-            transactionLimit: transactionLimit,
-            rewardRecipient: rewardRecipient,
-            minimumWork: minimumWork,
-            difficultyAnchor: difficultyAnchor,
-            fetcher: fetcher
-        )
-    }
-
-    public func candidate(workID: String, nonce: UInt64) throws -> Block {
-        try submission(workID: workID, nonce: nonce).block
-    }
-
-    func submission(
-        workID: String,
-        nonce: UInt64
-    ) throws -> (block: Block, children: [DirectChildCandidate]) {
-        guard let template = templates[workID] else {
-            throw MiningTemplateError.unknownWork
-        }
-        guard ContinuousClock.now < template.expiresAt else {
-            templates.removeValue(forKey: workID)
-            order.removeAll { $0 == workID }
-            throw MiningTemplateError.expired
-        }
-        let candidate = template.block.replacingNonce(nonce)
-        let rootHash = candidate.proofOfWorkHash()
-        guard rootHash <= template.searchTarget else {
-            throw MiningTemplateError.missesSearchTarget
-        }
-        return (candidate, template.childCandidates)
-    }
-
-    public func invalidateAll() {
-        templates.removeAll(keepingCapacity: true)
-        order.removeAll(keepingCapacity: true)
-    }
 }
 
 struct FittingMiningTemplate {

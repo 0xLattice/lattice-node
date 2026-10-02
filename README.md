@@ -107,10 +107,10 @@ cannot select a second chain at runtime.
 | Endpoint | Method | Purpose |
 |---|---|---|
 | `/health` | GET | Process and chain status |
-| `/v1/status` | GET | Same structured status response |
-| `/v1/transactions` | POST | Submit a content-bound signed transaction |
-| `/v1/mining/templates` | POST | Create Nexus work and gather direct-child candidates |
-| `/v1/mining/work` | POST | Submit a nonce for issued work |
+| `/status` | GET | Same structured status response |
+| `/transactions` | POST | Submit a content-bound signed transaction |
+| `/mining/templates` | POST | Create Nexus work and gather direct-child candidates |
+| `/mining/work` | POST | Submit a nonce for issued work |
 
 See [docs/rpc-api.md](docs/rpc-api.md) for request and response shapes.
 
@@ -120,7 +120,7 @@ Nexus starts from one deterministic local bootstrap block. Its sole unsigned
 transaction credits the premine; the node recomputes the block CID locally and
 requires the exact configured value:
 
-`bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24`
+`bafyreigsvcxa7kveg7ywaykwqqwvakgtcujds634k4cc6mejyh43pmoqny`
 
 | Parameter | Value |
 |---|---:|

@@ -76,7 +76,7 @@ consensus projection.
 
 Nexus has no parent, so its genesis is constructed locally and pinned by CID:
 
-`bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24`
+`bafyreigsvcxa7kveg7ywaykwqqwvakgtcujds634k4cc6mejyh43pmoqny`
 
 The CID is checked before configured root bootstrap, never used as a
 peer-admission signature permit. Every child genesis is self-contained content

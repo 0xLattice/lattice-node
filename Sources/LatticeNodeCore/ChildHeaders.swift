@@ -1,4 +1,5 @@
 import Lattice
+import cashew
 import UInt256
 
 /// A child level's proof bounds: plain caps. A peer whose proof fails
@@ -104,7 +105,9 @@ public struct ProofJob: Sendable {
 public struct AwaitingProof: Sendable {
     public let blockCID: String
     public let block: Block
-    public internal(set) var children: ChildIndex?
+    public internal(set) var children: FlatDictionary<BlockHeader>?
+    /// A genesis's spec, as its first announcer sent it.
+    public internal(set) var spec: ChainSpec?
     public internal(set) var announcers: [PeerID]
     /// Whether its proofs were looked up since the evidence index changed.
     public internal(set) var lookedUp = false
@@ -176,6 +179,13 @@ extension Core {
 
     var proofConfig: ProofConfig { config.proofs }
 
+    /// A genesis's spec only when it is the one the block names: a wrong
+    /// one from a peer is dropped, so the next announcer's can be held.
+    static func bound(_ spec: ChainSpec?, by block: Block) -> ChainSpec? {
+        guard let spec, block.parent == nil, (try? VolumeImpl<ChainSpec>(node: spec).rawCID) == block.spec.rawCID else { return nil }
+        return spec
+    }
+
     // MARK: - Taking proofs
 
     /// A child header nobody weighed yet: it waits for a proof. A header with
@@ -186,6 +196,7 @@ extension Core {
         if var held = sync.proofs.awaiting[cid] {
             if !held.announcers.contains(peer) { held.announcers.append(peer) }
             if held.children == nil, let children = entry.children { held.children = children }
+            if held.spec == nil { held.spec = Self.bound(entry.spec, by: entry.block) }
             sync.proofs.awaiting[cid] = held
             offer(entry.proofs, cid: cid, from: peer)
             return
@@ -197,7 +208,7 @@ extension Core {
         guard fromPeer < proofConfig.maxAwaitingPerPeer, makeRoomToAwait() else { return }
         sync.proofs.sequence += 1
         sync.proofs.awaiting[cid] = AwaitingProof(
-            blockCID: cid, block: entry.block, children: entry.children,
+            blockCID: cid, block: entry.block, children: entry.children, spec: Self.bound(entry.spec, by: entry.block),
             announcers: [peer], sequence: sync.proofs.sequence
         )
         sync.proofs.wanted.remove(cid)
@@ -310,6 +321,7 @@ extension Core {
         if index.contains(cid) {
             guard case .applied(let update) = tree.addWork(work, to: cid) else { return }
             turn.facts += update.batches
+            weighed += update.weighed
             turn.indexed.append((cid, job.proof))
         } else if let held = sync.pending.entries[cid] {
             guard held.evidence[evidence.grindID] == nil else { return }
@@ -325,11 +337,11 @@ extension Core {
     /// weighed at once when its parent is.
     mutating func promote(_ waiting: AwaitingProof, evidence: VerifiedChildEvidence, proof: ChildBlockProof, _ turn: inout Turn) {
         let cid = waiting.blockCID
-        guard waiting.block.parent != nil else { return }
         var header = PendingHeader(
             blockCID: cid,
             block: waiting.block,
             children: waiting.children,
+            spec: waiting.spec,
             hash: evidence.rootHash,
             bytes: Self.size(of: waiting.block) + (waiting.children.map(Self.size) ?? 0)
                 + ((try? proof.serialize().count) ?? 0),
@@ -388,15 +400,20 @@ extension Core {
 
     // MARK: - Weighing
 
-    /// Weigh a pending child header with its smallest-hash grind.
+    /// Weigh a pending child header with its smallest-hash grind: a genesis
+    /// as a root, with the spec it came with.
     mutating func insertChildHeader(
         _ header: PendingHeader,
-        children: ChildIndex,
+        children: FlatDictionary<BlockHeader>,
         _ context: ValidationContext
     ) -> ChainTreeAdmission {
         guard let first = header.evidence.values.min(by: {
             $0.rootHash != $1.rootHash ? $0.rootHash < $1.rootHash : $0.grindID < $1.grindID
         }) else { return .rejected(.unavailableEvidence) }
+        guard header.parent != nil else {
+            guard let spec = header.spec else { return .rejected(.unavailableEvidence) }
+            return tree.insertGenesis(header.block, spec: spec, childIndex: children, evidence: first)
+        }
         return tree.insertChildHeader(
             header.block, childIndex: children, evidence: first, validationContext: context
         )
@@ -414,6 +431,7 @@ extension Core {
             if tree.getConsensusBlock(hash: header.blockCID)?.workContributions[root] == nil {
                 guard case .applied(let update) = tree.addWork(work, to: header.blockCID) else { continue }
                 turn.facts += update.batches
+                weighed += update.weighed
             }
             credited.append(proof)
             turn.indexed.append((header.blockCID, proof))
@@ -424,15 +442,17 @@ extension Core {
     // MARK: - Local and cross-level inputs
 
     /// Weigh this node's own grind at this level, blaming no one: a root
-    /// block by its own work, a child block by the grind's verified proof.
-    /// Part of one mined handoff, whose levels persist as one batch.
+    /// block by its own work, a child block by the grind's verified proof (a
+    /// child genesis as a root, with the spec it was built with). Part of
+    /// one mined handoff, whose levels persist as one batch.
     mutating func weighOwn(
         _ block: Block,
-        children: ChildIndex,
+        children: FlatDictionary<BlockHeader>,
         proof: (proof: ChildBlockProof, evidence: VerifiedChildEvidence)?,
         now: Int64
     ) -> [Effect] {
         var turn = Turn(now: now)
+        weighed = []
         guard let cid = try? BlockHeader(node: block).rawCID else { return [] }
         let context = ValidationContext(nowMilliseconds: now)
         let held = index.contains(cid)
@@ -442,16 +462,26 @@ extension Core {
         } else {
             guard let proof, proof.evidence.childCID == cid,
                   let work = proof.evidence.contribution, work.work > .zero else { return [] }
-            admission = held
-                ? tree.addWork(work, to: cid)
-                : tree.insertChildHeader(block, childIndex: children, evidence: proof.evidence, validationContext: context)
+            if held {
+                admission = tree.addWork(work, to: cid)
+            } else if block.parent == nil {
+                guard let spec = block.spec.node else { return [] }
+                admission = tree.insertGenesis(block, spec: spec, childIndex: children, evidence: proof.evidence)
+            } else {
+                admission = tree.insertChildHeader(
+                    block, childIndex: children, evidence: proof.evidence, validationContext: context
+                )
+            }
         }
         guard case .applied(let update) = admission else { return [] }
+        weighed += update.weighed
         if !held {
             let waiting = sync.pending.childrenOf[cid] ?? []
             sync.removePending(cid)
             sync.proofs.awaiting[cid] = nil
-            turn.headers.append(StoredHeader(blockCID: cid, block: block, children: children))
+            turn.headers.append(StoredHeader(
+                blockCID: cid, block: block, children: children, spec: block.parent == nil ? block.spec.node : nil
+            ))
             index.add(cid, parent: block.parent?.rawCID, height: block.height)
             for child in waiting { dirty(child, &turn) }
         }
@@ -462,24 +492,20 @@ extension Core {
         return finish(turn)
     }
 
-    /// Credit a parent's attributed run at one of this level's blocks
-    /// (hierarchical GHOST), derived and applied in one step.
-    mutating func strengthen(
-        _ child: String,
-        directory: String,
-        report: ParentRunReport,
+    /// Credit this level with its parent's attributed runs (hierarchical
+    /// GHOST) that the host's forwarded blocks can have moved: derived, never
+    /// persisted. Returns the blocks it raised, to forward a level down, and
+    /// the step's effects when any were.
+    mutating func applyParentRun(
+        from parent: ChainTree,
+        parentBlocks: Set<String>,
+        held: Set<String>,
         now: Int64
-    ) -> [Effect]? {
-        guard case .strengthened(let batch) = tree.strengthenFromParentReport(
-            child: child, directory: directory, report: report
-        ) else { return nil }
-        do {
-            _ = try tree.replay(batch)
-        } catch {
-            return nil
-        }
-        var turn = Turn(now: now)
-        turn.facts.append(batch)
-        return finish(turn)
+    ) -> (raised: [String], effects: [Effect]) {
+        let raised = tree.applyParentRun(
+            from: parent, directory: chainPath[chainPath.count - 1], parentBlocks: parentBlocks, held: held
+        ).raised
+        guard !raised.isEmpty else { return ([], []) }
+        return (raised, finish(Turn(now: now)))
     }
 }

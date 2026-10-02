@@ -10,7 +10,6 @@ enum NodeStoreError: Error, Equatable, LocalizedError {
     case wipeRequired(String)
     case conflictingImportFact
     case conflictingImportBatch
-    case conflictingIssuedParentFact
     case conflictingIssuedChildProof
     case invalidIssuedChildProof(String)
     case corrupt(String)
@@ -31,8 +30,6 @@ enum NodeStoreError: Error, Equatable, LocalizedError {
             "Conflicting bytes for an immutable chain fact."
         case .conflictingImportBatch:
             "An admission batch was replayed with different Volume roots."
-        case .conflictingIssuedParentFact:
-            "A locally issued parent fact was replayed with different bytes."
         case .conflictingIssuedChildProof:
             "A locally issued child proof was replayed with different bytes."
         case .invalidIssuedChildProof(let childCID):
@@ -50,34 +47,17 @@ actor NodeStore {
     let database: NodeSQLite
     let nexusGenesisCID: String
     let chainPath: [String]
-    let recoveryVolumeBroker: any RetainedRootMergeBroker
-    let blockRetentionScope: String
-    let issuedRecoveryRetentionScope: String
-    let contextualCandidateOwner: String
-    private var preparedMutationInFlight = false
-    private var preparedMutationWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(
         databasePath: URL,
         nexusGenesisCID: String,
-        chainPath: [String],
-        recoveryVolumeBroker: any RetainedRootMergeBroker,
-        blockRetentionScope: String,
-        issuedRecoveryRetentionScope: String,
-        contextualCandidateOwner: String
+        chainPath: [String]
     ) throws {
         guard !nexusGenesisCID.isEmpty else {
             throw NodeStoreError.invalidConfiguration("Nexus genesis CID is empty")
         }
         guard chainPath.first == "Nexus", chainPath.allSatisfy({ !$0.isEmpty }) else {
             throw NodeStoreError.invalidConfiguration("chainPath must be absolute and begin with Nexus")
-        }
-        guard !blockRetentionScope.isEmpty,
-              !issuedRecoveryRetentionScope.isEmpty,
-              !contextualCandidateOwner.isEmpty else {
-            throw NodeStoreError.invalidConfiguration(
-                "retention scopes must be nonempty"
-            )
         }
         let database = try NodeSQLite(path: databasePath.path)
         let pathData = try Self.encode(chainPath)
@@ -113,36 +93,8 @@ actor NodeStore {
         self.database = database
         self.nexusGenesisCID = nexusGenesisCID
         self.chainPath = chainPath
-        self.recoveryVolumeBroker = recoveryVolumeBroker
-        self.blockRetentionScope = blockRetentionScope
-        self.issuedRecoveryRetentionScope = issuedRecoveryRetentionScope
-        self.contextualCandidateOwner = contextualCandidateOwner
     }
 
-    func acquirePreparedMutation() async {
-        guard preparedMutationInFlight else {
-            preparedMutationInFlight = true
-            return
-        }
-        await withCheckedContinuation { continuation in
-            preparedMutationWaiters.append(continuation)
-        }
-    }
-
-    func releasePreparedMutation() {
-        guard !preparedMutationWaiters.isEmpty else {
-            preparedMutationInFlight = false
-            return
-        }
-        preparedMutationWaiters.removeFirst().resume()
-    }
-
-    #if DEBUG
-    /// Test seam: the mutations parked at the prepared-mutation gate.
-    func preparedMutationWaiterCountForTesting() -> Int {
-        preparedMutationWaiters.count
-    }
-    #endif
 
     static func encode<T: Encodable>(_ value: T) throws -> Data {
         let encoder = JSONEncoder()
@@ -180,3 +132,19 @@ actor NodeImportStorage: VolumeStorer {
     }
 }
 
+
+/// The legacy owner pins as VolumeBroker retained roots: one scope per owner
+/// name. Merges and advances on one scope are serialized by their callers
+/// (the process mutation gate, or boot's storage-directory lock). Sets, not
+/// counts: a root retained twice under one owner is released by one release.
+extension RetainedRootMergeBroker {
+    func retain(_ roots: [String], owner: String) async throws {
+        guard !roots.isEmpty else { return }
+        try await mergeRetainedRoots(scope: owner, roots: roots)
+    }
+
+    func release(_ roots: Set<String>, owner: String) async throws {
+        let kept = try await retainedRoots(scope: owner).filter { !roots.contains($0) }
+        try await advanceRetainedRoots(scope: owner, roots: kept)
+    }
+}

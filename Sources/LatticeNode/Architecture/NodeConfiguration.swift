@@ -11,7 +11,8 @@ public struct ChainAddress: Hashable, Sendable, CustomStringConvertible {
 
     public init?(_ components: [String]) {
         guard (try? ChainRuntimeContext(
-            path: components
+            path: components,
+            genesisCID: components.count == 1 ? NexusGenesis.expectedBlockHash : nil
         )) != nil else {
             return nil
         }
@@ -57,13 +58,6 @@ public struct NodeConfiguration: Sendable {
     public let listenPort: UInt16
     public let rpcPort: UInt16
     public let bootstrapPeers: [PeerEndpoint]
-    /// The directories of the co-hosted child levels, which `ChainHost`
-    /// wires: this level announces their anchored geneses on its overlay.
-    private(set) var hostedChildDirectories: Set<String> = []
-    /// The public read URLs those child levels are configured with, by
-    /// directory: this level serves them to a read-endpoint ask for the
-    /// child genesis it anchored.
-    private(set) var hostedChildReadURLs: [String: String] = [:]
     public let minPeerKeyBits: Int
     /// Per-netgroup inbound/outbound overlay connection cap. Ivy buckets peers by
     /// the connection's observed remote host (/16), an anti-eclipse defense that
@@ -105,6 +99,12 @@ public struct NodeConfiguration: Sendable {
     /// peer, and it has no bearing on validation or fork choice. `0` disables.
     public let peerSearchInterval: TimeInterval
     public let resourcePolicy: NodeResourcePolicy
+    /// The child chains this process hosts as levels under Nexus (operator
+    /// choice), parent before child; every parent is Nexus or listed.
+    public let hostedChildren: [[String]]
+    /// The spec a hosted child's genesis is built from while it has no root
+    /// (operator choice; a child with none only follows roots others mine).
+    public let childSpecs: [[String]: ChainSpec]
 
     /// Overlay slots kept in reserve for outbound dials so a burst of inbound
     /// connections (from one source, especially behind a proxy where the
@@ -124,8 +124,17 @@ public struct NodeConfiguration: Sendable {
         externalAddress: String? = nil,
         publicReadURL: String? = nil,
         peerSearchInterval: TimeInterval = 600,
-        resourcePolicy: NodeResourcePolicy = .default
+        resourcePolicy: NodeResourcePolicy = .default,
+        hostedChildren: [[String]] = [],
+        childSpecs: [[String]: ChainSpec] = [:]
     ) throws {
+        for child in hostedChildren {
+            guard child.count > 1, (try? ChainRuntimeContext(path: child)) != nil,
+                  child.dropLast().count == 1 || hostedChildren.contains(Array(child.dropLast())),
+                  child.first == chainPath.first else {
+                throw NodeConfigurationError.invalidChainPath
+            }
+        }
         guard let address = ChainAddress(chainPath) else {
             throw NodeConfigurationError.invalidChainPath
         }
@@ -171,15 +180,8 @@ public struct NodeConfiguration: Sendable {
         self.publicReadURL = declaredReadURL
         self.peerSearchInterval = max(0, peerSearchInterval)
         self.resourcePolicy = resourcePolicy
-    }
-
-    /// This configuration hosting the child level `directory`, configured
-    /// with the public read URL `publicReadURL`, if any.
-    func withHostedChild(directory: String, publicReadURL: String?) -> NodeConfiguration {
-        var configuration = self
-        configuration.hostedChildDirectories.insert(directory)
-        configuration.hostedChildReadURLs[directory] = publicReadURL
-        return configuration
+        self.childSpecs = childSpecs.filter { hostedChildren.contains($0.key) }
+        self.hostedChildren = hostedChildren.sorted { $0.count != $1.count ? $0.count < $1.count : $0.joined(separator: "/") < $1.joined(separator: "/") }
     }
 
     public var chainPath: [String] { address.components }
@@ -189,7 +191,10 @@ public struct NodeConfiguration: Sendable {
     }
     public var runtimeContext: ChainRuntimeContext {
         get throws {
-            try ChainRuntimeContext(path: chainPath)
+            // Only the root chain pins its genesis (Lattice §5.1).
+            try ChainRuntimeContext(
+                path: chainPath, genesisCID: address.isNexus ? nexusGenesisCID : nil
+            )
         }
     }
 

@@ -9,12 +9,10 @@ final class NexusGenesisArchitectureTests: XCTestCase {
         let store = InMemoryContentStore()
         let first = try await NexusGenesis.create(fetcher: store)
         let second = try await NexusGenesis.create(fetcher: store)
-        let computed = try await NexusGenesis.computedBlockHash(fetcher: store)
         let verified = try NexusGenesis.verifyGenesis(first)
 
         XCTAssertEqual(first.blockHash, second.blockHash)
-        XCTAssertEqual(first.blockHash, computed)
-        XCTAssertEqual(computed, NexusGenesis.expectedBlockHash)
+        XCTAssertEqual(first.blockHash, NexusGenesis.expectedBlockHash)
         XCTAssertTrue(verified)
 
         let transactions = try XCTUnwrap(first.block.transactions.node)
@@ -46,7 +44,7 @@ final class NexusGenesisArchitectureTests: XCTestCase {
         XCTAssertTrue(strict.0)
 
         let bootstrap = try await ChainLevel.bootstrap(
-            context: try ChainRuntimeContext(path: ["Nexus"]),
+            context: try ChainRuntimeContext(path: ["Nexus"], genesisCID: header.rawCID),
             genesisHeader: header,
             fetcher: store,
             validationContentStorer: store,

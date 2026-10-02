@@ -42,6 +42,10 @@ public struct TopologyChain: Codable, Sendable {
     /// requests per second. Address-agnostic, so it stays correct behind such
     /// a proxy. Absent = the node's default; `0` disables it.
     public var publicReadMaxRate: Double?
+    /// On the Nexus entry: the child chains the one process hosts as levels,
+    /// by path (e.g. `["Nexus/Alpha"]`), a parent before its children. A
+    /// child has no process, ports or peers of its own.
+    public var children: [String]?
 
     public init(
         listen: UInt16, rpc: UInt16, peers: [String]? = nil,
@@ -89,7 +93,7 @@ public struct TopologyMine: Codable {
     /// How long to wait for the node to ANSWER a template request, in seconds.
     /// This bounds how long the node takes to BUILD a template, which is a
     /// different quantity from the template lifetime the answer reports and is
-    /// not bounded by it. Set it above what `POST /v1/mining/templates` costs
+    /// not bounded by it. Set it above what `POST /mining/templates` costs
     /// on this host: if it is lower, no round deadline can be derived and the
     /// miner will not mine at all (#153, where a 15s compiled-in value sat
     /// under a 16.6s build). Keep it at or below the coordinator's own request
@@ -267,10 +271,15 @@ public struct Topology: Codable {
                   }) else {
                 throw CtlError("chain path is not absolute and Nexus-rooted: \(path)")
             }
-            if address.components.count > 1 {
-                let parent = address.components.dropLast().joined(separator: "/")
-                guard chains[parent] != nil else {
-                    throw CtlError("\(path) has no local parent \(parent); every child needs its immediate parent in the tree")
+            guard address.isNexus else {
+                throw CtlError("\(path): list a child chain under the Nexus entry's children, not as a chain of its own")
+            }
+            var listed: Set<String> = [path]
+            for child in chain.children ?? [] {
+                guard let childAddress = ChainAddress(string: child), childAddress.key == child,
+                      !childAddress.isNexus, let parent = childAddress.parent, listed.contains(parent.key),
+                      listed.insert(child).inserted else {
+                    throw CtlError("\(path): child \(child) is not a new Nexus-rooted path listed after its parent")
                 }
             }
             for port in [chain.listen, chain.rpc]
@@ -324,7 +333,12 @@ public struct HostLayout: Sendable {
             ?? FileManager.default.currentDirectoryPath)
     }
 
-    /// Percent-encoded like `pendingDeploy`: `-` is a legal directory atom,
+    /// A hosted child chain's spec, the one its genesis is mined from.
+    public func childSpec(for path: String) -> URL {
+        root.appendingPathComponent("specs").appendingPathComponent(Self.encoded(path) + ".json")
+    }
+
+    /// Percent-encoded: `-` is a legal directory atom,
     /// so flattening `/` to `-` gave `Nexus/A/B` and `Nexus/A-B` one key,
     /// and one process cannot host two levels with one key.
     public func identityKey(for path: String) -> URL {
@@ -362,17 +376,6 @@ public struct HostLayout: Sendable {
 
     public func chainDirectory(for path: String) -> URL {
         root.appendingPathComponent("chains").appendingPathComponent(path)
-    }
-
-    /// An in-flight `child deploy` (genesis seed + signed anchor). Outside the
-    /// wipeable chain directories: the anchor may land on the parent at any
-    /// time, and without this file its genesis could never be rebuilt.
-    public func pendingDeploy(for path: String) -> URL {
-        // Percent-encoded, not `/`-flattened: `-` is a legal directory atom,
-        // so flattening would give `Nexus/A/B` and `Nexus/A-B` one file, and
-        // one child's genesis seed would overwrite the other's.
-        return root.appendingPathComponent("pending-deploy")
-            .appendingPathComponent(Self.encoded(path) + ".json")
     }
 
     private static func encoded(_ path: String) -> String {

@@ -80,12 +80,16 @@ public struct TemplateRequest: Sendable, Equatable {
     public let rewardRecipient: String?
     public let minimumWork: [[String]: UInt256]
     public let parentCarrier: ParentCarrier?
+    /// Each hosted child chain's reward recipient, by path.
+    public let childRecipients: [[String]: String]
 
     public init(
         rewardRecipient: String?,
         minimumWork: [[String]: UInt256] = [:],
-        parentCarrier: ParentCarrier? = nil
+        parentCarrier: ParentCarrier? = nil,
+        childRecipients: [[String]: String] = [:]
     ) {
+        self.childRecipients = childRecipients
         self.rewardRecipient = rewardRecipient
         self.minimumWork = minimumWork
         self.parentCarrier = parentCarrier
@@ -230,7 +234,9 @@ public struct Mining: Sendable {
     public private(set) var tipCID: String
     /// Moves on every tip move: what makes a job stale (see `PreflightJob`).
     public private(set) var tipEpoch: UInt64 = 0
-    public let spec: ChainSpec
+    /// The spec of the tip's genesis root; nil while the level executed no
+    /// root, when the pool admits nothing.
+    public internal(set) var spec: ChainSpec?
     public let config: MiningConfig
 
     /// Which bound a pending admission counts against. A local or restored
@@ -266,7 +272,7 @@ public struct Mining: Sendable {
     private var builds: [UInt64: (job: TemplateJob, replies: [Waiting])] = [:]
     private var nextJobID: UInt64 = 1
 
-    public init(tipCID: String, spec: ChainSpec, config: MiningConfig = MiningConfig()) {
+    public init(tipCID: String, spec: ChainSpec?, config: MiningConfig = MiningConfig()) {
         self.tipCID = tipCID
         self.spec = spec
         self.config = config
@@ -338,6 +344,7 @@ public struct Mining: Sendable {
     ) {
         let cid: String
         do {
+            guard let spec else { throw MempoolError.unresolved }
             cid = try mempool.check(transaction, spec: spec)
         } catch {
             // Too large or value-creating: the pool can never hold it, on any
@@ -455,6 +462,7 @@ public struct Mining: Sendable {
             return nil
         }.first
         do {
+            guard let spec else { throw MempoolError.unresolved }
             let mutation = try mempool.submit(
                 admission.transaction,
                 spec: spec,

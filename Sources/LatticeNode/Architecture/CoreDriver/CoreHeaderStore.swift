@@ -24,6 +24,31 @@ final class CoreHeaderStore: Sendable {
         try database.execute(
             "CREATE TABLE IF NOT EXISTS child_indexes (cid TEXT PRIMARY KEY, bytes BLOB NOT NULL)"
         )
+        try database.execute(
+            "CREATE TABLE IF NOT EXISTS child_proofs (chain TEXT NOT NULL, child TEXT NOT NULL, root TEXT NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (chain, child, root))"
+        )
+    }
+
+    /// A credited child proof, kept so a restarted node serves its child
+    /// headers with their proofs at once.
+    func storeProof(_ proof: ChildBlockProof, for child: String, at path: [String]) throws {
+        try database.execute(
+            "INSERT OR IGNORE INTO child_proofs (chain, child, root, bytes) VALUES (?1, ?2, ?3, ?4)",
+            params: [.text(path.joined(separator: "/")), .text(child), .text(proof.rootCID), .blob(try proof.serialize())]
+        )
+    }
+
+    /// Every stored child proof, by level, block and root.
+    func proofs() throws -> [[String]: [String: [String: ChildBlockProof]]] {
+        var proofs: [[String]: [String: [String: ChildBlockProof]]] = [:]
+        for row in try database.rows(from: "child_proofs", "SELECT chain, child, root, bytes FROM child_proofs") {
+            guard let proof = ChildBlockProof.deserialize(try row.blob("bytes")) else {
+                throw NodeStoreError.corrupt("a saved child proof does not deserialize")
+            }
+            let path = try row.text("chain").split(separator: "/").map(String.init)
+            proofs[path, default: [:]][try row.text("child"), default: [:]][try row.text("root")] = proof
+        }
+        return proofs
     }
 
     /// One transaction: every header of a persist batch, or none.
@@ -51,14 +76,14 @@ final class CoreHeaderStore: Sendable {
     }
 
     /// A stored header's block node and child index.
-    func header(_ cid: String) -> (block: Block, children: ChildIndex)? {
+    func header(_ cid: String) -> (block: Block, children: FlatDictionary<BlockHeader>)? {
         guard let row = try? database.row(
             CoreHeaderRow.self,
             "SELECT h.block AS block, c.bytes AS children FROM headers h JOIN child_indexes c ON c.cid = h.children_cid WHERE h.cid = ?1",
             params: [.text(cid)]
         ),
               let block = (try? row.block).flatMap(Block.init(data:)),
-              let children = (try? row.children).flatMap(ChildIndex.init(data:))
+              let children = (try? row.children).flatMap(FlatDictionary<BlockHeader>.init(data:))
         else { return nil }
         return (block, children)
     }
@@ -90,4 +115,3 @@ struct CoreChildIndexRow: NodeStoreRecord {
 
     var bytes: Data { get throws { try row.blob("bytes") } }
 }
-

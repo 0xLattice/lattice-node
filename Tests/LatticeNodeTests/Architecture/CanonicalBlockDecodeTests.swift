@@ -18,12 +18,10 @@ final class CanonicalBlockDecodeTests: XCTestCase {
 
         XCTAssertNotNil(_contentBoundBlock(cid: cid, data: canonical))
 
-        // cashew's Node.init?(data:) falls back to JSON, so a JSON
-        // re-encoding of the same logical block genuinely decodes. Only the
-        // canonical re-encode comparison stands between one grind and two
-        // identities; it must reject regardless of the CID presented.
+        // cashew 5 decodes only canonical DAG-CBOR: a JSON re-encoding of
+        // the same logical block decodes to nothing, whatever CID it names.
         let json = try XCTUnwrap(block.toJSON())
-        XCTAssertNotNil(Block(data: json))
+        XCTAssertNil(Block(data: json))
         XCTAssertNil(_contentBoundBlock(cid: cid, data: json))
     }
 

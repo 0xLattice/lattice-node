@@ -1,4 +1,5 @@
 import Lattice
+import cashew
 import LatticeNodeCore
 
 /// What a scripted peer does in reply to an input.
@@ -17,7 +18,7 @@ public protocol SimScript: Sendable {
     mutating func connected(_ peer: PeerID, now: Int64, world: World) -> [ScriptAction]
     mutating func received(_ message: SyncMessage, from peer: PeerID, now: Int64, world: World) -> [ScriptAction]
     /// The child index bytes it returns for `cid`, or nil.
-    func fetch(_ cid: String, now: Int64, world: World) -> ChildIndex?
+    func fetch(_ cid: String, now: Int64, world: World) -> FlatDictionary<BlockHeader>?
     mutating func tick(peers: [PeerID], now: Int64, world: World) -> [ScriptAction]
 }
 
@@ -136,7 +137,7 @@ public struct HonestSource: SimScript {
         return [.send(peer, reply)]
     }
 
-    public func fetch(_ cid: String, now: Int64, world: World) -> ChildIndex? {
+    public func fetch(_ cid: String, now: Int64, world: World) -> FlatDictionary<BlockHeader>? {
         world.blocks.values.first { $0.block.children.rawCID == cid && $0.releaseAt <= now }?.children
     }
 
@@ -183,7 +184,7 @@ public struct HeaderSpammer: SimScript {
         return [.send(peer, reply)]
     }
 
-    public func fetch(_ cid: String, now: Int64, world: World) -> ChildIndex? { nil }
+    public func fetch(_ cid: String, now: Int64, world: World) -> FlatDictionary<BlockHeader>? { nil }
 
     public mutating func tick(peers: [PeerID], now: Int64, world: World) -> [ScriptAction] { [] }
 }
@@ -219,7 +220,7 @@ public struct UncleShower: SimScript {
         return [.send(peer, reply)]
     }
 
-    public func fetch(_ cid: String, now: Int64, world: World) -> ChildIndex? {
+    public func fetch(_ cid: String, now: Int64, world: World) -> FlatDictionary<BlockHeader>? {
         world.blocks.values.first { $0.block.children.rawCID == cid && $0.releaseAt <= now }?.children
     }
 
@@ -267,7 +268,7 @@ public struct Liar: SimScript {
         return [.send(peer, reply)]
     }
 
-    public func fetch(_ cid: String, now: Int64, world: World) -> ChildIndex? {
+    public func fetch(_ cid: String, now: Int64, world: World) -> FlatDictionary<BlockHeader>? {
         world.blocks.values.first { $0.block.children.rawCID == cid && $0.releaseAt <= now }?.children
     }
 

@@ -11,7 +11,10 @@ final class MetricsTests: XCTestCase {
     func testMetricsScrapeIsParseableExposition() async throws {
         let service = try await openService(chainPath: ["Nexus"])
         let app = makeApplication(
-            service: service,
+            reads: service.reads,
+            writes: service,
+            status: { await service.status() },
+            metrics: { service.metricsExposition(peers: $0, processStartTime: $1) },
             host: "127.0.0.1",
             port: 8080,
             peers: { ExplorerPeersResponse(count: 3, peers: []) },
@@ -46,7 +49,7 @@ final class MetricsTests: XCTestCase {
             XCTAssertEqual(samples[mempool], "0")
 
             let templateResponse = try await client.execute(
-                uri: "/v1/mining/templates",
+                uri: "/mining/templates",
                 method: .post,
                 headers: [.contentType: "application/json"],
                 body: ByteBuffer(bytes: try JSONEncoder().encode(MiningTemplateRequest()))
@@ -56,7 +59,7 @@ final class MetricsTests: XCTestCase {
                 from: Data(templateResponse.body.readableBytesView)
             )
             let workResponse = try await client.execute(
-                uri: "/v1/mining/work",
+                uri: "/mining/work",
                 method: .post,
                 headers: [.contentType: "application/json"],
                 body: ByteBuffer(bytes: try JSONEncoder().encode(
@@ -77,7 +80,6 @@ final class MetricsTests: XCTestCase {
                 accountActions: [],
                 actions: [],
                 depositActions: [],
-                genesisActions: [],
                 receiptActions: [],
                 withdrawalActions: [],
                 signers: [CryptoUtils.createAddress(from: key.publicKey)],
@@ -92,7 +94,7 @@ final class MetricsTests: XCTestCase {
                 body: bodyHeader
             )
             let submitted = try await client.execute(
-                uri: "/v1/transactions",
+                uri: "/transactions",
                 method: .post,
                 headers: [.contentType: "application/json"],
                 body: ByteBuffer(bytes: try JSONEncoder().encode(
@@ -106,7 +108,7 @@ final class MetricsTests: XCTestCase {
         }
     }
 
-    func testMetricsExposeParentReportAndExecutionWalkCounters() throws {
+    func testMetricsExposeExecutionWalkCounters() throws {
         let rendered = renderNodeMetrics(NodeMetricsSample(
             chainPath: ["Nexus", "Payments"],
             validatedTipHeight: 1,
@@ -114,19 +116,13 @@ final class MetricsTests: XCTestCase {
             overlayPeers: 0,
             mempoolTransactions: 0,
             processStartTime: Date(timeIntervalSince1970: 0),
-            parentReportsApplied: 3,
-            parentReportRefusals: ["notStronger": 2, "locationConflict": 1],
             executionWalkParked: 4,
             candidateSessionReads: 5
         ))
         let samples = try parseExposition(rendered)
         let chain = "chain=\"Nexus/Payments\""
-        XCTAssertEqual(samples["lattice_parent_run_reports_applied_total{\(chain)}"], "3")
-        XCTAssertEqual(samples["lattice_parent_run_reports_refused_total{\(chain),reason=\"notStronger\"}"], "2")
-        XCTAssertEqual(samples["lattice_parent_run_reports_refused_total{\(chain),reason=\"locationConflict\"}"], "1")
         XCTAssertEqual(samples["lattice_validate_walk_parked_total{\(chain)}"], "4")
         XCTAssertEqual(samples["lattice_candidate_session_reads_total{\(chain)}"], "5")
-        XCTAssertTrue(rendered.contains("# TYPE lattice_parent_run_reports_applied_total counter"))
     }
 
     func testMetricsEscapeOperatorSuppliedChainPath() async throws {
@@ -146,42 +142,6 @@ final class MetricsTests: XCTestCase {
         // The tiers are distinct series: validated 7, weighed 8.
         XCTAssertEqual(samples["lattice_chain_tip_height{\(chain),tier=\"validated\"}"], "7")
         XCTAssertEqual(samples["lattice_chain_tip_height{\(chain),tier=\"weighed\"}"], "8")
-
-        // Daemon: `"` and `\` are valid chain directory atoms, so a configured
-        // chain path reaches the label as-is (newline is not a valid atom).
-        let service = try await openService(chainPath: ["Nexus", #"q"b\s"#])
-        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
-        try await app.test(.router) { client in
-            let samples = try await scrape(client)
-            XCTAssertEqual(samples[#"lattice_overlay_peers{chain="Nexus/q\"b\\s"}"#], "0")
-            // An unbootstrapped child has no tip: the height samples are absent.
-            XCTAssertFalse(samples.keys.contains { $0.hasPrefix("lattice_chain_tip_height") })
-        }
-    }
-
-    func testMetricsSeparateWeighedTierFromValidated() async throws {
-        // A block admitted on the weighed tier leads fork choice before it
-        // executes: the weighed tier reads 1 while the validated tier stays at
-        // genesis, so each tier is wired to its own read.
-        let producer = try await openProcess(chainPath: ["Nexus"])
-        let template = try await service(for: producer)
-            .miningTemplate(MiningTemplateRequest())
-        let produced = try await producer.importBlock(BlockHeader(node: template.block))
-        XCTAssertTrue(produced.decision.isAccepted)
-
-        let consumer = try await openProcess(chainPath: ["Nexus"])
-        let weighed = try await consumer.importBlock(
-            BlockHeader(node: template.block),
-            remoteSource: FetcherContentSource(producer),
-            mode: .header
-        )
-        XCTAssertTrue(weighed.decision.isAccepted)
-
-        let samples = try parseExposition(
-            await service(for: consumer).metricsExposition(peers: 0, processStartTime: Date())
-        )
-        XCTAssertEqual(samples[#"lattice_chain_tip_height{chain="Nexus",tier="validated"}"#], "0")
-        XCTAssertEqual(samples[#"lattice_chain_tip_height{chain="Nexus",tier="weighed"}"#], "1")
     }
 
     func testMetricsAbsentOnPublicReadApplication() async throws {
@@ -210,17 +170,8 @@ final class MetricsTests: XCTestCase {
         ))
     }
 
-    private func openService(chainPath: [String]) async throws -> ChainService {
-        service(for: try await openProcess(chainPath: chainPath))
-    }
-
-    private func service(for process: ChainProcess) -> ChainService {
-        ChainService(
-            process: process,
-            network: ClosureNetworkInterface(
-                acceptedBlockPublisher: { _ in },
-            )
-        )
+    private func openService(chainPath: [String]) async throws -> CoreDriver {
+        try await startDriver(try await openProcess(chainPath: chainPath))
     }
 }
 

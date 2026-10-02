@@ -31,7 +31,7 @@ final class WireProtocolFuzzTests: XCTestCase {
     /// Real CIDs from this network, because several validators demand a
     /// canonically encoded one and a CID-shaped string will not do.
     private let cids = [
-        "bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24",
+        "bafyreigsvcxa7kveg7ywaykwqqwvakgtcujds634k4cc6mejyh43pmoqny",
         "bafyreibdhxo7e76c3szbi7i7qwzzgbhgliweuz7ewqba4ybk5h7itegjva",
         "bafyreif4a3a4rgpuhapiellfgmycngfyukrbajjuqkvcrslm43py5y6ixu",
         "bafyreifqhvjsjikap3cj5n6piiq7bh56r6evy5l4x76oyzq74lpy3fjw2q",
@@ -66,51 +66,17 @@ final class WireProtocolFuzzTests: XCTestCase {
     /// spell its whole schema — so it would pass while covering nothing.
     private func corpus() throws -> [Seed] {
         [
-            try seed(BlockAnnouncementMessage(blockCID: cids[0], height: 42)),
             try seed(TransactionAvailableMessage(volumeRootCID: cids[1])),
-            try seed(TransactionInventoryRequestMessage(
-                requestID: 23, afterRootCID: cids[0]
+            try seed(StreamRequestMessage(
+                chainPath: ["Nexus"], requestID: 7, logID: "log-a", after: 42, own: "log-b"
             )),
-            try seed(TransactionInventoryResponseMessage(
-                requestID: 9,
-                afterRootCID: nil,
-                volumeRootCIDs: Array(cids.prefix(2)),
+            try seed(StreamPageMessage(
+                chainPath: ["Nexus"], requestID: 7, logID: "log-a",
+                entries: [WireLogEntry(position: 43, proof: false, cid: cids[0], block: cids[0])],
                 hasMore: false
             )),
-            try seed(AcceptedLeavesRequestMessage(
-                requestID: 7, afterCID: cids[0], snapshotSequence: 3
-            )),
-            try seed(AcceptedLeavesResponseMessage(
-                requestID: 7,
-                afterCID: nil,
-                snapshotSequence: 3,
-                blockCIDs: Array(cids.prefix(2)),
-                hasMore: false
-            )),
-            try seed(ForwardRangeRequestMessage(requestID: 11, afterCID: cids[0])),
-            try seed(ForwardRangeResponseMessage(
-                requestID: 11,
-                afterCID: cids[0],
-                blockCIDs: [cids[1]],
-                hasMore: false
-            )),
-            try seed(AncestorRangeRequestMessage(requestID: 13, locator: [cids[1]])),
-            try seed(AncestorRangeResponseMessage(
-                requestID: 24,
-                commonAncestor: cids[0],
-                blockCIDs: [cids[1]],
-                hasMore: false
-            )),
-            try seed(ReadEndpointRequestMessage(requestID: 26, genesisCID: cids[2])),
-            try seed(ReadEndpointResponseMessage(
-                requestID: 17,
-                genesisCID: cids[2],
-                // Empty rather than a guessed URL: the validator demands a
-                // string its own normaliser leaves unchanged, and inventing
-                // one here would test my guess, not the protocol.
-                readURLs: []
-            )),
-            try seed(ChildEvidenceRootMessage(rootCID: cids[4])),
+            try seed(DataRequestMessage(chainPath: ["Nexus"], requestID: 11, cids: Array(cids.prefix(2)))),
+            try seed(AncestorsRequestMessage(chainPath: ["Nexus"], requestID: 13, cid: cids[1], maximum: 64)),
         ]
     }
 
@@ -213,19 +179,11 @@ final class WireProtocolFuzzTests: XCTestCase {
 
     private var probes: [Probe] {
         [
-            probe(BlockAnnouncementMessage.self),
             probe(TransactionAvailableMessage.self),
-            probe(TransactionInventoryRequestMessage.self),
-            probe(TransactionInventoryResponseMessage.self),
-            probe(AcceptedLeavesRequestMessage.self),
-            probe(AcceptedLeavesResponseMessage.self),
-            probe(ForwardRangeRequestMessage.self),
-            probe(ForwardRangeResponseMessage.self),
-            probe(AncestorRangeRequestMessage.self),
-            probe(AncestorRangeResponseMessage.self),
-            probe(ReadEndpointRequestMessage.self),
-            probe(ReadEndpointResponseMessage.self),
-            probe(ChildEvidenceRootMessage.self),
+            probe(StreamRequestMessage.self),
+            probe(StreamPageMessage.self),
+            probe(DataRequestMessage.self),
+            probe(AncestorsRequestMessage.self),
         ]
     }
 
@@ -290,7 +248,9 @@ final class WireProtocolFuzzTests: XCTestCase {
             cid.contains(where: \.isNumber),
             "the check is only meaningful against a CID that contains digits"
         )
-        let data = try BlockAnnouncementMessage(blockCID: cid, height: 42).encoded()
+        let data = try StreamRequestMessage(
+            chainPath: ["Nexus"], requestID: 7, logID: cid, after: 42, own: ""
+        ).encoded()
         var generator = SplitMix64(state: 1)
         for _ in 0..<64 {
             let mutated = try XCTUnwrap(
@@ -299,7 +259,7 @@ final class WireProtocolFuzzTests: XCTestCase {
             let text = String(decoding: mutated, as: UTF8.self)
             XCTAssertTrue(text.contains(cid), "a CID was altered: \(text)")
             XCTAssertTrue(
-                text.contains("\"height\":\(UInt64.max)"),
+                text.contains(":\(UInt64.max)"),
                 "the number field was not the one replaced: \(text)"
             )
         }
@@ -340,8 +300,8 @@ final class WireProtocolFuzzTests: XCTestCase {
     /// size bound can produce `.oversized`.
     func testOversizedInputIsRefusedByTheSizeBoundNotTheParser() {
         let padding = String(repeating: "a", count: 5 * 1024 * 1024)
-        let wellFormed = Data("{\"blockCID\":\"\(padding)\"}".utf8)
-        XCTAssertThrowsError(try BlockAnnouncementMessage.decoded(wellFormed)) {
+        let wellFormed = Data("{\"volumeRootCID\":\"\(padding)\"}".utf8)
+        XCTAssertThrowsError(try TransactionAvailableMessage.decoded(wellFormed)) {
             XCTAssertEqual($0 as? NodeNetworkWireError, .oversized)
         }
     }

@@ -253,8 +253,8 @@ jobs:
       - name: Resolve dependencies
         run: swift package resolve
 
-      - name: Run hierarchy regressions under ASan + UBSan
-        run: swift test --sanitize address --sanitize undefined --filter NetworkTrust
+      - name: Run core driver tests under ASan + UBSan
+        run: swift test --sanitize address --sanitize undefined --filter CoreDriver
 
   static-analysis:
     runs-on: macos-15

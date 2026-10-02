@@ -44,4 +44,4 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD curl --fail --silent http://127.0.0.1:8080/health >/dev/null || exit 1
 
 ENTRYPOINT ["/usr/local/bin/lattice-entrypoint"]
-CMD ["lattice-node", "--chain-path", "Nexus", "--data-directory", "/home/lattice/.lattice/chains/Nexus"]
+CMD ["lattice-node", "--data-directory", "/home/lattice/.lattice/chains/Nexus"]

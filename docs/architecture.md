@@ -151,7 +151,7 @@ miner's work within one status probe.
    seed always yields the same CID.
 2. Construct and sign an ordinary parent transaction containing
    `GenesisAction(directory, genesisCID)`, then submit it to
-   `POST /v1/transactions`.
+   `POST /transactions`.
 3. External mining includes that transaction in a parent block like any other.
    The accepted block records `directory -> genesisCID` in the parent's
    committed genesis state.
@@ -209,7 +209,7 @@ Nexus has no parent, so an empty Nexus store starts from a configured local
 trust anchor. `ChainProcess.open` constructs the deterministic genesis,
 recomputes its CID, and requires it to equal:
 
-`bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24`
+`bafyreigsvcxa7kveg7ywaykwqqwvakgtcujds634k4cc6mejyh43pmoqny`
 
 Only then does it bootstrap the root locally. Signature and signer fields in
 genesis transactions are non-authoritative and need no special empty shape. The
@@ -223,7 +223,7 @@ genesis is accepted.
 
 ```text
 lattice-mining-coordinator
-  │ POST /v1/mining/templates
+  │ POST /mining/templates
   ▼
 lattice-node (Nexus)
   │ complete nonce-zero candidate + effective search target
@@ -232,7 +232,7 @@ lattice-miner workers
   │ nonce results
   ▼
 lattice-mining-coordinator
-  │ POST /v1/mining/work
+  │ POST /mining/work
   ▼
 lattice-node import → durability → overlay publication
 ```

@@ -131,9 +131,6 @@ enum PublicReadRouteClass: Sendable, Equatable {
             // method-insensitive would hand a caller a free, unmetered path to
             // the router — a `POST /health` 404 that no bucket ever sees.
             self = (method == .get || method == .head) ? .exempt : .general
-        case 3 where components[0] == "api"
-            && components[1] == "chain" && components[2] == "endpoints":
-            self = .expensive
         case 3 where components[0] == "api" && components[1] == "block"
             && components[2] != "latest":
             // Block detail reads every transaction body to report the reward

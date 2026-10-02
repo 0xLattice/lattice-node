@@ -1,4 +1,5 @@
 import Lattice
+import cashew
 import LatticeNodeCore
 
 /// What a scripted peer does in reply to an input, at some level.
@@ -14,7 +15,7 @@ public protocol LevelScript: Sendable {
     var isHonest: Bool { get }
     mutating func connected(_ peer: PeerID, now: Int64, world: LevelWorld) -> [LevelAction]
     mutating func received(_ message: SyncMessage, at path: ChainPath, from peer: PeerID, now: Int64, world: LevelWorld) -> [LevelAction]
-    func fetch(_ cid: String, at path: ChainPath, now: Int64, world: LevelWorld) -> ChildIndex?
+    func fetch(_ cid: String, at path: ChainPath, now: Int64, world: LevelWorld) -> FlatDictionary<BlockHeader>?
     mutating func tick(peers: [PeerID], now: Int64, world: LevelWorld) -> [LevelAction]
 }
 
@@ -80,7 +81,7 @@ struct LevelStream: Sendable {
 }
 
 extension LevelWorld {
-    func childIndex(_ cid: String, at path: ChainPath, now: Int64) -> ChildIndex? {
+    func childIndex(_ cid: String, at path: ChainPath, now: Int64) -> FlatDictionary<BlockHeader>? {
         (blocks[path] ?? [:]).values.first { $0.block.children.rawCID == cid && $0.releaseAt <= now }?.children
     }
 
@@ -142,7 +143,7 @@ public struct LevelSource: LevelScript {
         return [.send(peer, path, reply)]
     }
 
-    public func fetch(_ cid: String, at path: ChainPath, now: Int64, world: LevelWorld) -> ChildIndex? {
+    public func fetch(_ cid: String, at path: ChainPath, now: Int64, world: LevelWorld) -> FlatDictionary<BlockHeader>? {
         world.childIndex(cid, at: path, now: now)
     }
 
@@ -195,7 +196,7 @@ public struct ProofWithholder: LevelScript {
         return [.send(peer, path, reply)]
     }
 
-    public func fetch(_ cid: String, at path: ChainPath, now: Int64, world: LevelWorld) -> ChildIndex? {
+    public func fetch(_ cid: String, at path: ChainPath, now: Int64, world: LevelWorld) -> FlatDictionary<BlockHeader>? {
         world.childIndex(cid, at: path, now: now)
     }
 
@@ -240,7 +241,7 @@ public struct LoneHeader: LevelScript {
         return [.send(peer, path, reply)]
     }
 
-    public func fetch(_ cid: String, at path: ChainPath, now: Int64, world: LevelWorld) -> ChildIndex? {
+    public func fetch(_ cid: String, at path: ChainPath, now: Int64, world: LevelWorld) -> FlatDictionary<BlockHeader>? {
         header.flatMap { $0.block.block.children.rawCID == cid ? $0.block.children : nil }
     }
 
@@ -303,7 +304,7 @@ public struct ProofFlooder: LevelScript {
         return [.send(peer, path, reply)]
     }
 
-    public func fetch(_ cid: String, at path: ChainPath, now: Int64, world: LevelWorld) -> ChildIndex? {
+    public func fetch(_ cid: String, at path: ChainPath, now: Int64, world: LevelWorld) -> FlatDictionary<BlockHeader>? {
         world.childIndex(cid, at: path, now: now)
     }
 

@@ -3,7 +3,7 @@
 // A coordinator round ends on a solution, an exhausted nonce batch, a stale
 // tip, or the node refusing nonces for expired work — so a round's natural
 // bound is the template expiry the node itself advertises
-// (`expiresInMilliseconds` on `POST /v1/mining/templates`) plus the time a
+// (`expiresInMilliseconds` on `POST /mining/templates`) plus the time a
 // batch takes. Expiry is OBSERVED from the node rather than assumed; batch
 // time is MEASURED as the longest round that has actually completed in this
 // process. Neither is a constant here.

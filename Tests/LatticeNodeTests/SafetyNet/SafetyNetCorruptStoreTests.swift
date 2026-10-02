@@ -7,41 +7,23 @@ import XCTest
 /// Safety net: what boot does with one damaged row in each table it reads.
 ///
 /// "Boot" is `ChainProcess.open`: `NodeStore.init` (node_metadata), then the
-/// admission log replay and the normalized-index audit (admission_batches,
-/// admission_facts, accepted_blocks, issued_parent_fact_sources,
-/// issued_parent_facts, issued_child_edges, issued_child_proofs,
-/// contextual_candidates, contextual_candidate_roots), the local mempool
-/// (local_mempool_transactions) and the consensus revision floor
-/// (consensus_revision).
+/// journal audit (admission_batches, admission_facts, accepted_blocks) and
+/// the local mempool (local_mempool_transactions).
 ///
 /// Every case starts from one valid fixture (Nexus, two mined blocks), damages
 /// exactly one row through SQL, reopens, and records what boot did. The
 /// fixture is built once and copied per case, so a case can never see another
-/// case's damage. The tables the fixture leaves empty (the hierarchy and
-/// candidate tables of a childless Nexus node) are damaged by INSERTING one
-/// malformed row, which is the only row boot can then read.
+/// case's damage.
 ///
-/// Summary of CURRENT behaviour, as pinned by the tests below:
+/// - node_metadata: refused with `NodeStoreError.wipeRequired`.
+/// - A column that cannot be read as its table declares it: refused with
+///   `NodeStoreError.malformedRow(table:column:)` naming exactly the damaged
+///   table and column.
+/// - Semantic damage the row layer cannot see (undecodable batches, facts
+///   that disagree with their batch): refused with `NodeStoreError.corrupt`.
+/// - accepted_blocks.leaf disagreeing with the parent links: repaired at boot.
 ///
-/// - node_metadata: refused with `NodeStoreError.wipeRequired` (an untyped
-///   reason string; the column is not named).
-/// - A column that cannot be read as its table declares it (consensus_revision
-///   text that is not an integer, an empty accepted_blocks parent, a
-///   non-positive sequence or an execution tier outside `BlockStatus`, a
-///   non-canonical CID in issued_child_proofs or
-///   local_mempool_transactions): refused
-///   with `NodeStoreError.malformedRow(table:column:)` naming exactly the
-///   damaged table and column.
-/// - Semantic damage the row layer cannot see (admission_batches and
-///   issued_parent_fact_sources JSON that fails to decode, admission_facts and
-///   issued_parent_facts that disagree with their sources, an orphaned
-///   issued_child_edges row, contextual_candidates / contextual_candidate_roots
-///   rows that break the index's SQL consistency): refused with
-///   `NodeStoreError.corrupt` (a free-text reason).
-/// - accepted_blocks.leaf disagreeing with the parent links: repaired at boot
-///   (documented behaviour, pinned as such).
-///
-/// No damage crashes the process today.
+/// No damage crashes the process.
 final class SafetyNetCorruptStoreTests: XCTestCase {
 
     /// What `ChainProcess.open` did with the damaged store.
@@ -94,41 +76,11 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             description: "one fact's bytes no longer match its batch",
             sql: ["UPDATE admission_facts SET payload = X'00' WHERE fact_id = (SELECT MIN(fact_id) FROM admission_facts)"]
         ),
-        Damage(
-            table: "issued_parent_fact_sources", column: "payload",
-            description: "inserted malformed JSON source",
-            sql: ["INSERT INTO issued_parent_fact_sources (payload) VALUES (X'00')"]
-        ),
-        Damage(
-            table: "issued_parent_facts", column: "payload",
-            description: "inserted fact with no source",
-            sql: ["INSERT INTO issued_parent_facts (kind, key_a, key_b, payload) VALUES ('carrier', 'x', 'y', X'00')"]
-        ),
-        Damage(
-            table: "issued_child_edges", column: "edge_cid",
-            description: "inserted edge without an attachment",
-            sql: ["INSERT INTO issued_child_edges (edge_cid, parent_carrier_cid, directory, child_cid) VALUES ('not-a-cid', 'carrier', 'Payments', 'child')"]
-        ),
-        Damage(
-            table: "contextual_candidates", column: "candidate_cid",
-            description: "inserted candidate without roots",
-            sql: ["INSERT INTO contextual_candidates (candidate_cid, offer_seq, issued) VALUES ('not-a-cid', 1, 0)"]
-        ),
-        Damage(
-            table: "contextual_candidate_roots", column: "root_cid",
-            description: "inserted root without a candidate",
-            sql: ["INSERT INTO contextual_candidate_roots (candidate_cid, root_cid) VALUES ('orphan', 'not-a-cid')"]
-        ),
     ]
 
     /// Refused with `NodeStoreError.malformedRow(table:column:)` naming the
     /// damaged table and column.
     private static let refusedAsMalformedRow: [Damage] = [
-        Damage(
-            table: "consensus_revision", column: "revision",
-            description: "non-numeric text",
-            sql: ["UPDATE consensus_revision SET revision = 'not-a-number' WHERE singleton = 1"]
-        ),
         Damage(
             table: "accepted_blocks", column: "parent_cid",
             description: "empty parent CID on a non-genesis block",
@@ -143,11 +95,6 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             table: "accepted_blocks", column: "validated",
             description: "tier 7 (neither weighed, eager nor walk-validated)",
             sql: ["UPDATE accepted_blocks SET validated = 7 WHERE block_cid = (SELECT MIN(block_cid) FROM accepted_blocks WHERE parent_cid IS NOT NULL)"]
-        ),
-        Damage(
-            table: "issued_child_proofs", column: "root_cid",
-            description: "inserted proof with malformed CID text",
-            sql: ["INSERT INTO issued_child_proofs (scope, edge_cid, root_cid, attachment_cid) VALUES ('incoming_carrier', 'edge', 'not-a-cid', 'not-a-cid')"]
         ),
         Damage(
             table: "local_mempool_transactions", column: "transaction_cid",
@@ -250,10 +197,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
 
     private func observeBoot(at root: URL) async -> Observed {
         do {
-            let process = try await ChainProcess.open(
-                configuration: try configuration(root)
-            )
-            _ = await process.status()
+            _ = try await ChainProcess.open(configuration: try configuration(root))
             return .opened
         } catch NodeStoreError.corrupt {
             return .corrupt
@@ -268,29 +212,15 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         }
     }
 
-    /// A valid Nexus store: genesis plus two deterministically mined blocks,
-    /// closed (storage lock released) before returning.
+    /// A valid Nexus store: genesis plus two mined blocks, the driver
+    /// stopped before returning.
     private func buildFixture() async throws -> URL {
         let root = temporaryDirectory()
-        var producer: ChainProcess? = try await ChainProcess.open(
-            configuration: try configuration(root)
+        let driver = try await startDriver(
+            try await ChainProcess.open(configuration: try configuration(root))
         )
-        var previous = try await producer!.canonicalTipBlock()
-        for timestamp in [Int64(3_600_000), 7_200_000] {
-            let candidate = try await BlockBuilder.buildBlock(
-                previous: previous, timestamp: timestamp, fetcher: producer!
-            )
-            let mined = try XCTUnwrap(BlockBuilder.mine(
-                block: candidate, target: candidate.target, maxAttempts: 1 << 16
-            ))
-            try await BlockHeader(node: mined).storeBlock(
-                fetcher: producer!, storer: producer!
-            )
-            let outcome = try await producer!.importBlock(BlockHeader(node: mined))
-            XCTAssertTrue(outcome.decision.isAccepted, "fixture block \(timestamp)")
-            previous = mined
-        }
-        producer = nil
+        for _ in 0..<2 { _ = try await driver.mineBlock() }
+        await driver.stop()
         return root
     }
 

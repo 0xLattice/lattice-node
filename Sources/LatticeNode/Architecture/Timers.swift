@@ -61,27 +61,6 @@ enum Timers {
         case stale
     }
 
-    /// `attempt`; while its result is `capacityUnavailable`, sleep `every`,
-    /// then re-check `stillCurrent` and attempt again. The closures run on
-    /// the caller's actor.
-    static func retryWhileCapacityUnavailable<T: Sendable>(
-        every interval: Duration,
-        isolation: isolated (any Actor)? = #isolation,
-        attempt: () async -> T,
-        capacityUnavailable: (T) -> Bool,
-        stillCurrent: () -> Bool
-    ) async -> Retry<T> {
-        let intervalNanoseconds = Timers.nanoseconds(interval)
-        while true {
-            let result = await attempt()
-            guard capacityUnavailable(result) else { return .value(result) }
-            guard await Timers.sleep(nanoseconds: intervalNanoseconds) else {
-                return .cancelled
-            }
-            guard stillCurrent() else { return .stale }
-        }
-    }
-
     enum Step<T: Sendable>: Sendable {
         case again
         case done(T)

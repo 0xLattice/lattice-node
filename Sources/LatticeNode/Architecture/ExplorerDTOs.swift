@@ -139,36 +139,6 @@ public struct ExplorerChainGenesis: Codable, Sendable, Equatable {
     public let genesisHash: String
 }
 
-public struct ExplorerChainChild: Codable, Sendable, Equatable {
-    public let chainPath: [String]
-    public let genesisHash: String?
-}
-
-public struct ExplorerChainChildren: Codable, Sendable, Equatable {
-    public let children: [ExplorerChainChild]
-}
-
-public struct ExplorerEndpoint: Codable, Sendable, Equatable {
-    /// A reachable HTTP(S) read URL for a node serving the child chain. By
-    /// convention (A) this is `https://<provider-host>` — the child node serves
-    /// its public read API over HTTPS on the same host it announced as a DHT
-    /// provider of the child's genesis. The explorer connects here and
-    /// genesis-verifies it against the parent's anchored genesisCID.
-    public let rpcUrl: String
-
-    public init(rpcUrl: String) {
-        self.rpcUrl = rpcUrl
-    }
-}
-
-public struct ExplorerEndpoints: Codable, Sendable, Equatable {
-    public let endpoints: [ExplorerEndpoint]
-
-    public init(endpoints: [ExplorerEndpoint]) {
-        self.endpoints = endpoints
-    }
-}
-
 /// Public explorer peer DTOs. Defined here (module LatticeNode) so both the
 /// runtime and the daemon's HTTP handlers (module LatticeNodeDaemon) can see
 /// them; the handlers only `json()` these.

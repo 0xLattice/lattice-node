@@ -127,8 +127,8 @@ func withSpawnLock<T>(
     return try await body()
 }
 
-func health(rpc: UInt16) async -> [String: Any]? {
-    guard let url = URL(string: "http://127.0.0.1:\(rpc)/health") else {
+func health(rpc: UInt16, chain: String = "Nexus") async -> [String: Any]? {
+    guard let url = readURL(rpc: rpc, "health", chain: chain) else {
         return nil
     }
     var request = URLRequest(url: url)
@@ -142,9 +142,9 @@ func health(rpc: UInt16) async -> [String: Any]? {
 /// The pidfile and log name of the one daemon hosting the whole tree.
 let hostProcessName = "lattice-node"
 
-/// Starts the one `lattice-node` hosting every chain in the tree. It wires
-/// each child to its co-hosted parent itself. The host reads `lattice.json`
-/// once, so the chain set it starts with is recorded beside its pidfile.
+/// Starts the one `lattice-node`, for the tree's Nexus chain (the node hosts
+/// no child chain yet). The chain set it starts with is recorded beside its
+/// pidfile.
 func spawnHost(layout: HostLayout) throws {
     let manager = FileManager.default
     for directory in [
@@ -155,16 +155,35 @@ func spawnHost(layout: HostLayout) throws {
             at: directory, withIntermediateDirectories: true
         )
     }
-    let chains = try Topology.load(root: layout.root).chains.keys.sorted()
+    let chains = try hostedPaths(Topology.load(root: layout.root))
     try Data(chains.joined(separator: "\n").utf8).write(
         to: hostedChainsFile(layout), options: .atomic
     )
     let process = Process()
     process.executableURL = try nodeBinary()
-    process.arguments = [
-        "--config", layout.root.appendingPathComponent(Topology.fileName).path,
-        "--data-root", layout.root.path,
+    guard let nexus = try Topology.load(root: layout.root).chains["Nexus"] else {
+        throw CtlError("the tree has no Nexus chain")
+    }
+    var arguments = [
+        "--data-directory", layout.chainDirectory(for: "Nexus").path,
+        "--identity-key", layout.identityKey(for: "Nexus").path,
+        "--listen-port", String(nexus.listen),
+        "--rpc-port", String(nexus.rpc),
     ]
+    if let peers = nexus.peers {
+        arguments += peers.isEmpty ? ["--no-default-peers"] : ["--peer"] + peers
+    }
+    if let port = nexus.publicRead { arguments += ["--public-read-port", String(port)] }
+    if let host = nexus.externalAddress { arguments += ["--external-address", host] }
+    if let url = nexus.publicReadUrl { arguments += ["--public-read-url", url] }
+    if let rate = nexus.publicReadRate { arguments += ["--public-read-rate", String(rate)] }
+    if let rate = nexus.publicReadExpensiveRate { arguments += ["--public-read-expensive-rate", String(rate)] }
+    if let rate = nexus.publicReadMaxRate { arguments += ["--public-read-max-rate", String(rate)] }
+    for child in nexus.children ?? [] {
+        let spec = layout.childSpec(for: child)
+        arguments += ["--host-chain", FileManager.default.fileExists(atPath: spec.path) ? "\(child)=\(spec.path)" : child]
+    }
+    process.arguments = arguments
     let log = layout.logFile(for: hostProcessName)
     _ = manager.createFile(atPath: log.path, contents: nil)
     let handle = try FileHandle(forWritingTo: log)
@@ -176,6 +195,11 @@ func spawnHost(layout: HostLayout) throws {
         layout, hostProcessName, pid: process.processIdentifier,
         name: "lattice-node"
     )
+}
+
+/// Every chain path the one process hosts: Nexus and its listed children.
+func hostedPaths(_ topology: Topology) -> [String] {
+    (topology.chains.keys + topology.chains.values.flatMap { $0.children ?? [] }).sorted()
 }
 
 private func hostedChainsFile(_ layout: HostLayout) -> URL {
@@ -252,7 +276,7 @@ struct Up: AsyncParsableCommand {
         let topology = try Topology.load(root: layout.root).validated()
         try await withSpawnLock(layout) {
             if let pid = runningPid(layout, hostProcessName) {
-                guard hostedChains(layout) != Set(topology.chains.keys) else {
+                guard hostedChains(layout) != Set(hostedPaths(topology)) else {
                     print("already running (pid \(pid))")
                     return
                 }
@@ -260,7 +284,7 @@ struct Up: AsyncParsableCommand {
                 try await stopProcess(layout, hostProcessName)
             }
             try spawnHost(layout: layout)
-            print("started \(topology.chains.count) chain(s) (pid \(runningPid(layout, hostProcessName) ?? -1))")
+            print("started \(hostedPaths(topology).count) chain(s) (pid \(runningPid(layout, hostProcessName) ?? -1))")
         }
         guard foreground else { return }
         while true {
@@ -313,13 +337,13 @@ struct Status: AsyncParsableCommand {
         let layout = rootOption.layout
         let topology = try Topology.load(root: layout.root).validated()
         let running = runningPid(layout, hostProcessName) != nil
-        for path in topology.chains.keys.sorted() {
-            let chain = topology.chains[path]!
+        let nexusRPC = topology.chains["Nexus"]?.rpc ?? 0
+        for path in hostedPaths(topology) {
             guard running else {
                 print("\(path): down")
                 continue
             }
-            guard let health = await health(rpc: chain.rpc) else {
+            guard let health = await health(rpc: topology.chains[path]?.rpc ?? nexusRPC, chain: path) else {
                 print("\(path): running, rpc unreachable")
                 continue
             }

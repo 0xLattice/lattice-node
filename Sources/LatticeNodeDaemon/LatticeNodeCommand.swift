@@ -8,47 +8,32 @@ import LatticeNode
 import LatticeNodeCore
 import UInt256
 
-/// Match DiskBroker's default storage-age grace: a newly stored orphan that
-/// misses one sweep is old enough to reclaim at the next.
-let volumeMaintenanceIntervalNanoseconds: UInt64 = 600 * 1_000_000_000
-
-func runVolumeMaintenance(
-    everyNanoseconds interval: UInt64 = volumeMaintenanceIntervalNanoseconds,
-    evict: @escaping @Sendable () async throws -> Void
-) async {
-    precondition(interval > 0)
-    while !Task.isCancelled {
-        do {
-            try await Task.sleep(nanoseconds: interval)
-        } catch {
-            return
-        }
-        guard !Task.isCancelled else { return }
-        do {
-            try await evict()
-        } catch {
-            FileHandle.standardError.write(Data(
-                "lattice-node volume maintenance failed: \(error)\n".utf8
-            ))
-        }
-    }
-}
-
 @main
 struct LatticeNodeCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "lattice-node",
-        abstract: "Run the Nexus chain process, or with --config every chain of a lattice.json tree"
+        abstract: "Run a Nexus node"
     )
-
-    @Option(help: "Absolute slash-separated path, always beginning with Nexus. Without --config only Nexus runs: a child chain runs co-hosted with its ancestry, from a lattice.json tree.")
-    var chainPath = "Nexus"
 
     @Option(help: "Storage directory; defaults to ~/.lattice/chains/<chain-path>")
     var dataDirectory: String?
 
     @Option(help: "Process identity key file; created with mode 0600 when absent")
     var identityKey: String?
+
+    @Option(name: .customLong("host-chain"), help: "A child chain to host as a level of this process, e.g. Nexus/Alpha, optionally =<spec.json> to mine its genesis (repeatable; a parent before its children)")
+    var hostChain: [String] = []
+
+    /// `--host-chain` entries: each path, and the spec file it names.
+    private func hostedChains() throws -> [(path: [String], spec: ChainSpec?)] {
+        try hostChain.map { entry in
+            let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
+            let path = parts[0].split(separator: "/").map(String.init)
+            guard parts.count == 2 else { return (path, nil) }
+            let data = try Data(contentsOf: URL(fileURLWithPath: parts[1]))
+            return (path, try JSONDecoder().decode(ChainSpec.self, from: data))
+        }
+    }
 
     @Option(help: "Same-chain overlay listen port")
     var listenPort: UInt16 = 4001
@@ -80,7 +65,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Per-client arrival-rate ceiling for the general public read routes, in requests per second. The client is the PEER SOCKET ADDRESS (no forwarded-for header is trusted), so behind a proxy that presents one address for every client this throttles the whole internet as one user — set it to 0 there. 0 disables this ceiling.")
     var publicReadRate = PublicReadRateLimits.defaultGeneralRate
 
-    @Option(help: "Per-client arrival-rate ceiling, in requests per second, for the expensive public reads: /api/chain/endpoints (a peer fan-out), and a block's /transactions or /children (hundreds of content fetches). Keyed like --public-read-rate; 0 disables it.")
+    @Option(help: "Per-client arrival-rate ceiling, in requests per second, for the expensive public reads: a block's detail, /transactions or /children (hundreds of content fetches). Keyed like --public-read-rate; 0 disables it.")
     var publicReadExpensiveRate = PublicReadRateLimits.defaultExpensiveRate
 
     @Option(help: "Listener-wide arrival-rate ceiling for the public read port, in requests per second. Address-agnostic, so it remains correct behind a proxy that collapses every client onto one address. 0 disables it; all three rates 0 is no rate limiting at all.")
@@ -92,30 +77,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Operator-declared browsable base URL for this chain's public read surface (e.g. https://toy.example.com — a TLS-fronted hostname a browser can dial, distinct from the IP-literal P2P plane). Advertised through the parent rendezvous so explorers can reach this chain; consumers verify the served genesis against the parent's on-chain anchor. Leave unset for nodes without a public TLS surface.")
     var publicReadUrl: String?
 
-    @Option(help: "Host every chain of this lattice.json tree in this one process: per-chain ports, peers and public-read settings come from the file, and each child is wired to its co-hosted parent over loopback. Only --rpc-bind, --minimum-peer-key-bits, --overlay-max-connections-per-netgroup and --peer-search-interval apply to every level; every other single-chain option is refused.")
-    var config: String?
-
-    @Option(help: "Data root for --config: chains/<path> holds each chain's storage and identity/ its keys. Defaults to the config file's directory.")
-    var dataRoot: String?
-
-    @Flag(name: .customLong("core-driver"), help: "Experimental: run Nexus sync on the sans-IO core driver (headers-first sync, bodies by CID) instead of the network runtime. Nexus only, without --config. Off by default.")
-    var coreDriver = false
-
     mutating func run() async throws {
-        if coreDriver, config != nil {
-            throw ValidationError("--core-driver runs Nexus only; it does not combine with --config")
-        }
-        if let config {
-            try await runHost(configPath: config)
-            return
-        }
         let processStartTime = Date()
-        guard let address = ChainAddress(string: chainPath) else {
-            throw ValidationError("--chain-path must be absolute and begin with Nexus")
-        }
-        guard address.isNexus else {
-            throw ValidationError("a child chain runs only co-hosted with its ancestry: host its lattice.json tree with --config")
-        }
+        let address = ChainAddress([ChainAddress.nexus])!
         guard ["127.0.0.1", "::1", "localhost"].contains(rpcBind.lowercased()) else {
             throw ValidationError("the unauthenticated HTTP API may bind only to loopback")
         }
@@ -143,6 +107,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             configured: explicitPeers.isEmpty && !noDefaultPeers ? nil : explicitPeers
         )
 
+        // Each spec file read once: the paths and specs agree.
+        let hosted = try hostedChains()
         let configuration = try NodeConfiguration(
             chainPath: address.components,
             storagePath: storage,
@@ -154,107 +120,15 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             overlayMaxConnectionsPerNetgroup: overlayMaxConnectionsPerNetgroup,
             externalAddress: externalAddress,
             publicReadURL: publicReadUrl,
-            peerSearchInterval: peerSearchInterval
+            peerSearchInterval: peerSearchInterval,
+            hostedChildren: hosted.map(\.path),
+            childSpecs: Dictionary(hosted.compactMap { entry in entry.spec.map { (entry.path, $0) } }) { first, _ in first }
         )
-        if coreDriver {
-            try await runCoreDriver(
-                configuration: configuration,
-                publicReadLimits: publicReadLimits,
-                processStartTime: processStartTime
-            )
-            return
-        }
-
-        let node = try await Node.build(configuration: configuration)
-        let network = node.network
-        let process = node.process
-        let service = node.service
-
-        let peersProvider: @Sendable () async -> ExplorerPeersResponse = { [weak network] in
-            guard let network else {
-                return ExplorerPeersResponse(count: 0, peers: [])
-            }
-            return await network.peerSummaries(limit: 200)
-        }
-        let providerDiscovery: @Sendable (String) async -> [String] = { [weak network] genesisCID in
-            guard let network else { return [] }
-            return await network.discoverProviderReadURLs(
-                genesisCID: genesisCID
-            )
-        }
-        let app = makeApplication(
-            service: service,
-            host: rpcBind,
-            port: Int(rpcPort),
-            peers: peersProvider,
-            discoverProviders: providerDiscovery,
+        try await runCoreDriver(
+            configuration: configuration,
+            publicReadLimits: publicReadLimits,
             processStartTime: processStartTime
         )
-        let publicReadApp = publicReadPort.map { port in
-            makePublicReadApplication(
-                service: service,
-                host: "0.0.0.0",
-                port: Int(port),
-                peers: peersProvider,
-                discoverProviders: providerDiscovery,
-                limits: publicReadLimits
-            )
-        }
-
-        print("lattice-node \(address.key)")
-        print("  process: \(configuration.processPublicKey)")
-        print("  nexus:   \(configuration.nexusGenesisCID)")
-        print("  rpc:     http://\(rpcBind):\(rpcPort)")
-        if !overlayPeers.isEmpty {
-            print(
-                "  peers:   \(overlayPeers.count) "
-                    + (explicitPeers.isEmpty ? "default" : "configured")
-                    + " bootstrap peer(s)"
-            )
-        }
-        if let publicReadPort {
-            print("  public-read: http://0.0.0.0:\(publicReadPort)")
-            print("  public-read rate limits: \(publicReadLimits.bannerDescription)")
-        }
-        if let declared = configuration.publicReadURL {
-            print("  public-read-url: \(declared)")
-        }
-
-        let volumeMaintenance = Task {
-            await runVolumeMaintenance {
-                _ = try await process.pruneUnpinnedVolumes()
-            }
-        }
-        // Each app's `runService()` returns once SIGTERM/SIGINT has
-        // gracefully stopped its listener; the node then shuts down behind
-        // it, on success and on error alike: tasks that touch the store are
-        // joined, the network stops, and the service joins its own work.
-        // The stores close when `run()` returns and drops the node.
-        let result: Result<Void, any Error>
-        do {
-            if let publicReadApp {
-                try await withThrowingTaskGroup(of: Void.self) { group in
-                    group.addTask { try await app.runService() }
-                    group.addTask { try await publicReadApp.runService() }
-                    do {
-                        _ = try await group.next()
-                    } catch {
-                        group.cancelAll()
-                        throw error
-                    }
-                    group.cancelAll()
-                }
-            } else {
-                try await app.runService()
-            }
-            result = .success(())
-        } catch {
-            result = .failure(error)
-        }
-        volumeMaintenance.cancel()
-        await volumeMaintenance.value
-        await node.shutdown()
-        try result.get()
     }
 
     private func storageURL(for address: ChainAddress) throws -> URL {
@@ -337,58 +211,32 @@ private func parseEndpoint(_ value: String) throws -> (key: String, host: String
     return (key, host, port)
 }
 
-/// The loopback operator writes: the actor path's `ChainService`, or the
-/// core driver's RPC events (`--core-driver`).
+/// The loopback operator writes: the core driver's RPC events.
 protocol OperatorWrites: Sendable {
     func submitTransaction(_ request: SubmitTransactionRequest) async throws -> SubmitTransactionResponse
     func miningTemplate(_ request: MiningTemplateRequest) async throws -> MiningTemplateResponse
     func submitWork(_ request: SubmitWorkRequest) async throws -> SubmitWorkResponse
 }
 
-extension ChainService: OperatorWrites {}
 extension CoreDriver: OperatorWrites {}
 
 func makeApplication(
-    service: ChainService,
-    host: String,
-    port: Int,
-    peers: @Sendable @escaping () async -> ExplorerPeersResponse = {
-        ExplorerPeersResponse(count: 0, peers: [])
-    },
-    discoverProviders: @Sendable @escaping (String) async -> [String] = { _ in [] },
-    processStartTime: Date = Date()
-) -> Application<RouterResponder<BasicRequestContext>> {
-    makeApplication(
-        reads: service.reads,
-        writes: service,
-        status: { await service.status() },
-        metrics: { await service.metricsExposition(peers: $0, processStartTime: $1) },
-        host: host,
-        port: port,
-        peers: peers,
-        discoverProviders: discoverProviders,
-        processStartTime: processStartTime
-    )
-}
-
-func makeApplication(
     reads: ChainReads,
+    levelReads: [ChainReads] = [],
     writes: any OperatorWrites,
     status: @Sendable @escaping () async -> ChainServiceStatusResponse,
     metrics: @Sendable @escaping (_ peers: Int, _ processStartTime: Date) async -> String,
     host: String,
     port: Int,
     peers: @Sendable @escaping () async -> ExplorerPeersResponse,
-    discoverProviders: @Sendable @escaping (String) async -> [String],
     processStartTime: Date,
     configure: (Router<BasicRequestContext>) -> Void = { _ in }
 ) -> Application<RouterResponder<BasicRequestContext>> {
     let router = Router()
     addPublicReadRoutes(
         to: router,
-        reads: reads,
+        reads: ChainReadsByPath(root: reads, levels: levelReads),
         peers: peers,
-        discoverProviders: discoverProviders,
         // Loopback reads the live snapshot: `lattice status` and the E2E
         // suites poll this to watch height advance, and the public listener's
         // staleness window is a defence against public load that does not
@@ -396,11 +244,11 @@ func makeApplication(
         healthSnapshot: { await reads.readSnapshot() }
     )
     // Operator surface below: registered ONLY on this loopback application.
-    // /v1/status stays on the reconciling status() (expires the mempool, prunes
+    // /status stays on the reconciling status() (expires the mempool, prunes
     // stale child-intents) — existing operational clients poll it to observe
     // mempool drain, and depend on that reconciliation. It is an internal
     // endpoint; the public status surface is /health.
-    router.get("v1/status") { request, context in
+    router.get("status") { request, context in
         try json(await status(), request: request, context: context)
     }
     // Prometheus exposition: operator surface only, never the public read app.
@@ -422,39 +270,17 @@ func makeApplication(
 
 /// The public read application: exactly the bounded, non-mutating GET routes
 /// the read-replica nginx allowlist exposes (/health,
-/// /v1/transactions/:cid, /v1/accounts/:owner, /api/*), enforced in code.
+/// /transactions/:cid, /accounts/:owner, /api/*), enforced in code.
 /// Registered from the same function as the loopback application's read
 /// surface so the two cannot drift apart.
 func makePublicReadApplication(
-    service: ChainService,
-    host: String,
-    port: Int,
-    peers: @Sendable @escaping () async -> ExplorerPeersResponse = {
-        ExplorerPeersResponse(count: 0, peers: [])
-    },
-    discoverProviders: @Sendable @escaping (String) async -> [String] = { _ in [] },
-    limits: PublicReadRateLimits = .default,
-    healthClock: @escaping @Sendable () -> Double = PublicReadRateLimiter.monotonicSeconds
-) -> Application<RouterResponder<PublicReadRequestContext>> {
-    makePublicReadApplication(
-        reads: service.reads,
-        host: host,
-        port: port,
-        peers: peers,
-        discoverProviders: discoverProviders,
-        limits: limits,
-        healthClock: healthClock
-    )
-}
-
-func makePublicReadApplication(
     reads: ChainReads,
+    levelReads: [ChainReads] = [],
     host: String,
     port: Int,
     peers: @Sendable @escaping () async -> ExplorerPeersResponse = {
         ExplorerPeersResponse(count: 0, peers: [])
     },
-    discoverProviders: @Sendable @escaping (String) async -> [String] = { _ in [] },
     limits: PublicReadRateLimits = .default,
     healthClock: @escaping @Sendable () -> Double = PublicReadRateLimiter.monotonicSeconds
 ) -> Application<RouterResponder<PublicReadRequestContext>> {
@@ -483,9 +309,8 @@ func makePublicReadApplication(
     }
     addPublicReadRoutes(
         to: router,
-        reads: reads,
+        reads: ChainReadsByPath(root: reads, levels: levelReads),
         peers: peers,
-        discoverProviders: discoverProviders,
         healthSnapshot: { await health.value() }
     )
     return Application(
@@ -499,9 +324,8 @@ func makePublicReadApplication(
 /// one registration function, so the two surfaces cannot drift apart.
 private func addPublicReadRoutes<Context: RequestContext>(
     to router: Router<Context>,
-    reads service: ChainReads,
+    reads byPath: ChainReadsByPath,
     peers: @Sendable @escaping () async -> ExplorerPeersResponse,
-    discoverProviders: @Sendable @escaping (String) async -> [String],
     healthSnapshot: @Sendable @escaping () async -> ChainServiceStatusResponse
 ) {
     // CORS is scoped to READ methods only. The POST write routes stay off the
@@ -521,8 +345,9 @@ private func addPublicReadRoutes<Context: RequestContext>(
     // can never head-of-line-block or mutate consensus/mempool state.
     let health: @Sendable (Request, Context) async throws -> Response = {
         request, context in
-        try jsonCached(
-            await healthSnapshot(),
+        let service = try byPath(request)
+        return try jsonCached(
+            service.chainPath == byPath.root.chainPath ? await healthSnapshot() : await service.readSnapshot(),
             cacheControl: statusCacheControl,
             request: request,
             context: context
@@ -540,7 +365,8 @@ private func addPublicReadRoutes<Context: RequestContext>(
     router.head("health") { request, context in
         try await health(request, context).createHeadResponse()
     }
-    router.get("v1/transactions/:cid") { request, context in
+    router.get("transactions/:cid") { request, context in
+        let service = try byPath(request)
         guard let cid = context.parameters.get("cid"), isPlausibleCID(cid) else {
             throw HTTPError(.badRequest)
         }
@@ -554,7 +380,8 @@ private func addPublicReadRoutes<Context: RequestContext>(
             context: context
         )
     }
-    router.get("v1/accounts/:owner") { request, context in
+    router.get("accounts/:owner") { request, context in
+        let service = try byPath(request)
         guard let owner = context.parameters.get("owner"), isPlausibleCID(owner) else {
             throw HTTPError(.badRequest)
         }
@@ -580,11 +407,12 @@ private func addPublicReadRoutes<Context: RequestContext>(
     // MARK: - Explorer read API (/api/*)
     //
     // Ungated, read-only surface for the static browser explorer. Every handler
-    // mirrors a `/v1/*` read: content-verified, size-bounded, never touching the
+    // mirrors the public CID read routes: content-verified, size-bounded, never touching the
     // operation gate (no status()/transactionInventoryRoots()). Served to the
     // public internet via a read-replica.
 
     router.get("api/block/latest") { request, context in
+        let service = try byPath(request)
         guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
             throw HTTPError(.notFound)
         }
@@ -599,6 +427,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
         )
     }
     router.get("api/block/:id") { request, context in
+        let service = try byPath(request)
         guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
             throw HTTPError(.notFound)
         }
@@ -633,6 +462,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
         )
     }
     router.get("api/block/:id/transactions") { request, context in
+        let service = try byPath(request)
         guard let id = context.parameters.get("id"), isPlausibleCID(id) else {
             throw HTTPError(.badRequest)
         }
@@ -653,6 +483,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
         )
     }
     router.get("api/block/:id/children") { request, context in
+        let service = try byPath(request)
         guard let id = context.parameters.get("id"), isPlausibleCID(id) else {
             throw HTTPError(.badRequest)
         }
@@ -671,6 +502,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
         )
     }
     router.get("api/transaction/:cid") { request, context in
+        let service = try byPath(request)
         guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
             throw HTTPError(.notFound)
         }
@@ -688,6 +520,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
         )
     }
     router.get("api/state/account/:addr") { request, context in
+        let service = try byPath(request)
         guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
             throw HTTPError(.notFound)
         }
@@ -705,7 +538,8 @@ private func addPublicReadRoutes<Context: RequestContext>(
         )
     }
     router.get("api/mempool") { request, context in
-        try jsonCached(
+        let service = try byPath(request)
+        return try jsonCached(
             await service.explorerMempool(),
             cacheControl: statusCacheControl,
             request: request,
@@ -721,6 +555,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
         )
     }
     router.get("api/chain/info") { request, context in
+        let service = try byPath(request)
         guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
             throw HTTPError(.notFound)
         }
@@ -732,6 +567,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
         )
     }
     router.get("api/chain/spec") { request, context in
+        let service = try byPath(request)
         guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
             throw HTTPError(.notFound)
         }
@@ -746,64 +582,33 @@ private func addPublicReadRoutes<Context: RequestContext>(
         )
     }
     router.get("api/chain/genesis") { request, context in
-        try jsonCached(
+        let service = try byPath(request)
+        return try jsonCached(
             await service.explorerChainGenesis(),
             cacheControl: immutableCacheControl,
             request: request,
             context: context
         )
     }
-    router.get("api/chain/children") { request, context in
-        guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
-            throw HTTPError(.notFound)
-        }
-        let limit = try explorerParseLimit(request, defaultValue: 100, cap: 100)
-        return try jsonCached(
-            await service.explorerChainChildren(limit: limit),
-            cacheControl: statusCacheControl,
-            request: request,
-            context: context
-        )
-    }
-    // Permissionless child discovery: `?chainPath=<parent>/<dir>` names a DIRECT
-    // child of this node's chain. We resolve that child's anchored genesisCID
-    // from our own genesisState, then return the read URLs declared for it: our
-    // own (a wired child's hello declaration) and those of the nodes DHT
-    // discovery finds providing that CID. No registry: a child node becomes
-    // discoverable purely by announcing itself as a provider of its genesis.
-    router.get("api/chain/endpoints") { request, context in
-        guard let requested = request.uri.queryParameters["chainPath"]
-            .map(String.init) else {
-            throw HTTPError(.badRequest)
-        }
-        let own = service.explorerChainPath()
-        let parts = requested.split(separator: "/").map(String.init)
-        guard parts.count == own.count + 1,
-              Array(parts.prefix(own.count)) == own else {
-            // Only direct children of THIS node's chain are resolvable here.
-            throw HTTPError(.notFound)
-        }
-        let directory = parts[own.count]
-        guard let genesisCID = await service.explorerChildGenesisCID(
-            directory: directory
-        ) else {
-            // Not anchored (yet): no error — the explorer treats empty as offline.
-            return try jsonCached(
-                ExplorerEndpoints(endpoints: []),
-                cacheControl: statusCacheControl,
-                request: request,
-                context: context
-            )
-        }
-        let urls = await discoverProviders(genesisCID)
-        return try jsonCached(
-            ExplorerEndpoints(endpoints: urls.map { ExplorerEndpoint(rpcUrl: $0) }),
-            cacheControl: statusCacheControl,
-            request: request,
-            context: context
-        )
+}
+
+/// The read surface a request names with `?chainPath=Nexus/Alpha`: the
+/// root's when it names none, a hosted child level's, or 404.
+struct ChainReadsByPath: Sendable {
+    let root: ChainReads
+    let levels: [String: ChainReads]
+
+    init(root: ChainReads, levels: [ChainReads]) {
+        self.root = root
+        self.levels = Dictionary(uniqueKeysWithValues: levels.map { ($0.chainPath.joined(separator: "/"), $0) })
     }
 
+    func callAsFunction(_ request: Request) throws -> ChainReads {
+        guard let key = request.uri.queryParameters["chainPath"].map(String.init),
+              key != root.chainPath.joined(separator: "/") else { return root }
+        guard let level = levels[key] else { throw HTTPError(.notFound) }
+        return level
+    }
 }
 
 /// Unauthenticated writes: registered only on the loopback application, never
@@ -812,19 +617,19 @@ private func addOperatorWriteRoutes(
     to router: Router<BasicRequestContext>,
     writes service: any OperatorWrites
 ) {
-    router.post("v1/transactions") { request, context in
+    router.post("transactions") { request, context in
         let input: SubmitTransactionRequest = try await decode(request, context: context)
         return try await serviceCall(request: request, context: context) {
             try await service.submitTransaction(input)
         }
     }
-    router.post("v1/mining/templates") { request, context in
+    router.post("mining/templates") { request, context in
         let input: MiningTemplateRequest = try await decode(request, context: context)
         return try await serviceCall(request: request, context: context) {
             try await service.miningTemplate(input)
         }
     }
-    router.post("v1/mining/work") { request, context in
+    router.post("mining/work") { request, context in
         let input: SubmitWorkRequest = try await decode(request, context: context)
         return try await serviceCall(request: request, context: context) {
             try await service.submitWork(input)
@@ -911,10 +716,6 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.serviceUnavailable, message: reason(error))
     } catch let error as ChainServiceError {
         throw HTTPError(.badRequest, message: reason(error))
-    } catch TransactionPoolError.full {
-        throw HTTPError(.tooManyRequests, message: "full")
-    } catch let error as TransactionPoolError {
-        throw HTTPError(.badRequest, message: reason(error))
     } catch let error as MiningTemplateError {
         throw HTTPError(.badRequest, message: reason(error))
     } catch MempoolError.full {
@@ -929,8 +730,8 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.badRequest, message: reason(error))
     } catch CoreDriverError.stopped {
         throw HTTPError(.serviceUnavailable, message: "shuttingDown")
-    } catch ChainProcessError.chainNotBootstrapped {
-        throw HTTPError(.conflict, message: "chainNotBootstrapped")
+    } catch CoreDriverError.unknownChain {
+        throw HTTPError(.notFound, message: "unknownChain")
     }
 }
 
@@ -1003,14 +804,14 @@ private func jsonCached<Value: Encodable, Context: RequestContext>(
     return response
 }
 
-/// GET /v1/transactions/:cid response: the decoded, content-verified
+/// GET /transactions/:cid response: the decoded, content-verified
 /// transaction, echoing the requested CID.
 struct TransactionResponse: Codable {
     let cid: String
     let transaction: Transaction
 }
 
-/// GET /v1/accounts/:owner?block=:cid response: the balance and next-expected
+/// GET /accounts/:owner?block=:cid response: the balance and next-expected
 /// nonce as of `block`'s post-state, echoing the requested owner/block CIDs.
 ///
 /// NODE-ATTESTED, not proof-backed: unlike by-CID block/tx bytes (which a

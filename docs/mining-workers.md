@@ -80,9 +80,9 @@ Validate any implementation against this before mining (from
 `MiningWorkerContractTests`, derived from the canonical Nexus genesis block):
 
 - preimage prefix begins
-  `3100006261667972656962696a6d6b69666f36336d69667a62796b6b766c…`
+  `31000062616679726569663765766172756b6d7a7074636576657865686c…`
 - `SHA256(prefix || be64(12345))` =
-  `8d06a81f94cdde1edb04950057cdcfcbf4f8226695b36bcbc1c6c99656ff266f`
+  `33b96b32f3c74227bba9668fe309863fcc2b25a461f6fff72946a72ea94880ca`
 
 Run your worker with the Nexus genesis prefix, `--target` set to that hash,
 `--start-nonce 12345 --count 1`: it must report `found` at nonce `12345` with
