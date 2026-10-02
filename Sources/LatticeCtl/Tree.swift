@@ -179,7 +179,10 @@ func spawnHost(layout: HostLayout) throws {
     if let rate = nexus.publicReadRate { arguments += ["--public-read-rate", String(rate)] }
     if let rate = nexus.publicReadExpensiveRate { arguments += ["--public-read-expensive-rate", String(rate)] }
     if let rate = nexus.publicReadMaxRate { arguments += ["--public-read-max-rate", String(rate)] }
-    for child in nexus.children ?? [] { arguments += ["--host-chain", child] }
+    for child in nexus.children ?? [] {
+        let spec = layout.childSpec(for: child)
+        arguments += ["--host-chain", FileManager.default.fileExists(atPath: spec.path) ? "\(child)=\(spec.path)" : child]
+    }
     process.arguments = arguments
     let log = layout.logFile(for: hostProcessName)
     _ = manager.createFile(atPath: log.path, contents: nil)

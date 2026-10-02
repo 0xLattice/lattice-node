@@ -333,6 +333,11 @@ public struct HostLayout: Sendable {
             ?? FileManager.default.currentDirectoryPath)
     }
 
+    /// A hosted child chain's spec, the one its genesis is mined from.
+    public func childSpec(for path: String) -> URL {
+        root.appendingPathComponent("specs").appendingPathComponent(Self.encoded(path) + ".json")
+    }
+
     /// Percent-encoded: `-` is a legal directory atom,
     /// so flattening `/` to `-` gave `Nexus/A/B` and `Nexus/A-B` one key,
     /// and one process cannot host two levels with one key.
