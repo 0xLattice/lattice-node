@@ -26,7 +26,8 @@ final class CoreSyncTests: XCTestCase {
                 headersTimeout: 1_000,
                 maxInlineChildIndexBytes: 1_024,
                 pendingBudget: pendingBudget
-            )
+            ),
+            log: WeighLog(id: "test")
         )
     }
 
@@ -538,7 +539,7 @@ final class CoreSyncTests: XCTestCase {
     /// A core whose store handed back cursors for the test servers, so they
     /// outlive each session.
     private func keeping(_ core: Core) -> Core {
-        let fresh = StreamCursor(logID: "", position: 0)
+        let fresh = StreamCursor(logID: "unread", position: 0)
         return Core(tree: core.tree, config: core.config, cursors: ["server": fresh, "second": fresh])
     }
 
