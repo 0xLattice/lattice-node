@@ -139,8 +139,8 @@ final class LatticeCtlE2ETests: XCTestCase {
 
     /// Never from the URL cache: `/health` is `max-age=3`, so a cached answer
     /// can report a stopped-and-restarting node as active before it listens.
-    private func health(_ rpc: UInt16) async -> [String: Any]? {
-        guard let url = URL(string: "http://127.0.0.1:\(rpc)/health") else {
+    private func health(_ rpc: UInt16, chain: String = "Nexus") async -> [String: Any]? {
+        guard let url = URL(string: "http://127.0.0.1:\(rpc)/health" + Self.query(chain)) else {
             return nil
         }
         var request = URLRequest(url: url)
@@ -303,9 +303,62 @@ final class LatticeCtlE2ETests: XCTestCase {
         }
     }
 
-    private func balance(_ rpc: UInt16, _ address: String) async -> UInt64 {
+    private static func query(_ chain: String) -> String {
+        chain == "Nexus" ? "" : "?chainPath=\(chain)"
+    }
+
+    private func height(_ rpc: UInt16, chain: String) async -> Int {
+        await health(rpc, chain: chain)?["height"] as? Int ?? -1
+    }
+
+    /// Nexus plus one hosted child, all through the CLI: the child created
+    /// from a spec, both mined by merged mining, a transaction on the child,
+    /// and a restart that resumes both.
+    func testAChildChainIsCreatedMergeMinedTransactedAndResumedThroughTheCLI() async throws {
+        let alpha = "Nexus/Alpha"
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lattice-node-e2e-ctlkeys-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let miner = try await makeKey(scratch, "alpha-miner")
+        let recipient = try await makeKey(scratch, "alpha-recipient")
+        let host = try await bringUpMiningHost(miner: nil, recipients: [alpha: miner])
+        _ = try await runCtl(["child", "create", alpha, "--block-time", "1000", "--reward", "100"], root: host.root)
+        try await waitFor("Nexus active after the restart") {
+            await self.health(host.nexusRPC)?["phase"] as? String == "active"
+        }
+        _ = try await runCtl(["mine", "start"], root: host.root)
+        try await waitFor("Alpha mined by merged mining", seconds: 180) {
+            await self.height(host.nexusRPC, chain: alpha) >= 2
+        }
+        try await waitFor("the Alpha miner is funded", seconds: 180) {
+            await self.balance(host.nexusRPC, miner.address, chain: alpha) >= 10
+        }
+        try await submitUntilAccepted("Alpha accepts the transfer", host, [
+            "send", "--chain", alpha, "--key", miner.file.path,
+            "--to", recipient.address, "--amount", "10",
+        ])
+        try await waitFor("the Alpha transfer is mined", seconds: 240) {
+            await self.balance(host.nexusRPC, recipient.address, chain: alpha) == 10
+        }
+        let before = await height(host.nexusRPC, chain: alpha)
+        _ = try await runCtl(["mine", "stop"], root: host.root)
+        _ = try await runCtl(["down"], root: host.root)
+        _ = try await runCtl(["up"], root: host.root)
+        try await waitFor("Alpha resumes where it was") {
+            await self.height(host.nexusRPC, chain: alpha) >= before
+        }
+        let balance = await balance(host.nexusRPC, recipient.address, chain: alpha)
+        XCTAssertEqual(balance, 10)
+        _ = try await runCtl(["mine", "start"], root: host.root)
+        try await waitFor("Alpha advances after the restart", seconds: 180) {
+            await self.height(host.nexusRPC, chain: alpha) > before
+        }
+    }
+
+    private func balance(_ rpc: UInt16, _ address: String, chain: String = "Nexus") async -> UInt64 {
         guard let url = URL(
-            string: "http://127.0.0.1:\(rpc)/api/state/account/\(address)"
+            string: "http://127.0.0.1:\(rpc)/api/state/account/\(address)" + Self.query(chain)
         ) else { return 0 }
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
