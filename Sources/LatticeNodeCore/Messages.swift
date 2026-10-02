@@ -49,42 +49,119 @@ public struct StoredHeader: Sendable {
     }
 }
 
-/// Where a header sits in a catch-up page: pages list a weighed subgraph by
-/// height, then CID, so every parent precedes its children.
-public struct HeaderKey: Sendable, Hashable, Comparable {
-    public let height: UInt64
+/// One weighed object in a node's weigh log: a header, or a proof (a
+/// `ChildBlockProof` grind) it credited at a child block. Only verifiable
+/// objects are logged; validation and exclusion facts and attributed run
+/// work never are (each node derives them).
+public struct LogEntry: Sendable, Hashable {
+    public enum Kind: Sendable, Hashable { case header, proof }
+
+    public let kind: Kind
+    /// A header's CID, or a proof's content identity (`ProofJob.id`).
     public let cid: String
+    /// The block the object is fetched by: the header itself, or the child
+    /// block the proof weighs.
+    public let block: String
 
-    public init(height: UInt64, cid: String) {
-        self.height = height
+    public static func header(_ cid: String) -> LogEntry { LogEntry(kind: .header, cid: cid, block: cid) }
+
+    public static func proof(_ id: String, of block: String) -> LogEntry { LogEntry(kind: .proof, cid: id, block: block) }
+
+    public init(kind: Kind, cid: String, block: String) {
+        self.kind = kind
         self.cid = cid
-    }
-
-    public static func < (lhs: HeaderKey, rhs: HeaderKey) -> Bool {
-        lhs.height != rhs.height ? lhs.height < rhs.height : lhs.cid < rhs.cid
+        self.block = block
     }
 }
 
-/// Catch-up: "your weighed headers after these known CIDs". The server
-/// answers every header it weighed that is neither one of `known` nor an
-/// ancestor of one — side branches included — in `HeaderKey` order, after
-/// `after` (the last header of the previous page).
-public struct HeadersRequest: Sendable, Equatable {
-    public static let maximumKnown = 64
+/// A node's weigh log: every object it weighed, in its own weigh order,
+/// append-only. Position `n` is entry `n - 1`. `id` names this log: a node
+/// whose store resets starts a new log with a new id. The shell persists the
+/// entries with the facts (`PersistBatch.log`) and hands them back at
+/// restore.
+public struct WeighLog: Sendable {
+    public let id: String
+    public private(set) var entries: [LogEntry] = []
+    private var held: Set<LogEntry> = []
 
+    public init(id: String = "", entries: [LogEntry] = []) {
+        self.id = id
+        for entry in entries { append(entry) }
+    }
+
+    public var count: UInt64 { UInt64(entries.count) }
+
+    public func contains(_ entry: LogEntry) -> Bool { held.contains(entry) }
+
+    @discardableResult
+    mutating func append(_ entry: LogEntry) -> Bool {
+        guard held.insert(entry).inserted else { return false }
+        entries.append(entry)
+        return true
+    }
+
+    /// Entries after position `after`, at most `limit` and (beyond the
+    /// first) `bytes` of IDs, with their positions.
+    func page(after: UInt64, limit: Int, bytes: Int = .max) -> (entries: [StreamEntry], hasMore: Bool) {
+        guard after < count else { return ([], false) }
+        var page: [StreamEntry] = []
+        var total = 0
+        var next = Int(after)
+        while next < entries.count, page.count < limit {
+            let entry = entries[next]
+            total += entry.cid.utf8.count + entry.block.utf8.count + 16
+            if !page.isEmpty, total > bytes { break }
+            page.append(StreamEntry(position: UInt64(next + 1), entry: entry))
+            next += 1
+        }
+        return (page, next < entries.count)
+    }
+}
+
+/// One log entry on the wire, at its position in the sender's log.
+public struct StreamEntry: Sendable, Hashable {
+    public let position: UInt64
+    public let entry: LogEntry
+
+    public init(position: UInt64, entry: LogEntry) {
+        self.position = position
+        self.entry = entry
+    }
+}
+
+/// A page of the sender's weigh log (IDs only, inv-style): the answer to
+/// `getStream` (`requestID` set; `hasMore` asks for the next page), or a push
+/// of entries just appended (`requestID` 0) to a peer that reached the end.
+public struct StreamPage: Sendable {
     public let requestID: UInt64
-    public let known: [String]
-    public let after: HeaderKey?
+    public let logID: String
+    public let entries: [StreamEntry]
+    public let hasMore: Bool
 
-    public init(requestID: UInt64, known: [String], after: HeaderKey?) {
+    public init(requestID: UInt64, logID: String, entries: [StreamEntry], hasMore: Bool) {
         self.requestID = requestID
-        self.known = known
-        self.after = after
+        self.logID = logID
+        self.entries = entries
+        self.hasMore = hasMore
     }
 }
 
-/// Headers the sender weighed: a relay (`requestID` 0) or the answer to a
-/// request. `hasMore` continues a catch-up page.
+/// Where a node is in a peer's log: the last position it received and
+/// applied, in the log named `logID`. The shell persists it per peer key.
+public struct StreamCursor: Sendable, Equatable {
+    public let logID: String
+    public let position: UInt64
+
+    public init(logID: String, position: UInt64) {
+        self.logID = logID
+        self.position = position
+    }
+}
+
+/// Headers the sender weighed, each with every proof it credited at it: the
+/// answer to `getData` or `getAncestors` (an ancestors answer lists child to
+/// parent). `hasMore`: the answer was cut by bytes. A `requestID` of 0 is an
+/// unsolicited header, verified like any other.
 public struct HeadersResponse: Sendable {
     public let requestID: UInt64
     public let entries: [HeaderEntry]
@@ -100,8 +177,16 @@ public struct HeadersResponse: Sendable {
 /// The sync messages the core reads and writes, decoded. The wire encoding
 /// belongs to the shell.
 public enum SyncMessage: Sendable {
-    case getHeaders(HeadersRequest)
-    /// One header by CID: the unknown parent of a header the sender sent.
-    case getHeader(requestID: UInt64, cid: String)
+    /// The receiver's weigh log after position `after`, if its log is still
+    /// `logID`; otherwise from position 0. `own` names the sender's own log
+    /// at this level, so the receiver reads it again when it changed.
+    case getStream(requestID: UInt64, logID: String?, after: UInt64, own: String)
+    case stream(StreamPage)
+    /// These weighed headers, by CID, with their proofs.
+    case getData(requestID: UInt64, cids: [String])
+    /// The header `cid` (the unknown parent of a header the sender sent)
+    /// and up to `max` of its ancestors, child to parent: Ethereum's reverse
+    /// `GetBlockHeaders`, Avalanche's `GetAncestors`.
+    case getAncestors(requestID: UInt64, cid: String, max: Int)
     case headers(HeadersResponse)
 }

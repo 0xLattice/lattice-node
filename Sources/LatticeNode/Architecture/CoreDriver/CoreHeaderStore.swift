@@ -90,3 +90,4 @@ struct CoreChildIndexRow: NodeStoreRecord {
 
     var bytes: Data { get throws { try row.blob("bytes") } }
 }
+

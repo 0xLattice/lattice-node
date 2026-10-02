@@ -31,9 +31,6 @@ public struct LevelSimConfig: Sendable {
     public var headersTimeout: Int64 = 3_000
     public var pendingBudget = 512 * 1_024
     public var reconnectDelay: Int64 = 3_000
-    /// Each peer's repair catch-up: how a proof-less header dropped before
-    /// the evidence index named it (the withholder's) comes back.
-    public var catchUpInterval: Int64 = 10_000
     public var settle: Int64 = 60_000
     public var replayInterval = 48
 
@@ -142,7 +139,6 @@ public struct LevelSimulator {
         case connect(String, String)
         case linkDown(String, String, UInt64)
         case mine(Int)
-        case publishProofs(Int)
     }
 
     struct Scheduled {
@@ -172,8 +168,6 @@ public struct LevelSimulator {
         let node: String
         let time: Int64
     }
-    /// The network's evidence index: what `lookupProofs` finds.
-    var index: [ChainPath: [String: [String: ChildBlockProof]]] = [:]
     public private(set) var report = LevelSimReport()
 
     /// A core's durable store, by name (`report.digests` keys).
@@ -201,12 +195,11 @@ public struct LevelSimulator {
         coreConfig = CoreConfig(
             maxHeadersPerPage: config.pageSize,
             headersTimeout: config.headersTimeout,
-            pendingBudget: config.pendingBudget,
-            catchUpInterval: config.catchUpInterval
+            pendingBudget: config.pendingBudget
         )
         coreConfig.proofs = config.proofs
         for index in 0..<config.cores {
-            let core = HostCore(root: world.rootBootstrap.tree, hosted: world.hosted, config: coreConfig)
+            let core = HostCore(root: world.rootBootstrap.tree, hosted: world.hosted, config: coreConfig, logID: "core\(index)")
             cores["core\(index)"] = HostNode(
                 core: core,
                 store: HostStore(world: world),
@@ -228,11 +221,10 @@ public struct LevelSimulator {
         }
         for script in scripts.keys.sorted() { schedule(at: now, to: script, .scriptTick) }
         for (position, grind) in world.grinds.enumerated() {
-            if grind.withheld {
-                schedule(at: grind.proofsAt, to: "index", .publishProofs(position))
-            } else {
-                schedule(at: grind.releaseAt, to: names[Int(self.rng.next() % UInt64(names.count))], .mine(position))
-            }
+            // A withheld grind is the withholder's: it reaches nodes only
+            // through its log.
+            guard !grind.withheld else { continue }
+            schedule(at: grind.releaseAt, to: names[Int(self.rng.next() % UInt64(names.count))], .mine(position))
         }
     }
 
@@ -335,17 +327,9 @@ public struct LevelSimulator {
             scripts[node] = script
             perform(actions, by: node)
         case .mine(let position):
-            // The miner hands its grind to its node and publishes its proofs
-            // to the evidence index, whatever levels that node runs yet.
-            let grind = world.grinds[position]
-            try await step(node, .mined(grind.mined))
-            for carried in grind.mined.carried {
-                publish(carried.proof, for: WorldCID.of(carried.evidence), at: carried.path)
-            }
-        case .publishProofs(let position):
-            for carried in world.grinds[position].mined.carried {
-                publish(carried.proof, for: WorldCID.of(carried.evidence), at: carried.path)
-            }
+            // The miner hands its grind to its node, whatever levels that
+            // node runs yet; its log carries the grind to everyone.
+            try await step(node, .mined(world.grinds[position].mined))
         }
     }
 
@@ -378,15 +362,6 @@ public struct LevelSimulator {
             send(.host(.received(from, path, message)), from: name, to: peer.key)
         } else if session(name, peer.key) == peer.session {
             send(.script(from, path, message), from: name, to: peer.key)
-        }
-    }
-
-    /// A proof enters the network's evidence index; if it is new there,
-    /// every core hears the index changed.
-    mutating func publish(_ proof: ChildBlockProof, for cid: String, at path: ChainPath) {
-        guard index[path, default: [:]][cid, default: [:]].updateValue(proof, forKey: proof.rootCID) == nil else { return }
-        for name in cores.keys.sorted() {
-            schedule(at: delay(), to: name, .host(.level(path, .evidenceChanged(childCIDs: [cid]))))
         }
     }
 
@@ -515,7 +490,8 @@ public struct LevelSimulator {
         case .lookupProofs(let cids):
             report.lookups += 1
             for cid in cids {
-                let found = (index[path]?[cid] ?? [:]).sorted { $0.key < $1.key }.map(\.value)
+                // Each node's evidence index holds the proofs it credited.
+                let found = node.store.proofs(path, cid)
                 if !found.isEmpty {
                     schedule(at: delay(), to: name, .host(.level(path, .proofsFound(childCID: cid, found))))
                 }
@@ -529,7 +505,6 @@ public struct LevelSimulator {
             schedule(at: delay(), to: name, .host(.level(path, .proofVerified(job, result))))
         case .indexProof(let cid, let proof):
             node.store.index(proof, for: cid, at: path)
-            publish(proof, for: cid, at: path)
         case .readTransactions(let blocks):
             // The simulated chains carry no transactions.
             schedule(at: delay(), to: name, .host(.level(path, .transactionsRead(
@@ -557,7 +532,9 @@ public struct LevelSimulator {
             facts: node.store.levels.mapValues(\.facts),
             issued: node.store.issued,
             hosted: world.hosted,
-            config: coreConfig
+            config: coreConfig,
+            logID: name,
+            cursors: node.store.levels.mapValues(\.cursors)
         )
         guard Set(restored.levels.keys) == Set(node.core.levels.keys) else {
             throw Invariants.fail(name, "replay restores levels \(restored.levels.keys.sorted { $0.count < $1.count })")

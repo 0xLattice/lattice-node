@@ -531,6 +531,12 @@ public struct World: Sendable {
         return junk
     }
 
+    /// A header on `parent` dated `timestamp` whose proof-of-work fails.
+    public func forgery(on parent: SimBlock, timestamp: Int64) async throws -> SimBlock {
+        let cas = SimCAS()
+        return try await World.extend(parent, timestamp: timestamp, nonce: 0xF0F << 32, in: cas).forged(in: cas)
+    }
+
     /// `count` blocks extending `parent`, one `interval` apart after it: a
     /// side branch built beside the world's own blocks.
     public func branch(from parent: SimBlock, count: Int, interval: Int64 = World.blockInterval) async throws -> [SimBlock] {

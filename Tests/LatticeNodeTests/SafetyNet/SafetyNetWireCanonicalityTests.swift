@@ -256,15 +256,53 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
 
     // MARK: - Core driver header sync topics
 
-    func testCoreHeadersRequestIsCanonical() throws {
-        try assertCanonical(HeadersRequestMessage.self, seed: 0x40) { g in
-            HeadersRequestMessage(
+    func testCoreStreamRequestIsCanonical() throws {
+        try assertCanonical(StreamRequestMessage.self, seed: 0x40) { g in
+            StreamRequestMessage(
                 chainPath: self.randomChainPath(&g, minimumCount: 1),
                 requestID: self.nonZeroID(&g),
-                known: (0..<self.randomInt(&g, 0...HeadersRequest.maximumKnown)).map { _ in self.randomCID(&g) },
-                after: self.randomBool(&g)
-                    ? WireHeaderKey(height: UInt64(self.randomInt(&g, 0...1_000_000)), cid: self.randomCID(&g))
-                    : nil
+                logID: self.randomBool(&g) ? self.randomCID(&g) : nil,
+                after: UInt64(self.randomInt(&g, 0...1_000_000)),
+                own: self.randomCID(&g)
+            )
+        }
+    }
+
+    func testCoreStreamPageIsCanonical() throws {
+        try assertCanonical(StreamPageMessage.self, seed: 0x43) { g in
+            StreamPageMessage(
+                chainPath: self.randomChainPath(&g, minimumCount: 1),
+                requestID: UInt64(self.randomInt(&g, 0...1_000_000)),
+                logID: self.randomCID(&g),
+                entries: (0..<self.randomInt(&g, 0...8)).map { index in
+                    let block = self.randomCID(&g)
+                    let proof = self.randomBool(&g)
+                    return WireLogEntry(position: UInt64(index + 1), proof: proof, cid: proof ? self.randomCID(&g) : block, block: block)
+                },
+                hasMore: self.randomBool(&g)
+            )
+        }
+    }
+
+    /// Log entries name CIDs; a log id is empty only on an empty page.
+    func testCoreStreamPagesAreBounded() throws {
+        let cid = "bafyreidorreo6ltq5bs3f3g5e7hnu5nurtykfshq3iwilvrh37hmtvgopa"
+        func page(_ logID: String, _ entries: [WireLogEntry]) -> StreamPageMessage {
+            StreamPageMessage(chainPath: ["Nexus"], requestID: 1, logID: logID, entries: entries, hasMore: false)
+        }
+        XCTAssertNoThrow(try page("", []).validate())
+        XCTAssertNoThrow(try page("log", [WireLogEntry(position: 1, proof: false, cid: cid, block: cid)]).validate())
+        XCTAssertThrowsError(try page("", [WireLogEntry(position: 1, proof: false, cid: cid, block: cid)]).validate())
+        XCTAssertThrowsError(try page("log", [WireLogEntry(position: 1, proof: true, cid: "junk", block: cid)]).validate())
+        XCTAssertThrowsError(try page(String(repeating: "x", count: 129), []).validate())
+    }
+
+    func testCoreDataRequestIsCanonical() throws {
+        try assertCanonical(DataRequestMessage.self, seed: 0x44) { g in
+            DataRequestMessage(
+                chainPath: self.randomChainPath(&g, minimumCount: 1),
+                requestID: self.nonZeroID(&g),
+                cids: (0..<self.randomInt(&g, 0...8)).map { _ in self.randomCID(&g) }
             )
         }
     }

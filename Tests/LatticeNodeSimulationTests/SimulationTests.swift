@@ -39,7 +39,11 @@ final class SimulationTests: XCTestCase {
 
     func testTheSameSeedReplaysTheSameRun() async throws {
         var config = SimConfig.random(seed: 0xD37)
-        config.drop = 0.15
+        // Every loss ends its session. A stream session takes a few round
+        // trips (a page of IDs, the objects, a child index); at 15% loss per
+        // message one rarely survives them, and a core can end the run with
+        // no live session at all.
+        config.drop = 0.05
         config.duplicate = 0.1
         var a = try await Simulator.make(config)
         var b = try await Simulator.make(config)
@@ -180,6 +184,9 @@ final class SimulationTests: XCTestCase {
         config.liar = false
         config.spamBlocks = 40
         config.garbage = 64
+        // The spammer's whole log (spam, garbage, two blamed headers) fits
+        // in a page of holes.
+        config.pageSize = 128
         config.pendingBudget = 64 * 1_024
         config.drop = 0
         config.duplicate = 0
@@ -231,6 +238,7 @@ final class SimulationTests: XCTestCase {
         config.honestBlocks = 10
         config.forkProbability = 0
         config.split = (lighter: 150, heavier: 170)
+        config.pageSize = 64
         config.spammer = true
         config.liar = false
         config.drop = 0
@@ -244,14 +252,63 @@ final class SimulationTests: XCTestCase {
             XCTAssertEqual(tip, heavier, "\(core) did not converge on the heavier side")
         }
         XCTAssertLessThanOrEqual(report.pendingPeak, config.pendingBudget)
+        print("partition heal: \(report.healPages) stream pages, \(report.healData) objects fetched, \(report.healParentFetches) ancestor fetches")
+    }
+
+    /// A core offline for a while (longer than the margin) gets every block
+    /// produced during the outage when it returns, uncles included.
+    func testANodeBackFromAnOutageGetsEveryUncleOfTheOutage() async throws {
+        var config = SimConfig(seed: 0x0FF1)
+        config.cores = 3
+        config.honestSources = 1
+        config.spammer = false
+        config.liar = false
+        config.honestBlocks = 60
+        config.forkProbability = 0.5
+        config.drop = 0
+        config.duplicate = 0
+        // It resumes each peer's log from its cursor, not from 0.
+        config.outage = (core: 2, from: 20_000, milliseconds: 25_000)
+        try await assertHoldsEveryHonestBlock(config, during: 20_000..<45_000)
+    }
+
+    /// A fresh node joining after every release gets everything.
+    func testAFreshNodeGetsEverything() async throws {
+        var config = SimConfig(seed: 0xF5E5)
+        config.cores = 3
+        config.honestSources = 1
+        config.spammer = false
+        config.liar = false
+        config.honestBlocks = 30
+        config.forkProbability = 0.4
+        config.drop = 0
+        config.duplicate = 0
+        config.outage = (core: 2, from: 0, milliseconds: 45_000)
+        try await assertHoldsEveryHonestBlock(config, during: 0..<45_000)
+    }
+
+    /// `core2` holds every released honest block (side blocks too) at the
+    /// end, and side blocks were produced within `window` (ms after genesis).
+    private func assertHoldsEveryHonestBlock(_ config: SimConfig, during window: Range<Int64>, line: UInt = #line) async throws {
+        var simulator = try await Simulator.make(config)
+        let world = simulator.world
+        let report = try await simulator.run()
+        let best = Set(report.sourceChains["source0"] ?? [])
+        let uncles = world.honest.filter {
+            !best.contains($0) && window.contains((world.blocks[$0]?.block.timestamp ?? 0) - World.genesisTime)
+        }
+        XCTAssertFalse(uncles.isEmpty, "no uncle was produced in the window", line: line)
+        let held = report.coreHeld["core2"] ?? []
+        XCTAssertEqual(Set(world.honest).subtracting(held), [], "core2 misses honest blocks", line: line)
+        assertSynced(report, TestSeed(value: config.seed), line: line)
     }
 
     /// A slow honest link: a page takes longer to transfer than the request
     /// deadline, so the honest source is disconnected as stalled, and the
-    /// invariant catches it.
+    /// invariant catches it. One core, so nothing reaches it any other way.
     func testASlowHonestLinkThatMissesTheDeadlineIsCaught() async throws {
         var config = SimConfig(seed: 0x510)
-        config.cores = 2
+        config.cores = 1
         config.honestSources = 1
         config.spammer = false
         config.liar = false
@@ -267,7 +324,7 @@ final class SimulationTests: XCTestCase {
         }
     }
 
-    /// More leaves than a locator holds, over a ring of cores that sources
+    /// Many leaves, over a ring of cores that sources
     /// reach through one core each, with links that do not always come back.
     func testManyLeavesOverARingWithFlakyReconnects() async throws {
         var config = SimConfig(seed: 0x1EAF)
@@ -275,6 +332,7 @@ final class SimulationTests: XCTestCase {
         config.honestSources = 2
         config.honestBlocks = 90
         config.sideLeaves = 80
+        config.pageSize = 64
         config.forkProbability = 0
         config.ring = true
         config.sourceFanout = 1
@@ -282,7 +340,7 @@ final class SimulationTests: XCTestCase {
         config.drop = 0.005
         var simulator = try await Simulator.make(config)
         let report = try await simulator.run()
-        XCTAssertGreaterThan(report.peakLeaves, HeadersRequest.maximumKnown)
+        XCTAssertGreaterThan(report.peakLeaves, 64)
         assertSynced(report, TestSeed(value: config.seed))
     }
 }

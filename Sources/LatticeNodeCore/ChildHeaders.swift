@@ -220,7 +220,11 @@ extension Core {
     /// caps; otherwise it is dropped without blame and the block is looked
     /// up again later. Checks start in `proofWork`.
     mutating func offer(_ proofs: [ChildBlockProof], cid: String, from source: PeerID?) {
-        for proof in proofs.prefix(proofConfig.maxPerHeader) {
+        // Grinds not yet credited first, so a header served again with the
+        // same proofs offers the ones a cap left out.
+        var fresh: [ChildBlockProof] = []
+        for proof in proofs where !credits(proof.rootCID, at: cid) { fresh.append(proof) }
+        for proof in fresh.prefix(proofConfig.maxPerHeader) {
             guard let bytes = try? proof.serialize(), bytes.count <= proofConfig.maxProofBytes else { continue }
             let id = "\(UInt256.hash(bytes))"
             let queued = QueuedProof(cid: cid, proof: proof, id: id, source: source, bytes: bytes.count)
@@ -307,9 +311,6 @@ extension Core {
             guard case .applied(let update) = tree.addWork(work, to: cid) else { return }
             turn.facts += update.batches
             turn.indexed.append((cid, job.proof))
-            if let block = job.block {
-                turn.relays.append((HeaderEntry(block: block, children: nil, proofs: [job.proof]), from: nil))
-            }
         } else if let held = sync.pending.entries[cid] {
             guard held.evidence[evidence.grindID] == nil else { return }
             sync.pending.entries[cid]?.evidence[evidence.grindID] = evidence
@@ -402,8 +403,9 @@ extension Core {
     }
 
     /// Credit a newly weighed child header's other grinds, one per root, and
-    /// return every proof it now weighs by, to index and relay. Its queued
+    /// return every proof it now weighs by, to index and log. Its queued
     /// proofs are checked later against the weighed block.
+    @discardableResult
     mutating func creditRemainingProofs(of header: PendingHeader, _ turn: inout Turn) -> [ChildBlockProof] {
         guard !isRoot else { return [] }
         var credited: [ChildBlockProof] = []
@@ -455,10 +457,6 @@ extension Core {
         }
         turn.facts += update.batches
         if let proof { turn.indexed.append((cid, proof.proof)) }
-        turn.relays.append((
-            config.entry(block, children: children, proofs: proof.map { [$0.proof] } ?? []),
-            from: nil
-        ))
         drain(&turn)
         if !isRoot { proofWork(&turn) }
         return finish(turn)

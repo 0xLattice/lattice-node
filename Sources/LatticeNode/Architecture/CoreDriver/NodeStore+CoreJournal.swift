@@ -7,7 +7,9 @@ extension NodeStore {
     /// executed tier of each validated block. The content those facts
     /// reference (`volumeRoots`) is stored and retained before this runs. A
     /// batch already journaled is a replay and adds nothing.
-    func stageCoreFacts(_ batches: [BlockImportBatch], volumeRoots: [String]) throws {
+    /// The weigh log id is recorded in the same transaction as the first
+    /// fact, so a store with facts always names the log they imply.
+    func stageCoreFacts(_ batches: [BlockImportBatch], volumeRoots: [String], logID: String) throws {
         let rootsPayload = try Self.encode(Array(Set(volumeRoots)).sorted())
         var rows: [(payload: Data, facts: [(id: Data, payload: Data)], blocks: [AcceptedBlockRecord], validated: [String])] = []
         for batch in batches {
@@ -19,6 +21,11 @@ extension NodeStore {
             rows.append((try Self.encode(batch), facts, try Self.acceptedBlocks(in: batch), validated))
         }
         try database.transaction {
+            if !rows.isEmpty {
+                try database.execute(
+                    "INSERT OR IGNORE INTO core_meta (key, value) VALUES ('log_id', ?1)", params: [.text(logID)]
+                )
+            }
             for row in rows {
                 if try database.row(
                     ImportBatchRow.self,
@@ -72,6 +79,11 @@ extension NodeStore {
         }
     }
 
+    /// The weigh log id recorded with the first core fact, if any.
+    func coreLogID() throws -> String? {
+        return try database.row(CoreMetaRow.self, "SELECT value FROM core_meta WHERE key = 'log_id'")?.value
+    }
+
     /// A block's execution re-states its block fact with the state diff it
     /// produced (`ChainTree.connect`), where the weighed tier stated an empty
     /// one. Only that change is a re-statement; any other difference is a
@@ -94,4 +106,15 @@ extension NodeStore {
             childCommitments: executed.childCommitments
         )
     }
+}
+
+
+/// `core_meta`: one value by key (the weigh log id).
+struct CoreMetaRow: NodeStoreRecord {
+    static let table = "core_meta"
+    private let row: Row
+
+    init(_ row: Row) { self.row = row }
+
+    var value: String { get throws { try row.text("value") } }
 }

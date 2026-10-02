@@ -33,7 +33,7 @@ final class CoreDriverJobOrderTests: NetworkTrustTestCase {
                 let effects = host.step(pending.removeFirst(), now: CoreDriver.now())
                 for case .persist(let batch) in effects {
                     for (_, level) in batch.levels {
-                        try await process.persistCoreBatch(level, headers: headers)
+                        try await process.persistCoreBatch(level, logID: host.logID, headers: headers)
                     }
                 }
                 for effect in effects {

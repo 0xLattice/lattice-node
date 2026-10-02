@@ -4,9 +4,22 @@ import UInt256
 /// Per-peer sync state: at most one request of each kind in flight, each
 /// with a deadline. A deadline that passes disconnects the peer.
 public struct PeerSync: Sendable, Equatable {
-    /// The catch-up page in flight.
-    public internal(set) var catchUp: InFlightPage?
-    /// The header asked for by CID (a parent this peer's header named).
+    /// The `getStream` page in flight.
+    public internal(set) var stream: InFlightStream?
+    /// The last page said more follows.
+    public internal(set) var more = false
+    /// The last position of the peer's log taken, and the entries taken that
+    /// are not yet applied (at most a page): the cursor stays before the
+    /// first of them.
+    public internal(set) var taken: UInt64 = 0
+    public internal(set) var holes: [StreamEntry] = []
+    /// The last position whose object was asked for.
+    public internal(set) var requested: UInt64 = 0
+    /// The objects asked of this peer (`getData`).
+    public internal(set) var data: InFlightData?
+    /// This peer read our log to its end: we push what we append.
+    public internal(set) var subscribed = false
+    /// The ancestors asked for by CID (a parent this peer's header named).
     public internal(set) var parentRequest: InFlightHeader?
     /// The child index asked for by CID (one wait per peer).
     public internal(set) var childIndex: InFlightFetch?
@@ -16,25 +29,31 @@ public struct PeerSync: Sendable, Equatable {
     /// Requests that arrived while `serving` was being sent, in order (at
     /// most one of each kind: an honest peer has no more in flight).
     public internal(set) var queued: [SyncMessage] = []
-    /// When to ask this peer for a catch-up again (the repair path).
-    public internal(set) var nextCatchUp: Int64 = .max
 
     public init() {}
 
     public static func == (lhs: PeerSync, rhs: PeerSync) -> Bool {
-        lhs.catchUp == rhs.catchUp && lhs.parentRequest == rhs.parentRequest
+        lhs.stream == rhs.stream && lhs.more == rhs.more && lhs.taken == rhs.taken
+            && lhs.holes == rhs.holes && lhs.requested == rhs.requested
+            && lhs.data == rhs.data && lhs.subscribed == rhs.subscribed
+            && lhs.parentRequest == rhs.parentRequest
             && lhs.childIndex == rhs.childIndex && lhs.serving == rhs.serving
-            && lhs.queued.count == rhs.queued.count && lhs.nextCatchUp == rhs.nextCatchUp
+            && lhs.queued.count == rhs.queued.count
     }
 
     var deadlines: [Int64] {
-        [catchUp?.deadline, parentRequest?.deadline, childIndex?.deadline].compactMap { $0 }
+        [stream?.deadline, data?.deadline, parentRequest?.deadline, childIndex?.deadline].compactMap { $0 }
     }
 }
 
-public struct InFlightPage: Sendable, Equatable {
+public struct InFlightStream: Sendable, Equatable {
     public let requestID: UInt64
-    public let after: HeaderKey?
+    public let deadline: Int64
+}
+
+public struct InFlightData: Sendable, Equatable {
+    public let requestID: UInt64
+    public let cids: [String]
     public let deadline: Int64
 }
 
@@ -235,96 +254,23 @@ public struct PendingQueue: Sendable {
 }
 
 /// The weighed graph as sync reads it, maintained as headers are weighed:
-/// every header by (height, CID), and its parent.
+/// every header and its parent.
 public struct WeighedIndex: Sendable {
-    /// CIDs at each height, sorted. Heights are contiguous from genesis.
-    var byHeight: [[String]] = []
     var parent: [String: String] = [:]
     var height: [String: UInt64] = [:]
     /// Leaves: headers with no weighed child.
     public internal(set) var leaves: Set<String> = []
-    /// The highest leaves, highest first, kept as headers are added: a leaf
-    /// only leaves by gaining a child, which is higher and takes its place,
-    /// so the set stays exact without a sort of all leaves.
-    public internal(set) var topLeaves: [HeaderKey] = []
-    static let topLeafCount = HeadersRequest.maximumKnown + 1
 
     mutating func add(_ cid: String, parent: String?, height: UInt64) {
-        guard self.height[cid] == nil else { return }
-        while byHeight.count <= Int(height) { byHeight.append([]) }
-        let row = byHeight[Int(height)]
-        byHeight[Int(height)].insert(cid, at: row.firstIndex { $0 > cid } ?? row.count)
-        self.height[cid] = height
+        guard self.height.updateValue(height, forKey: cid) == nil else { return }
         if let parent {
             self.parent[cid] = parent
             leaves.remove(parent)
-            if let position = topLeaves.firstIndex(where: { $0.cid == parent }) {
-                topLeaves.remove(at: position)
-            }
         }
         leaves.insert(cid)
-        let key = HeaderKey(height: height, cid: cid)
-        let position = topLeaves.firstIndex { $0 < key } ?? topLeaves.count
-        if position < Self.topLeafCount {
-            topLeaves.insert(key, at: position)
-            if topLeaves.count > Self.topLeafCount { topLeaves.removeLast() }
-        }
     }
 
     func contains(_ cid: String) -> Bool { height[cid] != nil }
-
-
-    func key(_ cid: String) -> HeaderKey? {
-        height[cid].map { HeaderKey(height: $0, cid: cid) }
-    }
-
-    /// The ancestor of `cid` at `target` height, walking parents.
-    func ancestor(of cid: String, atHeight target: UInt64) -> String? {
-        var current = cid
-        while let h = height[current], h > target {
-            guard let up = parent[current] else { return nil }
-            current = up
-        }
-        return height[current] == target ? current : nil
-    }
-
-    /// Headers in `HeaderKey` order from `start` (inclusive of its height,
-    /// after its CID when `strictlyAfter`), as a lazy stream.
-    func keys(from start: HeaderKey, strictlyAfter: Bool) -> AnySequence<HeaderKey> {
-        let rows = byHeight
-        // A peer chooses `start`: a height past the graph streams nothing
-        // (and is never converted to `Int`).
-        guard start.height < UInt64(rows.count) else { return AnySequence([]) }
-        return AnySequence { () -> AnyIterator<HeaderKey> in
-            var height = Int(start.height)
-            var column: Int = {
-                guard height < rows.count else { return 0 }
-                let row = rows[height]
-                // Binary search the first CID at or after the start.
-                var low = 0, high = row.count
-                while low < high {
-                    let middle = (low + high) / 2
-                    if row[middle] < start.cid || (strictlyAfter && row[middle] == start.cid) {
-                        low = middle + 1
-                    } else {
-                        high = middle
-                    }
-                }
-                return low
-            }()
-            return AnyIterator {
-                while height < rows.count {
-                    if column < rows[height].count {
-                        defer { column += 1 }
-                        return HeaderKey(height: UInt64(height), cid: rows[height][column])
-                    }
-                    height += 1
-                    column = 0
-                }
-                return nil
-            }
-        }
-    }
 }
 
 /// Header sync for one level: which peers are asked for what, and the
@@ -346,9 +292,13 @@ public struct Sync: Sendable {
     var held = Heap<(time: Int64, cid: String)> { $0.time != $1.time ? $0.time < $1.time : $0.cid < $1.cid }
     var nextRequestID: UInt64 = 1
     var nextToken: UInt64 = 1
-    /// How many index entries the last catch-up page examined: serving is
-    /// O(page + locator × window), never O(graph).
-    public internal(set) var lastServeScanned = 0
+    /// This node's weigh log, which peers stream.
+    public internal(set) var log = WeighLog()
+    /// Per peer key: the last position of its log received and applied.
+    /// Written with the facts (`PersistBatch.cursors`) and handed back to
+    /// `Core.init`; kept only for connected peers and those handed back.
+    public internal(set) var cursors: [String: StreamCursor] = [:]
+    var knownCursors: Set<String> = []
 
     public init() {}
 
@@ -390,35 +340,15 @@ public struct Sync: Sendable {
 
     /// The earliest time after `now` the core must wake for.
     func nextDeadline(after now: Int64) -> Int64? {
-        let requests = peers.values.flatMap { $0.deadlines + [$0.nextCatchUp] }
+        let requests = peers.values.flatMap(\.deadlines)
         let times = requests + [held.first?.time].compactMap { $0 }
         return times.filter { $0 > now && $0 != .max }.min()
     }
 }
 
-/// One request slot of one peer: its parent request or its child-index wait.
+/// One request slot of one peer: its ancestors request or its child-index
+/// wait.
 struct WantSlot: Hashable, Sendable {
     let peer: PeerID
     let parent: Bool
-}
-
-extension ChainTree {
-    /// The deepest block on the best header chain whose ancestry is executed
-    /// from genesis: the tip a node acts on. The executed blocks on one path
-    /// are a prefix of it, so this is a binary search over heights.
-    func actOnTip() -> (hash: String, height: UInt64) {
-        let tipHeight = headerSnapshot(of: canonicalTip)?.tipHeight ?? 0
-        var low: UInt64 = 0
-        var high = tipHeight
-        while low < high {
-            let middle = low + (high - low + 1) / 2
-            if let hash = canonicalBlockHash(atHeight: middle),
-               hasExecutedAncestry(blockHash: hash) {
-                low = middle
-            } else {
-                high = middle - 1
-            }
-        }
-        return (canonicalBlockHash(atHeight: low) ?? canonicalTip, low)
-    }
 }

@@ -25,18 +25,25 @@ final class CoreMiningTests: XCTestCase {
         content = SimCAS(world.genesisContent)
     }
 
-    /// A core that weighed `blocks` from `peer`'s catch-up page.
+    /// A core that weighed `blocks` from `peer`'s log: a page of their IDs,
+    /// then the objects it asks for.
     private func weighed(_ blocks: [SimBlock]) -> Core {
         var core = Core(tree: world.bootstrap.tree, config: CoreConfig(bodyWindow: 4))
         let asked = core.step(.peerReady(peer), now: Self.now).compactMap { effect -> UInt64? in
-            if case .send(_, .getHeaders(let request)) = effect { return request.requestID }
+            if case .send(_, .getStream(let id, _, _, _)) = effect { return id }
             return nil
         }
-        _ = core.step(.received(peer, .headers(HeadersResponse(
-            requestID: asked.first ?? 0,
-            entries: blocks.map { HeaderEntry(block: $0.block, children: $0.children) },
-            hasMore: false
+        let ids = blocks.enumerated().map { StreamEntry(position: UInt64($0.offset + 1), entry: .header($0.element.cid)) }
+        let page = core.step(.received(peer, .stream(StreamPage(
+            requestID: asked.first ?? 0, logID: "peer", entries: ids, hasMore: false
         ))), now: Self.now)
+        for case .send(_, .getData(let id, _)) in page {
+            _ = core.step(.received(peer, .headers(HeadersResponse(
+                requestID: id,
+                entries: blocks.map { HeaderEntry(block: $0.block, children: $0.children) },
+                hasMore: false
+            ))), now: Self.now)
+        }
         return core
     }
 

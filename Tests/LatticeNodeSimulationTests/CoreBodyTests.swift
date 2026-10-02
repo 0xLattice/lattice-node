@@ -25,21 +25,47 @@ final class CoreBodyTests: XCTestCase {
         content = SimCAS(world.genesisContent)
     }
 
-    /// A core that weighed `blocks` as `peer`'s catch-up page (so nothing
-    /// is left in flight), and the fact log it persisted from genesis.
+    /// A core that weighed `blocks` from `peer`, its stream read to the end
+    /// (so nothing is left in flight), and the fact log it persisted from genesis.
     private func weighed(_ blocks: [SimBlock], window: Int = 4) -> (Core, [BlockImportBatch]) {
         var core = Core(tree: world.bootstrap.tree, config: CoreConfig(bodyWindow: window))
         let asked = core.step(.peerReady(peer), now: Self.now).compactMap { effect -> UInt64? in
-            if case .send(_, .getHeaders(let request)) = effect { return request.requestID }
+            if case .send(_, .getStream(let id, _, _, _)) = effect { return id }
             return nil
         }
-        let effects = core.step(.received(peer, .headers(HeadersResponse(
-            requestID: asked.first ?? 0,
-            entries: blocks.map { HeaderEntry(block: $0.block, children: $0.children) },
-            hasMore: false
-        ))), now: Self.now)
+        _ = asked
+        let effects = show(&core, blocks.map { HeaderEntry(block: $0.block, children: $0.children) }, at: Self.now)
         for block in blocks { XCTAssertTrue(core.tree.contains(blockHash: block.cid)) }
         return (core, [world.bootstrap.facts] + persisted(effects))
+    }
+
+    private var shown: [String: HeaderEntry] = [:]
+
+    /// `entries` shown by `peer` the way a peer shows headers: appended to
+    /// its log (answering the stream request in flight, or pushed), then
+    /// served as the core asks. Returns every effect of the exchange.
+    private func show(_ core: inout Core, _ entries: [HeaderEntry], at now: Int64) -> [Effect] {
+        guard let state = core.sync.peers[peer] else { return [] }
+        let first = core.sync.cursors[peer.key] == nil ? 1 : state.taken + 1
+        let ids = entries.enumerated().map { offset, entry -> StreamEntry in
+            let cid = (try? BlockHeader(node: entry.block).rawCID) ?? ""
+            shown[cid] = entry
+            return StreamEntry(position: first + UInt64(offset), entry: .header(cid))
+        }
+        var effects = core.step(.received(peer, .stream(StreamPage(
+            requestID: state.stream?.requestID ?? 0, logID: "peer", entries: ids, hasMore: false
+        ))), now: now)
+        var all = effects
+        while let ask = effects.compactMap({ effect -> (UInt64, [String])? in
+            if case .send(_, .getData(let id, let cids)) = effect { return (id, cids) }
+            return nil
+        }).first {
+            effects = core.step(.received(peer, .headers(HeadersResponse(
+                requestID: ask.0, entries: ask.1.compactMap { shown[$0] }, hasMore: false
+            ))), now: now)
+            all += effects
+        }
+        return all
     }
 
     private func persisted(_ effects: [Effect]) -> [BlockImportBatch] {
@@ -134,11 +160,7 @@ final class CoreBodyTests: XCTestCase {
     func testTheNextWindowOfTheBestChainIsAskedForInParentOrder() {
         var core = Core(tree: world.bootstrap.tree, config: CoreConfig(bodyWindow: 3))
         _ = core.step(.peerReady(peer), now: Self.now)
-        let effects = core.step(.received(peer, .headers(HeadersResponse(
-            requestID: 0,
-            entries: chain.prefix(6).map { HeaderEntry(block: $0.block, children: $0.children) },
-            hasMore: false
-        ))), now: Self.now)
+        let effects = show(&core, chain.prefix(6).map { HeaderEntry(block: $0.block, children: $0.children) }, at: Self.now)
         XCTAssertEqual(bodyFetches(effects), chain.prefix(3).map(\.cid))
         XCTAssertEqual(core.bodyWindow, chain.prefix(3).map(\.cid))
         XCTAssertEqual(core.bodies.requested, Set(chain.prefix(3).map(\.cid)))
@@ -264,17 +286,13 @@ final class CoreBodyTests: XCTestCase {
         // A header weighed off the best chain moves neither the act-on tip
         // nor the window: the wait stands.
         let side = try XCTUnwrap(world.blocks[world.spam[0]])
-        let off = core.step(.received(peer, .headers(HeadersResponse(
-            requestID: 0, entries: [HeaderEntry(block: side.block, children: side.children)], hasMore: false
-        ))), now: Self.now + 1)
+        let off = show(&core, [HeaderEntry(block: side.block, children: side.children)], at: Self.now + 1)
         XCTAssertTrue(core.tree.contains(blockHash: side.cid))
         XCTAssertFalse(bodyFetches(off).contains(chain[0].cid))
         XCTAssertEqual(core.bodies.parked[chain[0].cid], parked)
         // A new header extends the best chain: the window changed, so the
         // wait is over.
-        let effects = core.step(.received(peer, .headers(HeadersResponse(
-            requestID: 0, entries: [HeaderEntry(block: chain[3].block, children: chain[3].children)], hasMore: false
-        ))), now: Self.now + 1)
+        let effects = show(&core, [HeaderEntry(block: chain[3].block, children: chain[3].children)], at: Self.now + 1)
         XCTAssertTrue(bodyFetches(effects).contains(chain[0].cid))
         XCTAssertTrue(core.bodies.parked.isEmpty)
     }

@@ -48,8 +48,9 @@ public struct SimConfig: Sendable {
     public var inlineChildIndexBytes = 1_024
     public var pendingBudget = 256 * 1_024
     public var reconnectDelay: Int64 = 3_000
-    /// Each core asks each peer for a repair catch-up this often.
-    public var catchUpInterval: Int64 = 20_000
+    /// One core loses every link from `from` (ms after genesis) for
+    /// `milliseconds`; from 0, it is a fresh node joining late.
+    public var outage: (core: Int, from: Int64, milliseconds: Int64)?
     /// Simulated time after the last release before the run stops.
     public var settle: Int64 = 60_000
     /// Replay the store and compare trees every this many persists per node.
@@ -127,6 +128,12 @@ public struct SimReport: Sendable {
     public var fetches = 0
     /// The most bytes any core's pending queue held after a step.
     public var pendingPeak = 0
+    /// Requests cores sent from the last release on (a partition's heal):
+    /// catch-up pages and missing-parent fetches.
+    public var healPages = 0
+    public var healParentFetches = 0
+    /// Objects cores asked for by CID (`getData`), from the last release on.
+    public var healData = 0
     /// Body Volumes fetched through the content layer, and connect jobs run.
     public var bodyFetches = 0
     public var connects = 0
@@ -160,20 +167,13 @@ public struct Simulator {
     }
 
     /// After the quiet point every honest core selects the same head, and
-    /// above the head's height less `sideBranchWindow` holds every released
-    /// honest block and the identical weighed graph (the same blocks,
-    /// grinds, subtree work and exclusions). A side block forking deeper that
-    /// a core missed while a link was down is never re-sent: the catch-up
-    /// window's documented boundary.
+    /// holds every released honest block and the identical weighed graph
+    /// (the same blocks, grinds, subtree work and exclusions): the stream is
+    /// exact.
     func checkQuietPoint() throws {
         let nodes = cores.sorted { $0.key < $1.key }
         guard let (first, reference) = nodes.first else { return }
-        let headHeight = reference.digest.blocks[reference.digest.canonicalTip]?.height ?? 0
-        let window = coreConfig.sideBranchWindow
-        let cutoff = headHeight > window ? headHeight - window : 0
-        let above = { (digest: TreeDigest) in digest.blocks.filter { $0.value.height > cutoff } }
-        let honest = Set(world.released(world.honest, at: now)
-            .filter { $0.height > cutoff }.map(\.cid))
+        let honest = Set(world.released(world.honest, at: now).map(\.cid))
         for (name, node) in nodes {
             if let missing = honest.subtracting(node.digest.blocks.keys).first {
                 throw Invariants.fail(name, "misses released honest block \(missing) after the quiet point")
@@ -183,9 +183,8 @@ public struct Simulator {
             // other exclusion is the header tier's and the same everywhere.
             let deep = { (digest: TreeDigest) in
                 digest.excluded.subtracting(self.world.invalidBodies)
-                    .filter { (digest.blocks[$0]?.height ?? 0) > cutoff }
             }
-            if above(node.digest) != above(reference.digest) || deep(node.digest) != deep(reference.digest) {
+            if node.digest.blocks != reference.digest.blocks || deep(node.digest) != deep(reference.digest) {
                 throw Invariants.fail(name, "weighs a different graph than \(first) after the quiet point")
             }
             if node.digest.canonicalTip != reference.digest.canonicalTip {
@@ -203,8 +202,12 @@ public struct Simulator {
             replaying: node.store.facts,
             context: world.context,
             spec: world.spec,
-            config: node.core.config
+            config: node.core.config,
+            logID: name
         )
+        guard restored.sync.log.entries == node.core.sync.log.entries else {
+            throw Invariants.fail(name, "replaying the store gives a different weigh log")
+        }
         guard TreeDigest(restored.tree) == digest else {
             throw Invariants.fail(name, "replaying the store gives a different tree")
         }
@@ -224,6 +227,8 @@ public struct Simulator {
         case crash(CrashMode)
         /// The session ends: both ends learn it, and reconnect later.
         case linkDown(String, String, UInt64)
+        /// The outage begins: every session of the core ends.
+        case isolate(String)
     }
 
     struct Scheduled {
@@ -284,12 +289,11 @@ public struct Simulator {
             headersTimeout: config.headersTimeout,
             maxInlineChildIndexBytes: config.inlineChildIndexBytes,
             pendingBudget: config.pendingBudget,
-            catchUpInterval: config.catchUpInterval,
             bodyWindow: config.bodyWindow
         )
         self.coreConfig = coreConfig
         for index in 0..<config.cores {
-            let core = Core(tree: world.bootstrap.tree, config: coreConfig)
+            let core = Core(tree: world.bootstrap.tree, config: coreConfig, log: WeighLog(id: "core\(index)"))
             cores["core\(index)"] = CoreNode(
                 core: core,
                 store: SimStore(genesis: world.genesis, facts: world.bootstrap.facts),
@@ -340,11 +344,19 @@ public struct Simulator {
         for crash in config.crashes {
             schedule(at: crash.at, to: crash.core, .crash(crash.mode))
         }
+        if let outage = config.outage, outage.from > 0 {
+            schedule(at: World.genesisTime + outage.from, to: "core\(outage.core)", .isolate("core\(outage.core)"))
+        }
     }
 
-    /// When a link may first come up: a link across the split waits for
-    /// the last release.
+    /// When a link may first come up: a link of a core in its outage waits
+    /// for its end; a link across the split waits for the last release.
     func linkTime(_ a: String, _ b: String) -> Int64 {
+        if let outage = config.outage, [a, b].contains("core\(outage.core)") {
+            let start = World.genesisTime + outage.from
+            let end = start + outage.milliseconds
+            if now >= start, now < end { return end }
+        }
         guard config.split != nil, let x = Int(a.dropFirst(4)), let y = Int(b.dropFirst(4)),
               a.hasPrefix("core"), b.hasPrefix("core") else { return now }
         let half = (config.cores + 1) / 2
@@ -418,6 +430,13 @@ public struct Simulator {
                 try await step(end, .peerGone(PeerID(key: other, session: id)))
             }
             schedule(at: now + config.reconnectDelay, to: a, .connect(a, b))
+        case .isolate(let core):
+            for pair in sessions.keys.sorted(by: { ($0.low, $0.high) < ($1.low, $1.high) })
+            where pair.low == core || pair.high == core {
+                if let id = sessions[pair] {
+                    schedule(at: now, to: core, .linkDown(pair.low, pair.high, id))
+                }
+            }
         case .core(let event):
             try await step(node, event)
         case .scriptMessage(let peer, let message):
@@ -496,6 +515,7 @@ public struct Simulator {
     static func bytes(of delivery: Delivery) -> Int {
         switch delivery {
         case .core(.received(_, let message)), .scriptMessage(_, let message):
+            if case .stream(let page) = message { return 64 + 64 * page.entries.count }
             guard case .headers(let response) = message else { return 64 }
             return 64 + response.entries.reduce(0) {
                 $0 + ($1.block.toData()?.count ?? 0) + ($1.children?.toData()?.count ?? 0)
@@ -566,13 +586,20 @@ public struct Simulator {
                     throw Invariants.fail(name, "published tip \(tip) is not durable")
                 }
             case .send(let peer, let message):
-                // Relaying a weighed header is not acting on it, but it is
+                if now >= lastRelease {
+                    switch message {
+                    case .getStream: report.healPages += 1
+                    case .getData(_, let cids): report.healData += cids.count
+                    case .getAncestors: report.healParentFetches += 1
+                    default: break
+                    }
+                }
+                // Streaming a weighed header is not acting on it, but it is
                 // sent only once durable.
-                if case .headers(let relayed) = message {
-                    for entry in relayed.entries {
-                        let cid = (try? BlockHeader(node: entry.block).rawCID) ?? ""
-                        guard node.store.headers[cid] != nil else {
-                            throw Invariants.fail(name, "relayed \(cid) before it was durable")
+                if case .stream(let page) = message {
+                    for entry in page.entries where entry.entry.kind == .header {
+                        guard node.store.headers[entry.entry.cid] != nil else {
+                            throw Invariants.fail(name, "streamed \(entry.entry.cid) before it was durable")
                         }
                     }
                 }
