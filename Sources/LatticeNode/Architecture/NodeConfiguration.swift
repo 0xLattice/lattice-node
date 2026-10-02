@@ -102,6 +102,9 @@ public struct NodeConfiguration: Sendable {
     /// The child chains this process hosts as levels under Nexus (operator
     /// choice), parent before child; every parent is Nexus or listed.
     public let hostedChildren: [[String]]
+    /// The spec a hosted child's genesis is built from while it has no root
+    /// (operator choice; a child with none only follows roots others mine).
+    public let childSpecs: [[String]: ChainSpec]
 
     /// Overlay slots kept in reserve for outbound dials so a burst of inbound
     /// connections (from one source, especially behind a proxy where the
@@ -122,7 +125,8 @@ public struct NodeConfiguration: Sendable {
         publicReadURL: String? = nil,
         peerSearchInterval: TimeInterval = 600,
         resourcePolicy: NodeResourcePolicy = .default,
-        hostedChildren: [[String]] = []
+        hostedChildren: [[String]] = [],
+        childSpecs: [[String]: ChainSpec] = [:]
     ) throws {
         for child in hostedChildren {
             guard child.count > 1, (try? ChainRuntimeContext(path: child)) != nil,
@@ -176,6 +180,7 @@ public struct NodeConfiguration: Sendable {
         self.publicReadURL = declaredReadURL
         self.peerSearchInterval = max(0, peerSearchInterval)
         self.resourcePolicy = resourcePolicy
+        self.childSpecs = childSpecs.filter { hostedChildren.contains($0.key) }
         self.hostedChildren = hostedChildren.sorted { $0.count != $1.count ? $0.count < $1.count : $0.joined(separator: "/") < $1.joined(separator: "/") }
     }
 

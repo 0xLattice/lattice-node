@@ -3,6 +3,7 @@ import Foundation
 import Lattice
 import LatticeNodeCore
 import cashew
+import UInt256
 
 /// What RPC reads besides the core's snapshot, published by the loop with
 /// it: the act-on chain by height, the pool listing and the template digest.
@@ -43,6 +44,18 @@ struct HeightIndex: Sendable {
     }
 }
 
+/// One hosted child level as a template job reads it: its executed tip (nil
+/// when it executed no root), its pool, its difficulty anchor, and the spec a
+/// genesis is built from when it has no root yet.
+struct ChildTemplateInput: Sendable {
+    let path: ChainPath
+    let tipCID: String?
+    let transactions: [Transaction]
+    let anchor: DifficultyAnchor?
+    let genesisSpec: ChainSpec?
+    let genesisTarget: UInt256
+}
+
 /// An RPC's answer, from the effect that names its reply ID.
 enum CoreReply: Sendable {
     case admitted(cid: String, count: Int, bytes: Int)
@@ -73,15 +86,17 @@ extension CoreDriver {
         _ request: MiningTemplateRequest
     ) async throws -> MiningTemplateResponse {
         let chainPath = configuration.chainPath
-        // The driver hosts no child level, so only this chain's part of the
-        // plan is used.
+        // One plan for every level the template carries: each hosted
+        // child's recipient and minimum work by path.
+        let recipients = try MiningPlan.validatedRecipientPlan(request.recipients, chainPath: chainPath)
         let plan = TemplateRequest(
-            rewardRecipient: try MiningPlan.validatedRecipientPlan(
-                request.recipients, chainPath: chainPath
-            ).current,
+            rewardRecipient: recipients.current,
             minimumWork: try MiningPlan.validatedMinimumWorkPlan(
                 request.minimumWork, chainPath: chainPath
-            ).works
+            ).works,
+            childRecipients: Dictionary(
+                recipients.descendants.map { ($0.chainPath, $0.address) }, uniquingKeysWith: { first, _ in first }
+            )
         )
         guard case .template(let template) = try await ask({
             .templateRequested(replyID: $0, plan)
@@ -226,7 +241,8 @@ extension CoreDriver {
         _ effect: MiningEffect,
         at path: ChainPath,
         level: ChainLevel?,
-        process: ChainProcess
+        process: ChainProcess,
+        children: [ChildTemplateInput] = []
     ) -> CoreJob {
         let fetcher = process.localFetcher
         switch effect {
@@ -240,7 +256,7 @@ extension CoreDriver {
             return CoreJob(path: path, epoch: job.tipEpoch) {
                 let anchor = await level?.chain.difficultyAnchor(forBlockHash: job.tipCID)
                 return [.level(path, .mining(.templateBuilt(job, await buildTemplate(
-                    job, difficultyAnchor: anchor, process: process, chainPath: path
+                    job, difficultyAnchor: anchor, process: process, chainPath: path, children: children
                 ))))]
             }
         case .returnTransactions(let left, let carried):
@@ -316,7 +332,8 @@ extension CoreDriver {
         _ job: TemplateJob,
         difficultyAnchor: DifficultyAnchor?,
         process: ChainProcess,
-        chainPath: [String]
+        chainPath: [String],
+        children: [ChildTemplateInput] = []
     ) async -> TemplateBuild? {
         let fetcher = process.localFetcher
         guard job.request.parentCarrier == nil,
@@ -332,12 +349,16 @@ extension CoreDriver {
             spec: spec,
             fetcher: fetcher
         )
+        let provided = await childCandidates(
+            of: chainPath, among: children, entering: previous.postState, timestamp: timestamp,
+            request: job.request, fetcher: fetcher
+        )
         guard let template = try? await MiningTemplateAssembly.fit(
             chainPath: chainPath,
             lifetime: .seconds(30),
             previous: previous,
             pooled: pooled,
-            provided: [],
+            provided: provided,
             parentCarrier: nil,
             timestamp: timestamp,
             rewardRecipient: job.request.rewardRecipient,
@@ -353,6 +374,62 @@ extension CoreDriver {
             targets: template.targets,
             digest: templateDigest(tip: job.tipCID, transactions: job.transactions.compactMap { try? Mempool.cid(of: $0) })
         )
+    }
+
+    /// Merged mining: a candidate block for each hosted direct child of
+    /// `parent`, each carrying its own children's, every one committing its
+    /// carrier's entering state. A child with an executed tip builds on it;
+    /// one with no root yet and a configured spec gets a genesis; one whose
+    /// root is weighed but not executed waits.
+    static func childCandidates(
+        of parent: ChainPath,
+        among inputs: [ChildTemplateInput],
+        entering: LatticeStateHeader,
+        timestamp: Int64,
+        request: TemplateRequest,
+        fetcher: any Fetcher
+    ) async -> [DirectChildCandidate] {
+        var candidates: [DirectChildCandidate] = []
+        for input in inputs where input.path.dropLast().elementsEqual(parent) {
+            let carrier = Block(
+                version: Block.currentVersion, parent: nil,
+                transactions: HeaderImpl(rawCID: entering.rawCID), target: .max, nextTarget: .max,
+                spec: VolumeImpl(rawCID: entering.rawCID), parentState: entering, prevState: entering,
+                postState: entering, children: HeaderImpl(rawCID: entering.rawCID), height: 0,
+                timestamp: timestamp, rewardRecipient: nil, nonce: 0
+            )
+            let block: Block?
+            if let tipCID = input.tipCID {
+                guard let previous = try? await BlockHeader(rawCID: tipCID).resolve(fetcher: fetcher).node,
+                      let spec = try? await previous.spec.resolve(fetcher: fetcher).node,
+                      let time = try? MiningPlan.nextTimestamp(after: previous.timestamp, parentCarrier: carrier)
+                else { continue }
+                let grandchildren = await childCandidates(
+                    of: input.path, among: inputs, entering: previous.postState, timestamp: time,
+                    request: request, fetcher: fetcher
+                )
+                block = try? await MiningTemplateAssembly.fit(
+                    chainPath: input.path, lifetime: .seconds(30), previous: previous,
+                    pooled: input.transactions, provided: grandchildren, parentCarrier: carrier,
+                    timestamp: time, rewardRecipient: request.childRecipients[input.path],
+                    minimumWork: request.minimumWork, difficultyAnchor: input.anchor, spec: spec, fetcher: fetcher
+                ).block
+            } else if let spec = input.genesisSpec {
+                let grandchildren = await childCandidates(
+                    of: input.path, among: inputs, entering: LatticeState.emptyHeader, timestamp: timestamp,
+                    request: request, fetcher: fetcher
+                )
+                block = try? await BlockBuilder.buildChildGenesis(
+                    spec: spec, parentState: entering,
+                    children: Dictionary(uniqueKeysWithValues: grandchildren.map { ($0.directory, $0.block) }),
+                    timestamp: timestamp, target: input.genesisTarget, fetcher: fetcher
+                )
+            } else {
+                block = nil
+            }
+            if let block { candidates.append(DirectChildCandidate(directory: input.path[input.path.count - 1], block: block)) }
+        }
+        return candidates
     }
 
     static func disposition(_ preflight: TransactionPreflightDisposition) -> MempoolDisposition {

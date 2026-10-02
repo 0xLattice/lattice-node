@@ -789,14 +789,17 @@ extension CoreDriver {
             case .mined(let replyID, let block):
                 // Content first: the block is stored before the grind's one
                 // step weighs it.
-                // PENDING (child levels): the carried blocks of hosted
-                // levels, each with its proof verified, join the grind.
+                // The carried blocks of hosted levels, each with its proof
+                // verified, join the grind: one step weighs every level the
+                // grind meets.
                 let (process, inputs) = (process, inputs)
+                let hosted = Set(core.levels.keys)
                 spawn {
                     do {
                         let children = try await process.storeMinedBlock(block)
+                        let carried = try await process.carriedGrinds(of: block, hosted: hosted)
                         inputs.yield(.event(.mined(
-                            MinedGrind(root: block, rootChildren: children, carried: []), replyID: replyID
+                            MinedGrind(root: block, rootChildren: children, carried: carried), replyID: replyID
                         )))
                     } catch {
                         inputs.yield(.answer(replyID, .failure(error)))
@@ -808,7 +811,9 @@ extension CoreDriver {
                 startJobs()
             case .buildTemplate(let job):
                 guard let level = await epochLevel(at: path, epoch: job.tipEpoch) else { break }
-                miningJobs.append(CoreDriver.miningJob(effect, at: path, level: level, process: process))
+                miningJobs.append(CoreDriver.miningJob(
+                    effect, at: path, level: level, process: process, children: childTemplateInputs(below: path)
+                ))
                 startJobs()
             case .returnTransactions:
                 miningJobs.append(CoreDriver.miningJob(effect, at: path, level: nil, process: process))
@@ -825,6 +830,31 @@ extension CoreDriver {
             guard let tree = core.levels[path]?.tree, let level = CoreDriver.jobLevel(tree) else { return nil }
             preflightLevels[path] = (epoch, level)
             return level
+        }
+
+        private func anchor(_ tree: ChainTree, _ tip: String) -> DifficultyAnchor? {
+            var tree = tree
+            return tree.difficultyAnchor(forBlockHash: tip)
+        }
+
+        /// Every hosted level below `path`, as a template job reads it.
+        func childTemplateInputs(below path: ChainPath) -> [ChildTemplateInput] {
+            core.ordered.filter { $0.count > path.count && $0.starts(with: path) }.compactMap { child -> ChildTemplateInput? in
+                guard let level = core.levels[child] else { return nil }
+                let snapshot = level.snapshot
+                let executed = !snapshot.actOnTip.isEmpty
+                // A root weighed but not executed yet: carry nothing until
+                // it executes, rather than a rival genesis.
+                if !executed, !snapshot.bestHeaderTip.isEmpty { return nil }
+                return ChildTemplateInput(
+                    path: child,
+                    tipCID: executed ? snapshot.actOnTip : nil,
+                    transactions: level.mining.mempool.transactions(limit: .max),
+                    anchor: executed ? anchor(level.tree, snapshot.actOnTip) : nil,
+                    genesisSpec: configuration.childSpecs[child],
+                    genesisTarget: .max
+                )
+            }
         }
 
         /// The live, ready session the core's peer names.

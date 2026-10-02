@@ -21,8 +21,19 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Process identity key file; created with mode 0600 when absent")
     var identityKey: String?
 
-    @Option(name: .customLong("host-chain"), help: "A child chain to host as a level of this process, e.g. Nexus/Alpha (repeatable; a parent before its children)")
+    @Option(name: .customLong("host-chain"), help: "A child chain to host as a level of this process, e.g. Nexus/Alpha, optionally =<spec.json> to mine its genesis (repeatable; a parent before its children)")
     var hostChain: [String] = []
+
+    /// `--host-chain` entries: each path, and the spec file it names.
+    private func hostedChains() throws -> [(path: [String], spec: ChainSpec?)] {
+        try hostChain.map { entry in
+            let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
+            let path = parts[0].split(separator: "/").map(String.init)
+            guard parts.count == 2 else { return (path, nil) }
+            let data = try Data(contentsOf: URL(fileURLWithPath: parts[1]))
+            return (path, try JSONDecoder().decode(ChainSpec.self, from: data))
+        }
+    }
 
     @Option(help: "Same-chain overlay listen port")
     var listenPort: UInt16 = 4001
@@ -108,7 +119,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             externalAddress: externalAddress,
             publicReadURL: publicReadUrl,
             peerSearchInterval: peerSearchInterval,
-            hostedChildren: hostChain.map { $0.split(separator: "/").map(String.init) }
+            hostedChildren: try hostedChains().map(\.path),
+            childSpecs: Dictionary(try hostedChains().compactMap { entry in entry.spec.map { (entry.path, $0) } }) { first, _ in first }
         )
         try await runCoreDriver(
             configuration: configuration,

@@ -24,7 +24,10 @@ extension CoreDriver {
     func mineBlock() async throws -> Block {
         let template = try await miningTemplate(MiningTemplateRequest())
         var nonce: UInt64 = 0
-        while template.block.replacingNonce(nonce).proofOfWorkHash() > template.searchTarget { nonce += 1 }
+        // The hardest threshold: the root's own, which every carried
+        // child's easier target also meets.
+        let target = template.targets.min() ?? template.searchTarget
+        while template.block.replacingNonce(nonce).proofOfWorkHash() > target { nonce += 1 }
         _ = try await submitWork(SubmitWorkRequest(workID: template.workID, nonce: nonce))
         return template.block.replacingNonce(nonce)
     }

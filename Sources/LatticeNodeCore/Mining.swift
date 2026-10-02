@@ -80,12 +80,16 @@ public struct TemplateRequest: Sendable, Equatable {
     public let rewardRecipient: String?
     public let minimumWork: [[String]: UInt256]
     public let parentCarrier: ParentCarrier?
+    /// Each hosted child chain's reward recipient, by path.
+    public let childRecipients: [[String]: String]
 
     public init(
         rewardRecipient: String?,
         minimumWork: [[String]: UInt256] = [:],
-        parentCarrier: ParentCarrier? = nil
+        parentCarrier: ParentCarrier? = nil,
+        childRecipients: [[String]: String] = [:]
     ) {
+        self.childRecipients = childRecipients
         self.rewardRecipient = rewardRecipient
         self.minimumWork = minimumWork
         self.parentCarrier = parentCarrier
