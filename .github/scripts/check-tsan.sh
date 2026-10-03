@@ -86,7 +86,9 @@ fi
 export LATTICE_TSAN_STRESS=1
 export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1:exitcode=66:history_size=7}"
 
-if ! swift test list | grep -q '^LatticeNodeTests\.NodeRuntime'; then
+test_list="$tmp_dir/swift-tests.txt"
+swift test list > "$test_list"
+if ! grep -q '^LatticeNodeTests\.NodeRuntime' "$test_list"; then
     echo "TSan filter matched no NodeRuntime tests" >&2
     exit 1
 fi
