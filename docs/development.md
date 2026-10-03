@@ -16,7 +16,7 @@ for local macOS builds.
 
 ```bash
 swift run lattice-node --help
-swift run lattice-node --chain-path Nexus --rpc-port 8080
+swift run lattice-node --rpc-port 8080
 
 # External proof-of-work pipeline:
 swift run lattice-mining-coordinator \
