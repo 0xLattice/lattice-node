@@ -3,9 +3,10 @@
 #
 #   scripts/set-nexus-genesis-timestamp.sh <unix-milliseconds | now>
 #
-# The timestamp is the chain's real launch time: block 1 must be strictly
-# later and no later than a validating node's clock, and it anchors the ASERT
-# schedule. Run this once, at deploy time, then commit the result. It:
+# The timestamp is the chain's real launch time. It is the only lower bound on
+# block 1's timestamp, and block 1 anchors the ASERT schedule, so run this as
+# close to the start of mining as the release allows (re-run it if the launch
+# slips), then commit the result. It:
 #   1. writes the timestamp into Sources/LatticeNode/Configuration/NexusGenesis.swift;
 #   2. computes the resulting genesis CID with the canonical genesis test;
 #   3. replaces the old CID in every tracked file (NexusGenesis.swift,
@@ -60,7 +61,12 @@ repin() {
     | head -1)
   if [ -z "$new" ]; then
     printf '%s\n' "$out" | tail -30 >&2
-    echo "could not read the computed value for $2 from $1" >&2
+    if printf '%s\n' "$out" | grep -q 'XCTAssertEqual failed'; then
+      echo "could not read the computed value for $2 from $1" >&2
+    else
+      echo "$1 did not report a new value: the build or test failed, or the pin is already current" >&2
+    fi
+    git checkout -- "$genesis_file" "$vector_file"
     exit 1
   fi
   git grep -l "$2" | while IFS= read -r file; do

@@ -12,8 +12,9 @@ variables carried between steps.
 ## 1. Pin the genesis timestamp
 
 The genesis timestamp is the chain's real launch time in Unix milliseconds.
-Block 1 must be strictly later and not in a validating node's future, and it
-anchors the ASERT schedule, so set it at deploy time and not earlier:
+It is the only lower bound on block 1's timestamp, and block 1 anchors the
+ASERT schedule, so set it at deploy time and not earlier. If the launch slips
+by more than a few hours after this step, run it again:
 
 ```bash
 scripts/set-nexus-genesis-timestamp.sh now
@@ -62,6 +63,16 @@ for app in lattice-mainnet-iad lattice-mainnet-ams lattice-mainnet-sjc \
   fly machines list -a "$app" --json > "/tmp/relaunch/$app.list.json"
   jq '.[0].config' "/tmp/relaunch/$app.list.json" > "/tmp/relaunch/$app.config.json"
   jq -r '.[0].id' "/tmp/relaunch/$app.list.json"
+done
+```
+
+Confirm each backbone's current `--identity-key` is
+`/data/identity/nexus.key`, the path the new command keeps; a different path
+would boot the node with a fresh identity and break every pinned peer key:
+
+```bash
+for app in lattice-mainnet-iad lattice-mainnet-ams lattice-mainnet-sjc; do
+  jq -r '.init.cmd | index("--identity-key") as $i | .[$i + 1]' "/tmp/relaunch/$app.config.json"
 done
 ```
 
