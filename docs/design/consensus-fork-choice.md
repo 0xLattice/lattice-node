@@ -46,9 +46,9 @@ The child work carried by the losing parent fork is not revoked: work weighs,
 validity selects, and the parent is not authoritative over which child fork is
 canonical. Likewise, a withdrawal anchored on a losing parent fork is valid:
 an anchor needs parent-state continuity, not canonicity, and consensus fork
-choice alone settles it. There is no standard confirmation depth. Pinned by
-`CrossLevelForkChoiceTests` here and by Lattice #79's
-`CrossChainReorgReplayEdgeTests`.
+choice alone settles it. There is no standard confirmation depth. The
+omission is pinned by `CrossLevelForkChoiceTests`; the withdrawal by Lattice
+#79's `CrossChainReorgReplayEdgeTests`.
 
 ## Sync trust boundary
 

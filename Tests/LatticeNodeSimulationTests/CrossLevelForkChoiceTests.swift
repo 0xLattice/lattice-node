@@ -80,6 +80,9 @@ final class CrossLevelForkChoiceTests: XCTestCase {
     /// Nexus block P committing Alpha block C, `runWork(P) − grindWork(P)`
     /// credited at C under `AttributedRunIdentity(P, Alpha)`, where a Nexus
     /// block is in the run of its nearest carrier by parent pointer.
+    /// Scoped to these two-level worlds: a Nexus block's credited work is its
+    /// own block work (shares never enter Nexus, and no grandparent attributes
+    /// runs), so `runWork` and `grindWork` reduce to `workForTarget`.
     private func predicted(_ world: LevelWorld) throws -> GhostReference {
         let directory = Self.alpha[Self.alpha.count - 1]
         var commits: [String: String] = [:]
@@ -126,12 +129,14 @@ final class CrossLevelForkChoiceTests: XCTestCase {
         XCTAssertEqual(digest.blocks.compactMapValues(\.subtreeWork), work, "\(context): child weights")
     }
 
-    private func assertRestartHolds(_ hosts: Hosts, _ context: String) throws {
+    @discardableResult
+    private func assertRestartHolds(_ hosts: Hosts, _ context: String) throws -> NodeCore {
         let restored = try hosts.restored()
         for path in hosts.world.paths {
             let after = TreeDigest(try XCTUnwrap(restored.levels[path]).tree)
             XCTAssertEqual(after, try hosts.digest(path), "\(context): restart rebuilds \(path) differently")
         }
+        return restored
     }
 
     // MARK: - Test 1: carried child forks under a parent fork
@@ -198,8 +203,7 @@ final class CrossLevelForkChoiceTests: XCTestCase {
             XCTAssertEqual(alpha.canonicalTip, b1, "attribution selects B's child fork")
         }
 
-        try assertRestartHolds(hosts, "restart")
-        let restored = try hosts.restored()
+        let restored = try assertRestartHolds(hosts, "restart")
         assertMatches(TreeDigest(try XCTUnwrap(restored.levels[Self.alpha]).tree), reference, "restart")
     }
 
@@ -267,8 +271,7 @@ final class CrossLevelForkChoiceTests: XCTestCase {
         XCTAssertEqual(alpha.blocks[g.cid]?.grinds[runID],
                        workForTarget(rootB1.block.target) + workForTarget(rootB2.block.target))
 
-        try assertRestartHolds(hosts, "restart")
-        let restored = try hosts.restored()
+        let restored = try assertRestartHolds(hosts, "restart")
         XCTAssertEqual(TreeDigest(try XCTUnwrap(restored.levels[Self.alpha]).tree).canonicalTip, c1.cid)
     }
 }
