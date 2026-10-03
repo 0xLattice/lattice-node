@@ -38,6 +38,18 @@ derives the credit itself as `runWork − ownWork` under an identity keyed by th
 carrier and directory, applies it only as a strict increase over the value it
 holds, and never revokes it.
 
+A parent fork that omits a hosted child (commits nothing into its directory)
+changes no child fork choice. Its blocks join the run of their nearest
+carrier above the fork, so their work is attributed at that carrier's child
+block, a common ancestor of every child fork below it, and to neither fork.
+The child work carried by the losing parent fork is not revoked: work weighs,
+validity selects, and the parent is not authoritative over which child fork is
+canonical. Likewise, a withdrawal anchored on a losing parent fork is valid:
+an anchor needs parent-state continuity, not canonicity, and consensus fork
+choice alone settles it. There is no standard confirmation depth. The
+omission is pinned by `CrossLevelForkChoiceTests`; the withdrawal by Lattice
+#79's `CrossChainReorgReplayEdgeTests`.
+
 ## Sync trust boundary
 
 Cold sync pays two independent costs, and only one is cheap:
