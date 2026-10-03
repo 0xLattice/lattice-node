@@ -20,6 +20,9 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 genesis_file=Sources/LatticeNode/Configuration/NexusGenesis.swift
 
+# A failed run restores the tracked tree, so it must start clean.
+git diff --quiet HEAD || { echo "commit or stash tracked changes first" >&2; exit 1; }
+
 ts="${1:?usage: $0 <unix-milliseconds | now>}"
 now_ms=$(( $(date +%s) * 1000 ))
 [ "$ts" = now ] && ts=$now_ms
@@ -66,7 +69,7 @@ repin() {
     else
       echo "$1 did not report a new value: the build or test failed, or the pin is already current" >&2
     fi
-    git checkout -- "$genesis_file" "$vector_file"
+    git checkout -- .
     exit 1
   fi
   git grep -l "$2" | while IFS= read -r file; do
