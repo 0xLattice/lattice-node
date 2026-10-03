@@ -131,7 +131,7 @@ transaction selects its level with `body.chainPath`; an unhosted path returns
 
 Nexus is pinned to the deterministic local genesis CID:
 
-`bafyreigsvcxa7kveg7ywaykwqqwvakgtcujds634k4cc6mejyh43pmoqny`
+`bafyreigv5sprcqkq52sonreff7yh6bgg5lgaekvzceiddnkckzb2vzguem`
 
 Its timestamp remains `0`. The full constants are documented in
 [docs/protocol.md](docs/protocol.md).
