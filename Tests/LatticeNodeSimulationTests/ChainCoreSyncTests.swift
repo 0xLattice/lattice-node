@@ -19,13 +19,14 @@ final class ChainCoreSyncTests: XCTestCase {
         chain = world.honest.compactMap { world.blocks[$0] }
     }
 
-    private func core(pageSize: Int = 4, pendingBudget: Int = 1 << 20) -> ChainCore {
+    private func core(pageSize: Int = 4, pendingBudget: Int = 1 << 20, maxChildIndexBytes: Int = 1 << 20) -> ChainCore {
         ChainCore(
             tree: world.bootstrap.tree,
             config: ChainCoreConfig(
                 maxHeadersPerPage: pageSize,
                 headersTimeout: 1_000,
                 maxInlineChildIndexBytes: 1_024,
+                maxChildIndexBytes: maxChildIndexBytes,
                 pendingBudget: pendingBudget
             ),
             log: WeighLog(id: "test")
@@ -428,6 +429,31 @@ final class ChainCoreSyncTests: XCTestCase {
                 XCTAssertTrue(core.sync.pending.entries.isEmpty)
             }
         }
+    }
+
+    func testAChildIndexOverTheOperatorLimitIsUnavailableNeverJudgedOrBlamed() async throws {
+        let carrier = try await world.carriers(count: 1, entries: 48)[0]
+        let cid = carrier.block.children.rawCID
+        let size = try XCTUnwrap(carrier.children.toData()).count
+        var core = core(maxChildIndexBytes: size - 1)
+        ready(&core, peer)
+        // Inline over the limit is as if not sent: asked for by CID.
+        let effects = relay(&core, [entry(carrier)], from: peer)
+        XCTAssertTrue(disconnects(effects).isEmpty)
+        XCTAssertEqual(fetches(effects), [cid])
+        // The honest map, over the limit, is unavailable here: the header is
+        // dropped unjudged (neither weighed nor excluded) and nobody is blamed.
+        let fetched = core.step(.childIndexFetched(peer, cid: cid, carrier.children), now: Self.now)
+        XCTAssertTrue(disconnects(fetched).isEmpty, "a resource limit, never blame")
+        XCTAssertTrue(core.sync.pending.entries.isEmpty)
+        XCTAssertFalse(core.tree.contains(blockHash: carrier.cid))
+        XCTAssertTrue(relays(fetched).isEmpty, "no verdict is logged or pushed")
+
+        // The same header within the limit is weighed as usual.
+        var roomy = self.core(maxChildIndexBytes: size)
+        ready(&roomy, peer)
+        relay(&roomy, [entry(carrier)], from: peer)
+        XCTAssertTrue(roomy.tree.contains(blockHash: carrier.cid))
     }
 
     func testOnePeerHoldsAtMostOneChildIndexWait() async throws {
