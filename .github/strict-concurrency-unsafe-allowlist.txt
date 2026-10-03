@@ -1,14 +1,14 @@
 # Every @unchecked Sendable or nonisolated(unsafe) site must be listed here with
 # a rationale. This keeps strict-concurrency escapes visible in review.
 Sources/LatticeMinerCore/ProofOfWork.swift|private struct SendableSearchArgs: @unchecked Sendable {|SHA256 midstate is copied into worker arguments and not mutated after task creation.
-Sources/LatticeNode/Architecture/NodeSQLite.swift|final class NodeSQLite: @unchecked Sendable {|SQLite is opened FULLMUTEX and every operation uses that serialized handle without exposing it.
-Sources/LatticeNode/Architecture/IvyContentBridge.swift|public final class AttributionCapture: @unchecked Sendable {|All access to the optional attribution value is guarded by AttributionCapture's NSLock.
-Sources/LatticeNode/Architecture/IvyContentBridge.swift|private final class Trace: @unchecked Sendable {|All mutable attribution state is guarded by Trace's NSLock.
-Sources/LatticeNode/Architecture/IvyContentBridge.swift|private final class Context: @unchecked Sendable {|The root CID is immutable and the referenced Trace synchronizes its own mutable state.
+Sources/LatticeNode/Storage/NodeSQLite.swift|final class NodeSQLite: @unchecked Sendable {|SQLite is opened FULLMUTEX and every operation uses that serialized handle without exposing it.
+Sources/LatticeNode/Content/IvyContentSource.swift|public final class AttributionCapture: @unchecked Sendable {|All access to the optional attribution value is guarded by AttributionCapture's NSLock.
+Sources/LatticeNode/Content/IvyContentSource.swift|private final class Trace: @unchecked Sendable {|All mutable attribution state is guarded by Trace's NSLock.
+Sources/LatticeNode/Content/IvyContentSource.swift|private final class Context: @unchecked Sendable {|The root CID is immutable and the referenced Trace synchronizes its own mutable state.
 Tests/LatticeMiningCoordinatorTests/MiningCoordinatorTests.swift|nonisolated(unsafe) static var responder: ((URLRequest) -> (Int, Data))?|The URLProtocol test stub installs and clears this callback serially within each test.
 Sources/LatticeCtl/Mine.swift|final class InterruptFlag: @unchecked Sendable {|All access to the boolean is guarded by InterruptFlag's NSLock; raised only from the SIGTERM dispatch source.
-Tests/LatticeNodeTests/Architecture/ProcessStderrReuseTests.swift|private final class PidCounter: @unchecked Sendable {|Test-only counter; the spawn count is guarded by PidCounter's NSLock.
-Tests/LatticeNodeTests/Architecture/PublicReadRateLimitTests.swift|private final class TestClock: @unchecked Sendable {|Test-only injected monotonic clock; its seconds value is guarded by TestClock's NSLock.
+Tests/LatticeNodeTests/Utilities/ProcessStderrReuseTests.swift|private final class PidCounter: @unchecked Sendable {|Test-only counter; the spawn count is guarded by PidCounter's NSLock.
+Tests/LatticeNodeTests/API/PublicReadRateLimitTests.swift|private final class TestClock: @unchecked Sendable {|Test-only injected monotonic clock; its seconds value is guarded by TestClock's NSLock.
 Sources/LatticeProcessWait/BoundedProcessWait.swift|public final class BoundedProcessWait: @unchecked Sendable {|Owns one Foundation.Process; all continuation, pending-outcome and settled state is guarded by the handle NSLock, and the process reference is only read for its pid and termination handler.
-Tests/LatticeNodeTests/Support/CoreDriverTestSupport.swift|private nonisolated(unsafe) static var allocated = Set<UInt16>()|The issued test port set is read and mutated only while holding its static NSLock.
-Tests/LatticeNodeTests/Support/CoreDriverTestSupport.swift|private nonisolated(unsafe) static var cursor = UInt16(|The next test port to probe is read and advanced only while holding the same static NSLock.
+Tests/LatticeNodeTests/Support/NodeRuntimeTestSupport.swift|private nonisolated(unsafe) static var allocated = Set<UInt16>()|The issued test port set is read and mutated only while holding its static NSLock.
+Tests/LatticeNodeTests/Support/NodeRuntimeTestSupport.swift|private nonisolated(unsafe) static var cursor = UInt16(|The next test port to probe is read and advanced only while holding the same static NSLock.
