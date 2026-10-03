@@ -21,7 +21,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NGINX_IMAGE="nginx:1.18"
 UPSTREAM_IMAGE="python:3-alpine"
 PROXY_PORT=8081
-CID="bafyreigv5sprcqkq52sonreff7yh6bgg5lgaekvzceiddnkckzb2vzguem"
+CID="bafyreiea6sw7enxfy7wn6jwc2ubtplkhp2buierain3lb3roqo6n4bjyvm"
 
 cleanup() {
   docker rm -f rr-allowlist-nginx rr-allowlist-upstream >/dev/null 2>&1 || true
