@@ -155,6 +155,10 @@ carry IDs only. `getData` and `getAncestors` return bounded header entries that
 contain the canonical block bytes, an optional child index, the credited
 `ChildBlockProof` values for that block, and a genesis spec when needed. The
 receiver verifies every header and proof before adding it to its own log.
+A child index larger than the node's `maxChildIndexBytes` (default 1 MiB) or
+a proof larger than `maxProofBytes` (default 64 KiB) is unavailable on that
+node, like content it cannot fetch: never judged, never blamed. These are local
+resource limits, not consensus rules.
 Durable sync cursors are written in the same tree-wide transaction as the
 facts they pass.
 

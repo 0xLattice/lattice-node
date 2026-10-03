@@ -134,6 +134,10 @@ public struct ChainCoreConfig: Sendable {
     public var headersTimeout: Int64
     /// A child index larger than this travels by CID instead of inline.
     public var maxInlineChildIndexBytes: Int
+    /// The largest child index this node takes from a peer. A larger one is
+    /// unavailable here, like content that cannot be fetched: its header is
+    /// not taken from that peer, never judged and never blamed.
+    public var maxChildIndexBytes: Int
     /// The operator's byte budget for headers not yet connected.
     public var pendingBudget: Int
     /// A header dated more than this beyond now is dropped (never blamed)
@@ -158,6 +162,7 @@ public struct ChainCoreConfig: Sendable {
         maxPageBytes: Int = 1 << 20,
         headersTimeout: Int64 = 30_000,
         maxInlineChildIndexBytes: Int = 16 * 1_024,
+        maxChildIndexBytes: Int = 1 << 20,
         pendingBudget: Int = 16 * 1_024 * 1_024,
         maxFutureDrift: Int64 = 2 * 60 * 60 * 1_000,
         bodyWindow: Int = 64,
@@ -169,6 +174,7 @@ public struct ChainCoreConfig: Sendable {
         self.maxPageBytes = maxPageBytes
         self.headersTimeout = headersTimeout
         self.maxInlineChildIndexBytes = maxInlineChildIndexBytes
+        self.maxChildIndexBytes = maxChildIndexBytes
         self.pendingBudget = pendingBudget
         self.bodyWindow = bodyWindow
         self.bodyRetryBase = bodyRetryBase
@@ -760,6 +766,12 @@ public struct ChainCore: Sendable {
     /// the pending queue. Returns its CID, or nil when the peer was
     /// disconnected.
     private mutating func accept(_ entry: HeaderEntry, from peer: PeerID, _ turn: inout Turn) -> String? {
+        // An inline children map over the operator's limit is as if not sent:
+        // asked for by CID, where the same limit makes it unavailable.
+        var entry = entry
+        if let children = entry.children, Self.size(of: children) > config.maxChildIndexBytes {
+            entry = HeaderEntry(block: entry.block, children: nil, proofs: entry.proofs, spec: entry.spec)
+        }
         guard let cid = try? BlockHeader(node: entry.block).rawCID else {
             disconnect(peer, .proofOfWorkInvalid, &turn)
             return nil
@@ -1020,6 +1032,8 @@ public struct ChainCore: Sendable {
         guard let waiting = sync.peers[peer]?.childIndex, waiting.cid == cid else { return }
         sync.peers[peer]?.childIndex = nil
         let committing = sync.pending.committing(cid)
+        // Over the operator's limit is unavailable here, exactly as absent.
+        let index = index.flatMap { Self.size(of: $0) <= config.maxChildIndexBytes ? $0 : nil }
         guard let index else {
             // The peer definitively lacks what its own header commits: drop
             // that header, never blame.
