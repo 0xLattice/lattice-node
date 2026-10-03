@@ -123,3 +123,6 @@ Never combine databases from different snapshots. For ordinary backups, stop
 the processes and snapshot `lattice.json`, `identity`, `specs`, and
 `chains/Nexus` together. See [the operations runbook](../docs/operations.md)
 for preflight, recovery, discovery, mining, and alerting details.
+
+For a Nexus relaunch across the public Fly hosts (new genesis, wipe, restore,
+first block), follow [RELAUNCH.md](RELAUNCH.md).
