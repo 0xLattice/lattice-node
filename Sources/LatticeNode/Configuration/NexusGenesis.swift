@@ -20,8 +20,9 @@ public enum NexusGenesis {
     )
     public static let config = GenesisConfig(
         spec: spec,
-        // The launch definition deliberately retains timestamp zero. Changing
-        // it would change `expectedBlockHash` and every derived identity.
+        // The real launch time, in milliseconds. Changing it changes
+        // `expectedBlockHash` and every derived identity; set it only with
+        // scripts/set-nexus-genesis-timestamp.sh.
         timestamp: 0
     )
 
