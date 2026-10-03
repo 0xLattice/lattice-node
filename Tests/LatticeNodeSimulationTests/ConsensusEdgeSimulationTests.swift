@@ -59,15 +59,29 @@ final class ConsensusEdgeSimulationTests: XCTestCase {
         }
         XCTAssertFalse(threeLevel.isEmpty, "no grind carries a block at every level")
 
+        // Non-vacuity: every core reported every level. With three cores each
+        // core hears every header from two distinct peers, and `duplicate = 1`
+        // doubles every message leg.
+        XCTAssertEqual(once.digests.count, 2)
+        XCTAssertEqual(twice.digests.count, 3)
+        for digests in Array(once.digests.values) + Array(twice.digests.values) {
+            XCTAssertEqual(Set(digests.keys), Set(world.paths))
+            for path in world.paths { XCTAssertGreaterThan(digests[path]?.blocks.count ?? 0, 1, "\(path) weighed nothing") }
+        }
+
         let reference = try XCTUnwrap(once.digests.values.first)
         for path in world.paths {
             for (core, digests) in once.digests {
-                XCTAssertEqual(credits(digests)[path], credits(reference)[path], "\(core) differs at \(path) on one link")
+                XCTAssertEqual(digests[path], reference[path], "\(core) differs at \(path) on one link")
             }
         }
         for (core, digests) in twice.digests {
             for path in world.paths {
                 XCTAssertEqual(credits(digests)[path], credits(reference)[path], "\(core) credits \(path) differently when relayed twice")
+                XCTAssertEqual(digests[path]?.blocks.mapValues(\.subtreeWork), reference[path]?.blocks.mapValues(\.subtreeWork),
+                               "\(core) weighs \(path) differently when relayed twice")
+                XCTAssertEqual(digests[path]?.canonicalTip, reference[path]?.canonicalTip, "\(core) selects differently at \(path)")
+                XCTAssertEqual(digests[path], reference[path], "\(core) holds a different graph at \(path)")
             }
             for grind in threeLevel {
                 XCTAssertEqual(digests[LevelWorld.nexus]?.blocks[grind.root.cid]?.grinds.count, 1, core)
@@ -77,10 +91,23 @@ final class ConsensusEdgeSimulationTests: XCTestCase {
                     let grinds = try XCTUnwrap(digests[carried.path]?.blocks[cid]?.grinds, "\(core) never weighed \(cid)")
                     // Hierarchical GHOST also credits the parent level's
                     // attributed runs, keyed by carrier: derived, not grinds.
-                    let parent = Array(carried.path.dropLast())
-                    let runs = Set((digests[parent]?.blocks.keys.map { $0 } ?? []).compactMap {
-                        AttributedRunIdentity(carrierBlockHash: $0, directory: carried.path[carried.path.count - 1]).contributionID
+                    // Every other key must be the run of a parent-level block
+                    // that carries this one (a Nexus block root for Alpha, an
+                    // Alpha block for Beta), and only a carrier the parent weighed.
+                    let directory = carried.path[carried.path.count - 1]
+                    let carriers = Set(world.grinds.flatMap { other -> [String] in
+                        guard other.mined.carried.contains(where: { $0.path == carried.path && (try? BlockHeader(node: $0.block).rawCID) == cid })
+                        else { return [] }
+                        if carried.path.count == 2 { return other.rootIsBlock ? [other.root.cid] : [] }
+                        return other.mined.carried.filter { $0.path == Array(carried.path.dropLast()) }
+                            .compactMap { try? BlockHeader(node: $0.block).rawCID }
                     })
+                    let parent = Array(carried.path.dropLast())
+                    let runs = Set(carriers.filter { digests[parent]?.blocks[$0] != nil }.compactMap {
+                        AttributedRunIdentity(carrierBlockHash: $0, directory: directory).contributionID
+                    })
+                    let extra = Set(grinds.keys).subtracting(truth.keys)
+                    XCTAssertTrue(extra.isSubset(of: runs), "\(core) credits \(cid) at \(carried.path) with \(extra.subtracting(runs)), neither a grind nor a carrier's run")
                     let direct = grinds.filter { !runs.contains($0.key) }
                     XCTAssertEqual(direct, truth.compactMapValues { $0.evidence.contribution?.work },
                                    "\(core) credits \(cid) at \(carried.path) other than once per grind")
@@ -105,6 +132,8 @@ final class ConsensusEdgeSimulationTests: XCTestCase {
                 let after = TreeDigest(level.tree)
                 XCTAssertEqual(after.blocks.mapValues(\.grinds), credits(digests)[path], "\(core) re-credits \(path) after restart")
                 XCTAssertEqual(after.blocks.mapValues(\.grinds), credits(reference)[path], "\(core) after restart at \(path)")
+                XCTAssertEqual(after.blocks.mapValues(\.subtreeWork), digests[path]?.blocks.mapValues(\.subtreeWork), "\(core) reweighs \(path) after restart")
+                XCTAssertEqual(after.canonicalTip, digests[path]?.canonicalTip, "\(core) reselects at \(path) after restart")
             }
         }
     }
@@ -189,9 +218,9 @@ final class ConsensusEdgeSimulationTests: XCTestCase {
         XCTAssertTrue(core.tree.isExcludedRoot(invalid.cid))
 
         // The excluded subtree keeps gaining work, well past the honest chain.
-        let extension_ = try await world.branch(from: child, count: 8)
+        let extendedBranch = try await world.branch(from: child, count: 8)
         var previous = TreeDigest(core.tree).blocks[invalid.cid]?.subtreeWork
-        for block in extension_ {
+        for block in extendedBranch {
             all += show(&core, [block])
             XCTAssertTrue(core.tree.contains(blockHash: block.cid), "a block on the excluded subtree is weighed")
             let weight = TreeDigest(core.tree).blocks[invalid.cid]?.subtreeWork
@@ -215,6 +244,6 @@ final class ConsensusEdgeSimulationTests: XCTestCase {
         XCTAssertEqual(after, before, "the restart rebuilds the same weighed graph")
         XCTAssertTrue(after.excluded.contains(invalid.cid))
         XCTAssertFalse(after.canonicalPath.contains(invalid.cid))
-        for block in extension_ { XCTAssertNotNil(after.blocks[block.cid]) }
+        for block in extendedBranch { XCTAssertNotNil(after.blocks[block.cid]) }
     }
 }
