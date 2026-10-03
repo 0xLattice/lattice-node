@@ -97,8 +97,7 @@ let package = Package(
                 .product(name: "VolumeBroker", package: "VolumeBroker"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "cashew", package: "cashew"),
-            ],
-            path: "Sources/LatticeNode/Architecture"),
+            ]),
         .executableTarget(
             name: "LatticeNodeDaemon",
             dependencies: [
@@ -191,8 +190,7 @@ let package = Package(
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "HummingbirdTesting", package: "hummingbird"),
             ],
-            path: "Tests/LatticeNodeTests",
-            exclude: ["SafetyNet/Goldens"]),
+            path: "Tests/LatticeNodeTests"),
         .testTarget(
             name: "LatticeNodeSimulationTests",
             dependencies: [

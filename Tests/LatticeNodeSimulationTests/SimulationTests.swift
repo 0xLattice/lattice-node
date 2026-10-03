@@ -243,7 +243,7 @@ final class SimulationTests: XCTestCase {
         config.liar = false
         config.drop = 0
         config.duplicate = 0
-        config.pendingBudget = CoreConfig().pendingBudget
+        config.pendingBudget = ChainCoreConfig().pendingBudget
         var simulator = try await Simulator.make(config)
         let world = simulator.world
         let heavier = try XCTUnwrap(world.sides[1].last)

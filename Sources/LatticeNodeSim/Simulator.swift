@@ -32,7 +32,7 @@ public struct SimConfig: Sendable {
     /// Probability that a reconnect attempt fails (retried later, backing
     /// off): links do not always come back.
     public var reconnectFailure = 0.0
-    /// Core-to-core links: every pair, or a ring (multi-hop).
+    /// Chain-core links: every pair, or a ring (multi-hop).
     public var ring = false
     /// How many cores each honest source connects to (nil: all).
     public var sourceFanout: Int?
@@ -147,11 +147,11 @@ public struct SimReport: Sendable {
 }
 
 /// A deterministic network of honest cores and scripted peers in one thread.
-/// Every step runs `Core.step`, executes its effects, then checks the
+/// Every step runs `ChainCore.step`, executes its effects, then checks the
 /// invariants.
 public struct Simulator {
     struct CoreNode {
-        var core: Core
+        var core: ChainCore
         var store: SimStore
         var digest: TreeDigest
         var persists = 0
@@ -159,7 +159,7 @@ public struct Simulator {
         /// fetched and the post-states its executions produced. It serves
         /// only this.
         let content: SimCAS
-        /// Bodies it fetched, and bodies it is fetching.
+        /// BodyPipeline it fetched, and bodies it is fetching.
         var bodies: Set<String> = []
         var fetching: Set<String> = []
         /// Bumped by a restart: work the dead process started never reports.
@@ -198,7 +198,7 @@ public struct Simulator {
 
     /// DST 7: the store alone rebuilds an equal tree.
     func checkReplay(_ name: String, _ node: CoreNode, _ digest: TreeDigest) throws {
-        let restored = try Core.restore(
+        let restored = try ChainCore.restore(
             replaying: node.store.facts,
             context: world.context,
             specs: [world.spec],
@@ -214,7 +214,7 @@ public struct Simulator {
     }
 
     enum Delivery {
-        case core(Event)
+        case core(ChainEvent)
         case scriptMessage(PeerID, SyncMessage)
         case scriptFetch(from: String, session: UInt64, cid: String)
         case scriptTick
@@ -239,7 +239,7 @@ public struct Simulator {
     }
 
     public let config: SimConfig
-    public let coreConfig: CoreConfig
+    public let coreConfig: ChainCoreConfig
     public let world: World
     var rng: SplitMix64
     public private(set) var now: Int64 = World.genesisTime
@@ -284,7 +284,7 @@ public struct Simulator {
         self.config = config
         self.world = world
         self.rng = rng
-        let coreConfig = CoreConfig(
+        let coreConfig = ChainCoreConfig(
             maxHeadersPerPage: config.pageSize,
             headersTimeout: config.headersTimeout,
             maxInlineChildIndexBytes: config.inlineChildIndexBytes,
@@ -293,7 +293,7 @@ public struct Simulator {
         )
         self.coreConfig = coreConfig
         for index in 0..<config.cores {
-            let core = Core(tree: world.bootstrap.tree, config: coreConfig, log: WeighLog(id: "core\(index)"))
+            let core = ChainCore(tree: world.bootstrap.tree, config: coreConfig, log: WeighLog(id: "core\(index)"))
             cores["core\(index)"] = CoreNode(
                 core: core,
                 store: SimStore(genesis: world.genesis, facts: world.bootstrap.facts),
@@ -540,8 +540,8 @@ public struct Simulator {
         }
     }
 
-    /// One `Core.step`, its effects in order, then the invariants.
-    mutating func step(_ name: String, _ event: Event) async throws {
+    /// One `ChainCore.step`, its effects in order, then the invariants.
+    mutating func step(_ name: String, _ event: ChainEvent) async throws {
         guard var node = cores[name] else { return }
         let revision = node.core.tree.currentRevision()
         var effects = node.core.step(event, now: now)
@@ -564,7 +564,7 @@ public struct Simulator {
                 }
                 if faults.dropFact, !droppedFact, let dropped = batch.facts.last {
                     droppedFact = true
-                    batch = PersistBatch(
+                    batch = ChainBatch(
                         headers: batch.headers,
                         states: batch.states,
                         facts: batch.facts.filter { $0 != dropped }
@@ -644,7 +644,7 @@ public struct Simulator {
                     Dictionary(uniqueKeysWithValues: blocks.map { ($0, [String]()) })
                 )))
             case .mining, .workSubmitted:
-                // The transaction workload drives `Mining` on its own
+                // The transaction workload drives `MiningState` on its own
                 // (`TxWorkload`); this simulator submits no transactions.
                 break
             case .cancelBody(let cid):

@@ -112,7 +112,7 @@ of by refusing requests: the public listener serves `/health` from a
 server-side snapshot cache with the same `max-age` it already advertises, so a
 flood costs one `readSnapshot()` per interval however fast it arrives. That is
 a tighter bound than a rate limit, which would still admit
-`--public-read-max-rate` snapshot walks per second into the `ChainProcess`
+`--public-read-max-rate` snapshot walks per second into the `NodeStorage`
 actor that also serves sync and block import. The exemption is limited to
 `GET` and `HEAD`, the only methods a health check uses; `/health` under any
 other method is charged normally rather than being handed a free path to a 404.

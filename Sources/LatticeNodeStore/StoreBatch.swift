@@ -12,21 +12,21 @@ public struct StoreBatch: Sendable {
     /// Each level's facts, in the order the core emitted them.
     public var levels: [(path: ChainPath, facts: [BlockImportBatch])] = []
     /// The root level's record, at first boot.
-    public var added: [LevelRecord] = []
+    public var added: [ChainLevelRecord] = []
 
     public init() {}
 
     /// One level's persist effect.
-    public init(_ batch: PersistBatch, at path: ChainPath) throws {
+    public init(_ batch: ChainBatch, at path: ChainPath) throws {
         try add(batch, at: path)
     }
 
     /// The host core's persist effect.
-    public init(_ batch: HostBatch) throws {
+    public init(_ batch: NodeBatch) throws {
         for (path, level) in batch.levels { try add(level, at: path) }
     }
 
-    public mutating func add(_ batch: PersistBatch, at path: ChainPath) throws {
+    public mutating func add(_ batch: ChainBatch, at path: ChainPath) throws {
         for header in batch.headers {
             try Self.materialized(BlockHeader(node: header.block), into: &content)
             try Self.materialized(HeaderImpl(node: header.children), into: &content)
@@ -38,7 +38,7 @@ public struct StoreBatch: Sendable {
         levels.append((path, batch.facts))
     }
 
-    public mutating func add(_ record: LevelRecord) throws {
+    public mutating func add(_ record: ChainLevelRecord) throws {
         try Self.materialized(BlockHeader(node: record.genesis.block), into: &content)
         try Self.materialized(HeaderImpl(node: record.genesis.children), into: &content)
         try Self.materialized(VolumeImpl<ChainSpec>(node: record.spec), into: &content)

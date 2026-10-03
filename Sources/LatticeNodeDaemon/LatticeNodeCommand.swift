@@ -21,7 +21,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Process identity key file; created with mode 0600 when absent")
     var identityKey: String?
 
-    @Option(name: .customLong("host-chain"), help: "A child chain to host as a level of this process, e.g. Nexus/Alpha, optionally =<spec.json> to mine its genesis (repeatable; a parent before its children)")
+    @Option(name: .customLong("host-chain"), help: "A child chain to host as a level of this storage, e.g. Nexus/Alpha, optionally =<spec.json> to mine its genesis (repeatable; a parent before its children)")
     var hostChain: [String] = []
 
     /// `--host-chain` entries: each path, and the spec file it names.
@@ -96,7 +96,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
 
         let storage = try storageURL(for: address)
         let keyURL = identityKey.map { URL(fileURLWithPath: $0) }
-            ?? storage.appendingPathComponent("process.key")
+            ?? storage.appendingPathComponent("storage.key")
         let privateKeyHex = try loadOrCreateIdentity(at: keyURL)
         let explicitPeers = try peer.map(parsePeerEndpoint)
         // An operator peer source is authoritative: a supplied list replaces
@@ -124,7 +124,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             hostedChildren: hosted.map(\.path),
             childSpecs: Dictionary(hosted.compactMap { entry in entry.spec.map { (entry.path, $0) } }) { first, _ in first }
         )
-        try await runCoreDriver(
+        try await runNodeRuntime(
             configuration: configuration,
             publicReadLimits: publicReadLimits,
             processStartTime: processStartTime
@@ -211,20 +211,20 @@ private func parseEndpoint(_ value: String) throws -> (key: String, host: String
     return (key, host, port)
 }
 
-/// The loopback operator writes: the core driver's RPC events.
+/// The loopback operator writes: the node runtime's RPC events.
 protocol OperatorWrites: Sendable {
     func submitTransaction(_ request: SubmitTransactionRequest) async throws -> SubmitTransactionResponse
     func miningTemplate(_ request: MiningTemplateRequest) async throws -> MiningTemplateResponse
     func submitWork(_ request: SubmitWorkRequest) async throws -> SubmitWorkResponse
 }
 
-extension CoreDriver: OperatorWrites {}
+extension NodeRuntime: OperatorWrites {}
 
 func makeApplication(
     reads: ChainReads,
     levelReads: [ChainReads] = [],
     writes: any OperatorWrites,
-    status: @Sendable @escaping () async -> ChainServiceStatusResponse,
+    status: @Sendable @escaping () async -> NodeStatusResponse,
     metrics: @Sendable @escaping (_ peers: Int, _ processStartTime: Date) async -> String,
     host: String,
     port: Int,
@@ -300,7 +300,7 @@ func makePublicReadApplication(
     // refused by public load — a refused check depools the machine, and on the
     // testnet follower that machine carries every chain in the path. The cost
     // is bounded by collapsing the work instead: readSnapshot() is isolated on
-    // the same ChainProcess actor that serves sync and block admission, and
+    // the same NodeStorage actor that serves sync and block admission, and
     // this makes a flood cost one call per TTL however fast it arrives.
     let health = ShortTTLSnapshotCache(
         ttl: statusCacheMaxAgeSeconds, clock: healthClock
@@ -326,7 +326,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
     to router: Router<Context>,
     reads byPath: ChainReadsByPath,
     peers: @Sendable @escaping () async -> ExplorerPeersResponse,
-    healthSnapshot: @Sendable @escaping () async -> ChainServiceStatusResponse
+    healthSnapshot: @Sendable @escaping () async -> NodeStatusResponse
 ) {
     // CORS is scoped to READ methods only. The POST write routes stay off the
     // allow-list on purpose: they consume application/json, so a cross-origin
@@ -340,9 +340,9 @@ private func addPublicReadRoutes<Context: RequestContext>(
         allowMethods: [.get, .options]
     ))
 
-    // /health is the public, non-mutating status: readSnapshot() takes no
-    // operation gate and reconciles nothing, so a health-check/explorer poll
-    // can never head-of-line-block or mutate consensus/mempool state.
+    // /health is the public, non-mutating status: readSnapshot() never enters
+    // the runtime loop, so a health-check/explorer poll cannot mutate or
+    // head-of-line-block consensus/mempool work.
     let health: @Sendable (Request, Context) async throws -> Response = {
         request, context in
         let service = try byPath(request)
@@ -407,9 +407,9 @@ private func addPublicReadRoutes<Context: RequestContext>(
     // MARK: - Explorer read API (/api/*)
     //
     // Ungated, read-only surface for the static browser explorer. Every handler
-    // mirrors the public CID read routes: content-verified, size-bounded, never touching the
-    // operation gate (no status()/transactionInventoryRoots()). Served to the
-    // public internet via a read-replica.
+    // mirrors the public CID read routes: content-verified, size-bounded, and
+    // outside the runtime loop. Served to the public internet via a
+    // read-replica.
 
     router.get("api/block/latest") { request, context in
         let service = try byPath(request)
@@ -706,15 +706,15 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
             request: request,
             context: context
         )
-    } catch ChainServiceError.childIntentLimitReached {
+    } catch NodeAPIError.childIntentLimitReached {
         throw HTTPError(.tooManyRequests, message: "childIntentLimitReached")
-    } catch ChainServiceError.noDeploymentAvailable {
+    } catch NodeAPIError.noDeploymentAvailable {
         throw HTTPError(.conflict, message: "noDeploymentAvailable")
-    } catch let error as ChainServiceError
+    } catch let error as NodeAPIError
     where error == .mempoolUnavailable || error == .parentUnavailable
         || error == .shuttingDown {
         throw HTTPError(.serviceUnavailable, message: reason(error))
-    } catch let error as ChainServiceError {
+    } catch let error as NodeAPIError {
         throw HTTPError(.badRequest, message: reason(error))
     } catch let error as MiningTemplateError {
         throw HTTPError(.badRequest, message: reason(error))
@@ -728,9 +728,9 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.serviceUnavailable, message: reason(error))
     } catch let error as TemplateError {
         throw HTTPError(.badRequest, message: reason(error))
-    } catch CoreDriverError.stopped {
+    } catch NodeRuntimeError.stopped {
         throw HTTPError(.serviceUnavailable, message: "shuttingDown")
-    } catch CoreDriverError.unknownChain {
+    } catch NodeRuntimeError.unknownChain {
         throw HTTPError(.notFound, message: "unknownChain")
     }
 }

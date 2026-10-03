@@ -1,286 +1,214 @@
 # Architecture
 
-## Process boundary
+## One node, one hosted chain tree
 
-One `lattice-node` process hosts a chain tree: one level per absolute chain
-path, each child co-hosted with its whole ancestry (`ChainHost`). `Nexus` is
-the only root. The set of levels comes from `lattice.json` (`--config`) and
-takes effect when the process starts.
-
-```text
-lattice-node process
-  Nexus level
-    chain: Nexus
-    overlay: 4001
-    RPC: 127.0.0.1:8080
-  Nexus/Payments level
-    chain: Nexus/Payments
-    parent level: Nexus (in-process)
-    overlay: 4101
-    RPC: 127.0.0.1:8180
-```
-
-Each level keeps its own identity key, storage directory, overlay, and RPC
-port. A parent level never owns its child's chain state, mempool,
-persistence, sync, or fork choice. The host starts levels parent-first and
-stops them children-first; stopping one level stops its descendants and
-leaves the rest running.
-
-## Identity and addressing
-
-`ChainAddress` accepts only absolute paths beginning with `Nexus`. The final
-component is also the parent-relative `directory` edge, but a directory alone
-is not a chain identity and is never accepted as a public chain path.
-
-Examples:
-
-- `Nexus` — valid root path.
-- `Nexus/Payments` — valid child path.
-- `Nexus/Payments/Rollups` — valid descendant path.
-- `Payments` — invalid chain path.
-- `/Nexus/Payments`, `Nexus/`, and `Nexus//Payments` — invalid.
-
-Nexus has no parent. Every child runs in the same `lattice-node` process as
-its whole ancestry, configured through `lattice.json` (`--config`): it reads its
-parent facts from the co-hosted parent level.
-
-## Runtime components
+One `lattice-node` process hosts a Nexus-rooted tree. Nexus is always the
+runtime root; `hostedChildren` adds the child paths that this operator chooses
+to serve. A nested child is valid only when every ancestor is hosted by the
+same process.
 
 ```text
-LatticeNodeDaemon
-  ├─ NodeConfiguration     immutable path, keys, ports
-  ├─ ChainProcess          block import and durable recovery
-  ├─ ChainService          transactions, templates, work results
-  ├─ NodeStore             state.db: semantic facts, indexes, root references
-  ├─ DiskBroker            volumes.db: materialized CAS volumes
-  ├─ Ivy overlay           same-chain peers and content
-  └─ loopback HTTP         thin JSON adapter over ChainService
+lattice-node
+  Nexus
+  Nexus/Alpha
+  Nexus/Alpha/Beta
 ```
 
-`Node.build` assembles the process, service, and network runtime the way the
-daemon runs them. `ChainService` reaches the runtime only through
-`NetworkInterface`, and the runtime reaches the service only through
-`ChainInterface`. `ChainProcess.open` runs `BootRecovery` before anything is
-exposed to networking. `NodeStore` groups its tables by owner (import journal,
-block index, evidence index, candidate store, mempool journal, pruning).
-`NodeNetworkRuntime` is one actor whose code is split by concern into
-`+Lifecycle`, `+Overlay`, `+Candidates` (the `BlockFetcher` side),
-`+Genesis`, `+ReadURL`, and `+RangeSync`. The overlay's state lives in
-`OverlayState` and per-peer state is a `PeerSet`. Every sleep in the node
-library goes through `Timers`.
+The process has one identity, one Ivy overlay, one RPC listener, one content
+store, and one serial runtime loop. Each hosted path still has independent
+consensus state, fork choice, sync state, mempool, and durable fact journal.
+Messages, transactions, reads, and mining work identify the path they concern.
 
-`ChainProcess` is the sole block-import boundary (`importBlock`). Service and
-network code may prepare data, but canonical state changes only through process
-import and its staged durable batch.
+## Dependency direction
 
-Production ingress is intentionally one-way:
+The node is split into a deterministic core and an I/O shell:
 
 ```text
-Ivy acquisition and root attribution
-  -> ChainService ingress
-  -> ChainProcess validation and durable commit
-  -> ChainService reconciliation and publication
+HTTP requests ─┐
+Ivy messages ──┼─> NodeRuntime ─> NodeCore.step(event) ─> ordered effects
+timers/jobs ───┘        │                                  │
+                       │                                  ├─> NodeStorage
+                       │                                  ├─> content fetch
+                       │                                  └─> Ivy send
+                       └─> published snapshots ─> ChainReads ─> HTTP responses
 ```
 
-The runtime never mutates consensus state directly. Network preflight remains
-outside the service operation gate, while a commit reserves the service's small
-reconciliation fence before process mutation order is released. That prevents a
-new template or mempool operation from observing a canonical
-commit before its service projection catches up, without allowing a slow peer
-to stall mining or RPC. Miner/RPC/reconciliation reads are local-only; remote
-content acquisition is explicit and root-scoped to network import or a
-targeted retry.
+The dependency points inward. `LatticeNodeCore` knows consensus values and
+plain events, but it does not know SQLite, Ivy, HTTP, files, clocks, or tasks.
+`LatticeNode` owns adapters and executes the core's effects. The daemon only
+maps HTTP requests and responses.
 
-Each network generation receives one immutable handler bundle before its
-listener starts. Candidate acquisition creates an explicit root-bound content
-session and passes that session through service ingress; provider identity,
-cache state, and attribution never depend on ambient task-local state.
+## Deterministic core
 
-Ivy applies bounded transport admission before awaiting the runtime's inbound
-delegate, so peer work is backpressured at the transport boundary. All
-overlay traffic remains reputation-gated. Its optional public-address
-discovery runs after listener readiness and never delays local RPC
-availability.
+`ChainCore` is the state machine for one chain path. It owns:
 
-## One network plane per chain
+- header synchronization and fork choice;
+- body acquisition and execution scheduling;
+- child-proof admission;
+- the mempool and mining-template state;
+- the immutable snapshot published to readers.
 
-Each level has one network plane, its public overlay. The overlay admits peers
-that claim the same Nexus genesis and absolute chain path. It carries block and
-transaction Volume inventories, the child-evidence index root, and
-content-addressed retrieval.
+`NodeCore` owns one `ChainCore` per hosted path. Its synchronous `step` method
+routes a `NodeEvent` to the right level, coordinates parent/child facts, and
+returns ordered `NodeEffect` values. A mined subtree is handled in one node
+step, so all contributing levels agree on what the submitted grind changed.
 
-Parent facts (genesis links and parent-state continuity), run reports, and
-merged-mining candidates pass in-process between co-hosted levels, never over
-a network plane.
+Time is an input to `step`; work such as execution and proof verification is
+represented by a job effect whose result returns as another event. This makes
+the same core usable by production and deterministic simulation.
 
-A parent never waits on a child to serve a template. Each hosted child level
-keeps one pre-built candidate against its parent level's validated tip's
-post-state — the only thing a candidate takes from a carrier — and the
-miner's recipients and minimum work for its subtree, and rebuilds it, one
-build at a time, whenever an input changed: the parent's tip, its own
-tip, the plan, a grandchild's candidate (a mempool change alone waits for
-the next rebuild). The build
-takes only the child's own lease and reads its parent level without taking
-the parent's gate or lease (`ParentLevel`), and the parent's template path
-reads each child's latest candidate synchronously (`ChildLevel`), so the
-lock order is acyclic; a SafetyNet gate enforces both. A template takes
-every candidate whose parent state is the current tip's post-state and
-whose plan is the current one. A child that has not built yet, or whose
-candidate is for an older tip, is simply not carried that round; nothing is
-asked and nothing is awaited.
+The core source is grouped by responsibility:
 
-A candidate's content is retained by the chain that built it, as its own
-budgeted policy (`maximumRetainedCandidateOffers`, oldest offer first), never
-by a parent's reservation: the parent commits the candidate's block node it
-holds, and the carried block's import at the child later owns the roots
-the candidate pinned. A candidate
-the parent never carried costs nothing for long; one evicted before its
-block landed is a lost fork, the cache-eviction outcome the design already
-takes. Every hierarchy level applies the same rule; nothing is relayed down.
+```text
+LatticeNodeCore/
+  Chain/       ChainCore, selection, bodies, child proofs
+  Host/        NodeCore and multi-level coordination
+  Mempool/     transaction-pool policy
+  Mining/      mining state and issued work
+  Sync/        header sync and decoded sync messages
+```
 
-A miner learns its work is stale from one template digest, served by the
-template and by the status route alike: the validated tip, the mempool, and
-the child candidates held, so a fresh candidate at any level refreshes the
-miner's work within one status probe.
+## Production runtime
 
-## Child genesis flow
+`NodeRuntime` is the production shell around `NodeCore`. One serial task owns
+the core and is the only code that calls `step`. Network messages, RPC writes,
+timer firings, content arrivals, and worker results all enter that task as
+plain inputs.
 
-1. Build the self-contained child genesis offline from a seed: the child
-   `ChainSpec`, an optional premine recipient, and a timestamp. The genesis
-   commits to the empty parent state and uses the maximum target, so the same
-   seed always yields the same CID.
-2. Construct and sign an ordinary parent transaction containing
-   `GenesisAction(directory, genesisCID)`, then submit it to
-   `POST /transactions`.
-3. External mining includes that transaction in a parent block like any other.
-   The accepted block records `directory -> genesisCID` in the parent's
-   committed genesis state.
-4. The child level, co-hosted with its ancestry (`lattice.json`, `--config`),
-   opens its durable store in `awaitingGenesis`. It tries to activate on each
-   trigger: its start, every parent tip change, a child-overlay peer's hello,
-   and one slow retry armed after an anchored genesis could not be fetched or
-   confirmed. There is no polling loop.
-5. Each attempt reads the CID its co-hosted parent level anchored under its
-   directory. If the data directory holds the seed as `child-genesis.json`
-   (re-read on every attempt), the child rebuilds the genesis and requires the
-   anchored CID. Without a seed, or when the seed is unreadable or builds
-   another CID, it fetches the genesis block by the anchored CID from
-   child-overlay peers, requiring the content to hash back to it. A brand-new
-   chain has no such peer, so its first node needs the seed.
-6. The child confirms, by a local read of its co-hosted parent level, that the
-   parent still anchors that CID and recorded the exact
-   `(directory, genesisCID, empty parent state)` fact. Only then does it
-   bootstrap the genesis and become `active`; otherwise it stays
-   `awaitingGenesis` until the next trigger.
+For each turn the runtime preserves the core's effect order:
 
-There is no opaque genesis byte channel, and no parent block carries a child
-genesis.
+1. Persist the `NodeBatch` and referenced content.
+2. Publish the new per-level snapshots and read views.
+3. Execute sends, fetches, jobs, timers, disconnects, and RPC replies.
 
-The process that directly parents an edge retains only its sparse commitment
-proof. Ordinary child validation Volumes remain child-chain data. An ancestor does not become an implicit archive for packages below
-its direct children.
+Network ingress is bounded before it reaches the loop. Worker tasks never
+mutate core state; they post their results back as events. A persistence
+failure is fail-stop because publishing state that was not durably recorded
+would make restart behavior disagree with the live process.
 
-Parent and child retain the same child-evidence proof attachment, but acquire it
-at different moments. The semantic direct edge is indexed in SQLite and derived
-from that proof when read; it is not stored again as a second Volume. The parent
-retains the edge it issued; the child retains the edge it validated and may
-relay complete content-verified root Volumes to same-chain peers.
-The child never returns topology or derived work to its parent. Work is derived
-from the child proof and remains entirely inside the child process.
+The production source is grouped by adapter boundary:
 
-An evidence Volume is one complete, one-entry Volume whose canonical manifest
-contains the child CID and proof envelope.
+```text
+LatticeNode/
+  API/             request/response models and read operations
+  Configuration/   immutable process configuration and genesis policy
+  Content/         content-addressed decoding and Ivy content adapters
+  Mining/          template assembly and multi-level mining plans
+  Networking/      handshake, overlay frames, sync codec, Ivy delegate
+  Observability/   metrics and sync tracing
+  Runtime/         NodeRuntime and storage-backed effect execution
+  Storage/         SQLite facts, indexes, boot recovery, and locks
+```
 
-The permanent edge record is the reusable source for later outer-root
-attachments. It is not embedded as a backlink in a block.
+## Storage and recovery
 
-Evidence discovery is the child-evidence index: `child CID -> root CID ->
-attachment Volume CID`, every node of it a Volume. A node announces its index
-root to same-chain overlay peers on hello and whenever it changes; a receiver
-walks a peer's index against its own, fetches the evidence Volumes it lacks as
-ordinary Volumes, and verifies them locally. There is no separate evidence
-request, proof-root request, or partial evidence response protocol; every
-`(child, root)` attachment is already one independent index entry, including
-noncanonical and repeated-child roots.
+`NodeStorage` is the runtime's storage gateway. It owns the root `NodeStore`,
+the shared `DiskBroker`, retained-root scopes, and the durable local mempool
+journal. Hosted children use their own `NodeStore` journals under `levels/`.
 
-## Nexus bootstrap
+`HeaderContentStore` is a deliberate sidecar for weighed header material and
+credited child proofs. A sync header can arrive before the full block Volume,
+so this data cannot be inserted into the immutable Volume store as though it
+were a complete boundary. The existing `core-headers.db` filename is retained
+as an on-disk compatibility name even though the Swift type is now explicit.
 
-Nexus has no parent, so an empty Nexus store starts from a configured local
-trust anchor. `ChainProcess.open` constructs the deterministic genesis,
-recomputes its CID, and requires it to equal:
+```text
+<storage>/
+  state.db                         root chain facts and indexes
+  volumes.db                       shared materialized content
+  core-headers.db                  header material and child proofs
+  levels/Nexus.Alpha/state.db      one hosted-child fact journal
+  levels/Nexus.Alpha.Beta/state.db one nested-child fact journal
+```
 
-`bafyreigsvcxa7kveg7ywaykwqqwvakgtcujds634k4cc6mejyh43pmoqny`
+Persistence is content-first: referenced Volumes and header material become
+durable before the fact transaction that names them. A crash may therefore
+leave retained content that no fact references, but it cannot leave a durable
+fact whose required content was never stored.
 
-Only then does it bootstrap the root locally. Signature and signer fields in
-genesis transactions are non-authoritative and need no special empty shape. The
-exact genesis CID supplies authorization: local configuration for Nexus and a
-parent `GenesisAction` commitment for a child. Ordinary post-genesis
-transactions remain signature-strict. On recovery, store
-metadata and the height-zero fact must name that same CID; no alternate Nexus
-genesis is accepted.
+`BootRecovery` validates the databases and retained roots before networking
+starts. `NodeRuntime.boot` then rebuilds every `ChainCore` by replaying its
+fact journal. Saved child proofs are required to decode successfully; startup
+fails rather than serving child headers without their proofs.
 
-## External mining pipeline
+Legacy storage is not migrated in place. `state.db`, `volumes.db`, the header
+sidecar, and child-level journals are one recovery unit.
+
+## Networking and synchronization
+
+The Ivy adapter has three distinct wire responsibilities:
+
+- `ChainHandshake` establishes the Nexus identity and chain-root context;
+- `ChainSyncWire` translates decoded `SyncMessage` values to bounded overlay
+  frames for a specific hosted path;
+- `OverlayWire` carries process-level announcements such as transaction
+  availability.
+
+Wire validation and canonical decoding happen at the adapter boundary. Policy
+decisions remain in `NodeCore` and `ChainCore`. The sync state itself is split
+into `HeaderSync`, `BodyPipeline`, and `ChildProofSync` so a header, its body,
+and the work proving a child block are not conflated.
+
+A child header is not a second kind of block. It is an ordinary block header
+for a child path plus one or more `ChildBlockProof` values showing which
+ancestor grind contributed work to it. That is why the former
+`ChildHeaders.swift` is now `ChildProofs.swift`: the file owns proof admission
+and verification, while ordinary header synchronization stays in `Sync/`.
+
+## API and reads
+
+The HTTP surface has one unversioned set of routes. The daemon decodes a
+request, calls `NodeRuntime` for mutations or `ChainReads` for reads, and
+encodes the returned API model. There is no second service actor and no
+version-routing layer.
+
+RPC mutations are core events with reply IDs:
+
+- submit a transaction;
+- request a mining template;
+- submit mined work.
+
+Reads do not enter the serial loop. `NodeRuntime` publishes immutable
+`ChainSnapshot` and `NodeReadView` values; `ChainReads` combines those with
+content-verified reads from `NodeStorage`. Each hosted child has its own
+`ChainReads` instance. A request for a path this node does not host is a 404.
+
+## Hosted children and merged mining
+
+Every hosted child has its own `ChainCore`. A parent template may carry the
+latest candidate from each direct child, and that candidate may recursively
+carry its own child. The template digest includes every hosted level, so a new
+child transaction, child candidate, or child block makes existing miner work
+stale.
+
+A nested child's first block can be built only after its parent has executed a
+block of its own. Consensus binds the child genesis to the parent's state. If
+the parent pays no block rewards and otherwise never changes state, it cannot
+produce the distinct state needed to host a nested child. Operators must fund
+state progression on a parent chain before expecting a nested child to start.
+
+When work is submitted, `NodeStorage` stores only child blocks for which the
+grind's verified proof contributes work. `NodeCore` then weighs the root and
+all qualifying carried children in path order.
+
+## External mining
 
 ```text
 lattice-mining-coordinator
   │ POST /mining/templates
   ▼
-lattice-node (Nexus)
-  │ complete nonce-zero candidate + effective search target
+lattice-node
+  │ immutable candidate + search target
   ▼
 lattice-miner workers
-  │ nonce results
+  │ nonce result
   ▼
 lattice-mining-coordinator
   │ POST /mining/work
   ▼
-lattice-node import → durability → overlay publication
+lattice-node runtime and durable effects
 ```
 
-The node owns chain truth and template validity. The coordinator owns work
-lifecycle and range allocation. Workers own only proof-of-work search over an
-immutable assignment.
-
-Templates have no deployment mode. A transaction carrying a `GenesisAction` is
-selected like any other pooled transaction. Child geneses are self-contained,
-so a template never carries one; merged-mining templates attach only ongoing
-direct-child candidates supplied by their processes. The effective search
-target is the easiest target among the Nexus candidate and those child
-candidates.
-
-## Durability and recovery
-
-Each process directory contains:
-
-```text
-<storage>/
-  process.key   # default process identity, mode 0600
-  state.db      # staged protocol facts, immutable indexes, recovery metadata
-  volumes.db    # materialized content volumes
-```
-
-Import publishes each complete Volume, merge-retains its root, and only then
-commits the protocol fact that references it. A failed fact commit may leave a
-safe retained orphan. Import and issued hierarchy roots therefore grow
-merge-only while live. Under the exclusive startup lock, the node materializes
-protocol constants, derives the exact roots for the import and issued
-hierarchy scopes, verifies every referenced Volume, audits semantic indexes,
-and reconstructs the chain by replaying staged import batches. Networking
-starts afterward. Nexus also verifies the exact genesis CID.
-
-The on-disk names predate the import vocabulary and are kept deliberately: the
-import journal is still stored in the `admission_batches` and `admission_facts`
-tables, and a block's `BlockStatus` (`header`, `executed`, `executedAndPinned`)
-is stored in the `accepted_blocks.validated` column with its original integer
-values.
-
-Legacy databases and volume layouts are not migrated in place. Operators must
-remove the entire configured storage directory and resync; keeping only one of
-`state.db` or `volumes.db` breaks their durability invariant.
-
-## Testing networks
-
-Deploy a child chain with test-oriented parameters when an application needs a
-public or long-lived testing network. Nexus retains its one pinned genesis.
-This preserves the same addressing, parent facts,
-merged mining, and consensus rules used by every other child.
+The node owns chain truth, template construction, and submission validation.
+The coordinator owns work lifecycle and range allocation. Workers only search
+nonces for an immutable assignment.

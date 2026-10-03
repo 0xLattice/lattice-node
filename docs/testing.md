@@ -10,7 +10,7 @@ The suites are grouped by the boundary they actually cross:
 
 - `NodeStoreTests`: atomic import, crash recovery, retained hierarchy
   evidence, immutable-index audit, and Volume ownership.
-- `ChainProcessTests`: one-path import, restart, child bootstrap, proof composition, cancellation, and explicit local-versus-network acquisition boundaries.
+- `NodeStorageTests`: one-path import, restart, child bootstrap, proof composition, cancellation, and explicit local-versus-network acquisition boundaries.
 - `NetworkTrust*Tests` (FrontierSync, Evidence, Candidate, ReadURL,
   HierarchySession, over the shared `NetworkTrustTestCase`): real-network
   integration tests, not E2E. They exercise
@@ -26,7 +26,7 @@ The suites are grouped by the boundary they actually cross:
   endpoints; run the shipped miner/coordinator; or participate as a real Ivy
   peer. A transparent TCP fault proxy may cut and heal a real node link without
   inspecting or altering its protocol bytes. Tests never instantiate
-  `ChainProcess`, mutate stores, install runtime callbacks, or seed internal
+  `NodeStorage`, mutate stores, install runtime callbacks, or seed internal
   consensus state. They exercise direct-child
   bootstrap/restart, proof availability from same-chain peers, parent-fact
   retry across disconnect, reopen with every source offline, three-level proof

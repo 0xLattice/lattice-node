@@ -31,7 +31,7 @@ class StoreTestCase: XCTestCase {
     struct Fixture: Sendable {
         let paths: [ChainPath]
         let hosted: Set<ChainPath>
-        let coreConfig: CoreConfig
+        let coreConfig: ChainCoreConfig
         let host: HostStore
         let batch: StoreBatch
         let digests: [ChainPath: TreeDigest]
@@ -53,7 +53,7 @@ class StoreTestCase: XCTestCase {
             try batch.add(try XCTUnwrap(host.records[path]))
         }
         for (path, level) in host.levels.sorted(by: { $0.key.count < $1.key.count }) {
-            try batch.add(PersistBatch(headers: Array(level.headers.values), facts: level.facts), at: path)
+            try batch.add(ChainBatch(headers: Array(level.headers.values), facts: level.facts), at: path)
         }
         return Fixture(
             paths: simulator.world.paths,

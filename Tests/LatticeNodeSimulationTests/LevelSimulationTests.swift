@@ -217,7 +217,7 @@ final class LevelSimulationTests: XCTestCase {
             $0.flooders = 1
             $0.doubleProbability = 0.5
             $0.pageSize = 12
-            $0.proofs = ProofConfig(maxChecks: 4, indexChecks: 1, maxPerSource: 16, maxAwaiting: 64, maxAwaitingPerPeer: 32)
+            $0.proofs = ChildProofConfig(maxChecks: 4, indexChecks: 1, maxPerSource: 16, maxAwaiting: 64, maxAwaitingPerPeer: 32)
             $0.withholder = false
             $0.zeroWork = false
             $0.scheduleLiar = false
@@ -234,7 +234,7 @@ final class LevelSimulationTests: XCTestCase {
     /// proof is credited everywhere within a bounded latency, no honest peer
     /// is blamed, and state stays within the caps (checked every step).
     func testSybilFloodersAreDisconnectedAndCannotStarveHonestProofs() async throws {
-        let proofs = ProofConfig(maxChecks: 4, indexChecks: 1, maxPerSource: 16, maxAwaiting: 64, maxAwaitingPerPeer: 16)
+        let proofs = ChildProofConfig(maxChecks: 4, indexChecks: 1, maxPerSource: 16, maxAwaiting: 64, maxAwaitingPerPeer: 16)
         let flooders = proofs.maxChecks + 1
         let (_, report) = try await simulate(config(0x5B11) {
             $0.flooders = flooders
@@ -267,10 +267,10 @@ final class LevelSimulationTests: XCTestCase {
 
     /// Drives one host by hand over a two-level world: weighs root blocks
     /// and runs every connect job, or holds the root's.
-    struct HostDriver {
+    struct NodeCoreHarness {
         let world: LevelWorld
         let now = World.genesisTime + 10_000
-        var host: HostCore
+        var host: NodeCore
         /// When true, root connect jobs are held here, not run.
         var holdRoot = false
         var heldRoot: [ConnectJob] = []
@@ -283,10 +283,10 @@ final class LevelSimulationTests: XCTestCase {
                 rng: &rng, levels: 2, grinds: 12, forkProbability: 0, shareProbability: 0,
                 doubleProbability: 0, withholdDelay: 1_000
             )
-            host = HostCore(root: world.rootBootstrap.tree, hosted: world.hosted)
+            host = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted)
         }
 
-        mutating func step(_ event: HostEvent) async throws {
+        mutating func step(_ event: NodeEvent) async throws {
             var queue = [event]
             while !queue.isEmpty {
                 for effect in host.step(queue.removeFirst(), now: now) {
@@ -316,34 +316,34 @@ final class LevelSimulationTests: XCTestCase {
     /// the parent level's execution wakes it, and the child level goes on
     /// executing its chain.
     func testAChildConnectLackingAParentFactWaitsForItsParentLevel() async throws {
-        var driver = try await HostDriver()
-        let grinds = driver.world.grinds
-        try await driver.step(.mined(grinds[0].mined))
-        driver.holdRoot = true
-        for grind in grinds.dropFirst() { try await driver.step(.mined(grind.mined)) }
+        var harness = try await NodeCoreHarness()
+        let grinds = harness.world.grinds
+        try await harness.step(.mined(grinds[0].mined))
+        harness.holdRoot = true
+        for grind in grinds.dropFirst() { try await harness.step(.mined(grind.mined)) }
         // Alpha's genesis names the post-state of a held root block.
         let first = try XCTUnwrap(grinds[2].mined.carried.first).block
         let firstCID = try BlockHeader(node: first).rawCID
-        var alpha = try XCTUnwrap(driver.host.levels[LevelWorld.alpha])
+        var alpha = try XCTUnwrap(harness.host.levels[LevelWorld.alpha])
         XCTAssertEqual(Array(alpha.bodies.awaitingParent.keys), [firstCID])
-        try LevelInvariants.checkExecutionStop("driver", path: LevelWorld.alpha, host: driver.host, digest: TreeDigest(alpha.tree))
+        try LevelInvariants.checkExecutionStop("harness", path: LevelWorld.alpha, host: harness.host, digest: TreeDigest(alpha.tree))
         XCTAssertEqual(alpha.snapshot.actOnHeight, 0)
         XCTAssertTrue(TreeDigest(alpha.tree).excluded.isEmpty, "a missing parent fact is never invalidity")
 
-        driver.holdRoot = false
-        while !driver.heldRoot.isEmpty {
-            let job = driver.heldRoot.removeFirst()
+        harness.holdRoot = false
+        while !harness.heldRoot.isEmpty {
+            let job = harness.heldRoot.removeFirst()
             let verdict = await ChainTree.connect(
-                job, fetcher: driver.world.cas, validationContext: ValidationContext(nowMilliseconds: driver.now)
+                job, fetcher: harness.world.cas, validationContext: ValidationContext(nowMilliseconds: harness.now)
             )
-            try await driver.step(.level(LevelWorld.nexus, .connected(verdict)))
+            try await harness.step(.level(LevelWorld.nexus, .connected(verdict)))
         }
-        let nexus = try XCTUnwrap(driver.host.levels[LevelWorld.nexus]).snapshot
+        let nexus = try XCTUnwrap(harness.host.levels[LevelWorld.nexus]).snapshot
         XCTAssertEqual(nexus.actOnTip, nexus.bestHeaderTip)
-        alpha = try XCTUnwrap(driver.host.levels[LevelWorld.alpha])
-        try LevelInvariants.checkExecutionStop("driver", path: LevelWorld.alpha, host: driver.host, digest: TreeDigest(alpha.tree))
+        alpha = try XCTUnwrap(harness.host.levels[LevelWorld.alpha])
+        try LevelInvariants.checkExecutionStop("harness", path: LevelWorld.alpha, host: harness.host, digest: TreeDigest(alpha.tree))
         XCTAssertTrue(alpha.bodies.awaitingParent.isEmpty)
-        XCTAssertEqual(driver.connects[firstCID], 2, "parked once, connected again once when its fact arrived")
+        XCTAssertEqual(harness.connects[firstCID], 2, "parked once, connected again once when its fact arrived")
         XCTAssertEqual(alpha.snapshot.actOnTip, alpha.snapshot.bestHeaderTip, "the woken child level executed its whole chain")
         XCTAssertGreaterThan(alpha.snapshot.actOnHeight, 1)
     }

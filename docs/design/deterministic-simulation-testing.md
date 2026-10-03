@@ -430,7 +430,7 @@ hard to recover. This section states what is achievable and what is not.
 - **Actors are reentrant.** Every `await` inside an actor is a point at which
   another message may run and change the state the suspended code resumes with.
   The node defends against this by hand:
-  - `ChainProcess` queues import and eviction because "actors are reentrant".
+  - `NodeStorage` queues import and eviction because "actors are reentrant".
   - `ChainService` keeps "one externally observable order" because it "calls
     other actors and is therefore reentrant".
 
@@ -464,7 +464,7 @@ hard to recover. This section states what is achievable and what is not.
   datagram bootstraps over the operating system's sockets. SwiftNIO event loops
   run on their own threads, outside Swift Concurrency's executor entirely.
 - **Disk is real SQLite and a real broker.** `NodeStore` opens its database
-  directly, and `ChainProcess` holds a concrete `DiskBroker`. Durability timing
+  directly, and `NodeStorage` holds a concrete `DiskBroker`. Durability timing
   and crash behaviour belong to the operating system.
 - **Randomness is ambient.**
   - Ivy draws reconnect jitter and session secrets from the system generator.
@@ -587,7 +587,7 @@ answers a question simulation cannot, and simulation answers one they cannot.
 | Tier | Keeps owning | Relation to simulation |
 |---|---|---|
 | Reducer and unit tests (`BlockFetcherTests`, `ImportDecisionTests`) | Exact contracts of small state machines | Unchanged. The reducers run inside simulated nodes as they are. |
-| Component tests with latches and blocking sources (`ChainProcessTests`, `ChainServiceTests`, `NodeStoreTests`) | One named interleaving, pinned forever | Complemented. Simulation searches for interleavings. A failing seed, once understood, can become a pinned component test. Purpose-built DEBUG ordering hooks become less necessary for discovery. |
+| Component tests with latches and blocking sources (`NodeStorageTests`, `ChainServiceTests`, `NodeStoreTests`) | One named interleaving, pinned forever | Complemented. Simulation searches for interleavings. A failing seed, once understood, can become a pinned component test. Purpose-built DEBUG ordering hooks become less necessary for discovery. |
 | Real-network integration (the `NetworkTrust*Tests` suites) | Ivy sessions, framing, authentication and delegate delivery over real sockets | Complemented. Simulation replaces the transport, so it cannot vouch for it. |
 | Black-box E2E with real binaries (`LatticeNodeE2ETests`, `LatticeCtlE2ETests`, release smoke) | The shipped artifact: daemon startup, configuration, HTTP, real disk, real processes, real load | Complemented. These stay the gate for the thing users run. Two things move to simulation: their role as the main place ordering bugs surface, and the scaled deadlines and opt-in gates used to absorb those bugs. |
 | Sanitizers and strict concurrency | Memory safety and true data races | Complemented. A simulation driven by the seed rather than by hardware parallelism cannot see this class, and these tools cannot see logical interleavings. |

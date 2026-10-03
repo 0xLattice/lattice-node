@@ -90,7 +90,7 @@ public struct TxWorkloadReport: Sendable {
 
 /// The mempool and template book under a seeded transaction workload.
 ///
-/// One `Mining` value runs against a simulated executed chain. Its jobs run
+/// One `MiningState` value runs against a simulated executed chain. Its jobs run
 /// the real Lattice work (the state reads of a preflight, `BlockBuilder` for a
 /// template) one at a time, and post their results after a seeded delay, so
 /// the tip often moves under a job and its result goes stale. A miner grinds
@@ -122,7 +122,7 @@ public struct TxWorkload {
     }
 
     public let config: TxWorkloadConfig
-    public private(set) var mining: Mining
+    public private(set) var mining: MiningState
     public private(set) var report = TxWorkloadReport()
     var rng: SplitMix64
     var now: Int64
@@ -193,7 +193,7 @@ public struct TxWorkload {
         self.genesis = genesis.cid
         self.blocks = [genesis.cid: ChainBlock(sim: genesis, transactions: [:])]
         self.tip = genesis.cid
-        self.mining = Mining(
+        self.mining = MiningState(
             tipCID: genesis.cid,
             spec: World.spec,
             config: MiningConfig(
@@ -510,7 +510,7 @@ public struct TxWorkload {
     }
 
     /// The executor's side of the job contract: a job is skipped iff its tip
-    /// epoch is not `Mining.tipEpoch` when it is dequeued.
+    /// epoch is not `MiningState.tipEpoch` when it is dequeued.
     mutating func run(_ job: PreflightJob) async throws {
         guard job.tipEpoch == mining.tipEpoch else {
             report.skippedJobs += 1

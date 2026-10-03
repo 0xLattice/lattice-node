@@ -1,11 +1,11 @@
 import Foundation
 import XCTest
 
-/// Structural gates over `Sources/LatticeNode/Architecture`: the storage
+/// Structural gates over `Sources/LatticeNode`: the storage
 /// layer's two single-spelling rules, checked on the source text so a new
 /// site cannot bypass them.
 ///
-/// - (a) Only `NodeSQLite.swift` and `Storage/NodeStoreRow.swift` read a
+/// - (a) Only `Storage/NodeSQLite.swift` and `Storage/NodeStoreRow.swift` read a
 ///   `NodeSQLiteValue` through `textValue` / `intValue` / `blobValue`; every
 ///   other reader goes through a per-table record.
 /// - (b) No execution tier is spelled as an integer: every
@@ -17,7 +17,7 @@ import XCTest
 final class SafetyNetStorageGateTests: XCTestCase {
 
     private func sources() throws -> [SourceFile] {
-        try SourceTree.swiftFiles(under: "Sources/LatticeNode/Architecture")
+        try SourceTree.swiftFiles(under: "Sources/LatticeNode")
     }
 
     private func matches(_ pattern: String, in files: [SourceFile]) throws -> [String] {
@@ -26,13 +26,13 @@ final class SafetyNetStorageGateTests: XCTestCase {
 
     func testGateSeesTheSources() throws {
         let paths = try sources().map(\.path)
-        XCTAssertTrue(paths.contains("NodeSQLite.swift"), "gate walked \(paths.count) files")
+        XCTAssertTrue(paths.contains("Storage/NodeSQLite.swift"), "gate walked \(paths.count) files")
         XCTAssertTrue(paths.contains("Storage/NodeStoreRow.swift"))
         XCTAssertTrue(paths.contains("Storage/BlockStatus.swift"))
     }
 
     func testRawColumnValuesAreReadOnlyByTheRowLayer() throws {
-        let allowed: Set<String> = ["NodeSQLite.swift", "Storage/NodeStoreRow.swift"]
+        let allowed: Set<String> = ["Storage/NodeSQLite.swift", "Storage/NodeStoreRow.swift"]
         let found = try matches(
             #"\.(textValue|intValue|blobValue)\b"#,
             in: sources().filter { !allowed.contains($0.path) }

@@ -23,7 +23,7 @@ public struct LevelSimConfig: Sendable {
     /// twins of the honest ones.
     public var flooders = 0
     /// The child levels' proof bounds (scaled down, pages overrun them).
-    public var proofs = ProofConfig()
+    public var proofs = ChildProofConfig()
     public var drop = 0.01
     public var duplicate = 0.05
     public var minDelay: Int64 = 5
@@ -78,13 +78,13 @@ public struct LevelSimReport: Sendable {
 /// A node's durable store across levels.
 public struct HostStore: Sendable {
     public private(set) var levels: [ChainPath: SimStore] = [:]
-    public private(set) var records: [ChainPath: LevelRecord] = [:]
+    public private(set) var records: [ChainPath: ChainLevelRecord] = [:]
     /// The local evidence index: verified proofs per level, block and root.
     public private(set) var proofs: [ChainPath: [String: [String: ChildBlockProof]]] = [:]
 
     init(world: LevelWorld) {
         let genesis = world.geneses[LevelWorld.nexus]!
-        records[LevelWorld.nexus] = LevelRecord(
+        records[LevelWorld.nexus] = ChainLevelRecord(
             path: LevelWorld.nexus,
             spec: world.specs[LevelWorld.nexus]!,
             genesis: StoredHeader(blockCID: genesis.cid, block: genesis.block, children: genesis.children)
@@ -94,7 +94,7 @@ public struct HostStore: Sendable {
         for path in world.hosted { levels[path] = SimStore() }
     }
 
-    mutating func append(_ batch: HostBatch) {
+    mutating func append(_ batch: NodeBatch) {
         for (path, level) in batch.levels {
             levels[path, default: SimStore()].append(level)
         }
@@ -113,18 +113,18 @@ public struct HostStore: Sendable {
 /// hosts, beside scripted peers; an evidence index the cores and the
 /// withholder publish to; and a content layer holding every body, which
 /// answers each level's body window and runs its connect jobs. Every step
-/// runs `HostCore.step`, executes its effects, then checks the invariants at
+/// runs `NodeCore.step`, executes its effects, then checks the invariants at
 /// every level.
 public struct LevelSimulator {
     struct HostNode {
-        var core: HostCore
+        var core: NodeCore
         var store: HostStore
         var digests: [ChainPath: TreeDigest]
         var persists = 0
     }
 
     enum Delivery {
-        case host(HostEvent)
+        case host(NodeEvent)
         case script(PeerID, ChainPath, SyncMessage)
         case scriptFetch(from: String, session: UInt64, path: ChainPath, cid: String)
         case scriptTick
@@ -141,7 +141,7 @@ public struct LevelSimulator {
     }
 
     public let config: LevelSimConfig
-    public private(set) var coreConfig: CoreConfig
+    public private(set) var coreConfig: ChainCoreConfig
     public let world: LevelWorld
     /// The generator right after the world was drawn: with the world, it
     /// replays the run.
@@ -184,14 +184,14 @@ public struct LevelSimulator {
         self.world = world
         self.rng = rng
         rngAfterWorld = rng
-        coreConfig = CoreConfig(
+        coreConfig = ChainCoreConfig(
             maxHeadersPerPage: config.pageSize,
             headersTimeout: config.headersTimeout,
             pendingBudget: config.pendingBudget
         )
         coreConfig.proofs = config.proofs
         for index in 0..<config.cores {
-            let core = HostCore(root: world.rootBootstrap.tree, hosted: world.hosted, config: coreConfig, logID: "core\(index)")
+            let core = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted, config: coreConfig, logID: "core\(index)")
             cores["core\(index)"] = HostNode(
                 core: core,
                 store: HostStore(world: world),
@@ -359,8 +359,8 @@ public struct LevelSimulator {
 
     // MARK: - Steps
 
-    /// One `HostCore.step`, its effects in order, then the invariants.
-    mutating func step(_ name: String, _ event: HostEvent) async throws {
+    /// One `NodeCore.step`, its effects in order, then the invariants.
+    mutating func step(_ name: String, _ event: NodeEvent) async throws {
         guard var node = cores[name] else { return }
         let effects = node.core.step(event, now: now)
         var persisted = false
@@ -423,7 +423,7 @@ public struct LevelSimulator {
         cores[name] = node
     }
 
-    mutating func perform(_ effect: Effect, at path: ChainPath, by name: String, _ node: inout HostNode) async throws {
+    mutating func perform(_ effect: ChainEffect, at path: ChainPath, by name: String, _ node: inout HostNode) async throws {
         switch effect {
         case .send(let peer, let message):
             if case .headers(let relayed) = message {
@@ -489,7 +489,7 @@ public struct LevelSimulator {
                 Dictionary(uniqueKeysWithValues: blocks.map { ($0, [String]()) })
             ))))
         case .mining, .workSubmitted:
-            // The transaction workload drives `Mining` on its own
+            // The transaction workload drives `MiningState` on its own
             // (`TxWorkload`); the level simulator submits no transactions,
             // and its grinds carry no reply.
             break
@@ -505,7 +505,7 @@ public struct LevelSimulator {
 
     /// DST 7 across levels: the store alone rebuilds equal trees and facts.
     func checkReplay(_ name: String, _ node: HostNode) throws {
-        let restored = try HostCore.restore(
+        let restored = try NodeCore.restore(
             root: node.store.records[LevelWorld.nexus]!,
             facts: node.store.levels.mapValues(\.facts),
             specs: node.store.levels.mapValues { $0.headers.values.compactMap(\.spec) },

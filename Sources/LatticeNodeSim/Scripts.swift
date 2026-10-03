@@ -48,7 +48,7 @@ struct ScriptStream: Sendable {
     /// `entry`; ancestors are served from `held`.
     func answer(
         _ message: SyncMessage, log: [SimBlock], held: Set<String>, world: World, now: Int64,
-        _ config: CoreConfig, entry: ((SimBlock) -> HeaderEntry)? = nil
+        _ config: ChainCoreConfig, entry: ((SimBlock) -> HeaderEntry)? = nil
     ) -> SyncMessage? {
         let make = entry ?? { config.entry($0.block, children: $0.children) }
         switch message {
@@ -111,12 +111,12 @@ func logOnceReleased(_ cids: [String], world: World, now: Int64) -> [SimBlock] {
 public struct HonestSource: SimScript {
     public let name: String
     public let isHonest = true
-    let config: CoreConfig
+    let config: ChainCoreConfig
     /// The honest blocks this source mines and serves (all by default).
     let chain: [String]?
     var stream: ScriptStream
 
-    public init(name: String, config: CoreConfig, chain: [String]? = nil) {
+    public init(name: String, config: ChainCoreConfig, chain: [String]? = nil) {
         self.name = name
         self.config = config
         self.chain = chain
@@ -159,10 +159,10 @@ public struct HonestSource: SimScript {
 public struct HeaderSpammer: SimScript {
     public let name: String
     public let isHonest = false
-    let config: CoreConfig
+    let config: ChainCoreConfig
     let stream: ScriptStream
 
-    public init(name: String, config: CoreConfig) {
+    public init(name: String, config: ChainCoreConfig) {
         self.name = name
         self.config = config
         stream = ScriptStream(name)
@@ -197,10 +197,10 @@ public struct UncleShower: SimScript {
     public let name: String
     public let isHonest = true
     let target: String
-    let config: CoreConfig
+    let config: ChainCoreConfig
     var stream: ScriptStream
 
-    public init(name: String, showingTo target: String, config: CoreConfig) {
+    public init(name: String, showingTo target: String, config: ChainCoreConfig) {
         self.name = name
         self.target = target
         self.config = config
@@ -241,10 +241,10 @@ public struct Liar: SimScript {
 
     public let name: String
     public let isHonest = false
-    let config: CoreConfig
+    let config: ChainCoreConfig
     var pushed: Set<UInt64> = []
 
-    public init(name: String, config: CoreConfig) {
+    public init(name: String, config: ChainCoreConfig) {
         self.name = name
         self.config = config
     }

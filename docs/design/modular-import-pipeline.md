@@ -93,7 +93,7 @@ input only when its child block is accepted and connected.
 
 ## Atomic mutation
 
-`ChainProcess` serializes the small semantic commit:
+`NodeStorage` serializes the small semantic commit:
 
 ```text
 preflight

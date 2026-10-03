@@ -1,6 +1,6 @@
 # Correctness invariants
 
-The node-level claims that still hold on the core driver. Each entry names
+The node-level claims that still hold on the node runtime. Each entry names
 the check that enforces it after every simulated step (`Sources/LatticeNodeSim`)
 or the test that pins it. The consensus invariants (weighed graph, executed
 set, GHOST, continuity) are the architecture doc's and are checked by
@@ -23,7 +23,7 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   block awaiting a fact its parent lacks; a held fact is a lost wake).
 - **NODE-SEMANTICS-003.d** — A node-local failure while executing is
   retriable, never an exclusion. Pinned by
-  `CoreBodyTests.testALocalFailureIsNeverAnExclusion`.
+  `ChainCoreBodyTests.testALocalFailureIsNeverAnExclusion`.
 
 ## NODE-SEMANTICS-005 — only obtained invalid evidence is punishable
 
@@ -49,7 +49,7 @@ set, GHOST, continuity) are the architecture doc's and are checked by
 - **NODE-STORAGE-002.c** — Boot retains exactly the roots every level's
   journal names, so a sweep keeps them. Pinned by
   `ChildLevelRestartTests.testAWeighedUnexecutedChildGenesisSurvivesARestart`
-  and `CoreDriverTests.testJoinerSyncsHeadersAndExecutesBodiesOverLoopbackIvy`.
+  and `NodeRuntimeTests.testJoinerSyncsHeadersAndExecutesBodiesOverLoopbackIvy`.
 - **NODE-STORAGE-002.d** — Levels write parent before child; a crash
   between them restores with the child behind, never ahead. Pinned by
   `ChildLevelRestartTests.testACrashBetweenLevelWritesRestoresTheParentAhead`.
