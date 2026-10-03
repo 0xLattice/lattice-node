@@ -18,6 +18,9 @@ public struct PeerSync: Sendable, Equatable {
     public internal(set) var requested: UInt64 = 0
     /// The objects asked of this peer (`getData`).
     public internal(set) var data: InFlightData?
+    /// When the last `getData` was sent: holes are asked again no sooner
+    /// than a request's timeout after it.
+    public internal(set) var askedAt: Int64 = .min
     /// This peer read our log to its end: we push what we append.
     public internal(set) var subscribed = false
     /// The ancestors asked for by CID (a parent this peer's header named).
@@ -36,7 +39,7 @@ public struct PeerSync: Sendable, Equatable {
     public static func == (lhs: PeerSync, rhs: PeerSync) -> Bool {
         lhs.stream == rhs.stream && lhs.more == rhs.more && lhs.taken == rhs.taken
             && lhs.holes == rhs.holes && lhs.requested == rhs.requested
-            && lhs.data == rhs.data && lhs.subscribed == rhs.subscribed
+            && lhs.data == rhs.data && lhs.askedAt == rhs.askedAt && lhs.subscribed == rhs.subscribed
             && lhs.parentRequest == rhs.parentRequest
             && lhs.childIndex == rhs.childIndex && lhs.serving == rhs.serving
             && lhs.queued.count == rhs.queued.count

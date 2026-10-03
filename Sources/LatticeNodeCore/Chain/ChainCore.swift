@@ -442,6 +442,9 @@ public struct ChainCore: Sendable {
                 effects.append(.send(peer, .stream(StreamPage(
                     requestID: 0, logID: sync.log.id, entries: appended.entries, hasMore: appended.hasMore
                 ))))
+                // A cut push has the peer pull the rest: it is subscribed
+                // again once a pull reaches the end.
+                if appended.hasMore { sync.peers[peer]?.subscribed = false }
             }
         }
         effects += turn.effects
@@ -700,6 +703,7 @@ public struct ChainCore: Sendable {
         sync.peers[peer]?.data = InFlightData(
             requestID: requestID, cids: cids, deadline: turn.now + config.headersTimeout
         )
+        sync.peers[peer]?.askedAt = turn.now
         turn.effects.append(.send(peer, .getData(requestID: requestID, cids: cids)))
     }
 
@@ -1047,7 +1051,10 @@ public struct ChainCore: Sendable {
         where state.deadlines.contains(where: { $0 <= now }) {
             disconnect(peer, .stalled, &turn)
         }
-        for peer in sync.peers.keys.sorted() { pump(peer, &turn, again: true) }
+        for (peer, state) in sync.peers.sorted(by: { $0.key < $1.key }) {
+            let (due, overflow) = state.askedAt.addingReportingOverflow(config.headersTimeout)
+            pump(peer, &turn, again: overflow || now >= due)
+        }
         while let first = sync.held.first, first.time <= now {
             _ = sync.held.pop()
             if sync.pending.entries[first.cid]?.notBefore == first.time {

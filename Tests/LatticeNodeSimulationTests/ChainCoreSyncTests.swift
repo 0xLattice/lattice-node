@@ -589,6 +589,8 @@ final class ChainCoreSyncTests: XCTestCase {
         effects = relay(&core, [entry(carrier, inline: false)], from: peer, requestID: ask.requestID)
         effects = core.step(.childIndexFetched(peer, cid: carrier.block.children.rawCID, nil), now: Self.now)
         XCTAssertTrue(dataRequests(effects).isEmpty)
+        XCTAssertTrue(dataRequests(core.step(.tick, now: Self.now + 999)).isEmpty,
+                      "not asked again sooner than a request's timeout")
         let again = try XCTUnwrap(dataRequests(core.step(.tick, now: Self.now + 1_000)).first, "asked again on a tick")
         XCTAssertEqual(again.cids, [carrier.cid])
         effects = relay(&core, [entry(carrier)], from: peer, requestID: again.requestID, at: Self.now + 1_000)
@@ -665,6 +667,7 @@ final class ChainCoreSyncTests: XCTestCase {
         }
         XCTAssertEqual(pushes.first?.entries.count, 4)
         XCTAssertEqual(pushes.first?.hasMore, true)
+        XCTAssertEqual(server.sync.peers[other]?.subscribed, false, "a cut push is not followed by more pushes")
         // The receiving side pulls the rest.
         var client = core()
         let request = try XCTUnwrap(requests(ready(&client, other)).first)
