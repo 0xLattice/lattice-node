@@ -21,12 +21,12 @@ final class ChildGenesisSpecTests: XCTestCase {
     /// `peer` streams the genesis and answers its `getData` with `spec`;
     /// proof checks run to completion. Returns the effects seen.
     private func announce(
-        _ world: LevelWorld, to host: inout HostCore, from peer: PeerID, spec: ChainSpec, verify: Bool = true
-    ) async throws -> [HostEffect] {
+        _ world: LevelWorld, to host: inout NodeCore, from peer: PeerID, spec: ChainSpec, verify: Bool = true
+    ) async throws -> [NodeEffect] {
         let genesis = try XCTUnwrap(world.geneses[alpha])
         let proofs = world.publicProofs(alpha, genesis.cid, at: .max)
-        var seen: [HostEffect] = []
-        var queue: [HostEvent] = [.received(peer, alpha, .stream(StreamPage(
+        var seen: [NodeEffect] = []
+        var queue: [NodeEvent] = [.received(peer, alpha, .stream(StreamPage(
             requestID: 0, logID: "log-\(peer.key)",
             entries: [StreamEntry(position: 1, entry: .header(genesis.cid))], hasMore: false
         )))]
@@ -52,7 +52,7 @@ final class ChildGenesisSpecTests: XCTestCase {
 
     func testABadSpecNeverBlocksTheGenesis() async throws {
         let world = try await world()
-        var host = HostCore(root: world.rootBootstrap.tree, hosted: world.hosted)
+        var host = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted)
         let liar = PeerID(key: "liar", session: 1)
         let honest = PeerID(key: "honest", session: 1)
         _ = host.step(.peerReady(liar), now: now)
@@ -68,18 +68,18 @@ final class ChildGenesisSpecTests: XCTestCase {
 
     func testADroppedProofCheckFreesItsSlotWithoutBlame() async throws {
         let world = try await world()
-        var host = HostCore(root: world.rootBootstrap.tree, hosted: world.hosted)
+        var host = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted)
         let peer = PeerID(key: "peer", session: 1)
         _ = host.step(.peerReady(peer), now: now)
         let effects = try await announce(
             world, to: &host, from: peer, spec: try XCTUnwrap(world.specs[alpha]), verify: false
         )
-        let jobs = effects.compactMap { effect -> ProofJob? in
+        let jobs = effects.compactMap { effect -> ChildProofJob? in
             if case .level(_, .verifyProof(let job)) = effect { return job }
             return nil
         }
         XCTAssertFalse(jobs.isEmpty)
-        var dropped: [HostEffect] = []
+        var dropped: [NodeEffect] = []
         for job in jobs { dropped += host.step(.level(alpha, .proofDropped(job)), now: now) }
         XCTAssertEqual(host.levels[alpha]?.sync.proofs.verifying.count, 0)
         XCTAssertFalse(dropped.contains { if case .disconnect = $0 { true } else { false } })

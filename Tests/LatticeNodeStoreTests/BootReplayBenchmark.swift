@@ -91,7 +91,7 @@ final class BootReplayBenchmark: StoreTestCase {
             BOOT-REPLAY blocks=\(count) rows=\(rows) facts=\(count * 4) \
             write=\(String(format: "%.2f", written))s \
             scan+decode=\(String(format: "%.2f", scanned.timeIntervalSince(start)))s \
-            Core.restore=\(String(format: "%.2f", done.timeIntervalSince(scanned)))s \
+            ChainCore.restore=\(String(format: "%.2f", done.timeIntervalSince(scanned)))s \
             total=\(String(format: "%.2f", done.timeIntervalSince(start)))s \
             peakRSS=\(after / 1_048_576)MiB (before restore \(before / 1_048_576)MiB) \
             db=\(size / 1_048_576)MiB

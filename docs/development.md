@@ -83,14 +83,25 @@ Docker-compatible runtime without the GUI.
 
 | Path | What |
 |---|---|
-| `Sources/LatticeNode/Architecture` | One-chain process, service, networking, storage, and protocol wire types. |
-| `Sources/LatticeNode/Architecture/Storage` | `NodeStore` tables grouped by owner, `BlockStatus`, and `ImportPersistence`. |
+| `Sources/LatticeNodeCore/Chain` | `ChainCore`, chain selection, body execution, and child-proof admission for one chain level. |
+| `Sources/LatticeNodeCore/Host` | `NodeCore`, the deterministic state machine spanning every hosted chain level. |
+| `Sources/LatticeNodeCore/Sync` | Header-graph synchronization state and its decoded protocol values. |
+| `Sources/LatticeNodeCore/Mempool` | Transaction-pool policy and mutations. |
+| `Sources/LatticeNodeCore/Mining` | Mining state, template jobs, and issued-work tracking. |
+| `Sources/LatticeNode/Runtime` | `NodeRuntime`, the production shell that drives `NodeCore` and executes effects. |
+| `Sources/LatticeNode/API` | Public service models, read operations, and route-input validation. |
+| `Sources/LatticeNode/Networking` | Overlay handshake, wire codecs, transport adapter, and wire validation. |
+| `Sources/LatticeNode/Content` | Content-addressed block decoding and Ivy/VolumeBroker adapters. |
+| `Sources/LatticeNode/Storage` | Durable fact journals, header content, SQLite rows, boot recovery, and locking. |
+| `Sources/LatticeNode/Configuration` | Node configuration, genesis, bootstrap peers, and public URL policy. |
+| `Sources/LatticeNode/Mining` | Mining-template assembly and multi-level mining plans. |
+| `Sources/LatticeNode/Observability` | Metrics and opt-in synchronization tracing. |
 | `Sources/LatticeNodeDaemon` | CLI and loopback HTTP adapter. |
 | `Sources/LatticeMiner` | External proof-of-work worker target; nonce search only. |
 | `Sources/LatticeMiningCoordinatorTool` | Node-facing coordinator CLI; fetches work, allocates local ranges, and submits nonce results. |
 | `Sources/CSQLite` | SQLite C shim. |
 
-Core protocol types (Block, Transaction, ChainState, consensus) live in the
+Consensus protocol types (Block, Transaction, ChainState, consensus) live in the
 upstream `Lattice`, `cashew`, `Ivy`, `VolumeBroker`, and `Tally` packages. The
 `Lattice` product is an umbrella that re-exports its six modules
 (`LatticePrimitives`, `LatticePoW`, `LatticeValidation`, `LatticeProofs`,

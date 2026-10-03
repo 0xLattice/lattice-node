@@ -26,7 +26,7 @@ struct ContentLayer: Fetcher {
 
 /// How a crash tears a node's last write. The fact log and the content a
 /// node holds are separate stores (state.db and the volumes). The shell
-/// fsyncs a batch's content before it commits the facts (`PersistBatch`), so
+/// fsyncs a batch's content before it commits the facts (`ChainBatch`), so
 /// a crash can lose facts whose content is durable, or content no durable
 /// fact references, but never content a durable fact references: facts kept
 /// with their states lost is an ordering violation, not a crash mode.
@@ -49,10 +49,10 @@ public enum CrashMode: CaseIterable, Sendable {
 public struct InvalidBodyMiner: SimScript {
     public let name: String
     public let isHonest = true
-    let config: CoreConfig
+    let config: ChainCoreConfig
     var stream: ScriptStream
 
-    public init(name: String, config: CoreConfig) {
+    public init(name: String, config: ChainCoreConfig) {
         self.name = name
         self.config = config
         stream = ScriptStream(name)
@@ -88,7 +88,7 @@ extension Invariants {
     /// held is exactly on the best chain after the act-on tip and within the
     /// operator's count; the one connect in flight is a weighed block whose
     /// parent is executed.
-    static func checkBodies(node: String, core: Core, digest: TreeDigest, now: Int64, wakes: [Int64]) throws {
+    static func checkBodies(node: String, core: ChainCore, digest: TreeDigest, now: Int64, wakes: [Int64]) throws {
         let window = core.bodyWindow
         let inWindow = Set(window)
         let bodies = core.bodies
@@ -130,7 +130,7 @@ extension Invariants {
     /// Content before facts: every block a persist records as executed has
     /// its whole post-state — every node of it, not only the root — in the
     /// node's own store.
-    static func checkStatesStored(node: String, batch: PersistBatch, store: SimStore, content: SimCAS) async throws {
+    static func checkStatesStored(node: String, batch: ChainBatch, store: SimStore, content: SimCAS) async throws {
         for fact in batch.facts.flatMap(\.facts) {
             guard case .validation(let validation) = fact else { continue }
             guard let postState = store.headers[validation.blockHash]?.block.postState else {
@@ -159,7 +159,7 @@ extension Simulator {
     /// its stores kept: the core is rebuilt by replaying the fact log, every
     /// session ends (both ends reconnect later), and work the dead process
     /// started never reports.
-    mutating func crash(_ name: String, tearing batch: PersistBatch, _ mode: CrashMode) async throws {
+    mutating func crash(_ name: String, tearing batch: ChainBatch, _ mode: CrashMode) async throws {
         guard var node = cores[name] else { return }
         switch mode {
         case .loseBatch:
@@ -180,7 +180,7 @@ extension Simulator {
             }
         }
         node.fetching = []
-        let restored = try Core.restore(
+        let restored = try ChainCore.restore(
             replaying: node.store.facts,
             context: world.context,
             specs: [world.spec],

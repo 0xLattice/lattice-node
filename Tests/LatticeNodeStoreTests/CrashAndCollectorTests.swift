@@ -68,7 +68,7 @@ final class CrashAndCollectorTests: StoreTestCase {
             var batch = StoreBatch()
             for fact in facts.facts {
                 if case .block(let block) = fact, let header = headers[block.blockHash] {
-                    try batch.add(PersistBatch(headers: [header], facts: []), at: LevelWorld.nexus)
+                    try batch.add(ChainBatch(headers: [header], facts: []), at: LevelWorld.nexus)
                 }
             }
             batch.levels = [(LevelWorld.nexus, [facts])]

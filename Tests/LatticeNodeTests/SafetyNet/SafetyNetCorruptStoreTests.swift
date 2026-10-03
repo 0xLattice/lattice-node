@@ -6,7 +6,7 @@ import XCTest
 
 /// Safety net: what boot does with one damaged row in each table it reads.
 ///
-/// "Boot" is `ChainProcess.open`: `NodeStore.init` (node_metadata), then the
+/// "Boot" is `NodeStorage.open`: `NodeStore.init` (node_metadata), then the
 /// journal audit (admission_batches, admission_facts, accepted_blocks) and
 /// the local mempool (local_mempool_transactions).
 ///
@@ -23,10 +23,10 @@ import XCTest
 ///   that disagree with their batch): refused with `NodeStoreError.corrupt`.
 /// - accepted_blocks.leaf disagreeing with the parent links: repaired at boot.
 ///
-/// No damage crashes the process.
+/// No damage crashes the storage.
 final class SafetyNetCorruptStoreTests: XCTestCase {
 
-    /// What `ChainProcess.open` did with the damaged store.
+    /// What `NodeStorage.open` did with the damaged store.
     private enum Observed: Equatable, CustomStringConvertible {
         case corrupt
         case malformedRow(table: String, column: String)
@@ -41,7 +41,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             case .malformedRow(let table, let column):
                 "NodeStoreError.malformedRow(\(table).\(column))"
             case .wipeRequired: "NodeStoreError.wipeRequired"
-            case .missingMaterializedVolume: "ChainProcessError.missingMaterializedVolume"
+            case .missingMaterializedVolume: "NodeStorageError.missingMaterializedVolume"
             case .opened: "opened (damage tolerated)"
             case .other(let error): "other error: \(error)"
             }
@@ -197,7 +197,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
 
     private func observeBoot(at root: URL) async -> Observed {
         do {
-            _ = try await ChainProcess.open(configuration: try configuration(root))
+            _ = try await NodeStorage.open(configuration: try configuration(root))
             return .opened
         } catch NodeStoreError.corrupt {
             return .corrupt
@@ -205,22 +205,22 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             return .malformedRow(table: table, column: column)
         } catch NodeStoreError.wipeRequired {
             return .wipeRequired
-        } catch ChainProcessError.missingMaterializedVolume {
+        } catch NodeStorageError.missingMaterializedVolume {
             return .missingMaterializedVolume
         } catch {
             return .other(String(describing: error))
         }
     }
 
-    /// A valid Nexus store: genesis plus two mined blocks, the driver
+    /// A valid Nexus store: genesis plus two mined blocks, the runtime
     /// stopped before returning.
     private func buildFixture() async throws -> URL {
         let root = temporaryDirectory()
-        let driver = try await startDriver(
-            try await ChainProcess.open(configuration: try configuration(root))
+        let runtime = try await startRuntime(
+            try await NodeStorage.open(configuration: try configuration(root))
         )
-        for _ in 0..<2 { _ = try await driver.mineBlock() }
-        await driver.stop()
+        for _ in 0..<2 { _ = try await runtime.mineBlock() }
+        await runtime.stop()
         return root
     }
 

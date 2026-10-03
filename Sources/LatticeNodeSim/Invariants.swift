@@ -23,13 +23,13 @@ public struct SimStore: Sendable {
     init() {}
 
     public init(genesis: SimBlock, facts seed: BlockImportBatch) {
-        append(PersistBatch(
+        append(ChainBatch(
             headers: [StoredHeader(blockCID: genesis.cid, block: genesis.block, children: genesis.children)],
             facts: [seed]
         ))
     }
 
-    public mutating func append(_ batch: PersistBatch) {
+    public mutating func append(_ batch: ChainBatch) {
         for header in batch.headers {
             torn.remove(header.blockCID)
             headers[header.blockCID] = header
@@ -50,9 +50,9 @@ public struct SimStore: Sendable {
 
     /// A crash in the middle of writing `batch`: its header content lands
     /// in the volumes, its facts never reach the fact log.
-    public mutating func appendTorn(_ batch: PersistBatch) {
+    public mutating func appendTorn(_ batch: ChainBatch) {
         for header in batch.headers where headers[header.blockCID] == nil {
-            append(PersistBatch(headers: [header], facts: []))
+            append(ChainBatch(headers: [header], facts: []))
             torn.insert(header.blockCID)
         }
     }
@@ -124,7 +124,7 @@ public enum Invariants {
     /// one node's tree, against its previous digest and its durable store.
     public static func check(
         node: String,
-        core: Core,
+        core: ChainCore,
         digest: TreeDigest,
         previous: TreeDigest?,
         store: SimStore,
@@ -162,7 +162,7 @@ public enum Invariants {
     /// The checks over the tree itself: run whenever it changed.
     static func checkTree(
         node: String,
-        core: Core,
+        core: ChainCore,
         digest: TreeDigest,
         previous: TreeDigest?,
         store: SimStore,

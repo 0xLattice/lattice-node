@@ -31,7 +31,7 @@ public struct WeightEntry: Sendable, Equatable {
 /// What a restart reads back: one linear scan of the log.
 public struct Restored: Sendable {
     /// The root level's record.
-    public let records: [LevelRecord]
+    public let records: [ChainLevelRecord]
     /// Each level's facts, in log order.
     public let facts: [ChainPath: [BlockImportBatch]]
     /// Each level's genesis specs, read from its genesis block facts.
@@ -43,10 +43,10 @@ public struct Restored: Sendable {
     public func host(
         hosted: Set<ChainPath>,
         pins: [ChainPath: String] = [:],
-        config: CoreConfig = CoreConfig()
-    ) throws -> HostCore {
+        config: ChainCoreConfig = ChainCoreConfig()
+    ) throws -> NodeCore {
         guard let root = records.first else { throw StoreError.corrupt("no root level record") }
-        return try HostCore.restore(
+        return try NodeCore.restore(
             root: root, facts: facts, specs: specs, hosted: hosted, pins: pins, config: config
         )
     }
@@ -235,7 +235,7 @@ public final class Store: Sendable {
                     throw StoreError.corrupt("log kind \(row.text(1))")
                 }
             }
-            var records: [LevelRecord] = []
+            var records: [ChainLevelRecord] = []
             for (path, cid) in genesis {
                 records.append(try Self.record(path, genesis: cid, db))
             }
@@ -260,9 +260,9 @@ public final class Store: Sendable {
         return node
     }
 
-    private static func record(_ path: ChainPath, genesis cid: String, _ db: SQLite) throws -> LevelRecord {
+    private static func record(_ path: ChainPath, genesis cid: String, _ db: SQLite) throws -> ChainLevelRecord {
         let block = try node(cid, as: Block.self, path, db)
-        return LevelRecord(
+        return ChainLevelRecord(
             path: path,
             spec: try node(block.spec.rawCID, as: ChainSpec.self, path, db),
             genesis: StoredHeader(

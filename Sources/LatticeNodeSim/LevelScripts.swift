@@ -46,7 +46,7 @@ struct LevelStream: Sendable {
     /// each served header made by `make`; ancestors from `held`.
     func answer(
         _ message: SyncMessage, at path: ChainPath, log: [LevelLogItem], held: [SimBlock],
-        world: LevelWorld, _ config: CoreConfig, _ make: (SimBlock) -> HeaderEntry
+        world: LevelWorld, _ config: ChainCoreConfig, _ make: (SimBlock) -> HeaderEntry
     ) -> SyncMessage? {
         switch message {
         case .getStream(let requestID, let asked, let after, _):
@@ -119,10 +119,10 @@ extension LevelWorld {
 public struct LevelSource: LevelScript {
     public let name: String
     public let isHonest = true
-    let config: CoreConfig
+    let config: ChainCoreConfig
     var stream: LevelStream
 
-    public init(name: String, config: CoreConfig) {
+    public init(name: String, config: ChainCoreConfig) {
         self.name = name
         self.config = config
         stream = LevelStream(name)
@@ -165,10 +165,10 @@ public struct LevelSource: LevelScript {
 public struct ProofWithholder: LevelScript {
     public let name: String
     public let isHonest = true
-    let config: CoreConfig
+    let config: ChainCoreConfig
     var stream: LevelStream
 
-    public init(name: String, config: CoreConfig) {
+    public init(name: String, config: ChainCoreConfig) {
         self.name = name
         self.config = config
         stream = LevelStream(name)
@@ -235,7 +235,7 @@ public struct LoneHeader: LevelScript {
     public mutating func received(_ message: SyncMessage, at path: ChainPath, from peer: PeerID, now: Int64, world: LevelWorld) -> [LevelAction] {
         let log = log(path, now)
         let proof = header?.proof
-        guard let reply = stream.answer(message, at: path, log: log, held: log.map(\.block), world: world, CoreConfig(), {
+        guard let reply = stream.answer(message, at: path, log: log, held: log.map(\.block), world: world, ChainCoreConfig(), {
             HeaderEntry(block: $0.block, children: $0.children, proofs: proof.map { [$0] } ?? [])
         }) else { return [] }
         return [.send(peer, path, reply)]
@@ -261,10 +261,10 @@ public struct LoneHeader: LevelScript {
 public struct ProofFlooder: LevelScript {
     public let name: String
     public let isHonest = false
-    let config: CoreConfig
+    let config: ChainCoreConfig
     var stream: LevelStream
 
-    public init(name: String, config: CoreConfig) {
+    public init(name: String, config: ChainCoreConfig) {
         self.name = name
         self.config = config
         stream = LevelStream(name)

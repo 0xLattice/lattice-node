@@ -65,7 +65,7 @@ nexus/Payments
 - `--chain-path` fixes the one chain owned by a process.
 - `TransactionBody.chainPath` is signed replay protection and must equal that
   process path exactly.
-- `ChainHello.chainPath` prevents same-overlay peers for different chains from
+- `ChainHandshake.chainPath` prevents same-overlay peers for different chains from
   being confused.
 - Mining reward routing uses full paths so each reward reaches one exact chain.
 - Hierarchy messages carry full child paths, while direct-child lookup uses the

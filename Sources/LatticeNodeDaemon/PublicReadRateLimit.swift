@@ -149,7 +149,7 @@ enum PublicReadRouteClass: Sendable, Equatable {
 /// with concurrent askers coalesced onto a single in-flight load.
 ///
 /// This is what bounds `/health`, which is exempt from every rate limit. Its
-/// handler is not free — `readSnapshot()` is actor-isolated on `ChainProcess`,
+/// handler is not free — `readSnapshot()` is actor-isolated on `NodeStorage`,
 /// the same actor serving sync and block admission, and `Cache-Control` only
 /// asks the CLIENT to cache, so without this every request pays. The TTL is the
 /// max-age the node already advertises for that snapshot, so serving one that

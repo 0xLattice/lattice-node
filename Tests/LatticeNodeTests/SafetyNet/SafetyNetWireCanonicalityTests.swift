@@ -14,7 +14,7 @@ import cashew
 /// `WireProtocolFuzzTests` cover the adversarial direction (mutated bytes must
 /// be refused) from ONE hand-written seed per JSON decoder; this file covers
 /// the honest direction across the value space, and also the codecs the fuzz
-/// corpus does not reach: `ChainHello` and the RPC types with a custom
+/// corpus does not reach: `ChainHandshake` and the RPC types with a custom
 /// Codable (`ContentBoundTransaction`, `SubmitTransactionRequest`,
 /// `MiningTemplateRequest`).
 ///
@@ -86,7 +86,7 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
     /// `messagesPerCodec` seeded messages. A generator that cannot produce a
     /// message its own validator accepts FAILS (`encoded()` throws) rather
     /// than being skipped.
-    private func assertCanonical<M: NodeJSONMessage & Equatable>(
+    private func assertCanonical<M: CanonicalJSONMessage & Equatable>(
         _ type: M.Type,
         seed: UInt64,
         file: StaticString = #filePath,
@@ -112,7 +112,7 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
         }
     }
 
-    // MARK: - JSON messages (every NodeJSONMessage conformer)
+    // MARK: - JSON messages (every CanonicalJSONMessage conformer)
 
     func testTransactionAvailableIsCanonical() throws {
         try assertCanonical(TransactionAvailableMessage.self, seed: 0x02) { g in
@@ -120,7 +120,7 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
         }
     }
 
-    // MARK: - Core driver header sync topics
+    // MARK: - Node runtime header sync topics
 
     func testCoreStreamRequestIsCanonical() throws {
         try assertCanonical(StreamRequestMessage.self, seed: 0x40) { g in
@@ -253,21 +253,21 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
 
     // MARK: - Binary hierarchy frames
 
-    func testChainHelloIsCanonical() throws {
+    func testChainHandshakeIsCanonical() throws {
         var generator = SplitMix64(state: 0x1b)
         for iteration in 0..<Self.messagesPerCodec {
-            let hello = ChainHello(
+            let hello = ChainHandshake(
                 nexusGenesisCID: randomCID(&generator),
                 chainPath: randomChainPath(&generator, minimumCount: 1),
                 publicReadURL: randomBool(&generator)
                     ? "https://hello\(generator.next() % 1000).example" : nil
             )
             let bytes = try hello.encode()
-            let decoded = try ChainHello.decode(bytes)
-            XCTAssertEqual(decoded, hello, "ChainHello #\(iteration)")
+            let decoded = try ChainHandshake.decode(bytes)
+            XCTAssertEqual(decoded, hello, "ChainHandshake #\(iteration)")
             XCTAssertEqual(
                 try decoded.encode(), bytes,
-                "ChainHello #\(iteration): encode(decode(bytes)) != bytes"
+                "ChainHandshake #\(iteration): encode(decode(bytes)) != bytes"
             )
         }
     }

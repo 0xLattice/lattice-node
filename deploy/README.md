@@ -6,8 +6,8 @@ were removed because those roles do not exist in Lattice.
 
 ## Rules that every deployment must preserve
 
-1. `lattice-node` runs Nexus on the core driver; it hosts no child chain
-   yet.
+1. `lattice-node` runs Nexus and every configured child level in one node
+   runtime.
 2. Keep the unauthenticated HTTP API on loopback. To serve public reads
    directly, use `--public-read-port`: a second listener on all interfaces
    carrying ONLY the bounded GET read routes (the read-replica allowlist,

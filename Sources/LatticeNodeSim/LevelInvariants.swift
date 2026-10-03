@@ -27,7 +27,7 @@ import UInt256
 public enum LevelInvariants {
     public static func check(
         node: String,
-        host: HostCore,
+        host: NodeCore,
         digests: [ChainPath: TreeDigest],
         previous: [ChainPath: TreeDigest],
         store: HostStore,
@@ -47,8 +47,8 @@ public enum LevelInvariants {
     static func checkLevel(
         _ node: String,
         path: ChainPath,
-        host: HostCore,
-        core: Core,
+        host: NodeCore,
+        core: ChainCore,
         digest: TreeDigest,
         previous: TreeDigest?,
         store: SimStore,
@@ -222,7 +222,7 @@ public enum LevelInvariants {
     /// that of its nearest ancestor (itself included) committing into the
     /// directory, and a run is its blocks' total credited work.
     static func attributedRuns(
-        at path: ChainPath, host: HostCore, digests: [ChainPath: TreeDigest], world: LevelWorld
+        at path: ChainPath, host: NodeCore, digests: [ChainPath: TreeDigest], world: LevelWorld
     ) -> [String: [String: UInt256]] {
         let parentPath = Array(path.dropLast())
         guard path.count > 1, let parent = host.levels[parentPath],
@@ -257,7 +257,7 @@ public enum LevelInvariants {
     /// Where a level stopped executing its best chain: at the head, or at
     /// a child block awaiting a parent fact its parent level still lacks.
     /// A fact the parent holds there is a lost wake.
-    public static func checkExecutionStop(_ name: String, path: ChainPath, host: HostCore, digest: TreeDigest) throws {
+    public static func checkExecutionStop(_ name: String, path: ChainPath, host: NodeCore, digest: TreeDigest) throws {
         let executedPrefix = digest.canonicalPath.prefix { digest.executed.contains($0) }.count
         if executedPrefix < digest.canonicalPath.count {
             let next = digest.canonicalPath[executedPrefix]
@@ -280,7 +280,7 @@ public enum LevelInvariants {
     /// Executed sets and exclusions may differ: each core executed the best
     /// chains it followed.
     public static func checkQuietPoint(
-        _ cores: [String: (host: HostCore, digests: [ChainPath: TreeDigest])],
+        _ cores: [String: (host: NodeCore, digests: [ChainPath: TreeDigest])],
         world: LevelWorld,
         now: Int64,
         withheldShown: Bool
