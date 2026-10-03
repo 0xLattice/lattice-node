@@ -34,6 +34,29 @@ final class NodeStoreBootTests: XCTestCase {
         }
     }
 
+    func testAStorageDirectoryCannotBeOpenedByTwoLiveNodes() async throws {
+        let directory = temporaryDirectory()
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: directory,
+            privateKeyHex: String(repeating: "42", count: 32)
+        )
+        let first = try await NodeStorage.open(configuration: configuration)
+
+        do {
+            _ = try await NodeStorage.open(configuration: configuration)
+            XCTFail("a second writer opened the live node's storage")
+        } catch let error as NodeStorageError {
+            XCTAssertEqual(error, .storageInUse)
+        } catch {
+            XCTFail("expected storageInUse, got \(error)")
+        }
+
+        // Keep the first storage alive through the conflicting open. Without
+        // this use, ARC is free to release its process-lifetime lock early.
+        XCTAssertEqual(first.configuration.storagePath, directory)
+    }
+
     func testLegacyDatabaseFailsBeforeNewDDL() throws {
         let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let legacy = try NodeSQLite(path: path.path)

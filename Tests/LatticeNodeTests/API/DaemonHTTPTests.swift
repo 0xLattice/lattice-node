@@ -372,6 +372,59 @@ final class DaemonHTTPTests: XCTestCase {
         }
     }
 
+    func testTransactionForAnUnhostedChainReturns404AndDoesNotEnterNexusPool() async throws {
+        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-http-unknown-chain-\(UUID().uuidString)"
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: storageDirectory,
+            privateKeyHex: String(repeating: "01", count: 32)
+        )
+        let storage = try await NodeStorage.open(configuration: configuration)
+        let service = try await startRuntime(storage)
+        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
+        let key = CryptoUtils.generateKeyPair()
+        let body = try HeaderImpl(node: TransactionBody(
+            accountActions: [],
+            actions: [],
+            depositActions: [],
+            receiptActions: [],
+            withdrawalActions: [],
+            signers: [CryptoUtils.createAddress(from: key.publicKey)],
+            nonce: 0,
+            chainPath: ["Nexus", "NotHosted"]
+        ))
+        let transaction = Transaction(
+            signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(
+                bodyHeader: body,
+                privateKeyHex: key.privateKey
+            ))],
+            body: body
+        )
+
+        try await app.test(.router) { client in
+            try await client.execute(
+                uri: "/transactions",
+                method: .post,
+                headers: [.contentType: "application/json"],
+                body: ByteBuffer(bytes: try JSONEncoder().encode(
+                    SubmitTransactionRequest(transaction: transaction)
+                ))
+            ) { response in
+                XCTAssertEqual(response.status, .notFound)
+                XCTAssertTrue(
+                    String(decoding: response.body.readableBytesView, as: UTF8.self)
+                        .contains("unknownChain")
+                )
+            }
+        }
+
+        let status = await service.status()
+        XCTAssertEqual(status.mempoolCount, 0)
+    }
+
     func testMalformedCIDPathParameterIsRejectedBeforeAnyLookup() async throws {
         let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-http-malformed-cid-test-\(UUID().uuidString)"

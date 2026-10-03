@@ -73,18 +73,51 @@ final class MergedMiningTests: XCTestCase {
             requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
             mode: .overlay
         )
+        let betaHeight = try await mineNestedFirstRun(configuration, overlay, beta: beta)
+
+        // A nested proof crosses two child indexes. Restoring only Alpha is
+        // not enough: Beta must have its exact evidence immediately after a
+        // process restart, and the next merged grind must keep advancing it.
+        let storedProofs = try HeaderEvidenceStore(directory: storageDirectory).proofs()
+        XCTAssertFalse((storedProofs[beta] ?? [:]).isEmpty, "Beta's credited proofs survive the restart")
+        let reopened = try await NodeStorage.open(configuration: configuration)
+        let restarted = try await NodeRuntime.start(
+            storage: reopened, configuration: configuration, overlay: overlay
+        )
+        let betaReads = try XCTUnwrap(restarted.levelReads[beta])
+        let restoredHeight = await betaReads.readSnapshot().height ?? 0
+        XCTAssertGreaterThanOrEqual(restoredHeight, betaHeight)
+        _ = try await restarted.mineBlock()
+        try await eventually("Beta advances after the restart") {
+            (await betaReads.readSnapshot().height ?? 0) > restoredHeight
+        }
+        await restarted.stop()
+    }
+
+    private func mineNestedFirstRun(
+        _ configuration: NodeConfiguration,
+        _ overlay: IvyConfig,
+        beta: [String]
+    ) async throws -> UInt64 {
         let storage = try await NodeStorage.open(configuration: configuration)
-        let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
+        let runtime = try await NodeRuntime.start(
+            storage: storage, configuration: configuration, overlay: overlay
+        )
         let betaReads = try XCTUnwrap(runtime.levelReads[beta])
+        let recipient = CryptoUtils.createAddress(
+            from: CryptoUtils.generateKeyPair().publicKey
+        )
         try await eventually("Beta's genesis is mined after Alpha executes") {
-            // Alpha pays a recipient, so its states change: Beta's genesis
+            // Alpha pays a recipient, so its state changes: Beta's genesis
             // must commit a non-empty parent state.
             _ = try await runtime.mineBlock(MiningTemplateRequest(recipients: [
-                MiningRecipient(chainPath: Self.alpha, address: CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)),
+                MiningRecipient(chainPath: Self.alpha, address: recipient),
             ]))
             return (await betaReads.readSnapshot().height ?? 0) >= 1
         }
+        let height = await betaReads.readSnapshot().height ?? 0
         await runtime.stop()
+        return height
     }
 
     /// The first run: Nexus hardens, Alpha advances by merged grinds and by
