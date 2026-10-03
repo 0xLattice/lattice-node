@@ -8,25 +8,6 @@ import cashew
 /// to the `Mempool` value: the same admission, replacement, eviction and
 /// ordering rules, synchronous, over resolved content.
 final class MempoolTests: XCTestCase {
-    func testHistoricalBodyCIDInputSignatureIsAccepted() throws {
-        let key = CryptoUtils.generateKeyPair()
-        let body = transactionBody(
-            key: key,
-            accountActions: [AccountAction(owner: address(key), delta: -1)],
-            nonce: 0,
-            chainPath: ["Nexus"]
-        )
-        let header = try HeaderImpl(node: body)
-        let signature = try XCTUnwrap(CryptoUtils.sign(message: header.rawCID, privateKeyHex: key.privateKey))
-        let transaction = Transaction(signatures: [key.publicKey: signature], body: header)
-        var pool = Mempool()
-
-        let cid = try pool.submit(transaction, spec: testSpec(), addedAt: 0).transactionCID
-
-        XCTAssertEqual(cid, try VolumeImpl<Transaction>(node: transaction).rawCID)
-        XCTAssertEqual(pool.count, 1)
-    }
-
     func testPoolEnforcesResourcesButLeavesConsensusToLattice() throws {
         let key = CryptoUtils.generateKeyPair()
         let wrongPathBody = transactionBody(

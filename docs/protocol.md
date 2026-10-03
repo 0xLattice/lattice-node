@@ -48,10 +48,9 @@ signatures. A cashew header alone is not a complete transaction payload.
 Lattice validates the transaction for its signed absolute path, which the host
 must serve.
 
-Lattice accepts both the current domain-separated transaction preimage and the
-historical body-CID preimage. Mixed multisignature envelopes are valid when each
-individual signature verifies under one accepted form. This compatibility does
-not weaken body, signer, nonce, or path validation.
+Lattice accepts only the domain-separated `lattice-tx-v1` envelope signature;
+a signature over the bare body CID is invalid. One body therefore has exactly
+one valid signature form per key.
 
 A block pays its reward and fees to its `rewardRecipient`, a header field the
 proof of work covers; a block with none burns them. The recipient is only an
